@@ -261,6 +261,23 @@ fn task_program(name: &str) -> Option<String> {
     }
 }
 
+/// Whether the task `name` runs as the current account: its principal is
+/// this account, named as the task XML names it or by its identifier.
+fn task_is_mine(name: &str) -> bool {
+    let principal = unsafe {
+        (|| {
+            let task = task_folder()?.GetTask(&BSTR::from(name)).ok()?;
+            let mut user = BSTR::new();
+            task.Definition().ok()?.Principal().ok()?.UserId(&mut user).ok()?;
+            Some(user.to_string())
+        })()
+    };
+    let Some(principal) = principal else { return false };
+    let account = std::env::var("USERDOMAIN").map(|domain| format!("{domain}\\")).unwrap_or_default()
+        + &std::env::var("USERNAME").unwrap_or_default();
+    principal.eq_ignore_ascii_case(&account) || user_sid().is_some_and(|sid| principal.eq_ignore_ascii_case(&sid))
+}
+
 /// Whether the task `name` runs this very executable.
 fn runs_this(name: &str) -> bool {
     let (Some(program), Some(this)) = (task_program(name), this_program()) else { return false };
@@ -352,22 +369,22 @@ fn delete_task(name: &str) {
 /// Keeps the launch task pointing at this executable, if it may start
 /// unasked; else makes sure no task starts it. Needs elevation.
 pub fn register_launch_task() {
-    // Tasks under the names earlier versions used go if they run this copy;
-    // starting at sign-in carries over to this account's own task.
-    let started_at_sign_in = runs_this(LOGON_TASK);
-    for name in [LAUNCH_TASK, LOGON_TASK] {
-        if runs_this(name) {
-            delete_task(name);
-        }
-    }
     if may_start_unasked() {
         register_task(&launch_task(), false);
-        if started_at_sign_in {
-            register_task(&logon_task(), true);
+        // Earlier versions' tasks, shared by every account under one name,
+        // move to this account's own if they were this account's: starting
+        // at sign-in carries over, and only then does the old task go.
+        let mine = |name: &str| runs_this(name) && task_is_mine(name);
+        if mine(LAUNCH_TASK) {
+            delete_task(LAUNCH_TASK);
+        }
+        if mine(LOGON_TASK) && register_task(&logon_task(), true) {
+            delete_task(LOGON_TASK);
         }
     } else {
-        // A copy that may not start unasked keeps no task that starts it.
-        for name in [launch_task(), logon_task()] {
+        // A copy that may not start unasked keeps no task that starts it,
+        // whosever it is.
+        for name in [LAUNCH_TASK.to_string(), LOGON_TASK.to_string(), launch_task(), logon_task()] {
             if runs_this(&name) {
                 delete_task(&name);
             }
