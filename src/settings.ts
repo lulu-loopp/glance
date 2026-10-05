@@ -295,8 +295,12 @@ export function buildSettings(
     const now = await actions.autostart(on);
     startup.querySelector('.switch')!.setAttribute('aria-checked', String(now));
   });
-  const quit = element<HTMLButtonElement>(`<button type="button" class="quit">${t('quit')}</button>`);
-  quit.addEventListener('click', () => actions.quit());
+  const quit = element(`
+    <div class="field">
+      <span class="field-label">${t('quit')}<small>${escapeHtml(t('quitDetail'))}</small></span>
+      <button type="button" class="quit">${t('quitAction')}</button>
+    </div>`);
+  quit.querySelector('button')!.addEventListener('click', () => actions.quit());
   root.append(section(t('system'), startup, quit));
   return root;
 }

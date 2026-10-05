@@ -36,8 +36,8 @@ fn windows_build() -> u32 {
 }
 
 /// The settings window's size, and the least it can be resized to (logical px).
-const SETTINGS_SIZE: (f64, f64) = (1040.0, 720.0);
-const SETTINGS_MIN_SIZE: (f64, f64) = (860.0, 560.0);
+const SETTINGS_SIZE: (f64, f64) = (1120.0, 760.0);
+const SETTINGS_MIN_SIZE: (f64, f64) = (900.0, 560.0);
 
 /// With the panel hidden, the process list and network adapter are read once
 /// in this many samples: often enough to be current when the panel opens.
