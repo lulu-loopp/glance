@@ -155,29 +155,6 @@ pub struct BatterySample {
     pub seconds_left: Option<u32>,
 }
 
-impl Sample {
-    /// What decides how many rows the panel has, and so how tall it is.
-    pub fn layout_rows(&self) -> Vec<String> {
-        let mut rows: Vec<String> = self.volumes.iter().map(|volume| volume.name.clone()).collect();
-        rows.push(format!("programs {}", self.processes.len().min(1)));
-        rows.push(format!("battery {}", self.battery.is_some()));
-        rows.extend(self.drive_temps.iter().map(|drive| format!("drive {}", drive.name)));
-        if let Some(cpu) = &self.cpu_sensors {
-            rows.push(format!("cpu {} {} {}", cpu.temp.is_some(), cpu.power.is_some(), cpu.ccds.len()));
-        }
-        if let Some(board) = &self.board {
-            rows.extend(board.temps.iter().map(|(name, _)| format!("board temp {name}")));
-            rows.extend(board.fans.iter().map(|(name, _)| format!("board fan {name}")));
-        }
-        rows.push(format!("network {}", self.network.as_ref().is_some_and(|n| n.ipv4.is_some())));
-        for gpu in &self.gpus {
-            rows.extend(gpu.engines.iter().map(|(kind, _)| kind.clone()));
-            rows.push(format!("{:?} {:?} {:?}", gpu.temp.is_some(), gpu.clock_mhz.is_some(), gpu.fan_rpm.is_some()));
-        }
-        rows
-    }
-}
-
 /// PDH_FMT_DOUBLE with PDH_FMT_NOCAP100, which lets a percentage counter
 /// report above 100 (turbo frequencies do).
 const PDH_FMT_DOUBLE_NOCAP100: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);

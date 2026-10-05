@@ -9,6 +9,7 @@ mod sensors;
 mod superio;
 mod settings;
 mod smbios;
+mod ui;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +20,7 @@ use tauri::http::{Response, StatusCode};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::window::{Effect, EffectsBuilder};
 use tauri::{
-    App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
+    App, AppHandle, Manager, PhysicalPosition, PhysicalSize, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
 use windows::UI::ViewManagement::{UIColorType, UISettings};
@@ -28,7 +29,7 @@ use windows::Win32::Graphics::Gdi::{GetSysColor, COLOR_DESKTOP};
 use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETDESKWALLPAPER};
 
 use metrics::{Sampler, StaticInfo};
-use panel::{Controller, PageRect, Surface};
+use panel::Controller;
 use settings::Settings;
 
 const FIRST_WINDOWS_11_BUILD: u32 = 22000;
@@ -107,8 +108,24 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) {
     if let Err(error) = settings.save(&app) {
         eprintln!("could not save settings: {error}");
     }
-    *state.settings.lock().unwrap() = settings.clone();
-    app.emit_to("panel", "settings-changed", settings).unwrap();
+    *state.settings.lock().unwrap() = settings;
+}
+
+/// The process list was sorted from the panel: kept for next time, as if
+/// chosen in the settings.
+pub(crate) fn set_process_sort(app: &AppHandle, sort: ui::prefs::ProcessSort) {
+    let state = app.state::<AppState>();
+    let mut settings = state.settings.lock().unwrap();
+    if !settings.view.is_object() {
+        settings.view = serde_json::json!({});
+    }
+    let view = settings.view.as_object_mut().unwrap();
+    let processes = view.entry("processes").or_insert_with(|| serde_json::json!({ "count": 5 }));
+    processes["sort"] = serde_json::to_value(sort).unwrap();
+    state.controller.apply(&settings);
+    if let Err(error) = settings.save(app) {
+        eprintln!("could not save settings: {error}");
+    }
 }
 
 #[tauri::command(async)]
@@ -152,13 +169,11 @@ fn open_settings(app: AppHandle) {
     show_settings(&app);
 }
 
-/// Brings the settings window up, creating it centred on the monitor the
-/// pointer is on, with a capture of that desktop for its preview.
 /// Brings the settings window up, centred on the monitor the pointer is on.
 /// It shows itself when its page has drawn (see `settings_ready`), so it
 /// never appears blank. Closing it ends it: keeping it hidden saved about a
 /// tenth of a second on the next opening and cost 150 MB meanwhile.
-fn show_settings(app: &AppHandle) {
+pub(crate) fn show_settings(app: &AppHandle) {
     let state = app.state::<AppState>();
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
@@ -218,38 +233,12 @@ fn set_autostart(enabled: bool) -> bool {
 }
 
 #[tauri::command(async)]
-fn set_surface(state: State<AppState>, surface: Surface) {
-    state.controller.set_surface(surface);
-}
-
-#[tauri::command(async)]
-fn set_panel_rect(state: State<AppState>, epoch: u64, rect: PageRect) {
-    state.controller.set_panel_rect(epoch, rect);
-}
-
-#[tauri::command(async)]
-fn relocate(state: State<AppState>, epoch: u64) {
-    state.controller.relocate(epoch);
-}
-
-#[tauri::command(async)]
-fn close_panel(state: State<AppState>) {
-    state.controller.close();
-}
-
-#[tauri::command(async)]
-fn panel_hidden(state: State<AppState>, epoch: u64) {
-    state.controller.hidden(epoch);
-}
-
-#[tauri::command(async)]
 fn quit(app: AppHandle) {
     app.exit(0);
 }
 
 fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    let window = app.get_webview_window("panel").unwrap();
     let settings = Settings::load(&handle);
 
     // Elevated (see elevation.rs): keep later starts from asking again, and
@@ -261,10 +250,7 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut sampler = Sampler::new();
-    let controller = Arc::new(Controller::new(handle.clone(), window.hwnd()?, &settings));
-    controller.apply(&settings);
-    // The panel starts hidden.
-    controller.set_on_screen(false);
+    let controller = Arc::new(Controller::new(handle.clone(), sampler.info.clone(), &settings));
     app.manage(AppState {
         info: sampler.info.clone(),
         controller: controller.clone(),
@@ -329,11 +315,10 @@ pub fn run() {
         .register_uri_scheme_protocol("backdrop", |context, request| {
             let state = context.app_handle().state::<AppState>();
             let path = request.uri().path().trim_start_matches('/');
-            let found = if path.starts_with("wallpaper/") {
-                state.wallpaper.lock().unwrap().as_ref().map(|(bytes, mime)| (bytes.clone(), *mime))
-            } else {
-                path.parse().ok().and_then(|shot| state.controller.snapshot(shot)).map(|bytes| (bytes, "image/bmp"))
-            };
+            let found = path
+                .starts_with("wallpaper/")
+                .then(|| state.wallpaper.lock().unwrap().as_ref().map(|(bytes, mime)| (bytes.clone(), *mime)))
+                .flatten();
             match found {
                 Some((bytes, mime)) => Response::builder()
                     .header("Content-Type", mime)
@@ -349,18 +334,21 @@ pub fn run() {
             bootstrap,
             save_settings,
             set_autostart,
-            set_surface,
-            set_panel_rect,
-            close_panel,
             history,
             preview,
             open_settings,
             settings_ready,
-            relocate,
-            panel_hidden,
             quit
         ])
         .setup(setup)
-        .run(tauri::generate_context!())
-        .expect("failed to start");
+        .build(tauri::generate_context!())
+        .expect("failed to start")
+        // The panel is not one of Tauri's windows: closing the settings,
+        // the only one, leaves Glance running in the tray. Quitting asks
+        // with an exit code.
+        .run(|_, event| {
+            if let RunEvent::ExitRequested { code: None, api, .. } = event {
+                api.prevent_exit();
+            }
+        });
 }
