@@ -41,6 +41,8 @@ pub struct StaticInfo {
     pub memory_modules: Option<String>,
     /// The model of each physical drive.
     pub drives: Vec<String>,
+    /// The adapter internet traffic leaves by, when the app started.
+    pub network_adapter: Option<String>,
     pub threads: usize,
     pub mem_total: u64,
     pub gpus: Vec<GpuInfo>,
@@ -240,6 +242,7 @@ impl Sampler {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
             drives: crate::drives::models(),
+            network_adapter: default_interface().map(|adapter| adapter.name),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
             gpus,

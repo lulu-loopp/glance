@@ -12,6 +12,7 @@ export interface StaticInfo {
   cpu_name: string;
   memory_modules: string | null;
   drives: string[];
+  network_adapter: string | null;
   threads: number;
   mem_total: number;
   gpus: GpuInfo[];
