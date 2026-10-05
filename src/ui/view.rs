@@ -270,6 +270,11 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let total = info.mem_total.max(1) as f64;
             let percent = (s.memory.used as f64 / total * 100.0) as f32;
             let mut facts = Vec::new();
+            // Each module's own temperature, as each chiplet's on the CPU lane.
+            for (i, value) in s.dimm_temps.iter().enumerate() {
+                let name = if lang == Lang::Zh { format!("内存条 {}", i + 1) } else { format!("Module {}", i + 1) };
+                facts.push((name, celsius(*value), *value > hot_temp));
+            }
             if prefs.memory.details {
                 facts.push((lang.pick("已提交", "Committed").into(), text::usage(s.memory.committed, s.memory.commit_limit), false));
                 facts.push((lang.pick("缓存", "Cached").into(), text::size(s.memory.cached), false));

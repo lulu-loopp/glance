@@ -1,4 +1,5 @@
 mod detector;
+mod dimm;
 mod drives;
 mod elevation;
 mod metrics;
