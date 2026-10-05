@@ -494,7 +494,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
             let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
-            match with_ui(|ui| ui.key(VIRTUAL_KEY(wparam.0 as u16), shift, alt)) {
+            // Bit 30: the key was already down (an auto-repeat).
+            let repeat = lparam.0 & (1 << 30) != 0;
+            match with_ui(|ui| ui.key(VIRTUAL_KEY(wparam.0 as u16), shift, alt, repeat)) {
                 Some(true) => LRESULT(0),
                 _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
             }
@@ -814,6 +816,11 @@ impl Ui {
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.pressed = self.hovered();
+        // A press moves the focus there too, without showing it.
+        if let Some(target) = &self.pressed {
+            self.keyboard = false;
+            self.focus = Some(self.stop_for(target));
+        }
         if let Some(Target::Grip(id)) = &self.pressed {
             let top = self.row_top(id);
             self.drag = Some(Drag { id: id.clone(), grab: y + self.scroll - top, pointer: y + self.scroll });
@@ -843,9 +850,8 @@ impl Ui {
             self.next_frame = Instant::now();
             return;
         }
-        // A click moves the focus there too, without showing it.
+        // The focus follows the choice a click made.
         let target = pressed.unwrap();
-        self.keyboard = false;
         self.activate(target.clone());
         self.focus = Some(self.stop_for(&target));
     }
@@ -905,10 +911,16 @@ impl Ui {
             .collect()
     }
 
-    /// A key pressed: Tab and Shift+Tab move between controls, the arrows
-    /// change a row's choice, Space and Enter press, Alt with the up and down
-    /// arrows moves a module, Escape closes the window.
-    fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool) -> bool {
+    /// A key pressed (`repeat` when it is held down and auto-repeating): Tab
+    /// and Shift+Tab move between controls, the arrows change a row's
+    /// choice, Space and Enter press, Alt with the up and down arrows moves a
+    /// module, Escape closes the window. Returns whether the key was used;
+    /// any other combination with Alt is left to the system.
+    fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
+        let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_)));
+        if alt && !moves_module {
+            return false;
+        }
         self.keyboard = true;
         self.next_frame = Instant::now();
         let stops = self.stops();
@@ -927,6 +939,8 @@ impl Ui {
             VK_ESCAPE => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
+            // Holding the key presses once.
+            VK_SPACE | VK_RETURN if repeat => {}
             VK_SPACE | VK_RETURN => {
                 if let Some(focus) = self.focus.clone() {
                     self.activate(focus);
@@ -935,7 +949,7 @@ impl Ui {
             VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => {
                 let forward = key == VK_RIGHT || key == VK_DOWN;
                 match self.focus.clone() {
-                    Some(Target::Module(id)) if alt && (key == VK_UP || key == VK_DOWN) => self.shift_module(&id, forward),
+                    Some(Target::Module(id)) if moves_module => self.shift_module(&id, forward),
                     Some(Target::Choice(field, index)) => {
                         let count = self.choices(field).1.len();
                         let next = if forward { (index + 1).min(count - 1) } else { index.saturating_sub(1) };

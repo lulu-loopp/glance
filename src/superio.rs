@@ -69,7 +69,8 @@ enum Kind {
     /// With its number of temperature inputs and fan headers.
     Ite { temps: u8, fans: usize },
     /// With its number of fan headers.
-    Nuvoton { fans: usize },
+    /// How many of the temperature inputs and fan headers below it has.
+    Nuvoton { temps: usize, fans: usize },
 }
 
 pub struct SuperIo {
@@ -149,8 +150,8 @@ impl SuperIo {
                     }
                 }
             }
-            Kind::Nuvoton { fans } => {
-                for (register, name) in NUVOTON_TEMPERATURES {
+            Kind::Nuvoton { temps, fans } => {
+                for (register, name) in NUVOTON_TEMPERATURES[..temps].iter().copied() {
                     if let Some(value) = self.register(register).and_then(celsius) {
                         sensors.temps.push((name.to_string(), value));
                     }
@@ -209,12 +210,12 @@ fn find_nuvoton(module: &Module, port: u64) -> Option<(Kind, u16, u64)> {
             module.call("ioctl_pio_outb", &[port, 0x87], &mut []).ok()?;
         }
         let chip = module.read("ioctl_superio_inw", CHIP_ID).ok()? as u16;
-        let fans = nuvoton_fans(chip)?;
+        let (temps, fans) = nuvoton_layout(chip)?;
         module.call("ioctl_find_bars", &[], &mut []).ok()?;
         module.call("ioctl_superio_outb", &[DEVICE_SELECT, NUVOTON_MONITOR], &mut []).ok()?;
         let locked = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).ok()? & 0x10 != 0;
         let base = module.read("ioctl_superio_inw", BASE_ADDRESS).ok()?;
-        (!locked).then_some((Kind::Nuvoton { fans }, chip, base))
+        (!locked).then_some((Kind::Nuvoton { temps, fans }, chip, base))
     })();
     // Nuvoton's key out of configuration mode.
     let _ = module.call("ioctl_pio_outb", &[port, 0xAA], &mut []);
@@ -235,14 +236,19 @@ fn ite_layout(chip: u16) -> Option<(u8, usize)> {
     })
 }
 
-/// Fan headers of the Nuvoton chips read here, by identifier and revision:
-/// NCT6779D, NCT6791D, NCT6792D, NCT6793D, NCT6795D, NCT6796D(-R),
-/// NCT6797D, NCT6798D and NCT6799D, whose monitor keeps the registers above.
-fn nuvoton_fans(chip: u16) -> Option<usize> {
-    Some(match chip {
-        _ if chip & 0xFFF0 == 0xC560 => 5,
-        0xC803 | 0xC911 | 0xC913 | 0xD121 | 0xD352 | 0xD423 => 6,
-        0xD42A | 0xD451 | 0xD42B | 0xD802 => 7,
+/// Temperature inputs and fan headers of the Nuvoton chips read here,
+/// whose monitor keeps the registers above. The identifier's low three bits
+/// are the revision (as Linux's nct6775 driver reads them).
+fn nuvoton_layout(chip: u16) -> Option<(usize, usize)> {
+    Some(match chip & 0xFFF8 {
+        // NCT6779D: up to AUXTIN3.
+        0xC560 => (6, 5),
+        // NCT6791D, NCT6792D, NCT6793D, NCT6795D.
+        0xC800 | 0xC910 | 0xD120 | 0xD350 => (6, 6),
+        // NCT6796D, which adds AUXTIN4.
+        0xD420 => (7, 6),
+        // NCT6797D, NCT6798D, NCT6799D.
+        0xD450 | 0xD428 | 0xD800 => (7, 7),
         _ => return None,
     })
 }
@@ -251,9 +257,12 @@ fn nuvoton_fans(chip: u16) -> Option<usize> {
 mod tests {
     #[test]
     fn knows_nuvoton_chips() {
-        assert_eq!(super::nuvoton_fans(0xD42B), Some(7));
-        assert_eq!(super::nuvoton_fans(0xC562), Some(5));
-        assert_eq!(super::nuvoton_fans(0x8689), None);
+        assert_eq!(super::nuvoton_layout(0xD42B), Some((7, 7)));
+        // NCT6798D's other revisions, and NCT6796D's beside them.
+        assert_eq!(super::nuvoton_layout(0xD428), Some((7, 7)));
+        assert_eq!(super::nuvoton_layout(0xD423), Some((7, 6)));
+        assert_eq!(super::nuvoton_layout(0xC562), Some((6, 5)));
+        assert_eq!(super::nuvoton_layout(0x8689), None);
     }
 
     /// Needs administrator rights and the PawnIO driver.
