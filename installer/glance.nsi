@@ -73,6 +73,10 @@ LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件�
 LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder; installation has stopped."
 LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除，请手动删除：$\r$\n$INSTDIR"
 LangString RemoveFailed ${LANG_ENGLISH} "Some files could not be removed from the following folder; please delete them manually:$\r$\n$INSTDIR"
+LangString BackToDefaultNo ${LANG_SIMPCHINESE} "选择“否”将恢复为默认位置：$PROGRAMFILES64\${NAME}"
+LangString BackToDefaultNo ${LANG_ENGLISH} "Choose No to return to the default location: $PROGRAMFILES64\${NAME}"
+LangString BackToDefaultOk ${LANG_SIMPCHINESE} "点击“确定”后将恢复为默认位置：$PROGRAMFILES64\${NAME}"
+LangString BackToDefaultOk ${LANG_ENGLISH} "Clicking OK returns to the default location: $PROGRAMFILES64\${NAME}"
 LangString SettingsLeft ${LANG_SIMPCHINESE} "Glance 的设置文件正被其他程序占用，未能删除。可稍后手动删除以下文件夹：$\r$\n$APPDATA\dev.weiyi.glance"
 LangString SettingsLeft ${LANG_ENGLISH} "Glance's settings file is in use by another program and could not be removed. You can delete this folder later:$\r$\n$APPDATA\dev.weiyi.glance"
 LangString RemovePawnIO ${LANG_SIMPCHINESE} "是否同时卸载 PawnIO 驱动？$\r$\n$\r$\nPawnIO 由 Glance 安装，用于读取温度和风扇转速。如果其他硬件监控或风扇控制软件（例如 HWiNFO、FanControl）也在使用它，请选择“否”予以保留。"
@@ -141,12 +145,31 @@ Function CheckFolder
   !insertmacro Helper
   !insertmacro Ask '--check-install-folder "$INSTDIR"'
   ${If} $0 == 1
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolderAsk)" /SD IDNO IDYES +2
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolderAsk)$\r$\n$\r$\n$(BackToDefaultNo)" /SD IDNO IDYES anyway
+    Call BackToDefault
     Abort
+    anyway:
     StrCpy $Anyway 1
+  ${ElseIf} $0 == 2
+    MessageBox MB_ICONSTOP "$(OccupiedFolder)$\r$\n$\r$\n$(BackToDefaultOk)" /SD IDOK
+    Call BackToDefault
+    Abort
+  ${ElseIf} $0 == 3
+    MessageBox MB_ICONSTOP "$(IndirectFolder)$\r$\n$\r$\n$(BackToDefaultOk)" /SD IDOK
+    Call BackToDefault
+    Abort
   ${ElseIf} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}
+FunctionEnd
+
+; Puts the default folder back in the folder page's box, so that the user
+; sees where Glance goes unless told otherwise.
+Function BackToDefault
+  StrCpy $INSTDIR "$PROGRAMFILES64\${NAME}"
+  FindWindow $1 "#32770" "" $HWNDPARENT
+  GetDlgItem $1 $1 1019
+  SendMessage $1 ${WM_SETTEXT} 0 "STR:$INSTDIR"
 FunctionEnd
 
 ; Installed in an unprotected place, Glance is not started from the finish

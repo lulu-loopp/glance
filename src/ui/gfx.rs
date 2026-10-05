@@ -330,6 +330,49 @@ fn shipped_face(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader,
     }
 }
 
+#[cfg(feature = "studio")]
+impl Gfx {
+    /// Draws `paint` into a picture `size` pixels large, at `scale` pixels
+    /// per DIP, off screen; returns its pixels, rows top to bottom,
+    /// premultiplied BGRA. For the studio, which films the panel.
+    pub fn draw_offscreen(&self, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Vec<u8>> {
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ,
+            D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_MAP_OPTIONS_READ,
+        };
+        let properties = |options: D2D1_BITMAP_OPTIONS| D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0 * scale,
+            dpiY: 96.0 * scale,
+            bitmapOptions: options,
+            ..Default::default()
+        };
+        let pixels = D2D_SIZE_U { width: size.0, height: size.1 };
+        unsafe {
+            let dc = self.device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let target = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            dc.SetTarget(&target);
+            dc.SetDpi(96.0 * scale, 96.0 * scale);
+            dc.BeginDraw();
+            dc.SetTransform(&Matrix3x2::identity());
+            dc.Clear(Some(&D2D1_COLOR_F::default()));
+            let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity() });
+            dc.EndDraw(None, None)?;
+            let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
+            read.CopyFromBitmap(None, &target, None)?;
+            let mapped = read.Map(D2D1_MAP_OPTIONS_READ)?;
+            let row = size.0 as usize * 4;
+            let mut out = Vec::with_capacity(row * size.1 as usize);
+            for y in 0..size.1 as usize {
+                out.extend_from_slice(std::slice::from_raw_parts(mapped.bits.add(y * mapped.pitch as usize), row));
+            }
+            read.Unmap()?;
+            Ok(out)
+        }
+    }
+}
+
 /// One frame being drawn onto a surface.
 pub struct Frame<'a> {
     pub gfx: &'a Gfx,
