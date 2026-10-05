@@ -8,7 +8,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::drives::DriveTemperature;
-use crate::hwinfo::{HwSensors, Hwinfo};
+use crate::sensors::{AmdCpu, CpuSensors};
+use crate::superio::{BoardSensors, SuperIo};
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
@@ -43,6 +44,8 @@ pub struct StaticInfo {
     pub drives: Vec<String>,
     /// The adapter internet traffic leaves by, when the app started.
     pub network_adapter: Option<String>,
+    /// The motherboard's model, as its firmware names it.
+    pub board: String,
     pub threads: usize,
     pub mem_total: u64,
     pub gpus: Vec<GpuInfo>,
@@ -80,8 +83,10 @@ pub struct Sample {
     pub processes: Vec<ProcessSample>,
     pub system: SystemSample,
     pub battery: Option<BatterySample>,
-    /// From HWiNFO, when it shares its sensors.
-    pub hw: Option<HwSensors>,
+    /// The CPU's own temperatures and power, read through the driver.
+    pub cpu_sensors: Option<CpuSensors>,
+    /// The motherboard's temperatures and fans, read through the driver.
+    pub board: Option<BoardSensors>,
     /// Drives that report their temperature to Windows directly.
     pub drive_temps: Vec<DriveTemperature>,
 }
@@ -157,12 +162,12 @@ impl Sample {
         rows.push(format!("programs {}", self.processes.len().min(1)));
         rows.push(format!("battery {}", self.battery.is_some()));
         rows.extend(self.drive_temps.iter().map(|drive| format!("drive {}", drive.name)));
-        match &self.hw {
-            Some(hw) => {
-                rows.push(format!("cpu sensors {} {}", hw.cpu_temp.is_some(), hw.cpu_power.is_some()));
-                rows.extend(hw.fans.iter().map(|(name, _)| format!("fan {name}")));
-            }
-            None => rows.push("no hwinfo".into()),
+        if let Some(cpu) = &self.cpu_sensors {
+            rows.push(format!("cpu {} {} {}", cpu.temp.is_some(), cpu.power.is_some(), cpu.ccds.len()));
+        }
+        if let Some(board) = &self.board {
+            rows.extend(board.temps.iter().map(|(name, _)| format!("board temp {name}")));
+            rows.extend(board.fans.iter().map(|(name, _)| format!("board fan {name}")));
         }
         rows.push(format!("network {}", self.network.as_ref().is_some_and(|n| n.ipv4.is_some())));
         for gpu in &self.gpus {
@@ -209,7 +214,9 @@ pub struct Sampler {
     base_mhz: f64,
     adapters: Vec<Adapter>,
     net_prev: (u64, u64, Instant),
-    hwinfo: Option<Hwinfo>,
+    /// Readers that need the driver; absent without it or without rights.
+    amd_cpu: Option<AmdCpu>,
+    super_io: Option<SuperIo>,
     /// Each process's GPU use at the last sample, by process id.
     gpu_by_pid: HashMap<usize, f32>,
     buf: Vec<u64>,
@@ -249,6 +256,7 @@ impl Sampler {
             memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
             drives: crate::drives::models(),
             network_adapter: default_interface().map(|adapter| adapter.name),
+            board: reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
             gpus,
@@ -268,7 +276,11 @@ impl Sampler {
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
             net_prev: (down, up, Instant::now()),
-            hwinfo: None,
+            amd_cpu: AmdCpu::open(),
+            super_io: SuperIo::open(&reg_string(
+                w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
+                w!("BaseBoardManufacturer"),
+            )),
             gpu_by_pid: HashMap::new(),
             buf: Vec::new(),
             info,
@@ -342,22 +354,10 @@ impl Sampler {
                 handles: perf.HandleCount,
             },
             battery: battery(),
-            hw: self.hw_sensors(),
+            cpu_sensors: self.amd_cpu.as_mut().map(AmdCpu::read),
+            board: self.super_io.as_ref().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
         })
-    }
-
-    /// HWiNFO's readings, opening its block when it starts sharing one and
-    /// letting go of it when it stops.
-    fn hw_sensors(&mut self) -> Option<HwSensors> {
-        if self.hwinfo.is_none() {
-            self.hwinfo = Hwinfo::open();
-        }
-        let sensors = self.hwinfo.as_ref()?.read();
-        if sensors.is_none() {
-            self.hwinfo = None;
-        }
-        sensors
     }
 
     fn sample_gpus(&mut self) -> Option<Vec<GpuSample>> {

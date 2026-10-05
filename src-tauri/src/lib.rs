@@ -1,11 +1,12 @@
 mod capture;
-mod hwinfo;
 mod detector;
 mod drives;
+mod elevation;
 mod metrics;
 mod panel;
 mod pawnio;
 mod sensors;
+mod superio;
 mod settings;
 mod smbios;
 
@@ -21,7 +22,6 @@ use tauri::{
     App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use windows::UI::ViewManagement::{UIColorType, UISettings};
 
 use windows::Win32::Graphics::Gdi::{GetSysColor, COLOR_DESKTOP};
@@ -91,12 +91,12 @@ fn accent() -> windows::core::Result<Accent> {
 // controller's lock must never be waited on by the thread that owns the window.
 
 #[tauri::command(async)]
-fn bootstrap(app: AppHandle, state: State<AppState>) -> serde_json::Value {
+fn bootstrap(state: State<AppState>) -> serde_json::Value {
     serde_json::to_value(Bootstrap {
         info: &state.info,
         settings: state.settings.lock().unwrap().clone(),
         accent: accent().expect("system accent colour"),
-        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        autostart: elevation::autostart_enabled(),
     })
     .unwrap()
 }
@@ -213,13 +213,8 @@ fn settings_ready(app: AppHandle) {
 }
 
 #[tauri::command(async)]
-fn set_autostart(app: AppHandle, enabled: bool) -> bool {
-    let launcher = app.autolaunch();
-    let result = if enabled { launcher.enable() } else { launcher.disable() };
-    if let Err(error) = result {
-        eprintln!("could not change autostart: {error}");
-    }
-    launcher.is_enabled().unwrap_or(false)
+fn set_autostart(enabled: bool) -> bool {
+    elevation::set_autostart(enabled)
 }
 
 #[tauri::command(async)]
@@ -256,6 +251,14 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let window = app.get_webview_window("panel").unwrap();
     let settings = Settings::load(&handle);
+
+    // Elevated (see elevation.rs): keep later starts from asking again, and
+    // put the sensor driver in place before the sensors are looked for.
+    if elevation::is_elevated() {
+        elevation::register_launch_task();
+        let setup = handle.path().resource_dir()?.join("resources").join("PawnIO_setup.exe");
+        elevation::ensure_pawnio(&setup);
+    }
 
     let mut sampler = Sampler::new();
     let controller = Arc::new(Controller::new(handle.clone(), window.hwnd()?, &settings));
@@ -315,9 +318,14 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 pub fn run() {
+    // The sensors need administrator rights. An ordinary start hands over to
+    // an elevated one and leaves; if the user declines, Glance runs without
+    // the driver's sensors.
+    if !elevation::is_elevated() && elevation::relaunch_elevated() {
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|_, _, _| {}))
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .register_uri_scheme_protocol("backdrop", |context, request| {
             let state = context.app_handle().state::<AppState>();
             let path = request.uri().path().trim_start_matches('/');
