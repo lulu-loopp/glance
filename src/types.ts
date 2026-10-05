@@ -79,6 +79,7 @@ export interface Settings {
   sensitivity: 'light' | 'medium' | 'firm';
   close_delay_ms: number;
   interval_ms: number;
+  live_backdrop: boolean;
   view: ViewPrefs | null;
 }
 

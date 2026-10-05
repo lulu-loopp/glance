@@ -56,6 +56,9 @@ pub struct Settings {
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
+    /// Refresh the desktop behind the glass while the panel is open. The
+    /// panel then hides itself from every screen capture, screenshots too.
+    pub live_backdrop: bool,
     pub view: serde_json::Value,
 }
 
@@ -68,6 +71,7 @@ impl Default for Settings {
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,
+            live_backdrop: false,
             view: serde_json::Value::Null,
         }
     }

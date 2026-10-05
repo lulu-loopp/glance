@@ -79,17 +79,24 @@ export async function settingsApp(boot: Bootstrap) {
 
   // The preview stage is the work area at its real size, scaled to fit the
   // frame; the panel inside it is laid out exactly as on screen.
-  const size = await invoke<PreviewInfo>('preview');
-  const desktop = await desktopImage(size);
   const stage = element(`<div class="stage" data-state="open"></div>`);
-  stage.style.width = `${size.width}px`;
-  stage.style.height = `${size.height}px`;
-  stage.style.backgroundImage = `url(${desktop})`;
   frame.append(stage);
-
   const backdrop = new Backdrop();
-  await backdrop.load(desktop);
   const view = new PanelView(stage, modules, backdrop, () => {});
+  let size: PreviewInfo = { wallpaper: null, color: '#000000', width: 1920, height: 1040 };
+
+  /** Takes the desktop and work area of the monitor the window opens on. */
+  const loadDesktop = async () => {
+    size = await invoke<PreviewInfo>('preview');
+    const desktop = await desktopImage(size);
+    stage.style.width = `${size.width}px`;
+    stage.style.height = `${size.height}px`;
+    stage.style.backgroundImage = `url(${desktop})`;
+    await backdrop.load(desktop);
+  };
+
+  /** Asks to be shown once what is drawn has reached the screen. */
+  const ready = () => requestAnimationFrame(() => void invoke('settings_ready'));
 
   /**
    * Scales the stage to the frame, anchored at the edge the panel opens
@@ -169,13 +176,16 @@ export async function settingsApp(boot: Bootstrap) {
   };
   fill();
 
-  view.samples = await invoke<Sample[]>('history');
+  await Promise.all([
+    loadDesktop(),
+    invoke<Sample[]>('history').then((history) => (view.samples = history)),
+    ...['Archivo Variable', 'Inter Variable'].map((family) => document.fonts.load(`13px "${family}"`)),
+  ]);
   await listen<Sample>('sample', ({ payload }) => view.push(payload, 300_000 / settings.interval_ms + 16));
-
-  await Promise.all(['Archivo Variable', 'Inter Variable'].map((family) => document.fonts.load(`13px "${family}"`)));
   render();
   new ResizeObserver(fit).observe(frame);
   onSystemTheme(render);
+  ready();
 
   const draw = () => {
     view.draw(Date.now());
