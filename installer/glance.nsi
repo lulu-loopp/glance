@@ -55,8 +55,9 @@ LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver too?$\r$\n$\r$
 
 ; A running Glance holds its files.
 !macro StopGlance
-  nsExec::Exec 'schtasks.exe /End /TN "${NAME}"'
-  nsExec::Exec 'taskkill.exe /IM ${EXE} /F'
+  ; System tools by their full path: never one that happens to lie beside
+  ; the installer.
+  nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${EXE} /F'
   Sleep 500
 !macroend
 
@@ -74,6 +75,12 @@ Section "Glance"
   File "..\target\release\${EXE}"
   SetOutPath "$INSTDIR\resources"
   File "..\resources\PawnIO_setup.exe"
+  ; What Glance is built from and ships with, and the source the modules'
+  ; licence asks to come with them.
+  SetOutPath "$INSTDIR\licenses"
+  File "..\licenses\*.txt"
+  SetOutPath "$INSTDIR\licenses\pawnio-modules-source"
+  File /r "..\pawnio-modules\source\*"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
@@ -99,8 +106,9 @@ FunctionEnd
 
 Section "Uninstall"
   !insertmacro StopGlance
-  nsExec::Exec 'schtasks.exe /Delete /TN "${NAME}" /F'
-  nsExec::Exec 'schtasks.exe /Delete /TN "${NAME} at sign-in" /F'
+  ; Every account's tasks for Glance ("Glance <SID>", "Glance at sign-in
+  ; <SID>"), and those of earlier versions.
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-ScheduledTask -TaskPath '\' | Where-Object { $$_.TaskName -match '^Glance( at sign-in)?( S-1-[0-9-]+)?$$' } | Unregister-ScheduledTask -Confirm:$$false"`
 
   ; The driver goes only if Glance put it there and the user agrees; a
   ; silent uninstall keeps it.
@@ -123,6 +131,7 @@ Section "Uninstall"
   Delete "$INSTDIR\${EXE}"
   Delete "$INSTDIR\resources\PawnIO_setup.exe"
   RMDir "$INSTDIR\resources"
+  RMDir /r "$INSTDIR\licenses"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
