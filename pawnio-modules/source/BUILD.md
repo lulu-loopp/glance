@@ -38,4 +38,6 @@ python -c "import sys; d=open(sys.argv[1],'rb').read(); open(sys.argv[2],'wb').w
 then put `name.bin` in `pawnio-modules/` and build Glance from its source
 (`cargo build --release`): the modules are compiled into the executable.
 
-Licence: GNU Lesser General Public License 2.1 (`../COPYING`).
+Licence: GNU Lesser General Public License 2.1: `pawnio-modules/COPYING` in
+Glance's source, `PawnIO-Modules-LGPL-2.1.txt` beside this folder in an
+installed Glance.
