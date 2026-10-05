@@ -35,7 +35,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
-    PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN,
+    MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -764,11 +765,31 @@ impl Ui {
             Switch::Startup => (
                 p("开机时启动", "Start with Windows"),
                 (!self.may_autostart).then(|| {
-                    p("需装在普通程序改不了的位置，如 Program Files", "Needs a folder programs cannot change, as Program Files")
+                    p("当前安装位置不受保护，无法启用；点击查看原因", "Unavailable in this location; click for details")
                 }),
                 self.autostart,
             ),
         }
+    }
+
+    /// Why Start with Windows cannot be turned on for this copy, and how it can.
+    fn explain_no_autostart(&self) {
+        let place = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.display().to_string())).unwrap_or_default();
+        let (title, text) = match self.lang {
+            Lang::Zh => (
+                "无法启用开机时启动".to_string(),
+                format!(
+                    "Glance 当前位于：\n{place}\n\n这个位置不受保护：普通程序可以修改它或它的上级文件夹，因此可能把 Glance 替换掉。开机时启动会让 Glance 不经确认就以管理员身份运行，只有在受保护的位置才能安全地这样做。\n\n如需启用，请使用安装程序将 Glance 安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\\Glance）。"
+                ),
+            ),
+            Lang::En => (
+                "Start with Windows is unavailable".to_string(),
+                format!(
+                    "Glance is currently located in:\n{place}\n\nThis location is not protected: ordinary programs can change it or a folder above it, and so could replace Glance. Starting with Windows runs Glance with administrator rights without asking, which is safe only from a protected location.\n\nTo turn it on, use the installer to install Glance to Program Files, or to a new folder at the root of a drive (for example D:\\Glance)."
+                ),
+            ),
+        };
+        unsafe { MessageBoxW(Some(self.hwnd), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONINFORMATION) };
     }
 
     fn flip(&mut self, switch: Switch) {
@@ -783,6 +804,10 @@ impl Ui {
             Switch::MemoryDetails => prefs.memory.details ^= true,
             Switch::NetworkDetails => prefs.network.details ^= true,
             Switch::DiskActive => prefs.disk.active ^= true,
+            Switch::Startup if !self.may_autostart && !self.autostart => {
+                self.explain_no_autostart();
+                return;
+            }
             Switch::Startup => {
                 // What the system then reports, not what was asked.
                 self.autostart = elevation::set_autostart(!self.autostart);

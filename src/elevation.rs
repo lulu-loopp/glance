@@ -292,13 +292,26 @@ pub fn install_folder(folder: &Path) -> InstallFolder {
 /// read by everyone (as Program Files' folders are), in the one step that
 /// creates it: no one else ever has it. An earlier Glance's folder, which
 /// only administrators can change, is left as it is. Anything else is
-/// refused; nothing outside `folder` is touched.
-pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
+/// refused, unless the user has chosen to install there `anyway`: then an
+/// unprotected place or an existing folder is used as it is (a new folder
+/// is still created administrators'), and Glance there asks for
+/// administrator rights at every start and cannot start with Windows, as
+/// it checks for itself. A link or a drive's root is refused either way:
+/// the files would land elsewhere, or among others at the root, and could
+/// not be removed cleanly. Nothing outside `folder` is touched.
+pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), InstallFolder> {
     match install_folder(folder) {
         InstallFolder::Holds => {}
+        InstallFolder::Open | InstallFolder::Occupied if anyway => {}
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
+    if anyway && !folder.exists() {
+        // Folders above a new one in an unprotected place, as they come.
+        if let Some(above) = folder.parent() {
+            std::fs::create_dir_all(above).map_err(|_| InstallFolder::Open)?;
+        }
+    }
     if !folder.exists() {
         let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -313,8 +326,8 @@ pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
         made.map_err(|_| InstallFolder::Occupied)?;
     }
-    // As Glance will check it when it starts.
-    (only_ours(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
+    // As Glance will check it when it starts (the user's choice aside).
+    (anyway || only_ours(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -661,7 +674,7 @@ mod tests {
         assert!(made.status.success());
         // Refused for where it is, and for what is in it.
         assert_eq!(install_folder(&earlier), InstallFolder::Open);
-        assert_eq!(prepare_install_folder(&earlier), Err(InstallFolder::Open));
+        assert_eq!(prepare_install_folder(&earlier, false), Err(InstallFolder::Open));
         assert!(!only_trusted_inside(&earlier));
         std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
