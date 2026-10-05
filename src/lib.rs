@@ -78,6 +78,13 @@ pub(crate) fn quit() {
 }
 
 pub fn run() {
+    // One multithreaded COM apartment for the life of the process: every
+    // thread that uses COM or WinRT (the panel's and the settings' threads)
+    // is in it, so objects and the factories cached for them never outlive
+    // the apartment they were made in.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    }
     // The sensors need administrator rights. An ordinary start hands over to
     // an elevated one and leaves; if the user declines, Glance runs without
     // the driver's sensors. A debug build runs as started, so that tools
@@ -92,13 +99,6 @@ pub fn run() {
         return;
     }
 
-    // One multithreaded COM apartment for the life of the process: every
-    // thread that uses COM or WinRT (the panel's and the settings' threads)
-    // is in it, so objects and the factories cached for them never outlive
-    // the apartment they were made in.
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-    }
     let config = settings::config_dir();
     let settings = Settings::load(&config);
 

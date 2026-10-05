@@ -25,18 +25,40 @@ const TOP_SHARE: f32 = 0.6;
 /// size, up to what the screen allows, and zoomed out only if even that is
 /// too little.
 pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32)) -> (Layout, f32) {
-    let (room, max_columns) = match edge {
-        Edge::Left | Edge::Right => (work.1 - 2.0 * GAP, MAX_COLUMNS),
+    // The room the panel has: across from its edge it keeps a gap from the
+    // far side; along its edge, from both ends.
+    let (room_width, room) = match edge {
+        Edge::Left | Edge::Right => (work.0 - GAP - theme.inset, work.1 - 2.0 * GAP),
         // Along the top the panel grows sideways instead, and no lower than a
         // share of the screen.
-        Edge::Top => (
-            work.1 * TOP_SHARE - GAP - theme.inset,
-            (((work.0 - 2.0 * GAP + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1),
-        ),
+        Edge::Top => (work.0 - 2.0 * GAP, work.1 * TOP_SHARE - GAP - theme.inset),
     };
+    // As many columns as fit across, and along a side no more than a few.
+    let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
+    let max_columns = if edge == Edge::Top { fit } else { fit.min(MAX_COLUMNS) };
     let layout = Layout::new(heights, room, max_columns, theme);
-    let zoom = (room / layout.height()).min(1.0);
+    // Zoomed out only if even the most columns are too tall, or one is too wide.
+    let zoom = (room / layout.height()).min(room_width / layout.width()).min(1.0);
     (layout, zoom)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::Skin;
+
+    #[test]
+    fn fits_narrow_and_short_screens() {
+        let theme = Theme::new(Skin::Paper, false);
+        // A portrait screen 600 DIPs wide holds one column, not three.
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0));
+        assert_eq!(layout.columns, 1);
+        assert!(zoom < 1.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
+        // Narrower than a column: the column is zoomed to fit across.
+        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0));
+        assert!(layout.width() * zoom <= 300.0 - 2.0 * GAP + 0.01);
+        assert!(zoom.is_finite() && zoom > 0.0);
+    }
 }
 
 /// What one drawing of the panel shows.

@@ -44,8 +44,20 @@ impl Module {
             )
         }?;
         let module = Module { handle };
+        // A synchronous call has to be given somewhere to say how much it
+        // returned, even when it returns nothing.
+        let mut returned = 0u32;
         unsafe {
-            DeviceIoControl(handle, IOCTL_LOAD_BINARY, Some(blob.as_ptr() as *const _), blob.len() as u32, None, 0, None, None)
+            DeviceIoControl(
+                handle,
+                IOCTL_LOAD_BINARY,
+                Some(blob.as_ptr() as *const _),
+                blob.len() as u32,
+                None,
+                0,
+                Some(&mut returned),
+                None,
+            )
         }?;
         Ok(module)
     }
@@ -93,6 +105,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_the_cpu_temperature() {
         let blob = std::fs::read(env!("CARGO_MANIFEST_DIR").to_string() + "/pawnio-modules/AMDFamily17.bin").unwrap();
         let module = match Module::load(&blob) {

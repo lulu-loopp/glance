@@ -32,7 +32,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, Tr
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
     RegisterClassExW, SetCursor, SetForegroundWindow,
-    SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_DEFAULTCOLOR, MINMAXINFO,
+    SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
@@ -56,7 +56,8 @@ use crate::settings::{Anchor, Edge, Sensitivity, Settings};
 /// The window's size, and the least it can be resized to (DIPs).
 const SIZE: (f32, f32) = (1120.0, 760.0);
 const MIN_SIZE: (f32, f32) = (900.0, 560.0);
-const FIRST_WINDOWS_11_BUILD: u32 = 22000;
+/// The first Windows 11 build that lets a window ask for Mica.
+const FIRST_MICA_BUILD: u32 = 22621;
 
 /// The list of choices: its width, its padding (top, sides, bottom), and
 /// the thin scroll bar's gutter.
@@ -303,6 +304,8 @@ struct Ui {
     dark: bool,
     palette: Palette,
     autostart: bool,
+    /// Whether this copy may start with Windows (see elevation.rs).
+    may_autostart: bool,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -325,7 +328,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
     let scale = scale as f32;
     unsafe {
         let instance = GetModuleHandleW(None).ok()?;
-        let icon = |size| LoadImageW(Some(instance.into()), PCWSTR(1 as _), IMAGE_ICON, size, size, LR_DEFAULTCOLOR).ok().map(|h| HICON(h.0));
+        let icon = |size| LoadImageW(Some(instance.into()), PCWSTR(1 as _), IMAGE_ICON, size, size, LR_SHARED).ok().map(|h| HICON(h.0));
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(procedure),
@@ -358,7 +361,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         .ok()?;
         // Mica, the Windows 11 window material, where the system has it: the
         // window's content leaves it showing through.
-        let mica = windows_build() >= FIRST_WINDOWS_11_BUILD;
+        let mica = windows_build() >= FIRST_MICA_BUILD;
         if mica {
             let _ = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_MAINWINDOW as *const _ as *const _, 4);
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
@@ -382,6 +385,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             settings,
             prefs,
             autostart: elevation::autostart_enabled(),
+            may_autostart: elevation::may_start_unasked(),
             scroll: 0.0,
             scroll_target: 0.0,
             motion: HashMap::new(),
@@ -489,9 +493,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Closed: everything it drew with is let go; the device stays with
         // the panel.
         WM_DESTROY => {
+            // Its surfaces and bitmaps go first; then the device gives back
+            // what they held.
             let ui = UI.with(|cell| cell.borrow_mut().take());
             if let Some(ui) = ui {
-                ui.gfx.trim();
+                let gfx = ui.gfx.clone();
+                drop(ui);
+                gfx.trim();
             }
             WINDOW.store(0, Ordering::Release);
             LRESULT(0)
@@ -715,7 +723,12 @@ impl Ui {
             Switch::MemoryDetails => (p("内存提交量和缓存", "Committed and cached memory"), None, prefs.memory.details),
             Switch::NetworkDetails => (p("网卡、地址和累计流量", "Adapter, address and totals"), None, prefs.network.details),
             Switch::DiskActive => (p("磁盘活动时间", "Disk active time"), None, prefs.disk.active),
-            Switch::Startup => (p("开机时启动", "Start with Windows"), None, self.autostart),
+            // Only an installed copy may start elevated unasked.
+            Switch::Startup => (
+                p("开机时启动", "Start with Windows"),
+                (!self.may_autostart).then(|| p("安装后可用", "Available once installed")),
+                self.autostart,
+            ),
         }
     }
 
@@ -1163,16 +1176,16 @@ impl Ui {
         let skin = Skin::named(&self.settings.skin);
         let edge = self.settings.edge;
         let interval = self.settings.interval_ms as f64;
-        let history = app.controller.history.lock().unwrap();
-        let samples: Vec<_> = history.iter().cloned().collect();
-        drop(history);
+        // Held while the preview is drawn; the sampler waits that long.
+        let mut history = app.controller.history.lock().unwrap();
+        let samples = history.make_contiguous();
         if samples.is_empty() {
             return None;
         }
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
         let measure = Theme::new(skin, false);
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: &samples, pen_ms: pen, process_scroll: 0.0, hover: None };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = render::arrange(&measure, edge, heights, (sw, sh));
@@ -1191,7 +1204,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: &samples, pen_ms: pen, process_scroll: 0.0, hover: None };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

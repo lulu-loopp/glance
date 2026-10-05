@@ -100,12 +100,14 @@ pub fn config_dir() -> PathBuf {
 }
 
 impl Settings {
-    /// A missing or hand-edited file that no longer parses means defaults.
+    /// A missing or hand-edited file that no longer parses means defaults;
+    /// numbers outside what the settings offer are brought within it.
     pub fn load(dir: &Path) -> Self {
-        fs::read_to_string(dir.join(FILE))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+        let mut settings: Settings =
+            fs::read_to_string(dir.join(FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
+        settings.close_delay_ms = settings.close_delay_ms.min(10_000);
+        settings
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {

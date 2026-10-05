@@ -3,7 +3,7 @@
 //! chips (Gigabyte, ASRock and others) are supported.
 
 use crate::pawnio::Module;
-use crate::sensors::NamedLock;
+use crate::sensors::{NamedLock, LOCK_WAIT};
 
 const LPC_IO: &[u8] = include_bytes!("../pawnio-modules/LpcIO.bin");
 
@@ -55,6 +55,8 @@ pub struct SuperIo {
     base: u64,
     temp_count: u8,
     fan_count: usize,
+    /// The latest readings, kept while another program has the ISA bus.
+    last: BoardSensors,
 }
 
 impl SuperIo {
@@ -62,7 +64,8 @@ impl SuperIo {
     /// `vendor` is the board's maker, which decides what the inputs are named.
     pub fn open(vendor: &str) -> Option<Self> {
         let module = Module::load(LPC_IO).ok()?;
-        let _lock = NamedLock::acquire(ISA_LOCK, 100);
+        // Entering configuration mode writes to the chip: only with the bus to ourselves.
+        let _lock = NamedLock::acquire(ISA_LOCK, 1000)?;
         for slot in 0..2u64 {
             module.call("ioctl_select_slot", &[slot], &mut []).ok()?;
             let port = if slot == 0 { 0x2E } else { 0x4E };
@@ -82,7 +85,7 @@ impl SuperIo {
             if base < 0x100 || base & 0xF007 != 0 {
                 continue;
             }
-            return Some(SuperIo { module, layout: layout(vendor, chip), base, temp_count, fan_count });
+            return Some(SuperIo { module, layout: layout(vendor, chip), base, temp_count, fan_count, last: BoardSensors::default() });
         }
         None
     }
@@ -92,22 +95,16 @@ impl SuperIo {
         self.module.read("ioctl_pio_inb", self.base + DATA_OFFSET).ok().map(|v| v as u8)
     }
 
-    /// One register, under the ISA bus lock; or, when another program holds
-    /// that lock for good, read twice and taken only if both agree.
-    fn read_register(&self, locked: bool, register: u8) -> Option<u8> {
-        if locked {
-            return self.register(register);
-        }
-        let first = self.register(register)?;
-        (self.register(register)? == first).then_some(first)
-    }
-
-    pub fn read(&self) -> BoardSensors {
-        let lock = NamedLock::acquire(ISA_LOCK, 10);
-        let locked = lock.is_some();
+    /// The board's temperatures and fans. The chip is reached through an
+    /// address and a data port, so only under the ISA lock other programs
+    /// share; while another program has the bus, the last readings stand.
+    pub fn read(&mut self) -> BoardSensors {
+        let Some(_lock) = NamedLock::acquire(ISA_LOCK, LOCK_WAIT) else {
+            return self.last.clone();
+        };
         let mut sensors = BoardSensors::default();
         for input in 0..self.temp_count {
-            if let Some(raw) = self.read_register(locked, ITE_TEMPERATURE_BASE + input) {
+            if let Some(raw) = self.register(ITE_TEMPERATURE_BASE + input) {
                 let celsius = raw as i8;
                 // Unconnected inputs read 0 or −128 / 127.
                 if celsius > 0 && celsius < 127 {
@@ -117,7 +114,7 @@ impl SuperIo {
         }
         for fan in 0..self.fan_count {
             let (Some(low), Some(high)) =
-                (self.read_register(locked, ITE_FAN_LOW[fan]), self.read_register(locked, ITE_FAN_HIGH[fan]))
+                (self.register(ITE_FAN_LOW[fan]), self.register(ITE_FAN_HIGH[fan]))
             else {
                 continue;
             };
@@ -127,6 +124,7 @@ impl SuperIo {
                 sensors.fans.push((self.name(fan, |l| l.fans), 1.35e6 / (count as f32 * 2.0)));
             }
         }
+        self.last = sensors.clone();
         sensors
     }
 }
@@ -164,8 +162,9 @@ fn ite_layout(chip: u16) -> Option<(u8, usize)> {
 mod tests {
     /// Needs administrator rights and the PawnIO driver.
     #[test]
+    #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_this_board() {
-        let chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.").expect("a supported Super I/O chip, elevated");
+        let mut chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.").expect("a supported Super I/O chip, elevated");
         println!("{:?}", chip.read());
     }
 }
