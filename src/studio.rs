@@ -212,7 +212,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
-                let backdrop = bitmap.as_ref().map(|bitmap| (bitmap, Vector2 { X: rest.0, Y: rest.1 }, desktop.digest));
+                // The desktop as the panel's own DIPs measure it, zoomed with
+                // the panel, as the panel takes it (its pixels per DIP
+                // include the zoom).
+                let behind = desktop.bitmap(&frame.dc, px * zoom).ok();
+                let backdrop = behind.as_ref().map(|bitmap| (bitmap, Vector2 { X: rest.0 / zoom, Y: rest.1 / zoom }, desktop.digest));
                 let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
                 let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + shift * travel * zoom, rest.1);
                 let _ = layers.draw(frame, &picture, local, px * zoom);

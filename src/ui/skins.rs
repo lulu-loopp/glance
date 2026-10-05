@@ -219,15 +219,20 @@ fn saturation(amount: f32) -> [f32; 20] {
 }
 
 /// The backdrop inside `area` (DIPs from the panel's corner), its edges
-/// carried on outward, as SVG filters do with `edgeMode="duplicate"`.
+/// carried on outward, as SVG filters do with `edgeMode="duplicate"`. Where
+/// `area` reaches past the backdrop (beside the screen's edge), it is the
+/// backdrop's own edge that is carried on, not the nothing beyond it.
 fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), area: Rect) -> Result<ID2D1Effect> {
     let (bitmap, at) = backdrop;
     // The backdrop placed so the panel's corner is at the origin.
     let image = effect_input(&frame.dc, bitmap)?;
     let placed = effect(frame, &CLSID_D2D12DAffineTransform, &image)?;
     prop(&placed, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0, D2D1_PROPERTY_TYPE_MATRIX_3X2, &Matrix3x2::translation(-at.X, -at.Y))?;
+    let size = unsafe { bitmap.GetSize() };
+    let (left, top) = (area.x.max(-at.X), area.y.max(-at.Y));
+    let (right, bottom) = ((area.x + area.w).min(size.width - at.X), (area.y + area.h).min(size.height - at.Y));
     let crop = effect(frame, &CLSID_D2D1Crop, &output(&placed)?)?;
-    prop(&crop, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[area.x, area.y, area.x + area.w, area.y + area.h])?;
+    prop(&crop, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[left, top, right, bottom])?;
     let border = effect(frame, &CLSID_D2D1Border, &output(&crop)?)?;
     prop(&border, D2D1_BORDER_PROP_EDGE_MODE_X.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_CLAMP.0)?;
     prop(&border, D2D1_BORDER_PROP_EDGE_MODE_Y.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_CLAMP.0)?;
