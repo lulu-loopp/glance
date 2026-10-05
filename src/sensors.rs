@@ -38,6 +38,10 @@ pub struct CpuSensors {
 /// Two programs must not interleave their accesses.
 pub struct NamedLock(HANDLE);
 
+/// How long to wait for another program's use of a bus to end (ms): longer
+/// than its transfers take, short enough not to hold the readings up.
+pub const LOCK_WAIT: u32 = 50;
+
 /// The PCI bus lock's name.
 const PCI_LOCK: PCWSTR = w!("Global\\Access_PCI");
 
@@ -70,6 +74,8 @@ pub struct AmdCpu {
     /// Joules per count of the energy counter.
     energy_unit: f64,
     last_energy: Option<(u32, Instant)>,
+    /// The latest temperatures, kept while another program has the PCI bus.
+    last: (Option<f32>, Vec<f32>),
 }
 
 impl AmdCpu {
@@ -81,40 +87,36 @@ impl AmdCpu {
         let ccd_base = if family >= 0x1A || (family == 0x19 && model >= 0x60) { CCD_TEMP_ZEN4 } else { CCD_TEMP_ZEN2 };
         let units = module.read("ioctl_read_msr", MSR_PWR_UNIT).ok()?;
         let energy_unit = 1.0 / (1u64 << ((units >> 8) & 0x1F)) as f64;
-        Some(AmdCpu { module, ccd_base, energy_unit, last_energy: None })
+        Some(AmdCpu { module, ccd_base, energy_unit, last_energy: None, last: (None, Vec::new()) })
     }
 
-    /// One SMN register. Normally under the shared PCI lock. Some programs
-    /// hold that lock for good (fan and LCD utilities that never release
-    /// it); then the register is read twice and taken only if both agree, as
-    /// a read interleaved with another program's would not.
-    fn smn(&self, locked: bool, address: u64) -> Option<u64> {
-        let read = || self.module.read("ioctl_read_smn", address).ok();
-        if locked {
-            return read();
-        }
-        let first = read()?;
-        (read()? == first).then_some(first)
+    /// One SMN register. Reached through an index and a data register on
+    /// the PCI bus, so only under the PCI lock other programs share.
+    fn smn(&self, address: u64) -> Option<u64> {
+        self.module.read("ioctl_read_smn", address).ok()
     }
 
     pub fn read(&mut self) -> CpuSensors {
         let mut sensors = CpuSensors::default();
-        let lock = NamedLock::acquire(PCI_LOCK, 10);
-        let locked = lock.is_some();
-        if let Some(raw) = self.smn(locked, THM_TCON_CUR_TMP) {
-            let offset = if raw & (1 << 19) != 0 { 49.0 } else { 0.0 };
-            sensors.temp = Some(((raw >> 21) & 0x7FF) as f32 * 0.125 - offset);
-        }
-        for ccd in 0..MAX_CCDS {
-            let Some(raw) = self.smn(locked, self.ccd_base + ccd * 4) else { continue };
-            let raw = raw & 0xFFF;
-            let celsius = raw as f32 * 0.125 - 305.0;
-            // An absent CCD reads zero.
-            if raw > 0 && celsius < 125.0 {
-                sensors.ccds.push(celsius);
+        // While another program has the bus, the last temperatures stand.
+        if let Some(_lock) = NamedLock::acquire(PCI_LOCK, LOCK_WAIT) {
+            let mut ccds = Vec::new();
+            let temp = self.smn(THM_TCON_CUR_TMP).map(|raw| {
+                let offset = if raw & (1 << 19) != 0 { 49.0 } else { 0.0 };
+                ((raw >> 21) & 0x7FF) as f32 * 0.125 - offset
+            });
+            for ccd in 0..MAX_CCDS {
+                let Some(raw) = self.smn(self.ccd_base + ccd * 4) else { continue };
+                let raw = raw & 0xFFF;
+                let celsius = raw as f32 * 0.125 - 305.0;
+                // An absent CCD reads zero.
+                if raw > 0 && celsius < 125.0 {
+                    ccds.push(celsius);
+                }
             }
+            self.last = (temp, ccds);
         }
-        drop(lock);
+        (sensors.temp, sensors.ccds) = self.last.clone();
         // The package's energy counter, 32 bits wide: power is its rate.
         if let Ok(raw) = self.module.read("ioctl_read_msr", MSR_PKG_ENERGY_STAT) {
             let now = Instant::now();
@@ -145,6 +147,7 @@ mod tests {
 
     /// Needs administrator rights and the PawnIO driver.
     #[test]
+    #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_this_cpu() {
         println!("family/model {:x?}", cpu_family_model());
         let mut cpu = AmdCpu::open().expect("PawnIO and an AMD Zen CPU, elevated");

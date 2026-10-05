@@ -4,7 +4,7 @@
 //! read them; nothing is ever written to a module.
 
 use crate::pawnio::Module;
-use crate::sensors::NamedLock;
+use crate::sensors::{NamedLock, LOCK_WAIT};
 
 use windows::core::w;
 
@@ -14,9 +14,6 @@ const SMBUS_I801: &[u8] = include_bytes!("../pawnio-modules/SmbusI801.bin");
 
 /// The lock every program using the SMBus takes around its transfers.
 const SMBUS_LOCK: windows::core::PCWSTR = w!("Global\\Access_SMBUS.HTP.Method");
-/// How long to wait for another program's transfer to finish (ms). Longer
-/// than one transfer, short enough not to hold the readings up.
-const LOCK_WAIT: u32 = 50;
 
 const READ: u64 = 1;
 const BYTE_DATA: u64 = 2;
@@ -70,7 +67,7 @@ impl Dimms {
         }
         // A DDR4 sensor: as Linux's jc42 checks, reserved bits clear and a
         // manufacturer set.
-        let word = |address, register| transfer(&module, address, register, WORD_DATA).map(|w| w.swap_bytes() as u16);
+        let word = |address, register| transfer(&module, address, register, WORD_DATA).map(|w| (w as u16).swap_bytes());
         let jc42: Vec<u64> = JC42_ADDRESSES
             .filter(|&address| {
                 let (Some(capability), Some(config), Some(maker)) =
@@ -146,6 +143,7 @@ mod tests {
 
     /// Run as administrator with `cargo test reads_these_modules -- --nocapture`.
     #[test]
+    #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_these_modules() {
         let mut dimms = Dimms::open().expect("no module sensors (administrator needed)");
         println!("{:?}", dimms.read());

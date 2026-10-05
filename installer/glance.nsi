@@ -1,10 +1,11 @@
-; Glance's installer: for every user of the machine, under Program Files.
+﻿; Glance's installer: for every user of the machine, under Program Files.
 ; Build with: makensis installer\glance.nsi (after cargo build --release).
 ;
 ; Installing copies Glance and the PawnIO driver's setup, which Glance runs
 ; itself on its first start. Uninstalling takes away everything Glance set
-; up: its scheduled tasks, its registry key, the PawnIO driver if Glance was
-; the one to install it (another program may rely on it), and its settings.
+; up: its scheduled tasks, its registry key and its settings. The PawnIO
+; driver, if Glance was the one to install it, goes only if the user says
+; so: other monitoring programs may have come to rely on it since.
 
 Unicode true
 !include "MUI2.nsh"
@@ -48,6 +49,9 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
+
+LangString RemovePawnIO ${LANG_SIMPCHINESE} "也要卸载 PawnIO 驱动吗？$\r$\n$\r$\n它是 Glance 安装的，用来读取温度和风扇。如果其他硬件监控或风扇控制软件（比如 HWiNFO、FanControl）也在用它，请保留。"
+LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver too?$\r$\n$\r$\nGlance installed it to read temperatures and fans. Keep it if other monitoring or fan control programs (such as HWiNFO or FanControl) use it."
 
 ; A running Glance holds its files.
 !macro StopGlance
@@ -98,13 +102,15 @@ Section "Uninstall"
   nsExec::Exec 'schtasks.exe /Delete /TN "${NAME}" /F'
   nsExec::Exec 'schtasks.exe /Delete /TN "${NAME} at sign-in" /F'
 
-  ; The driver goes only if Glance put it there.
+  ; The driver goes only if Glance put it there and the user agrees; a
+  ; silent uninstall keeps it.
   ReadRegDWORD $0 HKLM "SOFTWARE\Glance" "InstalledPawnIO"
+  ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "QuietUninstallString"
   ${If} $0 == 1
-    ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "QuietUninstallString"
-    ${If} $1 != ""
-      nsExec::Exec '$1'
-    ${EndIf}
+  ${AndIf} $1 != ""
+    MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(RemovePawnIO)" /SD IDNO IDNO keep_pawnio
+    nsExec::Exec '$1'
+    keep_pawnio:
   ${EndIf}
   DeleteRegKey HKLM "SOFTWARE\Glance"
 

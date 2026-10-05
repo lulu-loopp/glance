@@ -339,7 +339,7 @@ impl Sampler {
             },
             battery: battery(),
             cpu_sensors: self.amd_cpu.as_mut().map(AmdCpu::read),
-            board: self.super_io.as_ref().map(SuperIo::read),
+            board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
         })
@@ -553,7 +553,13 @@ impl ProcessTable {
                 // and moved all its bytes, since.
                 let (time_before, bytes_before) = self.totals.get(&key).copied().unwrap_or((0, 0));
                 totals.insert(key, (time, bytes));
-                let name = unsafe { record.image_name.Buffer.to_string() }.unwrap_or_default();
+                // A counted string, not necessarily terminated.
+                let image = &record.image_name;
+                let name = if image.Buffer.is_null() {
+                    String::new()
+                } else {
+                    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(image.Buffer.0, image.Length as usize / 2) })
+                };
                 let name = name.trim_end_matches(".exe").to_string();
                 *moved.entry(name.clone()).or_default() += bytes - bytes_before;
                 let program = programs.entry(name.clone()).or_insert_with(|| ProcessSample {

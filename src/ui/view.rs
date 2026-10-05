@@ -483,6 +483,10 @@ fn full_scale(scene: &Scene, series: &[Box<dyn Fn(&Sample) -> f64>]) -> f64 {
 /// is as short as it can be.
 pub fn split(heights: &[f32], columns: usize, gap: f32) -> (Vec<usize>, f32) {
     let n = heights.len();
+    // With every module switched off, there is only the bar.
+    if n == 0 {
+        return (vec![0; columns], 0.0);
+    }
     let span = |from: usize, to: usize| heights[from..to].iter().sum::<f32>() + (to - from).saturating_sub(1) as f32 * gap;
     let mut best = vec![vec![f32::INFINITY; n + 1]; columns + 1];
     let mut from = vec![vec![0usize; n + 1]; columns + 1];
@@ -923,6 +927,16 @@ mod tests {
         assert_eq!(split(&heights, 3, 0.0).1, 200.0);
         // Gaps count between the lanes of a column, not after the last.
         assert_eq!(split(&heights, 2, 8.0), (vec![0, 2], 308.0));
+        assert_eq!(split(&[], 1, 8.0), (vec![0], 0.0));
+    }
+
+    #[test]
+    fn lays_out_a_panel_with_no_lanes() {
+        let theme = Theme::new(Skin::Paper, false);
+        let layout = Layout::new(Vec::new(), 1000.0, 3, &theme);
+        assert_eq!(layout.columns, 1);
+        assert!(layout.lanes().is_empty());
+        assert_eq!(layout.height(), theme.bar_height);
     }
 
     #[test]

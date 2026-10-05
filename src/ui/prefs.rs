@@ -145,6 +145,11 @@ impl Prefs {
     /// modules it no longer has are dropped, new ones appended.
     pub fn resolve(stored: &serde_json::Value, known: &[String]) -> Self {
         let mut prefs: Prefs = serde_json::from_value(stored.clone()).unwrap_or_default();
+        // A hand-edited file may hold numbers the settings never offer.
+        prefs.chart_seconds = prefs.chart_seconds.clamp(10.0, 300.0);
+        prefs.hot_load = prefs.hot_load.clamp(1.0, 100.0);
+        prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
+        prefs.processes.count = prefs.processes.count.clamp(1, 30);
         prefs.modules.retain(|entry| known.contains(&entry.id));
         for id in known {
             if !prefs.modules.iter().any(|entry| &entry.id == id) {
