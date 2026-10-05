@@ -68,7 +68,8 @@ export class Backdrop {
     const image = new Image();
     image.crossOrigin = 'anonymous';
     image.src = url;
-    await image.decode();
+    // A live capture can be replaced before it is fetched; keep the last one.
+    if (!(await image.decode().then(() => true, () => false))) return;
     // A newer capture may have been asked for meanwhile.
     if (this.url === url) this.image = image;
   }

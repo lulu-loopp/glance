@@ -63,6 +63,8 @@ const STRINGS = {
   themeDark: { zh: '深色', en: 'Dark' },
   themeBackdrop: { zh: '跟随背景', en: 'Backdrop' },
   language: { zh: '语言', en: 'Language' },
+  liveBackdrop: { zh: '实时折射', en: 'Live refraction' },
+  liveBackdropHint: { zh: '开启后截图里不会出现面板', en: 'The panel then stays out of screenshots' },
   opening: { zh: '呼出', en: 'Opening' },
   edge: { zh: '屏幕边缘', en: 'Screen edge' },
   left: { zh: '左侧', en: 'Left' },

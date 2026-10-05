@@ -193,6 +193,10 @@ export function buildSettings(
         prefs.theme = theme;
         changed();
       }),
+      toggle(t('liveBackdrop'), settings.live_backdrop, (on) => {
+        settings.live_backdrop = on;
+        changed();
+      }, t('liveBackdropHint')),
       segmented(t('language'), [
         { value: 'system', label: t('themeSystem') },
         { value: 'zh', label: '中文' },

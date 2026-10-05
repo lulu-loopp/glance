@@ -11,7 +11,6 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::http::{Response, StatusCode};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::window::{Effect, EffectsBuilder};
 use tauri::{
     App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
@@ -142,13 +141,17 @@ fn open_settings(app: AppHandle) {
 
 /// Brings the settings window up, creating it centred on the monitor the
 /// pointer is on, with a capture of that desktop for its preview.
+/// Brings the settings window up, centred on the monitor the pointer is on.
+/// It shows itself when its page has drawn (see `settings_ready`), so it
+/// never appears blank. Closing it ends it: keeping it hidden saved about a
+/// tenth of a second on the next opening and cost 150 MB meanwhile.
 fn show_settings(app: &AppHandle) {
+    let state = app.state::<AppState>();
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.unminimize();
         let _ = window.set_focus();
         return;
     }
-    let state = app.state::<AppState>();
     // The settings take over from the panel.
     state.controller.dismiss();
     let Some((work, scale)) = panel::work_area_at_cursor() else { return };
@@ -159,10 +162,16 @@ fn show_settings(app: &AppHandle) {
     let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?settings".into()))
         .title("Glance 设置")
         .visible(false)
-        .transparent(true)
-        .effects(EffectsBuilder::new().effect(Effect::Mica).build())
         .build()
         .expect("settings window");
+    let controller = state.controller.clone();
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Destroyed = event {
+            controller.set_settings_open(false);
+            *handle.state::<AppState>().wallpaper.lock().unwrap() = None;
+        }
+    });
     // Sized and centred in physical pixels of the monitor it opens on: a
     // logical size would be scaled by whichever monitor the window happens
     // to be created on.
@@ -175,16 +184,13 @@ fn show_settings(app: &AppHandle) {
         .set_position(PhysicalPosition::new(work.left + (work_width - width) / 2, work.top + (work_height - height) / 2))
         .unwrap();
     window.set_size(PhysicalSize::new(width, height)).unwrap();
+}
+
+#[tauri::command(async)]
+fn settings_ready(app: AppHandle) {
+    let window = app.get_webview_window("settings").unwrap();
     window.show().unwrap();
     window.set_focus().unwrap();
-    let controller = state.controller.clone();
-    let handle = app.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Destroyed = event {
-            controller.set_settings_open(false);
-            *handle.state::<AppState>().wallpaper.lock().unwrap() = None;
-        }
-    });
 }
 
 #[tauri::command(async)]
@@ -234,6 +240,9 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut sampler = Sampler::new();
     let controller = Arc::new(Controller::new(handle.clone(), window.hwnd()?, &settings));
+    controller.apply(&settings);
+    // The panel starts hidden.
+    controller.set_on_screen(false);
     app.manage(AppState {
         info: sampler.info.clone(),
         controller: controller.clone(),
@@ -319,6 +328,7 @@ pub fn run() {
             history,
             preview,
             open_settings,
+            settings_ready,
             relocate,
             panel_hidden,
             quit

@@ -27,9 +27,14 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, SetTimer,
-    SetWindowPos, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, HWND_TOPMOST, MSG, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_TIMER,
+    SetWindowDisplayAffinity, SetWindowPos, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, HWND_TOPMOST, MSG, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, WINDOW_EX_STYLE, WINDOW_STYLE, WM_INPUT, WM_TIMER, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
 };
+
+use webview2_com::Microsoft::Web::WebView2::Win32::{
+    ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+};
+use windows::core::Interface;
 
 use crate::capture;
 use crate::detector::{Detector, Motion};
@@ -47,6 +52,8 @@ const CORNER_EXCLUSION: f64 = 48.0;
 /// History is kept for the longest chart span the settings offer.
 const LONGEST_SPAN: Duration = Duration::from_secs(300);
 const TICK_MS: u32 = 16;
+/// How often a live backdrop is captured again.
+const LIVE_INTERVAL: Duration = Duration::from_millis(250);
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
 
 /// What the page draws behind the panel.
@@ -112,6 +119,7 @@ struct Placement {
 
 struct Config {
     edge: Edge,
+    live: bool,
     pressure: i32,
     close_delay: Duration,
     history: usize,
@@ -131,8 +139,10 @@ struct Inner {
     history: VecDeque<Sample>,
     /// The rows the page last laid out (see `Sample::layout_rows`).
     rows: Option<Vec<String>>,
-    /// The number the current capture is served under, if there is one.
+    /// The number the current capture is served under, if there is one, and
+    /// when it was taken.
     shot: Option<u64>,
+    shot_at: Instant,
     shots: u64,
 }
 
@@ -163,6 +173,12 @@ struct OpenPayload<'a> {
 }
 
 #[derive(Clone, Serialize)]
+struct BackdropFrame {
+    epoch: u64,
+    backdrop: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
 struct BackdropPayload {
     epoch: u64,
     room: Room,
@@ -178,6 +194,7 @@ struct Contact {
 fn config_from(settings: &Settings) -> Config {
     Config {
         edge: settings.edge,
+        live: settings.live_backdrop,
         pressure: settings.sensitivity.pressure(),
         close_delay: settings.close_delay(),
         history: (LONGEST_SPAN.as_millis() / settings.interval().as_millis()) as usize + 16,
@@ -224,6 +241,7 @@ impl Controller {
                 history: VecDeque::new(),
                 rows: None,
                 shot: None,
+                shot_at: Instant::now(),
                 shots: 0,
             }),
         }
@@ -231,6 +249,15 @@ impl Controller {
 
     pub fn apply(&self, settings: &Settings) {
         *self.config.lock().unwrap() = config_from(settings);
+        self.exclude_from_capture(settings.live_backdrop);
+    }
+
+    /// While the backdrop is live the window has to stay out of the captures
+    /// of what is behind it; the system offers that only as "out of every
+    /// capture".
+    fn exclude_from_capture(&self, exclude: bool) {
+        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        unsafe { SetWindowDisplayAffinity(self.hwnd(), affinity) }.expect("display affinity");
     }
 
     fn edge(&self) -> Edge {
@@ -329,6 +356,7 @@ impl Controller {
             _ => None,
         };
         inner.shot = capture.as_ref().map(|(shot, _)| *shot);
+        inner.shot_at = Instant::now();
         *self.capture.lock().unwrap() = capture;
     }
 
@@ -370,6 +398,7 @@ impl Controller {
             inner.shot = None;
             *self.capture.lock().unwrap() = None;
             self.window().hide().unwrap();
+            self.set_on_screen(false);
         }
     }
 
@@ -388,6 +417,7 @@ impl Controller {
         }
         // No lock held: the main thread carries the hide out.
         self.hide_and_wait();
+        self.set_on_screen(false);
     }
 
     /// Hides the window and waits until the screen no longer shows it.
@@ -407,6 +437,23 @@ impl Controller {
         if matches!(inner.phase, Phase::Open { .. }) {
             self.begin_close(&mut inner);
         }
+    }
+
+    /// Tells the web view whether the panel is on screen. Off screen it gives
+    /// back what it keeps for drawing (mostly the glass's textures in the GPU
+    /// process, some 120 MB), which it otherwise holds on to.
+    pub fn set_on_screen(&self, on_screen: bool) {
+        let level = if on_screen {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+        } else {
+            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+        };
+        self.window()
+            .with_webview(move |webview| unsafe {
+                let core: ICoreWebView2_19 = webview.controller().CoreWebView2().unwrap().cast().unwrap();
+                core.SetMemoryUsageTargetLevel(level).unwrap();
+            })
+            .unwrap();
     }
 
     fn hwnd(&self) -> HWND {
@@ -445,6 +492,7 @@ impl Controller {
         }
 
         self.window().set_ignore_cursor_events(false).unwrap();
+        self.set_on_screen(true);
         self.window().show().unwrap();
         let window = inner.placement.as_ref().unwrap().window;
         let epoch = inner.epoch;
@@ -529,7 +577,10 @@ impl Controller {
 
     /// Follows the pointer while the panel is open.
     fn track(&self, cursor: POINT, now: Instant) {
-        let close_delay = self.config.lock().unwrap().close_delay;
+        let (close_delay, live) = {
+            let config = self.config.lock().unwrap();
+            (config.close_delay, config.live)
+        };
         let mut inner = self.inner.lock().unwrap();
         // Until the page has placed the panel, the pointer counts as on it.
         let (on_panel, in_reach) = match inner.panel {
@@ -560,6 +611,15 @@ impl Controller {
         if inner.click_through == on_panel {
             inner.click_through = !on_panel;
             self.window().set_ignore_cursor_events(!on_panel).unwrap();
+        }
+
+        // A live backdrop is captured again every so often. The window is
+        // out of captures then, so it can stay where it is.
+        if live && inner.shot.is_some() && now.duration_since(inner.shot_at) >= LIVE_INTERVAL {
+            let window = inner.placement.as_ref().unwrap().window;
+            self.shoot(&mut inner, window);
+            let frame = BackdropFrame { epoch: inner.epoch, backdrop: Self::backdrop_url(&inner) };
+            self.app.emit("backdrop-frame", frame).unwrap();
         }
     }
 

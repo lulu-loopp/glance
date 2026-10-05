@@ -55,6 +55,12 @@ export async function panelApp(boot: Bootstrap) {
     void invoke('set_surface', { surface });
   };
 
+  /** Lets go of the captured desktop and the glass built on it while hidden. */
+  const release = () => {
+    void backdrop.load(null);
+    view.dress(prefs.theme);
+  };
+
   /** Lays the panel out and, while it is up, tells the host where it is. */
   const relayout = () => {
     const centre = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
@@ -126,12 +132,20 @@ export async function panelApp(boot: Bootstrap) {
       if (epoch !== closing || body.dataset.state !== 'closing') return;
       body.dataset.state = 'hidden';
       void invoke('panel_hidden', { epoch: closing });
+      release();
     }, CLOSE_MS);
+  });
+
+  // A live backdrop, captured again while the panel is open.
+  await listen<{ epoch: number; backdrop: string | null }>('backdrop-frame', async ({ payload }) => {
+    await backdrop.load(payload.backdrop);
+    if (epoch === payload.epoch && body.dataset.state === 'open') view.dress(prefs.theme);
   });
 
   // Taken off the screen at once, as the settings window opens.
   await listen<number>('panel-dismissed', () => {
     body.dataset.state = 'hidden';
+    release();
   });
 
   // Changed in the settings window.
