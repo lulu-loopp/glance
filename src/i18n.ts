@@ -15,6 +15,8 @@ const STRINGS = {
   processes: { zh: '进程', en: 'Processes' },
   storage: { zh: '存储', en: 'Storage' },
   storageDetail: { zh: '各分区的空间', en: 'Space on each drive' },
+  networkDetail: { zh: '所有物理网卡的上下行速度', en: 'Traffic over every physical adapter' },
+  processesDetail: { zh: '占用最多的程序', en: 'The busiest programs' },
   battery: { zh: '电池', en: 'Battery' },
   fans: { zh: '风扇', en: 'Fans' },
   temperatures: { zh: '温度', en: 'Temperatures' },

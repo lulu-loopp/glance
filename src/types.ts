@@ -10,6 +10,8 @@ export interface GpuInfo {
 
 export interface StaticInfo {
   cpu_name: string;
+  memory_modules: string | null;
+  drives: string[];
   threads: number;
   mem_total: number;
   gpus: GpuInfo[];
