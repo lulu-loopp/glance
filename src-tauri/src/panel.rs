@@ -60,13 +60,15 @@ pub enum Backdrop {
 }
 
 /// How the current skin wants its window, as declared by the page.
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Surface {
-    /// The lanes' height laid out in one column, and the height of what is
-    /// not lanes (the bar), at zoom 1 (logical px). How many columns the
+    /// The height of each lane, the space between lanes in a column, the
+    /// height of what is not lanes (the bar), and a column's width and the
+    /// space between columns, at zoom 1 (logical px). How many columns the
     /// lanes need depends on the screen, which only this side knows before
     /// the panel opens; the page splits them by the same rule.
-    lanes_height: f64,
+    lane_heights: Vec<f64>,
+    lane_gap: f64,
     chrome_height: f64,
     column_width: f64,
     column_gap: f64,
@@ -152,9 +154,9 @@ pub struct Controller {
 struct OpenPayload<'a> {
     epoch: u64,
     history: &'a VecDeque<Sample>,
-    /// Height of the work area the panel has to fit in (logical px).
-    room: f64,
-    /// Pointer height relative to the window (physical px).
+    room: Room,
+    /// Pointer position relative to the window (physical px).
+    focus_x: i32,
     focus_y: i32,
     /// Where to fetch the capture of the screen behind the window.
     backdrop: Option<String>,
@@ -163,7 +165,7 @@ struct OpenPayload<'a> {
 #[derive(Clone, Serialize)]
 struct BackdropPayload {
     epoch: u64,
-    room: f64,
+    room: Room,
     backdrop: Option<String>,
 }
 
@@ -271,6 +273,7 @@ impl Controller {
         match self.edge() {
             Edge::Left => reach.left = placement.monitor.left,
             Edge::Right => reach.right = placement.monitor.right,
+            Edge::Top => reach.top = placement.monitor.top,
         }
         inner.panel = Some(panel);
         inner.reach = reach;
@@ -318,7 +321,7 @@ impl Controller {
 
     /// Captures the screen inside `window` for the current surface, if it wants that.
     fn shoot(&self, inner: &mut Inner, window: RECT) {
-        let capture = match inner.surface {
+        let capture = match &inner.surface {
             Some(surface) if surface.backdrop == Backdrop::Snapshot => {
                 inner.shots += 1;
                 Some((inner.shots, Arc::new(capture::screen_bmp(window))))
@@ -349,13 +352,13 @@ impl Controller {
 
         let mut inner = self.inner.lock().unwrap();
         // The panel may have been dismissed while the window was going.
-        let Some(surface) = inner.surface.filter(|_| is_current(&inner)) else { return };
-        let window = self.place(&mut inner, surface, &contact);
+        let Some(surface) = inner.surface.clone().filter(|_| is_current(&inner)) else { return };
+        let window = self.place(&mut inner, &surface, &contact);
         self.shoot(&mut inner, window);
         inner.panel = None;
         self.window().show().unwrap();
         self.app
-            .emit("panel-backdrop", BackdropPayload { epoch, room: room(&contact), backdrop: Self::backdrop_url(&inner) })
+            .emit("panel-backdrop", BackdropPayload { epoch, room: room(&surface, &contact, self.edge()), backdrop: Self::backdrop_url(&inner) })
             .unwrap();
     }
 
@@ -424,7 +427,7 @@ impl Controller {
 
     fn open(&self, cursor: POINT, contact: &Contact) {
         let mut inner = self.inner.lock().unwrap();
-        let Some(surface) = inner.surface else { return };
+        let Some(surface) = inner.surface.clone() else { return };
         if matches!(inner.phase, Phase::Open { .. }) {
             return;
         }
@@ -437,7 +440,7 @@ impl Controller {
         // A reopen during the slide-out keeps the window, and the capture
         // behind it, where they are.
         if !reopening {
-            let window = self.place(&mut inner, surface, contact);
+            let window = self.place(&mut inner, &surface, contact);
             self.shoot(&mut inner, window);
         }
 
@@ -451,7 +454,8 @@ impl Controller {
                 OpenPayload {
                     epoch,
                     history: &inner.history,
-                    room: room(contact),
+                    room: room(&surface, contact, self.edge()),
+                    focus_x: cursor.x - window.left,
                     focus_y: cursor.y - window.top,
                     backdrop: Self::backdrop_url(&inner),
                 },
@@ -460,15 +464,9 @@ impl Controller {
     }
 
     /// Sizes and positions the (hidden) window for `contact`'s monitor.
-    fn place(&self, inner: &mut Inner, surface: Surface, contact: &Contact) -> RECT {
-        let work_height = (contact.work.bottom - contact.work.top) as f64 / contact.scale;
-        let (panel_width, _, zoom) = fit_panel(surface, work_height);
-        let width = window_width(surface, panel_width, contact.scale, zoom);
-        let left = match self.edge() {
-            Edge::Left => contact.monitor.left,
-            Edge::Right => contact.monitor.right - width,
-        };
-        let window = RECT { left, top: contact.work.top, right: left + width, bottom: contact.work.bottom };
+    fn place(&self, inner: &mut Inner, surface: &Surface, contact: &Contact) -> RECT {
+        let (window, zoom) = geometry(surface, contact, self.edge());
+        let (left, width) = (window.left, window.right - window.left);
         inner.placement = Some(Placement { window, monitor: contact.monitor, work: contact.work, scale: contact.scale, zoom });
 
         // Crossing to a monitor with another scale factor makes the windowing
@@ -497,29 +495,25 @@ impl Controller {
 
     /// The panel changed size while on screen: keep it fitting the work area.
     fn fit(&self, inner: &mut Inner) {
-        let (Some(surface), Some(placement)) = (inner.surface, inner.placement.as_mut()) else { return };
-        let work_height = (placement.window.bottom - placement.window.top) as f64 / placement.scale;
-        let (panel_width, _, zoom) = fit_panel(surface, work_height);
-        let width = window_width(surface, panel_width, placement.scale, zoom);
-        if zoom == placement.zoom && width == placement.window.right - placement.window.left {
+        let (Some(surface), Some(placement)) = (inner.surface.clone(), inner.placement.as_mut()) else { return };
+        let contact = Contact { monitor: placement.monitor, work: placement.work, scale: placement.scale };
+        let (window, zoom) = geometry(&surface, &contact, self.edge());
+        if zoom == placement.zoom && window == placement.window {
             return;
         }
-        // A capture covers the window as it was; a wider window would show
+        // A capture covers the window as it was; a larger window would show
         // past it. Only the zoom changes then, and only to shrink.
-        if inner.shot.is_some() && width > placement.window.right - placement.window.left {
+        let w = placement.window;
+        let grows = window.right - window.left > w.right - w.left || window.bottom - window.top > w.bottom - w.top;
+        if inner.shot.is_some() && grows {
             return;
         }
         placement.zoom = zoom;
         if inner.shot.is_none() {
-            let left = match self.edge() {
-                Edge::Left => placement.monitor.left,
-                Edge::Right => placement.monitor.right - width,
-            };
-            placement.window.left = left;
-            placement.window.right = left + width;
-            let w = placement.window;
+            placement.window = window;
+            let w = window;
             unsafe {
-                SetWindowPos(self.hwnd(), None, w.left, w.top, width, w.bottom - w.top, SWP_NOACTIVATE | SWP_NOZORDER)
+                SetWindowPos(self.hwnd(), None, w.left, w.top, w.right - w.left, w.bottom - w.top, SWP_NOACTIVATE | SWP_NOZORDER)
             }
             .unwrap();
         }
@@ -659,8 +653,53 @@ impl Controller {
     }
 }
 
-fn room(contact: &Contact) -> f64 {
-    (contact.work.bottom - contact.work.top) as f64 / contact.scale
+/// Share of the work area's height a panel opened from the top may take.
+const TOP_SHARE: f64 = 0.6;
+
+/// What a panel may take up on a work area, in logical px: its height, and
+/// how many columns it may spread over. The page lays out by the same figures.
+#[derive(Clone, Copy, Serialize)]
+struct Room {
+    height: f64,
+    max_columns: f64,
+}
+
+fn room(surface: &Surface, contact: &Contact, edge: Edge) -> Room {
+    let work_width = (contact.work.right - contact.work.left) as f64 / contact.scale;
+    let work_height = (contact.work.bottom - contact.work.top) as f64 / contact.scale;
+    match edge {
+        Edge::Left | Edge::Right => Room { height: work_height, max_columns: MAX_COLUMNS },
+        // Along the top edge the panel grows sideways: as many columns as the
+        // width holds, and no taller than a share of the screen.
+        Edge::Top => {
+            let fit = ((work_width - 2.0 * GAP + surface.column_gap) / (surface.column_width + surface.column_gap)).floor();
+            Room { height: work_height * TOP_SHARE, max_columns: fit.max(1.0) }
+        }
+    }
+}
+
+/// The window's rectangle (physical px) and the page zoom for a panel opened
+/// on the monitor of `contact` from `edge`. The window is a strip along that
+/// edge: as long as the work area, and as deep as the panel.
+fn geometry(surface: &Surface, contact: &Contact, edge: Edge) -> (RECT, f64) {
+    let (panel_width, panel_height, zoom) = fit_panel(surface, room(surface, contact, edge));
+    let px = |logical: f64| (logical * contact.scale * zoom).round() as i32;
+    let (monitor, work) = (contact.monitor, contact.work);
+    let window = match edge {
+        Edge::Left => {
+            let width = px(panel_width + surface.margin + surface.inset);
+            RECT { left: monitor.left, top: work.top, right: monitor.left + width, bottom: work.bottom }
+        }
+        Edge::Right => {
+            let width = px(panel_width + surface.margin + surface.inset);
+            RECT { left: monitor.right - width, top: work.top, right: monitor.right, bottom: work.bottom }
+        }
+        Edge::Top => {
+            let height = px(panel_height + surface.margin + surface.inset);
+            RECT { left: work.left, top: monitor.top, right: work.right, bottom: monitor.top + height }
+        }
+    };
+    (window, zoom)
 }
 
 /// The work area of the monitor under the pointer, and its scale factor.
@@ -675,21 +714,47 @@ pub fn work_area_at_cursor() -> Option<(RECT, f64)> {
 /// The page keeps the same limit.
 const MAX_COLUMNS: f64 = 3.0;
 
-/// The panel's size (logical px) and zoom on a work area `work_height` tall:
+/// The panel's size (logical px) and zoom in `room`:
 /// as many columns as it takes to show the lanes at full size, and only if
 /// even the most columns are not enough, zoomed out until they fit.
-fn fit_panel(surface: Surface, work_height: f64) -> (f64, f64, f64) {
-    let space = work_height - 2.0 * GAP - surface.chrome_height;
-    let columns = (surface.lanes_height / space).ceil().clamp(1.0, MAX_COLUMNS);
+fn fit_panel(surface: &Surface, room: Room) -> (f64, f64, f64) {
+    let space = room.height - 2.0 * GAP - surface.chrome_height;
+    let most = (room.max_columns as usize).min(surface.lane_heights.len()).max(1);
+    // The fewest columns whose tallest fits; failing that, the most.
+    let (columns, tallest) = (1..=most)
+        .map(|columns| (columns, tallest_column(&surface.lane_heights, columns, surface.lane_gap)))
+        .find(|&(columns, tallest)| tallest <= space || columns == most)
+        .unwrap();
+    let columns = columns as f64;
     let width = columns * surface.column_width + (columns - 1.0) * surface.column_gap;
-    let height = surface.lanes_height / columns + surface.chrome_height;
-    let zoom = ((work_height - 2.0 * GAP) / height).min(1.0);
+    let height = tallest + surface.chrome_height;
+    let zoom = ((room.height - 2.0 * GAP) / height).min(1.0);
     (width, height, zoom)
 }
 
-/// Window width (physical px) for a panel `width` wide.
-fn window_width(surface: Surface, width: f64, scale: f64, zoom: f64) -> i32 {
-    ((width + surface.margin + surface.inset) * scale * zoom).round() as i32
+/// The height of the tallest column when `heights`, in order, are split into
+/// `columns` columns so that the tallest is as short as it can be. Lanes of
+/// height zero are hidden and take no gap. The page splits by the same rule.
+fn tallest_column(heights: &[f64], columns: usize, gap: f64) -> f64 {
+    let span = |from: usize, to: usize| {
+        let shown: Vec<f64> = heights[from..to].iter().copied().filter(|&h| h > 0.0).collect();
+        shown.iter().sum::<f64>() + shown.len().saturating_sub(1) as f64 * gap
+    };
+    let n = heights.len();
+    // best[k][i]: the tallest column splitting the first i lanes into k columns.
+    let mut best = vec![vec![f64::INFINITY; n + 1]; columns + 1];
+    best[0][0] = 0.0;
+    for k in 1..=columns {
+        for i in k..=n {
+            for j in (k - 1)..i {
+                let candidate = best[k - 1][j].max(span(j, i));
+                if candidate < best[k][i] {
+                    best[k][i] = candidate;
+                }
+            }
+        }
+    }
+    best[columns][n]
 }
 
 fn contains(rect: &RECT, point: POINT) -> bool {
@@ -727,8 +792,10 @@ fn read_motion(handle: HRAWINPUT, edge: Edge) -> Option<Motion> {
     let outward = match edge {
         Edge::Left => -mouse.lLastX,
         Edge::Right => mouse.lLastX,
+        Edge::Top => -mouse.lLastY,
     };
-    Some(Motion::Relative { outward, along: mouse.lLastY })
+    let along = if edge == Edge::Top { mouse.lLastX } else { mouse.lLastY };
+    Some(Motion::Relative { outward, along })
 }
 
 fn monitor_at(point: POINT) -> Option<Contact> {
@@ -746,15 +813,35 @@ fn monitor_at(point: POINT) -> Option<Contact> {
 fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     let contact = monitor_at(cursor)?;
     let monitor = contact.monitor;
-    let (on_edge, beyond) = match edge {
-        Edge::Left => (cursor.x <= monitor.left, monitor.left - 1),
-        Edge::Right => (cursor.x >= monitor.right - 1, monitor.right),
-    };
     let corner = (CORNER_EXCLUSION * contact.scale).round() as i32;
-    let clear_of_corners = (monitor.top + corner..monitor.bottom - corner).contains(&cursor.y);
+    let along_height = (monitor.top + corner..monitor.bottom - corner).contains(&cursor.y);
+    let (on_edge, beyond, clear_of_corners) = match edge {
+        Edge::Left => (cursor.x <= monitor.left, POINT { x: monitor.left - 1, y: cursor.y }, along_height),
+        Edge::Right => (cursor.x >= monitor.right - 1, POINT { x: monitor.right, y: cursor.y }, along_height),
+        Edge::Top => (
+            cursor.y <= monitor.top,
+            POINT { x: cursor.x, y: monitor.top - 1 },
+            (monitor.left + corner..monitor.right - corner).contains(&cursor.x),
+        ),
+    };
     if !on_edge || !clear_of_corners || buttons_down() || !cursor_showing() {
         return None;
     }
-    let neighbour = unsafe { MonitorFromPoint(POINT { x: beyond, y: cursor.y }, MONITOR_DEFAULTTONULL) };
+    let neighbour = unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) };
     neighbour.is_invalid().then_some(contact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tallest_column;
+
+    #[test]
+    fn splits_lanes_into_the_shortest_columns() {
+        let heights = [100.0, 200.0, 50.0, 0.0, 150.0];
+        assert_eq!(tallest_column(&heights, 1, 10.0), 100.0 + 200.0 + 50.0 + 150.0 + 3.0 * 10.0);
+        // [100, 200] | [50, 0, 150]: 310 and 210.
+        assert_eq!(tallest_column(&heights, 2, 10.0), 310.0);
+        // [100] | [200] | [50, 0, 150] would be 210; [100, 200] stays 310; best is 210.
+        assert_eq!(tallest_column(&heights, 3, 10.0), 210.0);
+    }
 }

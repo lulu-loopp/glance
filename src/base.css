@@ -22,12 +22,20 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* The direction the panel comes in from. */
 [data-edge='left'] {
-  --dir: -1;
+  --dx: -1;
+  --dy: 0;
 }
 
 [data-edge='right'] {
-  --dir: 1;
+  --dx: 1;
+  --dy: 0;
+}
+
+[data-edge='top'] {
+  --dx: 0;
+  --dy: -1;
 }
 
 button {
@@ -58,8 +66,12 @@ button {
   right: calc(var(--inset) * 1px);
 }
 
+[data-edge='top'] .panel {
+  top: calc(var(--inset) * 1px);
+}
+
 [data-state]:not([data-state='open']) .panel {
-  transform: translateX(calc(var(--dir) * var(--enter-shift)));
+  transform: translate(calc(var(--dx) * var(--enter-shift)), calc(var(--dy) * var(--enter-shift)));
   opacity: 0;
   transition:
     transform 180ms cubic-bezier(0.4, 0, 1, 1),

@@ -8,7 +8,7 @@ import { Backdrop } from './glass';
 import { setLanguage } from './i18n';
 import { catalog } from './modules';
 import { onSystemTheme, resolveTheme } from './theme';
-import { PanelView } from './panelView';
+import { PanelView, type Room } from './panelView';
 import { resolvePrefs } from './settings';
 import type { Bootstrap, Sample, Settings } from './types';
 
@@ -29,8 +29,8 @@ export async function panelApp(boot: Bootstrap) {
   body.dataset.state = 'hidden';
 
   let epoch = 0;
-  let room = window.innerHeight;
-  let focusY = window.innerHeight / 2;
+  let room: Room = { height: window.innerHeight, max_columns: 3 };
+  let focus = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
   let drawing = false;
 
   /** Tells the window host how the current skin wants its window. */
@@ -38,9 +38,10 @@ export async function panelApp(boot: Bootstrap) {
   const reportSurface = () => {
     const style = getComputedStyle(body);
     const token = (name: string) => style.getPropertyValue(name).trim();
-    const { lanesHeight, chromeHeight, columnWidth, columnGap } = view.measures;
+    const { laneHeights, laneGap, chromeHeight, columnWidth, columnGap } = view.measures;
     const surface = {
-      lanes_height: lanesHeight,
+      lane_heights: laneHeights,
+      lane_gap: laneGap,
       chrome_height: chromeHeight,
       column_width: columnWidth,
       column_gap: columnGap,
@@ -56,9 +57,10 @@ export async function panelApp(boot: Bootstrap) {
 
   /** Lays the panel out and, while it is up, tells the host where it is. */
   const relayout = () => {
-    view.layout(room, settings.anchor === 'center' ? window.innerHeight / 2 : focusY);
+    const centre = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    view.layout(() => room, settings.anchor === 'center' ? centre : focus);
     if (body.dataset.state === 'hidden') return;
-    view.dress();
+    view.dress(prefs.theme);
     void invoke('set_panel_rect', { epoch, rect: view.rect() });
   };
 
@@ -76,14 +78,17 @@ export async function panelApp(boot: Bootstrap) {
     requestAnimationFrame(frame);
   };
 
-  await listen<{ epoch: number; history: Sample[]; room: number; focus_y: number; backdrop: string | null }>(
+  await listen<{ epoch: number; history: Sample[]; room: Room; focus_x: number; focus_y: number; backdrop: string | null }>(
     'panel-open',
     async ({ payload }) => {
       const reopening = body.dataset.state === 'closing';
       epoch = payload.epoch;
       view.samples = payload.history;
       room = payload.room;
-      if (!reopening) focusY = payload.focus_y / window.devicePixelRatio;
+      if (!reopening) {
+        const ratio = window.devicePixelRatio;
+        focus = { x: payload.focus_x / ratio, y: payload.focus_y / ratio };
+      }
       body.dataset.state = 'loading';
       view.showLatest();
       await backdrop.load(payload.backdrop);
@@ -96,7 +101,7 @@ export async function panelApp(boot: Bootstrap) {
     },
   );
 
-  await listen<{ epoch: number; room: number; backdrop: string | null }>('panel-backdrop', async ({ payload }) => {
+  await listen<{ epoch: number; room: Room; backdrop: string | null }>('panel-backdrop', async ({ payload }) => {
     room = payload.room;
     await backdrop.load(payload.backdrop);
     if (epoch === payload.epoch) relayout();
@@ -104,6 +109,14 @@ export async function panelApp(boot: Bootstrap) {
 
   await listen<Sample>('sample', ({ payload }) => {
     view.push(payload, 300_000 / settings.interval_ms + 16);
+    // A hidden page gets a sample only when it changes the layout (rows come
+    // or go). The window is hidden then, so nothing that waits on rendering
+    // (a resize observer) runs: measure now, so the window is sized right
+    // before the panel next opens.
+    if (body.dataset.state === 'hidden') {
+      relayout();
+      reportSurface();
+    }
   });
 
   await listen<number>('panel-close', ({ payload: closing }) => {
@@ -135,7 +148,7 @@ export async function panelApp(boot: Bootstrap) {
   onSystemTheme(() => {
     body.dataset.theme = resolveTheme(prefs.theme);
     view.recolor();
-    if (body.dataset.state === 'open') view.dress();
+    if (body.dataset.state === 'open') view.dress(prefs.theme);
   });
   // A new zoom, or the window moved to another monitor.
   window.addEventListener('resize', relayout);

@@ -1,4 +1,4 @@
-export type Edge = 'left' | 'right';
+export type Edge = 'left' | 'right' | 'top';
 export type Skin = 'paper' | 'glass' | 'fluent';
 export type ViewName = 'monitor' | 'settings';
 
@@ -67,7 +67,8 @@ export interface ViewPrefs {
   chartSeconds: number;
   hotLoad: number;
   hotTemp: number;
-  theme: 'system' | 'light' | 'dark';
+  /** 'backdrop': light or dark by what is behind the panel. */
+  theme: 'system' | 'light' | 'dark' | 'backdrop';
   language: 'system' | 'zh' | 'en';
 }
 

@@ -188,6 +188,7 @@ export function buildSettings(
         { value: 'system', label: t('themeSystem') },
         { value: 'light', label: t('themeLight') },
         { value: 'dark', label: t('themeDark') },
+        { value: 'backdrop', label: t('themeBackdrop') },
       ] as const, prefs.theme, (theme) => {
         prefs.theme = theme;
         changed();
@@ -203,7 +204,11 @@ export function buildSettings(
     ),
     section(
       t('opening'),
-      segmented(t('edge'), [{ value: 'left', label: t('left') }, { value: 'right', label: t('right') }] as const, settings.edge, (edge) => {
+      segmented(t('edge'), [
+        { value: 'left', label: t('left') },
+        { value: 'top', label: t('top') },
+        { value: 'right', label: t('right') },
+      ] as const, settings.edge, (edge) => {
         settings.edge = edge;
         actions.moved();
       }),
