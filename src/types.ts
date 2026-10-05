@@ -33,6 +33,9 @@ export interface ProcessSample {
   /** Percent of the whole machine. */
   cpu: number;
   mem: number;
+  /** Bytes per second read and written, to disk and network alike. */
+  io: number;
+  gpu: number;
 }
 
 export interface Sample {
@@ -52,8 +55,8 @@ export interface Sample {
   disk_write: number;
   disk_active: number;
   volumes: { name: string; used: number; total: number }[];
-  by_cpu: ProcessSample[];
-  by_memory: ProcessSample[];
+  /** The busiest programs by each measure, together. */
+  processes: ProcessSample[];
   system: { uptime_s: number; processes: number; threads: number; handles: number };
   battery: { percent: number; charging: boolean; seconds_left: number | null } | null;
   /** From HWiNFO, when it shares its sensors. */
@@ -73,7 +76,7 @@ export interface ViewPrefs {
   memory: { details: boolean };
   network: { bits: boolean; details: boolean };
   disk: { active: boolean };
-  processes: { count: number; sort: 'cpu' | 'memory' };
+  processes: { count: number; sort: 'cpu' | 'memory' | 'io' | 'gpu' };
   chartSeconds: number;
   hotLoad: number;
   hotTemp: number;

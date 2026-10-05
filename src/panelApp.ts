@@ -136,6 +136,12 @@ export async function panelApp(boot: Bootstrap) {
     }, CLOSE_MS);
   });
 
+  // A choice made on the panel itself (sorting the processes).
+  window.addEventListener('prefs-changed', () => {
+    settings.view = prefs;
+    void invoke('save_settings', { settings });
+  });
+
   // A live backdrop, captured again while the panel is open.
   await listen<{ epoch: number; backdrop: string | null }>('backdrop-frame', async ({ payload }) => {
     await backdrop.load(payload.backdrop);

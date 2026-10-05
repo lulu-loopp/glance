@@ -2,7 +2,7 @@ import type { Plot } from './chart';
 import { type Key, t } from './i18n';
 import * as fmt from './format';
 import { element, escapeHtml } from './format';
-import type { Sample, StaticInfo, ViewPrefs } from './types';
+import type { ProcessSample, Sample, StaticInfo, ViewPrefs } from './types';
 
 /** One section of the panel: its readings and the plots it draws. */
 export interface Lane {
@@ -335,39 +335,68 @@ function disk(info: StaticInfo): ModuleDef {
   };
 }
 
+type ProcessSort = ViewPrefs['processes']['sort'];
+
+/** The process table's columns: what each shows, and how it sorts. */
+const PROCESS_COLUMNS: { sort: ProcessSort; label: () => string; value: (p: ProcessSample) => number; text: (p: ProcessSample) => string }[] = [
+  { sort: 'cpu', label: () => 'CPU', value: (p) => p.cpu, text: (p) => fmt.percent(p.cpu) },
+  { sort: 'memory', label: () => t('memory'), value: (p) => p.mem, text: (p) => fmt.size(p.mem) },
+  { sort: 'io', label: () => t('io'), value: (p) => p.io, text: (p) => fmt.rate(p.io, false) },
+  { sort: 'gpu', label: () => 'GPU', value: (p) => p.gpu, text: (p) => fmt.percent(p.gpu) },
+];
+
+/**
+ * The busiest programs, as a table. A column heading sorts by it; the list
+ * shows as many rows as chosen and scrolls through the rest.
+ */
 function processes(): ModuleDef {
   return {
     id: 'processes',
     title: t('processes'),
     detail: t('processesDetail'),
     build(prefs) {
-      const byMemory = prefs.processes.sort === 'memory';
       const root = element(`
-        <section class="lane lane-list lane-processes">
+        <section class="lane lane-list lane-processes" style="--visible-rows: ${prefs.processes.count}">
           <header class="lane-head">
             <h2>${t('processes')}</h2>
-            <span class="lane-device">${t('sortedBy', byMemory ? t('memory') : 'CPU')}</span>
-            <span class="lane-aside">CPU</span>
-            <span class="lane-aside">${t('memory')}</span>
+            ${PROCESS_COLUMNS.map((c) => `<button type="button" class="sort" data-sort="${c.sort}">${c.label()}</button>`).join('')}
           </header>
           <ol class="rows"></ol>
         </section>`);
       const list = root.querySelector('ol')!;
+      const headings = [...root.querySelectorAll<HTMLButtonElement>('.sort')];
+      let latest: ProcessSample[] = [];
+      const draw = () => {
+        const column = PROCESS_COLUMNS.find((c) => c.sort === prefs.processes.sort)!;
+        headings.forEach((h) => h.setAttribute('aria-pressed', String(h.dataset.sort === column.sort)));
+        const ranked = [...latest].sort((x, y) => column.value(y) - column.value(x));
+        // Rows are rewritten in place: emptying the list, even for a moment,
+        // would throw its scroll position back to the top.
+        while (list.children.length < ranked.length) {
+          list.append(element(`<li><span class="row-name"></span>${'<span class="row-value"></span>'.repeat(PROCESS_COLUMNS.length)}</li>`));
+        }
+        while (list.children.length > ranked.length) list.lastElementChild!.remove();
+        ranked.forEach((process, i) => {
+          const cells = list.children[i].children;
+          cells[0].textContent = process.name;
+          PROCESS_COLUMNS.forEach((c, j) => (cells[j + 1].textContent = c.text(process)));
+        });
+      };
+      for (const heading of headings) {
+        heading.addEventListener('click', () => {
+          prefs.processes.sort = heading.dataset.sort as ProcessSort;
+          list.scrollTop = 0;
+          draw();
+          // Kept for next time, as if chosen in the settings.
+          window.dispatchEvent(new CustomEvent('prefs-changed'));
+        });
+      }
       return {
         root,
         plots: [],
         update(sample) {
-          const ranked = (byMemory ? sample.by_memory : sample.by_cpu).slice(0, prefs.processes.count);
-          list.replaceChildren(
-            ...ranked.map((process) =>
-              element(`
-                <li>
-                  <span class="row-name">${escapeHtml(process.name)}</span>
-                  <span class="row-value">${fmt.percent(process.cpu)}</span>
-                  <span class="row-value">${fmt.size(process.mem)}</span>
-                </li>`),
-            ),
-          );
+          latest = sample.processes;
+          draw();
         },
       };
     },

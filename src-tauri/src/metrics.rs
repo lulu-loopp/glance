@@ -76,8 +76,8 @@ pub struct Sample {
     pub disk_active: f32,
     pub volumes: Vec<VolumeSample>,
     /// The busiest programs by CPU, and by memory.
-    pub by_cpu: Vec<ProcessSample>,
-    pub by_memory: Vec<ProcessSample>,
+    /// The busiest programs by each measure, together (see `ProcessTable`).
+    pub processes: Vec<ProcessSample>,
     pub system: SystemSample,
     pub battery: Option<BatterySample>,
     /// From HWiNFO, when it shares its sensors.
@@ -113,6 +113,11 @@ pub struct ProcessSample {
     /// Percent of the whole machine.
     pub cpu: f32,
     pub mem: u64,
+    /// Bytes read and written per second, to disk and to the network alike
+    /// (Windows counts a process's I/O without telling them apart).
+    pub io: f64,
+    /// Percent of its busiest GPU engine, as Task Manager shows it.
+    pub gpu: f32,
 }
 
 #[derive(Clone, Serialize)]
@@ -149,7 +154,7 @@ impl Sample {
     /// What decides how many rows the panel has, and so how tall it is.
     pub fn layout_rows(&self) -> Vec<String> {
         let mut rows: Vec<String> = self.volumes.iter().map(|volume| volume.name.clone()).collect();
-        rows.push(format!("{} {}", self.by_cpu.len(), self.by_memory.len()));
+        rows.push(format!("programs {}", self.processes.len().min(1)));
         rows.push(format!("battery {}", self.battery.is_some()));
         rows.extend(self.drive_temps.iter().map(|drive| format!("drive {}", drive.name)));
         match &self.hw {
@@ -172,8 +177,9 @@ impl Sample {
 /// report above 100 (turbo frequencies do).
 const PDH_FMT_DOUBLE_NOCAP100: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);
 
-/// How many programs each ranking lists.
-const TOP_PROCESSES: usize = 8;
+/// How many programs each ranking contributes; the page shows the top of
+/// whichever ranking is chosen, and scrolls through the rest.
+const TOP_PROCESSES: usize = 40;
 const DRIVE_FIXED: u32 = 3;
 
 struct Adapter {
@@ -184,8 +190,7 @@ struct Adapter {
 /// What is read less often than every sample (see `Sampler::sample`).
 #[derive(Default)]
 struct Slow {
-    by_cpu: Vec<ProcessSample>,
-    by_memory: Vec<ProcessSample>,
+    processes: Vec<ProcessSample>,
     network: Option<NetworkInfo>,
 }
 
@@ -205,6 +210,8 @@ pub struct Sampler {
     adapters: Vec<Adapter>,
     net_prev: (u64, u64, Instant),
     hwinfo: Option<Hwinfo>,
+    /// Each process's GPU use at the last sample, by process id.
+    gpu_by_pid: HashMap<usize, f32>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -232,7 +239,7 @@ impl Sampler {
         // Rate counters need a first collection to diff against.
         unsafe { PdhCollectQueryData(query) };
         let mut processes = ProcessTable::default();
-        processes.sample(1);
+        processes.sample(1, &HashMap::new());
 
         let (adapters, gpus) = enumerate_gpus();
         let (down, up) = net_octets();
@@ -262,6 +269,7 @@ impl Sampler {
             adapters,
             net_prev: (down, up, Instant::now()),
             hwinfo: None,
+            gpu_by_pid: HashMap::new(),
             buf: Vec::new(),
             info,
         }
@@ -293,7 +301,7 @@ impl Sampler {
         let gpus = self.sample_gpus()?;
 
         if refresh_slow {
-            (self.slow.by_cpu, self.slow.by_memory) = self.processes.sample(self.info.threads);
+            self.slow.processes = self.processes.sample(self.info.threads, &self.gpu_by_pid);
             self.slow.network = default_interface();
         }
 
@@ -326,8 +334,7 @@ impl Sampler {
             disk_write: read_scalar(self.disk_write, PDH_FMT_DOUBLE)?,
             disk_active: (100.0 - read_scalar(self.disk_idle, PDH_FMT_DOUBLE)?).clamp(0.0, 100.0) as f32,
             volumes: volumes(),
-            by_cpu: self.slow.by_cpu.clone(),
-            by_memory: self.slow.by_memory.clone(),
+            processes: self.slow.processes.clone(),
             system: SystemSample {
                 uptime_s: unsafe { GetTickCount64() } / 1000,
                 processes: perf.ProcessCount,
@@ -358,10 +365,20 @@ impl Sampler {
         // kind of engine is as busy as its busiest engine; an adapter is as
         // busy as its busiest kind.
         let mut engines: HashMap<((u32, i32), u32), (String, f64)> = HashMap::new();
+        // A process's use is that of the engine it uses most.
+        let mut by_process: HashMap<(usize, (u32, i32), u32), f64> = HashMap::new();
         for (name, value) in read_array(self.gpu_engine, &mut self.buf)? {
             if let (Some(luid), Some(engine), Some(kind)) = (parse_luid(&name), parse_engine(&name), parse_kind(&name)) {
                 engines.entry((luid, engine)).or_insert_with(|| (kind, 0.0)).1 += value;
+                if let Some(pid) = parse_pid(&name) {
+                    *by_process.entry((pid, luid, engine)).or_default() += value;
+                }
             }
+        }
+        self.gpu_by_pid.clear();
+        for ((pid, _, _), value) in by_process {
+            let use_ = self.gpu_by_pid.entry(pid).or_default();
+            *use_ = use_.max(value.min(100.0) as f32);
         }
         let mut memory = |counter| -> Option<HashMap<(u32, i32), u64>> {
             let mut per_adapter = HashMap::new();
@@ -468,6 +485,28 @@ struct ProcessRecord {
     image_name: UNICODE_STRING,
     base_priority: i32,
     process_id: usize,
+    inherited_from_process_id: usize,
+    handle_count: u32,
+    session_id: u32,
+    process_key: usize,
+    peak_virtual_size: usize,
+    virtual_size: usize,
+    page_fault_count: u32,
+    peak_working_set_size: usize,
+    working_set_size: usize,
+    quota_peak_paged_pool_usage: usize,
+    quota_paged_pool_usage: usize,
+    quota_peak_non_paged_pool_usage: usize,
+    quota_non_paged_pool_usage: usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+    private_page_count: usize,
+    read_operation_count: i64,
+    write_operation_count: i64,
+    other_operation_count: i64,
+    read_transfer_count: i64,
+    write_transfer_count: i64,
+    other_transfer_count: i64,
 }
 
 const SYSTEM_PROCESS_INFORMATION: u32 = 5;
@@ -479,19 +518,21 @@ extern "system" {
     fn NtQuerySystemInformation(class: u32, info: *mut c_void, length: u32, returned: *mut u32) -> i32;
 }
 
-/// CPU time of every process at the previous sample, to diff against.
+/// CPU time and bytes moved of every process at the previous sample, to
+/// diff against.
 #[derive(Default)]
 struct ProcessTable {
     /// Keyed by (process id, creation time): ids are reused.
-    cpu_time: HashMap<(usize, i64), i64>,
+    totals: HashMap<(usize, i64), (i64, i64)>,
     at: Option<Instant>,
     buf: Vec<u64>,
 }
 
 impl ProcessTable {
-    /// The busiest programs since the previous call, by CPU and by memory.
-    /// Processes sharing an executable name are added together.
-    fn sample(&mut self, processors: usize) -> (Vec<ProcessSample>, Vec<ProcessSample>) {
+    /// The busiest programs since the previous call: the top of the ranking
+    /// by CPU, by memory, by I/O and by GPU, together. Processes sharing an
+    /// executable name are added together.
+    fn sample(&mut self, processors: usize, gpu_by_pid: &HashMap<usize, f32>) -> Vec<ProcessSample> {
         let mut returned = 0u32;
         loop {
             let status = unsafe {
@@ -513,47 +554,67 @@ impl ProcessTable {
         let now = Instant::now();
         // CPU time is in 100 ns units.
         let interval = self.at.map(|at| now.duration_since(at).as_secs_f64() * 1e7);
-        let mut cpu_time = HashMap::with_capacity(self.cpu_time.len());
-        let mut programs: HashMap<String, (i64, u64)> = HashMap::new();
+        let mut totals = HashMap::with_capacity(self.totals.len());
+        let mut programs: HashMap<String, ProcessSample> = HashMap::new();
+        let mut moved: HashMap<String, i64> = HashMap::new();
         let mut offset = 0usize;
         loop {
             let record = unsafe { &*((self.buf.as_ptr() as *const u8).add(offset) as *const ProcessRecord) };
             if record.process_id != IDLE_PROCESS_ID {
                 let key = (record.process_id, record.create_time);
-                let total = record.user_time + record.kernel_time;
-                // A process that was not there before has spent all its time since.
-                let spent = total - self.cpu_time.get(&key).copied().unwrap_or(0);
-                cpu_time.insert(key, total);
+                let time = record.user_time + record.kernel_time;
+                let bytes = record.read_transfer_count + record.write_transfer_count + record.other_transfer_count;
+                // A process that was not there before has spent all its time,
+                // and moved all its bytes, since.
+                let (time_before, bytes_before) = self.totals.get(&key).copied().unwrap_or((0, 0));
+                totals.insert(key, (time, bytes));
                 let name = unsafe { record.image_name.Buffer.to_string() }.unwrap_or_default();
-                let program = programs.entry(name.trim_end_matches(".exe").to_string()).or_default();
-                program.0 += spent;
-                program.1 += record.working_set_private as u64;
+                let name = name.trim_end_matches(".exe").to_string();
+                *moved.entry(name.clone()).or_default() += bytes - bytes_before;
+                let program = programs.entry(name.clone()).or_insert_with(|| ProcessSample {
+                    name,
+                    cpu: 0.0,
+                    mem: 0,
+                    io: 0.0,
+                    gpu: 0.0,
+                });
+                program.cpu += (time - time_before) as f32;
+                program.mem += record.working_set_private as u64;
+                program.gpu += gpu_by_pid.get(&record.process_id).copied().unwrap_or(0.0);
             }
             if record.next_entry_offset == 0 {
                 break;
             }
             offset += record.next_entry_offset as usize;
         }
-        self.cpu_time = cpu_time;
+        self.totals = totals;
         self.at = Some(now);
 
         // Without a previous sample there is no interval to take a share of.
-        let Some(interval) = interval else { return (Vec::new(), Vec::new()) };
-        let all: Vec<ProcessSample> = programs
-            .into_iter()
-            .map(|(name, (spent, mem))| ProcessSample {
-                name,
-                cpu: (spent as f64 / (interval * processors as f64) * 100.0) as f32,
-                mem,
+        let Some(interval) = interval else { return Vec::new() };
+        let mut all: Vec<ProcessSample> = programs
+            .into_values()
+            .map(|mut program| {
+                program.cpu = (program.cpu as f64 / (interval * processors as f64) * 100.0) as f32;
+                program.io = moved[&program.name] as f64 / (interval / 1e7);
+                program.gpu = program.gpu.min(100.0);
+                program
             })
             .collect();
-        let mut by_cpu = all.clone();
-        by_cpu.sort_by(|a, b| b.cpu.total_cmp(&a.cpu).then(b.mem.cmp(&a.mem)));
-        by_cpu.truncate(TOP_PROCESSES);
-        let mut by_memory = all;
-        by_memory.sort_by(|a, b| b.mem.cmp(&a.mem));
-        by_memory.truncate(TOP_PROCESSES);
-        (by_cpu, by_memory)
+        // The top of each ranking; a program high in several appears once.
+        let mut keep = std::collections::HashSet::new();
+        let rankings: [fn(&ProcessSample, &ProcessSample) -> std::cmp::Ordering; 4] = [
+            |a, b| b.cpu.total_cmp(&a.cpu),
+            |a, b| b.mem.cmp(&a.mem),
+            |a, b| b.io.total_cmp(&a.io),
+            |a, b| b.gpu.total_cmp(&a.gpu),
+        ];
+        for ranking in rankings {
+            all.sort_by(ranking);
+            keep.extend(all.iter().take(TOP_PROCESSES).map(|program| program.name.clone()));
+        }
+        all.retain(|program| keep.contains(&program.name));
+        all
     }
 }
 
@@ -583,6 +644,12 @@ fn parse_luid(instance: &str) -> Option<(u32, i32)> {
     let high = u32::from_str_radix(rest.get(..8)?, 16).ok()? as i32;
     let low = u32::from_str_radix(rest.get(11..19)?, 16).ok()?;
     Some((low, high))
+}
+
+/// `pid_12016_luid_...` → 12016
+fn parse_pid(instance: &str) -> Option<usize> {
+    let rest = instance.strip_prefix("pid_")?;
+    rest[..rest.find('_')?].parse().ok()
 }
 
 /// `..._eng_3_engtype_VideoDecode` → 3
@@ -785,8 +852,8 @@ mod tests {
         assert!(sample.memory.used > 0 && sample.memory.used < sampler.info.mem_total);
         assert!(sample.memory.committed <= sample.memory.commit_limit);
         assert_eq!(sample.gpus.len(), sampler.info.gpus.len());
-        assert_eq!(sample.by_cpu.len(), TOP_PROCESSES);
-        assert!(sample.by_memory.windows(2).all(|pair| pair[0].mem >= pair[1].mem));
+        assert!(sample.processes.len() >= TOP_PROCESSES);
+        assert!(sample.processes.iter().any(|p| p.io > 0.0));
         assert!(sample.volumes.iter().any(|volume| volume.name == "C:"));
         assert!(sample.system.uptime_s > 0 && sample.system.processes > 0);
     }
