@@ -315,7 +315,8 @@ struct Ui {
     autostart: bool,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
-    /// The installer's uninstaller beside this executable, if it was installed.
+    /// The installer's uninstaller beside this executable, if it was
+    /// installed somewhere ordinary programs cannot change.
     uninstaller: Option<std::path::PathBuf>,
     scroll: f32,
     scroll_target: f32,
@@ -403,7 +404,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             prefs,
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
-            uninstaller: std::env::current_exe().ok().map(|exe| exe.with_file_name("uninstall.exe")).filter(|path| path.is_file()),
+            // Run elevated, so only where no ordinary program can change it.
+            uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
             motion: HashMap::new(),
@@ -762,7 +764,7 @@ impl Ui {
             Switch::Startup => (
                 p("开机时启动", "Start with Windows"),
                 (!self.may_autostart).then(|| {
-                    p("用安装程序装到 Program Files 后才能开启", "Install Glance with its installer, into Program Files, to turn this on")
+                    p("需装在普通程序改不了的位置，如 Program Files", "Needs a folder programs cannot change, as Program Files")
                 }),
                 self.autostart,
             ),
@@ -890,7 +892,8 @@ impl Ui {
             }
             // The uninstaller asks first and closes Glance itself.
             Target::Uninstall => {
-                if let Some(uninstaller) = &self.uninstaller {
+                // Checked again as it is run: the window may have been open a while.
+                if let Some(uninstaller) = self.uninstaller.as_deref().and_then(elevation::trusted) {
                     let path = HSTRING::from(uninstaller.as_os_str());
                     unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
                 }

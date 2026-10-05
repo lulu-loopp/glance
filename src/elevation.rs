@@ -17,12 +17,16 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
-use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT};
+use windows::core::{w, Interface, BOOL, BSTR, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
+use windows::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+    ProgressInvokeNever, TreeSetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, TREE_SEC_INFO_RESET,
+};
 use windows::Win32::Security::{
-    GetAce, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID,
     TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -182,16 +186,104 @@ fn folders_hold(folder: &Path) -> bool {
     })
 }
 
-/// Whether Glance installed into `folder` could start elevated without
-/// asking: every folder above it already exists and holds (see `checked`);
-/// the installer makes `folder` itself writable by administrators only.
-pub fn install_folder_holds(folder: &Path) -> bool {
-    let Ok(folder) = std::path::absolute(folder) else { return false };
-    match folder.parent() {
-        Some(above) => std::fs::canonicalize(above).is_ok_and(|above| folders_hold(&above)),
-        // A drive's root is not a folder to install into.
-        None => false,
+/// What an install folder may already hold: an earlier Glance.
+const INSTALLED: [&str; 4] = ["glance.exe", "uninstall.exe", "resources", "licenses"];
+
+/// What a folder chosen to install into is.
+#[derive(Debug, PartialEq)]
+pub enum InstallFolder {
+    /// Glance there could start elevated without asking: every folder above
+    /// it holds (see `checked`), and the installer makes it administrators'.
+    Holds,
+    /// Glance there would ask every time: a folder above can be changed.
+    Open,
+    /// It holds something besides an earlier Glance, which taking it over
+    /// would re-permission, or which Glance might load.
+    Occupied,
+    /// It, or a folder above it, is a link or junction, or it is a drive's
+    /// root: what it leads to is not what was chosen.
+    Indirect,
+}
+
+/// The folder as chosen, if it is where it says: no part of it a link or
+/// junction (what exists of it resolves to itself), and not a drive's root.
+fn direct(folder: &Path) -> Option<PathBuf> {
+    let folder = std::path::absolute(folder).ok()?;
+    folder.parent()?;
+    let existing = folder.ancestors().find(|dir| dir.exists())?;
+    let resolved = std::fs::canonicalize(existing).ok()?;
+    // canonicalize answers with the \\?\ prefix; compare without it.
+    let plain = |path: &Path| path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase();
+    (plain(&resolved) == plain(existing)).then_some(folder)
+}
+
+pub fn install_folder(folder: &Path) -> InstallFolder {
+    let Some(folder) = direct(folder) else { return InstallFolder::Indirect };
+    if let Ok(entries) = std::fs::read_dir(&folder) {
+        let ours = |name: &str| INSTALLED.iter().any(|known| known.eq_ignore_ascii_case(name));
+        if !entries.flatten().all(|entry| ours(&entry.file_name().to_string_lossy())) {
+            return InstallFolder::Occupied;
+        }
     }
+    match folder.parent() {
+        Some(above) if std::fs::canonicalize(above).is_ok_and(|above| folders_hold(&above)) => InstallFolder::Holds,
+        _ => InstallFolder::Open,
+    }
+}
+
+/// Makes `folder` Glance's own before anything is put in it: created if
+/// need be, owned by the administrators, changed only by them and the
+/// system, read by everyone, as Program Files' folders are; an earlier
+/// Glance in it takes the same owner and rights, with nothing of its own.
+/// Only a folder `install_folder` does not call occupied or indirect.
+pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
+    match install_folder(folder) {
+        InstallFolder::Holds | InstallFolder::Open => {}
+        other => return Err(other),
+    }
+    let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
+    if !folder.exists() {
+        std::fs::create_dir_all(&folder).map_err(|_| InstallFolder::Open)?;
+    }
+    // Owner Administrators; a protected list: Administrators and SYSTEM full
+    // control, Users read and run, all passed on to what is inside.
+    let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
+        .map_err(|_| InstallFolder::Open)?;
+    let (mut owner, mut dacl) = (PSID::default(), std::ptr::null_mut::<ACL>());
+    let (mut defaulted, mut present) = (BOOL::default(), BOOL::default());
+    let parts = unsafe {
+        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted)
+            .and_then(|_| GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted))
+    };
+    // On the folder, and reset on all inside it: each takes the owner, and
+    // only what the folder passes on.
+    let set = parts.is_ok().then(|| unsafe {
+        TreeSetNamedSecurityInfoW(
+            &HSTRING::from(folder.as_os_str()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            Some(owner),
+            None,
+            Some(dacl),
+            None,
+            TREE_SEC_INFO_RESET,
+            None,
+            ProgressInvokeNever,
+            None,
+        )
+    });
+    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    // Then it must hold as Glance will check it.
+    let held = only_trusted_can(&folder, (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
+    (set == Some(ERROR_SUCCESS) && held).then_some(()).ok_or(InstallFolder::Open)
+}
+
+/// `file` where it really is, if Glance may run it elevated without asking
+/// (see `checked`), as a plain path.
+pub fn trusted(file: &Path) -> Option<PathBuf> {
+    checked(file).map(|real| plain(&real))
 }
 
 fn protected(file: &Path) -> bool {
@@ -201,9 +293,14 @@ fn protected(file: &Path) -> bool {
 /// This executable as Task Scheduler should run it: where it really is,
 /// without the `\\?\` prefix resolution adds.
 fn this_program() -> Option<PathBuf> {
-    let real = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    Some(plain(&std::fs::canonicalize(std::env::current_exe().ok()?).ok()?))
+}
+
+/// A resolved path without the `\\?\` prefix (kept on a network path, which
+/// needs it).
+fn plain(real: &Path) -> PathBuf {
     let text = real.to_string_lossy();
-    Some(text.strip_prefix(r"\\?\").filter(|rest| !rest.starts_with("UNC\\")).map_or(real.clone(), PathBuf::from))
+    text.strip_prefix(r"\\?\").filter(|rest| !rest.starts_with("UNC\\")).map_or(real.to_path_buf(), PathBuf::from)
 }
 
 /// Whether this executable may be started elevated without asking: see the
@@ -496,13 +593,30 @@ mod tests {
 
     #[test]
     fn tells_where_an_install_would_hold() {
+        use InstallFolder::*;
         // A new folder in Program Files would; one beside this build would not.
-        assert!(install_folder_holds(Path::new(r"C:\Program Files\Glance-not-there")));
+        assert_eq!(install_folder(Path::new(r"C:\Program Files\Glance-not-there")), Holds);
         let beside = std::env::current_exe().unwrap().with_file_name("Glance-not-there");
-        assert!(!install_folder_holds(&beside));
-        // Nor would a drive's root, or a folder under one that is missing.
-        assert!(!install_folder_holds(Path::new(r"C:\")));
-        assert!(!install_folder_holds(Path::new(r"C:\no-such-folder\Glance")));
-        println!(r"D:\Glance would hold: {}", install_folder_holds(Path::new(r"D:\Glance")));
+        assert_eq!(install_folder(&beside), Open);
+        // A drive's root is no folder to install into; one with other things in it is taken.
+        assert_eq!(install_folder(Path::new(r"C:\")), Indirect);
+        assert_eq!(install_folder(Path::new(r"C:\Windows")), Occupied);
+        assert_eq!(install_folder(Path::new(r"C:\no-such-folder\Glance")), Open);
+        println!(r"D:\Glance: {:?}", install_folder(Path::new(r"D:\Glance")));
+    }
+
+    #[test]
+    fn sees_through_links() {
+        // A junction to a folder: what was chosen is not where it leads.
+        let base = std::env::temp_dir().join(format!("glance-link-test-{}", std::process::id()));
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
+        assert!(made.status.success());
+        assert_eq!(install_folder(&link), InstallFolder::Indirect);
+        assert_eq!(install_folder(&link.join("Glance")), InstallFolder::Indirect);
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }
