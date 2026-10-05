@@ -974,7 +974,7 @@ impl Ui {
                     let cell = (width - 2.0 * ROW_SIDE - 2.0 * gap) / 3.0;
                     let names = [
                         (Skin::Paper, pick(lang, "记录纸", "Chart paper")),
-                        (Skin::Glass, pick(lang, "液态玻璃", "Liquid glass")),
+                        (Skin::Glass, pick(lang, "磨砂玻璃", "Frosted glass")),
                         (Skin::Fluent, "Windows 11"),
                     ];
                     let current = theme::Skin::named(&self.settings.skin);

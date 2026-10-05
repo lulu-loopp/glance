@@ -13,7 +13,7 @@ pub enum Skin {
     Paper,
     /// Windows 11: one acrylic sheet, as the Start menu and Quick Settings.
     Fluent,
-    /// 液态玻璃: separate pieces of clear glass bending the desktop at their rims.
+    /// 磨砂玻璃: separate pieces of clear glass bending the desktop at their rims.
     Glass,
 }
 
@@ -293,7 +293,7 @@ fn fluent(dark: bool) -> Theme {
     }
 }
 
-/// 液态玻璃: separate pieces of clear glass floating over the desktop, each
+/// 磨砂玻璃: separate pieces of clear glass floating over the desktop, each
 /// bending what is behind it at its rim and catching light along its edge.
 /// The theme sets the glass's colour; the busier or less fitting the
 /// backdrop, the more it frosts, so text stays legible over anything.

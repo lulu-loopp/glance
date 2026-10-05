@@ -42,7 +42,7 @@ pub struct StaticInfo {
     pub memory_modules: Option<String>,
     /// The model of each physical drive.
     pub drives: Vec<String>,
-    /// The adapter internet traffic leaves by, when the app started.
+    /// The model of the adapter internet traffic leaves by, when the app started.
     pub network_adapter: Option<String>,
     /// The motherboard's model, as its firmware names it.
     pub board: String,
@@ -135,7 +135,9 @@ pub struct VolumeSample {
 /// The interface the default route goes through.
 #[derive(Clone, Serialize)]
 pub struct NetworkInfo {
+    /// The connection's name ("WLAN", "Ethernet"), and the adapter's model.
     pub name: String,
+    pub model: String,
     pub ipv4: Option<String>,
     pub link_bps: u64,
 }
@@ -232,7 +234,7 @@ impl Sampler {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
             drives: crate::drives::models(),
-            network_adapter: default_interface().map(|adapter| adapter.name),
+            network_adapter: default_interface().map(|adapter| adapter.model),
             board: reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
@@ -745,6 +747,7 @@ fn default_interface() -> Option<NetworkInfo> {
                 });
                 return Some(NetworkInfo {
                     name: unsafe { a.FriendlyName.to_string() }.unwrap_or_default(),
+                    model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
                     link_bps: a.ReceiveLinkSpeed,
                 });
