@@ -128,6 +128,10 @@ button {
   align-content: start;
 }
 
+.measuring .column > .lane {
+  flex-grow: 0;
+}
+
 /* ---- Lanes ---- */
 
 .lane {
@@ -345,21 +349,54 @@ button {
   list-style: none;
 }
 
-.rows li,
+/* The process table: a name and four measures. */
+.lane-processes .rows li,
 .lane-processes .lane-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 48px 64px;
+  grid-template-columns: minmax(0, 1fr) 40px 52px 62px 36px;
   align-items: baseline;
-  column-gap: 10px;
+  column-gap: 6px;
 }
 
-.lane-processes .lane-head .lane-device {
-  display: none;
+.lane-processes .row-value {
+  font-size: 12px;
 }
 
-.lane-processes .lane-head .lane-aside {
+/* Headings sort; the chosen one is marked. */
+.lane-processes .sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
   font-size: 12px;
   text-align: right;
+  cursor: pointer;
+}
+
+.lane-processes .sort:hover {
+  color: var(--text);
+}
+
+.lane-processes .sort[aria-pressed='true'] {
+  color: var(--text);
+  font-weight: 650;
+}
+
+/* As many rows as chosen; the rest scroll. */
+.lane-processes .rows {
+  --row: 22px;
+  row-gap: 0;
+  max-height: calc(var(--visible-rows) * var(--row));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-3) transparent;
+}
+
+.lane-processes .rows li {
+  height: var(--row);
+  align-items: center;
 }
 
 .lane-fans .rows li {

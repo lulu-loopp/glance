@@ -131,7 +131,8 @@ function moduleList(prefs: ViewPrefs, modules: ModuleDef[], changed: () => void)
     if (!grip) return;
     const row = grip.closest<HTMLElement>('.module-row')!;
     event.preventDefault();
-    grip.setPointerCapture(event.pointerId);
+    // Followed on the window, not captured to the grip: moving the row in
+    // the list detaches the grip for a moment, which ends a capture.
     row.dataset.dragging = 'true';
     const move = (e: PointerEvent) => {
       const others = [...list.children].filter((child) => child !== row) as HTMLElement[];
@@ -143,15 +144,17 @@ function moduleList(prefs: ViewPrefs, modules: ModuleDef[], changed: () => void)
       else list.append(row);
     };
     const end = () => {
-      grip.removeEventListener('pointermove', move as EventListener);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
       delete row.dataset.dragging;
       const order = [...list.children].map((child) => (child as HTMLElement).dataset.id!);
       prefs.modules.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
       changed();
     };
-    grip.addEventListener('pointermove', move as EventListener);
-    grip.addEventListener('pointerup', end, { once: true });
-    grip.addEventListener('pointercancel', end, { once: true });
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
   });
   return list;
 }
@@ -252,11 +255,16 @@ export function buildSettings(
         prefs.network.bits = bits;
         changed();
       }),
-      segmented(t('processCountSetting'), [{ value: 3, label: '3' }, { value: 5, label: '5' }, { value: 8, label: '8' }], prefs.processes.count, (count) => {
+      segmented(t('processCountSetting'), [{ value: 5, label: '5' }, { value: 8, label: '8' }, { value: 12, label: '12' }], prefs.processes.count, (count) => {
         prefs.processes.count = count;
         changed();
       }),
-      segmented(t('processSort'), [{ value: 'cpu', label: 'CPU' }, { value: 'memory', label: t('memory') }] as const, prefs.processes.sort, (sort) => {
+      segmented(t('processSort'), [
+        { value: 'cpu', label: 'CPU' },
+        { value: 'memory', label: t('memory') },
+        { value: 'io', label: t('io') },
+        { value: 'gpu', label: 'GPU' },
+      ] as const, prefs.processes.sort, (sort) => {
         prefs.processes.sort = sort;
         changed();
       }),

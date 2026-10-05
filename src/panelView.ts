@@ -90,7 +90,7 @@ export class PanelView {
     this.host.dataset.edge = settings.edge;
     const byId = new Map(this.modules.map((module) => [module.id, module]));
     this.lanes = prefs.modules.filter((entry) => entry.on).map((entry) => byId.get(entry.id)!.build(prefs));
-    this.lanesHost.replaceChildren(...this.lanes.map((lane) => lane.root));
+    this.deal([this.lanes.map((lane) => lane.root)]);
     const plots = this.lanes.flatMap((lane) => lane.plots);
     this.recorder = new Recorder(this.canvas, this.panel, plots, settings.interval_ms + 100, prefs.chartSeconds * 1000);
     this.showLatest();
@@ -116,8 +116,9 @@ export class PanelView {
    * centres the panel on the focus along its edge, as far as the host allows.
    */
   layout(room: (measures: Measures) => Room, focus: { x: number; y: number }) {
-    this.panel.style.setProperty('--columns', '1');
-    this.deal([this.lanes.map((lane) => lane.root)]);
+    // Lanes are measured where they are, at their own height (not stretched
+    // to their column's): moving them would reset what is scrolled in them.
+    this.panel.classList.add('measuring');
     const style = getComputedStyle(this.panel);
     const laneGap = parseFloat(style.getPropertyValue('--lane-gap')) || 0;
     this.measures = {
@@ -127,6 +128,7 @@ export class PanelView {
       columnWidth: parseFloat(style.getPropertyValue('--column-width')),
       columnGap: parseFloat(style.getPropertyValue('--column-gap')) || 0,
     };
+    this.panel.classList.remove('measuring');
     const { height: roomHeight, max_columns } = room(this.measures);
     const space = roomHeight - 2 * GAP - this.measures.chromeHeight;
     // The fewest columns whose tallest fits; failing that, the most.
@@ -152,6 +154,11 @@ export class PanelView {
 
   /** Puts each group of lanes in a column of its own, in order. */
   private deal(groups: HTMLElement[][]) {
+    const current = [...this.lanesHost.children].map((column) => [...column.children]);
+    const same =
+      current.length === groups.length &&
+      current.every((column, i) => column.length === groups[i].length && column.every((lane, j) => lane === groups[i][j]));
+    if (same) return;
     this.lanesHost.replaceChildren(
       ...groups.map((group) => {
         const column = document.createElement('div');
