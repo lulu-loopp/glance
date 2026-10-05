@@ -1,10 +1,21 @@
-# Glance
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-en-dark.svg">
+  <img src="docs/readme/hero-en-light.svg" width="100%"
+       alt="Glance, a system monitor for Windows: push the pointer to the
+       screen's edge and a panel slides out. Beside the name, the panel's CPU
+       lane shows its use, a chart, the clock, the power and every thread.">
+</picture>
 
-**A system monitor for Windows that stays out of the way.** Push the pointer
-against the edge of the screen and a panel slides out with everything your
-PC is doing; move away and it slides back.
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](#licence)
+[![Release](https://img.shields.io/github/v/release/lulu-loopp/glance?label=release&color=blue)](https://github.com/lulu-loopp/glance/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/lulu-loopp/glance/total?label=downloads&color=pink)](https://github.com/lulu-loopp/glance/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-8a2be2)](#install)
 
-[中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · Windows 10 / 11, 64-bit · Free and open source (MIT)
+Glance is a free, open-source system monitor for Windows that stays out of
+the way. Push the pointer against the edge of the screen and a panel slides
+out with everything your PC is doing; move away and it slides back.
+
+[中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
 
 ![Glance's panel in the frosted-glass look, over the desktop](docs/images/hero-en.jpg)
 

@@ -1,8 +1,18 @@
-# Glance
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-zh-dark.svg">
+  <img src="docs/readme/hero-zh-light.svg" width="100%"
+       alt="Glance，Windows 系统监控：把鼠标推到屏幕边缘，面板就会滑出。名字旁边是面板的
+       CPU 一栏：占用、曲线、频率、功耗和每个线程。">
+</picture>
 
-**一个不打扰你的 Windows 系统监控。** 把鼠标推到屏幕边缘，面板滑出，电脑此刻的状态一目了然；移开鼠标，面板收回。
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](#许可证)
+[![Release](https://img.shields.io/github/v/release/lulu-loopp/glance?label=release&color=blue)](https://github.com/lulu-loopp/glance/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/lulu-loopp/glance/total?label=downloads&color=pink)](https://github.com/lulu-loopp/glance/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-8a2be2)](#安装)
 
-[English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest) · Windows 10 / 11 64 位 · 免费开源（MIT）
+Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标推到屏幕边缘，面板滑出，电脑此刻的状态一目了然；移开鼠标，面板收回。
+
+[English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest) · [硬件支持](#硬件支持) · [构建](#构建)
 
 ![Glance 磨砂玻璃外观的面板，叠在桌面上](docs/images/hero-zh.jpg)
 
