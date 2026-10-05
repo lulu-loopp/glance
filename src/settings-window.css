@@ -148,9 +148,15 @@ body.settings-app[data-mica] {
   min-height: calc(var(--row-height) - 2px);
 }
 
+.settings .module-row {
+  position: relative;
+}
+
 .settings .module-row[data-dragging='true'] {
+  z-index: 1;
   border-color: var(--selection);
-  background: var(--card);
+  /* Opaque while it passes over the other rows. */
+  background: linear-gradient(var(--card), var(--card)), var(--window);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
 }
 
