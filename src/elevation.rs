@@ -29,10 +29,12 @@ use windows::Win32::Security::{
     PSID, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateDirectoryW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC,
-    WRITE_OWNER,
+    CreateDirectoryW, FileDispositionInfo, GetFinalPathNameByHandleW, SetFileInformationByHandle, DELETE,
+    FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DELETE_CHILD, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, SYNCHRONIZE,
+    WRITE_DAC, WRITE_OWNER,
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -234,9 +236,13 @@ fn direct(folder: &Path) -> Option<PathBuf> {
     folder.parent()?;
     let existing = folder.ancestors().find(|dir| dir.exists())?;
     let resolved = std::fs::canonicalize(existing).ok()?;
-    // canonicalize answers with the \\?\ prefix; compare without it.
+    (same_path(&resolved, existing)).then_some(folder)
+}
+
+/// Whether two paths name the same place, the \\?\ prefix and case aside.
+fn same_path(a: &Path, b: &Path) -> bool {
     let plain = |path: &Path| path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase();
-    (plain(&resolved) == plain(existing)).then_some(folder)
+    plain(a) == plain(b)
 }
 
 /// Whether `folder` holds nothing but an earlier Glance.
@@ -261,29 +267,74 @@ fn is_link(path: &Path) -> bool {
     path.symlink_metadata().map_or(true, |meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
 }
 
-/// A folder held open: while it is, neither it nor any folder above it can
-/// be renamed, moved or deleted (Windows refuses while something below is
-/// open without delete sharing), so its path leads where it was checked to.
-struct Pinned(#[allow(dead_code)] std::fs::File);
+/// A file or folder held open by handle, not followed if it is a link.
+/// While a folder is held, neither it nor any folder above it can be
+/// renamed, moved or deleted (Windows refuses while something below is open
+/// without delete sharing), so its path leads where it was checked to.
+struct Held(std::fs::File);
 
-/// Holds `folder` open, if it is a folder and not a link.
-fn pin(folder: &Path) -> Option<Pinned> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
-        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
-        .open(folder)
-        .ok()?;
-    let meta = file.metadata().ok()?;
-    (meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0).then_some(Pinned(file))
+impl Held {
+    /// Opens `path` itself (a link as the link), able to delete it.
+    fn open(path: &Path) -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .access_mode((FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE).0)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+            .open(path)
+            .ok()
+            .map(Held)
+    }
+
+    /// Where it really is, as Windows resolved it when it was opened.
+    fn place(&self) -> Option<PathBuf> {
+        use std::os::windows::io::AsRawHandle;
+        let mut buffer = vec![0u16; 1024];
+        let handle = HANDLE(self.0.as_raw_handle());
+        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, FILE_NAME_NORMALIZED) } as usize;
+        (length > 0 && length < buffer.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..length])))
+    }
+
+    fn is_folder(&self) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        self.0.metadata().is_ok_and(|meta| meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0)
+    }
+
+    /// Whether it lies directly in the folder `parent` holds.
+    fn lies_in(&self, parent: &Held) -> bool {
+        let (Some(me), Some(parent)) = (self.place(), parent.place()) else { return false };
+        me.parent().is_some_and(|mine| same_path(mine, &parent))
+    }
+
+    /// Deletes what is held (a link as the link; a folder only if empty)
+    /// once it is let go.
+    fn delete(self) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        let handle = HANDLE(self.0.as_raw_handle());
+        unsafe {
+            SetFileInformationByHandle(handle, FileDispositionInfo, (&disposition as *const FILE_DISPOSITION_INFO).cast(), size_of::<FILE_DISPOSITION_INFO>() as u32)
+        }
+        .is_ok()
+    }
 }
 
-/// Rights over a folder that would let someone change what is in it.
-const FOLDER_CHANGES: u32 =
-    FILE_ADD_FILE.0 | FILE_ADD_SUBDIRECTORY.0 | FILE_DELETE_CHILD.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0;
+/// Holds `folder` open, if it is a folder and not a link.
+fn pin(folder: &Path) -> Option<Held> {
+    Held::open(folder).filter(Held::is_folder)
+}
+
+/// Rights over a folder that would let someone change what is in it, or
+/// make it a link (setting a reparse point needs only to write attributes).
+const FOLDER_CHANGES: u32 = FILE_ADD_FILE.0
+    | FILE_ADD_SUBDIRECTORY.0
+    | FILE_DELETE_CHILD.0
+    | DELETE.0
+    | WRITE_DAC.0
+    | WRITE_OWNER.0
+    | FILE_WRITE_ATTRIBUTES.0;
 /// Rights over a file that would let someone change it.
-const FILE_CHANGES: u32 = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0;
+const FILE_CHANGES: u32 = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0 | FILE_WRITE_ATTRIBUTES.0;
 
 /// Whether only administrators can change `folder` and everything in it,
 /// none of it a link. Then no one else can have changed it, or hold it open
@@ -326,6 +377,22 @@ pub fn install_folder(folder: &Path) -> InstallFolder {
     }
 }
 
+/// Creates `folder` (whose parent `parent` holds) with `attributes`, and
+/// holds it. What was created is checked by handle to lie in `parent`; if
+/// it went elsewhere (a link put in the way), it is removed again by that
+/// handle, and nothing is left behind.
+fn create_held(folder: &Path, parent: &Held, attributes: Option<&SECURITY_ATTRIBUTES>) -> Result<Held, InstallFolder> {
+    unsafe { CreateDirectoryW(&HSTRING::from(folder.as_os_str()), attributes.map(|a| a as *const _)) }
+        .map_err(|_| InstallFolder::Occupied)?;
+    let made = pin(folder).ok_or(InstallFolder::Indirect)?;
+    if made.lies_in(parent) {
+        Ok(made)
+    } else {
+        made.delete();
+        Err(InstallFolder::Indirect)
+    }
+}
+
 /// Puts the files the installer laid out in `payload` into `folder`. A new
 /// folder is created owned by the administrators, changed only by them and
 /// the system, and read by everyone (as Program Files' folders are), in the
@@ -333,10 +400,11 @@ pub fn install_folder(folder: &Path) -> InstallFolder {
 /// administrators could change is used as it is. Only where every folder
 /// above holds too, unless the user chose to install there `anyway`.
 ///
-/// The folder is pinned before anything is put in it, and checked again
-/// once pinned: then nothing above it can be swapped for a link, nothing in
-/// it can be changed by anyone else, and the files land where they were
-/// meant to and nowhere else.
+/// Every folder on the way is held before the next is made or used: then
+/// nothing above can be swapped for a link, and every folder made is
+/// checked by handle to be where it was meant to be. The install folder is
+/// administrators' alone, so nothing in it can be changed by anyone else:
+/// the files land where they were meant to and nowhere else.
 pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), InstallFolder> {
     match install_folder(folder) {
         InstallFolder::Holds => {}
@@ -344,25 +412,35 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
-    if !folder.exists() {
-        // Folders above a new one in an unprotected place, as they come.
-        if let Some(above) = folder.parent() {
-            std::fs::create_dir_all(above).map_err(|_| InstallFolder::Failed)?;
-        }
-        let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
-            .map_err(|_| InstallFolder::Failed)?;
-        let attributes = SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: false.into(),
-        };
-        let made = unsafe { CreateDirectoryW(&HSTRING::from(folder.as_os_str()), Some(&attributes)) };
-        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-        made.map_err(|_| InstallFolder::Occupied)?;
+    let existing = folder.ancestors().find(|dir| dir.exists()).ok_or(InstallFolder::Failed)?.to_path_buf();
+    let mut held = vec![pin(&existing).ok_or(InstallFolder::Indirect)?];
+    if !same_path(&held[0].place().ok_or(InstallFolder::Failed)?, &existing) {
+        return Err(InstallFolder::Indirect);
     }
-    let _pinned = pin(&folder).ok_or(InstallFolder::Indirect)?;
+    // The folders between it and the install folder, as they come (only in
+    // an unprotected place), then the install folder, administrators'.
+    let missing: Vec<&Path> = folder.ancestors().take_while(|dir| *dir != existing.as_path()).collect();
+    for dir in missing.iter().rev() {
+        let parent = held.last().unwrap();
+        let next = if *dir == folder.as_path() {
+            let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
+                .map_err(|_| InstallFolder::Failed)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0,
+                bInheritHandle: false.into(),
+            };
+            let made = create_held(dir, parent, Some(&attributes));
+            unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+            made?
+        } else {
+            create_held(dir, parent, None)?
+        };
+        held.push(next);
+    }
+    // Checked again with all of it held.
     if direct(&folder).is_none() {
         return Err(InstallFolder::Indirect);
     }
@@ -393,19 +471,23 @@ fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Takes Glance's own files out of `folder`, pinned, for the uninstaller:
-/// only what Glance puts there (links in it are removed as links, never
-/// followed), then the folder itself if nothing else is left in it.
+/// Takes Glance's own files out of `folder`, for the uninstaller: held, and
+/// only if only administrators can change it (then no one else can have put
+/// anything in its place or make it a link); only what Glance puts there,
+/// then the folder itself, by its handle, if nothing else is left.
 pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
-    let pinned = pin(&folder).ok_or(InstallFolder::Indirect)?;
-    if direct(&folder).is_none() {
+    let held = pin(&folder).ok_or(InstallFolder::Indirect)?;
+    if direct(&folder).is_none() || !held.place().is_some_and(|place| same_path(&place, &folder)) {
         return Err(InstallFolder::Indirect);
+    }
+    if !only_trusted_can(&folder, FOLDER_CHANGES) {
+        return Err(InstallFolder::Occupied);
     }
     let mut removed = true;
     for name in INSTALLED {
         let path = folder.join(name);
-        // Removing a folder tree here never follows a link out of it.
+        // Removing a folder tree never follows a link out of it.
         let gone = match path.symlink_metadata() {
             Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
             Ok(_) => std::fs::remove_file(&path),
@@ -413,9 +495,25 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
         };
         removed &= gone.is_ok();
     }
-    drop(pinned);
-    let _ = std::fs::remove_dir(&folder);
+    // Gone once let go, if nothing else is in it.
+    held.delete();
     removed.then_some(()).ok_or(InstallFolder::Failed)
+}
+
+/// Removes this user's settings for the uninstaller: the one file Glance
+/// keeps, then its folder if empty. The folder is held, the file opened as
+/// itself (a link as the link) and checked by handle to lie in it, and each
+/// removed by its handle: nothing elsewhere can be reached through a link.
+pub fn remove_settings() -> bool {
+    let folder = crate::settings::config_dir();
+    let Some(held) = pin(&folder) else { return !folder.exists() };
+    let file_gone = match Held::open(&folder.join("settings.json")) {
+        Some(file) if file.lies_in(&held) => file.delete(),
+        Some(_) => false,
+        None => true,
+    };
+    held.delete();
+    file_gone
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -763,6 +861,37 @@ mod tests {
         assert!(made.status.success());
         assert!(pin(&link).is_none());
         std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn acts_on_what_it_holds() {
+        let base = std::env::temp_dir().join(format!("glance-held-test-{}", std::process::id()));
+        let folder = base.join("folder");
+        let target = base.join("target");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(folder.join("settings.json"), b"{}").unwrap();
+        std::fs::write(target.join("settings.json"), b"{}").unwrap();
+        let held = pin(&folder).unwrap();
+        // A file in the held folder lies in it, and goes by its handle.
+        let file = Held::open(&folder.join("settings.json")).unwrap();
+        assert!(file.lies_in(&held));
+        assert!(file.delete());
+        assert!(!folder.join("settings.json").exists());
+        // A junction is held as itself: it lies where it is, and deleting it
+        // removes the junction, never what it leads to.
+        let base_held = pin(&base).unwrap();
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
+        assert!(made.status.success());
+        assert!(pin(&link).is_none());
+        let junction = Held::open(&link).unwrap();
+        assert!(junction.lies_in(&base_held));
+        assert!(!Held::open(&link.join("settings.json")).unwrap().lies_in(&base_held));
+        assert!(junction.delete());
+        assert!(!link.exists() && target.join("settings.json").exists());
+        drop((held, base_held));
         std::fs::remove_dir_all(&base).unwrap();
     }
 

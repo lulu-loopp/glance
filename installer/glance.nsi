@@ -19,7 +19,6 @@ Unicode true
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
-!define SETTINGS_DIR "dev.weiyi.glance"
 !define PAWNIO_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
 
 Name "${NAME}"
@@ -54,6 +53,7 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -147,6 +147,16 @@ Function CheckFolder
   ${EndIf}
 FunctionEnd
 
+; Installed in an unprotected place, Glance is not started from the finish
+; page: started from there it would run with the installer's rights, from
+; a folder others could have swapped since. The user starts it as usual.
+Function FinishShow
+  ${If} $Anyway == 1
+    SendMessage $mui.FinishPage.Run ${BM_SETCHECK} ${BST_UNCHECKED} 0
+    ShowWindow $mui.FinishPage.Run ${SW_HIDE}
+  ${EndIf}
+FunctionEnd
+
 Section "Glance"
   !insertmacro StopGlance
   !insertmacro Helper
@@ -228,11 +238,9 @@ Section "Uninstall"
   ${EndIf}
   DeleteRegKey HKLM "SOFTWARE\Glance"
 
-  ; The settings of the user uninstalling: Glance keeps one file there.
-  ; Neither step follows a link: a link is removed as a link.
-  SetShellVarContext current
-  Delete "$APPDATA\${SETTINGS_DIR}\settings.json"
-  RMDir "$APPDATA\${SETTINGS_DIR}"
+  ; The settings of the user uninstalling (the one file Glance keeps, and
+  ; its folder), removed by the helper through handles, following no link.
+  ExecWait '"$PLUGINSDIR\${EXE}" --remove-settings'
 
   SetShellVarContext all
   Delete "$SMPROGRAMS\${NAME}.lnk"
