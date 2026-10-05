@@ -4,6 +4,8 @@ mod detector;
 mod drives;
 mod metrics;
 mod panel;
+mod pawnio;
+mod sensors;
 mod settings;
 mod smbios;
 
