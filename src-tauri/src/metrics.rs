@@ -156,7 +156,6 @@ impl Sample {
             Some(hw) => {
                 rows.push(format!("cpu sensors {} {}", hw.cpu_temp.is_some(), hw.cpu_power.is_some()));
                 rows.extend(hw.fans.iter().map(|(name, _)| format!("fan {name}")));
-                rows.extend(hw.devices.iter().map(|(name, _)| format!("temp {name}")));
             }
             None => rows.push("no hwinfo".into()),
         }

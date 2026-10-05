@@ -93,12 +93,13 @@ function setFigure(lane: { root: HTMLElement; figure: HTMLElement }, value: numb
 function rateLane(options: {
   kind: string;
   title: string;
+  device?: string;
   rows: { label: string; value: (sample: Sample) => number }[];
   bits: boolean;
-}): { root: HTMLElement; plot: Plot; update: (sample: Sample, scale: number) => void } {
+}): { root: HTMLElement; plot: Plot; aside: HTMLElement; update: (sample: Sample, scale: number) => void } {
   const root = element(`
     <section class="lane lane-rates lane-${options.kind}">
-      ${head(options.title)}
+      ${head(options.title, options.device)}
       <dl class="rates">
         ${options.rows.map((row) => `<div><dt>${row.label}</dt><dd></dd></div>`).join('')}
       </dl>
@@ -108,6 +109,7 @@ function rateLane(options: {
   const aside = root.querySelector<HTMLElement>('.lane-aside')!;
   return {
     root,
+    aside,
     plot: { el: root.querySelector<HTMLElement>('.plot')!, series: options.rows.map((row) => row.value), max: 'auto' },
     update(sample, scale) {
       options.rows.forEach((row, i) => (cells[i].textContent = fmt.rate(row.value(sample), options.bits)));
@@ -299,6 +301,7 @@ function disk(info: StaticInfo): ModuleDef {
       const lane = rateLane({
         kind: 'disk',
         title: t('disk'),
+        device: info.drives.join(', '),
         bits: false,
         rows: [
           { label: t('read'), value: (s) => s.disk_read },
@@ -311,7 +314,21 @@ function disk(info: StaticInfo): ModuleDef {
         plots: [lane.plot],
         update(sample, scale) {
           lane.update(sample, scale(lane.plot));
-          setFacts(prefs.disk.active ? [[t('activeTime'), fmt.percent(sample.disk_active)]] : []);
+          // A drive's temperature takes the corner, as a GPU's does, and the
+          // graph's scale moves below. With several drives, each is listed.
+          const temps = sample.drive_temps;
+          const hottest = temps.reduce<number | null>((max, drive) => Math.max(max ?? drive.celsius, drive.celsius), null);
+          if (hottest !== null) {
+            lane.aside.textContent = `${Math.round(hottest)} °C`;
+            lane.aside.dataset.hot = String(hottest > prefs.hotTemp);
+          }
+          setFacts([
+            ...(temps.length > 1
+              ? temps.map((drive): [string, string] => [drive.name, `${Math.round(drive.celsius)} °C`])
+              : []),
+            [t('activeTime'), prefs.disk.active ? fmt.percent(sample.disk_active) : null],
+            [t('scale'), hottest !== null ? fmt.rate(scale(lane.plot), false) : null],
+          ]);
         },
       };
     },
@@ -385,38 +402,6 @@ function storage(): ModuleDef {
             const full = volume.used / volume.total;
             rows[i].set(full, fmt.usage(volume.used, volume.total), full * 100 > prefs.hotLoad);
           });
-        },
-      };
-    },
-  };
-}
-
-function temperatures(): ModuleDef {
-  return {
-    id: 'temperatures',
-    title: t('temperatures'),
-    detail: t('temperaturesDetail'),
-    build(prefs) {
-      const root = element(`
-        <section class="lane lane-list lane-temperatures">
-          <header class="lane-head"><h2>${t('temperatures')}</h2></header>
-          <ol class="rows"></ol>
-        </section>`);
-      const list = root.querySelector('ol')!;
-      return {
-        root,
-        plots: [],
-        update(sample) {
-          // HWiNFO sees every device, drives included; without it, the
-          // drives that report to Windows directly.
-          const rows: [string, number][] =
-            sample.hw?.devices ?? sample.drive_temps.map((drive) => [drive.name, drive.celsius]);
-          root.hidden = rows.length === 0;
-          list.replaceChildren(
-            ...rows.map(([name, celsius]) =>
-              element(`<li data-hot="${celsius > prefs.hotTemp}"><span class="row-name">${escapeHtml(name)}</span><span class="row-value">${Math.round(celsius)} °C</span></li>`),
-            ),
-          );
         },
       };
     },
@@ -519,7 +504,6 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     disk(info),
     processes(),
     storage(),
-    temperatures(),
     fans(),
     battery(),
     system(),

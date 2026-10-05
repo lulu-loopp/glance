@@ -61,7 +61,6 @@ export interface Sample {
     cpu_temp: number | null;
     cpu_power: number | null;
     fans: [string, number][];
-    devices: [string, number][];
   } | null;
   drive_temps: { name: string; celsius: number }[];
 }

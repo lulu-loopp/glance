@@ -362,11 +362,6 @@ button {
   text-align: right;
 }
 
-.lane-temperatures .rows li[data-hot='true'] .row-value {
-  color: var(--signal);
-}
-
-.lane-temperatures .rows li,
 .lane-fans .rows li {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
