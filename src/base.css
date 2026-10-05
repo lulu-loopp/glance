@@ -399,10 +399,16 @@ button {
   align-items: center;
 }
 
-.lane-fans .rows li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  column-gap: 10px;
+.lane-board .facts {
+  margin-top: 0;
+}
+
+.lane-board .facts + .facts {
+  margin-top: 10px;
+}
+
+.lane-board .facts [data-hot='true'] dd {
+  color: var(--signal);
 }
 
 .lane-storage .meter-row:first-child {

@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use windows::core::w;
+use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
 
@@ -32,16 +32,22 @@ pub struct CpuSensors {
     pub power: Option<f32>,
 }
 
-/// The PCI bus lock every hardware monitor on Windows agrees on: SMN reads
-/// go through a pair of PCI registers, which two programs must not interleave.
-struct PciLock(HANDLE);
+/// A lock that every hardware monitor on Windows agrees to take before
+/// touching a shared piece of hardware: the PCI configuration registers
+/// (SMN reads go through a pair of them) or the ISA bus (Super I/O chips).
+/// Two programs must not interleave their accesses.
+pub struct NamedLock(HANDLE);
 
-impl PciLock {
-    fn acquire() -> Option<Self> {
-        let mutex = unsafe { CreateMutexW(None, false, w!("Global\\Access_PCI")) }.ok()?;
-        let waited = unsafe { WaitForSingleObject(mutex, 10) };
+/// The PCI bus lock's name.
+const PCI_LOCK: PCWSTR = w!("Global\\Access_PCI");
+
+impl NamedLock {
+    /// Waits up to `timeout_ms` for the lock; `None` if another program has it.
+    pub fn acquire(name: PCWSTR, timeout_ms: u32) -> Option<Self> {
+        let mutex = unsafe { CreateMutexW(None, false, name) }.ok()?;
+        let waited = unsafe { WaitForSingleObject(mutex, timeout_ms) };
         if waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED {
-            Some(PciLock(mutex))
+            Some(NamedLock(mutex))
         } else {
             let _ = unsafe { CloseHandle(mutex) };
             None
@@ -49,7 +55,7 @@ impl PciLock {
     }
 }
 
-impl Drop for PciLock {
+impl Drop for NamedLock {
     fn drop(&mut self) {
         unsafe {
             let _ = ReleaseMutex(self.0);
@@ -93,7 +99,7 @@ impl AmdCpu {
 
     pub fn read(&mut self) -> CpuSensors {
         let mut sensors = CpuSensors::default();
-        let lock = PciLock::acquire();
+        let lock = NamedLock::acquire(PCI_LOCK, 10);
         let locked = lock.is_some();
         if let Some(raw) = self.smn(locked, THM_TCON_CUR_TMP) {
             let offset = if raw & (1 << 19) != 0 { 49.0 } else { 0.0 };

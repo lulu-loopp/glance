@@ -13,6 +13,7 @@ export interface StaticInfo {
   memory_modules: string | null;
   drives: string[];
   network_adapter: string | null;
+  board: string;
   threads: number;
   mem_total: number;
   gpus: GpuInfo[];
@@ -60,11 +61,9 @@ export interface Sample {
   system: { uptime_s: number; processes: number; threads: number; handles: number };
   battery: { percent: number; charging: boolean; seconds_left: number | null } | null;
   /** From HWiNFO, when it shares its sensors. */
-  hw: {
-    cpu_temp: number | null;
-    cpu_power: number | null;
-    fans: [string, number][];
-  } | null;
+  /** Read through the driver; absent without it or without rights. */
+  cpu_sensors: { temp: number | null; ccds: number[]; power: number | null } | null;
+  board: { temps: [string, number][]; fans: [string, number][] } | null;
   drive_temps: { name: string; celsius: number }[];
 }
 

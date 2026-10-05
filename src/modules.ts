@@ -152,16 +152,18 @@ function cpu(info: StaticInfo): ModuleDef {
         plots: [lane.plot],
         update(sample) {
           setFigure(lane, sample.cpu, prefs.hotLoad);
-          // With HWiNFO's temperature, it takes the clock's place, as on the
-          // GPU lanes; the clock and the power move below.
-          const temp = sample.hw?.cpu_temp ?? null;
+          // The temperature takes the corner, as on the GPU lanes; the clock,
+          // the power and each chiplet's temperature go below.
+          const sensors = sample.cpu_sensors;
+          const temp = sensors?.temp ?? null;
           const clock = prefs.cpu.clock ? `${sample.ghz.toFixed(2)} GHz` : null;
           lane.aside.textContent = temp !== null ? `${Math.round(temp)} °C` : (clock ?? '');
           lane.aside.dataset.hot = String(temp !== null && temp > prefs.hotTemp);
-          const power = sample.hw?.cpu_power ?? null;
+          const ccds = sensors && sensors.ccds.length > 1 ? sensors.ccds : [];
           setFacts([
             [t('clock'), temp !== null ? clock : null],
-            [t('power'), power !== null ? `${power.toFixed(1)} W` : null],
+            [t('power'), sensors?.power != null ? `${sensors.power.toFixed(1)} W` : null],
+            ...ccds.map((celsius, i): [string, string] => [t('ccd', i + 1), `${Math.round(celsius)} °C`]),
           ]);
           sample.threads.forEach((load, i) => {
             if (!cells[i]) return;
@@ -437,30 +439,42 @@ function storage(): ModuleDef {
   };
 }
 
-function fans(): ModuleDef {
+/** A board input's name: what it is wired to, or its number. */
+function inputName(name: string, numbered: Key): string {
+  return /^\d+$/.test(name) ? t(numbered, name) : t(name as Key);
+}
+
+function board(info: StaticInfo): ModuleDef {
   return {
-    id: 'fans',
-    title: t('fans'),
-    detail: t('fansDetail'),
-    build() {
+    id: 'board',
+    title: t('board'),
+    detail: info.board || undefined,
+    build(prefs) {
       const root = element(`
-        <section class="lane lane-list lane-fans">
-          <header class="lane-head"><h2>${t('fans')}</h2><span class="lane-device">HWiNFO</span></header>
-          <ol class="rows"></ol>
+        <section class="lane lane-list lane-board">
+          ${head(t('board'), info.board)}
+          <dl class="facts board-temps"></dl>
+          <dl class="facts board-fans"></dl>
         </section>`);
-      const list = root.querySelector('ol')!;
+      const temps = root.querySelector<HTMLElement>('.board-temps')!;
+      const fans = root.querySelector<HTMLElement>('.board-fans')!;
+      const fill = (list: HTMLElement, rows: [string, string, boolean][]) => {
+        list.hidden = rows.length === 0;
+        list.replaceChildren(
+          ...rows.map(([label, value, hot]) =>
+            element(`<div data-hot="${hot}"><dt>${escapeHtml(label)}</dt><dd>${value}</dd></div>`),
+          ),
+        );
+      };
       return {
         root,
         plots: [],
         update(sample) {
-          const fans = sample.hw?.fans ?? [];
-          // Nothing to show without HWiNFO, or with every fan stopped.
-          root.hidden = fans.length === 0;
-          list.replaceChildren(
-            ...fans.map(([name, rpm]) =>
-              element(`<li><span class="row-name">${escapeHtml(name)}</span><span class="row-value">${Math.round(rpm)} RPM</span></li>`),
-            ),
-          );
+          // Without the driver there is nothing to show.
+          root.hidden = sample.board === null;
+          if (!sample.board) return;
+          fill(temps, sample.board.temps.map(([name, celsius]) => [inputName(name, 'sensor'), `${Math.round(celsius)} °C`, celsius > prefs.hotTemp]));
+          fill(fans, sample.board.fans.map(([name, rpm]) => [inputName(name, 'fanNumbered'), `${Math.round(rpm)} RPM`, false]));
         },
       };
     },
@@ -533,7 +547,7 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     disk(info),
     processes(),
     storage(),
-    fans(),
+    board(info),
     battery(),
     system(),
   ];
