@@ -30,6 +30,7 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     CreateDirectoryW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC,
     WRITE_OWNER,
 };
@@ -203,23 +204,27 @@ fn folders_hold(folder: &Path) -> bool {
 /// What an install folder may already hold: an earlier Glance.
 const INSTALLED: [&str; 4] = ["glance.exe", "uninstall.exe", "resources", "licenses"];
 
-/// What a folder chosen to install into is.
+/// What a folder chosen to install into is, or why installing failed.
 #[derive(Debug, PartialEq)]
 pub enum InstallFolder {
     /// Glance can be installed there and start elevated without asking: no
     /// one but administrators can change any folder above it, and the folder
-    /// is new (the installer creates it administrators' from the start) or
-    /// an earlier Glance's that only administrators could ever change.
+    /// is new (created administrators' from the start) or an earlier
+    /// Glance's that only administrators could ever change.
     Holds,
-    /// A folder above it can be changed by others: whatever was installed
-    /// there could be put in another's place.
+    /// The same, except that a folder above it can be changed by others:
+    /// installed there at the user's choice, Glance asks for administrator
+    /// rights at every start and cannot start with Windows.
     Open,
-    /// It exists, and holds something besides an earlier Glance or could be
-    /// changed by others: Glance is not installed into what it cannot vouch for.
+    /// It exists and is not an earlier Glance's that only administrators
+    /// could change: what is in it cannot be vouched for, and writing into it
+    /// with administrator rights is not safe.
     Occupied,
     /// It, or a folder above it, is a link or junction, or it is a drive's
     /// root: what it leads to is not what was chosen.
     Indirect,
+    /// The files could not be put there or taken away.
+    Failed,
 }
 
 /// The folder as chosen, if it is where it says: no part of it a link or
@@ -256,17 +261,22 @@ fn is_link(path: &Path) -> bool {
     path.symlink_metadata().map_or(true, |meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
 }
 
-/// Whether anything inside `folder`, at any depth, is a link or junction
-/// (none is followed while looking).
-fn links_inside(folder: &Path) -> bool {
-    std::fs::read_dir(folder).map_or(true, |entries| {
-        entries.into_iter().any(|entry| {
-            entry.map_or(true, |entry| {
-                let path = entry.path();
-                is_link(&path) || (path.is_dir() && links_inside(&path))
-            })
-        })
-    })
+/// A folder held open: while it is, neither it nor any folder above it can
+/// be renamed, moved or deleted (Windows refuses while something below is
+/// open without delete sharing), so its path leads where it was checked to.
+struct Pinned(#[allow(dead_code)] std::fs::File);
+
+/// Holds `folder` open, if it is a folder and not a link.
+fn pin(folder: &Path) -> Option<Pinned> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+        .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
+        .open(folder)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0).then_some(Pinned(file))
 }
 
 /// Rights over a folder that would let someone change what is in it.
@@ -280,7 +290,7 @@ const FILE_CHANGES: u32 = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | DELETE.0 | WR
 /// to change it now.
 fn only_trusted_inside(folder: &Path) -> bool {
     !is_link(folder)
-        // What it passes on to what is extracted into it counts too.
+        // What it passes on to what is put into it counts too.
         && only_trusted_can_now_and_after(folder, FOLDER_CHANGES | FILE_CHANGES, true)
         && std::fs::read_dir(folder).is_ok_and(|entries| {
             entries.into_iter().all(|entry| {
@@ -298,58 +308,51 @@ fn only_trusted_inside(folder: &Path) -> bool {
         })
 }
 
-pub fn install_folder(folder: &Path) -> InstallFolder {
-    let Some(folder) = direct(folder) else { return InstallFolder::Indirect };
+/// Whether every folder above `folder` holds (see `checked`).
+fn above_holds(folder: &Path) -> bool {
     let above = folder.parent().and_then(|above| std::fs::canonicalize(above).ok());
-    if !above.is_some_and(|above| folders_hold(&above)) {
-        return InstallFolder::Open;
-    }
-    if folder.exists() && !(only_ours(&folder) && claimable(&folder) && only_trusted_inside(&folder)) {
-        return InstallFolder::Occupied;
-    }
-    InstallFolder::Holds
+    above.is_some_and(|above| folders_hold(&above))
 }
 
-/// Readies `folder` for Glance to be put in it. A new folder is created
-/// owned by the administrators, changed only by them and the system, and
-/// read by everyone (as Program Files' folders are), in the one step that
-/// creates it: no one else ever has it. An earlier Glance's folder, which
-/// only administrators can change, is left as it is. Anything else is
-/// refused, unless the user has chosen to install there `anyway`: then an
-/// unprotected place or an existing folder is used as it is (a new folder
-/// is still created administrators'), and Glance there asks for
-/// administrator rights at every start and cannot start with Windows, as
-/// it checks for itself. A link or a drive's root is refused either way:
-/// the files would land elsewhere, or among others at the root, and could
-/// not be removed cleanly. Nothing outside `folder` is touched.
-pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), InstallFolder> {
+pub fn install_folder(folder: &Path) -> InstallFolder {
+    let Some(folder) = direct(folder) else { return InstallFolder::Indirect };
+    if folder.exists() && !(claimable(&folder) && only_trusted_inside(&folder)) {
+        return InstallFolder::Occupied;
+    }
+    if above_holds(&folder) {
+        InstallFolder::Holds
+    } else {
+        InstallFolder::Open
+    }
+}
+
+/// Puts the files the installer laid out in `payload` into `folder`. A new
+/// folder is created owned by the administrators, changed only by them and
+/// the system, and read by everyone (as Program Files' folders are), in the
+/// one step that creates it; an earlier Glance's folder that only
+/// administrators could change is used as it is. Only where every folder
+/// above holds too, unless the user chose to install there `anyway`.
+///
+/// The folder is pinned before anything is put in it, and checked again
+/// once pinned: then nothing above it can be swapped for a link, nothing in
+/// it can be changed by anyone else, and the files land where they were
+/// meant to and nowhere else.
+pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), InstallFolder> {
     match install_folder(folder) {
         InstallFolder::Holds => {}
-        InstallFolder::Open | InstallFolder::Occupied if anyway => {}
+        InstallFolder::Open if anyway => {}
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
-    if anyway && folder.exists() {
-        // Even so, nothing in it may lead elsewhere: the installer would
-        // follow it and write there with administrator rights.
-        if links_inside(&folder) {
-            return Err(InstallFolder::Indirect);
-        }
-        if !claimable(&folder) {
-            return Err(InstallFolder::Occupied);
-        }
-    }
-    if anyway && !folder.exists() {
+    if !folder.exists() {
         // Folders above a new one in an unprotected place, as they come.
         if let Some(above) = folder.parent() {
-            std::fs::create_dir_all(above).map_err(|_| InstallFolder::Open)?;
+            std::fs::create_dir_all(above).map_err(|_| InstallFolder::Failed)?;
         }
-    }
-    if !folder.exists() {
         let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
-            .map_err(|_| InstallFolder::Open)?;
+            .map_err(|_| InstallFolder::Failed)?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.0,
@@ -359,8 +362,60 @@ pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), Install
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
         made.map_err(|_| InstallFolder::Occupied)?;
     }
-    // As Glance will check it when it starts (the user's choice aside).
-    (anyway || only_ours(&folder) && claimable(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
+    let _pinned = pin(&folder).ok_or(InstallFolder::Indirect)?;
+    if direct(&folder).is_none() {
+        return Err(InstallFolder::Indirect);
+    }
+    if !(claimable(&folder) && only_trusted_inside(&folder)) {
+        return Err(InstallFolder::Occupied);
+    }
+    if !anyway && !above_holds(&folder) {
+        return Err(InstallFolder::Open);
+    }
+    copy_into(payload, &folder).map_err(|_| InstallFolder::Failed)
+}
+
+/// Copies everything in `from` into `to`, folders and all, replacing files
+/// of the same name.
+fn copy_into(from: &Path, to: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            if !target.is_dir() {
+                std::fs::create_dir(&target)?;
+            }
+            copy_into(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Takes Glance's own files out of `folder`, pinned, for the uninstaller:
+/// only what Glance puts there (links in it are removed as links, never
+/// followed), then the folder itself if nothing else is left in it.
+pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
+    let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
+    let pinned = pin(&folder).ok_or(InstallFolder::Indirect)?;
+    if direct(&folder).is_none() {
+        return Err(InstallFolder::Indirect);
+    }
+    let mut removed = true;
+    for name in INSTALLED {
+        let path = folder.join(name);
+        // Removing a folder tree here never follows a link out of it.
+        let gone = match path.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(_) => Ok(()),
+        };
+        removed &= gone.is_ok();
+    }
+    drop(pinned);
+    let _ = std::fs::remove_dir(&folder);
+    removed.then_some(()).ok_or(InstallFolder::Failed)
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -689,6 +744,29 @@ mod tests {
     }
 
     #[test]
+    fn pinning_holds_the_path() {
+        // While a folder is pinned, nothing above it can be renamed or
+        // removed, so no link can be put in its place.
+        let base = std::env::temp_dir().join(format!("glance-pin-test-{}", std::process::id()));
+        let above = base.join("above");
+        let folder = above.join("Glance");
+        std::fs::create_dir_all(&folder).unwrap();
+        let pinned = pin(&folder).expect("a folder can be pinned");
+        assert!(std::fs::rename(&above, base.join("moved")).is_err());
+        assert!(std::fs::rename(&folder, above.join("moved")).is_err());
+        assert!(std::fs::remove_dir(&folder).is_err());
+        drop(pinned);
+        std::fs::rename(&above, base.join("moved")).unwrap();
+        // A junction is not pinned.
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(base.join("moved")).output().unwrap();
+        assert!(made.status.success());
+        assert!(pin(&link).is_none());
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
     fn sees_through_links() {
         // A junction to a folder: what was chosen is not where it leads.
         let base = std::env::temp_dir().join(format!("glance-link-test-{}", std::process::id()));
@@ -705,13 +783,15 @@ mod tests {
         let inner = earlier.join("resources");
         let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&inner).arg(&target).output().unwrap();
         assert!(made.status.success());
-        // Refused for where it is, and for what is in it.
-        assert_eq!(install_folder(&earlier), InstallFolder::Open);
-        assert_eq!(prepare_install_folder(&earlier, false), Err(InstallFolder::Open));
+        // Refused for what is in it, even when the user would install there
+        // all the same; nothing is written through the junction.
         assert!(!only_trusted_inside(&earlier));
-        // Not even when the user chooses to install there all the same.
-        assert!(links_inside(&earlier));
-        assert_eq!(prepare_install_folder(&earlier, true), Err(InstallFolder::Indirect));
+        assert_eq!(install_folder(&earlier), InstallFolder::Occupied);
+        let payload = base.join("payload");
+        std::fs::create_dir(&payload).unwrap();
+        std::fs::write(payload.join("glance.exe"), b"MZ").unwrap();
+        assert_eq!(install_into(&earlier, &payload, true), Err(InstallFolder::Occupied));
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
         std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();

@@ -63,16 +63,16 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 
 LangString OpenFolderAsk ${LANG_SIMPCHINESE} "所选位置不受保护。$\r$\n$\r$\n该位置的上级文件夹可由普通程序重命名或更改权限，因此安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都需要确认管理员权限；$\r$\n　· 无法启用“开机时启动”。$\r$\n$\r$\n建议安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此位置？"
 LangString OpenFolderAsk ${LANG_ENGLISH} "The selected location is not protected.$\r$\n$\r$\nA folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nTo keep it safe, when installed here:$\r$\n  · Glance asks for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" cannot be turned on.$\r$\n$\r$\nInstalling to Program Files, or to a new folder at the root of a drive (for example D:\Glance), is recommended.$\r$\n$\r$\nInstall to this location anyway?"
-LangString OccupiedFolderAsk ${LANG_SIMPCHINESE} "所选文件夹已存在，且无法确认其中的内容未被其他程序改动。$\r$\n$\r$\n安装程序不会更改该文件夹中原有内容的权限。为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都可能需要确认管理员权限；$\r$\n　· 可能无法启用“开机时启动”。$\r$\n$\r$\n建议选择一个尚不存在的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此文件夹？"
-LangString OccupiedFolderAsk ${LANG_ENGLISH} "The selected folder already exists, and it cannot be confirmed that its contents have not been changed by other programs.$\r$\n$\r$\nThe installer does not change the permissions of anything already in it. To keep it safe, when installed here:$\r$\n  · Glance may ask for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" may not be available.$\r$\n$\r$\nA folder that does not exist yet (for example D:\Glance) is recommended.$\r$\n$\r$\nInstall to this folder anyway?"
 LangString OpenFolderStop ${LANG_SIMPCHINESE} "所选位置不受保护，安装已停止。$\r$\n$\r$\n请安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。"
 LangString OpenFolderStop ${LANG_ENGLISH} "The selected location is not protected; installation has stopped.$\r$\n$\r$\nInstall to Program Files, or to a new folder at the root of a drive (for example D:\Glance)."
-LangString OccupiedFolderStop ${LANG_SIMPCHINESE} "所选文件夹已存在，且无法确认其中的内容未被其他程序改动，安装已停止。$\r$\n$\r$\n请选择一个尚不存在的新文件夹（例如 D:\Glance）。"
-LangString OccupiedFolderStop ${LANG_ENGLISH} "The selected folder already exists, and it cannot be confirmed that its contents have not been changed by other programs; installation has stopped.$\r$\n$\r$\nChoose a folder that does not exist yet (for example D:\Glance)."
+LangString OccupiedFolder ${LANG_SIMPCHINESE} "无法安装到所选文件夹。$\r$\n$\r$\n该文件夹已存在，且不是仅管理员可修改的早期 Glance 安装：其他程序可能已改动其中的内容，以管理员身份向其中写入文件并不安全。$\r$\n$\r$\n请选择一个尚不存在的新文件夹（例如 D:\Glance），或先删除该文件夹。"
+LangString OccupiedFolder ${LANG_ENGLISH} "Glance cannot be installed to the selected folder.$\r$\n$\r$\nThe folder already exists and is not an earlier Glance installation that only administrators can modify: other programs may have changed its contents, and writing into it with administrator rights is not safe.$\r$\n$\r$\nChoose a folder that does not exist yet (for example D:\Glance), or delete this folder first."
 LangString IndirectFolder ${LANG_SIMPCHINESE} "无法安装到所选位置。$\r$\n$\r$\n所选位置是磁盘根目录、联接点或符号链接：文件将被写入其他位置，或与磁盘根目录中的其他文件混在一起，卸载时也无法完整清除。$\r$\n$\r$\n请选择一个普通文件夹（例如 D:\Glance）。"
 LangString IndirectFolder ${LANG_ENGLISH} "Glance cannot be installed to the selected location.$\r$\n$\r$\nIt is the root of a drive, a junction or a symbolic link: the files would be written elsewhere, or mixed with other files at the root of the drive, and could not be removed completely when uninstalling.$\r$\n$\r$\nChoose an ordinary folder (for example D:\Glance)."
-LangString UnpreparedFolder ${LANG_SIMPCHINESE} "无法准备安装文件夹，安装已停止。"
-LangString UnpreparedFolder ${LANG_ENGLISH} "The installation folder could not be prepared; installation has stopped."
+LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件夹，安装已停止。"
+LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder; installation has stopped."
+LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除，请手动删除：$\r$\n$INSTDIR"
+LangString RemoveFailed ${LANG_ENGLISH} "Some files could not be removed from the following folder; please delete them manually:$\r$\n$INSTDIR"
 LangString RemovePawnIO ${LANG_SIMPCHINESE} "是否同时卸载 PawnIO 驱动？$\r$\n$\r$\nPawnIO 由 Glance 安装，用于读取温度和风扇转速。如果其他硬件监控或风扇控制软件（例如 HWiNFO、FanControl）也在使用它，请选择“否”予以保留。"
 LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n$\r$\nPawnIO was installed by Glance to read temperatures and fan speeds. If other monitoring or fan control software (for example HWiNFO or FanControl) also uses it, choose No to keep it."
 
@@ -92,59 +92,54 @@ Function .onInit
   SetRegView 64
 FunctionEnd
 
-; Glance itself, in the plugins folder (which NSIS makes administrators'
-; when elevated), answers for the chosen folder and prepares it: by the same
-; rules it applies when it starts.
+; Everything that touches the install folder is done by a copy of Glance
+; the installer (and uninstaller) carries, run from the plugins folder,
+; which NSIS makes administrators' when elevated: never by the copy in the
+; install folder, which may be somewhere others can change.
 !macro Helper
   InitPluginsDir
   File "/oname=$PLUGINSDIR\${EXE}" "..\target\release\${EXE}"
 !macroend
 
-; Whether the user chose to install in an unprotected place all the same.
-Var Anyway
-
-; Why a folder is refused, by Glance's answer: 1 a folder above it can be
-; changed by others, 2 it exists and is not an earlier Glance only
-; administrators could change, 3 it is a link or a drive's root, 4 Glance
-; could not answer.
-!macro Refuse code
-  ${If} ${code} == 1
-    MessageBox MB_ICONSTOP "$(OpenFolderStop)" /SD IDOK
-  ${ElseIf} ${code} == 2
-    MessageBox MB_ICONSTOP "$(OccupiedFolderStop)" /SD IDOK
-  ${ElseIf} ${code} == 3
-    MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
-  ${Else}
-    MessageBox MB_ICONSTOP "$(UnpreparedFolder)" /SD IDOK
-  ${EndIf}
-  Abort
-!macroend
-
-; Runs Glance with `flag` on the chosen folder; $0 is its answer. A Glance
-; that did not run (deleted from the plugins folder, say) answers 4, which
-; refuses like any other failure.
-!macro Ask flag
+; Runs the helper with `arguments`; $0 is its answer. A helper that did not
+; run (deleted from the plugins folder, say) answers 4, a failure.
+!macro Ask arguments
   StrCpy $0 4
   ClearErrors
-  ExecWait '"$PLUGINSDIR\${EXE}" ${flag} "$INSTDIR"' $0
+  ExecWait '"$PLUGINSDIR\${EXE}" ${arguments}' $0
   ${If} ${Errors}
     StrCpy $0 4
   ${EndIf}
 !macroend
 
-; An unprotected place, or an existing folder, is the user's call: told
-; what it means, they may install there all the same (the default answer
-; is No). A link or a drive's root is refused.
+; Whether the user chose to install in an unprotected place all the same.
+Var Anyway
+
+; Why installing stopped, by the helper's answer: 1 a folder above can be
+; changed by others, 2 the folder cannot be vouched for, 3 it is a link or
+; a drive's root, 4 the files could not be put there.
+!macro Refuse code
+  ${If} ${code} == 1
+    MessageBox MB_ICONSTOP "$(OpenFolderStop)" /SD IDOK
+  ${ElseIf} ${code} == 2
+    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
+  ${ElseIf} ${code} == 3
+    MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
+  ${Else}
+    MessageBox MB_ICONSTOP "$(InstallFailed)" /SD IDOK
+  ${EndIf}
+  Abort
+!macroend
+
+; An unprotected place is the user's call: told what it means, they may
+; install there all the same (No is the default). A folder that cannot be
+; vouched for, a link or a drive's root is refused.
 Function CheckFolder
   StrCpy $Anyway 0
   !insertmacro Helper
-  !insertmacro Ask --check-install-folder
+  !insertmacro Ask '--check-install-folder "$INSTDIR"'
   ${If} $0 == 1
     MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolderAsk)" /SD IDNO IDYES +2
-    Abort
-    StrCpy $Anyway 1
-  ${ElseIf} $0 == 2
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OccupiedFolderAsk)" /SD IDNO IDYES +2
     Abort
     StrCpy $Anyway 1
   ${ElseIf} $0 != 0
@@ -154,32 +149,32 @@ FunctionEnd
 
 Section "Glance"
   !insertmacro StopGlance
-  ; A new folder is created administrators' in one step, as Program Files'
-  ; folders are; an earlier Glance's, which only administrators could ever
-  ; change, is used as it is. Elsewhere only if the user chose so above;
-  ; otherwise (a silent install given such a folder with /D, say) it stops.
   !insertmacro Helper
+  ; The files are laid out in the plugins folder first; the helper then
+  ; pins the install folder (nothing above it can be swapped for a link
+  ; while it is held), creates it administrators' if it is new, checks it
+  ; again, and copies them in. A silent install never installs "anyway".
+  SetOutPath "$PLUGINSDIR\payload"
+  File "..\target\release\${EXE}"
+  SetOutPath "$PLUGINSDIR\payload\resources"
+  File "..\resources\PawnIO_setup.exe"
+  ; What Glance is built from and ships with, and the source the modules'
+  ; licence asks to come with them.
+  SetOutPath "$PLUGINSDIR\payload\licenses"
+  File "..\licenses\*.txt"
+  File "..\licenses\*.html"
+  SetOutPath "$PLUGINSDIR\payload\licenses\pawnio-modules-source"
+  File /r "..\pawnio-modules\source\*"
+  WriteUninstaller "$PLUGINSDIR\payload\uninstall.exe"
+  SetOutPath "$PLUGINSDIR"
   ${If} $Anyway == 1
-    !insertmacro Ask --prepare-install-folder-anyway
+    !insertmacro Ask '--install-anyway "$INSTDIR" "$PLUGINSDIR\payload"'
   ${Else}
-    !insertmacro Ask --prepare-install-folder
+    !insertmacro Ask '--install "$INSTDIR" "$PLUGINSDIR\payload"'
   ${EndIf}
   ${If} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}
-  SetOutPath "$INSTDIR"
-  File "..\target\release\${EXE}"
-  SetOutPath "$INSTDIR\resources"
-  File "..\resources\PawnIO_setup.exe"
-  ; What Glance is built from and ships with, and the source the modules'
-  ; licence asks to come with them.
-  SetOutPath "$INSTDIR\licenses"
-  File "..\licenses\*.txt"
-  File "..\licenses\*.html"
-  SetOutPath "$INSTDIR\licenses\pawnio-modules-source"
-  File /r "..\pawnio-modules\source\*"
-  SetOutPath "$INSTDIR"
-  WriteUninstaller "$INSTDIR\uninstall.exe"
 
   ; The PawnIO driver, if no program has installed it yet: from the
   ; installer's own copy, wherever Glance goes (Glance installs it at start
@@ -187,8 +182,7 @@ Section "Glance"
   ; offers to remove it.
   ReadRegStr $1 HKLM "${PAWNIO_KEY}" "DisplayVersion"
   ${If} $1 == ""
-    File "/oname=$PLUGINSDIR\PawnIO_setup.exe" "..\resources\PawnIO_setup.exe"
-    ExecWait '"$PLUGINSDIR\PawnIO_setup.exe" -install -silent'
+    ExecWait '"$PLUGINSDIR\payload\resources\PawnIO_setup.exe" -install -silent'
     ReadRegStr $1 HKLM "${PAWNIO_KEY}" "DisplayVersion"
     ${If} $1 != ""
       WriteRegDWORD HKLM "SOFTWARE\Glance" "InstalledPawnIO" 1
@@ -217,10 +211,10 @@ FunctionEnd
 
 Section "Uninstall"
   !insertmacro StopGlance
-  ; Every account's tasks for Glance, removed by the installed copy itself
-  ; (in a folder only administrators can change) through Task Scheduler: no
-  ; shell or script host that could load anything else.
-  ExecWait '"$INSTDIR\${EXE}" --remove-tasks'
+  !insertmacro Helper
+  ; Every account's tasks for Glance, removed through Task Scheduler by the
+  ; uninstaller's own copy of Glance.
+  ExecWait '"$PLUGINSDIR\${EXE}" --remove-tasks'
 
   ; The driver goes only if Glance put it there and the user agrees; a
   ; silent uninstall keeps it.
@@ -234,17 +228,18 @@ Section "Uninstall"
   ${EndIf}
   DeleteRegKey HKLM "SOFTWARE\Glance"
 
-  ; The settings of the user uninstalling.
+  ; The settings of the user uninstalling: Glance keeps one file there.
+  ; Neither step follows a link: a link is removed as a link.
   SetShellVarContext current
-  RMDir /r "$APPDATA\${SETTINGS_DIR}"
+  Delete "$APPDATA\${SETTINGS_DIR}\settings.json"
+  RMDir "$APPDATA\${SETTINGS_DIR}"
 
   SetShellVarContext all
   Delete "$SMPROGRAMS\${NAME}.lnk"
-  Delete "$INSTDIR\${EXE}"
-  Delete "$INSTDIR\resources\PawnIO_setup.exe"
-  RMDir "$INSTDIR\resources"
-  RMDir /r "$INSTDIR\licenses"
-  Delete "$INSTDIR\uninstall.exe"
-  RMDir "$INSTDIR"
+  ; Glance's own files, taken out by the helper with the folder pinned.
+  !insertmacro Ask '--uninstall-from "$INSTDIR"'
+  ${If} $0 != 0
+    MessageBox MB_ICONEXCLAMATION "$(RemoveFailed)" /SD IDOK
+  ${EndIf}
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
 SectionEnd

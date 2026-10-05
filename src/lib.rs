@@ -107,28 +107,31 @@ pub fn run() {
         elevation::remove_all_tasks();
         return;
     }
-    // The installer asks what a chosen folder is (exit code 0 where Glance
-    // could start unasked, 1 where it would ask, 2 where the folder holds
-    // other things, 3 where it is a link), and has it made Glance's own
-    // before anything is put in it (0 when done).
+    // The installer and uninstaller, elevated, have their own copy of Glance
+    // do what touches the install folder. Exit codes: 0 done (or, asked
+    // what a folder is, Glance could start unasked there), 1 a folder above
+    // can be changed by others, 2 the folder cannot be vouched for, 3 it is
+    // a link or a root, 4 the files could not be put there or taken away.
     let args: Vec<String> = std::env::args().collect();
-    if let [_, flag, folder] = args.as_slice() {
-        let code = |kind: elevation::InstallFolder| match kind {
-            elevation::InstallFolder::Holds => 0,
-            elevation::InstallFolder::Open => 1,
-            elevation::InstallFolder::Occupied => 2,
-            elevation::InstallFolder::Indirect => 3,
-        };
-        let folder = std::path::Path::new(folder);
-        match flag.as_str() {
-            "--check-install-folder" => std::process::exit(code(elevation::install_folder(folder))),
-            "--prepare-install-folder" => std::process::exit(elevation::prepare_install_folder(folder, false).map_or_else(code, |_| 0)),
-            // The user chose to install there all the same.
-            "--prepare-install-folder-anyway" => {
-                std::process::exit(elevation::prepare_install_folder(folder, true).map_or_else(code, |_| 0))
-            }
-            _ => {}
+    let code = |kind: elevation::InstallFolder| match kind {
+        elevation::InstallFolder::Holds => 0,
+        elevation::InstallFolder::Open => 1,
+        elevation::InstallFolder::Occupied => 2,
+        elevation::InstallFolder::Indirect => 3,
+        elevation::InstallFolder::Failed => 4,
+    };
+    let done = |result: Result<(), elevation::InstallFolder>| std::process::exit(result.map_or_else(code, |_| 0));
+    match args.as_slice() {
+        [_, flag, folder] if flag == "--check-install-folder" => {
+            std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }
+        [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
+        [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
+            // "anyway": the user chose an unprotected place all the same.
+            let anyway = flag == "--install-anyway";
+            done(elevation::install_into(std::path::Path::new(folder), std::path::Path::new(payload), anyway))
+        }
+        _ => {}
     }
     // One Glance at a time: starting it again opens its settings. Asked
     // before handing over to an elevated start, which the launch task
