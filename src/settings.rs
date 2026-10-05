@@ -102,9 +102,11 @@ pub fn config_dir() -> PathBuf {
 impl Settings {
     /// A missing or hand-edited file that no longer parses means defaults;
     /// numbers outside what the settings offer are brought within it.
+    /// Read and written so that Glance, running elevated, never follows a
+    /// link someone put in the user's folder (see `elevation::read_in_place`).
     pub fn load(dir: &Path) -> Self {
         let mut settings: Settings =
-            fs::read_to_string(dir.join(FILE)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+            crate::elevation::read_in_place(dir, FILE).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
         settings
@@ -112,6 +114,6 @@ impl Settings {
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         fs::create_dir_all(dir)?;
-        fs::write(dir.join(FILE), serde_json::to_string_pretty(self).unwrap())
+        crate::elevation::write_in_place(dir, FILE, serde_json::to_string_pretty(self).unwrap().as_bytes())
     }
 }

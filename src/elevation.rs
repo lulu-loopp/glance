@@ -500,13 +500,70 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     removed.then_some(()).ok_or(InstallFolder::Failed)
 }
 
+/// `folder` held, if it is really where its path says: Windows, asked by
+/// handle, puts it there (no link at it or anywhere above it).
+fn held_where_it_says(folder: &Path) -> Option<Held> {
+    let held = pin(folder)?;
+    let place = held.place()?;
+    same_path(&place, &std::path::absolute(folder).ok()?).then_some(held)
+}
+
+/// Reads `name` in `folder`, both held and checked by handle (the folder
+/// where its path says, the file in it and not a link), so that Glance,
+/// running elevated, reads nothing a link in a user's folder leads to.
+pub fn read_in_place(folder: &Path, name: &str) -> Option<String> {
+    use std::io::Read;
+    let held = held_where_it_says(folder)?;
+    let mut file = Held::open(&folder.join(name))?;
+    if file.is_folder() || is_link(&folder.join(name)) || !file.lies_in(&held) {
+        return None;
+    }
+    let mut text = String::new();
+    file.0.read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// Writes `contents` as `name` in `folder`, for Glance running elevated: the
+/// folder held and checked by handle to be where its path says, the bytes
+/// written to a new file there (a new file follows no link) checked by
+/// handle to lie in it, which then takes the name's place (a link there is
+/// replaced, never written through).
+pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::windows::fs::OpenOptionsExt;
+    let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not where its path says");
+    let held = held_where_it_says(folder).ok_or_else(refused)?;
+    let temporary = folder.join(format!(".{name}.{}.tmp", std::process::id()));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .access_mode((FILE_GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES).0)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(&temporary)?;
+    let mut file = Held(file);
+    if !file.lies_in(&held) {
+        file.delete();
+        return Err(refused());
+    }
+    if let Err(error) = file.0.write_all(contents) {
+        file.delete();
+        return Err(error);
+    }
+    drop(file);
+    std::fs::rename(&temporary, folder.join(name))
+}
+
 /// Removes this user's settings for the uninstaller: the one file Glance
-/// keeps, then its folder if empty. The folder is held, the file opened as
-/// itself (a link as the link) and checked by handle to lie in it, and each
-/// removed by its handle: nothing elsewhere can be reached through a link.
+/// keeps, then its folder if empty. The folder is held and checked by
+/// handle to be where its path says, the file opened as itself (a link as
+/// the link) and checked by handle to lie in it, and each removed by its
+/// handle: nothing elsewhere can be reached through a link.
 pub fn remove_settings() -> bool {
     let folder = crate::settings::config_dir();
-    let Some(held) = pin(&folder) else { return !folder.exists() };
+    if !folder.exists() {
+        return true;
+    }
+    let Some(held) = held_where_it_says(&folder) else { return false };
     let file_gone = match Held::open(&folder.join("settings.json")) {
         Some(file) if file.lies_in(&held) => file.delete(),
         Some(_) => false,
@@ -892,6 +949,43 @@ mod tests {
         assert!(junction.delete());
         assert!(!link.exists() && target.join("settings.json").exists());
         drop((held, base_held));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// This account's settings folder is where its path says, so settings load.
+    #[test]
+    #[ignore = "reads this account's settings; run with --ignored"]
+    fn finds_this_accounts_settings() {
+        let folder = crate::settings::config_dir();
+        println!("{} held where it says: {}", folder.display(), held_where_it_says(&folder).is_some());
+        println!("settings: {:?}", read_in_place(&folder, "settings.json").map(|text| text.len()));
+    }
+
+    #[test]
+    fn reads_and_writes_only_where_the_path_says() {
+        let base = std::env::temp_dir().join(format!("glance-place-test-{}", std::process::id()));
+        let folder = base.join("settings");
+        let target = base.join("target");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        // Where the path says: written, replaced, read back.
+        write_in_place(&folder, "settings.json", b"one").unwrap();
+        write_in_place(&folder, "settings.json", b"two").unwrap();
+        assert_eq!(read_in_place(&folder, "settings.json").as_deref(), Some("two"));
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        // Through a junction, and through a junction above: refused, the
+        // place it leads to untouched.
+        std::fs::write(target.join("settings.json"), b"theirs").unwrap();
+        let link = base.join("link");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
+        assert!(made.status.success());
+        assert!(write_in_place(&link, "settings.json", b"mine").is_err());
+        assert!(read_in_place(&link, "settings.json").is_none());
+        std::fs::create_dir(target.join("inner")).unwrap();
+        assert!(write_in_place(&link.join("inner"), "settings.json", b"mine").is_err());
+        assert_eq!(std::fs::read(target.join("settings.json")).unwrap(), b"theirs");
+        assert!(!target.join("inner").join("settings.json").exists());
+        std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
 
