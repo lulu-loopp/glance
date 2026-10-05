@@ -1,4 +1,5 @@
 mod capture;
+mod hwinfo;
 mod detector;
 mod metrics;
 mod panel;
@@ -11,6 +12,7 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::http::{Response, StatusCode};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::window::{Effect, EffectsBuilder};
 use tauri::{
     App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
@@ -24,6 +26,13 @@ use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETDESK
 use metrics::{Sampler, StaticInfo};
 use panel::{Controller, PageRect, Surface};
 use settings::Settings;
+
+const FIRST_WINDOWS_11_BUILD: u32 = 22000;
+
+fn windows_build() -> u32 {
+    let key = windows::core::w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    metrics::reg_string(key, windows::core::w!("CurrentBuild")).parse().unwrap_or(0)
+}
 
 /// The settings window's size, and the least it can be resized to (logical px).
 const SETTINGS_SIZE: (f64, f64) = (1040.0, 720.0);
@@ -159,11 +168,17 @@ fn show_settings(app: &AppHandle) {
         ((work.right - work.left) as f64 / scale, (work.bottom - work.top) as f64 / scale);
     *state.wallpaper.lock().unwrap() = wallpaper().map(|(bytes, mime)| (Arc::new(bytes), mime));
     state.controller.set_settings_open(true);
-    let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?settings".into()))
+    // Mica, the Windows 11 window material, where the system has it; the
+    // page paints a plain surface otherwise.
+    let mica = windows_build() >= FIRST_WINDOWS_11_BUILD;
+    let page = if mica { "index.html?settings&mica" } else { "index.html?settings" };
+    let mut builder = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App(page.into()))
         .title("Glance 设置")
-        .visible(false)
-        .build()
-        .expect("settings window");
+        .visible(false);
+    if mica {
+        builder = builder.transparent(true).effects(EffectsBuilder::new().effect(Effect::Mica).build());
+    }
+    let window = builder.build().expect("settings window");
     let controller = state.controller.clone();
     let handle = app.clone();
     window.on_window_event(move |event| {

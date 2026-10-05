@@ -7,6 +7,7 @@
 //! nothing that moves on screen can feed back into that decision.
 
 use std::collections::VecDeque;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -143,6 +144,8 @@ struct Inner {
     /// when it was taken.
     shot: Option<u64>,
     shot_at: Instant,
+    /// What the current capture shows, to tell a changed desktop from the same one.
+    shot_hash: Option<u64>,
     shots: u64,
 }
 
@@ -242,6 +245,7 @@ impl Controller {
                 rows: None,
                 shot: None,
                 shot_at: Instant::now(),
+                shot_hash: None,
                 shots: 0,
             }),
         }
@@ -356,6 +360,11 @@ impl Controller {
             _ => None,
         };
         inner.shot = capture.as_ref().map(|(shot, _)| *shot);
+        inner.shot_hash = capture.as_ref().map(|(_, bytes)| {
+            let mut hasher = DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        });
         inner.shot_at = Instant::now();
         *self.capture.lock().unwrap() = capture;
     }
@@ -615,11 +624,15 @@ impl Controller {
 
         // A live backdrop is captured again every so often. The window is
         // out of captures then, so it can stay where it is.
+        // Only a capture that differs from the last is passed on.
         if live && inner.shot.is_some() && now.duration_since(inner.shot_at) >= LIVE_INTERVAL {
             let window = inner.placement.as_ref().unwrap().window;
+            let before = inner.shot_hash;
             self.shoot(&mut inner, window);
-            let frame = BackdropFrame { epoch: inner.epoch, backdrop: Self::backdrop_url(&inner) };
-            self.app.emit("backdrop-frame", frame).unwrap();
+            if inner.shot_hash != before {
+                let frame = BackdropFrame { epoch: inner.epoch, backdrop: Self::backdrop_url(&inner) };
+                self.app.emit("backdrop-frame", frame).unwrap();
+            }
         }
     }
 

@@ -139,7 +139,7 @@ export async function panelApp(boot: Bootstrap) {
   // A live backdrop, captured again while the panel is open.
   await listen<{ epoch: number; backdrop: string | null }>('backdrop-frame', async ({ payload }) => {
     await backdrop.load(payload.backdrop);
-    if (epoch === payload.epoch && body.dataset.state === 'open') view.dress(prefs.theme);
+    if (epoch === payload.epoch && body.dataset.state === 'open') view.retexture();
   });
 
   // Taken off the screen at once, as the settings window opens.

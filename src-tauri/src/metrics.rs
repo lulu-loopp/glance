@@ -6,6 +6,8 @@ use std::ffi::c_void;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+
+use crate::hwinfo::{HwSensors, Hwinfo};
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
@@ -71,6 +73,8 @@ pub struct Sample {
     pub by_memory: Vec<ProcessSample>,
     pub system: SystemSample,
     pub battery: Option<BatterySample>,
+    /// From HWiNFO, when it shares its sensors.
+    pub hw: Option<HwSensors>,
 }
 
 #[derive(Clone, Serialize)]
@@ -138,6 +142,13 @@ impl Sample {
         let mut rows: Vec<String> = self.volumes.iter().map(|volume| volume.name.clone()).collect();
         rows.push(format!("{} {}", self.by_cpu.len(), self.by_memory.len()));
         rows.push(format!("battery {}", self.battery.is_some()));
+        match &self.hw {
+            Some(hw) => {
+                rows.push(format!("cpu sensors {} {}", hw.cpu_temp.is_some(), hw.cpu_power.is_some()));
+                rows.extend(hw.fans.iter().map(|(name, _)| format!("fan {name}")));
+            }
+            None => rows.push("no hwinfo".into()),
+        }
         rows.push(format!("network {}", self.network.as_ref().is_some_and(|n| n.ipv4.is_some())));
         for gpu in &self.gpus {
             rows.extend(gpu.engines.iter().map(|(kind, _)| kind.clone()));
@@ -183,6 +194,7 @@ pub struct Sampler {
     base_mhz: f64,
     adapters: Vec<Adapter>,
     net_prev: (u64, u64, Instant),
+    hwinfo: Option<Hwinfo>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -236,6 +248,7 @@ impl Sampler {
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
             net_prev: (down, up, Instant::now()),
+            hwinfo: None,
             buf: Vec::new(),
             info,
         }
@@ -309,7 +322,21 @@ impl Sampler {
                 handles: perf.HandleCount,
             },
             battery: battery(),
+            hw: self.hw_sensors(),
         })
+    }
+
+    /// HWiNFO's readings, opening its block when it starts sharing one and
+    /// letting go of it when it stops.
+    fn hw_sensors(&mut self) -> Option<HwSensors> {
+        if self.hwinfo.is_none() {
+            self.hwinfo = Hwinfo::open();
+        }
+        let sensors = self.hwinfo.as_ref()?.read();
+        if sensors.is_none() {
+            self.hwinfo = None;
+        }
+        sensors
     }
 
     fn sample_gpus(&mut self) -> Option<Vec<GpuSample>> {
@@ -704,7 +731,7 @@ fn reg_dword(key: PCWSTR, value: PCWSTR) -> u32 {
     data
 }
 
-fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
+pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
     let mut data = [0u16; 256];
     let mut size = size_of_val(&data) as u32;
     unsafe {

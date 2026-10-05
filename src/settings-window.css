@@ -8,6 +8,12 @@ body.settings-app {
   background: var(--window);
 }
 
+/* Over Mica the window is the material itself; it follows the window's theme
+   and turns flat by itself when the window is inactive. */
+body.settings-app[data-mica] {
+  background: transparent;
+}
+
 .settings-layout {
   display: grid;
   grid-template-columns: minmax(360px, 420px) 1fr;
