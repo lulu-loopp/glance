@@ -275,7 +275,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 facts.push((lang.pick("缓存", "Cached").into(), text::size(s.memory.cached), false));
             }
             vec![
-                head(lang.pick("内存", "Memory"), "", text::usage(s.memory.used, info.mem_total), false),
+                head(lang.pick("内存", "Memory"), info.memory_modules.clone().unwrap_or_default(), text::usage(s.memory.used, info.mem_total), false),
                 Block::Readout {
                     figure: format!("{percent:.0}"),
                     unit: "%",
@@ -304,7 +304,8 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 facts.push((lang.pick("开机以来", "Since boot").into(), total, false));
             }
             vec![
-                head(lang.pick("网络", "Network"), "", full_scale_text(lang, scale, bits), false),
+                // The adapter traffic leaves by now, which may have changed.
+                head(lang.pick("网络", "Network"), s.network.as_ref().map(|a| a.model.clone()).unwrap_or_default(), full_scale_text(lang, scale, bits), false),
                 Block::Rates {
                     rows: vec![
                         (lang.pick("下载", "Down").into(), text::rate(s.net_down, bits)),

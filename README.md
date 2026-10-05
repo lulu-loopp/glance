@@ -7,7 +7,7 @@ slides back.
 
 - Opens on a deliberate push into the edge (raw mouse input), not on merely
   touching it, so scroll bars and window borders at the edge stay usable.
-- Three looks: chart paper, liquid glass (the desktop behind is bent at the
+- Three looks: chart paper, frosted glass (the desktop behind is bent at the
   rim of each piece) and Windows 11 (acrylic, as the Start menu draws it),
   light or dark, in Chinese or English.
 - Temperatures, power, fans and clocks come from the CPU and the

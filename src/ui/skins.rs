@@ -361,7 +361,7 @@ fn grain(frame: &Frame) -> Result<windows::Win32::Graphics::Direct2D::ID2D1Bitma
     }
 }
 
-/// 液态玻璃: every lane and the bar a piece of glass. Each bends the desktop
+/// 磨砂玻璃: every lane and the bar a piece of glass. Each bends the desktop
 /// at its rim, frosts it as much as legibility needs, takes the theme's
 /// tint, glows faintly inside its edge and catches light along it.
 fn glass(frame: &Frame, ground: &Ground) -> Result<()> {
