@@ -748,10 +748,13 @@ impl Ui {
             Switch::MemoryDetails => (p("内存提交量和缓存", "Committed and cached memory"), None, prefs.memory.details),
             Switch::NetworkDetails => (p("网卡、地址和累计流量", "Adapter, address and totals"), None, prefs.network.details),
             Switch::DiskActive => (p("磁盘活动时间", "Disk active time"), None, prefs.disk.active),
-            // Only an installed copy may start elevated unasked.
+            // Only a copy no ordinary program can replace (one the installer
+            // put in Program Files) may start elevated unasked.
             Switch::Startup => (
                 p("开机时启动", "Start with Windows"),
-                (!self.may_autostart).then(|| p("安装后可用", "Available once installed")),
+                (!self.may_autostart).then(|| {
+                    p("用安装程序装到 Program Files 后才能开启", "Install Glance with its installer, into Program Files, to turn this on")
+                }),
                 self.autostart,
             ),
         }

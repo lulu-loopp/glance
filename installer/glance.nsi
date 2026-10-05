@@ -21,8 +21,9 @@ Unicode true
 
 Name "${NAME}"
 OutFile "..\target\${NAME}_${VERSION}_x64-setup.exe"
+; Always Program Files: only a copy there, which ordinary programs cannot
+; replace, may start elevated without asking and start with Windows.
 InstallDir "$PROGRAMFILES64\${NAME}"
-InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 ManifestDPIAware true
@@ -41,7 +42,6 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
 
-!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
