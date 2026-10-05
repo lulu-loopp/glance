@@ -69,19 +69,21 @@ impl SuperIo {
         for slot in 0..2u64 {
             module.call("ioctl_select_slot", &[slot], &mut []).ok()?;
             let port = if slot == 0 { 0x2E } else { 0x4E };
-            // ITE's key into configuration mode; the last byte differs by port.
-            for byte in [0x87, 0x01, 0x55, if slot == 0 { 0x55 } else { 0xAA }] {
-                module.call("ioctl_pio_outb", &[port, byte], &mut []).ok()?;
-            }
-            let chip = module.read("ioctl_superio_inw", CHIP_ID).ok()? as u16;
-            let Some((temp_count, fan_count)) = ite_layout(chip) else {
-                exit(&module);
-                continue;
-            };
-            module.call("ioctl_find_bars", &[], &mut []).ok()?;
-            module.call("ioctl_superio_outb", &[DEVICE_SELECT, ITE_ENVIRONMENT], &mut []).ok()?;
-            let base = module.read("ioctl_superio_inw", BASE_ADDRESS).ok()?;
+            let found = (|| {
+                // ITE's key into configuration mode; the last byte differs by port.
+                for byte in [0x87, 0x01, 0x55, if slot == 0 { 0x55 } else { 0xAA }] {
+                    module.call("ioctl_pio_outb", &[port, byte], &mut []).ok()?;
+                }
+                let chip = module.read("ioctl_superio_inw", CHIP_ID).ok()? as u16;
+                let (temp_count, fan_count) = ite_layout(chip)?;
+                module.call("ioctl_find_bars", &[], &mut []).ok()?;
+                module.call("ioctl_superio_outb", &[DEVICE_SELECT, ITE_ENVIRONMENT], &mut []).ok()?;
+                let base = module.read("ioctl_superio_inw", BASE_ADDRESS).ok()?;
+                Some((chip, temp_count, fan_count, base))
+            })();
+            // Out of configuration mode however far the search got.
             exit(&module);
+            let Some((chip, temp_count, fan_count, base)) = found else { continue };
             if base < 0x100 || base & 0xF007 != 0 {
                 continue;
             }

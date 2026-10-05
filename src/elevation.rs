@@ -9,25 +9,27 @@
 //!
 //! A task like that runs whatever file is at its path, elevated, whenever
 //! anyone running as the user asks. So Glance only makes one for an
-//! executable the user cannot change without elevation: one installed under
+//! executable no one but administrators can change: one installed under
 //! Program Files, not a copy in Downloads or a build folder. From anywhere
 //! else every start asks.
 
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows::core::{w, Interface, BOOL, BSTR, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
+use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT};
 use windows::Win32::Security::{
-    AccessCheck, DuplicateToken, GetFileSecurityW, GetTokenInformation, SecurityIdentification, TokenElevation,
-    TokenLinkedToken, DACL_SECURITY_INFORMATION, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PRIVILEGE_SET, PSECURITY_DESCRIPTOR, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_LINKED_TOKEN, TOKEN_QUERY,
+    GetAce, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
 };
+use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
@@ -76,96 +78,137 @@ pub fn is_elevated() -> bool {
 
 // ---- Who can change a file ----
 
-/// The user's own rights without elevation, as a token to check access
-/// against: the elevated token's linked one, or the process's own.
-fn limited_token() -> Option<HANDLE> {
-    let mut token = HANDLE::default();
-    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &mut token) }.ok()?;
-    let mut linked = TOKEN_LINKED_TOKEN::default();
-    let mut size = 0u32;
-    let elevated = is_elevated()
-        && unsafe {
-            GetTokenInformation(token, TokenLinkedToken, Some(&mut linked as *mut _ as *mut _), size_of::<TOKEN_LINKED_TOKEN>() as u32, &mut size)
-        }
-        .is_ok();
-    let source = if elevated { linked.LinkedToken } else { token };
-    let mut checkable = HANDLE::default();
-    let duplicated = unsafe { DuplicateToken(source, SecurityIdentification, &mut checkable) };
-    unsafe {
-        if elevated {
-            let _ = CloseHandle(linked.LinkedToken);
-        }
-        let _ = CloseHandle(token);
-    }
-    duplicated.ok().map(|_| checkable)
+/// The accounts that may change installed programs: SYSTEM, the
+/// Administrators group and TrustedInstaller.
+const TRUSTED: [&str; 3] = ["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"];
+
+fn sid_string(sid: PSID) -> Option<String> {
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(sid, &mut text) }.ok()?;
+    let string = unsafe { text.to_string() }.ok();
+    unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+    string
 }
 
-/// The rights `token` has to `path`, as Windows grants them.
-fn rights(token: HANDLE, path: &Path) -> Option<u32> {
+/// Whether only trusted accounts can do any of `forbidden` to `path`: it is
+/// owned by one (an owner may always re-permission), and its access list
+/// grants those rights to no one else. Fails closed on anything unexpected.
+fn only_trusted_can(path: &Path, forbidden: u32) -> bool {
     let wide = HSTRING::from(path.as_os_str());
-    let wanted = (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION).0;
-    let mut needed = 0u32;
-    unsafe {
-        let _ = GetFileSecurityW(&wide, wanted, None, 0, &mut needed);
-    }
-    let mut descriptor = vec![0u8; needed as usize];
-    unsafe {
-        GetFileSecurityW(&wide, wanted, Some(PSECURITY_DESCRIPTOR(descriptor.as_mut_ptr().cast())), needed, &mut needed)
-            .as_bool()
-            .then_some(())?
+    let (mut owner, mut dacl, mut descriptor) = (PSID::default(), std::ptr::null_mut::<ACL>(), PSECURITY_DESCRIPTOR::default());
+    let read = unsafe {
+        GetNamedSecurityInfoW(
+            &wide,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            Some(&mut dacl),
+            None,
+            &mut descriptor,
+        )
     };
+    if read.is_err() {
+        return false;
+    }
     let mapping = GENERIC_MAPPING {
         GenericRead: FILE_GENERIC_READ.0,
         GenericWrite: FILE_GENERIC_WRITE.0,
         GenericExecute: FILE_GENERIC_EXECUTE.0,
-        GenericAll: GENERIC_ALL.0,
+        GenericAll: FILE_ALL_ACCESS.0,
     };
-    let mut privileges = [0u8; 256];
-    let mut privileges_size = privileges.len() as u32;
-    let (mut granted, mut status) = (0u32, BOOL(0));
-    unsafe {
-        AccessCheck(
-            PSECURITY_DESCRIPTOR(descriptor.as_mut_ptr().cast()),
-            token,
-            windows::Win32::System::SystemServices::MAXIMUM_ALLOWED,
-            &mapping,
-            Some(privileges.as_mut_ptr() as *mut PRIVILEGE_SET),
-            &mut privileges_size,
-            &mut granted,
-            &mut status,
-        )
-        .ok()?
-    };
-    Some(if status.as_bool() { granted } else { 0 })
+    let trusted = |sid: PSID| sid_string(sid).is_some_and(|sid| TRUSTED.contains(&sid.as_str()));
+    // No access list at all lets everyone do everything.
+    let mut clear = trusted(owner) && !dacl.is_null();
+    if clear {
+        for index in 0..unsafe { (*dacl).AceCount } as u32 {
+            let mut ace = std::ptr::null_mut();
+            if unsafe { GetAce(dacl, index, &mut ace) }.is_err() {
+                clear = false;
+                break;
+            }
+            let header = unsafe { &*(ace as *const ACE_HEADER) };
+            // Entries that only pass on to children do not apply here.
+            if header.AceFlags as u32 & INHERIT_ONLY_ACE.0 != 0 {
+                continue;
+            }
+            match header.AceType as u32 {
+                ACCESS_DENIED_ACE_TYPE => {}
+                ACCESS_ALLOWED_ACE_TYPE => {
+                    let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+                    let mut mask = allowed.Mask;
+                    unsafe { MapGenericMask(&mut mask, &mapping) };
+                    if mask & forbidden != 0 && !trusted(PSID(&allowed.SidStart as *const u32 as *mut _)) {
+                        clear = false;
+                        break;
+                    }
+                }
+                // Conditional and object entries are not looked into.
+                _ => {
+                    clear = false;
+                    break;
+                }
+            }
+        }
+    }
+    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    clear
 }
 
-/// Whether the user, without elevation, can neither change `file` nor put
-/// anything else in its place: not alter or replace it, not add files beside
-/// it (which Windows might load with it), and not rename or re-permission any
-/// folder above it.
+/// Whether no one but administrators can change `file` or put anything else
+/// in its place: alter or replace it, add files beside it (which Windows
+/// might load with it), or rename or re-permission any folder above it.
+/// Checked where the file really is, through any links and junctions.
 fn protected(file: &Path) -> bool {
-    let Some(token) = limited_token() else { return false };
-    let clear = |path: &Path, forbidden: u32| rights(token, path).is_some_and(|granted| granted & forbidden == 0);
-    let file_ok = clear(file, (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER).0);
-    let mut folders_ok = true;
+    let Ok(file) = std::fs::canonicalize(file) else { return false };
+    let mut clear = only_trusted_can(&file, (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER).0);
     let mut folder = file.parent();
-    let mut first = true;
+    let mut own = true;
     while let Some(dir) = folder {
-        // Its own folder takes no new files; no folder above it can be
-        // emptied of a child, renamed or re-permissioned.
-        let adding = if first { (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY).0 } else { 0 };
-        folders_ok &= clear(dir, adding | (FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
-        first = false;
+        // Its own folder takes no new files; no folder above it can lose a
+        // child, be renamed or be re-permissioned.
+        let adding = if own { (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY).0 } else { 0 };
+        clear &= only_trusted_can(dir, adding | (FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
+        own = false;
         folder = dir.parent();
     }
-    let _ = unsafe { CloseHandle(token) };
-    file_ok && folders_ok
+    clear
+}
+
+/// This executable as Task Scheduler should run it: where it really is,
+/// without the `\\?\` prefix resolution adds.
+fn this_program() -> Option<PathBuf> {
+    let real = std::fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+    let text = real.to_string_lossy();
+    Some(text.strip_prefix(r"\\?\").filter(|rest| !rest.starts_with("UNC\\")).map_or(real.clone(), PathBuf::from))
 }
 
 /// Whether this executable may be started elevated without asking: see the
 /// module's notes.
 pub fn may_start_unasked() -> bool {
     std::env::current_exe().is_ok_and(|exe| protected(&exe))
+}
+
+/// The current user's security identifier, which names their tasks: each
+/// account that runs Glance has tasks of its own.
+fn user_sid() -> Option<String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.ok()?;
+    let mut buffer = vec![0u64; 64];
+    let mut size = 0u32;
+    let read = unsafe { GetTokenInformation(token, TokenUser, Some(buffer.as_mut_ptr().cast()), (buffer.len() * 8) as u32, &mut size) };
+    let _ = unsafe { CloseHandle(token) };
+    read.ok()?;
+    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    sid_string(user.User.Sid)
+}
+
+fn launch_task() -> String {
+    format!("{LAUNCH_TASK} {}", user_sid().unwrap_or_default())
+}
+
+fn logon_task() -> String {
+    format!("{LOGON_TASK} {}", user_sid().unwrap_or_default())
 }
 
 // ---- Tasks ----
@@ -190,16 +233,18 @@ fn task_program(name: &str) -> Option<String> {
     }
 }
 
-fn runs_this(name: &str, exe: &Path) -> bool {
-    task_program(name).is_some_and(|program| Path::new(&program) == exe)
+/// Whether the task `name` runs this very executable.
+fn runs_this(name: &str) -> bool {
+    let (Some(program), Some(this)) = (task_program(name), this_program()) else { return false };
+    std::fs::canonicalize(&program).is_ok_and(|program| std::fs::canonicalize(&this).is_ok_and(|this| program == this))
 }
 
 /// Starts an elevated copy of Glance, through its task if that runs this
 /// very executable, else by asking the user. Returns whether one was started.
 pub fn relaunch_elevated() -> bool {
     let exe = std::env::current_exe().expect("own path");
-    if runs_this(LAUNCH_TASK, &exe) && may_start_unasked() {
-        let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(LAUNCH_TASK)).ok()?.Run(&VARIANT::default()).ok() });
+    if runs_this(&launch_task()) && may_start_unasked() {
+        let started = task_folder().and_then(|folder| unsafe { folder.GetTask(&BSTR::from(launch_task())).ok()?.Run(&VARIANT::default()).ok() });
         if started.is_some() {
             return true;
         }
@@ -252,7 +297,7 @@ fn task_xml(exe: &Path, at_sign_in: bool) -> String {
 /// Registers a task for this executable, handed to Task Scheduler directly
 /// (no file in between). Needs elevation.
 fn register_task(name: &str, at_sign_in: bool) -> bool {
-    let exe = std::env::current_exe().expect("own path");
+    let Some(exe) = this_program() else { return false };
     let Some(folder) = task_folder() else { return false };
     let none = VARIANT::default();
     unsafe {
@@ -279,30 +324,37 @@ fn delete_task(name: &str) {
 /// Keeps the launch task pointing at this executable, if it may start
 /// unasked; else makes sure no task starts it. Needs elevation.
 pub fn register_launch_task() {
-    let exe = std::env::current_exe().expect("own path");
+    // Tasks under the names earlier versions used, for every account, go
+    // if they run this copy.
+    for name in [LAUNCH_TASK, LOGON_TASK] {
+        if runs_this(name) {
+            delete_task(name);
+        }
+    }
     if may_start_unasked() {
-        register_task(LAUNCH_TASK, false);
+        register_task(&launch_task(), false);
     } else {
-        // A task for this copy, made by an earlier version, goes.
-        for name in [LAUNCH_TASK, LOGON_TASK] {
-            if runs_this(name, &exe) {
-                delete_task(name);
+        // A copy that may not start unasked keeps no task that starts it.
+        for name in [launch_task(), logon_task()] {
+            if runs_this(&name) {
+                delete_task(&name);
             }
         }
     }
 }
 
+/// Whether this account starts this copy of Glance at sign-in.
 pub fn autostart_enabled() -> bool {
-    task_program(LOGON_TASK).is_some()
+    runs_this(&logon_task())
 }
 
 /// Turns starting at sign-in on or off; returns whether it is now on. Only
 /// an executable that may start unasked can start at sign-in.
 pub fn set_autostart(enabled: bool) -> bool {
     if enabled && may_start_unasked() {
-        register_task(LOGON_TASK, true);
+        register_task(&logon_task(), true);
     } else if !enabled {
-        delete_task(LOGON_TASK);
+        delete_task(&logon_task());
     }
     autostart_enabled()
 }

@@ -181,16 +181,21 @@ struct Slow {
     network: Option<NetworkInfo>,
 }
 
+/// Performance counters a machine may lack (disabled, or a display driver
+/// too old for the GPU ones) are absent here; what they measure then goes
+/// unreported, rather than everything else with it.
 pub struct Sampler {
     query: PDH_HQUERY,
-    cpu_time: PDH_HCOUNTER,
-    cpu_performance: PDH_HCOUNTER,
-    gpu_engine: PDH_HCOUNTER,
-    gpu_dedicated: PDH_HCOUNTER,
-    gpu_shared: PDH_HCOUNTER,
-    disk_read: PDH_HCOUNTER,
-    disk_write: PDH_HCOUNTER,
-    disk_idle: PDH_HCOUNTER,
+    cpu_time: Option<PDH_HCOUNTER>,
+    cpu_performance: Option<PDH_HCOUNTER>,
+    gpu_engine: Option<PDH_HCOUNTER>,
+    gpu_dedicated: Option<PDH_HCOUNTER>,
+    gpu_shared: Option<PDH_HCOUNTER>,
+    disk_read: Option<PDH_HCOUNTER>,
+    disk_write: Option<PDH_HCOUNTER>,
+    disk_idle: Option<PDH_HCOUNTER>,
+    /// The GPUs' last readings, kept through a momentary counter failure.
+    last_gpus: Vec<GpuSample>,
     processes: ProcessTable,
     slow: Slow,
     base_mhz: f64,
@@ -212,11 +217,11 @@ unsafe impl Send for Sampler {}
 impl Sampler {
     pub fn new() -> Self {
         let mut query = PDH_HQUERY::default();
-        pdh(unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) });
+        // Without a query no counter can be added, and every sample fails.
+        let _ = unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) };
         let add = |path: PCWSTR| {
             let mut counter = PDH_HCOUNTER::default();
-            pdh(unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) });
-            counter
+            (unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) } == ERROR_SUCCESS.0).then_some(counter)
         };
         let cpu_time = add(w!(r"\Processor Information(*)\% Processor Time"));
         let cpu_performance = add(w!(r"\Processor Information(_Total)\% Processor Performance"));
@@ -254,6 +259,7 @@ impl Sampler {
             disk_read,
             disk_write,
             disk_idle,
+            last_gpus: Vec::new(),
             processes,
             slow: Slow::default(),
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
@@ -282,7 +288,7 @@ impl Sampler {
 
         let mut cpu = None;
         let mut threads: Vec<((u32, u32), f32)> = Vec::new();
-        for (name, value) in read_array(self.cpu_time, &mut self.buf)? {
+        for (name, value) in read_array(self.cpu_time?, &mut self.buf)? {
             if name == "_Total" {
                 cpu = Some(value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
@@ -292,9 +298,16 @@ impl Sampler {
             }
         }
         threads.sort_by_key(|(key, _)| *key);
-        let performance = read_scalar(self.cpu_performance, PDH_FMT_DOUBLE_NOCAP100)?;
+        // Without the performance counter, the clock reads as its base.
+        let performance = self.cpu_performance.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
-        let gpus = self.sample_gpus()?;
+        let gpus = match self.sample_gpus() {
+            Some(gpus) => {
+                self.last_gpus = gpus.clone();
+                gpus
+            }
+            None => self.last_gpus.clone(),
+        };
 
         if refresh_slow {
             self.slow.processes = self.processes.sample(self.info.threads, &self.gpu_by_pid);
@@ -326,9 +339,9 @@ impl Sampler {
             net_total_down: down,
             net_total_up: up,
             network: self.slow.network.clone(),
-            disk_read: read_scalar(self.disk_read, PDH_FMT_DOUBLE)?,
-            disk_write: read_scalar(self.disk_write, PDH_FMT_DOUBLE)?,
-            disk_active: (100.0 - read_scalar(self.disk_idle, PDH_FMT_DOUBLE)?).clamp(0.0, 100.0) as f32,
+            disk_read: self.disk_read.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
+            disk_write: self.disk_write.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
+            disk_active: self.disk_idle.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map_or(0.0, |idle| (100.0 - idle).clamp(0.0, 100.0)) as f32,
             volumes: volumes(),
             processes: self.slow.processes.clone(),
             system: SystemSample {
@@ -352,7 +365,7 @@ impl Sampler {
         let mut engines: HashMap<((u32, i32), u32), (String, f64)> = HashMap::new();
         // A process's use is that of the engine it uses most.
         let mut by_process: HashMap<(usize, (u32, i32), u32), f64> = HashMap::new();
-        for (name, value) in read_array(self.gpu_engine, &mut self.buf)? {
+        for (name, value) in read_array(self.gpu_engine?, &mut self.buf)? {
             if let (Some(luid), Some(engine), Some(kind)) = (parse_luid(&name), parse_engine(&name), parse_kind(&name)) {
                 engines.entry((luid, engine)).or_insert_with(|| (kind, 0.0)).1 += value;
                 if let Some(pid) = parse_pid(&name) {
@@ -374,8 +387,8 @@ impl Sampler {
             }
             Some(per_adapter)
         };
-        let dedicated = memory(self.gpu_dedicated)?;
-        let shared = memory(self.gpu_shared)?;
+        let dedicated = memory(self.gpu_dedicated?)?;
+        let shared = memory(self.gpu_shared?)?;
 
         Some(
             self.adapters
@@ -407,10 +420,6 @@ impl Sampler {
                 .collect(),
         )
     }
-}
-
-fn pdh(status: u32) {
-    assert_eq!(status, ERROR_SUCCESS.0, "PDH call failed: {status:#x}");
 }
 
 fn valid(status: u32) -> bool {
@@ -833,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "opens the PawnIO driver's readers when elevated; run with --ignored"]
     fn samples_this_machine() {
         let mut sampler = Sampler::new();
         std::thread::sleep(std::time::Duration::from_millis(1100));

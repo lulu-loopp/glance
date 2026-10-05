@@ -121,8 +121,15 @@ pub fn run() {
     thread::spawn(move || {
         let mut next = Instant::now();
         for tick in 0u64.. {
-            next += app().settings.lock().unwrap().interval();
-            thread::sleep(next.saturating_duration_since(Instant::now()));
+            let interval = app().settings.lock().unwrap().interval();
+            next += interval;
+            // Fallen far behind (the machine slept): carry on from now rather
+            // than sampling again and again to catch up.
+            let now = Instant::now();
+            if next + interval < now {
+                next = now;
+            }
+            thread::sleep(next.saturating_duration_since(now));
             let refresh_slow = controller.is_shown() || ui::settings_window::is_open() || tick % HIDDEN_SLOW_TICKS == 0;
             if let Some(sample) = sampler.sample(refresh_slow) {
                 controller.record(sample);
