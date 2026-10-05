@@ -240,6 +240,16 @@ fn only_ours(folder: &Path) -> bool {
     std::fs::read_dir(folder).is_ok_and(|entries| entries.flatten().all(|entry| ours(&entry.file_name().to_string_lossy())))
 }
 
+/// Whether what Glance puts in `folder` and later removes (its licenses
+/// folder goes whole) can be no one else's: none of it is there yet, or the
+/// folder is an earlier Glance's alone (its program and uninstaller there,
+/// nothing else beside them).
+fn claimable(folder: &Path) -> bool {
+    let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
+    let earlier = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) && only_ours(folder);
+    !ours_there || earlier
+}
+
 /// Whether `path` is a link, junction or other reparse point (not followed).
 fn is_link(path: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
@@ -294,7 +304,7 @@ pub fn install_folder(folder: &Path) -> InstallFolder {
     if !above.is_some_and(|above| folders_hold(&above)) {
         return InstallFolder::Open;
     }
-    if folder.exists() && !(only_ours(&folder) && only_trusted_inside(&folder)) {
+    if folder.exists() && !(only_ours(&folder) && claimable(&folder) && only_trusted_inside(&folder)) {
         return InstallFolder::Occupied;
     }
     InstallFolder::Holds
@@ -325,13 +335,7 @@ pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), Install
         if links_inside(&folder) {
             return Err(InstallFolder::Indirect);
         }
-        // And what Glance puts there and later removes (its licenses folder
-        // goes whole) must not be someone else's: either none of it is
-        // there yet, or the folder is an earlier Glance's alone (its
-        // program and uninstaller there, nothing else beside them).
-        let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
-        let earlier = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) && only_ours(&folder);
-        if ours_there && !earlier {
+        if !claimable(&folder) {
             return Err(InstallFolder::Occupied);
         }
     }
@@ -356,7 +360,7 @@ pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), Install
         made.map_err(|_| InstallFolder::Occupied)?;
     }
     // As Glance will check it when it starts (the user's choice aside).
-    (anyway || only_ours(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
+    (anyway || only_ours(&folder) && claimable(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
