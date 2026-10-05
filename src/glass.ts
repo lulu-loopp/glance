@@ -6,10 +6,23 @@ import { offsetWithin } from './chart';
 const SVG = 'http://www.w3.org/2000/svg';
 
 /** Width of the curved rim of a piece of glass, and how far it bends what is behind (px). */
-const RIM = 20;
-const BEND = 16;
+const RIM = 26;
+const BEND = 22;
 /** Backdrop luminance (0–1) above which glass carries dark text. */
 const LIGHT_BACKDROP = 0.55;
+/**
+ * Spread of backdrop luminance (standard deviation, 0–0.5) at which glass is
+ * fully frosted, and below which it stays clear. Text, icons and photos
+ * behind the glass spread wide; an empty page or a plain wallpaper hardly.
+ */
+const BUSY = 0.14;
+const CALM = 0.03;
+/** Blur of fully frosted glass (px). */
+const FROST_BLUR = 9;
+/** Samples taken per px of backdrop when measuring it: fine enough to see text strokes. */
+const SAMPLING = 1;
+
+type Box = { left: number; top: number; width: number; height: number };
 
 export class Backdrop {
   private image: HTMLImageElement | null = null;
@@ -84,7 +97,13 @@ export class Backdrop {
         const left = origin.left + within.left;
         const top = origin.top + within.top;
         const id = `lens-${index}`;
-        this.defs.append(lensFilter(id, width, height, this.map(width, height, radius)));
+        // Each piece adapts to what is behind it: text tone to its
+        // brightness, and frosting to how busy it is.
+        const { mean, spread } = this.measure({ left, top, width, height });
+        const frost = Math.min(Math.max((spread - CALM) / (BUSY - CALM), 0), 1);
+        piece.dataset.tone = mean > LIGHT_BACKDROP ? 'light' : 'dark';
+        piece.style.setProperty('--frost', frost.toFixed(3));
+        this.defs.append(lensFilter(id, width, height, this.map(width, height, radius), frost * FROST_BLUR));
 
         const lens = document.createElement('div');
         lens.className = 'lens';
@@ -103,25 +122,30 @@ export class Backdrop {
     }
   }
 
-  /** How bright the capture is behind a box of the viewport, from 0 to 1. */
-  luminance(box: { left: number; top: number; width: number; height: number }): number {
+  /** Mean and standard deviation of the capture's luminance behind a box of the viewport, 0–1. */
+  measure(box: Box): { mean: number; spread: number } {
     const image = this.image!;
     const scale = image.naturalWidth / window.innerWidth;
     const canvas = document.createElement('canvas');
-    canvas.width = 32;
-    canvas.height = 64;
+    canvas.width = Math.max(1, Math.round(box.width * SAMPLING));
+    canvas.height = Math.max(1, Math.round(box.height * SAMPLING));
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-    ctx.drawImage(image, box.left * scale, box.top * scale, box.width * scale, box.height * scale, 0, 0, 32, 64);
-    const { data } = ctx.getImageData(0, 0, 32, 64);
+    ctx.drawImage(image, box.left * scale, box.top * scale, box.width * scale, box.height * scale, 0, 0, canvas.width, canvas.height);
+    const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
     let sum = 0;
+    let squares = 0;
     for (let i = 0; i < data.length; i += 4) {
-      sum += (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+      const y = (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+      sum += y;
+      squares += y * y;
     }
-    return sum / (data.length / 4);
+    const count = data.length / 4;
+    const mean = sum / count;
+    return { mean, spread: Math.sqrt(Math.max(squares / count - mean * mean, 0)) };
   }
 
-  tone(box: { left: number; top: number; width: number; height: number }): 'light' | 'dark' {
-    return this.luminance(box) > LIGHT_BACKDROP ? 'light' : 'dark';
+  tone(box: Box): 'light' | 'dark' {
+    return this.measure(box).mean > LIGHT_BACKDROP ? 'light' : 'dark';
   }
 
   /** The displacement map for a rounded rectangle, cached by size. */
@@ -190,7 +214,7 @@ function displacementMap(width: number, height: number, radius: number): string 
   return canvas.toDataURL();
 }
 
-function lensFilter(id: string, width: number, height: number, map: string): SVGFilterElement {
+function lensFilter(id: string, width: number, height: number, map: string, blur: number): SVGFilterElement {
   const filter = document.createElementNS(SVG, 'filter');
   const box = { x: 0, y: 0, width: width + 2 * BEND, height: height + 2 * BEND };
   filter.id = id;
@@ -199,10 +223,10 @@ function lensFilter(id: string, width: number, height: number, map: string): SVG
   filter.setAttribute('color-interpolation-filters', 'sRGB');
   for (const [key, value] of Object.entries(box)) filter.setAttribute(key, String(value));
   filter.innerHTML = `
-    <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="soft"/>
+    <feGaussianBlur in="SourceGraphic" stdDeviation="${blur.toFixed(2)}" edgeMode="duplicate" result="frosted"/>
     <feImage href="${map}" x="${BEND}" y="${BEND}" width="${width}" height="${height}" preserveAspectRatio="none" result="map"/>
-    <feDisplacementMap in="soft" in2="map" scale="${2 * BEND}" xChannelSelector="R" yChannelSelector="G" result="bent"/>
-    <feColorMatrix in="bent" type="saturate" values="1.6"/>`;
+    <feDisplacementMap in="frosted" in2="map" scale="${2 * BEND}" xChannelSelector="R" yChannelSelector="G" result="bent"/>
+    <feColorMatrix in="bent" type="saturate" values="1.3"/>`;
   return filter;
 }
 

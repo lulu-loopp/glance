@@ -1,6 +1,8 @@
-/* 液态玻璃: separate pieces of glass floating over the desktop. Each one
-   bends what is behind it at its rim (the lens is built in glass.ts), carries
-   a light catch along its edge, and tints only as much as legibility needs.
+/* 液态玻璃: separate pieces of clear glass floating over the desktop. Each
+   one bends what is behind it at its rim (the lens is built in glass.ts) and
+   catches light along its edge. Over a calm backdrop the middle stays clear;
+   the busier the backdrop behind a piece, the more it frosts (--frost, 0–1,
+   measured per piece in glass.ts), so text stays legible over anything.
    Text tone follows what is behind the glass, not the system theme. */
 body[data-skin='glass'] {
   --backdrop: snapshot;
@@ -26,9 +28,18 @@ body[data-skin='glass'] {
   --selection: var(--blue);
 }
 
-/* Glass over a light backdrop: dark text, a milky tint. */
-body[data-skin='glass'][data-tone='light'] {
-  --glass-tint: rgba(255, 255, 255, 0.3);
+/* Glass over a light backdrop: dark text, a milky tint. Tone is set on the
+   body for the panel as a whole and on each piece for what is behind it. */
+[data-skin='glass'][data-tone='light'],
+[data-skin='glass'] [data-tone='light'] {
+  --glass-tint: rgba(255, 255, 255, calc(0.08 + 0.55 * var(--frost, 0)));
+  /* Restated, since a light piece can sit inside a panel whose tone is dark. */
+  --blue: #0a7aff;
+  --green: #24a148;
+  --orange: #e8890c;
+  --purple: #a64fd6;
+  --teal: #1491b8;
+  --signal: #ff3b30;
   --text: rgba(0, 0, 0, 0.86);
   --text-2: rgba(0, 0, 0, 0.58);
   --text-3: rgba(0, 0, 0, 0.42);
@@ -40,13 +51,14 @@ body[data-skin='glass'][data-tone='light'] {
   --control-on-text: rgba(0, 0, 0, 0.86);
   --control-on-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   --switch-off: rgba(120, 120, 128, 0.2);
-  --legibility: 0 0 8px rgba(255, 255, 255, 0.6);
+  --legibility: 0 0 2px rgba(255, 255, 255, 0.9), 0 0 10px rgba(255, 255, 255, 0.8);
   --tile-shadow: 0 10px 30px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* Glass over a dark backdrop: light text, a smoky tint. */
-body[data-skin='glass'][data-tone='dark'] {
-  --glass-tint: rgba(28, 28, 34, 0.32);
+[data-skin='glass'][data-tone='dark'],
+[data-skin='glass'] [data-tone='dark'] {
+  --glass-tint: rgba(20, 20, 26, calc(0.18 + 0.5 * var(--frost, 0)));
   --text: rgba(255, 255, 255, 0.95);
   --text-2: rgba(255, 255, 255, 0.68);
   --text-3: rgba(255, 255, 255, 0.46);
@@ -64,7 +76,7 @@ body[data-skin='glass'][data-tone='dark'] {
   --purple: #c77dff;
   --teal: #5ac8f5;
   --signal: #ff6961;
-  --legibility: 0 0 8px rgba(0, 0, 0, 0.35);
+  --legibility: 0 0 2px rgba(0, 0, 0, 0.6), 0 0 10px rgba(0, 0, 0, 0.5);
   --tile-shadow: 0 10px 30px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
@@ -115,8 +127,9 @@ body[data-skin='glass'][data-tone='dark'] {
   border-radius: inherit;
   background: var(--glass-tint);
   box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.55),
-    inset 0 -1px 1px rgba(255, 255, 255, 0.18);
+    inset 0 1px 2px rgba(255, 255, 255, 0.7),
+    inset 0 -1px 2px rgba(255, 255, 255, 0.25),
+    inset 0 0 18px rgba(255, 255, 255, 0.12);
   pointer-events: none;
 }
 
