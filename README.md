@@ -33,3 +33,11 @@ makensis installer\glance.nsi
 The executable is `target\release\glance.exe`, the installer
 `target\Glance_0.1.0_x64-setup.exe`. A debug build runs without asking for
 administrator rights (and so without the driver's sensors).
+
+## Licence
+
+Glance is released under the MIT licence (`LICENSE`). It ships with and
+builds in third-party software under its own licences: the PawnIO driver
+setup (GPL-2.0 with an exception), the PawnIO modules (LGPL-2.1, with their
+source in `pawnio-modules/source`), the Archivo and Inter fonts (OFL 1.1) and
+Rust crates; see `licenses/THIRD-PARTY.txt`.
