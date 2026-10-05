@@ -197,14 +197,21 @@ impl Gfx {
         let write: IDWriteFactory6 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
         let loader = unsafe { write.CreateInMemoryFontFileLoader()? };
         unsafe { write.RegisterFontFileLoader(&loader)? };
-        let archivo = shipped_face(&write, &loader, ARCHIVO)?;
-        let inter = shipped_face(&write, &loader, INTER)?;
-        let icons = unsafe {
-            let system = write.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?;
-            let (mut index, mut fluent) = (0, BOOL(0));
-            system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
-            if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
-        };
+        let faces = (|| {
+            let archivo = shipped_face(&write, &loader, ARCHIVO)?;
+            let inter = shipped_face(&write, &loader, INTER)?;
+            let icons = unsafe {
+                let system = write.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?;
+                let (mut index, mut fluent) = (0, BOOL(0));
+                system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
+                if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
+            };
+            Ok::<_, windows::core::Error>((archivo, inter, icons))
+        })();
+        // Failing here, the loader is not left registered with nothing to free it.
+        let (archivo, inter, icons) = faces.inspect_err(|_| unsafe {
+            let _ = write.UnregisterFontFileLoader(&loader);
+        })?;
         Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, loader, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
     }
 

@@ -922,9 +922,11 @@ impl Ui {
     /// making the window's surface and the preview's bitmaps again on it.
     fn follow_device(&mut self) -> bool {
         let Ok(current) = gfx::current() else { return false };
-        if Rc::ptr_eq(&current, &self.gfx) {
+        if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
+        // A window has one composition target: the old one goes first.
+        self.surface = None;
         let Ok(surface) = Surface::new(&current, self.hwnd) else {
             gfx::lost();
             return false;

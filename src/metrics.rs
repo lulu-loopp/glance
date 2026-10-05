@@ -202,7 +202,8 @@ pub struct Sampler {
     slow: Slow,
     base_mhz: f64,
     adapters: Vec<Adapter>,
-    net_prev: (u64, u64, Instant),
+    /// The totals at the last successful read of the interface table.
+    net_prev: Option<(u64, u64, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
     amd_cpu: Option<AmdCpu>,
     super_io: Option<SuperIo>,
@@ -239,7 +240,6 @@ impl Sampler {
         processes.sample(1, &HashMap::new());
 
         let (adapters, gpus) = enumerate_gpus();
-        let (down, up) = net_octets().unwrap_or_default();
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
@@ -267,7 +267,7 @@ impl Sampler {
             slow: Slow::default(),
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
-            net_prev: (down, up, Instant::now()),
+            net_prev: net_octets().map(|(down, up)| (down, up, Instant::now())),
             amd_cpu: AmdCpu::open(),
             super_io: SuperIo::open(&reg_string(
                 w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
@@ -285,13 +285,14 @@ impl Sampler {
     /// worth refreshing. Returns `None` when PDH has no valid data for this
     /// interval (it reports that for a tick now and then, e.g. after resume).
     pub fn sample(&mut self, refresh_slow: bool) -> Option<Sample> {
-        if unsafe { PdhCollectQueryData(self.query) } != ERROR_SUCCESS.0 {
-            return None;
-        }
+        // Counters not collected this time read as absent, not as their
+        // last values; what does not depend on them is sampled regardless.
+        let collected = unsafe { PdhCollectQueryData(self.query) } == ERROR_SUCCESS.0;
+        let counter = |counter: Option<PDH_HCOUNTER>| counter.filter(|_| collected);
 
         let mut cpu = None;
         let mut threads: Vec<((u32, u32), f32)> = Vec::new();
-        let per_thread = self.cpu_time.and_then(|counter| read_array(counter, &mut self.buf));
+        let per_thread = counter(self.cpu_time).and_then(|counter| read_array(counter, &mut self.buf));
         for (name, value) in per_thread.unwrap_or_default() {
             if name == "_Total" {
                 cpu = Some(value as f32);
@@ -312,9 +313,9 @@ impl Sampler {
         });
         self.system_times = times;
         // Without the performance counter, the clock reads as its base.
-        let performance = self.cpu_performance.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
+        let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
-        let gpus = match self.sample_gpus() {
+        let gpus = match self.sample_gpus().filter(|_| collected) {
             Some(gpus) => {
                 self.last_gpus = gpus.clone();
                 gpus
@@ -327,12 +328,21 @@ impl Sampler {
             self.slow.network = default_interface();
         }
 
+        // Traffic since the last successful read, over the time since then:
+        // a read that fails counts nothing, and the next spans both.
         let now = Instant::now();
-        let (prev_down, prev_up, prev_at) = self.net_prev;
-        // Unreadable for a moment: no traffic counted, rather than a jump.
-        let (down, up) = net_octets().unwrap_or((prev_down, prev_up));
-        let dt = now.duration_since(prev_at).as_secs_f64();
-        self.net_prev = (down, up, now);
+        let octets = net_octets();
+        let (net_down, net_up) = match (octets, self.net_prev) {
+            (Some((down, up)), Some((down_before, up_before, at))) => {
+                let dt = now.duration_since(at).as_secs_f64();
+                (down.saturating_sub(down_before) as f64 / dt, up.saturating_sub(up_before) as f64 / dt)
+            }
+            _ => (0.0, 0.0),
+        };
+        if let Some((down, up)) = octets {
+            self.net_prev = Some((down, up, now));
+        }
+        let (down, up) = self.net_prev.map_or((0, 0), |(down, up, _)| (down, up));
 
         let perf = performance_info();
         let page = perf.PageSize as u64;
@@ -348,14 +358,14 @@ impl Sampler {
                 cached: perf.SystemCache as u64 * page,
             },
             gpus,
-            net_down: down.saturating_sub(prev_down) as f64 / dt,
-            net_up: up.saturating_sub(prev_up) as f64 / dt,
+            net_down,
+            net_up,
             net_total_down: down,
             net_total_up: up,
             network: self.slow.network.clone(),
-            disk_read: self.disk_read.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
-            disk_write: self.disk_write.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
-            disk_active: self.disk_idle.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map_or(0.0, |idle| (100.0 - idle).clamp(0.0, 100.0)) as f32,
+            disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
+            disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
+            disk_active: counter(self.disk_idle).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map_or(0.0, |idle| (100.0 - idle).clamp(0.0, 100.0)) as f32,
             volumes: volumes(),
             processes: self.slow.processes.clone(),
             system: SystemSample {
@@ -436,16 +446,55 @@ impl Sampler {
     }
 }
 
+/// One processor's times since boot, as the kernel keeps them (100 ns units;
+/// kernel time includes idle time).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ProcessorTimes {
+    idle: i64,
+    kernel: i64,
+    user: i64,
+    dpc: i64,
+    interrupt: i64,
+    interrupt_count: u32,
+}
+
+/// The query class that answers with each processor's times, for one group.
+const PROCESSOR_TIMES: u32 = 8;
+
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQuerySystemInformationEx(class: u32, input: *const core::ffi::c_void, input_length: u32, output: *mut core::ffi::c_void, output_length: u32, returned: *mut u32) -> i32;
+}
+
 /// All processors' idle time, and their busy (kernel and user, less idle)
-/// time, since boot, in 100 ns units.
+/// time, since boot, in 100 ns units: every processor group's, where
+/// GetSystemTimes would count only one group's beyond 64 processors.
 fn system_times() -> Option<(u64, u64)> {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::GetSystemTimes;
-    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
-    unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.ok()?;
-    let ticks = |time: FILETIME| ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
-    // Kernel time includes idle time.
-    Some((ticks(idle), ticks(kernel) + ticks(user) - ticks(idle)))
+    use windows::Win32::System::Threading::{GetActiveProcessorCount, GetActiveProcessorGroupCount};
+    let (mut idle, mut busy) = (0u64, 0u64);
+    for group in 0..unsafe { GetActiveProcessorGroupCount() } {
+        let mut times = vec![ProcessorTimes::default(); unsafe { GetActiveProcessorCount(group) } as usize];
+        let mut returned = 0u32;
+        let status = unsafe {
+            NtQuerySystemInformationEx(
+                PROCESSOR_TIMES,
+                (&group as *const u16).cast(),
+                size_of::<u16>() as u32,
+                times.as_mut_ptr().cast(),
+                size_of_val(times.as_slice()) as u32,
+                &mut returned,
+            )
+        };
+        if status < 0 {
+            return None;
+        }
+        for time in &times[..returned as usize / size_of::<ProcessorTimes>()] {
+            idle += time.idle as u64;
+            busy += (time.kernel + time.user - time.idle) as u64;
+        }
+    }
+    Some((idle, busy))
 }
 
 fn valid(status: u32) -> bool {
@@ -859,6 +908,22 @@ pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_every_processors_time() {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::GetSystemTimes;
+        let (idle, busy) = system_times().expect("processor times");
+        let (mut i, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetSystemTimes(Some(&mut i), Some(&mut k), Some(&mut u)) }.unwrap();
+        let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+        // On a machine of one processor group the two accounts agree, but
+        // for the moment between the two calls (a second at most).
+        let total = idle + busy;
+        let system = ticks(k) + ticks(u);
+        let cpus = std::thread::available_parallelism().unwrap().get() as u64;
+        assert!(total.abs_diff(system) < cpus * 10_000_000, "{total} vs {system}");
+    }
 
     #[test]
     fn parses_gpu_instance_names() {

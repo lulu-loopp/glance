@@ -422,7 +422,8 @@ struct Panel<'a> {
     controller: &'a Controller,
     gfx: Rc<Gfx>,
     window: Window,
-    surface: Surface,
+    /// None after the device was lost, until it is made again on the new one.
+    surface: Option<Surface>,
     layers: PanelLayers,
     phase: Phase,
     /// 0 at rest on screen, 1 slid out.
@@ -455,7 +456,7 @@ impl<'a> Panel<'a> {
     fn new(controller: &'a Controller) -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
         let window = Window::new()?;
-        let surface = Surface::new(&gfx, window.hwnd)?;
+        let surface = Some(Surface::new(&gfx, window.hwnd)?);
         let mut panel = Panel {
             controller,
             gfx,
@@ -590,7 +591,9 @@ impl<'a> Panel<'a> {
         self.phase = Phase::Hidden;
         self.window.hide();
         // The drawing memory is given back while the panel is away.
-        self.surface.release(&self.gfx);
+        if let Some(surface) = &mut self.surface {
+            surface.release(&self.gfx);
+        }
         self.layers.release();
         self.behind = None;
         self.gfx.trim();
@@ -687,14 +690,16 @@ impl<'a> Panel<'a> {
     /// False while there is no device to be had.
     fn follow_device(&mut self) -> bool {
         let Ok(current) = gfx::current() else { return false };
-        if Rc::ptr_eq(&current, &self.gfx) {
+        if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
+        // A window has one composition target: the old one goes first.
+        self.surface = None;
         let Ok(surface) = Surface::new(&current, self.window.hwnd) else {
             gfx::lost();
             return false;
         };
-        self.surface = surface;
+        self.surface = Some(surface);
         self.gfx = current;
         self.layers.release();
         // A desktop already made a bitmap on the lost device is gone with it.
@@ -744,7 +749,8 @@ impl<'a> Panel<'a> {
         let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, history.make_contiguous());
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
-        let painted = self.surface.draw(&self.gfx, size, px, |frame| {
+        let surface = self.surface.as_mut().unwrap();
+        let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if opacity < 1.0 {
                 let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
