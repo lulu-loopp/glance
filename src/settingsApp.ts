@@ -112,6 +112,8 @@ export async function settingsApp(boot: Bootstrap) {
     const theme = resolveTheme(prefs.theme);
     body.dataset.theme = theme;
     stage.dataset.theme = theme;
+    // The title bar is drawn by the system; it follows the window's theme.
+    void getCurrentWindow().setTheme(theme);
     view.build(settings, prefs);
     view.layout(size.height, size.height / 2);
     view.dress();
