@@ -10,24 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "label": "panel",
-        "title": "Glance",
-        "visible": false,
-        "decorations": false,
-        "transparent": true,
-        "backgroundColor": [0, 0, 0, 0],
-        "shadow": false,
-        "resizable": false,
-        "skipTaskbar": true,
-        "alwaysOnTop": true,
-        "focus": false,
-        "focusable": false,
-        "width": 400,
-        "height": 600
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
