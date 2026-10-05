@@ -17,9 +17,37 @@ import type { Bootstrap, Sample, Settings, Skin } from './types';
 const PREVIEW_MARGIN = 160;
 
 interface PreviewInfo {
-  url: string;
+  wallpaper: string | null;
+  color: string;
   width: number;
   height: number;
+}
+
+/**
+ * The desktop the preview stands in for, at the size of the work area:
+ * the wallpaper scaled to fill it as Windows does by default, or the plain
+ * desktop colour.
+ */
+async function desktopImage(info: PreviewInfo): Promise<string> {
+  const ratio = window.devicePixelRatio;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(info.width * ratio);
+  canvas.height = Math.round(info.height * ratio);
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = info.color;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (info.wallpaper) {
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.src = info.wallpaper;
+    await image.decode();
+    const cover = Math.max(canvas.width / image.naturalWidth, canvas.height / image.naturalHeight);
+    const width = image.naturalWidth * cover;
+    const height = image.naturalHeight * cover;
+    ctx.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+  }
+  const blob = await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!)));
+  return URL.createObjectURL(blob);
 }
 
 export async function settingsApp(boot: Bootstrap) {
@@ -47,18 +75,18 @@ export async function settingsApp(boot: Bootstrap) {
   const pane = layout.querySelector<HTMLElement>('.settings-pane')!;
   const frame = layout.querySelector<HTMLElement>('.preview-frame')!;
 
-  // The preview stage is the captured work area at its real size, scaled to
-  // fit the frame; the panel inside it is laid out exactly as on screen.
-  const preview = await invoke<PreviewInfo | null>('preview');
-  const size = preview ?? { width: 1920, height: 1040 };
+  // The preview stage is the work area at its real size, scaled to fit the
+  // frame; the panel inside it is laid out exactly as on screen.
+  const size = await invoke<PreviewInfo>('preview');
+  const desktop = await desktopImage(size);
   const stage = element(`<div class="stage" data-state="open"></div>`);
   stage.style.width = `${size.width}px`;
   stage.style.height = `${size.height}px`;
-  if (preview) stage.style.backgroundImage = `url(${preview.url})`;
+  stage.style.backgroundImage = `url(${desktop})`;
   frame.append(stage);
 
   const backdrop = new Backdrop();
-  await backdrop.load(preview?.url ?? null);
+  await backdrop.load(desktop);
   const view = new PanelView(stage, modules, backdrop, () => {});
   const systemTone = () => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 
@@ -71,6 +99,8 @@ export async function settingsApp(boot: Bootstrap) {
     const shown = view.rect().width + PREVIEW_MARGIN;
     const scale = Math.min(frame.clientHeight / size.height, frame.clientWidth / Math.min(shown, size.width), 1);
     stage.style.transform = `scale(${scale})`;
+    // Centred top to bottom when the width is what limits the scale.
+    stage.style.top = `${(frame.clientHeight - size.height * scale) / 2}px`;
     const right = settings.edge === 'right';
     stage.style.transformOrigin = right ? 'top right' : 'top left';
     stage.style.left = right ? '' : '0';

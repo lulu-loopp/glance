@@ -19,6 +19,9 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use windows::UI::ViewManagement::{UIColorType, UISettings};
 
+use windows::Win32::Graphics::Gdi::{GetSysColor, COLOR_DESKTOP};
+use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETDESKWALLPAPER};
+
 use metrics::{Sampler, StaticInfo};
 use panel::{Controller, PageRect, Surface};
 use settings::Settings;
@@ -35,20 +38,18 @@ struct AppState {
     info: StaticInfo,
     controller: Arc<Controller>,
     settings: Mutex<Settings>,
-    /// The desktop under the settings window when it opened, for its preview.
-    preview: Mutex<Option<Preview>>,
+    /// The wallpaper, served to the settings window's preview while it is open.
+    wallpaper: Mutex<Option<(Arc<Vec<u8>>, &'static str)>>,
+    /// The work area the settings window opened on (logical px).
+    preview_size: Mutex<(f64, f64)>,
 }
 
-struct Preview {
-    bmp: Arc<Vec<u8>>,
-    /// Size of the captured work area in logical px.
-    width: f64,
-    height: f64,
-}
-
+/// What the preview draws the panel over: the desktop wallpaper, as the
+/// panel mostly sits over it, or the desktop colour when there is no picture.
 #[derive(Serialize)]
 struct PreviewInfo {
-    url: String,
+    wallpaper: Option<String>,
+    color: String,
     width: f64,
     height: f64,
 }
@@ -104,13 +105,34 @@ fn history(state: State<AppState>) -> Vec<metrics::Sample> {
 }
 
 #[tauri::command(async)]
-fn preview(state: State<AppState>) -> Option<PreviewInfo> {
-    let preview = state.preview.lock().unwrap();
-    preview.as_ref().map(|p| PreviewInfo {
-        url: format!("http://backdrop.localhost/preview/{}", Arc::as_ptr(&p.bmp) as usize),
-        width: p.width,
-        height: p.height,
-    })
+fn preview(state: State<AppState>) -> PreviewInfo {
+    let (width, height) = *state.preview_size.lock().unwrap();
+    let wallpaper = state.wallpaper.lock().unwrap();
+    let rgb = unsafe { GetSysColor(COLOR_DESKTOP) };
+    PreviewInfo {
+        wallpaper: wallpaper.as_ref().map(|(bytes, _)| format!("http://backdrop.localhost/wallpaper/{}", Arc::as_ptr(bytes) as usize)),
+        color: format!("#{:02x}{:02x}{:02x}", rgb & 0xff, (rgb >> 8) & 0xff, (rgb >> 16) & 0xff),
+        width,
+        height,
+    }
+}
+
+/// The desktop wallpaper's image file and its media type; `None` for a plain colour.
+fn wallpaper() -> Option<(Vec<u8>, &'static str)> {
+    let mut path = [0u16; 260];
+    unsafe { SystemParametersInfoW(SPI_GETDESKWALLPAPER, path.len() as u32, Some(path.as_mut_ptr().cast()), Default::default()) }
+        .ok()?;
+    let path = String::from_utf16_lossy(&path[..path.iter().position(|&c| c == 0)?]);
+    let extension = std::path::Path::new(&path).extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match extension.as_str() {
+        "jpg" | "jpeg" | "jfif" => "image/jpeg",
+        "png" => "image/png",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    Some((std::fs::read(&path).ok()?, mime))
 }
 
 #[tauri::command(async)]
@@ -127,14 +149,12 @@ fn show_settings(app: &AppHandle) {
         return;
     }
     let state = app.state::<AppState>();
-    // The preview shows the desktop as it is without the panel.
+    // The settings take over from the panel.
     state.controller.dismiss();
     let Some((work, scale)) = panel::work_area_at_cursor() else { return };
-    *state.preview.lock().unwrap() = Some(Preview {
-        bmp: Arc::new(capture::screen_bmp(work)),
-        width: (work.right - work.left) as f64 / scale,
-        height: (work.bottom - work.top) as f64 / scale,
-    });
+    *state.preview_size.lock().unwrap() =
+        ((work.right - work.left) as f64 / scale, (work.bottom - work.top) as f64 / scale);
+    *state.wallpaper.lock().unwrap() = wallpaper().map(|(bytes, mime)| (Arc::new(bytes), mime));
     state.controller.set_settings_open(true);
     let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?settings".into()))
         .title("Glance 设置")
@@ -162,7 +182,7 @@ fn show_settings(app: &AppHandle) {
     window.on_window_event(move |event| {
         if let WindowEvent::Destroyed = event {
             controller.set_settings_open(false);
-            *handle.state::<AppState>().preview.lock().unwrap() = None;
+            *handle.state::<AppState>().wallpaper.lock().unwrap() = None;
         }
     });
 }
@@ -218,7 +238,8 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         info: sampler.info.clone(),
         controller: controller.clone(),
         settings: Mutex::new(settings),
-        preview: Mutex::new(None),
+        wallpaper: Mutex::new(None),
+        preview_size: Mutex::new((0.0, 0.0)),
     });
 
     thread::spawn({
@@ -272,14 +293,14 @@ pub fn run() {
         .register_uri_scheme_protocol("backdrop", |context, request| {
             let state = context.app_handle().state::<AppState>();
             let path = request.uri().path().trim_start_matches('/');
-            let bytes = if path.starts_with("preview/") {
-                state.preview.lock().unwrap().as_ref().map(|preview| preview.bmp.clone())
+            let found = if path.starts_with("wallpaper/") {
+                state.wallpaper.lock().unwrap().as_ref().map(|(bytes, mime)| (bytes.clone(), *mime))
             } else {
-                path.parse().ok().and_then(|shot| state.controller.snapshot(shot))
+                path.parse().ok().and_then(|shot| state.controller.snapshot(shot)).map(|bytes| (bytes, "image/bmp"))
             };
-            match bytes {
-                Some(bytes) => Response::builder()
-                    .header("Content-Type", "image/bmp")
+            match found {
+                Some((bytes, mime)) => Response::builder()
+                    .header("Content-Type", mime)
                     .header("Cache-Control", "no-store")
                     // The page reads the pixels (to pick a text tone), which needs CORS.
                     .header("Access-Control-Allow-Origin", "*")
