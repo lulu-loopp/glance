@@ -2,7 +2,7 @@
   "fps": 30,
   "frames": "target/studio/frames",
   "wallpaper": "target/studio/wall-dark.png",
-  "out": "target/studio/glance-promo-v4.mp4",
+  "out": "target/studio/glance-promo-v5.mp4",
   "scenes": [
     {
       "kind": "intro", "shot": "intro", "seconds": 4.4,
@@ -17,7 +17,7 @@
       "shots": ["look-paper", "look-glass", "look-fluent"],
       "stills": ["still-paper", "still-glass", "still-fluent"],
       "labels": ["记录纸", "磨砂玻璃", "Windows 11"],
-      "title": "三种外观\n随你换", "subtitle": "深浅色可跟随壁纸自动切换"
+      "title": "三种外观\n随你换", "subtitle": "深浅色可跟随\n壁纸自动切换"
     },
     {
       "kind": "detail", "shot": "detail", "seconds": 6.0,

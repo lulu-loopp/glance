@@ -131,15 +131,23 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         })
         .collect();
 
-    // Laid out, placed and toned as the panel would be on a screen this size.
+    // Laid out and placed as the panel would be on a screen this size, for
+    // the readings of the moment: as the panel does, a lane grows when a
+    // reading appears (a fan starting) and shrinks when it goes.
+    let edge = Edge::Right;
+    let place = |lanes: &[view::Lane], theme: &Theme| {
+        let heights = lanes.iter().map(|lane| lane.height(theme)).collect();
+        let (layout, zoom) = render::arrange(theme, edge, heights, (sw, sh));
+        let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
+        let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
+        (layout, zoom, rest)
+    };
+    // Toned by the desktop where it first rests.
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, pen_ms: 0.0, process_scroll: 0.0, hover: None };
-    let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
-    let edge = Edge::Right;
-    let (layout, zoom) = render::arrange(&measure, edge, heights, (sw, sh));
+    let (layout, zoom, rest) = place(&view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
-    let rest = (sw - measure.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
     let behind = RECT {
         left: (rest.0 * px) as i32,
         top: (rest.1 * px) as i32,
@@ -154,22 +162,8 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     };
     let theme = Theme::new(skin, dark);
     let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-    let travel = match theme.entrance {
-        Entrance::Beyond(extra) => pw / zoom + extra,
-        Entrance::Slide(distance) => distance,
-    };
-
-    // Where each lane rests in the frame, in pixels, for the compositor.
     let ids: Vec<&str> = prefs.modules.iter().filter(|entry| entry.on).map(|entry| entry.id.as_str()).collect();
-    let rects: Vec<serde_json::Value> = layout
-        .lanes()
-        .iter()
-        .zip(&ids)
-        .map(|(r, id)| {
-            serde_json::json!({ "id": id, "x": (rest.0 + r.x * zoom) * px, "y": (rest.1 + r.y * zoom) * px, "w": r.w * zoom * px, "h": r.h * zoom * px })
-        })
-        .collect();
-    std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&rects).unwrap()).map_err(|e| e.to_string())?;
+    let mut rects = Vec::new();
 
     let mut layers = PanelLayers::default();
     for index in 0..frames {
@@ -187,6 +181,19 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             hover: None,
         };
         let lanes = view::lanes(&scene);
+        let (layout, zoom, rest) = place(&lanes, &theme);
+        let travel = match theme.entrance {
+            Entrance::Beyond(extra) => layout.width() + extra,
+            Entrance::Slide(distance) => distance,
+        };
+        // Where the panel and each lane are in the frame, in pixels, for the
+        // compositor: where the shot leaves them.
+        let rect = |id: &str, x: f32, y: f32, w: f32, h: f32| {
+            serde_json::json!({ "id": id, "x": (rest.0 + x * zoom) * px, "y": (rest.1 + y * zoom) * px, "w": w * zoom * px, "h": h * zoom * px, "radius": theme.radius * zoom * px })
+        };
+        rects = std::iter::once(rect("panel", 0.0, 0.0, layout.width(), layout.height()))
+            .chain(layout.lanes().iter().zip(&ids).map(|(r, id)| rect(id, r.x, r.y, r.w, r.h)))
+            .collect();
         // Where the panel is at `at` seconds: off by `shift` of its travel,
         // at `opacity`.
         let moved = |at: f32| motion(shot, at);
@@ -229,7 +236,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         gfx.sweep();
         save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
     }
-    Ok(())
+    std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&rects).unwrap()).map_err(|e| e.to_string())
 }
 
 /// Where a shot's panel is at `t` seconds: how far out of its travel

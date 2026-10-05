@@ -3,7 +3,7 @@ and the scenes in video.json, encoded as a vertical H.264 MP4.
 
     python studio/compose.py studio/video.json FONT.ttf [--preview T]
 
-Scenes drift with a slow camera and cut with a whip pan; captions come in
+Scenes cut with a whip pan; captions, beside the panel, come in
 character by character over an accent rule; the pointer's push ripples
 along the edge; the looks slide in and away as the panel does, then stand
 side by side; the camera visits the CPU, graphics and motherboard lanes
@@ -28,6 +28,8 @@ W, H = 1080, 1920
 MARGIN = 64
 ACCENT = (255, 123, 74)
 WHIP_FRAMES = 8
+# Room kept between a caption and the panel.
+GAP = 44
 
 
 def clamp01(x):
@@ -93,17 +95,6 @@ def over(frame, layer):
     return out.convert("RGB")
 
 
-def camera(frame, zoom, cx=0.5, cy=0.5):
-    """The frame seen `zoom` times closer, about (cx, cy) as fractions."""
-    w, h = frame.size
-    if zoom <= 1.0001 and (w, h) == (W, H):
-        return frame
-    cw, ch = w / zoom, h / zoom
-    left = min(max(cx * w - cw / 2, 0), w - cw)
-    top = min(max(cy * h - ch / 2, 0), h - ch)
-    return frame.resize((W, H), Image.BILINEAR, box=(left, top, left + cw, top + ch))
-
-
 def make_vignette():
     y, x = np.mgrid[0:H, 0:W].astype(np.float32)
     d = np.sqrt(((x - W / 2) / (W * 0.75)) ** 2 + ((y - H / 2) / (H * 0.7)) ** 2)
@@ -134,6 +125,15 @@ def wrap(draw, text, font, width):
     return lines
 
 
+def fitting(draw, fonts, text, size, weight, width):
+    """The size, up to `size`, at which each of `text`'s lines fits in
+    `width`, so that a caption breaks only where it was written to."""
+    if not text:
+        return size
+    widest = max(draw.textlength(line, font=fonts.get(size, weight)) for line in text.split("\n"))
+    return min(size, int(size * width / widest))
+
+
 def kinetic(fonts, title, subtitle, t, length, width, top, size=76):
     """A caption: the title's characters rising in one after another, an
     accent rule drawn out beneath, the subtitle after; all of it lifting
@@ -142,8 +142,9 @@ def kinetic(fonts, title, subtitle, t, length, width, top, size=76):
     if not title and not subtitle:
         return layer
     draw = ImageDraw.Draw(layer)
-    big = fonts.get(size, b"Bold")
-    small = fonts.get(38, b"Regular")
+    big = fonts.get(fitting(draw, fonts, title, size, b"Bold", width), b"Bold")
+    small = fonts.get(fitting(draw, fonts, subtitle, 38, b"Regular", width), b"Regular")
+    size = big.size
     leave = ease((t - (length - 0.3)) / 0.3)
     start, step = 0.15, 0.035
     y = top - 40 * leave
@@ -215,17 +216,20 @@ def pill_layer(fonts, text, cx, cy, alpha, size=40):
     return layer
 
 
-def glow_box(rect, alpha, colour=ACCENT):
-    """A glowing outline round `rect` (x, y, w, h)."""
+def glow_box(rect, radius, alpha, colour=ACCENT):
+    """A glowing outline round `rect` (x, y, w, h), whose corners are
+    rounded by `radius`: an outline `out` pixels away all round, so
+    its corners share their centres with the rect's."""
     layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     if alpha <= 0:
         return layer
+    out = 10
     x, y, w, h = rect
-    box = (x - 10, y - 10, x + w + 10, y + h + 10)
+    box = (x - out, y - out, x + w + out, y + h + out)
     halo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(halo).rounded_rectangle(box, radius=34, outline=colour + (int(230 * alpha),), width=16)
+    ImageDraw.Draw(halo).rounded_rectangle(box, radius=radius + out, outline=colour + (int(230 * alpha),), width=16)
     halo = halo.filter(ImageFilter.GaussianBlur(18))
-    ImageDraw.Draw(layer).rounded_rectangle(box, radius=34, outline=colour + (int(255 * alpha),), width=4)
+    ImageDraw.Draw(layer).rounded_rectangle(box, radius=radius + out, outline=colour + (int(255 * alpha),), width=4)
     halo.alpha_composite(layer)
     return halo
 
@@ -311,16 +315,18 @@ class Video:
             self.footage[name] = Footage(self.frames / name)
         return self.footage[name]
 
-    def drift(self, frame, t, length, zoom=(1.0, 1.03), cx=0.82, cy=0.45):
-        """The slow camera: a push in over the scene."""
-        return camera(frame, zoom[0] + (zoom[1] - zoom[0]) * clamp01(t / length), cx, cy)
+    def room(self, scene):
+        """How wide a caption may be: from the margin to a gap short of the
+        panel, in the scene's shots."""
+        shots = scene["shots"] if "shots" in scene else [scene["shot"]]
+        return min(self.shot(name).lanes["panel"]["x"] for name in shots) - MARGIN - GAP
 
     def scene_frame(self, scene, t):
         kind, length = scene["kind"], scene["seconds"]
         n = int(t * self.fps)
         layers = []
         if kind == "intro":
-            frame = self.drift(self.shot(scene["shot"]).frame(n), t, length, (1.0, 1.04))
+            frame = self.shot(scene["shot"]).frame(n)
             move = ease((t - 0.35) / 0.85)
             push = ease((t - 1.2) / 0.12)
             x = 420 + (W - 40 - 420) * move + 26 * push
@@ -328,7 +334,7 @@ class Video:
             layers.append(ripple_layer(W, y, t - 1.25))
             layers.append(pointer_layer(x, y, 1 - ease((t - 2.8) / 0.5)))
         elif kind == "footage":
-            frame = self.drift(self.shot(scene["shot"]).frame(n), t, length)
+            frame = self.shot(scene["shot"]).frame(n)
         elif kind == "looks":
             frame, extra = self.looks(scene, t)
             layers.extend(extra)
@@ -344,7 +350,7 @@ class Video:
         frame = over(frame, self.vignette)
         for layer in layers:
             frame = over(frame, layer)
-        caption = kinetic(self.fonts, scene.get("title", ""), scene.get("subtitle", ""), t, length, scene.get("width", 470), scene.get("top", 280))
+        caption = kinetic(self.fonts, scene.get("title", ""), scene.get("subtitle", ""), t, length, self.room(scene), scene.get("top", 280))
         frame = over(frame, caption)
         if scene is self.spec["scenes"][0]:
             frame = Image.blend(Image.new("RGB", (W, H)), frame, ease(t / 0.5))
@@ -356,14 +362,14 @@ class Video:
         if t < sliding:
             index = min(int(t / each), len(shots) - 1)
             local = t - index * each
-            frame = self.drift(self.shot(shots[index]).frame(int(local * self.fps)), t, scene["seconds"], (1.0, 1.03))
+            frame = self.shot(shots[index]).frame(int(local * self.fps))
             a = ease_out((local - 0.05) / 0.25) * (1 - ease((local - each + 0.3) / 0.25))
             return frame, [pill_layer(self.fonts, labels[index], 230, 1600, a)]
         # Then the three side by side, flying in one after another.
         if self.triptych is None:
             self.triptych = [panel_crop(self.shot(name).frame(0), self.wallpaper) for name in scene["stills"]]
         local = t - sliding
-        frame = muted(self.drift(self.wallpaper, t, scene["seconds"], (1.0, 1.03)), blur=8, darken=0.25)
+        frame = muted(self.wallpaper, blur=8, darken=0.25)
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         gap = 22
         width = (W - 2 * 40 - 2 * gap) / 3
@@ -416,11 +422,11 @@ class Video:
         draw.text((MARGIN, cy - 70 + rise), stops[index]["name"], font=self.fonts.get(64, b"Bold"), fill=(255, 255, 255, int(255 * a)))
         for j, line in enumerate(stops[index]["what"].split("\n")):
             draw.text((MARGIN, cy + 14 + j * 50 + rise), line, font=self.fonts.get(36, b"Regular"), fill=(232, 236, 245, int(230 * a)))
-        return frame, [glow_box(rect, a), shadowed(label)]
+        return frame, [glow_box(rect, lane["radius"], a), shadowed(label)]
 
     def stats(self, scene, t):
         length = scene["seconds"]
-        frame = muted(self.drift(self.shot(scene["shot"]).frame(int(t * self.fps)), t, length, (1.04, 1.1)))
+        frame = muted(self.shot(scene["shot"]).frame(int(t * self.fps)))
         layer = kinetic(self.fonts, scene["title"], "", t, length, 900, 300, size=84)
         draw = ImageDraw.Draw(layer)
         number = self.fonts.get(104, b"Bold")
@@ -446,7 +452,7 @@ class Video:
         return over(frame, layer)
 
     def end(self, scene, t):
-        frame = muted(self.drift(self.shot(scene["shot"]).frame(int((t + 4.5) * self.fps)), t, scene["seconds"], (1.08, 1.0)), blur=30, darken=0.6)
+        frame = muted(self.shot(scene["shot"]).frame(int((t + 4.5) * self.fps)), blur=30, darken=0.6)
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
         # The mark, its pulse drawn as a trace is, then its dot.
         size = 260
