@@ -29,10 +29,11 @@ slides back.
 The sensors need administrator rights. The first start asks once; Glance then
 registers a scheduled task that starts it elevated without asking again, and
 can start with Windows. For that it must be where no ordinary program can
-change it, so the installer installs only there: into Program Files, or into
-a new folder at a drive's root such as `D:\Glance` (created changeable by
-administrators only); a folder inside one your account owns, an existing
-folder of other things or a link is refused, and left as it was.
+change it: Program Files, or a new folder at a drive's root such as
+`D:\Glance` (created changeable by administrators only). The installer
+recommends those; installed elsewhere at the user's choice, Glance asks for
+administrator rights at every start and cannot start with Windows.
+Releases are signed (Microsoft Artifact Signing, publisher Weiyi Shi).
 Left-click the tray icon for the panel, right-click it (or start Glance again)
 for the settings. Uninstall from Windows' Apps list or from the settings; it
 removes Glance, its scheduled tasks and its settings, and asks whether to
@@ -46,8 +47,11 @@ makensis installer\glance.nsi
 ```
 
 The executable is `target\release\glance.exe`, the installer
-`target\Glance_0.1.2_x64-setup.exe`. A debug build runs without asking for
-administrator rights (and so without the driver's sensors).
+`target\Glance_0.1.2_x64-setup.exe`. `scripts\release.ps1` does both, and
+with `-Sign` signs the executable, the uninstaller and the installer
+(`scripts\sign.ps1`; needs an Azure sign-in allowed to use the signing
+account). A debug build runs without asking for administrator rights (and so
+without the driver's sensors).
 
 ## Licence
 

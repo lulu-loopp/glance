@@ -246,6 +246,19 @@ fn is_link(path: &Path) -> bool {
     path.symlink_metadata().map_or(true, |meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
 }
 
+/// Whether anything inside `folder`, at any depth, is a link or junction
+/// (none is followed while looking).
+fn links_inside(folder: &Path) -> bool {
+    std::fs::read_dir(folder).map_or(true, |entries| {
+        entries.into_iter().any(|entry| {
+            entry.map_or(true, |entry| {
+                let path = entry.path();
+                is_link(&path) || (path.is_dir() && links_inside(&path))
+            })
+        })
+    })
+}
+
 /// Rights over a folder that would let someone change what is in it.
 const FOLDER_CHANGES: u32 =
     FILE_ADD_FILE.0 | FILE_ADD_SUBDIRECTORY.0 | FILE_DELETE_CHILD.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0;
@@ -306,6 +319,20 @@ pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), Install
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
+    if anyway && folder.exists() {
+        // Even so, nothing in it may lead elsewhere: the installer would
+        // follow it and write there with administrator rights.
+        if links_inside(&folder) {
+            return Err(InstallFolder::Indirect);
+        }
+        // And what Glance puts there and later removes (its licenses folder
+        // goes whole) must not be someone else's: either none of it is
+        // there yet, or the folder is an earlier Glance's alone.
+        let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
+        if ours_there && !only_ours(&folder) {
+            return Err(InstallFolder::Occupied);
+        }
+    }
     if anyway && !folder.exists() {
         // Folders above a new one in an unprotected place, as they come.
         if let Some(above) = folder.parent() {
@@ -676,6 +703,9 @@ mod tests {
         assert_eq!(install_folder(&earlier), InstallFolder::Open);
         assert_eq!(prepare_install_folder(&earlier, false), Err(InstallFolder::Open));
         assert!(!only_trusted_inside(&earlier));
+        // Not even when the user chooses to install there all the same.
+        assert!(links_inside(&earlier));
+        assert_eq!(prepare_install_folder(&earlier, true), Err(InstallFolder::Indirect));
         std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
