@@ -2,8 +2,9 @@
 ; unless another folder is chosen.
 ; Build with: makensis installer\glance.nsi (after cargo build --release).
 ;
-; Installing copies Glance and the PawnIO driver's setup, which Glance runs
-; itself on its first start. Uninstalling takes away everything Glance set
+; Installing copies Glance and installs the PawnIO driver if no program has
+; yet (Glance also carries its setup, to put it back from a protected place
+; should it be removed). Uninstalling takes away everything Glance set
 ; up: its scheduled tasks, its registry key and its settings. The PawnIO
 ; driver, if Glance was the one to install it, goes only if the user says
 ; so: other monitoring programs may have come to rely on it since.
@@ -19,6 +20,7 @@ Unicode true
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
 !define SETTINGS_DIR "dev.weiyi.glance"
+!define PAWNIO_KEY "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO"
 
 Name "${NAME}"
 OutFile "..\target\${NAME}_${VERSION}_x64-setup.exe"
@@ -179,6 +181,20 @@ Section "Glance"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
+  ; The PawnIO driver, if no program has installed it yet: from the
+  ; installer's own copy, wherever Glance goes (Glance installs it at start
+  ; only from a protected place). Noted as Glance's, so that uninstalling
+  ; offers to remove it.
+  ReadRegStr $1 HKLM "${PAWNIO_KEY}" "DisplayVersion"
+  ${If} $1 == ""
+    File "/oname=$PLUGINSDIR\PawnIO_setup.exe" "..\resources\PawnIO_setup.exe"
+    ExecWait '"$PLUGINSDIR\PawnIO_setup.exe" -install -silent'
+    ReadRegStr $1 HKLM "${PAWNIO_KEY}" "DisplayVersion"
+    ${If} $1 != ""
+      WriteRegDWORD HKLM "SOFTWARE\Glance" "InstalledPawnIO" 1
+    ${EndIf}
+  ${EndIf}
+
   SetShellVarContext all
   CreateShortcut "$SMPROGRAMS\${NAME}.lnk" "$INSTDIR\${EXE}"
 
@@ -209,7 +225,7 @@ Section "Uninstall"
   ; The driver goes only if Glance put it there and the user agrees; a
   ; silent uninstall keeps it.
   ReadRegDWORD $0 HKLM "SOFTWARE\Glance" "InstalledPawnIO"
-  ReadRegStr $1 HKLM "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO" "QuietUninstallString"
+  ReadRegStr $1 HKLM "${PAWNIO_KEY}" "QuietUninstallString"
   ${If} $0 == 1
   ${AndIf} $1 != ""
     MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 "$(RemovePawnIO)" /SD IDNO IDNO keep_pawnio
