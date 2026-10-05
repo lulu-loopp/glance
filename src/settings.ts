@@ -126,30 +126,61 @@ function moduleList(prefs: ViewPrefs, modules: ModuleDef[], changed: () => void)
     list.append(row);
   }
 
+  // The held row follows the pointer; the others make way for it, each
+  // gliding from where it was to where it now belongs; on release the held
+  // row settles into its place.
   list.addEventListener('pointerdown', (event) => {
     const grip = (event.target as Element).closest('.grip');
     if (!grip) return;
     const row = grip.closest<HTMLElement>('.module-row')!;
     event.preventDefault();
+    const startY = event.clientY;
+    const startTop = row.offsetTop;
+    row.dataset.dragging = 'true';
+    const follow = (pointerY: number) => {
+      row.style.transform = `translateY(${pointerY - startY - (row.offsetTop - startTop)}px)`;
+    };
+    const glide = (rows: HTMLElement[], before: Map<HTMLElement, number>) => {
+      for (const other of rows) {
+        const shift = before.get(other)! - other.offsetTop;
+        if (shift === 0) continue;
+        other.animate([{ transform: `translateY(${shift}px)` }, { transform: 'none' }], {
+          duration: 200,
+          easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+        });
+      }
+    };
     // Followed on the window, not captured to the grip: moving the row in
     // the list detaches the grip for a moment, which ends a capture.
-    row.dataset.dragging = 'true';
     const move = (e: PointerEvent) => {
       const others = [...list.children].filter((child) => child !== row) as HTMLElement[];
-      const before = others.find((other) => {
-        const box = other.getBoundingClientRect();
-        return e.clientY < box.top + box.height / 2;
+      // Where the held row's middle is now decides its place.
+      const box = row.getBoundingClientRect();
+      const middle = box.top + box.height / 2;
+      const next = others.find((other) => {
+        const r = other.getBoundingClientRect();
+        return middle < r.top + r.height / 2;
       });
-      if (before) list.insertBefore(row, before);
-      else list.append(row);
+      if ((next ?? null) !== row.nextElementSibling) {
+        const before = new Map(others.map((other) => [other, other.offsetTop]));
+        if (next) list.insertBefore(row, next);
+        else list.append(row);
+        glide(others, before);
+      }
+      follow(e.clientY);
     };
     const end = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
       window.removeEventListener('pointercancel', end);
-      delete row.dataset.dragging;
+      const settle = row.animate([{ transform: row.style.transform || 'none' }, { transform: 'none' }], {
+        duration: 180,
+        easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+      });
+      row.style.transform = '';
+      settle.onfinish = () => delete row.dataset.dragging;
       const order = [...list.children].map((child) => (child as HTMLElement).dataset.id!);
-      prefs.modules.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+      prefs.modules.sort((x, y) => order.indexOf(x.id) - order.indexOf(y.id));
       changed();
     };
     window.addEventListener('pointermove', move);
