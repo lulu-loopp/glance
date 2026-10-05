@@ -21,17 +21,19 @@ use windows::core::{w, Interface, BOOL, BSTR, HSTRING, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-    ProgressInvokeNever, TreeSetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, TREE_SEC_INFO_RESET,
+    SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-    PSECURITY_DESCRIPTOR, PSID,
-    TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, InitializeAcl, MapGenericMask,
+    TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
+    GENERIC_MAPPING, INHERIT_ONLY_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC, WRITE_OWNER,
+    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC,
+    WRITE_OWNER,
 };
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -217,12 +219,39 @@ fn direct(folder: &Path) -> Option<PathBuf> {
     (plain(&resolved) == plain(existing)).then_some(folder)
 }
 
+/// Whether `folder` holds nothing but an earlier Glance.
+fn only_ours(folder: &Path) -> bool {
+    let ours = |name: &str| INSTALLED.iter().any(|known| known.eq_ignore_ascii_case(name));
+    std::fs::read_dir(folder).is_ok_and(|entries| entries.flatten().all(|entry| ours(&entry.file_name().to_string_lossy())))
+}
+
+/// Whether `path` is a link, junction or other reparse point (not followed).
+fn is_link(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    path.symlink_metadata().map_or(true, |meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
+}
+
+/// Whether nothing anywhere inside `folder` is a link or junction (none is
+/// followed while looking).
+fn no_links_inside(folder: &Path) -> bool {
+    std::fs::read_dir(folder).is_ok_and(|entries| {
+        entries.into_iter().all(|entry| {
+            entry.is_ok_and(|entry| {
+                let path = entry.path();
+                !is_link(&path) && (!path.is_dir() || no_links_inside(&path))
+            })
+        })
+    })
+}
+
 pub fn install_folder(folder: &Path) -> InstallFolder {
     let Some(folder) = direct(folder) else { return InstallFolder::Indirect };
-    if let Ok(entries) = std::fs::read_dir(&folder) {
-        let ours = |name: &str| INSTALLED.iter().any(|known| known.eq_ignore_ascii_case(name));
-        if !entries.flatten().all(|entry| ours(&entry.file_name().to_string_lossy())) {
+    if folder.exists() {
+        if !only_ours(&folder) {
             return InstallFolder::Occupied;
+        }
+        if !no_links_inside(&folder) {
+            return InstallFolder::Indirect;
         }
     }
     match folder.parent() {
@@ -236,7 +265,14 @@ pub fn install_folder(folder: &Path) -> InstallFolder {
 /// system, read by everyone, as Program Files' folders are; an earlier
 /// Glance in it takes the same owner and rights, with nothing of its own.
 /// Only a folder `install_folder` does not call occupied or indirect.
+///
+/// Taken from the top down, each folder before what is in it: once a folder
+/// is the administrators', nothing else can add to it or swap what is in it,
+/// so what was found there (never a link: links are not followed, and stop
+/// the taking) is what is taken. What it holds is looked at again once all
+/// of it is theirs, when no one else can change it any more.
 pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
+    // Looked at first too, so that a folder of other things is not touched.
     match install_folder(folder) {
         InstallFolder::Holds | InstallFolder::Open => {}
         other => return Err(other),
@@ -246,38 +282,61 @@ pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
         std::fs::create_dir_all(&folder).map_err(|_| InstallFolder::Open)?;
     }
     // Owner Administrators; a protected list: Administrators and SYSTEM full
-    // control, Users read and run, all passed on to what is inside.
+    // control, Users read and run, all passed on to what is inside. What is
+    // inside takes the owner and an empty, unprotected list: only what the
+    // folder passes on.
     let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
     unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
         .map_err(|_| InstallFolder::Open)?;
     let (mut owner, mut dacl) = (PSID::default(), std::ptr::null_mut::<ACL>());
     let (mut defaulted, mut present) = (BOOL::default(), BOOL::default());
+    let mut empty = [0u64; 2];
     let parts = unsafe {
         GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted)
             .and_then(|_| GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted))
+            .and_then(|_| InitializeAcl(empty.as_mut_ptr().cast(), size_of::<ACL>() as u32, ACL_REVISION))
     };
-    // On the folder, and reset on all inside it: each takes the owner, and
-    // only what the folder passes on.
-    let set = parts.is_ok().then(|| unsafe {
-        TreeSetNamedSecurityInfoW(
-            &HSTRING::from(folder.as_os_str()),
-            SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            Some(owner),
-            None,
-            Some(dacl),
-            None,
-            TREE_SEC_INFO_RESET,
-            None,
-            ProgressInvokeNever,
-            None,
-        )
-    });
+    let taken = parts.is_ok()
+        && take(&folder, owner, dacl, PROTECTED_DACL_SECURITY_INFORMATION)
+        && take_inside(&folder, owner, empty.as_ptr().cast());
     unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-    // Then it must hold as Glance will check it.
+    if !taken {
+        return Err(if no_links_inside(&folder) { InstallFolder::Open } else { InstallFolder::Indirect });
+    }
+    // Now only administrators can change it: what it holds is what it holds.
+    if !only_ours(&folder) {
+        return Err(InstallFolder::Occupied);
+    }
+    if !no_links_inside(&folder) {
+        return Err(InstallFolder::Indirect);
+    }
     let held = only_trusted_can(&folder, (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
-    (set == Some(ERROR_SUCCESS) && held).then_some(()).ok_or(InstallFolder::Open)
+    held.then_some(()).ok_or(InstallFolder::Open)
+}
+
+/// Gives `path` (not a link: checked before) `owner` and `dacl`, `kind` saying
+/// whether the list is protected or passes on what its folder gives.
+fn take(path: &Path, owner: PSID, dacl: *const ACL, kind: OBJECT_SECURITY_INFORMATION) -> bool {
+    if is_link(path) {
+        return false;
+    }
+    let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | kind;
+    let set = unsafe { SetNamedSecurityInfoW(&HSTRING::from(path.as_os_str()), SE_FILE_OBJECT, info, Some(owner), None, Some(dacl), None) };
+    set == ERROR_SUCCESS
+}
+
+/// Takes everything inside `folder`, each folder before what is in it.
+fn take_inside(folder: &Path, owner: PSID, empty: *const ACL) -> bool {
+    std::fs::read_dir(folder).is_ok_and(|entries| {
+        entries.into_iter().all(|entry| {
+            entry.is_ok_and(|entry| {
+                let path = entry.path();
+                take(&path, owner, empty, UNPROTECTED_DACL_SECURITY_INFORMATION)
+                    && (!path.is_dir() || take_inside(&path, owner, empty))
+            })
+        })
+    })
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -616,6 +675,15 @@ mod tests {
         assert!(made.status.success());
         assert_eq!(install_folder(&link), InstallFolder::Indirect);
         assert_eq!(install_folder(&link.join("Glance")), InstallFolder::Indirect);
+        // An earlier Glance's folder whose resources lead elsewhere.
+        let earlier = base.join("Glance");
+        std::fs::create_dir(&earlier).unwrap();
+        let inner = earlier.join("resources");
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&inner).arg(&target).output().unwrap();
+        assert!(made.status.success());
+        assert_eq!(install_folder(&earlier), InstallFolder::Indirect);
+        assert_eq!(prepare_install_folder(&earlier), Err(InstallFolder::Indirect));
+        std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
