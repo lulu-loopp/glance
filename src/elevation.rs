@@ -239,14 +239,21 @@ fn is_glance_task(name: &str) -> bool {
 /// Removes every account's Glance tasks: what the uninstaller asks of the
 /// installed, protected copy of Glance, run elevated.
 pub fn remove_all_tasks() {
-    let Some(folder) = task_folder() else { return };
-    let names: Vec<String> = unsafe {
-        let Ok(tasks) = folder.GetTasks(TASK_ENUM_HIDDEN.0) else { return };
+    for name in glance_tasks() {
+        delete_task(&name);
+    }
+}
+
+/// Every account's Glance tasks, by name.
+fn glance_tasks() -> Vec<String> {
+    let Some(folder) = task_folder() else { return Vec::new() };
+    unsafe {
+        let Ok(tasks) = folder.GetTasks(TASK_ENUM_HIDDEN.0) else { return Vec::new() };
         let count = tasks.Count().unwrap_or(0);
-        (1..=count).filter_map(|i| tasks.get_Item(&VARIANT::from(i)).ok()?.Name().ok().map(|n| n.to_string())).collect()
-    };
-    for name in names.iter().filter(|name| is_glance_task(name)) {
-        delete_task(name);
+        (1..=count)
+            .filter_map(|i| tasks.get_Item(&VARIANT::from(i)).ok()?.Name().ok().map(|n| n.to_string()))
+            .filter(|name| is_glance_task(name))
+            .collect()
     }
 }
 
@@ -370,12 +377,13 @@ fn delete_task(name: &str) {
 /// unasked; else makes sure no task starts it. Needs elevation.
 pub fn register_launch_task() {
     if may_start_unasked() {
-        register_task(&launch_task(), false);
+        let launches = register_task(&launch_task(), false);
         // Earlier versions' tasks, shared by every account under one name,
         // move to this account's own if they were this account's: starting
-        // at sign-in carries over, and only then does the old task go.
+        // at sign-in carries over, and each old task goes only once its
+        // replacement is registered.
         let mine = |name: &str| runs_this(name) && task_is_mine(name);
-        if mine(LAUNCH_TASK) {
+        if launches && mine(LAUNCH_TASK) {
             delete_task(LAUNCH_TASK);
         }
         if mine(LOGON_TASK) && register_task(&logon_task(), true) {
@@ -383,8 +391,8 @@ pub fn register_launch_task() {
         }
     } else {
         // A copy that may not start unasked keeps no task that starts it,
-        // whosever it is.
-        for name in [LAUNCH_TASK.to_string(), LOGON_TASK.to_string(), launch_task(), logon_task()] {
+        // whose account it is.
+        for name in glance_tasks() {
             if runs_this(&name) {
                 delete_task(&name);
             }

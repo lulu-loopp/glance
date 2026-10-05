@@ -203,7 +203,7 @@ pub struct Sampler {
     base_mhz: f64,
     adapters: Vec<Adapter>,
     /// The totals at the last successful read of the interface table.
-    net_prev: Option<(u64, u64, Instant)>,
+    net_prev: Option<(HashMap<u64, (u64, u64)>, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
     amd_cpu: Option<AmdCpu>,
     super_io: Option<SuperIo>,
@@ -267,7 +267,7 @@ impl Sampler {
             slow: Slow::default(),
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
-            net_prev: net_octets().map(|(down, up)| (down, up, Instant::now())),
+            net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             amd_cpu: AmdCpu::open(),
             super_io: SuperIo::open(&reg_string(
                 w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
@@ -315,7 +315,8 @@ impl Sampler {
         // Without the performance counter, the clock reads as its base.
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
-        let gpus = match self.sample_gpus().filter(|_| collected) {
+        // Uncollected, the counters would only repeat their last values.
+        let gpus = match if collected { self.sample_gpus() } else { None } {
             Some(gpus) => {
                 self.last_gpus = gpus.clone();
                 gpus
@@ -329,20 +330,31 @@ impl Sampler {
         }
 
         // Traffic since the last successful read, over the time since then:
-        // a read that fails counts nothing, and the next spans both.
+        // a read that fails counts nothing, and the next spans both. Each
+        // adapter against its own last count: one that has just appeared
+        // counts from its next read, one whose counters restarted counts
+        // from zero.
         let now = Instant::now();
         let octets = net_octets();
-        let (net_down, net_up) = match (octets, self.net_prev) {
-            (Some((down, up)), Some((down_before, up_before, at))) => {
-                let dt = now.duration_since(at).as_secs_f64();
-                (down.saturating_sub(down_before) as f64 / dt, up.saturating_sub(up_before) as f64 / dt)
+        let (net_down, net_up) = match (&octets, &self.net_prev) {
+            (Some(adapters), Some((before, at))) => {
+                let dt = now.duration_since(*at).as_secs_f64();
+                let moved = |now: u64, then: u64| if now >= then { now - then } else { now };
+                let (down, up) = adapters.iter().fold((0u64, 0u64), |(down, up), (luid, (rx, tx))| match before.get(luid) {
+                    Some((rx_then, tx_then)) => (down + moved(*rx, *rx_then), up + moved(*tx, *tx_then)),
+                    None => (down, up),
+                });
+                (down as f64 / dt, up as f64 / dt)
             }
             _ => (0.0, 0.0),
         };
-        if let Some((down, up)) = octets {
-            self.net_prev = Some((down, up, now));
+        if let Some(adapters) = octets {
+            self.net_prev = Some((adapters, now));
         }
-        let (down, up) = self.net_prev.map_or((0, 0), |(down, up, _)| (down, up));
+        let (down, up) = self
+            .net_prev
+            .as_ref()
+            .map_or((0, 0), |(adapters, _)| adapters.values().fold((0, 0), |(down, up), (rx, tx)| (down + rx, up + tx)));
 
         let perf = performance_info();
         let page = perf.PageSize as u64;
@@ -402,17 +414,19 @@ impl Sampler {
             let use_ = self.gpu_by_pid.entry(pid).or_default();
             *use_ = use_.max(value.min(100.0) as f32);
         }
-        let mut memory = |counter| -> Option<HashMap<(u32, i32), u64>> {
+        // Memory use is shown as none where its counters are missing; the
+        // driver's own temperature, fan and clock are read regardless.
+        let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), u64>> {
             let mut per_adapter = HashMap::new();
-            for (name, value) in read_array(counter, &mut self.buf)? {
+            for (name, value) in read_array(counter?, &mut self.buf)? {
                 if let Some(luid) = parse_luid(&name) {
                     *per_adapter.entry(luid).or_default() += value as u64;
                 }
             }
             Some(per_adapter)
         };
-        let dedicated = memory(self.gpu_dedicated?)?;
-        let shared = memory(self.gpu_shared?)?;
+        let dedicated = memory(self.gpu_dedicated).unwrap_or_default();
+        let shared = memory(self.gpu_shared).unwrap_or_default();
 
         Some(
             self.adapters
@@ -800,19 +814,20 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
     (answered && perf.Frequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
 }
 
-/// Total octets (received, sent) across hardware network interfaces. Virtual
+/// Octets received and sent by each hardware network interface, by its LUID. Virtual
 /// and filter interfaces carry the same traffic again and are left out.
-fn net_octets() -> Option<(u64, u64)> {
+fn net_octets() -> Option<HashMap<u64, (u64, u64)>> {
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     unsafe { GetIfTable2(&mut table) }.ok().ok()?;
     let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
     const HARDWARE_INTERFACE: u8 = 1;
-    let totals = rows
+    let adapters = rows
         .iter()
         .filter(|row| row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE != 0)
-        .fold((0, 0), |(down, up), row| (down + row.InOctets, up + row.OutOctets));
+        .map(|row| (unsafe { row.InterfaceLuid.Value }, (row.InOctets, row.OutOctets)))
+        .collect();
     unsafe { FreeMibTable(table as *const _) };
-    Some(totals)
+    Some(adapters)
 }
 
 /// The interface that traffic to the internet would leave by. Asking for the
@@ -918,7 +933,12 @@ mod tests {
         unsafe { GetSystemTimes(Some(&mut i), Some(&mut k), Some(&mut u)) }.unwrap();
         let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
         // On a machine of one processor group the two accounts agree, but
-        // for the moment between the two calls (a second at most).
+        // for the moment between the two calls (a second at most). Beyond
+        // one group, GetSystemTimes sees only its own, and there is nothing
+        // to compare with.
+        if unsafe { windows::Win32::System::Threading::GetActiveProcessorGroupCount() } != 1 {
+            return;
+        }
         let total = idle + busy;
         let system = ticks(k) + ticks(u);
         let cpus = std::thread::available_parallelism().unwrap().get() as u64;
