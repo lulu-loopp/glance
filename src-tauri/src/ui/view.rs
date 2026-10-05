@@ -3,20 +3,23 @@
 
 use std::hash::{Hash, Hasher};
 
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN};
-use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+};
 use windows_numerics::Vector2;
 
 use super::gfx::{rect, Align, Color, Family, Font, Frame};
 use super::prefs::{Prefs, ProcessSort};
 use super::text::{self, Lang};
-use super::theme::Theme;
+use super::theme::{Ink, Skin, Theme};
 use crate::metrics::{ProcessSample, Sample, StaticInfo};
 
-/// A column's width, and the room around a lane's content (DIPs).
+/// A column's width (DIPs), whatever the skin.
 pub const COLUMN_WIDTH: f32 = 356.0;
-const PAD_X: f32 = 18.0;
-const PAD_Y: f32 = 12.0;
 /// The label column of a lane, and the gap after it.
 const LABEL: f32 = 96.0;
 const LABEL_GAP: f32 = 12.0;
@@ -24,23 +27,37 @@ const HEAD: f32 = 17.0;
 const HEAD_GAP: f32 = 8.0;
 const PLOT: f32 = 40.0;
 const RATE_PLOT: f32 = 36.0;
+/// Rate charts start this much further right, past the rates beside them.
+const RATE_INDENT: f32 = 26.0;
 const LINE: f32 = 16.0;
 const FACT_GAP: f32 = 3.0;
 pub const TABLE_ROW: f32 = 22.0;
-pub const BAR: f32 = 44.0;
-/// How wide a percentage chart is; the charts of rates are a little narrower.
-pub const PLOT_WIDTH: f32 = COLUMN_WIDTH - 2.0 * PAD_X - LABEL - LABEL_GAP;
+/// The settings button in the bar.
+const BUTTON: f32 = 32.0;
 /// Rates below this full scale are drawn against it, so idle chatter stays low.
 const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
 
 /// What a click or a wheel turn on the panel lands on.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Hash)]
 pub enum Hit {
     Settings,
     Sort(ProcessSort),
     /// The process list, and how far it scrolls.
-    Processes(f32),
+    Processes(u32),
 }
+
+impl Hit {
+    /// How far the process list scrolls, for a hit on it.
+    pub fn max_scroll(self) -> Option<f32> {
+        match self {
+            Hit::Processes(bits) => Some(f32::from_bits(bits)),
+            _ => None,
+        }
+    }
+}
+
+/// A region of the panel and what lands on it, in DIPs from its corner.
+pub type HitBox = (f32, f32, f32, f32, Hit);
 
 /// What the readings are drawn with: the moment, the data, and the choices.
 pub struct Scene<'a> {
@@ -53,6 +70,8 @@ pub struct Scene<'a> {
     /// the next one has always arrived by the time it is drawn to.
     pub pen_ms: f64,
     pub process_scroll: f32,
+    /// What the pointer is over.
+    pub hover: Option<Hit>,
 }
 
 impl Scene<'_> {
@@ -129,14 +148,20 @@ impl Hash for Block {
     }
 }
 
-#[derive(Hash)]
 pub struct Lane {
     blocks: Vec<Block>,
+    ink: Ink,
+}
+
+impl Hash for Lane {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.blocks.hash(state);
+    }
 }
 
 impl Lane {
-    pub fn height(&self) -> f32 {
-        2.0 * PAD_Y + self.blocks.iter().map(Block::height).sum::<f32>()
+    pub fn height(&self, theme: &Theme) -> f32 {
+        theme.pad_top + theme.pad_bottom + self.blocks.iter().map(Block::height).sum::<f32>()
     }
 }
 
@@ -147,8 +172,7 @@ pub fn lanes(scene: &Scene) -> Vec<Lane> {
         .modules
         .iter()
         .filter(|entry| entry.on)
-        .filter_map(|entry| lane(scene, &entry.id))
-        .map(|blocks| Lane { blocks })
+        .filter_map(|entry| Some(Lane { blocks: lane(scene, &entry.id)?, ink: scene.theme.ink(&entry.id) }))
         .collect()
 }
 
@@ -449,11 +473,11 @@ fn full_scale(scene: &Scene, series: &[Box<dyn Fn(&Sample) -> f64>]) -> f64 {
 }
 
 /// Where each column starts, and the tallest column's height, when the
-/// lanes, in order, are split into `columns` so the tallest is as short as
-/// it can be.
-pub fn split(heights: &[f32], columns: usize) -> (Vec<usize>, f32) {
+/// lanes, in order and `gap` apart, are split into `columns` so the tallest
+/// is as short as it can be.
+pub fn split(heights: &[f32], columns: usize, gap: f32) -> (Vec<usize>, f32) {
     let n = heights.len();
-    let span = |from: usize, to: usize| heights[from..to].iter().sum::<f32>();
+    let span = |from: usize, to: usize| heights[from..to].iter().sum::<f32>() + (to - from).saturating_sub(1) as f32 * gap;
     let mut best = vec![vec![f32::INFINITY; n + 1]; columns + 1];
     let mut from = vec![vec![0usize; n + 1]; columns + 1];
     best[0][0] = 0.0;
@@ -477,67 +501,118 @@ pub fn split(heights: &[f32], columns: usize) -> (Vec<usize>, f32) {
     (cuts, best[columns][n])
 }
 
-/// The panel laid out: lanes dealt into columns.
+/// A rectangle in DIPs: left, top, width, height.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// The panel laid out: lanes dealt into columns, and the bar below them.
 pub struct Layout {
     pub columns: usize,
     pub cuts: Vec<usize>,
     pub heights: Vec<f32>,
     /// The tallest column; every column is drawn this tall.
     pub lanes_height: f32,
+    outer: (f32, f32, f32),
+    lane_gap: f32,
+    column_gap: f32,
+    bar_gap: f32,
+    bar_height: f32,
 }
 
 impl Layout {
     /// The fewest columns, up to `max_columns`, whose tallest fits in `room`
     /// DIPs (bar included); failing that, the most.
-    pub fn new(heights: Vec<f32>, room: f32, max_columns: usize) -> Self {
+    pub fn new(heights: Vec<f32>, room: f32, max_columns: usize, theme: &Theme) -> Self {
         let most = max_columns.min(heights.len()).max(1);
-        let mut chosen = (1, split(&heights, 1));
+        let chrome = theme.outer.0 + theme.outer.2 + theme.bar_gap + theme.bar_height;
+        let mut chosen = (1, split(&heights, 1, theme.lane_gap));
         for columns in 1..=most {
-            let result = split(&heights, columns);
-            chosen = (columns, result);
-            if chosen.1 .1 + BAR <= room {
+            chosen = (columns, split(&heights, columns, theme.lane_gap));
+            if chosen.1 .1 + chrome <= room {
                 break;
             }
         }
         let (columns, (cuts, tallest)) = chosen;
-        Layout { columns, cuts, heights, lanes_height: tallest }
+        Layout {
+            columns,
+            cuts,
+            heights,
+            lanes_height: tallest,
+            outer: theme.outer,
+            lane_gap: theme.lane_gap,
+            column_gap: theme.column_gap,
+            bar_gap: theme.bar_gap,
+            bar_height: theme.bar_height,
+        }
     }
 
     pub fn width(&self) -> f32 {
-        self.columns as f32 * COLUMN_WIDTH
+        self.columns as f32 * COLUMN_WIDTH + (self.columns - 1) as f32 * self.column_gap
     }
 
     pub fn height(&self) -> f32 {
-        self.lanes_height + BAR
+        self.outer.0 + self.lanes_height + self.outer.2 + self.bar_gap + self.bar_height
+    }
+
+    /// Each lane's box, in order. A shorter column's lanes share what is
+    /// left over, so every column ends at the same line.
+    pub fn lanes(&self) -> Vec<Rect> {
+        let (top, side, _) = self.outer;
+        let column_width = (self.width() - 2.0 * side - (self.columns - 1) as f32 * self.column_gap) / self.columns as f32;
+        let mut boxes = Vec::with_capacity(self.heights.len());
+        for column in 0..self.columns {
+            let start = self.cuts[column];
+            let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
+            let count = (end - start) as f32;
+            let natural = self.heights[start..end].iter().sum::<f32>() + (count - 1.0).max(0.0) * self.lane_gap;
+            let extra = if end > start { (self.lanes_height - natural) / count } else { 0.0 };
+            let x = side + column as f32 * (column_width + self.column_gap);
+            let mut y = top;
+            for height in &self.heights[start..end] {
+                boxes.push(Rect { x, y, w: column_width, h: height + extra });
+                y += height + extra + self.lane_gap;
+            }
+        }
+        boxes
+    }
+
+    pub fn bar(&self) -> Rect {
+        let y = self.outer.0 + self.lanes_height + self.outer.2 + self.bar_gap;
+        Rect { x: 0.0, y, w: self.width(), h: self.bar_height }
+    }
+
+    /// How wide a percentage chart is (rate charts are a little narrower).
+    pub fn plot_width(&self, theme: &Theme) -> f32 {
+        self.lanes().first().map_or(COLUMN_WIDTH, |lane| lane.w) - 2.0 * theme.pad_x - LABEL - LABEL_GAP
     }
 }
 
 /// Draws one pass over the panel with its top-left corner at the origin,
 /// and returns where clicks and wheel turns land.
-pub fn paint(frame: &Frame, scene: &Scene, lanes: &[Lane], layout: &Layout, pass: Pass) -> Vec<(f32, f32, f32, f32, Hit)> {
+pub fn paint(frame: &Frame, scene: &Scene, lanes: &[Lane], layout: &Layout, pass: Pass) -> Vec<HitBox> {
     let theme = scene.theme;
     let mut hits = Vec::new();
-    for column in 0..layout.columns {
-        let start = layout.cuts[column];
-        let end = layout.cuts.get(column + 1).copied().unwrap_or(lanes.len());
-        let x = column as f32 * COLUMN_WIDTH;
-        // A shorter column's lanes share what is left, so columns end level.
-        let natural: f32 = layout.heights[start..end].iter().sum();
-        let extra = if end > start { (layout.lanes_height - natural) / (end - start) as f32 } else { 0.0 };
-        let mut y = 0.0;
-        for index in start..end {
-            let height = layout.heights[index] + extra;
-            paint_lane(frame, scene, &lanes[index], x, y, pass, &mut hits);
-            if pass == Pass::Content {
-                fill(frame, theme.rule, x, y + height - 1.0, COLUMN_WIDTH, 1.0);
-            }
-            y += height;
-        }
-        if column > 0 && pass == Pass::Content {
-            fill(frame, theme.rule, x, 0.0, 1.0, layout.lanes_height);
+    let boxes = layout.lanes();
+    for (lane, area) in lanes.iter().zip(&boxes) {
+        paint_lane(frame, scene, lane, *area, pass, &mut hits);
+        // Chart paper rules each lane off below; the last rule in a column
+        // also sets off the bar.
+        if pass == Pass::Content && theme.ruled {
+            fill(frame, theme.rule, area.x, area.y + area.h - 1.0, area.w, 1.0);
         }
     }
     if pass == Pass::Content {
+        if theme.ruled {
+            for column in 1..layout.columns {
+                let x = boxes[layout.cuts[column]].x;
+                fill(frame, theme.rule, x, 0.0, 1.0, layout.lanes_height);
+            }
+        }
         paint_bar(frame, scene, layout, &mut hits);
     }
     hits
@@ -547,56 +622,85 @@ fn fill(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32) {
     unsafe { frame.dc.FillRectangle(&rect(x, y, w, h), frame.brush(color)) };
 }
 
-fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, x: f32, top: f32, pass: Pass, hits: &mut Vec<(f32, f32, f32, f32, Hit)>) {
+fn fill_rounded(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+    if radius == 0.0 {
+        return fill(frame, color, x, y, w, h);
+    }
+    let radius = radius.min(w / 2.0).min(h / 2.0);
+    let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius };
+    unsafe { frame.dc.FillRoundedRectangle(&shape, frame.brush(color)) };
+}
+
+/// Draws `text` so that its baseline sits where a CSS line box `line` DIPs
+/// tall, aligned to `bottom`, would put it.
+fn text_on_line(frame: &Frame, text: &str, font: Font, color: Color, x: f32, bottom: f32, line: f32, width: f32) {
+    let (ascent, descent) = frame.gfx.baseline(font);
+    // The glyphs' ascent and descent centred in the line box.
+    let baseline = bottom - line / 2.0 + (ascent - descent) / 2.0;
+    frame.text(text, font, color, x, baseline - ascent, width, Align::Start);
+}
+
+fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let left = x + PAD_X;
-    let width = COLUMN_WIDTH - 2.0 * PAD_X;
+    let ink = lane.ink;
+    let left = area.x + theme.pad_x;
+    let width = area.w - 2.0 * theme.pad_x;
     let plot_left = left + LABEL + LABEL_GAP;
-    let plot_width = PLOT_WIDTH;
-    let mut y = top + PAD_Y;
+    let plot_width = left + width - plot_left;
+    let mut y = area.y + theme.pad_top;
     for block in &lane.blocks {
         let height = block.height();
         match (block, pass) {
-            (Block::Readout { plot, .. }, Pass::Plots) => paint_plot(frame, scene, plot, plot_left, y, plot_width, height),
-            (Block::Rates { plot, .. }, Pass::Plots) => paint_plot(frame, scene, plot, plot_left + 26.0, y, plot_width - 26.0, height),
+            (Block::Readout { plot, .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
+            (Block::Rates { plot, .. }, Pass::Plots) => {
+                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height)
+            }
             (_, Pass::Plots) => {}
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
                 let title_width = frame.gfx.measure(title, theme.title);
-                frame.text(title, theme.title, theme.text, left, y, width, Align::Start);
+                let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
+                frame.text(title, theme.title, theme.text, left, row, width, Align::Start);
                 let aside_width = if aside.is_empty() { 0.0 } else { frame.gfx.measure(aside, theme.body) };
                 let device_left = left + title_width + 8.0;
                 let device_width = width - title_width - 8.0 - if aside_width > 0.0 { aside_width + 8.0 } else { 0.0 };
-                frame.text(device, theme.small, theme.text3, device_left, y + 1.0, device_width, Align::Start);
+                frame.text(device, theme.small, theme.text3, device_left, row + 1.0, device_width, Align::Start);
                 let color = if *aside_hot { theme.signal } else { theme.text2 };
-                frame.text(aside, theme.body, color, left, y, width, Align::End);
+                frame.text(aside, theme.body, color, left, row, width, Align::End);
             }
             (Block::Readout { figure, unit, hot, .. }, Pass::Content) => {
                 let color = if *hot { theme.signal } else { theme.text };
-                // Figures sit on the plot's baseline.
+                // The figure and its unit stand on the chart's baseline.
                 let figure_width = frame.gfx.measure(figure, theme.figure);
-                let baseline = y + height;
-                frame.text(figure, theme.figure, color, left, baseline - theme.figure.size * 1.08, LABEL, Align::Start);
-                frame.text(unit, theme.unit, theme.text2, left + figure_width + 3.0, baseline - theme.unit.size * 1.2, 30.0, Align::Start);
+                let bottom = y + height;
+                text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, LABEL);
+                text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, 30.0);
             }
             (Block::Rates { rows, .. }, Pass::Content) => {
                 for (i, (label, value)) in rows.iter().enumerate() {
                     let row_y = y + height - (rows.len() - i) as f32 * (LINE + 2.0) + 1.0;
-                    let stroke = if i == 0 { (theme.trace, 2.0) } else { (theme.trace2, 1.0) };
+                    // A stroke sample in front of each label says which trace it names.
+                    let stroke = if i == 0 { (ink.trace, 2.0) } else { (ink.trace2, 1.0) };
                     fill(frame, stroke.0, left, row_y + LINE / 2.0, 10.0, stroke.1);
                     frame.text(label, theme.small, theme.text2, left + 15.0, row_y + 1.0, 40.0, Align::Start);
-                    frame.text(value, theme.value, theme.text, left, row_y, LABEL + 26.0, Align::End);
+                    frame.text(value, theme.value, theme.text, left, row_y, LABEL + RATE_INDENT, Align::End);
                 }
             }
             (Block::Threads(cells), Pass::Content) => {
                 let gap = 2.0;
                 let count = cells.len().max(1) as f32;
                 let cell = (width - gap * (count - 1.0)) / count;
+                let radius = theme.thread_radius;
                 for (i, (load, hot)) in cells.iter().enumerate() {
                     let cx = left + i as f32 * (cell + gap);
                     let cy = y + 10.0;
-                    fill(frame, theme.track, cx, cy, cell, 14.0);
+                    fill_rounded(frame, theme.track, cx, cy, cell, 14.0, radius);
                     let filled = 14.0 * load.clamp(0.0, 1.0);
-                    fill(frame, if *hot { theme.signal } else { theme.trace }, cx, cy + 14.0 - filled, cell, filled);
+                    if filled > 0.0 {
+                        // The load fills from the bottom, inside the cell's rounding.
+                        unsafe { frame.dc.PushAxisAlignedClip(&rect(cx, cy + 14.0 - filled, cell, filled), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                        fill_rounded(frame, if *hot { theme.signal } else { ink.trace }, cx, cy, cell, 14.0, radius);
+                        unsafe { frame.dc.PopAxisAlignedClip() };
+                    }
                 }
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {
@@ -604,11 +708,16 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, x: f32, top: f32, pass:
                 frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
                 let value_width = frame.gfx.measure(value, theme.small);
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
-                let bar_left = plot_left;
-                let bar_width = left + width - value_width - LABEL_GAP - bar_left;
-                let bar_y = row_y + LINE / 2.0 - 1.5;
-                fill(frame, theme.track, bar_left, bar_y, bar_width, 3.0);
-                fill(frame, if *hot { theme.signal } else { theme.trace }, bar_left, bar_y, bar_width * fraction.clamp(0.0, 1.0), 3.0);
+                let bar_width = left + width - value_width - LABEL_GAP - plot_left;
+                let bar_y = row_y + (LINE - theme.meter_height) / 2.0;
+                let (height, radius) = (theme.meter_height, theme.meter_radius);
+                fill_rounded(frame, theme.track, plot_left, bar_y, bar_width, height, radius);
+                let filled = bar_width * fraction.clamp(0.0, 1.0);
+                if filled > 0.0 {
+                    unsafe { frame.dc.PushAxisAlignedClip(&rect(plot_left, bar_y, filled, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                    fill_rounded(frame, if *hot { theme.signal } else { ink.trace }, plot_left, bar_y, bar_width, height, radius);
+                    unsafe { frame.dc.PopAxisAlignedClip() };
+                }
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
@@ -625,16 +734,15 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, x: f32, top: f32, pass:
                 for ((label, key), (cx, cw)) in headings.iter().zip(&columns[1..]) {
                     let chosen = key == sort;
                     let font = if chosen { Font { weight: 650.0, ..theme.small } } else { theme.small };
-                    frame.text(label, font, if chosen { theme.text } else { theme.text2 }, *cx, head_y + 1.0, *cw, Align::End);
+                    let lit = chosen || scene.hover == Some(Hit::Sort(*key));
+                    frame.text(label, font, if lit { theme.text } else { theme.text2 }, *cx, head_y + 1.0, *cw, Align::End);
                     hits.push((*cx, head_y, *cw, HEAD, Hit::Sort(*key)));
                 }
                 let list_height = *visible as f32 * TABLE_ROW;
                 let max_scroll = (rows.len().saturating_sub(*visible)) as f32 * TABLE_ROW;
-                hits.push((left, y, width, list_height, Hit::Processes(max_scroll)));
+                hits.push((left, y, width, list_height, Hit::Processes(max_scroll.to_bits())));
                 let scroll = scene.process_scroll.clamp(0.0, max_scroll);
-                unsafe {
-                    frame.dc.PushAxisAlignedClip(&rect(left, y, width, list_height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                }
+                unsafe { frame.dc.PushAxisAlignedClip(&rect(left, y, width, list_height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
                 for (i, row) in rows.iter().enumerate() {
                     let row_y = y + i as f32 * TABLE_ROW - scroll;
                     if row_y + TABLE_ROW < y || row_y > y + list_height {
@@ -649,10 +757,9 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, x: f32, top: f32, pass:
                 unsafe { frame.dc.PopAxisAlignedClip() };
                 // A thin thumb shows where in the list the view is.
                 if max_scroll > 0.0 {
-                    let track = list_height;
-                    let thumb = (track * *visible as f32 / rows.len() as f32).max(12.0);
-                    let at = y + (track - thumb) * scroll / max_scroll;
-                    fill(frame, theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb);
+                    let thumb = (list_height * *visible as f32 / rows.len() as f32).max(12.0);
+                    let at = y + (list_height - thumb) * scroll / max_scroll;
+                    fill_rounded(frame, theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
                 }
             }
         }
@@ -674,7 +781,8 @@ fn table_columns(left: f32, width: f32) -> [(f32, f32); 5] {
     columns
 }
 
-fn paint_plot(frame: &Frame, scene: &Scene, plot: &Plot, left: f32, top: f32, width: f32, height: f32) {
+#[allow(clippy::too_many_arguments)]
+fn paint_plot(frame: &Frame, scene: &Scene, ink: Ink, plot: &Plot, left: f32, top: f32, width: f32, height: f32) {
     let theme = scene.theme;
     let span = scene.prefs.chart_seconds * 1000.0;
     let pen = scene.pen_ms;
@@ -710,11 +818,11 @@ fn paint_plot(frame: &Frame, scene: &Scene, plot: &Plot, left: f32, top: f32, wi
             area.push(Vector2 { X: points.last().unwrap().X.max(right), Y: bottom });
             area.push(Vector2 { X: points[0].X, Y: bottom });
             if let Ok(path) = polyline(frame, &area, true) {
-                unsafe { frame.dc.FillGeometry(&path, frame.brush(theme.wash), None) };
+                fill_wash(frame, &path, ink, top, bottom);
             }
         }
         let Ok(path) = polyline(frame, &points, false) else { continue };
-        let (color, stroke) = if order == 0 { (theme.trace, 1.5) } else { (theme.trace2, 1.0) };
+        let (color, stroke) = if order == 0 { (ink.trace, 1.5) } else { (ink.trace2, 1.0) };
         unsafe { frame.dc.DrawGeometry(&path, frame.brush(color), stroke, None) };
         if let (0, Some(hot)) = (order, plot.hot) {
             unsafe {
@@ -735,9 +843,29 @@ fn paint_plot(frame: &Frame, scene: &Scene, plot: &Plot, left: f32, top: f32, wi
     };
     let progress = if after.t == before.t { 0.0 } else { (pen - before.t as f64) / (after.t - before.t) as f64 };
     let value = read(before) + (read(after) - read(before)) * progress;
-    let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { theme.trace };
+    let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { ink.trace };
     let dot = D2D1_ELLIPSE { point: Vector2 { X: right, Y: y(value) }, radiusX: 2.5, radiusY: 2.5 };
     unsafe { frame.dc.FillEllipse(&dot, frame.brush(color)) };
+}
+
+/// Fills the area under a chart's trace with its wash, fading from the top
+/// of the chart to the bottom where the skin's wash fades.
+fn fill_wash(frame: &Frame, path: &windows::Win32::Graphics::Direct2D::ID2D1PathGeometry1, ink: Ink, top: f32, bottom: f32) {
+    if ink.wash == ink.wash_end {
+        unsafe { frame.dc.FillGeometry(path, frame.brush(ink.wash), None) };
+        return;
+    }
+    let stops = [
+        D2D1_GRADIENT_STOP { position: 0.0, color: ink.wash.d2d() },
+        D2D1_GRADIENT_STOP { position: 1.0, color: ink.wash_end.d2d() },
+    ];
+    unsafe {
+        let Ok(collection) = ID2D1RenderTarget::CreateGradientStopCollection(&frame.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+        let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
+        if let Ok(brush) = frame.dc.CreateLinearGradientBrush(&line, None, &collection) {
+            frame.dc.FillGeometry(path, &brush, None);
+        }
+    }
 }
 
 fn polyline(frame: &Frame, points: &[Vector2], closed: bool) -> windows::core::Result<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry1> {
@@ -752,20 +880,28 @@ fn polyline(frame: &Frame, points: &[Vector2], closed: bool) -> windows::core::R
     Ok(path)
 }
 
-fn paint_bar(frame: &Frame, scene: &Scene, layout: &Layout, hits: &mut Vec<(f32, f32, f32, f32, Hit)>) {
+fn paint_bar(frame: &Frame, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let top = layout.lanes_height;
-    let width = layout.width();
+    let bar = layout.bar();
+    // Windows 11 sets the bar off as a slightly darker footer strip.
+    if theme.skin == Skin::Fluent {
+        fill(frame, theme.footer, bar.x, bar.y, bar.w, bar.h);
+        fill(frame, theme.rule, bar.x, bar.y, bar.w, 1.0);
+    }
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
-    frame.text(&label, theme.small, theme.text2, PAD_X, top + (BAR - LINE) / 2.0, width / 2.0, Align::Start);
+    frame.text(&label, theme.small, theme.text2, bar.x + theme.bar_pad.0, bar.y + (bar.h - LINE) / 2.0, bar.w / 2.0, Align::Start);
     // The Settings glyph of the system's icon font, centred in its button.
-    let button = (width - 10.0 - 32.0, top + (BAR - 32.0) / 2.0);
+    let button = (bar.x + bar.w - theme.bar_pad.1 - BUTTON, bar.y + (bar.h - BUTTON) / 2.0);
+    let hovered = scene.hover == Some(Hit::Settings);
+    if hovered {
+        fill_rounded(frame, theme.hover, button.0, button.1, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+    }
     let glyph = "\u{E713}";
     let icon = Font::new(Family::Icons, 16.0, 400.0);
-    let glyph_left = button.0 + (32.0 - frame.gfx.measure(glyph, icon)) / 2.0;
-    frame.text(glyph, icon, theme.text2, glyph_left, button.1 + 8.0, 32.0, Align::Start);
-    hits.push((button.0, button.1, 32.0, 32.0, Hit::Settings));
+    let glyph_left = button.0 + (BUTTON - frame.gfx.measure(glyph, icon)) / 2.0;
+    frame.text(glyph, icon, if hovered { theme.text } else { theme.text2 }, glyph_left, button.1 + 8.0, BUTTON, Align::Start);
+    hits.push((button.0, button.1, BUTTON, BUTTON, Hit::Settings));
 }
 
 #[cfg(test)]
@@ -775,19 +911,36 @@ mod tests {
     #[test]
     fn splits_lanes_into_the_shortest_columns() {
         let heights = [100.0, 200.0, 50.0, 150.0];
-        assert_eq!(split(&heights, 1), (vec![0], 500.0));
+        assert_eq!(split(&heights, 1, 0.0), (vec![0], 500.0));
         // [100, 200] | [50, 150] beats [100] | [200, 50, 150].
-        assert_eq!(split(&heights, 2), (vec![0, 2], 300.0));
-        assert_eq!(split(&heights, 3).1, 200.0);
+        assert_eq!(split(&heights, 2, 0.0), (vec![0, 2], 300.0));
+        assert_eq!(split(&heights, 3, 0.0).1, 200.0);
+        // Gaps count between the lanes of a column, not after the last.
+        assert_eq!(split(&heights, 2, 8.0), (vec![0, 2], 308.0));
     }
 
     #[test]
     fn takes_the_fewest_columns_that_fit() {
+        let theme = Theme::new(Skin::Paper, false);
+        let bar = theme.bar_height;
         let heights = vec![300.0, 300.0, 300.0];
-        assert_eq!(Layout::new(heights.clone(), 1000.0 + BAR, 3).columns, 1);
-        assert_eq!(Layout::new(heights.clone(), 700.0, 3).columns, 2);
+        assert_eq!(Layout::new(heights.clone(), 900.0 + bar, 3, &theme).columns, 1);
+        assert_eq!(Layout::new(heights.clone(), 700.0, 3, &theme).columns, 2);
         // Too short for even the most columns: the most, to be zoomed out.
-        assert_eq!(Layout::new(heights, 200.0, 2).columns, 2);
+        assert_eq!(Layout::new(heights, 200.0, 2, &theme).columns, 2);
+    }
+
+    #[test]
+    fn deals_lanes_into_level_columns() {
+        let theme = Theme::new(Skin::Glass, false);
+        let layout = Layout::new(vec![100.0, 200.0, 50.0, 150.0], 400.0, 2, &theme);
+        let boxes = layout.lanes();
+        assert_eq!(layout.columns, 2);
+        assert_eq!(boxes[2].x, COLUMN_WIDTH + theme.column_gap);
+        // Both columns end at the same line.
+        let end = |r: &Rect| r.y + r.h;
+        assert_eq!(end(&boxes[1]), end(&boxes[3]));
+        assert_eq!(layout.width(), 2.0 * COLUMN_WIDTH + theme.column_gap);
     }
 
     #[test]

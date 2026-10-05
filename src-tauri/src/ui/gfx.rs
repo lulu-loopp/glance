@@ -5,14 +5,15 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use windows::core::{w, Interface, Result, BOOL, PCWSTR};
+use windows::core::{w, Interface, Result, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1SolidColorBrush,
-    D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    CLSID_D2D1Shadow, D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
@@ -21,7 +22,8 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory6, IDWriteFontCollection, IDWriteFontSetBuilder1, IDWriteTextFormat3, IDWriteTextLayout,
+    DWriteCreateFactory, IDWriteFactory6, IDWriteFontCollection, IDWriteFontSetBuilder1, IDWriteInMemoryFontFileLoader,
+    IDWriteTextLayout1, DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_LINE_METRICS, DWRITE_TEXT_RANGE, IDWriteTextFormat3, IDWriteTextLayout,
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
@@ -31,8 +33,11 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
 use windows_numerics::Matrix3x2;
 
-/// Archivo, the chart-paper skin's face, shipped inside the program.
-const ARCHIVO: &[u8] = include_bytes!("../../fonts/Archivo.ttf");
+/// The faces shipped inside the program, Latin only (the system supplies
+/// Chinese): Archivo, with its weight and width axes, for chart paper, and
+/// Inter, with its weight axis, for glass.
+const ARCHIVO: &[u8] = include_bytes!("../../fonts/Archivo-latin.woff2");
+const INTER: &[u8] = include_bytes!("../../fonts/Inter-latin.woff2");
 
 /// A colour as a CSS-style straight (not premultiplied) RGBA.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -44,6 +49,8 @@ pub struct Color {
 }
 
 impl Color {
+    pub const CLEAR: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+
     pub const fn hex(rgb: u32, a: f32) -> Self {
         Color {
             r: ((rgb >> 16) & 0xFF) as f32 / 255.0,
@@ -66,6 +73,7 @@ impl Color {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {
     Archivo,
+    Inter,
     Segoe,
     SegoeDisplay,
     /// The system's icon font: Segoe Fluent Icons on Windows 11, Segoe MDL2
@@ -73,28 +81,36 @@ pub enum Family {
     Icons,
 }
 
-/// A text style: face, size in DIPs, weight (100–900) and width (% of normal).
+/// A text style: face, size in DIPs, weight (100–900), width (% of normal)
+/// and letter spacing (em).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Font {
     pub family: Family,
     pub size: f32,
     pub weight: f32,
     pub width: f32,
+    pub tracking: f32,
 }
 
 impl Font {
     pub const fn new(family: Family, size: f32, weight: f32) -> Self {
-        Font { family, size, weight, width: 100.0 }
+        Font { family, size, weight, width: 100.0, tracking: 0.0 }
     }
 
     pub const fn width(self, width: f32) -> Self {
         Font { width, ..self }
     }
 
-    fn key(&self) -> (Family, u32, u32, u32) {
-        (self.family, (self.size * 100.0) as u32, self.weight as u32, self.width as u32)
+    pub const fn tracking(self, tracking: f32) -> Self {
+        Font { tracking, ..self }
+    }
+
+    fn key(&self) -> FontKey {
+        (self.family, self.size.to_bits(), self.weight.to_bits(), self.width.to_bits(), self.tracking.to_bits())
     }
 }
+
+type FontKey = (Family, u32, u32, u32, u32);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -109,15 +125,17 @@ pub struct Gfx {
     dxgi: IDXGIDevice3,
     pub dcomp: IDCompositionDesktopDevice,
     write: IDWriteFactory6,
-    archivo: IDWriteFontCollection,
+    /// The shipped faces: their collections and family names.
+    archivo: (IDWriteFontCollection, HSTRING),
+    inter: (IDWriteFontCollection, HSTRING),
     icons: PCWSTR,
-    formats: RefCell<HashMap<(Family, u32, u32, u32), IDWriteTextFormat3>>,
+    formats: RefCell<HashMap<FontKey, IDWriteTextFormat3>>,
     /// Laid-out text, kept while frames keep drawing it: most of a panel's
     /// words and figures are the same from one frame to the next.
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, bool)>>,
 }
 
-type LayoutKey = (String, (Family, u32, u32, u32), u32, bool);
+type LayoutKey = (String, FontKey, u32, bool);
 
 impl Gfx {
     pub fn new() -> Result<Self> {
@@ -142,21 +160,17 @@ impl Gfx {
         // contexts already aimed at themselves.
         let dcomp: IDCompositionDesktopDevice = unsafe { DCompositionCreateDevice2(&device)? };
         let write: IDWriteFactory6 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let archivo = unsafe {
-            let loader = write.CreateInMemoryFontFileLoader()?;
-            write.RegisterFontFileLoader(&loader)?;
-            let file = loader.CreateInMemoryFontFileReference(&write, ARCHIVO.as_ptr() as *const _, ARCHIVO.len() as u32, None)?;
-            let builder = write.CreateFontSetBuilder()?;
-            IDWriteFontSetBuilder1::AddFontFile(&builder, &file)?;
-            write.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?.cast()?
-        };
+        let loader = unsafe { write.CreateInMemoryFontFileLoader()? };
+        unsafe { write.RegisterFontFileLoader(&loader)? };
+        let archivo = shipped_face(&write, &loader, ARCHIVO)?;
+        let inter = shipped_face(&write, &loader, INTER)?;
         let icons = unsafe {
             let system = write.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?;
             let (mut index, mut fluent) = (0, BOOL(0));
             system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
             if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
         };
-        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, archivo, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
+        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
     }
 
     fn format(&self, font: Font) -> IDWriteTextFormat3 {
@@ -168,7 +182,8 @@ impl Gfx {
             DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WIDTH, value: font.width },
         ];
         let (name, collection): (PCWSTR, Option<&IDWriteFontCollection>) = match font.family {
-            Family::Archivo => (w!("Archivo"), Some(&self.archivo)),
+            Family::Archivo => (PCWSTR(self.archivo.1.as_ptr()), Some(&self.archivo.0)),
+            Family::Inter => (PCWSTR(self.inter.1.as_ptr()), Some(&self.inter.0)),
             Family::Segoe => (w!("Segoe UI Variable Text"), None),
             Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
             Family::Icons => (self.icons, None),
@@ -202,8 +217,30 @@ impl Gfx {
             .expect("text layout");
         let alignment = if align == Align::End { DWRITE_TEXT_ALIGNMENT_TRAILING } else { DWRITE_TEXT_ALIGNMENT_LEADING };
         unsafe { layout.SetTextAlignment(alignment).unwrap() };
+        if font.tracking != 0.0 {
+            // As CSS letter-spacing: added after every character.
+            let range = DWRITE_TEXT_RANGE { startPosition: 0, length: wide.len() as u32 };
+            let spaced: IDWriteTextLayout1 = layout.cast().unwrap();
+            unsafe { spaced.SetCharacterSpacing(0.0, font.tracking * font.size, 0.0, range).unwrap() };
+        }
         self.layouts.borrow_mut().insert(key, (layout.clone(), true));
         layout
+    }
+
+    /// Where the first line's baseline falls below the top of `font`'s
+    /// text, and how far its descent reaches below it (DIPs).
+    pub fn baseline(&self, font: Font) -> (f32, f32) {
+        let layout = self.layout("0", font, 10_000.0, Align::Start);
+        let mut line = [DWRITE_LINE_METRICS::default()];
+        let mut count = 0;
+        unsafe { layout.GetLineMetrics(Some(&mut line), &mut count).unwrap() };
+        (line[0].baseline, line[0].height - line[0].baseline)
+    }
+
+    /// Lets go of what Direct2D keeps from earlier drawing, such as the
+    /// intermediate images of effects.
+    pub fn clear_caches(&self) {
+        unsafe { self.device.ClearResources(0) };
     }
 
     /// Gives back what drawing holds on to while nothing is on screen.
@@ -225,6 +262,29 @@ impl Gfx {
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe { self.layout(text, font, 10_000.0, Align::Start).GetMetrics(&mut metrics).unwrap() };
         metrics.widthIncludingTrailingWhitespace
+    }
+}
+
+/// A shipped face, unpacked from its WOFF2 container, as a collection of
+/// its own, and the family name it goes by.
+fn shipped_face(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader, packed: &[u8]) -> Result<(IDWriteFontCollection, HSTRING)> {
+    unsafe {
+        let stream = write.UnpackFontFile(DWRITE_CONTAINER_TYPE_WOFF2, packed.as_ptr().cast(), packed.len() as u32)?;
+        let size = stream.GetFileSize()?;
+        let (mut start, mut context) = (std::ptr::null_mut(), std::ptr::null_mut());
+        stream.ReadFileFragment(&mut start, 0, size, &mut context)?;
+        // Without an owner, the loader keeps a copy of the data.
+        let file = loader.CreateInMemoryFontFileReference(write, start, size as u32, None);
+        stream.ReleaseFileFragment(context);
+        let builder = write.CreateFontSetBuilder()?;
+        IDWriteFontSetBuilder1::AddFontFile(&builder, &file?)?;
+        let collection: IDWriteFontCollection =
+            write.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?.cast()?;
+        let names = collection.GetFontFamily(0)?.GetFamilyNames()?;
+        let mut name = vec![0u16; names.GetStringLength(0)? as usize + 1];
+        names.GetString(0, &mut name)?;
+        name.pop();
+        Ok((collection, HSTRING::from_wide(&name)))
     }
 }
 
@@ -329,9 +389,13 @@ pub struct Layer {
 }
 
 impl Layer {
-    /// Draws the layer, `size` DIPs at `scale`, at the frame's current
-    /// origin, painting it again first if `key` is not what it shows.
-    pub fn draw(&mut self, frame: &Frame, key: u64, size: (f32, f32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<()> {
+    /// Draws the layer, covering `area` (DIPs from the frame's origin) at
+    /// `scale`, painting it again first if `key` is not what it shows; paint
+    /// draws in the frame's coordinates. A `halo` colour rings what is drawn
+    /// with a faint one-DIP glow, as CSS's `text-shadow: 0 0 1px`.
+    pub fn draw(&mut self, frame: &Frame, key: u64, area: (f32, f32, f32, f32), scale: f32, halo: Option<Color>, paint: impl FnOnce(&Frame)) -> Result<()> {
+        let (left, top, width, height) = area;
+        let size = (width, height);
         let dc = &frame.dc;
         if self.bitmap.as_ref().is_none_or(|(shown, _)| *shown != key) {
             let pixels = D2D_SIZE_U { width: (size.0 * scale).ceil() as u32, height: (size.1 * scale).ceil() as u32 };
@@ -360,7 +424,7 @@ impl Layer {
                 let mut transform = Matrix3x2::default();
                 dc.GetTransform(&mut transform);
                 dc.SetTarget(&bitmap);
-                dc.SetTransform(&Matrix3x2::identity());
+                dc.SetTransform(&Matrix3x2::translation(-left, -top));
                 dc.Clear(Some(&D2D1_COLOR_F::default()));
                 paint(frame);
                 dc.SetTarget(&target);
@@ -368,10 +432,19 @@ impl Layer {
             }
             self.bitmap = Some((key, bitmap));
         }
-        let bitmap = &self.bitmap.as_ref().unwrap().1;
+        let image: ID2D1Image = self.bitmap.as_ref().unwrap().1.cast()?;
+        let at = windows_numerics::Vector2 { X: left, Y: top };
         unsafe {
-            dc.DrawImage(&bitmap.cast::<ID2D1Image>()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER)
-        };
+            if let Some(color) = halo {
+                let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                glow.SetInput(0, &image, true);
+                glow.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &0.5f32.to_ne_bytes())?;
+                let rgba = [color.r, color.g, color.b, color.a];
+                glow.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                dc.DrawImage(&glow.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+            dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+        }
         Ok(())
     }
 

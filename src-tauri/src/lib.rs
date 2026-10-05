@@ -1,4 +1,3 @@
-mod capture;
 mod detector;
 mod drives;
 mod elevation;

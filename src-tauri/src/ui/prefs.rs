@@ -70,7 +70,7 @@ pub struct ProcessPrefs {
     pub sort: ProcessSort,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProcessSort {
     #[default]

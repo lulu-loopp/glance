@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
-use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
+use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
@@ -31,21 +31,23 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, GetMessageW, KillTimer, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT,
-    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONUP, WM_MOUSEWHEEL, WM_QUIT,
+    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
 use crate::detector::{Detector, Motion};
 use crate::metrics::{Sample, StaticInfo};
 use crate::settings::{Edge, Settings};
+use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{Gfx, Layer, Surface};
 use crate::ui::motion::{Easing, Transition, LINEAR};
 use crate::ui::prefs::Prefs;
+use crate::ui::skins;
 use crate::ui::text::Lang;
-use crate::ui::theme::{self, Theme};
-use crate::ui::view::{self, Hit, Layout, Pass, Scene, COLUMN_WIDTH, TABLE_ROW};
+use crate::ui::theme::{self, Entrance, Skin, Theme};
+use crate::ui::view::{self, Hit, HitBox, Layout, Pass, Scene, COLUMN_WIDTH, TABLE_ROW};
 use crate::ui::window::Window;
-use crate::ui::paper;
+use windows_numerics::Vector2;
 
 /// Closest the panel gets to the ends of the work area (DIPs).
 const GAP: f32 = 12.0;
@@ -70,6 +72,8 @@ const TRACK_TIMER: usize = 1;
 const WATCH_TIMER: usize = 2;
 const WATCH_MS: u32 = 100;
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
+/// How often a live backdrop is captured again.
+const LIVE_INTERVAL: Duration = Duration::from_millis(250);
 /// Rows a wheel notch scrolls the process list by.
 const WHEEL_ROWS: f32 = 3.0;
 /// How quickly the process list catches up with the wheel.
@@ -89,6 +93,8 @@ const RESTYLE: u32 = WM_APP + 3;
 
 struct Config {
     edge: Edge,
+    skin: String,
+    live: bool,
     pressure: i32,
     close_delay: Duration,
     interval: Duration,
@@ -99,6 +105,8 @@ struct Config {
 fn config_from(settings: &Settings) -> Config {
     Config {
         edge: settings.edge,
+        skin: settings.skin.clone(),
+        live: settings.live_backdrop,
         pressure: settings.sensitivity.pressure(),
         close_delay: settings.close_delay(),
         interval: settings.interval(),
@@ -273,6 +281,7 @@ impl Controller {
                 DISMISS => panel.dismiss(),
                 RESTYLE => panel.restyle(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
+                WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
                 WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panel.wheel(lparam_point(msg.lParam), delta);
@@ -383,30 +392,55 @@ struct Placement {
     px: f32,
 }
 
+/// The desktop behind the window, captured as the panel opened (or again
+/// and again, with live refraction), and what it means for the glass.
+struct Behind {
+    digest: u64,
+    /// The luminance behind the panel: its mean and spread.
+    tone: (f32, f32),
+    /// The capture, until it is first drawn and becomes the bitmap.
+    capture: Option<Capture>,
+    bitmap: Option<ID2D1Bitmap1>,
+    taken: Instant,
+}
+
+impl Behind {
+    fn new(capture: Capture, placement: &Placement, now: Instant) -> Self {
+        let tone = capture.luminance(placement.panel, placement.px);
+        Behind { digest: capture.digest, tone, capture: Some(capture), bitmap: None, taken: now }
+    }
+}
+
 /// The panel and its window, owned by the input thread.
 struct Panel<'a> {
     controller: &'a Controller,
     gfx: Gfx,
     window: Window,
     surface: Surface,
-    slab: paper::Slab,
-    /// Everything but the charts, which alone move between samples.
+    /// What the skin puts behind the readings, and the readings themselves
+    /// but for the charts, which alone move between samples.
+    ground: Layer,
     content: Layer,
     phase: Phase,
-    /// 0 at rest on screen, 1 slid out past the edge.
+    /// 0 at rest on screen, 1 slid out.
     shift: Transition,
     opacity: Transition,
     placement: Option<Placement>,
     prefs: Prefs,
+    skin: Skin,
     theme: Theme,
-    dark: bool,
     lang: Lang,
     edge: Edge,
+    /// Refresh the desktop behind the glass while the panel is open.
+    live: bool,
+    behind: Option<Behind>,
+    frost: f32,
     scroll: f32,
     scroll_target: f32,
+    hover: Option<Hit>,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
-    hits: Vec<(f32, f32, f32, f32, Hit)>,
+    hits: Vec<HitBox>,
     corner: (f32, f32),
     last_frame: Instant,
     /// When the panel is next drawn: at once while anything on it is in
@@ -424,19 +458,23 @@ impl<'a> Panel<'a> {
             gfx,
             window,
             surface,
-            slab: paper::Slab::default(),
+            ground: Layer::default(),
             content: Layer::default(),
             phase: Phase::Hidden,
             shift: Transition::settled(1.0),
             opacity: Transition::settled(0.0),
             placement: None,
             prefs: Prefs::default(),
-            theme: theme::paper(false),
-            dark: false,
+            skin: Skin::Paper,
+            theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
             edge: Edge::Right,
+            live: false,
+            behind: None,
+            frost: 0.0,
             scroll: 0.0,
             scroll_target: 0.0,
+            hover: None,
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -460,17 +498,31 @@ impl<'a> Panel<'a> {
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.edge = config.edge;
+        self.skin = Skin::named(&config.skin);
+        self.live = config.live && self.skin.sees_backdrop();
         drop(config);
-        self.dark = theme::is_dark(self.prefs.theme);
-        self.theme = theme::paper(self.dark);
         self.lang = Lang::resolve(self.prefs.language);
+        // While the backdrop is live the window has to stay out of the
+        // captures of what is behind it; the system offers that only as
+        // "out of every capture", screenshots too.
+        self.window.exclude_from_capture(self.live);
+        self.dress();
+    }
+
+    /// Picks the theme, and how frosted the glass is, for the skin and the
+    /// desktop behind the panel.
+    fn dress(&mut self) {
+        let behind = self.behind.as_ref().map(|behind| behind.tone);
+        let dark = theme::is_dark(self.prefs.theme, behind.map(|(mean, _)| mean));
+        self.theme = Theme::new(self.skin, dark);
+        self.frost = behind.map_or(0.0, |(mean, spread)| skins::frost(mean, spread, dark));
     }
 
     fn open(&mut self, cursor: POINT, contact: Contact, now: Instant) {
         if self.is_open() || self.controller.history.lock().unwrap().is_empty() {
             return;
         }
-        // A reopening during the slide-out picks the panel up where it is.
+        // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
             self.placement = Some(Placement {
@@ -483,8 +535,17 @@ impl<'a> Panel<'a> {
             });
             self.scroll = 0.0;
             self.scroll_target = 0.0;
+            self.hover = None;
             self.shift.jump(1.0);
             self.opacity.jump(0.0);
+            // The desktop where the panel will be, taken while the window is
+            // still hidden.
+            if self.skin.sees_backdrop() {
+                self.arrange();
+                let placement = self.placement.as_ref().unwrap();
+                self.behind = Some(Behind::new(Capture::take(placement.window), placement, now));
+                self.dress();
+            }
         }
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
         self.controller.shown.store(true, Ordering::Relaxed);
@@ -522,7 +583,9 @@ impl<'a> Panel<'a> {
         self.window.hide();
         // The drawing memory is given back while the panel is away.
         self.surface.release(&self.gfx);
+        self.ground.release();
         self.content.release();
+        self.behind = None;
         self.gfx.trim();
         self.placement = None;
         self.controller.shown.store(false, Ordering::Relaxed);
@@ -537,6 +600,9 @@ impl<'a> Panel<'a> {
         let in_reach = contains(&placement.reach, cursor);
         let close_delay = self.controller.config.lock().unwrap().close_delay;
         let held = buttons_down();
+        if !on_panel && self.hover.take().is_some() {
+            self.next_frame = now;
+        }
         let Phase::Open { entered, outside_since, dragging } = &mut self.phase else { return };
         // A press that begins away from the panel dismisses it; one that
         // begins on it keeps it open wherever the pointer then goes.
@@ -556,14 +622,67 @@ impl<'a> Panel<'a> {
         self.window.set_click_through(!on_panel);
     }
 
-    /// Follows the pointer, and draws the panel if a frame is due.
+    /// Follows the pointer, takes the desktop behind the glass again when
+    /// it is live, and draws the panel if a frame is due.
     fn tick(&mut self, now: Instant) {
         if self.is_open() {
             self.track(now);
         }
+        if self.live && self.is_open() {
+            self.refresh_behind(now);
+        }
         if now >= self.next_frame {
             self.frame(now);
         }
+    }
+
+    /// With live refraction, captures the desktop behind the window again
+    /// every so often; only a capture that differs from the last is used.
+    fn refresh_behind(&mut self, now: Instant) {
+        let (Some(behind), Some(placement)) = (&self.behind, &self.placement) else { return };
+        if now.duration_since(behind.taken) < LIVE_INTERVAL {
+            return;
+        }
+        let capture = Capture::take(placement.window);
+        if capture.digest == behind.digest {
+            self.behind.as_mut().unwrap().taken = now;
+            return;
+        }
+        let behind = Behind::new(capture, placement, now);
+        // The theme holds for the opening; only the frost follows.
+        self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
+        self.behind = Some(behind);
+        self.next_frame = now;
+    }
+
+    /// Lays the panel out for the current readings and places the window.
+    fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
+        let controller = self.controller;
+        let mut history = controller.history.lock().unwrap();
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, history.make_contiguous());
+        let lanes = view::lanes(&scene);
+        let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&self.theme)).collect();
+        drop(history);
+
+        // As many columns as the lanes need to show at full size, up to what
+        // the screen allows; zoomed out only if even that is too little.
+        let contact = self.placement.as_ref().unwrap().contact;
+        let work_width = (contact.work.right - contact.work.left) as f32 / contact.scale;
+        let work_height = (contact.work.bottom - contact.work.top) as f32 / contact.scale;
+        let (room, max_columns) = match self.edge {
+            Edge::Left | Edge::Right => (work_height - 2.0 * GAP, MAX_COLUMNS),
+            // Along the top the panel grows sideways instead, and no lower
+            // than a share of the screen.
+            Edge::Top => (
+                work_height * TOP_SHARE - GAP - self.theme.inset,
+                (((work_width - 2.0 * GAP + self.theme.column_gap) / (COLUMN_WIDTH + self.theme.column_gap)) as usize).max(1),
+            ),
+        };
+        let layout = Layout::new(heights, room, max_columns, &self.theme);
+        let zoom = (room / layout.height()).min(1.0);
+        let placement = self.placement.as_mut().unwrap();
+        place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
+        (lanes, layout)
     }
 
     /// Draws the panel as it is at `now`, and finishes a closing that is done.
@@ -575,61 +694,51 @@ impl<'a> Panel<'a> {
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
 
-        let controller = self.controller;
-        let interval = controller.config.lock().unwrap().interval;
-        let mut history = controller.history.lock().unwrap();
-        let history = history.make_contiguous();
-        let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
-        let scene = Scene {
-            info: &controller.info,
-            prefs: &self.prefs,
-            theme: &self.theme,
-            lang: self.lang,
-            history,
-            pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
-            process_scroll: self.scroll,
-        };
-        let lanes = view::lanes(&scene);
-        let heights: Vec<f32> = lanes.iter().map(view::Lane::height).collect();
-
-        // As many columns as the lanes need to show at full size, up to what
-        // the screen allows; zoomed out only if even that is too little.
-        let contact = self.placement.as_ref().unwrap().contact;
-        let work_width = (contact.work.right - contact.work.left) as f32 / contact.scale;
-        let work_height = (contact.work.bottom - contact.work.top) as f32 / contact.scale;
-        let (room, max_columns) = match self.edge {
-            Edge::Left | Edge::Right => (work_height - 2.0 * GAP, MAX_COLUMNS),
-            // Along the top the panel grows sideways instead, and no lower
-            // than a share of the screen.
-            Edge::Top => (work_height * TOP_SHARE - 2.0 * GAP, (((work_width - 2.0 * GAP) / COLUMN_WIDTH) as usize).max(1)),
-        };
-        let layout = Layout::new(heights, room, max_columns);
-        let zoom = (room / layout.height()).min(1.0);
-        let placement = self.placement.as_mut().unwrap();
-        place(placement, &self.window, self.edge, (layout.width(), layout.height()), zoom);
-
+        let (lanes, layout) = self.arrange();
+        let boxes = layout.lanes();
+        let bar = layout.bar();
+        let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
         let window = placement.window;
         let size = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
-        // Where the panel sits in the window, slid out by `shift` of its
-        // depth and its shadow's.
+        let (width, height) = (layout.width(), layout.height());
+        // Where the panel rests in the window, and where it is now, slid
+        // out by `shift` of the way it comes in.
+        let rest = ((placement.panel.left - window.left) as f32 / px, (placement.panel.top - window.top) as f32 / px);
         let shift = self.shift.value(now);
         let opacity = self.opacity.value(now);
-        let mut x = (placement.panel.left - window.left) as f32 / px;
-        let mut y = (placement.panel.top - window.top) as f32 / px;
+        let travel = match self.theme.entrance {
+            Entrance::Beyond(extra) => (if self.edge == Edge::Top { height } else { width }) + extra,
+            Entrance::Slide(distance) => distance,
+        };
+        let (mut x, mut y) = rest;
         match self.edge {
-            Edge::Left => x -= shift * (layout.width() + paper::MARGIN),
-            Edge::Right => x += shift * (layout.width() + paper::MARGIN),
-            Edge::Top => y -= shift * (layout.height() + paper::MARGIN),
+            Edge::Left => x -= shift * travel,
+            Edge::Right => x += shift * travel,
+            Edge::Top => y -= shift * travel,
         }
-        // What the content layer shows: when none of it changed, the layer
-        // drawn for an earlier frame serves again.
+
+        // What each layer shows: when none of it changed, the one drawn for
+        // an earlier frame serves again.
         let mut key = DefaultHasher::new();
-        (&lanes, &layout.cuts, layout.columns, self.dark, self.lang, px.to_bits(), self.scroll.to_bits()).hash(&mut key);
-        layout.heights.iter().chain([&layout.lanes_height]).for_each(|h| h.to_bits().hash(&mut key));
-        let key = key.finish();
-        let (theme, edge, slab, content) = (&self.theme, self.edge, &mut self.slab, &mut self.content);
+        (self.skin, self.theme.dark, self.edge, px.to_bits(), self.frost.to_bits()).hash(&mut key);
+        boxes.iter().chain([&bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut key));
+        self.behind.as_ref().map(|behind| behind.digest).hash(&mut key);
+        let ground_key = key.finish();
+        (&lanes, &layout.cuts, layout.columns, self.lang, self.scroll.to_bits(), self.hover).hash(&mut key);
+        let content_key = key.finish();
+
+        let controller = self.controller;
+        let mut history = controller.history.lock().unwrap();
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, history.make_contiguous());
+        let theme = &self.theme;
+        let edge = self.edge;
+        let frost = self.frost;
+        let (ground, content, behind) = (&mut self.ground, &mut self.content, &mut self.behind);
+        let margin = theme.margin;
+        let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
         let mut hits = None;
+        let mut grounded = false;
         let drawn = self.surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(x, y);
             if opacity < 1.0 {
@@ -637,18 +746,39 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            slab.draw(frame, theme, edge, layout.width(), layout.height()).expect("panel slab");
-            let size = (layout.width(), layout.height());
+            let backdrop = behind.as_mut().map(|behind| {
+                if let Some(capture) = behind.capture.take() {
+                    behind.bitmap = Some(capture.bitmap(&frame.dc, px).expect("backdrop bitmap"));
+                }
+                // Aligned with the screen where the panel rests.
+                (behind.bitmap.as_ref().unwrap(), Vector2 { X: rest.0, Y: rest.1 })
+            });
+            let below = skins::Ground { theme, edge, size: (width, height), lanes: &boxes, bar, backdrop, frost };
+            let area = (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin);
+            ground
+                .draw(frame, ground_key, area, px, None, |frame| {
+                    skins::draw(frame, &below).expect("panel surface");
+                    grounded = true;
+                })
+                .expect("panel ground");
             content
-                .draw(frame, key, size, px, |frame| hits = Some(view::paint(frame, &scene, &lanes, &layout, Pass::Content)))
+                .draw(frame, content_key, (0.0, 0.0, width, height), px, halo, |frame| {
+                    hits = Some(view::paint(frame, &scene, &lanes, &layout, Pass::Content))
+                })
                 .expect("panel content");
             view::paint(frame, &scene, &lanes, &layout, Pass::Plots);
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
             }
         });
+        drop(history);
         drawn.expect("panel frame");
         self.gfx.sweep();
+        // The effects that drew the ground are not needed again until it
+        // changes; what they hold is let go.
+        if grounded {
+            self.gfx.clear_caches();
+        }
         if let Some(hits) = hits {
             self.hits = hits;
         }
@@ -660,7 +790,7 @@ impl<'a> Panel<'a> {
         self.next_frame = if moving {
             now
         } else {
-            let speed = view::PLOT_WIDTH * px / self.prefs.chart_seconds as f32;
+            let speed = layout.plot_width(&self.theme) * px / self.prefs.chart_seconds as f32;
             now + Duration::from_secs_f32(0.25 / speed)
         };
     }
@@ -670,6 +800,15 @@ impl<'a> Panel<'a> {
         let px = self.placement.as_ref()?.px;
         let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
         self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+    }
+
+    /// The pointer moved over the panel: lights what it is over.
+    fn hover_at(&mut self, client: POINT) {
+        let hover = self.hit_at(client).filter(|hit| hit.max_scroll().is_none());
+        if hover != self.hover {
+            self.hover = hover;
+            self.next_frame = Instant::now();
+        }
     }
 
     fn click(&mut self, client: POINT) {
@@ -696,7 +835,7 @@ impl<'a> Panel<'a> {
     fn wheel(&mut self, screen: POINT, delta: i16) {
         let Some(window) = self.placement.as_ref().map(|p| p.window) else { return };
         let client = POINT { x: screen.x - window.left, y: screen.y - window.top };
-        if let Some(Hit::Processes(max_scroll)) = self.hit_at(client) {
+        if let Some(max_scroll) = self.hit_at(client).and_then(Hit::max_scroll) {
             let rows = -(delta as f32) / 120.0 * WHEEL_ROWS;
             self.scroll_target = (self.scroll_target + rows * TABLE_ROW).clamp(0.0, max_scroll);
             self.next_frame = Instant::now();
@@ -704,21 +843,46 @@ impl<'a> Panel<'a> {
     }
 }
 
+/// What the readings are drawn with at this moment.
+fn scene<'s>(
+    controller: &'s Controller,
+    prefs: &'s Prefs,
+    theme: &'s Theme,
+    lang: Lang,
+    scroll: f32,
+    hover: Option<Hit>,
+    history: &'s [Sample],
+) -> Scene<'s> {
+    let interval = controller.config.lock().unwrap().interval;
+    let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+    Scene {
+        info: &controller.info,
+        prefs,
+        theme,
+        lang,
+        history,
+        pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
+        process_scroll: scroll,
+        hover,
+    }
+}
+
 /// Positions the panel for a layout `size` DIPs large, and moves the window
 /// if that changed it.
-fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, size: (f32, f32), zoom: f32) {
+fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &Theme, size: (f32, f32), zoom: f32) {
     let Contact { monitor, work, scale } = placement.contact;
     let px = scale * zoom;
     let (width, height) = ((size.0 * px).round() as i32, (size.1 * px).round() as i32);
     let gap = (GAP * scale).round() as i32;
+    let inset = (theme.inset * px).round() as i32;
     let centred = |at: i32, length: i32, low: i32, high: i32| (at - length / 2).min(high - gap - length).max(low + gap);
     let (left, top) = match edge {
-        Edge::Left => (monitor.left, centred(placement.anchor.y, height, work.top, work.bottom)),
-        Edge::Right => (monitor.right - width, centred(placement.anchor.y, height, work.top, work.bottom)),
-        Edge::Top => (centred(placement.anchor.x, width, work.left, work.right), monitor.top),
+        Edge::Left => (monitor.left + inset, centred(placement.anchor.y, height, work.top, work.bottom)),
+        Edge::Right => (monitor.right - inset - width, centred(placement.anchor.y, height, work.top, work.bottom)),
+        Edge::Top => (centred(placement.anchor.x, width, work.left, work.right), monitor.top + inset),
     };
     let panel = RECT { left, top, right: left + width, bottom: top + height };
-    let margin = (paper::MARGIN * px).ceil() as i32;
+    let margin = (theme.margin * px).ceil() as i32;
     // The shadow's room, kept on this monitor.
     let window = RECT {
         left: (left - margin).max(monitor.left),
