@@ -97,6 +97,16 @@ export class Backdrop {
     }
 
     if (skin === 'glass') {
+      // The pieces are one material: they frost alike, by what is behind the
+      // panel as a whole. Deciding per piece made neighbours look unrelated.
+      // Busy backdrops frost more, and so do backdrops that clash with the
+      // theme (bright under dark glass, dark under light glass).
+      const { mean, spread } = this.measure({ ...origin, width: panel.offsetWidth, height: panel.offsetHeight });
+      const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+      const busy = clamp((spread - CALM) / (BUSY - CALM));
+      const against = theme === 'light' ? READS_WELL.light - mean : mean - READS_WELL.dark;
+      const frost = Math.max(busy, clamp(against / CONTRAST_SPAN));
+      panel.style.setProperty('--frost', frost.toFixed(3));
       pieces.forEach((piece, index) => {
         if (piece.offsetParent === null) return;
         const width = piece.offsetWidth;
@@ -106,15 +116,6 @@ export class Backdrop {
         const left = origin.left + within.left;
         const top = origin.top + within.top;
         const id = `lens-${index}`;
-        // The theme sets the glass's colour; what is behind a piece sets how
-        // much it frosts: more when the backdrop is busy, and more when it is
-        // bright under dark glass or dark under light glass.
-        const { mean, spread } = this.measure({ left, top, width, height });
-        const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
-        const busy = clamp((spread - CALM) / (BUSY - CALM));
-        const against = theme === 'light' ? READS_WELL.light - mean : mean - READS_WELL.dark;
-        const frost = Math.max(busy, clamp(against / CONTRAST_SPAN));
-        piece.style.setProperty('--frost', frost.toFixed(3));
         this.defs.append(lensFilter(id, width, height, this.map(width, height, radius), frost * FROST_BLUR));
 
         const lens = document.createElement('div');
