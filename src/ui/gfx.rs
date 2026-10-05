@@ -1,0 +1,508 @@
+//! Drawing: Direct2D on a DirectComposition surface, text with DirectWrite.
+//! Coordinates are in device-independent pixels (DIPs); the surface is in
+//! physical pixels and the context scales between them.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// How long laid-out text no window draws is kept.
+const TEXT_KEPT: Duration = Duration::from_secs(2);
+
+use windows::core::{w, Interface, Result, BOOL, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image, ID2D1SolidColorBrush,
+    CLSID_D2D1DpiCompensation, CLSID_D2D1Shadow, D2D1_BITMAP_OPTIONS_TARGET, D2D1_DPICOMPENSATION_PROP_INPUT_DPI,
+    D2D1_PROPERTY_TYPE_VECTOR2, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION};
+use windows::Win32::Graphics::DirectComposition::{
+    DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory6, IDWriteFontCollection, IDWriteFontSetBuilder1, IDWriteInMemoryFontFileLoader,
+    IDWriteTextLayout1, DWRITE_CONTAINER_TYPE_WOFF2, DWRITE_LINE_METRICS, DWRITE_TEXT_RANGE, IDWriteTextFormat3, IDWriteTextLayout,
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
+    DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
+use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
+use windows_numerics::Matrix3x2;
+
+/// The faces shipped inside the program, Latin only (the system supplies
+/// Chinese): Archivo, with its weight and width axes, for chart paper, and
+/// Inter, with its weight axis, for glass.
+const ARCHIVO: &[u8] = include_bytes!("../../fonts/Archivo-latin.woff2");
+const INTER: &[u8] = include_bytes!("../../fonts/Inter-latin.woff2");
+
+/// A colour as a CSS-style straight (not premultiplied) RGBA.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Color {
+    pub const CLEAR: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+
+    pub const fn hex(rgb: u32, a: f32) -> Self {
+        Color {
+            r: ((rgb >> 16) & 0xFF) as f32 / 255.0,
+            g: ((rgb >> 8) & 0xFF) as f32 / 255.0,
+            b: (rgb & 0xFF) as f32 / 255.0,
+            a,
+        }
+    }
+
+    pub fn alpha(self, a: f32) -> Self {
+        Color { a: self.a * a, ..self }
+    }
+
+    /// For Direct2D, which takes colours straight and premultiplies itself.
+    pub fn d2d(self) -> D2D1_COLOR_F {
+        D2D1_COLOR_F { r: self.r, g: self.g, b: self.b, a: self.a }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Family {
+    Archivo,
+    Inter,
+    Segoe,
+    SegoeDisplay,
+    /// The system's icon font: Segoe Fluent Icons on Windows 11, Segoe MDL2
+    /// Assets before it; both put the same glyphs at the same code points.
+    Icons,
+}
+
+/// A text style: face, size in DIPs, weight (100–900), width (% of normal)
+/// and letter spacing (em).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Font {
+    pub family: Family,
+    pub size: f32,
+    pub weight: f32,
+    pub width: f32,
+    pub tracking: f32,
+}
+
+impl Font {
+    pub const fn new(family: Family, size: f32, weight: f32) -> Self {
+        Font { family, size, weight, width: 100.0, tracking: 0.0 }
+    }
+
+    pub const fn width(self, width: f32) -> Self {
+        Font { width, ..self }
+    }
+
+    pub const fn tracking(self, tracking: f32) -> Self {
+        Font { tracking, ..self }
+    }
+
+    fn key(&self) -> FontKey {
+        (self.family, self.size.to_bits(), self.weight.to_bits(), self.width.to_bits(), self.tracking.to_bits())
+    }
+}
+
+type FontKey = (Family, u32, u32, u32, u32);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Start,
+    End,
+}
+
+/// Devices and factories shared by every surface.
+pub struct Gfx {
+    pub factory: ID2D1Factory1,
+    device: ID2D1Device,
+    dxgi: IDXGIDevice3,
+    pub dcomp: IDCompositionDesktopDevice,
+    write: IDWriteFactory6,
+    /// The shipped faces: their collections and family names.
+    archivo: (IDWriteFontCollection, HSTRING),
+    inter: (IDWriteFontCollection, HSTRING),
+    icons: PCWSTR,
+    formats: RefCell<HashMap<FontKey, IDWriteTextFormat3>>,
+    /// Laid-out text, kept while frames keep drawing it: most of a panel's
+    /// words and figures are the same from one frame to the next. With when
+    /// each was last drawn.
+    layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
+}
+
+type LayoutKey = (String, FontKey, u32, bool);
+
+impl Gfx {
+    pub fn new() -> Result<Self> {
+        let mut d3d: Option<ID3D11Device> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut d3d),
+                None,
+                None,
+            )?
+        };
+        let dxgi: IDXGIDevice = d3d.unwrap().cast()?;
+        let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
+        let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
+        // Made from the Direct2D device, composition surfaces hand out device
+        // contexts already aimed at themselves.
+        let dcomp: IDCompositionDesktopDevice = unsafe { DCompositionCreateDevice2(&device)? };
+        let write: IDWriteFactory6 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        let loader = unsafe { write.CreateInMemoryFontFileLoader()? };
+        unsafe { write.RegisterFontFileLoader(&loader)? };
+        let archivo = shipped_face(&write, &loader, ARCHIVO)?;
+        let inter = shipped_face(&write, &loader, INTER)?;
+        let icons = unsafe {
+            let system = write.GetSystemFontCollection(false, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?;
+            let (mut index, mut fluent) = (0, BOOL(0));
+            system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
+            if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
+        };
+        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
+    }
+
+    fn format(&self, font: Font) -> IDWriteTextFormat3 {
+        if let Some(format) = self.formats.borrow().get(&font.key()) {
+            return format.clone();
+        }
+        let axes = [
+            DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WEIGHT, value: font.weight },
+            DWRITE_FONT_AXIS_VALUE { axisTag: DWRITE_FONT_AXIS_TAG_WIDTH, value: font.width },
+        ];
+        let (name, collection): (PCWSTR, Option<&IDWriteFontCollection>) = match font.family {
+            Family::Archivo => (PCWSTR(self.archivo.1.as_ptr()), Some(&self.archivo.0)),
+            Family::Inter => (PCWSTR(self.inter.1.as_ptr()), Some(&self.inter.0)),
+            Family::Segoe => (w!("Segoe UI Variable Text"), None),
+            Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
+            Family::Icons => (self.icons, None),
+        };
+        let format = unsafe {
+            self.write
+                .CreateTextFormat(name, collection, &axes, font.size, w!("zh-cn"))
+                .expect("text format")
+        };
+        unsafe {
+            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP).unwrap();
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR).unwrap();
+            // Text too long for its box ends in an ellipsis.
+            let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
+            let sign = self.write.CreateEllipsisTrimmingSign(&format).unwrap();
+            format.SetTrimming(&trimming, &sign).unwrap();
+        }
+        self.formats.borrow_mut().insert(font.key(), format.clone());
+        format
+    }
+
+    /// Lays `text` out on one line, `width` DIPs wide at most.
+    pub fn layout(&self, text: &str, font: Font, width: f32, align: Align) -> IDWriteTextLayout {
+        let key = (text.to_string(), font.key(), width.max(0.0).to_bits(), align == Align::End);
+        if let Some((layout, used)) = self.layouts.borrow_mut().get_mut(&key) {
+            *used = Instant::now();
+            return layout.clone();
+        }
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let layout = unsafe { self.write.CreateTextLayout(&wide, &self.format(font), width.max(0.0), font.size * 2.0) }
+            .expect("text layout");
+        let alignment = if align == Align::End { DWRITE_TEXT_ALIGNMENT_TRAILING } else { DWRITE_TEXT_ALIGNMENT_LEADING };
+        unsafe { layout.SetTextAlignment(alignment).unwrap() };
+        if font.tracking != 0.0 {
+            // As CSS letter-spacing: added after every character.
+            let range = DWRITE_TEXT_RANGE { startPosition: 0, length: wide.len() as u32 };
+            let spaced: IDWriteTextLayout1 = layout.cast().unwrap();
+            unsafe { spaced.SetCharacterSpacing(0.0, font.tracking * font.size, 0.0, range).unwrap() };
+        }
+        self.layouts.borrow_mut().insert(key, (layout.clone(), Instant::now()));
+        layout
+    }
+
+    /// Where the first line's baseline falls below the top of `font`'s
+    /// text, and how far its descent reaches below it (DIPs).
+    pub fn baseline(&self, font: Font) -> (f32, f32) {
+        let layout = self.layout("0", font, 10_000.0, Align::Start);
+        let mut line = [DWRITE_LINE_METRICS::default()];
+        let mut count = 0;
+        unsafe { layout.GetLineMetrics(Some(&mut line), &mut count).unwrap() };
+        (line[0].baseline, line[0].height - line[0].baseline)
+    }
+
+    /// Lets go of what Direct2D keeps from earlier drawing, such as the
+    /// intermediate images of effects.
+    pub fn clear_caches(&self) {
+        unsafe { self.device.ClearResources(0) };
+    }
+
+    /// Gives back what drawing holds on to while nothing is on screen.
+    pub fn trim(&self) {
+        self.layouts.borrow_mut().clear();
+        unsafe {
+            self.device.ClearResources(0);
+            self.dxgi.Trim();
+        }
+    }
+
+    /// Forgets the text no window has drawn for a while.
+    pub fn sweep(&self) {
+        self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+    }
+
+    /// How wide `text` is in `font`, in DIPs.
+    pub fn measure(&self, text: &str, font: Font) -> f32 {
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { self.layout(text, font, 10_000.0, Align::Start).GetMetrics(&mut metrics).unwrap() };
+        metrics.widthIncludingTrailingWhitespace
+    }
+}
+
+/// A shipped face, unpacked from its WOFF2 container, as a collection of
+/// its own, and the family name it goes by.
+fn shipped_face(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader, packed: &[u8]) -> Result<(IDWriteFontCollection, HSTRING)> {
+    unsafe {
+        let stream = write.UnpackFontFile(DWRITE_CONTAINER_TYPE_WOFF2, packed.as_ptr().cast(), packed.len() as u32)?;
+        let size = stream.GetFileSize()?;
+        let (mut start, mut context) = (std::ptr::null_mut(), std::ptr::null_mut());
+        stream.ReadFileFragment(&mut start, 0, size, &mut context)?;
+        // Without an owner, the loader keeps a copy of the data.
+        let file = loader.CreateInMemoryFontFileReference(write, start, size as u32, None);
+        stream.ReleaseFileFragment(context);
+        let builder = write.CreateFontSetBuilder()?;
+        IDWriteFontSetBuilder1::AddFontFile(&builder, &file?)?;
+        let collection: IDWriteFontCollection =
+            write.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?, DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC)?.cast()?;
+        let names = collection.GetFontFamily(0)?.GetFamilyNames()?;
+        let mut name = vec![0u16; names.GetStringLength(0)? as usize + 1];
+        names.GetString(0, &mut name)?;
+        name.pop();
+        Ok((collection, HSTRING::from_wide(&name)))
+    }
+}
+
+/// One frame being drawn onto a surface.
+pub struct Frame<'a> {
+    pub gfx: &'a Gfx,
+    pub dc: ID2D1DeviceContext,
+    brush: ID2D1SolidColorBrush,
+    /// Where the surface's region starts (DIPs).
+    base: Matrix3x2,
+}
+
+impl<'a> Frame<'a> {
+    /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
+    pub fn origin(&self, x: f32, y: f32) {
+        self.place(Matrix3x2::translation(x, y));
+    }
+
+    /// Draws from here on through `transform`, from the surface's corner.
+    pub fn place(&self, transform: Matrix3x2) {
+        unsafe { self.dc.SetTransform(&(transform * self.base)) };
+    }
+
+    pub fn brush(&self, color: Color) -> &ID2D1SolidColorBrush {
+        unsafe { self.brush.SetColor(&color.d2d()) };
+        &self.brush
+    }
+
+    /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.
+    pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
+        let layout = self.gfx.layout(text, font, width, align);
+        unsafe {
+            self.dc.DrawTextLayout(
+                windows_numerics::Vector2 { X: x, Y: y },
+                &layout,
+                self.brush(color),
+                D2D1_DRAW_TEXT_OPTIONS_CLIP | D2D1_DRAW_TEXT_OPTIONS_NONE,
+            )
+        };
+    }
+}
+
+/// A window's content: a composition surface the size of the window.
+pub struct Surface {
+    _target: IDCompositionTarget,
+    visual: IDCompositionVisual2,
+    surface: Option<IDCompositionSurface>,
+    size: (u32, u32),
+}
+
+impl Surface {
+    pub fn new(gfx: &Gfx, hwnd: HWND) -> Result<Self> {
+        let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
+        let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
+        unsafe { target.SetRoot(&visual)? };
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0) })
+    }
+
+    /// Draws one frame, at `scale` physical pixels per DIP, on a surface
+    /// `size` physical pixels large.
+    pub fn draw(&mut self, gfx: &Gfx, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<()> {
+        if self.surface.is_none() || self.size != size {
+            let surface = unsafe {
+                gfx.dcomp.CreateSurface(size.0.max(1), size.1.max(1), DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)?
+            };
+            unsafe { self.visual.SetContent(&surface)? };
+            self.surface = Some(surface);
+            self.size = size;
+        }
+        let surface = self.surface.as_ref().unwrap();
+        let mut offset = POINT::default();
+        let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
+        // The surface may hand out a region of a larger atlas.
+        let base = Matrix3x2::translation(offset.x as f32 / scale, offset.y as f32 / scale);
+        unsafe {
+            dc.SetDpi(96.0 * scale, 96.0 * scale);
+            dc.SetTransform(&base);
+            // A transparent surface takes no ClearType.
+            dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            dc.Clear(Some(&D2D1_COLOR_F::default()));
+        }
+        let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
+        paint(&Frame { gfx, dc, brush, base });
+        unsafe {
+            surface.EndDraw()?;
+            gfx.dcomp.Commit()?;
+        }
+        Ok(())
+    }
+
+    /// Lets go of the drawing memory while the window is hidden.
+    pub fn release(&mut self, gfx: &Gfx) {
+        if self.surface.take().is_some() {
+            unsafe {
+                let _ = self.visual.SetContent(None);
+                let _ = gfx.dcomp.Commit();
+            }
+        }
+    }
+}
+
+/// Drawing kept in a bitmap of its own and painted again only when what it
+/// shows changes, told by a key.
+#[derive(Default)]
+pub struct Layer {
+    bitmap: Option<(u64, ID2D1Bitmap1)>,
+}
+
+impl Layer {
+    /// Draws the layer: what `paint` draws in its own coordinates, inside
+    /// `area` of them, placed by `local` within the frame's current
+    /// transform, and kept at `scale` physical pixels per unit. It is painted
+    /// again first only if `key` is not what it shows. A `halo` colour rings
+    /// what is drawn with a faint one-unit glow, as CSS's `text-shadow: 0 0 1px`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        frame: &Frame,
+        key: u64,
+        local: Matrix3x2,
+        area: (f32, f32, f32, f32),
+        scale: f32,
+        halo: Option<Color>,
+        paint: impl FnOnce(&Frame),
+    ) -> Result<()> {
+        let (left, top, width, height) = area;
+        let size = (width, height);
+        let dc = &frame.dc;
+        if self.bitmap.as_ref().is_none_or(|(shown, _)| *shown != key) {
+            let pixels = D2D_SIZE_U { width: (size.0 * scale).ceil() as u32, height: (size.1 * scale).ceil() as u32 };
+            // The same bitmap serves while the size holds.
+            let reusable = self.bitmap.take().map(|(_, bitmap)| bitmap).filter(|bitmap| {
+                let have = unsafe { bitmap.GetPixelSize() };
+                let mut dpi = (0.0, 0.0);
+                unsafe { bitmap.GetDpi(&mut dpi.0, &mut dpi.1) };
+                have == pixels && dpi.0 == 96.0 * scale
+            });
+            let bitmap = match reusable {
+                Some(bitmap) => bitmap,
+                None => unsafe {
+                    let properties = D2D1_BITMAP_PROPERTIES1 {
+                        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                        dpiX: 96.0 * scale,
+                        dpiY: 96.0 * scale,
+                        bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+                        ..Default::default()
+                    };
+                    dc.CreateBitmap(pixels, None, 0, &properties)?
+                },
+            };
+            unsafe {
+                // A new target brings its own DPI to the context; the
+                // frame's is put back with the frame's target.
+                let target = dc.GetTarget()?;
+                let mut transform = Matrix3x2::default();
+                dc.GetTransform(&mut transform);
+                let mut dpi = (0.0, 0.0);
+                dc.GetDpi(&mut dpi.0, &mut dpi.1);
+                dc.SetTarget(&bitmap);
+                dc.SetDpi(96.0 * scale, 96.0 * scale);
+                dc.SetTransform(&Matrix3x2::translation(-left, -top));
+                dc.Clear(Some(&D2D1_COLOR_F::default()));
+                paint(frame);
+                dc.SetTarget(&target);
+                dc.SetDpi(dpi.0, dpi.1);
+                dc.SetTransform(&transform);
+            }
+            self.bitmap = Some((key, bitmap));
+        }
+        let image: ID2D1Image = self.bitmap.as_ref().unwrap().1.cast()?;
+        let at = windows_numerics::Vector2 { X: left, Y: top };
+        let mut parent = Matrix3x2::default();
+        unsafe { dc.GetTransform(&mut parent) };
+        unsafe {
+            dc.SetTransform(&(local * parent));
+            if let Some(color) = halo {
+                let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                glow.SetInput(0, &effect_input(dc, &self.bitmap.as_ref().unwrap().1)?, true);
+                glow.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &0.5f32.to_ne_bytes())?;
+                let rgba = [color.r, color.g, color.b, color.a];
+                glow.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                dc.DrawImage(&glow.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+            dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            dc.SetTransform(&parent);
+        }
+        Ok(())
+    }
+
+    pub fn release(&mut self) {
+        self.bitmap = None;
+    }
+}
+
+/// A bitmap as an effect's input, at its own DPI: effects read their input
+/// bitmaps' pixels at the context's DPI otherwise.
+pub fn effect_input(dc: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> Result<ID2D1Image> {
+    unsafe {
+        let mut dpi = (0.0f32, 0.0f32);
+        bitmap.GetDpi(&mut dpi.0, &mut dpi.1);
+        let compensation = dc.CreateEffect(&CLSID_D2D1DpiCompensation)?;
+        compensation.SetInput(0, &bitmap.cast::<ID2D1Image>()?, true);
+        let input_dpi = [dpi.0, dpi.1];
+        compensation.SetValue(
+            D2D1_DPICOMPENSATION_PROP_INPUT_DPI.0 as u32,
+            D2D1_PROPERTY_TYPE_VECTOR2,
+            std::slice::from_raw_parts(input_dpi.as_ptr().cast(), 8),
+        )?;
+        compensation.GetOutput()
+    }
+}
+
+pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
+    D2D_RECT_F { left, top, right: left + width, bottom: top + height }
+}
