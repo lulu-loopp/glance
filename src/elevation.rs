@@ -327,9 +327,11 @@ pub fn prepare_install_folder(folder: &Path, anyway: bool) -> Result<(), Install
         }
         // And what Glance puts there and later removes (its licenses folder
         // goes whole) must not be someone else's: either none of it is
-        // there yet, or the folder is an earlier Glance's alone.
+        // there yet, or the folder is an earlier Glance's alone (its
+        // program and uninstaller there, nothing else beside them).
         let ours_there = INSTALLED.iter().any(|name| folder.join(name).exists());
-        if ours_there && !only_ours(&folder) {
+        let earlier = ["glance.exe", "uninstall.exe"].iter().all(|name| folder.join(name).is_file()) && only_ours(&folder);
+        if ours_there && !earlier {
             return Err(InstallFolder::Occupied);
         }
     }
