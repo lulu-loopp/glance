@@ -1,8 +1,11 @@
 /* The settings window: Mica shows through (the window is transparent), the
    choices sit on the left, the live preview on the right. */
 
+/* The window's own surface, drawn here because the system backdrop does
+   not follow the app's own theme choice. */
 body.settings-app {
   overflow: hidden;
+  background: var(--window);
 }
 
 .settings-layout {
@@ -85,6 +88,7 @@ body.settings-app {
   --switch-off-knob: rgba(0, 0, 0, 0.6);
   --switch-on: var(--accent);
   --switch-on-knob: #ffffff;
+  --window: #f3f3f3;
   --card: rgba(255, 255, 255, 0.7);
   --card-stroke: rgba(0, 0, 0, 0.06);
   color: var(--text);
@@ -106,6 +110,7 @@ body.settings-app {
   --switch-off-stroke: rgba(255, 255, 255, 0.6);
   --switch-off-knob: rgba(255, 255, 255, 0.8);
   --switch-on-knob: #000000;
+  --window: #202020;
   --card: rgba(255, 255, 255, 0.05);
   --card-stroke: rgba(0, 0, 0, 0.2);
 }
