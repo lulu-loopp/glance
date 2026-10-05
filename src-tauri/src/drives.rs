@@ -22,9 +22,26 @@ pub struct DriveTemperature {
 /// Physical drives are numbered from zero; a gap this long means no more.
 const MAX_GAP: u32 = 4;
 
+/// The model name of every physical drive.
+pub fn models() -> Vec<String> {
+    let mut found = Vec::new();
+    each_drive(|index, handle| found.push(model(handle).unwrap_or_else(|| format!("Disk {index}"))));
+    found
+}
+
 /// Every physical drive that reports a temperature, by its model name.
 pub fn temperatures() -> Vec<DriveTemperature> {
     let mut found = Vec::new();
+    each_drive(|index, handle| {
+        if let Some(celsius) = temperature(handle) {
+            found.push(DriveTemperature { name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
+        }
+    });
+    found
+}
+
+/// Calls `visit` with each physical drive, opened for its properties only.
+fn each_drive(mut visit: impl FnMut(u32, HANDLE)) {
     let mut misses = 0;
     for index in 0.. {
         let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
@@ -48,12 +65,9 @@ pub fn temperatures() -> Vec<DriveTemperature> {
             continue;
         };
         misses = 0;
-        if let Some(celsius) = temperature(handle) {
-            found.push(DriveTemperature { name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
-        }
+        visit(index, handle);
         let _ = unsafe { CloseHandle(handle) };
     }
-    found
 }
 
 fn query(handle: HANDLE, property: STORAGE_PROPERTY_ID, buf: &mut [u64]) -> bool {

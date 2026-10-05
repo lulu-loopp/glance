@@ -134,6 +134,7 @@ function cpu(info: StaticInfo): ModuleDef {
   return {
     id: 'cpu',
     title: 'CPU',
+    detail: info.cpu_name,
     build(prefs) {
       const lane = percentLane({ kind: 'cpu', title: 'CPU', device: info.cpu_name, value: (s) => s.cpu, hotLoad: prefs.hotLoad });
       const setFacts = facts(lane.root);
@@ -222,6 +223,7 @@ function memory(info: StaticInfo): ModuleDef {
   return {
     id: 'memory',
     title: t('memory'),
+    detail: info.memory_modules ?? undefined,
     build(prefs) {
       const lane = percentLane({
         kind: 'memory',
@@ -254,6 +256,7 @@ function network(): ModuleDef {
   return {
     id: 'network',
     title: t('network'),
+    detail: t('networkDetail'),
     build(prefs) {
       const lane = rateLane({
         kind: 'network',
@@ -287,10 +290,11 @@ function network(): ModuleDef {
   };
 }
 
-function disk(): ModuleDef {
+function disk(info: StaticInfo): ModuleDef {
   return {
     id: 'disk',
     title: t('disk'),
+    detail: info.drives.join(', ') || undefined,
     build(prefs) {
       const lane = rateLane({
         kind: 'disk',
@@ -318,6 +322,7 @@ function processes(): ModuleDef {
   return {
     id: 'processes',
     title: t('processes'),
+    detail: t('processesDetail'),
     build(prefs) {
       const byMemory = prefs.processes.sort === 'memory';
       const root = element(`
@@ -511,7 +516,7 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     ...info.gpus.map((_, index) => gpu(info, index)),
     memory(info),
     network(),
-    disk(),
+    disk(info),
     processes(),
     storage(),
     temperatures(),

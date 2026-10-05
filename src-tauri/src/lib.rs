@@ -5,6 +5,7 @@ mod drives;
 mod metrics;
 mod panel;
 mod settings;
+mod smbios;
 
 use std::sync::{Arc, Mutex};
 use std::thread;

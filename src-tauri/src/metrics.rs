@@ -37,6 +37,10 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 #[derive(Clone, Serialize)]
 pub struct StaticInfo {
     pub cpu_name: String,
+    /// The memory modules, as "2 × 32 GB DDR5-6000", when the firmware says.
+    pub memory_modules: Option<String>,
+    /// The model of each physical drive.
+    pub drives: Vec<String>,
     pub threads: usize,
     pub mem_total: u64,
     pub gpus: Vec<GpuInfo>,
@@ -234,6 +238,8 @@ impl Sampler {
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
+            memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
+            drives: crate::drives::models(),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
             gpus,
