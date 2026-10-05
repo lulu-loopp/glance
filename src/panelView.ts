@@ -17,7 +17,8 @@ const MAX_COLUMNS = 3;
 
 /** What the column rule works from, measured with the lanes in one column (px). */
 export interface Measures {
-  lanesHeight: number;
+  laneHeights: number[];
+  laneGap: number;
   chromeHeight: number;
   columnWidth: number;
   columnGap: number;
@@ -25,6 +26,22 @@ export interface Measures {
 
 /** The Settings glyph of the system icon font. */
 const GEAR = '<span class="glyph" aria-hidden="true"></span>';
+
+/** What a panel may take up, in px: its height and how many columns. The backend works it out by the same rule. */
+export interface Room {
+  height: number;
+  max_columns: number;
+}
+
+/** Share of the height a panel opened from the top may take; the backend keeps the same. */
+const TOP_SHARE = 0.6;
+
+/** The room on a screen `width` by `height` px, for a panel opened from `edge`. */
+export function roomFor(edge: string, width: number, height: number, measures: Measures): Room {
+  if (edge !== 'top') return { height, max_columns: MAX_COLUMNS };
+  const fit = Math.floor((width - 2 * GAP + measures.columnGap) / (measures.columnWidth + measures.columnGap));
+  return { height: height * TOP_SHARE, max_columns: Math.max(fit, 1) };
+}
 
 export interface Box {
   left: number;
@@ -41,7 +58,7 @@ export class PanelView {
   private barText: HTMLElement;
   private lanes: Lane[] = [];
   private recorder!: Recorder;
-  measures: Measures = { lanesHeight: 0, chromeHeight: 0, columnWidth: 0, columnGap: 0 };
+  measures: Measures = { laneHeights: [], laneGap: 0, chromeHeight: 0, columnWidth: 0, columnGap: 0 };
 
   constructor(
     private host: HTMLElement,
@@ -94,31 +111,42 @@ export class PanelView {
   }
 
   /**
-   * Spreads the lanes over as many columns as `room` (px of height) needs to
-   * show them at full size, then centres the panel on `focus` as far as the
-   * host allows.
+   * Spreads the lanes over as many columns as they need to show at full size
+   * in the room (worked out from the measures, which this also takes), then
+   * centres the panel on the focus along its edge, as far as the host allows.
    */
-  layout(room: number, focus: number) {
+  layout(room: (measures: Measures) => Room, focus: { x: number; y: number }) {
     this.panel.style.setProperty('--columns', '1');
     this.deal([this.lanes.map((lane) => lane.root)]);
     const style = getComputedStyle(this.panel);
     const laneGap = parseFloat(style.getPropertyValue('--lane-gap')) || 0;
     this.measures = {
-      lanesHeight: this.lanesHost.offsetHeight,
+      laneHeights: this.lanes.map((lane) => lane.root.offsetHeight),
+      laneGap,
       chromeHeight: this.panel.offsetHeight - this.lanesHost.offsetHeight,
       columnWidth: parseFloat(style.getPropertyValue('--column-width')),
       columnGap: parseFloat(style.getPropertyValue('--column-gap')) || 0,
     };
-    const space = room - 2 * GAP - this.measures.chromeHeight;
-    const columns = Math.min(Math.max(Math.ceil(this.measures.lanesHeight / space), 1), MAX_COLUMNS);
+    const { height: roomHeight, max_columns } = room(this.measures);
+    const space = roomHeight - 2 * GAP - this.measures.chromeHeight;
+    // The fewest columns whose tallest fits; failing that, the most.
+    const heights = this.measures.laneHeights;
+    const most = Math.max(Math.min(max_columns, heights.length), 1);
+    let columns = 1;
+    while (columns < most && balancedCuts(heights, columns, laneGap).tallest > space) columns++;
     this.panel.style.setProperty('--columns', String(columns));
-    const heights = this.lanes.map((lane) => lane.root.offsetHeight);
-    const cuts = balancedCuts(heights, columns, laneGap);
+    const { cuts } = balancedCuts(heights, columns, laneGap);
     this.deal(cuts.map((start, i) => this.lanes.slice(start, cuts[i + 1]).map((lane) => lane.root)));
 
-    const height = this.panel.offsetHeight;
-    const bottom = this.host.clientHeight - GAP - height;
-    this.panel.style.top = `${Math.max(Math.min(focus - height / 2, bottom), GAP)}px`;
+    const along = (focus: number, size: number, extent: number) =>
+      Math.max(Math.min(focus - size / 2, extent - GAP - size), GAP);
+    if (this.host.dataset.edge === 'top') {
+      this.panel.style.top = '';
+      this.panel.style.left = `${along(focus.x, this.panel.offsetWidth, this.host.clientWidth)}px`;
+    } else {
+      this.panel.style.left = '';
+      this.panel.style.top = `${along(focus.y, this.panel.offsetHeight, this.host.clientHeight)}px`;
+    }
     this.recorder.layout();
   }
 
@@ -134,8 +162,16 @@ export class PanelView {
     );
   }
 
-  /** Lays the captured desktop under the panel for the active skin. */
-  dress() {
+  /**
+   * Lays the captured desktop under the panel for the active skin. With the
+   * theme following the backdrop, the whole panel turns light or dark by how
+   * bright the desktop behind it is.
+   */
+  dress(theme: ViewPrefs['theme']) {
+    if (theme === 'backdrop' && this.backdrop.present) {
+      this.host.dataset.theme = this.backdrop.isLight(this.rect(), this.host) ? 'light' : 'dark';
+      this.recorder.layout();
+    }
     this.backdrop.dress(this.panel, this.host.dataset.skin!, this.host);
   }
 
@@ -156,26 +192,32 @@ export class PanelView {
 }
 
 /**
- * Where each of `columns` columns starts, splitting the lanes in order so
- * the tallest column is as short as it can be. Lanes are few and columns at
- * most three, so every split is tried.
+ * Where each column starts, and the tallest column's height, when `heights`
+ * are split in order into `columns` columns so the tallest is as short as it
+ * can be. Lanes of height zero are hidden and take no gap. The backend splits
+ * by the same rule.
  */
-function balancedCuts(heights: number[], columns: number, gap: number): number[] {
+export function balancedCuts(heights: number[], columns: number, gap: number): { cuts: number[]; tallest: number } {
   const n = heights.length;
   const span = (from: number, to: number) => {
     const shown = heights.slice(from, to).filter((h) => h > 0);
     return shown.reduce((sum, h) => sum + h, 0) + Math.max(shown.length - 1, 0) * gap;
   };
-  let best = { tallest: Infinity, cuts: [0] };
-  const tryCuts = (cuts: number[]) => {
-    const bounds = [...cuts, n];
-    const tallest = Math.max(...cuts.map((start, i) => span(start, bounds[i + 1])));
-    if (tallest < best.tallest) best = { tallest, cuts };
-  };
-  if (columns === 1 || n < 2) return [0];
-  for (let i = 1; i < n; i++) {
-    if (columns === 2) tryCuts([0, i]);
-    else for (let j = i + 1; j < n; j++) tryCuts([0, i, j]);
+  const best = Array.from({ length: columns + 1 }, () => new Array<number>(n + 1).fill(Infinity));
+  const from = Array.from({ length: columns + 1 }, () => new Array<number>(n + 1).fill(0));
+  best[0][0] = 0;
+  for (let k = 1; k <= columns; k++) {
+    for (let i = k; i <= n; i++) {
+      for (let j = k - 1; j < i; j++) {
+        const candidate = Math.max(best[k - 1][j], span(j, i));
+        if (candidate < best[k][i]) {
+          best[k][i] = candidate;
+          from[k][i] = j;
+        }
+      }
+    }
   }
-  return best.cuts;
+  const cuts: number[] = [];
+  for (let k = columns, i = n; k > 0; i = from[k][i], k--) cuts.unshift(from[k][i]);
+  return { cuts, tallest: best[columns][n] };
 }

@@ -11,6 +11,7 @@ pub enum Edge {
     Left,
     #[default]
     Right,
+    Top,
 }
 
 /// Where along the edge the panel opens.

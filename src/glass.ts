@@ -5,9 +5,15 @@ import { offsetWithin } from './chart';
 
 const SVG = 'http://www.w3.org/2000/svg';
 
-/** Width of the curved rim of a piece of glass, and how far it bends what is behind (px). */
-const RIM = 26;
-const BEND = 22;
+/**
+ * Width of the curved rim of a piece of glass, and how far at most it bends
+ * what is behind (px). The bend falls off as (1 - depth/RIM)², whose steepest
+ * slope, at the very edge, is 2·BEND/RIM px of shift per px. Kept below one,
+ * the image behind is squeezed toward the edge as a convex rim does; above
+ * one it folds back on itself and reads as a hard break.
+ */
+const RIM = 40;
+const BEND = 16;
 /**
  * Backdrop luminance (0–1) that each theme's glass reads well over without
  * help, and the distance from it at which glass is fully frosted. Light
@@ -133,6 +139,12 @@ export class Backdrop {
         piece.prepend(lens);
       });
     }
+  }
+
+  /** Whether the capture behind a box of `stage` is light rather than dark. */
+  isLight(box: Box, stage: HTMLElement): boolean {
+    this.stage = stage;
+    return this.measure(box).mean > 0.5;
   }
 
   /** Mean and standard deviation of the capture's luminance behind a box of the viewport, 0–1. */

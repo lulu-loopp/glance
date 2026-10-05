@@ -12,7 +12,7 @@ import { Backdrop } from './glass';
 import { setLanguage, t } from './i18n';
 import { catalog } from './modules';
 import { onSystemTheme, resolveTheme } from './theme';
-import { PanelView } from './panelView';
+import { PanelView, roomFor } from './panelView';
 import { buildSettings, resolvePrefs } from './settings';
 import type { Bootstrap, Sample, Settings } from './types';
 
@@ -102,10 +102,18 @@ export async function settingsApp(boot: Bootstrap) {
     stage.style.transform = `scale(${scale})`;
     // Centred top to bottom when the width is what limits the scale.
     stage.style.top = `${(frame.clientHeight - size.height * scale) / 2}px`;
-    const right = settings.edge === 'right';
-    stage.style.transformOrigin = right ? 'top right' : 'top left';
-    stage.style.left = right ? '' : '0';
-    stage.style.right = right ? '0' : '';
+    // Along the top, the stage is centred and shows the panel and the top
+    // part of the screen below it.
+    const edge = settings.edge;
+    stage.style.transformOrigin = edge === 'right' ? 'top right' : edge === 'left' ? 'top left' : 'top center';
+    stage.style.left = edge === 'left' ? '0' : edge === 'top' ? `${(frame.clientWidth - size.width) / 2}px` : '';
+    stage.style.right = edge === 'right' ? '0' : '';
+    if (edge === 'top') {
+      const shownHeight = view.rect().height + PREVIEW_MARGIN;
+      const topScale = Math.min(frame.clientWidth / size.width, frame.clientHeight / shownHeight, 1);
+      stage.style.transform = `scale(${topScale})`;
+      stage.style.top = `${Math.max((frame.clientHeight - shownHeight * topScale) / 2, 0)}px`;
+    }
   };
 
   const render = () => {
@@ -115,8 +123,11 @@ export async function settingsApp(boot: Bootstrap) {
     // The title bar is drawn by the system; it follows the window's theme.
     void getCurrentWindow().setTheme(theme);
     view.build(settings, prefs);
-    view.layout(size.height, size.height / 2);
-    view.dress();
+    view.layout((measures) => roomFor(settings.edge, size.width, size.height, measures), {
+      x: size.width / 2,
+      y: size.height / 2,
+    });
+    view.dress(prefs.theme);
     fit();
   };
 

@@ -62,6 +62,10 @@
   border-radius: 16px 0 0 16px;
 }
 
+[data-skin='paper'][data-edge='top'] .panel {
+  border-radius: 0 0 16px 16px;
+}
+
 /* Columns are ruled like the lanes within them. */
 [data-skin='paper'] .column + .column {
   border-left: 1px solid var(--rule);
