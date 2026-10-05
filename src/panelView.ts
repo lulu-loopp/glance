@@ -121,7 +121,7 @@ export class PanelView {
     this.panel.classList.add('measuring');
     const style = getComputedStyle(this.panel);
     const laneGap = parseFloat(style.getPropertyValue('--lane-gap')) || 0;
-    this.measures = {
+    const fresh: Measures = {
       laneHeights: this.lanes.map((lane) => lane.root.offsetHeight),
       laneGap,
       chromeHeight: this.panel.offsetHeight - this.lanesHost.offsetHeight,
@@ -129,6 +129,11 @@ export class PanelView {
       columnGap: parseFloat(style.getPropertyValue('--column-gap')) || 0,
     };
     this.panel.classList.remove('measuring');
+    // Laid out at another zoom, a lane can measure a pixel or two off as its
+    // edges snap to other device pixels. That is not a change of content,
+    // and must not move the column count: the count sets the zoom, and a
+    // count that follows rounding flips back and forth for good.
+    if (!sameLayout(fresh, this.measures)) this.measures = fresh;
     const { height: roomHeight, max_columns } = room(this.measures);
     const space = roomHeight - 2 * GAP - this.measures.chromeHeight;
     // The fewest columns whose tallest fits; failing that, the most.
@@ -202,6 +207,22 @@ export class PanelView {
     return { left, top, width: this.panel.offsetWidth, height: this.panel.offsetHeight };
   }
 }
+
+/** Whether two measurements differ only by rounding. */
+function sameLayout(a: Measures, b: Measures): boolean {
+  const near = (x: number, y: number) => Math.abs(x - y) <= ROUNDING;
+  return (
+    a.laneHeights.length === b.laneHeights.length &&
+    a.laneHeights.every((h, i) => near(h, b.laneHeights[i])) &&
+    near(a.chromeHeight, b.chromeHeight) &&
+    a.columnWidth === b.columnWidth &&
+    a.columnGap === b.columnGap &&
+    a.laneGap === b.laneGap
+  );
+}
+
+/** How far (px) a measurement can drift with the zoom alone. */
+const ROUNDING = 2;
 
 /**
  * Where each column starts, and the tallest column's height, when `heights`
