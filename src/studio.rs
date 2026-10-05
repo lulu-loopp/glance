@@ -159,6 +159,18 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         Entrance::Slide(distance) => distance,
     };
 
+    // Where each lane rests in the frame, in pixels, for the compositor.
+    let ids: Vec<&str> = prefs.modules.iter().filter(|entry| entry.on).map(|entry| entry.id.as_str()).collect();
+    let rects: Vec<serde_json::Value> = layout
+        .lanes()
+        .iter()
+        .zip(&ids)
+        .map(|(r, id)| {
+            serde_json::json!({ "id": id, "x": (rest.0 + r.x * zoom) * px, "y": (rest.1 + r.y * zoom) * px, "w": r.w * zoom * px, "h": r.h * zoom * px })
+        })
+        .collect();
+    std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&rects).unwrap()).map_err(|e| e.to_string())?;
+
     let mut layers = PanelLayers::default();
     for index in 0..frames {
         let t = index as f32 / script.fps;
@@ -175,24 +187,11 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             hover: None,
         };
         let lanes = view::lanes(&scene);
-        // Sliding in and out as the panel does: the same curves, the same
-        // fades, slowed down `slow` times for the camera if asked.
-        let slow = shot.slow.max(1.0);
-        let (mut shift, mut opacity) = match shot.slide_in {
-            Some(at) if t < at => (1.0, 0.0),
-            Some(at) => {
-                let into = (t - at) / slow;
-                (1.0 - OPEN.1.at((into / OPEN.0.as_secs_f32()).min(1.0)), (into / OPEN_FADE.as_secs_f32()).min(1.0))
-            }
-            None => (0.0, 1.0),
-        };
-        if let Some(at) = shot.slide_out.filter(|at| t >= *at) {
-            let out = ((t - at) / slow / CLOSE.0.as_secs_f32()).min(1.0);
-            shift = shift.max(CLOSE.1.at(out));
-            opacity = opacity.min(1.0 - out);
-        }
-        let pixels = gfx
-            .draw_offscreen((script.width, script.height), px, |frame| {
+        // Where the panel is at `at` seconds: off by `shift` of its travel,
+        // at `opacity`.
+        let moved = |at: f32| motion(shot, at);
+        let draw = |shift: f32, opacity: f32, layers: &mut PanelLayers| {
+            gfx.draw_offscreen((script.width, script.height), px, |frame| {
                 let bitmap = desktop.bitmap(&frame.dc, px).ok();
                 if let Some(bitmap) = &bitmap {
                     unsafe { frame.dc.DrawBitmap(bitmap, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
@@ -209,11 +208,49 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 let _ = layers.draw(frame, &picture, local, px * zoom);
                 unsafe { frame.dc.PopLayer() };
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+        };
+        // While the panel moves, the frame is the mean of several moments
+        // across half the frame's time: a camera's motion blur.
+        let pixels = if moved(t) == moved(t + 1.0 / script.fps) {
+            let (shift, opacity) = moved(t);
+            draw(shift, opacity, &mut layers)?
+        } else {
+            const MOMENTS: usize = 8;
+            let mut sum = vec![0u32; (script.width * script.height * 4) as usize];
+            for k in 0..MOMENTS {
+                let (shift, opacity) = moved(t + k as f32 / MOMENTS as f32 * 0.5 / script.fps);
+                for (total, value) in sum.iter_mut().zip(draw(shift, opacity, &mut layers)?) {
+                    *total += value as u32;
+                }
+            }
+            sum.into_iter().map(|total| ((total + MOMENTS as u32 / 2) / MOMENTS as u32) as u8).collect()
+        };
         gfx.sweep();
         save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Where a shot's panel is at `t` seconds: how far out of its travel
+/// (1 out, 0 in place) and how opaque, sliding in and away as the panel
+/// does, with the same curves and fades, slowed `slow` times if asked.
+fn motion(shot: &Shot, t: f32) -> (f32, f32) {
+    let slow = shot.slow.max(1.0);
+    let (mut shift, mut opacity) = match shot.slide_in {
+        Some(at) if t < at => (1.0, 0.0),
+        Some(at) => {
+            let into = (t - at) / slow;
+            (1.0 - OPEN.1.at((into / OPEN.0.as_secs_f32()).min(1.0)), (into / OPEN_FADE.as_secs_f32()).min(1.0))
+        }
+        None => (0.0, 1.0),
+    };
+    if let Some(at) = shot.slide_out.filter(|at| t >= *at) {
+        let out = ((t - at) / slow / CLOSE.0.as_secs_f32()).min(1.0);
+        shift = shift.max(CLOSE.1.at(out));
+        opacity = opacity.min(1.0 - out);
+    }
+    (shift, opacity)
 }
 
 /// Readings for a machine with `info`'s hardware, at `load` (0 idle, 1 flat

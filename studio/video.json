@@ -1,77 +1,41 @@
 {
   "fps": 30,
   "frames": "target/studio/frames",
-  "out": "target/studio/glance-promo-v2.mp4",
+  "wallpaper": "target/studio/wall-dark.png",
+  "out": "target/studio/glance-promo-v4.mp4",
   "scenes": [
     {
-      "kind": "intro",
-      "shot": "intro",
-      "seconds": 5.0,
-      "title": "往屏幕边缘推一下鼠标",
-      "subtitle": ""
+      "kind": "intro", "shot": "intro", "seconds": 4.4,
+      "title": "往屏幕边缘\n推一下鼠标", "subtitle": ""
     },
     {
-      "kind": "footage",
-      "shot": "rise",
-      "seconds": 5.0,
-      "title": "从待机到满载\n实时跟踪",
-      "subtitle": "CPU 温度功耗、GPU、内存\n一个面板看完"
+      "kind": "footage", "shot": "rise", "seconds": 4.4,
+      "title": "从待机到满载\n实时跟踪", "subtitle": "CPU 温度功耗、GPU、内存\n一个面板看完"
     },
     {
-      "kind": "looks",
-      "shots": [
-        "look-paper",
-        "look-glass",
-        "look-fluent"
-      ],
-      "labels": [
-        "记录纸",
-        "磨砂玻璃",
-        "Windows 11"
-      ],
-      "seconds": 5.0,
-      "title": "三种外观\n随你换",
-      "subtitle": "深浅色可跟随壁纸自动切换"
+      "kind": "looks", "seconds": 5.7, "each": 1.3,
+      "shots": ["look-paper", "look-glass", "look-fluent"],
+      "stills": ["still-paper", "still-glass", "still-fluent"],
+      "labels": ["记录纸", "磨砂玻璃", "Windows 11"],
+      "title": "三种外观\n随你换", "subtitle": "深浅色可跟随壁纸自动切换"
     },
     {
-      "kind": "detail",
-      "shot": "detail",
-      "seconds": 5.0,
-      "title": "硬件细节\n一格不少",
-      "subtitle": "温度、功耗\n风扇、主板传感器",
-      "width": 330
-    },
-    {
-      "kind": "stats",
-      "shot": "calm",
-      "seconds": 5.0,
-      "title": "轻到感觉不到",
-      "subtitle": "",
-      "stats": [
-        [
-          "≈1 MB",
-          "程序大小"
-        ],
-        [
-          "≈55 MB",
-          "内存占用"
-        ],
-        [
-          "<1%",
-          "CPU 占用（面板收起时）"
-        ],
-        [
-          "不联网",
-          "无账号 · 无广告"
-        ]
+      "kind": "detail", "shot": "detail", "seconds": 6.0,
+      "title": "", "subtitle": "",
+      "stops": [
+        { "lane": "cpu", "name": "CPU", "what": "温度 · 功耗\n每个核心的负载" },
+        { "lane": "gpu:0", "name": "显卡", "what": "功耗 · 风扇\n显存 · 频率" },
+        { "lane": "board", "name": "主板", "what": "各处温度\n风扇转速" }
       ]
     },
     {
-      "kind": "end",
-      "shot": "calm",
-      "seconds": 5.0,
-      "title": "Glance",
-      "subtitle": "免费 · 开源 · Windows 10/11",
+      "kind": "stats", "shot": "calm", "seconds": 4.4,
+      "title": "轻到感觉不到",
+      "stats": [["≈1 MB", "程序大小"], ["≈55 MB", "内存占用"], ["<1%", "CPU 占用（面板收起时）"], ["不联网", "无账号 · 无广告"]]
+    },
+    {
+      "kind": "end", "shot": "calm", "seconds": 4.6,
+      "title": "Glance", "subtitle": "免费 · 开源 · Windows 10/11",
       "footer": "GitHub：lulu-loopp/glance"
     }
   ]
