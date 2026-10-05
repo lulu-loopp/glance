@@ -106,6 +106,14 @@ pub fn run() {
         elevation::remove_all_tasks();
         return;
     }
+    // The installer asks whether a chosen folder would let Glance start
+    // unasked: exit code 0 if so.
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, folder] = args.as_slice() {
+        if flag == "--check-install-folder" {
+            std::process::exit(if elevation::install_folder_holds(std::path::Path::new(folder)) { 0 } else { 1 });
+        }
+    }
     // One Glance at a time: starting it again opens its settings. Asked
     // before handing over to an elevated start, which the launch task
     // refuses while the Glance it started is running.

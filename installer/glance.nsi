@@ -1,4 +1,5 @@
-﻿; Glance's installer: for every user of the machine, under Program Files.
+﻿; Glance's installer: for every user of the machine, under Program Files
+; unless another folder is chosen.
 ; Build with: makensis installer\glance.nsi (after cargo build --release).
 ;
 ; Installing copies Glance and the PawnIO driver's setup, which Glance runs
@@ -21,9 +22,8 @@ Unicode true
 
 Name "${NAME}"
 OutFile "..\target\${NAME}_${VERSION}_x64-setup.exe"
-; Always Program Files: only a copy there, which ordinary programs cannot
-; replace, may start elevated without asking and start with Windows.
 InstallDir "$PROGRAMFILES64\${NAME}"
+InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 ManifestDPIAware true
@@ -42,6 +42,8 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
 
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
+!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -50,6 +52,8 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
+LangString OpenFolder ${LANG_SIMPCHINESE} "装在这里，Glance 不能开机自启，每次启动也都要确认管理员权限。$\r$\n$\r$\n这个位置上面有你的账户能改名或改权限的文件夹，别的程序就能把 Glance 换成自己，从而悄悄拿到管理员权限。Program Files，或者磁盘根目录下的新文件夹（比如 D:\Glance）没有这个问题。$\r$\n$\r$\n仍然装在这里吗？"
+LangString OpenFolder ${LANG_ENGLISH} "Installed here, Glance cannot start with Windows, and every start asks for administrator rights.$\r$\n$\r$\nA folder above this one can be renamed or re-permissioned by your account, so another program could put itself in Glance's place and quietly gain administrator rights. Program Files, or a new folder at a drive's root (such as D:\Glance), is safe.$\r$\n$\r$\nInstall here anyway?"
 LangString RemovePawnIO ${LANG_SIMPCHINESE} "也要卸载 PawnIO 驱动吗？$\r$\n$\r$\n它是 Glance 安装的，用来读取温度和风扇。如果其他硬件监控或风扇控制软件（比如 HWiNFO、FanControl）也在用它，请保留。"
 LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver too?$\r$\n$\r$\nGlance installed it to read temperatures and fans. Keep it if other monitoring or fan control programs (such as HWiNFO or FanControl) use it."
 
@@ -69,6 +73,18 @@ Function .onInit
   SetRegView 64
 FunctionEnd
 
+; Whether Glance in the chosen folder could start unasked: asked of Glance
+; itself, which applies the same rule when it starts.
+Function CheckFolder
+  InitPluginsDir
+  File "/oname=$PLUGINSDIR\${EXE}" "..\target\release\${EXE}"
+  ExecWait '"$PLUGINSDIR\${EXE}" --check-install-folder "$INSTDIR"' $0
+  ${If} $0 != 0
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolder)" /SD IDYES IDYES +2
+    Abort
+  ${EndIf}
+FunctionEnd
+
 Section "Glance"
   !insertmacro StopGlance
   SetOutPath "$INSTDIR"
@@ -84,6 +100,15 @@ Section "Glance"
   File /r "..\pawnio-modules\source\*"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  ; Glance's folder as Program Files keeps its folders: owned by the
+  ; administrators, changed only by them and the system, read by everyone.
+  ; What Glance put in it then takes those rights; anything else there is
+  ; left as it was.
+  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR" /setowner *S-1-5-32-544 /C /Q'
+  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /C /Q'
+  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR\${EXE}" "$INSTDIR\uninstall.exe" /reset /C /Q'
+  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR\resources" "$INSTDIR\licenses" /reset /T /C /Q'
 
   SetShellVarContext all
   CreateShortcut "$SMPROGRAMS\${NAME}.lnk" "$INSTDIR\${EXE}"
@@ -108,8 +133,8 @@ FunctionEnd
 Section "Uninstall"
   !insertmacro StopGlance
   ; Every account's tasks for Glance, removed by the installed copy itself
-  ; (in Program Files, where only administrators can change it) through
-  ; Task Scheduler: no shell or script host that could load anything else.
+  ; (in a folder only administrators can change) through Task Scheduler: no
+  ; shell or script host that could load anything else.
   ExecWait '"$INSTDIR\${EXE}" --remove-tasks'
 
   ; The driver goes only if Glance put it there and the user agrees; a
