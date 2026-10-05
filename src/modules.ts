@@ -386,6 +386,38 @@ function storage(): ModuleDef {
   };
 }
 
+function temperatures(): ModuleDef {
+  return {
+    id: 'temperatures',
+    title: t('temperatures'),
+    detail: t('temperaturesDetail'),
+    build(prefs) {
+      const root = element(`
+        <section class="lane lane-list lane-temperatures">
+          <header class="lane-head"><h2>${t('temperatures')}</h2></header>
+          <ol class="rows"></ol>
+        </section>`);
+      const list = root.querySelector('ol')!;
+      return {
+        root,
+        plots: [],
+        update(sample) {
+          // HWiNFO sees every device, drives included; without it, the
+          // drives that report to Windows directly.
+          const rows: [string, number][] =
+            sample.hw?.devices ?? sample.drive_temps.map((drive) => [drive.name, drive.celsius]);
+          root.hidden = rows.length === 0;
+          list.replaceChildren(
+            ...rows.map(([name, celsius]) =>
+              element(`<li data-hot="${celsius > prefs.hotTemp}"><span class="row-name">${escapeHtml(name)}</span><span class="row-value">${Math.round(celsius)} °C</span></li>`),
+            ),
+          );
+        },
+      };
+    },
+  };
+}
+
 function fans(): ModuleDef {
   return {
     id: 'fans',
@@ -482,6 +514,7 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     disk(),
     processes(),
     storage(),
+    temperatures(),
     fans(),
     battery(),
     system(),

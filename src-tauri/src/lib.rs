@@ -1,6 +1,7 @@
 mod capture;
 mod hwinfo;
 mod detector;
+mod drives;
 mod metrics;
 mod panel;
 mod settings;
