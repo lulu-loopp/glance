@@ -46,7 +46,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "glance"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "embed-resource",
  "serde",

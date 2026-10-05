@@ -14,7 +14,7 @@ Unicode true
 !include "x64.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.1.1"
+!define VERSION "0.1.2"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
@@ -25,6 +25,13 @@ OutFile "..\target\${NAME}_${VERSION}_x64-setup.exe"
 InstallDir "$PROGRAMFILES64\${NAME}"
 InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
+
+; A release build (scripts\release.ps1 -Sign, which defines SIGN) signs the
+; uninstaller as it is written and the installer once it is made.
+!ifdef SIGN
+  !uninstfinalize 'pwsh -NoProfile -ExecutionPolicy Bypass -File "..\scripts\sign.ps1" -Files "%1"' = 0
+  !finalize 'pwsh -NoProfile -ExecutionPolicy Bypass -File "..\scripts\sign.ps1" -Files "%1"' = 0
+!endif
 SetCompressor /SOLID lzma
 ManifestDPIAware true
 BrandingText "${NAME} ${VERSION}"
