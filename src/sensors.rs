@@ -132,13 +132,16 @@ impl EnergyCounter {
         EnergyCounter { unit, last: None }
     }
 
-    /// The power drawn since the previous count, given the count now.
+    /// The power drawn since the previous count, given the count now. A
+    /// counter that has not moved is not counting (a running package always
+    /// draws power; a hypervisor may return a constant): no reading.
     fn power(&mut self, count: u32) -> Option<f32> {
         let now = Instant::now();
         let longest = (1u64 << 32) as f64 * self.unit / MOST_WATTS;
         let power = self.last.and_then(|(before, at)| {
             let seconds = now.duration_since(at).as_secs_f64();
-            (seconds > 0.0 && seconds < longest).then(|| (count.wrapping_sub(before) as f64 * self.unit / seconds) as f32)
+            let counted = count.wrapping_sub(before);
+            (counted > 0 && seconds > 0.0 && seconds < longest).then(|| (counted as f64 * self.unit / seconds) as f32)
         });
         self.last = Some((count, now));
         power
@@ -377,6 +380,9 @@ mod tests {
         counter.last = Some((u32::MAX - 16384 * 50 + 1, start));
         let watts = counter.power(16384 * 50).unwrap();
         assert!((watts - 100.0).abs() < 0.5, "{watts}");
+        // A counter standing still is not counting.
+        counter.last = Some((7, Instant::now() - std::time::Duration::from_secs(1)));
+        assert_eq!(counter.power(7), None);
         // A gap the counter could wrap in more than once gives nothing.
         counter.last = Some((0, Instant::now() - std::time::Duration::from_secs(400)));
         assert_eq!(counter.power(5), None);

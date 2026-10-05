@@ -10,6 +10,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Ioctl::{
     PropertyStandardQuery, StorageDeviceProperty, StorageDeviceTemperatureProperty, IOCTL_STORAGE_QUERY_PROPERTY,
     STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY, STORAGE_TEMPERATURE_DATA_DESCRIPTOR,
+    STORAGE_TEMPERATURE_INFO,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -88,15 +89,28 @@ fn query(handle: HANDLE, property: STORAGE_PROPERTY_ID, buf: &mut [u64]) -> bool
     .is_ok()
 }
 
-/// The drive's own temperature sensor (the first one it lists, its composite
-/// temperature on NVMe drives).
+/// The drive's own temperature: the first of its sensors with a reading
+/// (on NVMe drives the first is the composite temperature).
 fn temperature(handle: HANDLE) -> Option<f32> {
     let mut buf = [0u64; 64];
     if !query(handle, StorageDeviceTemperatureProperty, &mut buf) {
         return None;
     }
     let descriptor = unsafe { &*(buf.as_ptr() as *const STORAGE_TEMPERATURE_DATA_DESCRIPTOR) };
-    (descriptor.InfoCount > 0).then(|| descriptor.TemperatureInfo[0].Temperature as f32)
+    // The sensors that fit in the buffer, of those the drive lists.
+    let room = (std::mem::size_of_val(&buf) - std::mem::offset_of!(STORAGE_TEMPERATURE_DATA_DESCRIPTOR, TemperatureInfo))
+        / std::mem::size_of::<STORAGE_TEMPERATURE_INFO>();
+    let count = (descriptor.InfoCount as usize).min(room);
+    let sensors = unsafe { std::slice::from_raw_parts(descriptor.TemperatureInfo.as_ptr(), count) };
+    sensors.iter().map(|sensor| sensor.Temperature).find(|&celsius| plausible(celsius)).map(f32::from)
+}
+
+/// Whether a drive's reported temperature can be one: not the "unknown"
+/// marker (the lowest value), and within what a working drive can be at
+/// (no storage device works below −55 °C or above 150 °C; virtual drives
+/// report numbers far outside).
+fn plausible(celsius: i16) -> bool {
+    (-55..=150).contains(&celsius)
 }
 
 fn model(handle: HANDLE) -> Option<String> {
@@ -116,6 +130,14 @@ fn model(handle: HANDLE) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tells_readings_from_markers() {
+        assert!(super::plausible(34));
+        // The unknown marker, and what a virtual NVMe drive reports.
+        assert!(!super::plausible(i16::MIN));
+        assert!(!super::plausible(11759));
+    }
+
     #[test]
     fn reads_this_machines_drives() {
         let start = std::time::Instant::now();

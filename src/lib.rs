@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
-use windows::core::w;
-use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 
 use metrics::{Sampler, StaticInfo};
 use panel::Controller;
@@ -77,6 +77,21 @@ pub(crate) fn quit() {
     tray::quit();
 }
 
+/// The mutex a running Glance holds, one per sign-in session.
+const SINGLE_INSTANCE: PCWSTR = w!("Local\\Glance.SingleInstance");
+
+/// Whether Glance already runs in this session.
+fn already_running() -> bool {
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, SINGLE_INSTANCE) } {
+        Ok(mutex) => {
+            let _ = unsafe { CloseHandle(mutex) };
+            true
+        }
+        // An elevated Glance's mutex is there but out of an ordinary start's reach.
+        Err(error) => error.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    }
+}
+
 pub fn run() {
     // One multithreaded COM apartment for the life of the process: every
     // thread that uses COM or WinRT (the panel's and the settings' threads)
@@ -91,6 +106,13 @@ pub fn run() {
         elevation::remove_all_tasks();
         return;
     }
+    // One Glance at a time: starting it again opens its settings. Asked
+    // before handing over to an elevated start, which the launch task
+    // refuses while the Glance it started is running.
+    if already_running() {
+        tray::ask_for_settings();
+        return;
+    }
     // The sensors need administrator rights. An ordinary start hands over to
     // an elevated one and leaves; if the user declines, Glance runs without
     // the driver's sensors. A debug build runs as started, so that tools
@@ -98,8 +120,8 @@ pub fn run() {
     if !cfg!(debug_assertions) && !elevation::is_elevated() && elevation::relaunch_elevated() {
         return;
     }
-    // One Glance at a time: starting it again opens its settings.
-    let _single = unsafe { CreateMutexW(None, true, w!("Local\\Glance.SingleInstance")) };
+    // Two starts at once: the later one asks the first for its settings.
+    let _single = unsafe { CreateMutexW(None, true, SINGLE_INSTANCE) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         tray::ask_for_settings();
         return;
