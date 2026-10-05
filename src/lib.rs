@@ -7,6 +7,8 @@ mod metrics;
 mod panel;
 mod pawnio;
 mod sensors;
+#[cfg(feature = "studio")]
+mod studio;
 mod settings;
 mod smbios;
 mod superio;
@@ -127,6 +129,15 @@ pub fn run() {
         }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
         [_, flag] if flag == "--remove-settings" => std::process::exit(if elevation::remove_settings() { 0 } else { 4 }),
+        // The studio films the panel for the video and the README.
+        #[cfg(feature = "studio")]
+        [_, flag, script, out] if flag == "--studio" => {
+            if let Err(error) = studio::run(std::path::Path::new(script), std::path::Path::new(out)) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
             // "anyway": the user chose an unprotected place all the same.
             let anyway = flag == "--install-anyway";

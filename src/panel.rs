@@ -61,7 +61,7 @@ const CORNER_EXCLUSION: f64 = 48.0;
 const LONGEST_SPAN: Duration = Duration::from_secs(300);
 /// The chart's pen runs this far behind the newest sample beyond one
 /// interval, so the next sample has arrived by the time it is drawn to.
-const PEN_LAG_MS: f64 = 100.0;
+pub(crate) const PEN_LAG_MS: f64 = 100.0;
 const TICK_MS: u32 = 16;
 /// Timers on the input loop while the panel is down: one that follows the
 /// pointer resting on the edge, and the slow watch for blocked input.
@@ -79,8 +79,8 @@ const WHEEL_ROWS: f32 = 3.0;
 const SCROLL_EASE: f32 = 0.06;
 
 /// The panel slides in from past the edge and fades up, and goes the same way.
-const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
-const OPEN_FADE: Duration = Duration::from_millis(140);
+pub(crate) const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
+pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
 const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
