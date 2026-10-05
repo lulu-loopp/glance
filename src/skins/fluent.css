@@ -12,7 +12,10 @@ body[data-skin='fluent'] {
   --font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
   --figure-font: 600 34px 'Segoe UI Variable Display', 'Segoe UI', sans-serif;
   --accent: var(--accent-on-light);
-  --sheet-tint: rgba(243, 243, 243, 0.82);
+  /* The acrylic recipe: a luminosity layer evens out how bright the
+     desktop behind is, then a thin tint colours it. */
+  --sheet-luminosity: rgba(252, 252, 252, 0.85);
+  --sheet-tint: rgba(252, 252, 252, 0);
   --sheet-stroke: rgba(0, 0, 0, 0.1);
   --footer: rgba(0, 0, 0, 0.035);
   --text: rgba(0, 0, 0, 0.9);
@@ -43,7 +46,8 @@ body[data-skin='fluent'] {
 @media (prefers-color-scheme: dark) {
   body[data-skin='fluent'] {
     --accent: var(--accent-on-dark);
-    --sheet-tint: rgba(36, 36, 36, 0.84);
+    --sheet-luminosity: rgba(44, 44, 44, 0.96);
+    --sheet-tint: rgba(44, 44, 44, 0.15);
     --sheet-stroke: rgba(255, 255, 255, 0.09);
     --footer: rgba(0, 0, 0, 0.18);
     --text: #ffffff;
@@ -77,11 +81,21 @@ body[data-skin='fluent'] {
   filter: url(#acrylic);
 }
 
-[data-skin='fluent'] .panel::before {
+[data-skin='fluent'] .panel::before,
+[data-skin='fluent'] .panel::after {
   content: '';
   position: absolute;
   inset: 0;
   z-index: -1;
+  pointer-events: none;
+}
+
+[data-skin='fluent'] .panel::before {
+  background: var(--sheet-luminosity);
+  mix-blend-mode: luminosity;
+}
+
+[data-skin='fluent'] .panel::after {
   background: var(--noise), var(--sheet-tint);
 }
 
