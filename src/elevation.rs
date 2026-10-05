@@ -17,21 +17,19 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use windows::core::{w, Interface, BOOL, BSTR, HSTRING, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, LocalFree, ERROR_SUCCESS, HANDLE, HLOCAL};
+use windows::core::{w, Interface, BSTR, HSTRING, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-    SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows::Win32::Security::{
-    GetAce, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation, InitializeAcl, MapGenericMask,
-    TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
-    GENERIC_MAPPING, INHERIT_ONLY_ACE, OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
-    UNPROTECTED_DACL_SECURITY_INFORMATION,
+    GetAce, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    PSID, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
+    CreateDirectoryW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_DELETE_CHILD, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_DATA, WRITE_DAC,
     WRITE_OWNER,
 };
@@ -194,13 +192,16 @@ const INSTALLED: [&str; 4] = ["glance.exe", "uninstall.exe", "resources", "licen
 /// What a folder chosen to install into is.
 #[derive(Debug, PartialEq)]
 pub enum InstallFolder {
-    /// Glance there could start elevated without asking: every folder above
-    /// it holds (see `checked`), and the installer makes it administrators'.
+    /// Glance can be installed there and start elevated without asking: no
+    /// one but administrators can change any folder above it, and the folder
+    /// is new (the installer creates it administrators' from the start) or
+    /// an earlier Glance's that only administrators could ever change.
     Holds,
-    /// Glance there would ask every time: a folder above can be changed.
+    /// A folder above it can be changed by others: whatever was installed
+    /// there could be put in another's place.
     Open,
-    /// It holds something besides an earlier Glance, which taking it over
-    /// would re-permission, or which Glance might load.
+    /// It exists, and holds something besides an earlier Glance or could be
+    /// changed by others: Glance is not installed into what it cannot vouch for.
     Occupied,
     /// It, or a folder above it, is a link or junction, or it is a drive's
     /// root: what it leads to is not what was chosen.
@@ -231,112 +232,74 @@ fn is_link(path: &Path) -> bool {
     path.symlink_metadata().map_or(true, |meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0)
 }
 
-/// Whether nothing anywhere inside `folder` is a link or junction (none is
-/// followed while looking).
-fn no_links_inside(folder: &Path) -> bool {
-    std::fs::read_dir(folder).is_ok_and(|entries| {
-        entries.into_iter().all(|entry| {
-            entry.is_ok_and(|entry| {
-                let path = entry.path();
-                !is_link(&path) && (!path.is_dir() || no_links_inside(&path))
+/// Rights over a folder that would let someone change what is in it.
+const FOLDER_CHANGES: u32 =
+    FILE_ADD_FILE.0 | FILE_ADD_SUBDIRECTORY.0 | FILE_DELETE_CHILD.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0;
+/// Rights over a file that would let someone change it.
+const FILE_CHANGES: u32 = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | DELETE.0 | WRITE_DAC.0 | WRITE_OWNER.0;
+
+/// Whether only administrators can change `folder` and everything in it,
+/// none of it a link. Then no one else can have changed it, or hold it open
+/// to change it now.
+fn only_trusted_inside(folder: &Path) -> bool {
+    !is_link(folder)
+        && only_trusted_can(folder, FOLDER_CHANGES)
+        && std::fs::read_dir(folder).is_ok_and(|entries| {
+            entries.into_iter().all(|entry| {
+                entry.is_ok_and(|entry| {
+                    let path = entry.path();
+                    if is_link(&path) {
+                        false
+                    } else if path.is_dir() {
+                        only_trusted_inside(&path)
+                    } else {
+                        only_trusted_can(&path, FILE_CHANGES)
+                    }
+                })
             })
         })
-    })
 }
 
 pub fn install_folder(folder: &Path) -> InstallFolder {
     let Some(folder) = direct(folder) else { return InstallFolder::Indirect };
-    if folder.exists() {
-        if !only_ours(&folder) {
-            return InstallFolder::Occupied;
-        }
-        if !no_links_inside(&folder) {
-            return InstallFolder::Indirect;
-        }
+    let above = folder.parent().and_then(|above| std::fs::canonicalize(above).ok());
+    if !above.is_some_and(|above| folders_hold(&above)) {
+        return InstallFolder::Open;
     }
-    match folder.parent() {
-        Some(above) if std::fs::canonicalize(above).is_ok_and(|above| folders_hold(&above)) => InstallFolder::Holds,
-        _ => InstallFolder::Open,
+    if folder.exists() && !(only_ours(&folder) && only_trusted_inside(&folder)) {
+        return InstallFolder::Occupied;
     }
+    InstallFolder::Holds
 }
 
-/// Makes `folder` Glance's own before anything is put in it: created if
-/// need be, owned by the administrators, changed only by them and the
-/// system, read by everyone, as Program Files' folders are; an earlier
-/// Glance in it takes the same owner and rights, with nothing of its own.
-/// Only a folder `install_folder` does not call occupied or indirect.
-///
-/// Taken from the top down, each folder before what is in it: once a folder
-/// is the administrators', nothing else can add to it or swap what is in it,
-/// so what was found there (never a link: links are not followed, and stop
-/// the taking) is what is taken. What it holds is looked at again once all
-/// of it is theirs, when no one else can change it any more.
+/// Readies `folder` for Glance to be put in it. A new folder is created
+/// owned by the administrators, changed only by them and the system, and
+/// read by everyone (as Program Files' folders are), in the one step that
+/// creates it: no one else ever has it. An earlier Glance's folder, which
+/// only administrators can change, is left as it is. Anything else is
+/// refused; nothing outside `folder` is touched.
 pub fn prepare_install_folder(folder: &Path) -> Result<(), InstallFolder> {
-    // Looked at first too, so that a folder of other things is not touched.
     match install_folder(folder) {
-        InstallFolder::Holds | InstallFolder::Open => {}
+        InstallFolder::Holds => {}
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
     if !folder.exists() {
-        std::fs::create_dir_all(&folder).map_err(|_| InstallFolder::Open)?;
+        let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
+            .map_err(|_| InstallFolder::Open)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: false.into(),
+        };
+        let made = unsafe { CreateDirectoryW(&HSTRING::from(folder.as_os_str()), Some(&attributes)) };
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        made.map_err(|_| InstallFolder::Occupied)?;
     }
-    // Owner Administrators; a protected list: Administrators and SYSTEM full
-    // control, Users read and run, all passed on to what is inside. What is
-    // inside takes the owner and an empty, unprotected list: only what the
-    // folder passes on.
-    let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
-    let mut descriptor = PSECURITY_DESCRIPTOR::default();
-    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
-        .map_err(|_| InstallFolder::Open)?;
-    let (mut owner, mut dacl) = (PSID::default(), std::ptr::null_mut::<ACL>());
-    let (mut defaulted, mut present) = (BOOL::default(), BOOL::default());
-    let mut empty = [0u64; 2];
-    let parts = unsafe {
-        GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted)
-            .and_then(|_| GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted))
-            .and_then(|_| InitializeAcl(empty.as_mut_ptr().cast(), size_of::<ACL>() as u32, ACL_REVISION))
-    };
-    let taken = parts.is_ok()
-        && take(&folder, owner, dacl, PROTECTED_DACL_SECURITY_INFORMATION)
-        && take_inside(&folder, owner, empty.as_ptr().cast());
-    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-    if !taken {
-        return Err(if no_links_inside(&folder) { InstallFolder::Open } else { InstallFolder::Indirect });
-    }
-    // Now only administrators can change it: what it holds is what it holds.
-    if !only_ours(&folder) {
-        return Err(InstallFolder::Occupied);
-    }
-    if !no_links_inside(&folder) {
-        return Err(InstallFolder::Indirect);
-    }
-    let held = only_trusted_can(&folder, (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
-    held.then_some(()).ok_or(InstallFolder::Open)
-}
-
-/// Gives `path` (not a link: checked before) `owner` and `dacl`, `kind` saying
-/// whether the list is protected or passes on what its folder gives.
-fn take(path: &Path, owner: PSID, dacl: *const ACL, kind: OBJECT_SECURITY_INFORMATION) -> bool {
-    if is_link(path) {
-        return false;
-    }
-    let info = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION | kind;
-    let set = unsafe { SetNamedSecurityInfoW(&HSTRING::from(path.as_os_str()), SE_FILE_OBJECT, info, Some(owner), None, Some(dacl), None) };
-    set == ERROR_SUCCESS
-}
-
-/// Takes everything inside `folder`, each folder before what is in it.
-fn take_inside(folder: &Path, owner: PSID, empty: *const ACL) -> bool {
-    std::fs::read_dir(folder).is_ok_and(|entries| {
-        entries.into_iter().all(|entry| {
-            entry.is_ok_and(|entry| {
-                let path = entry.path();
-                take(&path, owner, empty, UNPROTECTED_DACL_SECURITY_INFORMATION)
-                    && (!path.is_dir() || take_inside(&path, owner, empty))
-            })
-        })
-    })
+    // As Glance will check it when it starts.
+    (only_ours(&folder) && only_trusted_inside(&folder)).then_some(()).ok_or(InstallFolder::Occupied)
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -681,8 +644,10 @@ mod tests {
         let inner = earlier.join("resources");
         let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&inner).arg(&target).output().unwrap();
         assert!(made.status.success());
-        assert_eq!(install_folder(&earlier), InstallFolder::Indirect);
-        assert_eq!(prepare_install_folder(&earlier), Err(InstallFolder::Indirect));
+        // Refused for where it is, and for what is in it.
+        assert_eq!(install_folder(&earlier), InstallFolder::Open);
+        assert_eq!(prepare_install_folder(&earlier), Err(InstallFolder::Open));
+        assert!(!only_trusted_inside(&earlier));
         std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();

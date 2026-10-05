@@ -52,10 +52,10 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
-LangString OpenFolder ${LANG_SIMPCHINESE} "装在这里，Glance 不能开机自启，每次启动也都要确认管理员权限。$\r$\n$\r$\n这个位置上面有你的账户能改名或改权限的文件夹，别的程序就能把 Glance 换成自己，从而悄悄拿到管理员权限。Program Files，或者磁盘根目录下的新文件夹（比如 D:\Glance）没有这个问题。$\r$\n$\r$\n仍然装在这里吗？"
-LangString OpenFolder ${LANG_ENGLISH} "Installed here, Glance cannot start with Windows, and every start asks for administrator rights.$\r$\n$\r$\nA folder above this one can be renamed or re-permissioned by your account, so another program could put itself in Glance's place and quietly gain administrator rights. Program Files, or a new folder at a drive's root (such as D:\Glance), is safe.$\r$\n$\r$\nInstall here anyway?"
-LangString OccupiedFolder ${LANG_SIMPCHINESE} "这个文件夹里已经有别的东西了。$\r$\n$\r$\n请选一个新文件夹或空文件夹（比如 D:\Glance）：安装时 Glance 会把它设成只有管理员能改，里面原有的东西也会受影响。"
-LangString OccupiedFolder ${LANG_ENGLISH} "This folder already holds other things.$\r$\n$\r$\nChoose a new or empty folder (such as D:\Glance): installing makes it changeable by administrators only, which would affect what is in it."
+LangString OpenFolder ${LANG_SIMPCHINESE} "Glance 不能装在这里。$\r$\n$\r$\n这个位置上面有你的账户（或其他程序）能改名、改权限的文件夹，装进去的 Glance 可能被别的程序换掉，再以管理员身份运行。$\r$\n$\r$\n请选 Program Files，或者磁盘根目录下的新文件夹，比如 D:\Glance。"
+LangString OpenFolder ${LANG_ENGLISH} "Glance cannot be installed here.$\r$\n$\r$\nA folder above this one can be renamed or re-permissioned by your account (or other programs), so Glance installed here could be replaced by another program and then run with administrator rights.$\r$\n$\r$\nChoose Program Files, or a new folder at a drive's root, such as D:\Glance."
+LangString OccupiedFolder ${LANG_SIMPCHINESE} "请选一个还不存在的新文件夹，比如 D:\Glance。$\r$\n$\r$\n这个文件夹已经存在，而且不是只有管理员能改动的旧版 Glance：里面的东西没法保证没被动过。"
+LangString OccupiedFolder ${LANG_ENGLISH} "Choose a folder that does not exist yet, such as D:\Glance.$\r$\n$\r$\nThis one exists and is not an earlier Glance only administrators could change: what is in it cannot be vouched for."
 LangString IndirectFolder ${LANG_SIMPCHINESE} "这个位置是联接点、符号链接或磁盘根目录，实际指向的不是这里。请选一个普通文件夹。"
 LangString IndirectFolder ${LANG_ENGLISH} "This is a junction, a symbolic link or a drive's root: it leads somewhere else. Choose an ordinary folder."
 LangString UnpreparedFolder ${LANG_SIMPCHINESE} "无法设置安装文件夹的权限，安装已停止。"
@@ -87,38 +87,40 @@ FunctionEnd
   File "/oname=$PLUGINSDIR\${EXE}" "..\target\release\${EXE}"
 !macroend
 
-; What the chosen folder is: 0 Glance could start unasked there, 1 it would
-; ask every time, 2 the folder holds other things, 3 it is a link or a root.
+; Why a folder is refused, by Glance's answer: 1 a folder above it can be
+; changed by others, 2 it exists and is not an earlier Glance only
+; administrators could change, 3 it is a link or a drive's root.
+!macro Refuse code
+  ${If} ${code} == 1
+    MessageBox MB_ICONSTOP "$(OpenFolder)" /SD IDOK
+  ${ElseIf} ${code} == 2
+    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
+  ${ElseIf} ${code} == 3
+    MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
+  ${Else}
+    MessageBox MB_ICONSTOP "$(UnpreparedFolder)" /SD IDOK
+  ${EndIf}
+  Abort
+!macroend
+
 Function CheckFolder
   !insertmacro Helper
   ExecWait '"$PLUGINSDIR\${EXE}" --check-install-folder "$INSTDIR"' $0
-  ${If} $0 == 2
-    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
-    Abort
-  ${ElseIf} $0 == 3
-    MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
-    Abort
-  ${ElseIf} $0 != 0
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolder)" /SD IDYES IDYES +2
-    Abort
+  ${If} $0 != 0
+    !insertmacro Refuse $0
   ${EndIf}
 FunctionEnd
 
 Section "Glance"
   !insertmacro StopGlance
-  ; The folder becomes Glance's before anything is put in it: owned by the
-  ; administrators, changed only by them and the system, read by everyone,
-  ; as Program Files' folders are; an earlier Glance in it takes the same.
-  ; A folder holding other things, or a link, is left alone (a silent
-  ; install given one with /D stops here).
+  ; A new folder is created administrators' in one step, as Program Files'
+  ; folders are; an earlier Glance's, which only administrators could ever
+  ; change, is used as it is. Anything else is refused and left alone (a
+  ; silent install given one with /D stops here).
   !insertmacro Helper
   ExecWait '"$PLUGINSDIR\${EXE}" --prepare-install-folder "$INSTDIR"' $0
-  ${If} $0 == 2
-    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
-    Abort
-  ${ElseIf} $0 != 0
-    MessageBox MB_ICONSTOP "$(UnpreparedFolder)" /SD IDOK
-    Abort
+  ${If} $0 != 0
+    !insertmacro Refuse $0
   ${EndIf}
   SetOutPath "$INSTDIR"
   File "..\target\release\${EXE}"
