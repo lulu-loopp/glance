@@ -1,4 +1,5 @@
 import type { Plot } from './chart';
+import { type Key, t } from './i18n';
 import * as fmt from './format';
 import { element, escapeHtml } from './format';
 import type { Sample, StaticInfo, ViewPrefs } from './types';
@@ -22,13 +23,13 @@ export interface ModuleDef {
 /** The engine kinds Task Manager shows by default, which are the ones a
  * workload is recognisably using; drivers report many more (timers, security,
  * high-priority queues) that say nothing to a reader. */
-const ENGINE_NAMES: Record<string, string> = {
-  '3D': '3D',
-  Copy: '复制',
-  VideoDecode: '视频解码',
-  VideoEncode: '视频编码',
-  VideoCodec: '视频编解码',
-  Compute: '计算',
+const ENGINE_NAMES: Record<string, Key> = {
+  '3D': 'engine3D',
+  Copy: 'engineCopy',
+  VideoDecode: 'engineVideoDecode',
+  VideoEncode: 'engineVideoEncode',
+  VideoCodec: 'engineVideoCodec',
+  Compute: 'engineCompute',
 };
 
 function head(title: string, device = ''): string {
@@ -110,7 +111,7 @@ function rateLane(options: {
     plot: { el: root.querySelector<HTMLElement>('.plot')!, series: options.rows.map((row) => row.value), max: 'auto' },
     update(sample, scale) {
       options.rows.forEach((row, i) => (cells[i].textContent = fmt.rate(row.value(sample), options.bits)));
-      aside.textContent = `满刻度 ${fmt.rate(scale, options.bits)}`;
+      aside.textContent = t('fullScale', fmt.rate(scale, options.bits));
     },
   };
 }
@@ -137,7 +138,7 @@ function cpu(info: StaticInfo): ModuleDef {
       const lane = percentLane({ kind: 'cpu', title: 'CPU', device: info.cpu_name, value: (s) => s.cpu, hotLoad: prefs.hotLoad });
       let cells: HTMLElement[] = [];
       if (prefs.cpu.threads) {
-        const grid = element(`<div class="threads" title="${info.threads} 个线程"></div>`);
+        const grid = element(`<div class="threads" title="${t('threadsTitle', info.threads)}"></div>`);
         cells = Array.from({ length: info.threads }, () => document.createElement('i'));
         grid.append(...cells);
         lane.root.append(grid);
@@ -167,7 +168,7 @@ function gpu(info: StaticInfo, index: number): ModuleDef {
     detail: gpu.name,
     build(prefs) {
       const lane = percentLane({ kind: 'gpu', title: 'GPU', device: gpu.name, value: (s) => s.gpus[index].usage, hotLoad: prefs.hotLoad });
-      const memory = meterRow('显存');
+      const memory = meterRow(t('vram'));
       if (prefs.gpu.memory) lane.root.append(memory.root);
       const engines = element('<div class="engines"></div>');
       if (prefs.gpu.engines) lane.root.append(engines);
@@ -186,7 +187,7 @@ function gpu(info: StaticInfo, index: number): ModuleDef {
           if (prefs.gpu.engines) {
             const shown = reading.engines.filter(([kind]) => kind in ENGINE_NAMES);
             if (engineRows.map((e) => e.kind).join() !== shown.map(([kind]) => kind).join()) {
-              engineRows = shown.map(([kind]) => ({ kind, row: meterRow(ENGINE_NAMES[kind]) }));
+              engineRows = shown.map(([kind]) => ({ kind, row: meterRow(t(ENGINE_NAMES[kind])) }));
               engines.replaceChildren(...engineRows.map((e) => e.row.root));
             }
             shown.forEach(([, load], i) => engineRows[i].row.set(load / 100, fmt.percent(load), load > prefs.hotLoad));
@@ -194,9 +195,9 @@ function gpu(info: StaticInfo, index: number): ModuleDef {
           setFacts(
             prefs.gpu.sensors
               ? [
-                  ['频率', reading.clock_mhz === null ? null : `${Math.round(reading.clock_mhz)} MHz`],
-                  ['风扇', reading.fan_rpm === null ? null : `${reading.fan_rpm} RPM`],
-                  ['共享显存', fmt.usage(reading.shared_used, gpu.shared_total)],
+                  [t('clock'), reading.clock_mhz === null ? null : `${Math.round(reading.clock_mhz)} MHz`],
+                  [t('fan'), reading.fan_rpm === null ? null : `${reading.fan_rpm} RPM`],
+                  [t('sharedVram'), fmt.usage(reading.shared_used, gpu.shared_total)],
                 ]
               : [],
           );
@@ -209,11 +210,11 @@ function gpu(info: StaticInfo, index: number): ModuleDef {
 function memory(info: StaticInfo): ModuleDef {
   return {
     id: 'memory',
-    title: '内存',
+    title: t('memory'),
     build(prefs) {
       const lane = percentLane({
         kind: 'memory',
-        title: '内存',
+        title: t('memory'),
         value: (s) => (s.memory.used / info.mem_total) * 100,
         hotLoad: prefs.hotLoad,
       });
@@ -227,8 +228,8 @@ function memory(info: StaticInfo): ModuleDef {
           setFacts(
             prefs.memory.details
               ? [
-                  ['已提交', fmt.usage(sample.memory.committed, sample.memory.commit_limit)],
-                  ['缓存', fmt.size(sample.memory.cached)],
+                  [t('committed'), fmt.usage(sample.memory.committed, sample.memory.commit_limit)],
+                  [t('cached'), fmt.size(sample.memory.cached)],
                 ]
               : [],
           );
@@ -241,15 +242,15 @@ function memory(info: StaticInfo): ModuleDef {
 function network(): ModuleDef {
   return {
     id: 'network',
-    title: '网络',
+    title: t('network'),
     build(prefs) {
       const lane = rateLane({
         kind: 'network',
-        title: '网络',
+        title: t('network'),
         bits: prefs.network.bits,
         rows: [
-          { label: '下载', value: (s) => s.net_down },
-          { label: '上传', value: (s) => s.net_up },
+          { label: t('download'), value: (s) => s.net_down },
+          { label: t('upload'), value: (s) => s.net_up },
         ],
       });
       const setFacts = facts(lane.root);
@@ -262,10 +263,10 @@ function network(): ModuleDef {
           setFacts(
             prefs.network.details
               ? [
-                  ['网卡', adapter ? adapter.name : '未连接'],
-                  ['地址', adapter?.ipv4 ?? null],
-                  ['链路', adapter && adapter.link_bps > 0 ? fmt.linkSpeed(adapter.link_bps) : null],
-                  ['开机以来', `下载 ${fmt.bytes(sample.net_total_down)}，上传 ${fmt.bytes(sample.net_total_up)}`],
+                  [t('adapter'), adapter ? adapter.name : t('notConnected')],
+                  [t('address'), adapter?.ipv4 ?? null],
+                  [t('link'), adapter && adapter.link_bps > 0 ? fmt.linkSpeed(adapter.link_bps) : null],
+                  [t('sinceBoot'), t('sinceBootValue', fmt.bytes(sample.net_total_down), fmt.bytes(sample.net_total_up))],
                 ]
               : [],
           );
@@ -278,15 +279,15 @@ function network(): ModuleDef {
 function disk(): ModuleDef {
   return {
     id: 'disk',
-    title: '磁盘',
+    title: t('disk'),
     build(prefs) {
       const lane = rateLane({
         kind: 'disk',
-        title: '磁盘',
+        title: t('disk'),
         bits: false,
         rows: [
-          { label: '读取', value: (s) => s.disk_read },
-          { label: '写入', value: (s) => s.disk_write },
+          { label: t('read'), value: (s) => s.disk_read },
+          { label: t('write'), value: (s) => s.disk_write },
         ],
       });
       const setFacts = facts(lane.root);
@@ -295,7 +296,7 @@ function disk(): ModuleDef {
         plots: [lane.plot],
         update(sample, scale) {
           lane.update(sample, scale(lane.plot));
-          setFacts(prefs.disk.active ? [['活动时间', fmt.percent(sample.disk_active)]] : []);
+          setFacts(prefs.disk.active ? [[t('activeTime'), fmt.percent(sample.disk_active)]] : []);
         },
       };
     },
@@ -305,16 +306,16 @@ function disk(): ModuleDef {
 function processes(): ModuleDef {
   return {
     id: 'processes',
-    title: '进程',
+    title: t('processes'),
     build(prefs) {
       const byMemory = prefs.processes.sort === 'memory';
       const root = element(`
         <section class="lane lane-list lane-processes">
           <header class="lane-head">
-            <h2>进程</h2>
-            <span class="lane-device">按${byMemory ? '内存' : ' CPU '}排序</span>
+            <h2>${t('processes')}</h2>
+            <span class="lane-device">${t('sortedBy', byMemory ? t('memory') : 'CPU')}</span>
             <span class="lane-aside">CPU</span>
-            <span class="lane-aside">内存</span>
+            <span class="lane-aside">${t('memory')}</span>
           </header>
           <ol class="rows"></ol>
         </section>`);
@@ -343,12 +344,12 @@ function processes(): ModuleDef {
 function storage(): ModuleDef {
   return {
     id: 'storage',
-    title: '存储',
-    detail: '各分区的空间',
+    title: t('storage'),
+    detail: t('storageDetail'),
     build(prefs) {
       const root = element(`
         <section class="lane lane-list lane-storage">
-          <header class="lane-head"><h2>存储</h2></header>
+          <header class="lane-head"><h2>${t('storage')}</h2></header>
           <div class="volumes"></div>
         </section>`);
       const list = root.querySelector<HTMLElement>('.volumes')!;
@@ -380,12 +381,12 @@ const LOW_BATTERY = 20;
 function battery(): ModuleDef {
   return {
     id: 'battery',
-    title: '电池',
-    detail: '笔记本电脑',
+    title: t('battery'),
+    detail: t('batteryDetail'),
     build() {
       const root = element(`
         <section class="lane lane-battery">
-          ${head('电池')}
+          ${head(t('battery'))}
           <div class="readout"><span class="figure"></span><span class="unit">%</span></div>
         </section>`);
       const figure = root.querySelector<HTMLElement>('.figure')!;
@@ -399,7 +400,7 @@ function battery(): ModuleDef {
           const { percent, charging, seconds_left } = sample.battery;
           figure.textContent = String(percent);
           root.dataset.hot = String(!charging && percent <= LOW_BATTERY);
-          aside.textContent = charging ? '正在充电' : seconds_left === null ? '使用电池' : `剩余 ${fmt.duration(seconds_left)}`;
+          aside.textContent = charging ? t('charging') : seconds_left === null ? t('onBattery') : t('remaining', fmt.duration(seconds_left));
         },
       };
     },
@@ -409,20 +410,20 @@ function battery(): ModuleDef {
 function system(): ModuleDef {
   return {
     id: 'system',
-    title: '系统',
-    detail: '开机时长、进程和句柄数',
+    title: t('system'),
+    detail: t('systemDetail'),
     build() {
-      const root = element(`<section class="lane lane-system">${head('系统')}</section>`);
+      const root = element(`<section class="lane lane-system">${head(t('system'))}</section>`);
       const setFacts = facts(root);
       return {
         root,
         plots: [],
         update(sample) {
           setFacts([
-            ['开机时长', fmt.duration(sample.system.uptime_s)],
-            ['进程', String(sample.system.processes)],
-            ['线程', String(sample.system.threads)],
-            ['句柄', String(sample.system.handles)],
+            [t('uptimeFact'), fmt.duration(sample.system.uptime_s)],
+            [t('processCount'), String(sample.system.processes)],
+            [t('threadCount'), String(sample.system.threads)],
+            [t('handleCount'), String(sample.system.handles)],
           ]);
         },
       };

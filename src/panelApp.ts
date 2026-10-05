@@ -5,7 +5,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import { Backdrop } from './glass';
+import { setLanguage } from './i18n';
 import { catalog } from './modules';
+import { onSystemTheme, resolveTheme } from './theme';
 import { PanelView } from './panelView';
 import { resolvePrefs } from './settings';
 import type { Bootstrap, Sample, Settings } from './types';
@@ -15,8 +17,9 @@ const CLOSE_MS = 180;
 
 export async function panelApp(boot: Bootstrap) {
   let settings: Settings = boot.settings;
+  let prefs = resolvePrefs(settings.view, catalog(boot.info));
+  setLanguage(prefs.language);
   const modules = catalog(boot.info);
-  let prefs = resolvePrefs(settings.view, modules);
   const body = document.body;
   const backdrop = new Backdrop();
   const view = new PanelView(body, modules, backdrop, () => void invoke('open_settings'));
@@ -24,8 +27,6 @@ export async function panelApp(boot: Bootstrap) {
   body.style.setProperty('--accent-on-light', boot.accent.on_light);
   body.style.setProperty('--accent-on-dark', boot.accent.on_dark);
   body.dataset.state = 'hidden';
-  const systemTone = () => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-  body.dataset.tone = systemTone();
 
   let epoch = 0;
   let room = window.innerHeight;
@@ -63,7 +64,7 @@ export async function panelApp(boot: Bootstrap) {
 
   const build = () => {
     view.build(settings, prefs);
-    if (settings.skin !== 'glass') body.dataset.tone = systemTone();
+    body.dataset.theme = resolveTheme(prefs.theme);
     relayout();
     reportSurface();
   };
@@ -86,7 +87,9 @@ export async function panelApp(boot: Bootstrap) {
       body.dataset.state = 'loading';
       view.showLatest();
       await backdrop.load(payload.backdrop);
-      if (epoch !== payload.epoch) return;
+      // Superseded, or asked to close while the capture was loading: the
+      // close is already under way and must not be undone.
+      if (epoch !== payload.epoch || body.dataset.state !== 'loading') return;
       relayout();
       body.dataset.state = 'open';
       if (!drawing) frame();
@@ -122,14 +125,17 @@ export async function panelApp(boot: Bootstrap) {
   await listen<Settings>('settings-changed', ({ payload }) => {
     const moved = payload.skin !== settings.skin || payload.edge !== settings.edge;
     settings = payload;
-    prefs = resolvePrefs(settings.view, modules);
+    prefs = resolvePrefs(settings.view, view.modules);
+    setLanguage(prefs.language);
+    view.modules = catalog(boot.info);
     build();
     if (moved && body.dataset.state === 'open') void invoke('relocate', { epoch });
   });
 
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-    if (settings.skin !== 'glass') body.dataset.tone = systemTone();
+  onSystemTheme(() => {
+    body.dataset.theme = resolveTheme(prefs.theme);
     view.recolor();
+    if (body.dataset.state === 'open') view.dress();
   });
   // A new zoom, or the window moved to another monitor.
   window.addEventListener('resize', relayout);

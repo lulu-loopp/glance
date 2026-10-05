@@ -67,6 +67,8 @@ export interface ViewPrefs {
   chartSeconds: number;
   hotLoad: number;
   hotTemp: number;
+  theme: 'system' | 'light' | 'dark';
+  language: 'system' | 'zh' | 'en';
 }
 
 export interface Settings {

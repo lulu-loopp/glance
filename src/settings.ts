@@ -1,4 +1,5 @@
 import { element, escapeHtml } from './format';
+import { type Key, t } from './i18n';
 import { DEFAULT_OFF, type ModuleDef } from './modules';
 import type { Settings, Skin, ViewPrefs } from './types';
 
@@ -12,6 +13,8 @@ const DEFAULT_PREFS: Omit<ViewPrefs, 'modules'> = {
   chartSeconds: 60,
   hotLoad: 85,
   hotTemp: 85,
+  theme: 'system',
+  language: 'system',
 };
 
 /**
@@ -79,10 +82,10 @@ function section(title: string, ...children: HTMLElement[]): HTMLElement {
   return root;
 }
 
-const SKINS: { value: Skin; label: string }[] = [
-  { value: 'paper', label: '记录纸' },
-  { value: 'glass', label: '液态玻璃' },
-  { value: 'fluent', label: 'Windows 11' },
+const SKINS: { value: Skin; label: Key }[] = [
+  { value: 'paper', label: 'skinPaper' },
+  { value: 'glass', label: 'skinGlass' },
+  { value: 'fluent', label: 'skinFluent' },
 ];
 
 function skinPicker(current: Skin, pick: (skin: Skin) => void): HTMLElement {
@@ -91,7 +94,7 @@ function skinPicker(current: Skin, pick: (skin: Skin) => void): HTMLElement {
     const card = element<HTMLButtonElement>(`
       <button type="button" class="skin-card" role="radio" data-preview="${skin.value}">
         <span class="skin-preview"><i></i><i></i><i></i></span>
-        <span>${skin.label}</span>
+        <span>${t(skin.label)}</span>
       </button>`);
     card.setAttribute('aria-checked', String(skin.value === current));
     card.addEventListener('click', () => {
@@ -112,7 +115,7 @@ function moduleList(prefs: ViewPrefs, modules: ModuleDef[], changed: () => void)
     const module = byId.get(entry.id)!;
     const row = element(`
       <li class="module-row" data-id="${entry.id}">
-        <span class="grip" title="拖动以调整顺序"><svg viewBox="0 0 8 14" aria-hidden="true"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg></span>
+        <span class="grip" title="${t('dragToReorder')}"><svg viewBox="0 0 8 14" aria-hidden="true"><circle cx="2" cy="2" r="1.2"/><circle cx="6" cy="2" r="1.2"/><circle cx="2" cy="7" r="1.2"/><circle cx="6" cy="7" r="1.2"/><circle cx="2" cy="12" r="1.2"/><circle cx="6" cy="12" r="1.2"/></svg></span>
       </li>`);
     row.append(
       toggle(module.title, entry.on, (on) => {
@@ -154,10 +157,12 @@ function moduleList(prefs: ViewPrefs, modules: ModuleDef[], changed: () => void)
 }
 
 export interface SettingsActions {
-  /** Something changed; `layout` says whether the panel's content must be rebuilt. */
-  changed(layout: boolean): void;
-  skin(skin: Skin): void;
-  edge(): void;
+  /** Something changed that the panel shows. */
+  changed(): void;
+  /** The skin or the edge changed: the panel's window has to move or change. */
+  moved(): void;
+  /** The interface language changed: everything is drawn again. */
+  relabel(): void;
   autostart(enabled: boolean): Promise<boolean>;
   quit(): void;
 }
@@ -170,81 +175,119 @@ export function buildSettings(
   actions: SettingsActions,
 ): HTMLElement {
   const root = element('<div class="settings"></div>');
-  const relayout = () => actions.changed(true);
-  const save = () => actions.changed(false);
+  const changed = () => actions.changed();
 
   root.append(
-    section('外观', skinPicker(settings.skin, (skin) => actions.skin(skin))),
     section(
-      '呼出',
-      segmented('屏幕边缘', [{ value: 'left', label: '左侧' }, { value: 'right', label: '右侧' }] as const, settings.edge, (edge) => {
+      t('appearance'),
+      skinPicker(settings.skin, (skin) => {
+        settings.skin = skin;
+        actions.moved();
+      }),
+      segmented(t('theme'), [
+        { value: 'system', label: t('themeSystem') },
+        { value: 'light', label: t('themeLight') },
+        { value: 'dark', label: t('themeDark') },
+      ] as const, prefs.theme, (theme) => {
+        prefs.theme = theme;
+        changed();
+      }),
+      segmented(t('language'), [
+        { value: 'system', label: t('themeSystem') },
+        { value: 'zh', label: '中文' },
+        { value: 'en', label: 'English' },
+      ] as const, prefs.language, (language) => {
+        prefs.language = language;
+        actions.relabel();
+      }),
+    ),
+    section(
+      t('opening'),
+      segmented(t('edge'), [{ value: 'left', label: t('left') }, { value: 'right', label: t('right') }] as const, settings.edge, (edge) => {
         settings.edge = edge;
-        actions.edge();
+        actions.moved();
       }),
-      segmented('面板位置', [{ value: 'pointer', label: '跟随指针' }, { value: 'center', label: '居中' }] as const, settings.anchor, (anchor) => {
+      segmented(t('anchor'), [{ value: 'pointer', label: t('anchorPointer') }, { value: 'center', label: t('anchorCenter') }] as const, settings.anchor, (anchor) => {
         settings.anchor = anchor;
-        save();
+        changed();
       }),
-      segmented('推入力度', [{ value: 'light', label: '轻' }, { value: 'medium', label: '中' }, { value: 'firm', label: '重' }] as const, settings.sensitivity, (sensitivity) => {
+      segmented(t('push'), [
+        { value: 'light', label: t('pushLight') },
+        { value: 'medium', label: t('pushMedium') },
+        { value: 'firm', label: t('pushFirm') },
+      ] as const, settings.sensitivity, (sensitivity) => {
         settings.sensitivity = sensitivity;
-        save();
+        changed();
       }),
-      segmented('离开后收起', [{ value: 200, label: '立即' }, { value: 500, label: '0.5 秒' }, { value: 1000, label: '1 秒' }], settings.close_delay_ms, (ms) => {
+      segmented(t('closeDelay'), [
+        { value: 200, label: t('closeNow') },
+        { value: 500, label: t('seconds', 0.5) },
+        { value: 1000, label: t('seconds', 1) },
+      ], settings.close_delay_ms, (ms) => {
         settings.close_delay_ms = ms;
-        save();
+        changed();
       }),
     ),
-    section('显示内容', moduleList(prefs, modules, relayout)),
+    section(t('shown'), moduleList(prefs, modules, changed)),
     section(
-      '细节',
-      toggle('CPU 线程', prefs.cpu.threads, (on) => ((prefs.cpu.threads = on), relayout())),
-      toggle('CPU 频率', prefs.cpu.clock, (on) => ((prefs.cpu.clock = on), relayout())),
-      toggle('显存', prefs.gpu.memory, (on) => ((prefs.gpu.memory = on), relayout())),
-      toggle('GPU 温度、频率和风扇', prefs.gpu.sensors, (on) => ((prefs.gpu.sensors = on), relayout())),
-      toggle('GPU 各引擎', prefs.gpu.engines, (on) => ((prefs.gpu.engines = on), relayout()), '3D、复制、视频编解码'),
-      toggle('内存提交量和缓存', prefs.memory.details, (on) => ((prefs.memory.details = on), relayout())),
-      toggle('网卡、地址和累计流量', prefs.network.details, (on) => ((prefs.network.details = on), relayout())),
-      toggle('磁盘活动时间', prefs.disk.active, (on) => ((prefs.disk.active = on), relayout())),
-      segmented('网速单位', [{ value: false, label: 'MB/s' }, { value: true, label: 'Mbps' }], prefs.network.bits, (bits) => {
+      t('details'),
+      toggle(t('cpuThreads'), prefs.cpu.threads, (on) => ((prefs.cpu.threads = on), changed())),
+      toggle(t('cpuClock'), prefs.cpu.clock, (on) => ((prefs.cpu.clock = on), changed())),
+      toggle(t('gpuMemory'), prefs.gpu.memory, (on) => ((prefs.gpu.memory = on), changed())),
+      toggle(t('gpuSensors'), prefs.gpu.sensors, (on) => ((prefs.gpu.sensors = on), changed())),
+      toggle(t('gpuEngines'), prefs.gpu.engines, (on) => ((prefs.gpu.engines = on), changed()), t('gpuEnginesDetail')),
+      toggle(t('memoryDetails'), prefs.memory.details, (on) => ((prefs.memory.details = on), changed())),
+      toggle(t('networkDetails'), prefs.network.details, (on) => ((prefs.network.details = on), changed())),
+      toggle(t('diskActive'), prefs.disk.active, (on) => ((prefs.disk.active = on), changed())),
+      segmented(t('rateUnit'), [{ value: false, label: 'MB/s' }, { value: true, label: 'Mbps' }], prefs.network.bits, (bits) => {
         prefs.network.bits = bits;
-        relayout();
+        changed();
       }),
-      segmented('进程数量', [{ value: 3, label: '3' }, { value: 5, label: '5' }, { value: 8, label: '8' }], prefs.processes.count, (count) => {
+      segmented(t('processCountSetting'), [{ value: 3, label: '3' }, { value: 5, label: '5' }, { value: 8, label: '8' }], prefs.processes.count, (count) => {
         prefs.processes.count = count;
-        relayout();
+        changed();
       }),
-      segmented('进程排序', [{ value: 'cpu', label: 'CPU' }, { value: 'memory', label: '内存' }] as const, prefs.processes.sort, (sort) => {
+      segmented(t('processSort'), [{ value: 'cpu', label: 'CPU' }, { value: 'memory', label: t('memory') }] as const, prefs.processes.sort, (sort) => {
         prefs.processes.sort = sort;
-        relayout();
+        changed();
       }),
     ),
     section(
-      '数据',
-      segmented('刷新间隔', [{ value: 500, label: '0.5 秒' }, { value: 1000, label: '1 秒' }, { value: 2000, label: '2 秒' }], settings.interval_ms, (ms) => {
+      t('data'),
+      segmented(t('interval'), [
+        { value: 500, label: t('seconds', 0.5) },
+        { value: 1000, label: t('seconds', 1) },
+        { value: 2000, label: t('seconds', 2) },
+      ], settings.interval_ms, (ms) => {
         settings.interval_ms = ms;
-        relayout();
+        changed();
       }),
-      segmented('曲线时长', [{ value: 30, label: '30 秒' }, { value: 60, label: '1 分' }, { value: 120, label: '2 分' }, { value: 300, label: '5 分' }], prefs.chartSeconds, (seconds) => {
+      segmented(t('span'), [
+        { value: 30, label: t('seconds', 30) },
+        { value: 60, label: t('minutesShort', 1) },
+        { value: 120, label: t('minutesShort', 2) },
+        { value: 300, label: t('minutesShort', 5) },
+      ], prefs.chartSeconds, (seconds) => {
         prefs.chartSeconds = seconds;
-        relayout();
+        changed();
       }),
-      segmented('负载警示', [{ value: 70, label: '70%' }, { value: 85, label: '85%' }, { value: 95, label: '95%' }], prefs.hotLoad, (load) => {
+      segmented(t('loadAlert'), [{ value: 70, label: '70%' }, { value: 85, label: '85%' }, { value: 95, label: '95%' }], prefs.hotLoad, (load) => {
         prefs.hotLoad = load;
-        relayout();
+        changed();
       }),
-      segmented('温度警示', [{ value: 75, label: '75 °C' }, { value: 85, label: '85 °C' }, { value: 95, label: '95 °C' }], prefs.hotTemp, (temp) => {
+      segmented(t('tempAlert'), [{ value: 75, label: '75 °C' }, { value: 85, label: '85 °C' }, { value: 95, label: '95 °C' }], prefs.hotTemp, (temp) => {
         prefs.hotTemp = temp;
-        relayout();
+        changed();
       }),
     ),
   );
 
-  const startup = toggle('开机时启动', autostart, async (on) => {
+  const startup = toggle(t('startup'), autostart, async (on) => {
     const now = await actions.autostart(on);
     startup.querySelector('.switch')!.setAttribute('aria-checked', String(now));
   });
-  const quit = element<HTMLButtonElement>('<button type="button" class="quit">退出 Glance</button>');
+  const quit = element<HTMLButtonElement>(`<button type="button" class="quit">${t('quit')}</button>`);
   quit.addEventListener('click', () => actions.quit());
-  root.append(section('系统', startup, quit));
+  root.append(section(t('system'), startup, quit));
   return root;
 }

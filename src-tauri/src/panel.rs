@@ -593,6 +593,10 @@ impl Controller {
         unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.expect("raw mouse input");
 
         let mut detector = Detector::default();
+        // Once the panel has been up, the pointer has to leave the edge before
+        // it can open the panel again: pushing on after it closed is the same
+        // gesture, not a new one.
+        let mut armed = true;
         let mut ticking = false;
         let mut msg = MSG::default();
         while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
@@ -601,17 +605,23 @@ impl Controller {
                 let config = self.config.lock().unwrap();
                 (config.edge, config.pressure)
             };
+            if self.is_shown() {
+                armed = false;
+            }
             match msg.message {
                 WM_INPUT if !self.is_open() => {
                     if let Some(motion) = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge) {
                         let cursor = cursor_position();
                         match edge_contact(cursor, edge) {
-                            Some(contact) if detector.motion(motion, now, pressure) => {
+                            Some(contact) if armed && detector.motion(motion, now, pressure) => {
                                 detector.reset();
                                 self.open(cursor, &contact);
                             }
                             Some(_) => {}
-                            None => detector.reset(),
+                            None => {
+                                detector.reset();
+                                armed = !self.is_shown();
+                            }
                         }
                     }
                 }
@@ -619,12 +629,15 @@ impl Controller {
                 WM_TIMER => {
                     let cursor = cursor_position();
                     match edge_contact(cursor, edge) {
-                        Some(contact) if detector.dwell_elapsed(now) => {
+                        Some(contact) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
                             self.open(cursor, &contact);
                         }
                         Some(_) => {}
-                        None => detector.reset(),
+                        None => {
+                            detector.reset();
+                            armed = !self.is_shown();
+                        }
                     }
                 }
                 _ => {}

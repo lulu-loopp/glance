@@ -5,6 +5,7 @@
 import { type Plot, Recorder, offsetWithin } from './chart';
 import * as fmt from './format';
 import { element } from './format';
+import { t } from './i18n';
 import type { Backdrop } from './glass';
 import type { Lane, ModuleDef } from './modules';
 import type { Sample, Settings, ViewPrefs } from './types';
@@ -44,7 +45,8 @@ export class PanelView {
 
   constructor(
     private host: HTMLElement,
-    private modules: ModuleDef[],
+    /** Rebuilt when the interface language changes: titles are in it. */
+    public modules: ModuleDef[],
     private backdrop: Backdrop,
     onGear: () => void,
   ) {
@@ -55,7 +57,7 @@ export class PanelView {
         <div class="lanes"></div>
         <footer class="bar">
           <span class="bar-text"></span>
-          <button type="button" class="bar-button" aria-label="设置">${GEAR}</button>
+          <button type="button" class="bar-button" aria-label="${t('settings')}">${GEAR}</button>
         </footer>
       </main>`);
     this.lanesHost = this.panel.querySelector('.lanes')!;
@@ -88,7 +90,7 @@ export class PanelView {
     if (!latest) return;
     const scale = (plot: Plot) => this.recorder.scale(plot, this.samples);
     for (const lane of this.lanes) lane.update(latest, scale);
-    this.barText.textContent = `已开机 ${fmt.duration(latest.system.uptime_s)}`;
+    this.barText.textContent = t('uptime', fmt.duration(latest.system.uptime_s));
   }
 
   /**
@@ -98,7 +100,9 @@ export class PanelView {
    */
   layout(room: number, focus: number) {
     this.panel.style.setProperty('--columns', '1');
+    this.deal([this.lanes.map((lane) => lane.root)]);
     const style = getComputedStyle(this.panel);
+    const laneGap = parseFloat(style.getPropertyValue('--lane-gap')) || 0;
     this.measures = {
       lanesHeight: this.lanesHost.offsetHeight,
       chromeHeight: this.panel.offsetHeight - this.lanesHost.offsetHeight,
@@ -108,6 +112,9 @@ export class PanelView {
     const space = room - 2 * GAP - this.measures.chromeHeight;
     const columns = Math.min(Math.max(Math.ceil(this.measures.lanesHeight / space), 1), MAX_COLUMNS);
     this.panel.style.setProperty('--columns', String(columns));
+    const heights = this.lanes.map((lane) => lane.root.offsetHeight);
+    const cuts = balancedCuts(heights, columns, laneGap);
+    this.deal(cuts.map((start, i) => this.lanes.slice(start, cuts[i + 1]).map((lane) => lane.root)));
 
     const height = this.panel.offsetHeight;
     const bottom = this.host.clientHeight - GAP - height;
@@ -115,14 +122,21 @@ export class PanelView {
     this.recorder.layout();
   }
 
+  /** Puts each group of lanes in a column of its own, in order. */
+  private deal(groups: HTMLElement[][]) {
+    this.lanesHost.replaceChildren(
+      ...groups.map((group) => {
+        const column = document.createElement('div');
+        column.className = 'column';
+        column.append(...group);
+        return column;
+      }),
+    );
+  }
+
   /** Lays the captured desktop under the panel for the active skin. */
   dress() {
-    const skin = this.host.dataset.skin!;
-    this.backdrop.dress(this.panel, skin, this.host);
-    if (skin === 'glass' && this.backdrop.present) {
-      this.host.dataset.tone = this.backdrop.tone(this.rect());
-      this.recorder.layout();
-    }
+    this.backdrop.dress(this.panel, this.host.dataset.skin!, this.host);
   }
 
   draw(now: number) {
@@ -139,4 +153,29 @@ export class PanelView {
     const { left, top } = offsetWithin(this.panel, this.host);
     return { left, top, width: this.panel.offsetWidth, height: this.panel.offsetHeight };
   }
+}
+
+/**
+ * Where each of `columns` columns starts, splitting the lanes in order so
+ * the tallest column is as short as it can be. Lanes are few and columns at
+ * most three, so every split is tried.
+ */
+function balancedCuts(heights: number[], columns: number, gap: number): number[] {
+  const n = heights.length;
+  const span = (from: number, to: number) => {
+    const shown = heights.slice(from, to).filter((h) => h > 0);
+    return shown.reduce((sum, h) => sum + h, 0) + Math.max(shown.length - 1, 0) * gap;
+  };
+  let best = { tallest: Infinity, cuts: [0] };
+  const tryCuts = (cuts: number[]) => {
+    const bounds = [...cuts, n];
+    const tallest = Math.max(...cuts.map((start, i) => span(start, bounds[i + 1])));
+    if (tallest < best.tallest) best = { tallest, cuts };
+  };
+  if (columns === 1 || n < 2) return [0];
+  for (let i = 1; i < n; i++) {
+    if (columns === 2) tryCuts([0, i]);
+    else for (let j = i + 1; j < n; j++) tryCuts([0, i, j]);
+  }
+  return best.cuts;
 }
