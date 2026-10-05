@@ -10,11 +10,11 @@ use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D12DAffineTransform, CLSID_D2D1Blend, CLSID_D2D1Border, CLSID_D2D1ColorMatrix, CLSID_D2D1Crop,
     CLSID_D2D1DisplacementMap, CLSID_D2D1Flood, CLSID_D2D1GaussianBlur, CLSID_D2D1Shadow, ID2D1Bitmap1, ID2D1Effect,
     ID2D1Geometry, ID2D1Image, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1RenderTarget,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1RenderTarget,
     D2D1_BLEND_PROP_MODE, D2D1_BORDER_EDGE_MODE_CLAMP, D2D1_BORDER_PROP_EDGE_MODE_X, D2D1_BORDER_PROP_EDGE_MODE_Y,
     D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_CROP_PROP_RECT,
     D2D1_DISPLACEMENTMAP_PROP_SCALE, D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
-    D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_WRAP, D2D1_FLOOD_PROP_COLOR, D2D1_GAMMA_2_2,
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FLOOD_PROP_COLOR, D2D1_GAMMA_2_2,
     D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PROPERTY_TYPE, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT,
     D2D1_PROPERTY_TYPE_MATRIX_3X2, D2D1_PROPERTY_TYPE_MATRIX_5X4, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_ROUNDED_RECT,
@@ -51,10 +51,6 @@ const FROST_BLUR: f32 = 9.0;
 const ACRYLIC_BLUR: f32 = 30.0;
 const ACRYLIC_SATURATION: f32 = 1.25;
 const GLASS_SATURATION: f32 = 1.3;
-/// The grain acrylic carries to keep large blurs from banding: one tile, and
-/// how strongly it shows.
-const GRAIN: u32 = 64;
-const GRAIN_ALPHA: f32 = 6.0 / 255.0;
 
 /// How frosted glass over a backdrop of luminance `mean` and spread
 /// `spread` should be, 0–1: more when what is behind is busy, and more when
@@ -272,7 +268,8 @@ fn paper(frame: &Frame, ground: &Ground) -> Result<()> {
 
 /// Windows 11: one acrylic sheet. The desktop behind it, blurred and a
 /// little more saturated; a luminosity layer that evens out how bright it
-/// is; a thin tint; and a faint grain.
+/// is; and a thin tint. (Windows adds a faint grain; on a dark sheet it
+/// read as noise, so the sheet goes without.)
 fn fluent(frame: &Frame, ground: &Ground) -> Result<()> {
     let theme = ground.theme;
     let sheet = Rect { x: 0.0, y: 0.0, w: ground.size.0, h: ground.size.1 };
@@ -296,12 +293,7 @@ fn fluent(frame: &Frame, ground: &Ground) -> Result<()> {
             // backdrop of its own colour.
             _ => unsafe { frame.dc.FillRectangle(&area, frame.brush(Color { a: 1.0, ..theme.luminosity })) },
         }
-        unsafe {
-            frame.dc.FillRectangle(&area, frame.brush(theme.tint));
-            if let Ok(brush) = grain(frame) {
-                frame.dc.FillRectangle(&area, &brush);
-            }
-        }
+        unsafe { frame.dc.FillRectangle(&area, frame.brush(theme.tint)) };
     })
 }
 
@@ -328,41 +320,6 @@ fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), sheet: Rect, lumin
     let clipped = effect(frame, &CLSID_D2D1Crop, &output(&blend)?)?;
     prop(&clipped, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[sheet.x, sheet.y, sheet.x + sheet.w, sheet.y + sheet.h])?;
     Ok((output(&crop)?, output(&clipped)?))
-}
-
-/// A tile of faint grey grain, repeated: one grain to a device pixel, as
-/// Windows' acrylic has it (at 96 DPI each would be blown up 2x2 at 200%
-/// and read as noise).
-fn grain(frame: &Frame) -> Result<windows::Win32::Graphics::Direct2D::ID2D1BitmapBrush1> {
-    // The same grain every time: a fixed sequence, not the clock.
-    let mut seed = 0x2545_F491u32;
-    let mut pixels = Vec::with_capacity((GRAIN * GRAIN * 4) as usize);
-    for _ in 0..GRAIN * GRAIN {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        // Premultiplied grey at the grain's strength.
-        let value = ((seed >> 24) as f32 * GRAIN_ALPHA).round() as u8;
-        pixels.extend_from_slice(&[value, value, value, (GRAIN_ALPHA * 255.0).round() as u8]);
-    }
-    let mut dpi = (0.0f32, 0.0f32);
-    unsafe { frame.dc.GetDpi(&mut dpi.0, &mut dpi.1) };
-    let properties = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-        dpiX: dpi.0,
-        dpiY: dpi.1,
-        bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
-        ..Default::default()
-    };
-    unsafe {
-        let tile = frame.dc.CreateBitmap(D2D_SIZE_U { width: GRAIN, height: GRAIN }, Some(pixels.as_ptr().cast()), GRAIN * 4, &properties)?;
-        let brush = D2D1_BITMAP_BRUSH_PROPERTIES1 {
-            extendModeX: D2D1_EXTEND_MODE_WRAP,
-            extendModeY: D2D1_EXTEND_MODE_WRAP,
-            interpolationMode: windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-        };
-        frame.dc.CreateBitmapBrush(&tile, Some(&brush), None)
-    }
 }
 
 /// 磨砂玻璃: every lane and the bar a piece of glass. Each bends the desktop
