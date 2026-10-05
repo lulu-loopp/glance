@@ -131,6 +131,81 @@ impl AmdCpu {
     }
 }
 
+/// An Intel CPU's sensors, read from its model-specific registers through
+/// PawnIO's IntelMSR module: the package's temperature (its hottest core's)
+/// and its power. Registers per Intel's Software Developer's Manual, vol. 4.
+pub struct IntelCpu {
+    module: Module,
+    /// The temperature at which the CPU throttles, which readings count down from.
+    tj_max: f32,
+    /// Joules per count of the energy counter.
+    energy_unit: f64,
+    last_energy: Option<(u32, Instant)>,
+}
+
+const INTEL_MSR: &[u8] = include_bytes!("../pawnio-modules/IntelMSR.bin");
+const IA32_TEMPERATURE_TARGET: u64 = 0x1A2;
+const IA32_PACKAGE_THERM_STATUS: u64 = 0x1B1;
+const MSR_RAPL_POWER_UNIT: u64 = 0x606;
+const MSR_PKG_ENERGY_STATUS: u64 = 0x611;
+
+impl IntelCpu {
+    /// The CPU's sensors, if it is an Intel one and the driver can be used
+    /// (the module declines to load on other CPUs).
+    pub fn open() -> Option<Self> {
+        let module = Module::load(INTEL_MSR).ok()?;
+        let target = module.read("ioctl_read_msr", IA32_TEMPERATURE_TARGET).ok()?;
+        let tj_max = ((target >> 16) & 0xFF) as f32;
+        // A CPU that does not report one has nothing to count down from.
+        if tj_max == 0.0 {
+            return None;
+        }
+        let energy_unit = module
+            .read("ioctl_read_msr", MSR_RAPL_POWER_UNIT)
+            .map_or(0.0, |units| 1.0 / (1u64 << ((units >> 8) & 0x1F)) as f64);
+        Some(IntelCpu { module, tj_max, energy_unit, last_energy: None })
+    }
+
+    pub fn read(&mut self) -> CpuSensors {
+        let mut sensors = CpuSensors::default();
+        // How far below the throttling point the hottest core is.
+        if let Ok(status) = self.module.read("ioctl_read_msr", IA32_PACKAGE_THERM_STATUS) {
+            sensors.temp = Some(self.tj_max - ((status >> 16) & 0x7F) as f32);
+        }
+        if self.energy_unit > 0.0 {
+            if let Ok(raw) = self.module.read("ioctl_read_msr", MSR_PKG_ENERGY_STATUS) {
+                let now = Instant::now();
+                let count = raw as u32;
+                if let Some((before, at)) = self.last_energy {
+                    let joules = count.wrapping_sub(before) as f64 * self.energy_unit;
+                    sensors.power = Some((joules / now.duration_since(at).as_secs_f64()) as f32);
+                }
+                self.last_energy = Some((count, now));
+            }
+        }
+        sensors
+    }
+}
+
+/// The CPU's own sensors, whichever maker's.
+pub enum CpuReader {
+    Amd(AmdCpu),
+    Intel(IntelCpu),
+}
+
+impl CpuReader {
+    pub fn open() -> Option<Self> {
+        AmdCpu::open().map(CpuReader::Amd).or_else(|| IntelCpu::open().map(CpuReader::Intel))
+    }
+
+    pub fn read(&mut self) -> CpuSensors {
+        match self {
+            CpuReader::Amd(cpu) => cpu.read(),
+            CpuReader::Intel(cpu) => cpu.read(),
+        }
+    }
+}
+
 /// The CPU's family and model, as AMD defines them from CPUID leaf 1.
 fn cpu_family_model() -> (u32, u32) {
     let leaf = std::arch::x86_64::__cpuid(1);

@@ -1,0 +1,145 @@
+//  PawnIO Modules - Modules for various hardware to be used with PawnIO.
+//  Copyright (C) 2025  namazso <admin@namazso.eu>
+//
+//  This library is free software; you can redistribute it and/or
+//  modify it under the terms of the GNU Lesser General Public
+//  License as published by the Free Software Foundation; either
+//  version 2.1 of the License, or (at your option) any later version.
+//
+//  This library is distributed in the hope that it will be useful,
+//  but WITHOUT ANY WARRANTY; without even the implied warranty of
+//  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+//  Lesser General Public License for more details.
+//
+//  You should have received a copy of the GNU Lesser General Public
+//  License along with this library; if not, write to the Free Software
+//  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+//
+//  SPDX-License-Identifier: LGPL-2.1-or-later
+
+#include <pawnio.inc>
+
+#define MSR_IA32_PACKAGE_THERM_STATUS		0x000001b1
+#define MSR_IA32_PERF_STATUS		0x00000198
+#define MSR_IA32_TEMPERATURE_TARGET	0x000001a2
+#define MSR_IA32_THERM_STATUS		0x0000019c
+
+#define MSR_VR_CURRENT_CONFIG		0x00000601
+#define MSR_VR_MAILBOX_INTERFACE    0x00000607
+#define MSR_VR_MAILBOX_DATA         0x00000608
+#define MSR_PKG_POWER_LIMIT		0x00000610
+#define MSR_PKG_ENERGY_STATUS		0x00000611
+#define MSR_PKG_PERF_STATUS		0x00000613
+#define MSR_PKG_POWER_INFO		0x00000614
+
+#define MSR_DRAM_POWER_LIMIT		0x00000618
+#define MSR_DRAM_ENERGY_STATUS		0x00000619
+#define MSR_DRAM_PERF_STATUS		0x0000061b
+#define MSR_DRAM_POWER_INFO		0x0000061c
+
+#define MSR_UNC_PERF_GLOBAL_CTRL	0x00000620
+#define MSR_UNC_PERF_GLOBAL_STATUS	0x00000621
+
+#define MSR_PP0_POWER_LIMIT		0x00000638
+#define MSR_PP0_ENERGY_STATUS		0x00000639
+#define MSR_PP0_POLICY			0x0000063a
+#define MSR_PP0_PERF_STATUS		0x0000063b
+
+#define MSR_PP1_POWER_LIMIT		0x00000640
+#define MSR_PP1_ENERGY_STATUS		0x00000641
+#define MSR_PP1_POLICY			0x00000642
+
+#define MSR_PLATFORM_ENERGY_STATUS	0x0000064D
+
+#define MSR_RAPL_POWER_UNIT		0x00000606
+
+#define MSR_PLATFORM_INFO		0x000000ce
+
+#define MSR_EBL_CR_POWERON		0x0000002a
+#define MSR_TURBO_RATIO_LIMIT	0x000001ad
+
+#define MSR_IA32_MPERF			0x000000e7
+#define MSR_IA32_APERF			0x000000e8
+
+#define MSR_OC_MAILBOX          0x00000150
+
+// Hardware prefetcher controls (Intel SDM Vol. 4): bit 0 L2 HW prefetcher, bit 1 L2
+// adjacent-line, bit 2 DCU, bit 3 DCU IP. Used for CPU tuning.
+#define MSR_MISC_FEATURE_CONTROL    0x000001a4
+
+bool:is_allowed_msr_read(msr) {
+    switch (msr) {
+        case MSR_IA32_PACKAGE_THERM_STATUS, MSR_IA32_PERF_STATUS, MSR_IA32_TEMPERATURE_TARGET,
+            MSR_IA32_THERM_STATUS, MSR_IA32_MPERF, MSR_IA32_APERF,
+            MSR_VR_CURRENT_CONFIG, MSR_PKG_POWER_LIMIT, MSR_PKG_ENERGY_STATUS, MSR_PKG_PERF_STATUS, MSR_PKG_POWER_INFO,
+            MSR_DRAM_POWER_LIMIT, MSR_DRAM_ENERGY_STATUS, MSR_DRAM_PERF_STATUS, MSR_DRAM_POWER_INFO,
+            MSR_UNC_PERF_GLOBAL_CTRL, MSR_UNC_PERF_GLOBAL_STATUS,
+            MSR_PP0_POWER_LIMIT, MSR_PP0_ENERGY_STATUS, MSR_PP0_POLICY, MSR_PP0_PERF_STATUS,
+            MSR_PP1_POWER_LIMIT, MSR_PP1_ENERGY_STATUS, MSR_PP1_POLICY,
+            MSR_PLATFORM_ENERGY_STATUS, MSR_RAPL_POWER_UNIT, MSR_PLATFORM_INFO,
+            MSR_EBL_CR_POWERON, MSR_TURBO_RATIO_LIMIT, MSR_OC_MAILBOX, MSR_VR_MAILBOX_INTERFACE, MSR_VR_MAILBOX_DATA,
+            MSR_MISC_FEATURE_CONTROL:
+            return true;
+        default:
+            return false;
+    }
+    return false;
+}
+
+bool:is_allowed_msr_write(msr) {
+    switch (msr) {
+        case MSR_VR_CURRENT_CONFIG, MSR_PKG_POWER_LIMIT, MSR_OC_MAILBOX, MSR_VR_MAILBOX_INTERFACE, MSR_VR_MAILBOX_DATA,
+             MSR_MISC_FEATURE_CONTROL:
+            return true;
+        default:
+            return false;
+    }
+    return false;
+}
+
+/// Read MSR.
+///
+/// @param in [0] = MSR
+/// @param in_size Must be 1
+/// @param out [0] = Value read
+/// @param out_size Must be 1
+/// @return An NTSTATUS
+DEFINE_IOCTL_SIZED(ioctl_read_msr, 1, 1) {
+    new msr = in[0] & 0xFFFFFFFF;
+
+    if (!is_allowed_msr_read(msr))
+        return STATUS_ACCESS_DENIED;
+        
+    new value = 0;
+    new NTSTATUS:status = msr_read(msr, value);
+
+    out[0] = value;
+
+    return status;
+}
+
+/// Write MSR.
+///
+/// @param in [0] = MSR, [1] = Value
+/// @param in_size Must be 2
+/// @param out_size Must be 0
+/// @return An NTSTATUS
+DEFINE_IOCTL_SIZED(ioctl_write_msr, 2, 0) {
+    new msr = in[0] & 0xFFFFFFFF;
+
+    if (!is_allowed_msr_write(msr))
+        return STATUS_ACCESS_DENIED;
+        
+    return msr_write(msr, in[1]);
+}
+
+
+NTSTATUS:main() {
+    if (get_arch() != ARCH_X64)
+        return STATUS_NOT_SUPPORTED;
+
+    if (get_cpu_vendor() != CpuVendor_Intel)
+        return STATUS_NOT_SUPPORTED;
+
+    return STATUS_SUCCESS;
+}

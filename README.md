@@ -14,6 +14,10 @@ slides back.
   motherboard's sensor chip through the signed PawnIO driver, which Glance
   installs itself on its first start; the rest from Windows' own counters
   (PDH, D3DKMT, the process list), the same sources Task Manager uses.
+  Supported sensor chips: AMD Ryzen (family 17h and later) and Intel Core
+  CPUs, ITE and Nuvoton Super I/O chips, DDR4 and DDR5 memory temperature
+  sensors. Only AMD, ITE and DDR5 have been tried on real hardware so far;
+  reports from Intel and Nuvoton machines are welcome.
 - Small: one 0.8 MB executable, drawn natively with Direct2D, DirectWrite
   and DirectComposition; about 55 MB of memory and well under 1% of a core
   while the panel is hidden.

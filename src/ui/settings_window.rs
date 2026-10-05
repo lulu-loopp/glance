@@ -28,10 +28,13 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
-    RegisterClassExW, SetCursor, SetForegroundWindow,
+    PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -316,6 +319,10 @@ struct Ui {
     settle_thumbs: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
+    /// The control the keyboard acts on, and whether the keyboard has been
+    /// used since the last click (the focus is shown only then).
+    focus: Option<Target>,
+    keyboard: bool,
     drag: Option<Drag>,
     targets: Vec<(Rect, Target)>,
     relabel_at: Option<Instant>,
@@ -397,6 +404,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             settle_thumbs: true,
             pointer: None,
             pressed: None,
+            focus: None,
+            keyboard: false,
             drag: None,
             targets: Vec::new(),
             relabel_at: None,
@@ -481,6 +490,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let (x, y) = point(lparam);
             with_ui(|ui| ui.release(x as f32 / ui.scale, y as f32 / ui.scale));
             LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+            let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
+            match with_ui(|ui| ui.key(VIRTUAL_KEY(wparam.0 as u16), shift, alt)) {
+                Some(true) => LRESULT(0),
+                _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+            }
         }
         WM_MOUSEWHEEL => {
             let delta = (wparam.0 >> 16) as u16 as i16;
@@ -826,7 +843,16 @@ impl Ui {
             self.next_frame = Instant::now();
             return;
         }
-        match pressed.unwrap() {
+        // A click moves the focus there too, without showing it.
+        let target = pressed.unwrap();
+        self.keyboard = false;
+        self.activate(target.clone());
+        self.focus = Some(self.stop_for(&target));
+    }
+
+    /// Does what pressing `target` does.
+    fn activate(&mut self, target: Target) {
+        match target {
             Target::Skin(skin) => {
                 self.settings.skin = match skin {
                     Skin::Paper => "paper",
@@ -850,6 +876,137 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
+    // ---- Keyboard ----
+
+    /// The focus stop a target belongs to: a row of choices, or the skin
+    /// cards, is one stop, at the option chosen.
+    fn stop_for(&self, target: &Target) -> Target {
+        match target {
+            Target::Choice(field, _) => Target::Choice(*field, self.choices(*field).2.unwrap_or(0)),
+            Target::Skin(_) => Target::Skin(Skin::named(&self.settings.skin)),
+            Target::Grip(id) => Target::Module(id.clone()),
+            other => other.clone(),
+        }
+    }
+
+    /// Every focus stop, in the order the list shows them (scrolled out of
+    /// view or not).
+    fn stops(&self) -> Vec<Target> {
+        self.layout()
+            .into_iter()
+            .filter_map(|(row, ..)| match row {
+                Row::Skins => Some(Target::Skin(Skin::named(&self.settings.skin))),
+                Row::Choice(field) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
+                Row::Switch(switch) => Some(Target::Switch(switch)),
+                Row::Module(id) => Some(Target::Module(id)),
+                Row::Quit => Some(Target::Quit),
+                Row::Title | Row::Heading(..) => None,
+            })
+            .collect()
+    }
+
+    /// A key pressed: Tab and Shift+Tab move between controls, the arrows
+    /// change a row's choice, Space and Enter press, Alt with the up and down
+    /// arrows moves a module, Escape closes the window.
+    fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool) -> bool {
+        self.keyboard = true;
+        self.next_frame = Instant::now();
+        let stops = self.stops();
+        let at = self.focus.as_ref().and_then(|focus| stops.iter().position(|stop| stop == focus));
+        match key {
+            VK_TAB if !stops.is_empty() => {
+                let next = match (at, shift) {
+                    (None, false) => 0,
+                    (None, true) => stops.len() - 1,
+                    (Some(i), false) => (i + 1) % stops.len(),
+                    (Some(i), true) => (i + stops.len() - 1) % stops.len(),
+                };
+                self.focus = Some(stops[next].clone());
+                self.reveal_focus();
+            }
+            VK_ESCAPE => unsafe {
+                let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            },
+            VK_SPACE | VK_RETURN => {
+                if let Some(focus) = self.focus.clone() {
+                    self.activate(focus);
+                }
+            }
+            VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => {
+                let forward = key == VK_RIGHT || key == VK_DOWN;
+                match self.focus.clone() {
+                    Some(Target::Module(id)) if alt && (key == VK_UP || key == VK_DOWN) => self.shift_module(&id, forward),
+                    Some(Target::Choice(field, index)) => {
+                        let count = self.choices(field).1.len();
+                        let next = if forward { (index + 1).min(count - 1) } else { index.saturating_sub(1) };
+                        if next != index {
+                            self.activate(Target::Choice(field, next));
+                            self.focus = Some(Target::Choice(field, next));
+                        }
+                    }
+                    Some(Target::Skin(skin)) => {
+                        let order = [Skin::Paper, Skin::Glass, Skin::Fluent];
+                        let index = order.iter().position(|s| *s == skin).unwrap_or(0);
+                        let next = if forward { (index + 1).min(order.len() - 1) } else { index.saturating_sub(1) };
+                        if next != index {
+                            self.activate(Target::Skin(order[next]));
+                            self.focus = Some(Target::Skin(order[next]));
+                        }
+                    }
+                    // Elsewhere the up and down arrows scroll the list.
+                    _ if key == VK_UP || key == VK_DOWN => self.scroll_by(if forward { WHEEL / 2.0 } else { -WHEEL / 2.0 }),
+                    _ => return false,
+                }
+            }
+            VK_PRIOR | VK_NEXT => {
+                let page = self.client().1 * 0.8;
+                self.scroll_by(if key == VK_NEXT { page } else { -page });
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Moves module `id` one place up or down the list.
+    fn shift_module(&mut self, id: &str, down: bool) {
+        let Some(at) = self.prefs.modules.iter().position(|entry| entry.id == id) else { return };
+        let to = if down { at + 1 } else { at.wrapping_sub(1) };
+        if to >= self.prefs.modules.len() {
+            return;
+        }
+        let before = self.row_tops();
+        self.prefs.modules.swap(at, to);
+        self.glide_rows(before, "");
+        self.save();
+        self.reveal_focus();
+    }
+
+    fn scroll_by(&mut self, distance: f32) {
+        let most = (self.content_height() - self.client().1).max(0.0);
+        self.scroll_target = (self.scroll_target + distance).clamp(0.0, most);
+    }
+
+    /// Scrolls the list so the focused control is in view.
+    fn reveal_focus(&mut self) {
+        let Some(focus) = self.focus.clone() else { return };
+        let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
+            (Row::Skins, Target::Skin(_)) | (Row::Quit, Target::Quit) => true,
+            (Row::Choice(f), Target::Choice(g, _)) => f == g,
+            (Row::Switch(s), Target::Switch(t)) => s == t,
+            (Row::Module(m), Target::Module(n)) => m == n,
+            _ => false,
+        });
+        let Some((_, top, height)) = row else { return };
+        let view = self.client().1;
+        let margin = 24.0;
+        let most = (self.content_height() - view).max(0.0);
+        if top - margin < self.scroll_target {
+            self.scroll_target = (top - margin).clamp(0.0, most);
+        } else if top + height + margin > self.scroll_target + view {
+            self.scroll_target = (top + height + margin - view).clamp(0.0, most);
+        }
+    }
+
     fn wheel(&mut self, delta: i16) {
         let Some((x, _)) = self.pointer else { return };
         if x >= PANE {
@@ -871,8 +1028,7 @@ impl Ui {
     fn reorder(&mut self) {
         let Some(drag) = &self.drag else { return };
         let middle = drag.pointer - drag.grab + ROW / 2.0;
-        let before: HashMap<String, f32> =
-            self.layout().into_iter().filter_map(|(row, y, _)| if let Row::Module(id) = row { Some((id, y)) } else { None }).collect();
+        let before = self.row_tops();
         let held = self.prefs.modules.iter().position(|entry| entry.id == drag.id).unwrap();
         let entry = self.prefs.modules.remove(held);
         let next = self.prefs.modules.iter().position(|other| middle < before[&other.id] + ROW / 2.0).unwrap_or(self.prefs.modules.len());
@@ -881,9 +1037,20 @@ impl Ui {
         if next == held {
             return;
         }
+        self.glide_rows(before, &id);
+    }
+
+    /// Where each module's row is laid out (document DIPs).
+    fn row_tops(&self) -> HashMap<String, f32> {
+        self.layout().into_iter().filter_map(|(row, y, _)| if let Row::Module(id) = row { Some((id, y)) } else { None }).collect()
+    }
+
+    /// After the modules' order changed: every row but `moved` glides from
+    /// where it was (`before`) to where it now belongs.
+    fn glide_rows(&mut self, before: HashMap<String, f32>, moved: &str) {
         let now = Instant::now();
-        let after: HashMap<String, f32> =
-            self.layout().into_iter().filter_map(|(row, y, _)| if let Row::Module(id) = row { Some((id, y)) } else { None }).collect();
+        let after = self.row_tops();
+        let id = moved.to_string();
         for (other, was) in before {
             if other == id || after[&other] == was {
                 continue;
@@ -1087,6 +1254,18 @@ impl Ui {
             let drag = self.drag.as_ref().unwrap();
             let y = drag.pointer - drag.grab - scroll;
             self.module_row(frame, palette, &id, left, y, width, row_height, now, &hovered, true);
+        }
+        // The focus, shown once the keyboard is in use.
+        if self.keyboard {
+            if let Some(focus) = &self.focus {
+                if let Some((r, target)) = self.targets.iter().find(|(_, target)| target == focus) {
+                    // A skin's target holds its label flush with the card's
+                    // edge, so its ring keeps some room; the rest hug theirs.
+                    let room = if matches!(target, Target::Skin(_)) { 8.0 } else { -1.0 };
+                    let ring = Rect { x: r.x - room, y: r.y - room, w: r.w + 2.0 * room, h: r.h + 2.0 * room };
+                    stroke_outside(frame, ring, 5.0 + room.max(0.0), palette.text, 2.0);
+                }
+            }
         }
         // A thin thumb shows where in the list the view is.
         let content = self.content_height();

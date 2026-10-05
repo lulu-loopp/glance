@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use crate::drives::DriveTemperature;
-use crate::sensors::{AmdCpu, CpuSensors};
+use crate::sensors::{CpuReader, CpuSensors};
 use crate::dimm::Dimms;
 use crate::superio::{BoardSensors, SuperIo};
 use windows::core::{w, PCWSTR};
@@ -205,7 +205,7 @@ pub struct Sampler {
     /// The totals at the last successful read of the interface table.
     net_prev: Option<(HashMap<u64, (u64, u64)>, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
-    amd_cpu: Option<AmdCpu>,
+    cpu_sensors: Option<CpuReader>,
     super_io: Option<SuperIo>,
     dimms: Option<Dimms>,
     /// Each process's GPU use at the last sample, by process id.
@@ -268,7 +268,7 @@ impl Sampler {
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
-            amd_cpu: AmdCpu::open(),
+            cpu_sensors: CpuReader::open(),
             super_io: SuperIo::open(&reg_string(
                 w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
                 w!("BaseBoardManufacturer"),
@@ -387,7 +387,7 @@ impl Sampler {
                 handles: perf.HandleCount,
             },
             battery: battery(),
-            cpu_sensors: self.amd_cpu.as_mut().map(AmdCpu::read),
+            cpu_sensors: self.cpu_sensors.as_mut().map(CpuReader::read),
             board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
