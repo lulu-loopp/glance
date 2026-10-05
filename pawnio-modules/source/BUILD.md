@@ -1,7 +1,7 @@
 # Building the modules
 
-These are the sources of the four PawnIO modules Glance carries
-(`AMDFamily17`, `LpcIO`, `SmbusPIIX4`, `SmbusI801`), unmodified from
+These are the sources of the five PawnIO modules Glance carries
+(`AMDFamily17`, `IntelMSR`, `LpcIO`, `SmbusPIIX4`, `SmbusI801`), unmodified from
 [PawnIO.Modules release 0.2.11](https://github.com/namazso/PawnIO.Modules/tree/0.2.11),
 with the include files they need.
 

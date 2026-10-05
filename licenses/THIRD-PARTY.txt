@@ -17,7 +17,8 @@ PawnIO driver setup (resources\PawnIO_setup.exe), version 2.2.0
   The same source, with the submodule it builds with, is attached as an
   archive to every Glance release that includes the setup.
 
-PawnIO modules (AMDFamily17, LpcIO, SmbusPIIX4, SmbusI801), release 0.2.11
+PawnIO modules (AMDFamily17, IntelMSR, LpcIO, SmbusPIIX4, SmbusI801),
+  release 0.2.11
   Copyright (C) namazso and the PawnIO.Modules contributors.
   Licence: GNU Lesser General Public License, version 2.1
   (PawnIO-Modules-LGPL-2.1.txt).
