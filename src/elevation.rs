@@ -596,7 +596,8 @@ pub fn remove_settings() -> bool {
     let file_gone = match Held::open(&folder.join("settings.json")) {
         Some(file) if file.lies_in(&held) => file.delete(),
         Some(_) => false,
-        None => true,
+        // Not opened: gone already, or held by another program.
+        None => folder.join("settings.json").symlink_metadata().is_err(),
     };
     held.delete();
     file_gone
