@@ -149,7 +149,10 @@ const ADL_PMLOG_MAX_SENSORS: usize = 256;
 /// The whole board's power, on newer cards; the chip's alone, on the rest.
 const PMLOG_BOARD_POWER: usize = 73;
 const PMLOG_ASIC_POWER: usize = 23;
-const AMD_VENDOR: i32 = 0x1002;
+/// AMD's PCI vendor id 1002h, as ADL writes it: the hex digits read as a
+/// decimal number (AMD's sample compares with 1002; ADL also lists other
+/// makers' cards, an NVIDIA one as 10).
+const AMD_VENDOR: i32 = 1002;
 
 /// AdapterInfo, as Windows builds lay it out.
 #[repr(C)]

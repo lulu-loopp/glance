@@ -14,7 +14,7 @@ Unicode true
 !include "x64.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.1.0"
+!define VERSION "0.1.1"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"
@@ -54,6 +54,12 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 
 LangString OpenFolder ${LANG_SIMPCHINESE} "装在这里，Glance 不能开机自启，每次启动也都要确认管理员权限。$\r$\n$\r$\n这个位置上面有你的账户能改名或改权限的文件夹，别的程序就能把 Glance 换成自己，从而悄悄拿到管理员权限。Program Files，或者磁盘根目录下的新文件夹（比如 D:\Glance）没有这个问题。$\r$\n$\r$\n仍然装在这里吗？"
 LangString OpenFolder ${LANG_ENGLISH} "Installed here, Glance cannot start with Windows, and every start asks for administrator rights.$\r$\n$\r$\nA folder above this one can be renamed or re-permissioned by your account, so another program could put itself in Glance's place and quietly gain administrator rights. Program Files, or a new folder at a drive's root (such as D:\Glance), is safe.$\r$\n$\r$\nInstall here anyway?"
+LangString OccupiedFolder ${LANG_SIMPCHINESE} "这个文件夹里已经有别的东西了。$\r$\n$\r$\n请选一个新文件夹或空文件夹（比如 D:\Glance）：安装时 Glance 会把它设成只有管理员能改，里面原有的东西也会受影响。"
+LangString OccupiedFolder ${LANG_ENGLISH} "This folder already holds other things.$\r$\n$\r$\nChoose a new or empty folder (such as D:\Glance): installing makes it changeable by administrators only, which would affect what is in it."
+LangString IndirectFolder ${LANG_SIMPCHINESE} "这个位置是联接点、符号链接或磁盘根目录，实际指向的不是这里。请选一个普通文件夹。"
+LangString IndirectFolder ${LANG_ENGLISH} "This is a junction, a symbolic link or a drive's root: it leads somewhere else. Choose an ordinary folder."
+LangString UnpreparedFolder ${LANG_SIMPCHINESE} "无法设置安装文件夹的权限，安装已停止。"
+LangString UnpreparedFolder ${LANG_ENGLISH} "The install folder's permissions could not be set; installation stopped."
 LangString RemovePawnIO ${LANG_SIMPCHINESE} "也要卸载 PawnIO 驱动吗？$\r$\n$\r$\n它是 Glance 安装的，用来读取温度和风扇。如果其他硬件监控或风扇控制软件（比如 HWiNFO、FanControl）也在用它，请保留。"
 LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver too?$\r$\n$\r$\nGlance installed it to read temperatures and fans. Keep it if other monitoring or fan control programs (such as HWiNFO or FanControl) use it."
 
@@ -73,13 +79,26 @@ Function .onInit
   SetRegView 64
 FunctionEnd
 
-; Whether Glance in the chosen folder could start unasked: asked of Glance
-; itself, which applies the same rule when it starts.
-Function CheckFolder
+; Glance itself, in the plugins folder (which NSIS makes administrators'
+; when elevated), answers for the chosen folder and prepares it: by the same
+; rules it applies when it starts.
+!macro Helper
   InitPluginsDir
   File "/oname=$PLUGINSDIR\${EXE}" "..\target\release\${EXE}"
+!macroend
+
+; What the chosen folder is: 0 Glance could start unasked there, 1 it would
+; ask every time, 2 the folder holds other things, 3 it is a link or a root.
+Function CheckFolder
+  !insertmacro Helper
   ExecWait '"$PLUGINSDIR\${EXE}" --check-install-folder "$INSTDIR"' $0
-  ${If} $0 != 0
+  ${If} $0 == 2
+    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
+    Abort
+  ${ElseIf} $0 == 3
+    MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
+    Abort
+  ${ElseIf} $0 != 0
     MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolder)" /SD IDYES IDYES +2
     Abort
   ${EndIf}
@@ -87,6 +106,20 @@ FunctionEnd
 
 Section "Glance"
   !insertmacro StopGlance
+  ; The folder becomes Glance's before anything is put in it: owned by the
+  ; administrators, changed only by them and the system, read by everyone,
+  ; as Program Files' folders are; an earlier Glance in it takes the same.
+  ; A folder holding other things, or a link, is left alone (a silent
+  ; install given one with /D stops here).
+  !insertmacro Helper
+  ExecWait '"$PLUGINSDIR\${EXE}" --prepare-install-folder "$INSTDIR"' $0
+  ${If} $0 == 2
+    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
+    Abort
+  ${ElseIf} $0 != 0
+    MessageBox MB_ICONSTOP "$(UnpreparedFolder)" /SD IDOK
+    Abort
+  ${EndIf}
   SetOutPath "$INSTDIR"
   File "..\target\release\${EXE}"
   SetOutPath "$INSTDIR\resources"
@@ -100,15 +133,6 @@ Section "Glance"
   File /r "..\pawnio-modules\source\*"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-
-  ; Glance's folder as Program Files keeps its folders: owned by the
-  ; administrators, changed only by them and the system, read by everyone.
-  ; What Glance put in it then takes those rights; anything else there is
-  ; left as it was.
-  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR" /setowner *S-1-5-32-544 /C /Q'
-  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR" /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F *S-1-5-32-545:(OI)(CI)RX /C /Q'
-  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR\${EXE}" "$INSTDIR\uninstall.exe" /reset /C /Q'
-  nsExec::Exec '"$SYSDIR\icacls.exe" "$INSTDIR\resources" "$INSTDIR\licenses" /reset /T /C /Q'
 
   SetShellVarContext all
   CreateShortcut "$SMPROGRAMS\${NAME}.lnk" "$INSTDIR\${EXE}"

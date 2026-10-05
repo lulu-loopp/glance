@@ -19,15 +19,23 @@ slides back.
   sensors. Only AMD, ITE and DDR5 have been tried on real hardware so far;
   reports from Intel and Nuvoton machines are welcome. On laptops the fans
   and board temperatures belong to the laptop's embedded controller and are
-  not shown.
+  not shown. A discrete graphics card's power comes from its own driver
+  (NVIDIA's NVML, AMD's ADL); integrated graphics draw from the CPU
+  package, whose power the CPU lane shows.
 - Small: one 0.8 MB executable, drawn natively with Direct2D, DirectWrite
   and DirectComposition; about 55 MB of memory and well under 1% of a core
   while the panel is hidden.
 
 The sensors need administrator rights. The first start asks once; Glance then
-registers a scheduled task that starts it elevated without asking again.
+registers a scheduled task that starts it elevated without asking again, and
+can start with Windows. It does both only from a folder no ordinary program
+can change: Program Files, or another folder the installer sets up the same
+way (a new folder at a drive's root, such as `D:\Glance`, works; a folder
+inside one your account owns does not, and the installer says so).
 Left-click the tray icon for the panel, right-click it (or start Glance again)
-for the settings.
+for the settings. Uninstall from Windows' Apps list or from the settings; it
+removes Glance, its scheduled tasks and its settings, and asks whether to
+remove the PawnIO driver too.
 
 ## Build
 
@@ -37,7 +45,7 @@ makensis installer\glance.nsi
 ```
 
 The executable is `target\release\glance.exe`, the installer
-`target\Glance_0.1.0_x64-setup.exe`. A debug build runs without asking for
+`target\Glance_0.1.1_x64-setup.exe`. A debug build runs without asking for
 administrator rights (and so without the driver's sensors).
 
 ## Licence

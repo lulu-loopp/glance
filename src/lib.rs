@@ -107,12 +107,23 @@ pub fn run() {
         elevation::remove_all_tasks();
         return;
     }
-    // The installer asks whether a chosen folder would let Glance start
-    // unasked: exit code 0 if so.
+    // The installer asks what a chosen folder is (exit code 0 where Glance
+    // could start unasked, 1 where it would ask, 2 where the folder holds
+    // other things, 3 where it is a link), and has it made Glance's own
+    // before anything is put in it (0 when done).
     let args: Vec<String> = std::env::args().collect();
     if let [_, flag, folder] = args.as_slice() {
-        if flag == "--check-install-folder" {
-            std::process::exit(if elevation::install_folder_holds(std::path::Path::new(folder)) { 0 } else { 1 });
+        let code = |kind: elevation::InstallFolder| match kind {
+            elevation::InstallFolder::Holds => 0,
+            elevation::InstallFolder::Open => 1,
+            elevation::InstallFolder::Occupied => 2,
+            elevation::InstallFolder::Indirect => 3,
+        };
+        let folder = std::path::Path::new(folder);
+        match flag.as_str() {
+            "--check-install-folder" => std::process::exit(code(elevation::install_folder(folder))),
+            "--prepare-install-folder" => std::process::exit(elevation::prepare_install_folder(folder).map_or_else(code, |_| 0)),
+            _ => {}
         }
     }
     // One Glance at a time: starting it again opens its settings. Asked
