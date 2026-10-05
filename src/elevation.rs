@@ -239,9 +239,17 @@ fn direct(folder: &Path) -> Option<PathBuf> {
     (same_path(&resolved, existing)).then_some(folder)
 }
 
-/// Whether two paths name the same place, the \\?\ prefix and case aside.
+/// Whether two paths name the same place, case aside, and whether written
+/// plainly or as Windows answers by handle (\\?\C:\…, \\?\UNC\server\…).
 fn same_path(a: &Path, b: &Path) -> bool {
-    let plain = |path: &Path| path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase();
+    let plain = |path: &Path| {
+        let text = path.to_string_lossy();
+        let text = match text.strip_prefix(r"\\?\UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
+        };
+        text.trim_end_matches('\\').to_lowercase()
+    };
     plain(a) == plain(b)
 }
 
@@ -533,7 +541,10 @@ pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Re
     use std::os::windows::fs::OpenOptionsExt;
     let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not where its path says");
     let held = held_where_it_says(folder).ok_or_else(refused)?;
-    let temporary = folder.join(format!(".{name}.{}.tmp", std::process::id()));
+    // A name of its own for each attempt.
+    static ATTEMPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let attempt = ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = folder.join(format!(".{name}.{}.{attempt}.tmp", std::process::id()));
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -549,8 +560,26 @@ pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Re
         file.delete();
         return Err(error);
     }
-    drop(file);
-    std::fs::rename(&temporary, folder.join(name))
+    // Renamed while still open (it shares delete), so that if the name's
+    // place cannot be taken, what was written goes again by its handle.
+    match std::fs::rename(&temporary, folder.join(name)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            file.delete();
+            Err(error)
+        }
+    }
+}
+
+/// Makes sure `folder` exists, creating it, if need be, only in a parent
+/// that is where its path says, checked by handle to lie in it.
+pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
+    if folder.is_dir() {
+        return Ok(());
+    }
+    let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not where its path says");
+    let parent = folder.parent().and_then(held_where_it_says).ok_or_else(refused)?;
+    create_held(folder, &parent, None).map(drop).map_err(|_| refused())
 }
 
 /// Removes this user's settings for the uninstaller: the one file Glance
@@ -922,6 +951,13 @@ mod tests {
     }
 
     #[test]
+    fn compares_paths_as_windows_answers_them() {
+        assert!(same_path(Path::new(r"\\?\C:\Users\A\AppData"), Path::new(r"c:\users\a\appdata\")));
+        assert!(same_path(Path::new(r"\\?\UNC\server\share\Roaming"), Path::new(r"\\server\share\Roaming")));
+        assert!(!same_path(Path::new(r"\\?\UNC\server\share\Roaming"), Path::new(r"C:\server\share\Roaming")));
+    }
+
+    #[test]
     fn acts_on_what_it_holds() {
         let base = std::env::temp_dir().join(format!("glance-held-test-{}", std::process::id()));
         let folder = base.join("folder");
@@ -985,6 +1021,11 @@ mod tests {
         assert!(write_in_place(&link.join("inner"), "settings.json", b"mine").is_err());
         assert_eq!(std::fs::read(target.join("settings.json")).unwrap(), b"theirs");
         assert!(!target.join("inner").join("settings.json").exists());
+        // Nor is a missing folder created through one.
+        assert!(ensure_folder(&link.join("new")).is_err());
+        assert!(!target.join("new").exists());
+        ensure_folder(&base.join("made")).unwrap();
+        assert!(base.join("made").is_dir());
         std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
     }
