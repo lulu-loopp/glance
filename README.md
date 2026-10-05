@@ -17,7 +17,9 @@ slides back.
   Supported sensor chips: AMD Ryzen (family 17h and later) and Intel Core
   CPUs, ITE and Nuvoton Super I/O chips, DDR4 and DDR5 memory temperature
   sensors. Only AMD, ITE and DDR5 have been tried on real hardware so far;
-  reports from Intel and Nuvoton machines are welcome.
+  reports from Intel and Nuvoton machines are welcome. On laptops the fans
+  and board temperatures belong to the laptop's embedded controller and are
+  not shown.
 - Small: one 0.8 MB executable, drawn natively with Direct2D, DirectWrite
   and DirectComposition; about 55 MB of memory and well under 1% of a core
   while the panel is hidden.

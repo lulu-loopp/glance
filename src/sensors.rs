@@ -7,7 +7,7 @@ use std::time::Instant;
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::SystemInformation::{
-    GetLogicalProcessorInformationEx, RelationProcessorCore, RelationProcessorPackage, GROUP_AFFINITY,
+    GetLogicalProcessorInformationEx, RelationProcessorCore, RelationProcessorPackage, GROUP_AFFINITY, PROCESSOR_RELATIONSHIP,
     LOGICAL_PROCESSOR_RELATIONSHIP, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
 };
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentThread, ReleaseMutex, SetThreadGroupAffinity, WaitForSingleObject};
@@ -88,15 +88,28 @@ fn topology(relation: LOGICAL_PROCESSOR_RELATIONSHIP) -> Vec<Processors> {
     if unsafe { GetLogicalProcessorInformationEx(relation, Some(records), &mut length) }.is_err() {
         return Vec::new();
     }
+    // Each record is as long as its Size says, shorter than the Rust type
+    // (whose union holds the largest relation): its fields are read where
+    // they lie, never through a reference to the whole type.
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, length as usize) };
+    let size_at = std::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Size);
+    let processor_at = std::mem::offset_of!(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX, Anonymous);
+    let count_at = processor_at + std::mem::offset_of!(PROCESSOR_RELATIONSHIP, GroupCount);
+    let mask_at = processor_at + std::mem::offset_of!(PROCESSOR_RELATIONSHIP, GroupMask);
+    let read = |at: usize, len: usize| bytes.get(at..at + len);
     let mut found = Vec::new();
     let mut offset = 0usize;
-    while offset < length as usize {
-        let record = unsafe { &*((buffer.as_ptr() as *const u8).add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) };
-        let processor = unsafe { &record.Anonymous.Processor };
-        if processor.GroupCount > 0 {
-            found.push(processor.GroupMask[0]);
+    while let Some(size) = read(offset + size_at, 4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()) as usize) {
+        let count = read(offset + count_at, 2).map(|b| u16::from_ne_bytes(b.try_into().unwrap()));
+        let mask = read(offset + mask_at, std::mem::size_of::<Processors>())
+            .map(|b| unsafe { (b.as_ptr() as *const Processors).read_unaligned() });
+        if let (Some(1..), Some(mask)) = (count, mask) {
+            found.push(mask);
         }
-        offset += record.Size as usize;
+        if size == 0 {
+            break;
+        }
+        offset += size;
     }
     found
 }
@@ -190,6 +203,9 @@ impl AmdCpu {
 
     pub fn read(&mut self) -> CpuSensors {
         let mut sensors = CpuSensors::default();
+        // The temperatures are the first socket's: the module reaches SMN
+        // through the PCI root at 0/0/0 only, whichever processor asks
+        // (power, read from MSRs, covers every socket).
         // While another program has the bus, the last temperatures stand.
         if let Some(_lock) = NamedLock::acquire(PCI_LOCK, LOCK_WAIT) {
             let mut ccds = Vec::new();
