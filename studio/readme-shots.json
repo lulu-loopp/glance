@@ -2,10 +2,7 @@
   "width": 1920, "height": 1080, "scale": 1.5, "fps": 30,
   "wallpaper": "target/studio/wall-wide-dark.png",
   "shots": [
-    { "name": "readme-glass", "skin": "glass", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
-    { "name": "readme-paper", "skin": "paper", "theme": "light", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
-    { "name": "readme-fluent-dark", "skin": "fluent", "theme": "dark", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
-    { "name": "readme-paper-dark", "skin": "paper", "theme": "dark", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
-    { "name": "readme-glass-en", "skin": "glass", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] }
+    { "name": "desktop-zh", "skin": "glass", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "desktop-en", "skin": "glass", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] }
   ]
 }

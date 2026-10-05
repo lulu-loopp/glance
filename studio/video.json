@@ -2,7 +2,7 @@
   "fps": 30,
   "frames": "target/studio/frames",
   "wallpaper": "target/studio/wall-dark.png",
-  "out": "target/studio/glance-promo-v5.mp4",
+  "out": "target/studio/glance-promo-v6.mp4",
   "scenes": [
     {
       "kind": "intro", "shot": "intro", "seconds": 4.4,

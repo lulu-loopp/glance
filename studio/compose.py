@@ -69,7 +69,8 @@ class Fonts:
 
 class Footage:
     """A shot's frames, read on demand (past its end, its last frame), and
-    where its lanes rest, as the studio wrote them."""
+    where its panel rests, as the studio wrote it: the panel's rect, the
+    pieces it is drawn as, their corner radius and each lane's rect."""
 
     def __init__(self, folder):
         self.folder = Path(folder)
@@ -77,8 +78,7 @@ class Footage:
         if not self.files:
             raise SystemExit(f"no frames in {folder}")
         self.cache = {}
-        lanes = self.folder / "lanes.json"
-        self.lanes = {lane["id"]: lane for lane in json.loads(lanes.read_text())} if lanes.exists() else {}
+        self.placed = json.loads((self.folder / "lanes.json").read_text())
 
     def frame(self, index):
         index = min(max(index, 0), len(self.files) - 1)
@@ -238,16 +238,30 @@ def muted(frame, blur=26, darken=0.45):
     return Image.blend(frame.filter(ImageFilter.GaussianBlur(blur)), Image.new("RGB", frame.size, (6, 8, 16)), darken)
 
 
-def panel_crop(frame, wallpaper):
-    """The panel cut out of a still, where it differs from the wallpaper,
-    with rounded corners."""
-    diff = np.abs(np.asarray(frame, np.int16) - np.asarray(wallpaper, np.int16)).sum(axis=2) > 60
-    ys, xs = np.nonzero(diff)
-    box = (max(xs.min() - 20, 0), max(ys.min() - 20, 0), min(xs.max() + 20, frame.width), min(ys.max() + 30, frame.height))
-    crop = frame.crop(box).convert("RGBA")
-    mask = Image.new("L", crop.size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((14, 14, crop.width - 14, crop.height - 20), radius=26, fill=255)
-    crop.putalpha(mask.filter(ImageFilter.GaussianBlur(1)))
+def cutout(frame, placed, through=None):
+    """The panel cut out of a still along the pieces it is drawn as, with
+    their rounded corners; if `through` names a lane, only down to it, as
+    the panel would be if that lane were its last."""
+    panel, radius = placed["panel"], placed["radius"]
+    pieces = placed["pieces"]
+    if through:
+        lane = placed["lanes"][through]
+        # Below the lane, the room the panel keeps above its first.
+        first = min(placed["lanes"].values(), key=lambda r: r["y"])
+        end = lane["y"] + lane["h"] + (first["y"] - panel["y"])
+        pieces = [dict(p, h=min(p["h"], end - p["y"])) for p in pieces if p["y"] < end - 1]
+    left, top = panel["x"], panel["y"]
+    right = panel["x"] + panel["w"]
+    bottom = max(p["y"] + p["h"] for p in pieces)
+    # Drawn four times larger and scaled down, for smooth edges.
+    k = 4
+    mask = Image.new("L", (int((right - left) * k), int((bottom - top) * k)), 0)
+    draw = ImageDraw.Draw(mask)
+    for p in pieces:
+        x, y = (p["x"] - left) * k, (p["y"] - top) * k
+        draw.rounded_rectangle((x, y, x + p["w"] * k, y + p["h"] * k), radius=radius * k, fill=255)
+    crop = frame.crop((int(left), int(top), int(left) + mask.width // k, int(top) + mask.height // k)).convert("RGBA")
+    crop.putalpha(mask.resize(crop.size, Image.LANCZOS))
     return crop
 
 
@@ -319,7 +333,7 @@ class Video:
         """How wide a caption may be: from the margin to a gap short of the
         panel, in the scene's shots."""
         shots = scene["shots"] if "shots" in scene else [scene["shot"]]
-        return min(self.shot(name).lanes["panel"]["x"] for name in shots) - MARGIN - GAP
+        return min(self.shot(name).placed["panel"]["x"] for name in shots) - MARGIN - GAP
 
     def scene_frame(self, scene, t):
         kind, length = scene["kind"], scene["seconds"]
@@ -367,29 +381,34 @@ class Video:
             return frame, [pill_layer(self.fonts, labels[index], 230, 1600, a)]
         # Then the three side by side, flying in one after another.
         if self.triptych is None:
-            self.triptych = [panel_crop(self.shot(name).frame(0), self.wallpaper) for name in scene["stills"]]
+            crops = [cutout(self.shot(name).frame(0), self.shot(name).placed) for name in scene["stills"]]
+            # One scale for all three, so that their type is the same size:
+            # the widest fills its column.
+            column = (W - 2 * 40 - 2 * 22) / 3
+            scale = column / max(crop.width for crop in crops)
+            self.triptych = [crop.resize((round(crop.width * scale), round(crop.height * scale)), Image.LANCZOS) for crop in crops]
         local = t - sliding
         frame = muted(self.wallpaper, blur=8, darken=0.25)
         layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        gap = 22
-        width = (W - 2 * 40 - 2 * gap) / 3
-        # The labels on one line, under the tallest card.
-        lowest = 620 + max(crop.height * width / crop.width for crop in self.triptych)
-        for i, (crop, label) in enumerate(zip(self.triptych, labels)):
+        column = (W - 2 * 40) / 3
+        top = 670
+        lowest = top + max(card.height for card in self.triptych)
+        for i, (card, label) in enumerate(zip(self.triptych, labels)):
             a = ease_back((local - 0.08 * i) / 0.55)
             alpha = clamp01((local - 0.08 * i) / 0.25)
             if alpha <= 0:
                 continue
-            card = crop.resize((int(width), int(crop.height * width / crop.width)), Image.LANCZOS)
             if alpha < 1:
+                card = card.copy()
                 card.putalpha(card.getchannel("A").point(lambda v: int(v * alpha)))
-            x = int(40 + i * (width + gap))
-            y = int(620 + (1 - a) * 900)
-            shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            ImageDraw.Draw(shadow).rounded_rectangle((x + 8, y + 24, x + card.width - 8, y + card.height), radius=24, fill=(0, 0, 0, int(140 * alpha)))
-            layer.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(22)))
-            layer.alpha_composite(card, (x, y))
-            ImageDraw.Draw(layer).text((x + card.width / 2, lowest + 50 + (y - 620)), label, font=self.fonts.get(36, b"SemiBold"), anchor="mm", fill=(255, 255, 255, int(255 * alpha)))
+            centre = 40 + (i + 0.5) * column
+            x = int(centre - card.width / 2)
+            lift = (1 - a) * 900
+            y = int(top + lift)
+            placed = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            placed.alpha_composite(card, (x, y))
+            layer.alpha_composite(shadowed(placed, blur=20, strength=0.6))
+            ImageDraw.Draw(layer).text((centre, lowest + 56 + lift), label, font=self.fonts.get(36, b"SemiBold"), anchor="mm", fill=(255, 255, 255, int(255 * alpha)))
         return frame, [layer]
 
     def detail(self, scene, t):
@@ -403,14 +422,14 @@ class Video:
 
         # The camera travels to each lane, holding it in the middle.
         def top_for(i):
-            lane = footage.lanes[stops[i]["lane"]]
+            lane = footage.placed["lanes"][stops[i]["lane"]]
             return min(max(lane["y"] + lane["h"] / 2 - H * 0.5, 0), bh - H)
 
         previous = top_for(max(index - 1, 0))
         top = previous + (top_for(index) - previous) * ease(local / 0.6)
         left = bw - W
         frame = big.crop((left, int(top), left + W, int(top) + H))
-        lane = footage.lanes[stops[index]["lane"]]
+        lane = footage.placed["lanes"][stops[index]["lane"]]
         rect = (lane["x"] - left, lane["y"] - top, lane["w"], lane["h"])
         a = ease_out((local - 0.45) / 0.35) * (1 - ease((local - each + 0.25) / 0.25))
         # Its name and what it shows, in the room to its left.
@@ -422,7 +441,7 @@ class Video:
         draw.text((MARGIN, cy - 70 + rise), stops[index]["name"], font=self.fonts.get(64, b"Bold"), fill=(255, 255, 255, int(255 * a)))
         for j, line in enumerate(stops[index]["what"].split("\n")):
             draw.text((MARGIN, cy + 14 + j * 50 + rise), line, font=self.fonts.get(36, b"Regular"), fill=(232, 236, 245, int(230 * a)))
-        return frame, [glow_box(rect, lane["radius"], a), shadowed(label)]
+        return frame, [glow_box(rect, footage.placed["radius"], a), shadowed(label)]
 
     def stats(self, scene, t):
         length = scene["seconds"]

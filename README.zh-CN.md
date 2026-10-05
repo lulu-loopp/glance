@@ -1,9 +1,7 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-zh-dark.svg">
-  <img src="docs/readme/hero-zh-light.svg" width="100%"
-       alt="Glance，Windows 系统监控：把鼠标推到屏幕边缘，面板就会滑出。名字旁边是面板的
-       CPU 一栏：占用、曲线、频率、功耗和每个线程。">
-</picture>
+<img src="docs/images/banner-zh.webp" width="100%"
+     alt="Glance：藏在屏幕边缘的系统监控。鼠标推到边缘，面板滑出；移开即收回。名字旁边是
+     磨砂玻璃外观面板的 CPU 一栏，叠在桌面上。">
+
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#许可证)
 [![Release](https://img.shields.io/github/v/release/lulu-loopp/glance?label=release&color=blue)](https://github.com/lulu-loopp/glance/releases/latest)
@@ -14,7 +12,7 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 
 [English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest) · [硬件支持](#硬件支持) · [构建](#构建)
 
-![Glance 磨砂玻璃外观的面板，叠在桌面上](docs/images/hero-zh.jpg)
+![Glance 磨砂玻璃外观的面板，叠在桌面上](docs/images/desktop-zh.webp)
 
 ## 显示什么
 
@@ -31,7 +29,7 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 
 记录纸、磨砂玻璃（每一块面板的边缘都会折射背后的桌面）和 Windows 11（与开始菜单相同的亚克力材质）。可选浅色、深色，或跟随壁纸亮度自动切换。界面支持中文和英文。
 
-![三种外观：记录纸、磨砂玻璃、Windows 11](docs/images/looks-zh.jpg)
+![三种外观（深色）：记录纸、磨砂玻璃、Windows 11](docs/images/looks-zh.webp)
 
 ## 小巧安静
 
@@ -73,7 +71,7 @@ makensis installer\glance.nsi
 
 `scripts\release.ps1` 会完成以上两步；加上 `-Sign` 时，还会为可执行文件、卸载程序和安装程序签名（`scripts\sign.ps1`，使用 Microsoft Artifact Signing）。调试版本启动时不请求管理员权限，因此也没有驱动提供的传感器读数。
 
-本页的图片和宣传视频都由 Glance 自己绘制：`cargo build --release --features studio` 会加入 `glance --studio script.json out-folder` 命令，按镜头脚本在屏幕外逐帧渲染面板（见 `studio\`）。
+本页的图片和宣传视频都由 Glance 自己绘制：`cargo build --release --features studio` 会加入 `glance --studio script.json out-folder` 命令，按镜头脚本在屏幕外逐帧渲染面板，再由 `studio\readme.py` 和 `studio\compose.py` 合成（见 `studio\`）。
 
 ## 许可证
 

@@ -1,0 +1,8 @@
+{
+  "width": 1760, "height": 600, "scale": 2.0, "fps": 30,
+  "wallpaper": "target/studio/wall-banner-dark.png",
+  "shots": [
+    { "name": "banner-zh", "skin": "glass", "theme": "dark", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu"] },
+    { "name": "banner-en", "skin": "glass", "theme": "dark", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu"] }
+  ]
+}

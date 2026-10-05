@@ -1,0 +1,12 @@
+{
+  "width": 1080, "height": 1920, "scale": 2.0, "fps": 30,
+  "wallpaper": "target/studio/wall-dark.png",
+  "shots": [
+    { "name": "looks-paper-zh", "skin": "paper", "theme": "dark", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "looks-glass-zh", "skin": "glass", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "looks-fluent-zh", "skin": "fluent", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "looks-paper-en", "skin": "paper", "theme": "dark", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "looks-glass-en", "skin": "glass", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] },
+    { "name": "looks-fluent-en", "skin": "fluent", "lang": "en", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] }
+  ]
+}

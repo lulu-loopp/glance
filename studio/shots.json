@@ -48,7 +48,7 @@
     {
       "name": "look-paper",
       "skin": "paper",
-      "theme": "light",
+      "theme": "dark",
       "seconds": 1.3,
       "slide_in": 0.02,
       "slide_out": 0.98,
@@ -91,7 +91,6 @@
     {
       "name": "look-fluent",
       "skin": "fluent",
-      "theme": "dark",
       "seconds": 1.3,
       "slide_in": 0.02,
       "slide_out": 0.98,
@@ -113,7 +112,7 @@
     {
       "name": "still-paper",
       "skin": "paper",
-      "theme": "light",
+      "theme": "dark",
       "seconds": 0.04,
       "load": [
         0.6,
@@ -152,7 +151,6 @@
     {
       "name": "still-fluent",
       "skin": "fluent",
-      "theme": "dark",
       "seconds": 0.04,
       "load": [
         0.6,

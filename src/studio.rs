@@ -163,7 +163,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let theme = Theme::new(skin, dark);
     let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
     let ids: Vec<&str> = prefs.modules.iter().filter(|entry| entry.on).map(|entry| entry.id.as_str()).collect();
-    let mut rects = Vec::new();
+    let mut placed = serde_json::Value::Null;
 
     let mut layers = PanelLayers::default();
     for index in 0..frames {
@@ -186,14 +186,17 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             Entrance::Beyond(extra) => layout.width() + extra,
             Entrance::Slide(distance) => distance,
         };
-        // Where the panel and each lane are in the frame, in pixels, for the
-        // compositor: where the shot leaves them.
-        let rect = |id: &str, x: f32, y: f32, w: f32, h: f32| {
-            serde_json::json!({ "id": id, "x": (rest.0 + x * zoom) * px, "y": (rest.1 + y * zoom) * px, "w": w * zoom * px, "h": h * zoom * px, "radius": theme.radius * zoom * px })
+        // Where the panel, the pieces it is drawn as (each lane and the bar
+        // on glass, else one slab) and each lane are in the frame, in
+        // pixels, for the compositor: where the shot leaves them.
+        let rect = |r: &view::Rect| {
+            serde_json::json!({ "x": (rest.0 + r.x * zoom) * px, "y": (rest.1 + r.y * zoom) * px, "w": r.w * zoom * px, "h": r.h * zoom * px })
         };
-        rects = std::iter::once(rect("panel", 0.0, 0.0, layout.width(), layout.height()))
-            .chain(layout.lanes().iter().zip(&ids).map(|(r, id)| rect(id, r.x, r.y, r.w, r.h)))
-            .collect();
+        let panel = view::Rect { x: 0.0, y: 0.0, w: layout.width(), h: layout.height() };
+        let boxes = layout.lanes();
+        let pieces: Vec<_> = if skin == Skin::Glass { boxes.iter().chain([&layout.bar()]).map(rect).collect() } else { vec![rect(&panel)] };
+        let named: serde_json::Map<String, serde_json::Value> = ids.iter().zip(&boxes).map(|(id, r)| (id.to_string(), rect(r))).collect();
+        placed = serde_json::json!({ "panel": rect(&panel), "radius": theme.radius * zoom * px, "pieces": pieces, "lanes": named });
         // Where the panel is at `at` seconds: off by `shift` of its travel,
         // at `opacity`.
         let moved = |at: f32| motion(shot, at);
@@ -236,7 +239,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         gfx.sweep();
         save_png(&folder.join(format!("{:05}.png", index + 1)), script.width, script.height, &pixels).map_err(|e| e.to_string())?;
     }
-    std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&rects).unwrap()).map_err(|e| e.to_string())
+    std::fs::write(folder.join("lanes.json"), serde_json::to_string_pretty(&placed).unwrap()).map_err(|e| e.to_string())
 }
 
 /// Where a shot's panel is at `t` seconds: how far out of its travel
@@ -293,7 +296,9 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
                 shared_used: (0.2 * gb as f32) as u64,
                 temp: Some(36.0 + 34.0 * g + 1.5 * noise()),
                 clock_mhz: Some(if g > 0.05 { 2400.0 + 300.0 * g + 30.0 * noise() } else { 210.0 + 40.0 * noise() }),
-                fan_rpm: (g > 0.3).then_some((900.0 + 1100.0 * g) as u32),
+                // A card whose fans turn even at rest, so that its lane
+                // keeps its rows through a shot.
+                fan_rpm: Some((780.0 + 1100.0 * g) as u32),
                 power: (i == 0).then_some(18.0 + 255.0 * g + 12.0 * wave(4.0, 0.7) * g + 2.0 * noise()),
             }
         })

@@ -1,10 +1,8 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/hero-en-dark.svg">
-  <img src="docs/readme/hero-en-light.svg" width="100%"
-       alt="Glance, a system monitor for Windows: push the pointer to the
-       screen's edge and a panel slides out. Beside the name, the panel's CPU
-       lane shows its use, a chart, the clock, the power and every thread.">
-</picture>
+<img src="docs/images/banner-en.webp" width="100%"
+     alt="Glance: a system monitor at the edge of your screen. Push the
+     pointer there; move away and it's gone. Beside the name, the panel's CPU
+     lane in frosted glass, over the desktop.">
+
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#licence)
 [![Release](https://img.shields.io/github/v/release/lulu-loopp/glance?label=release&color=blue)](https://github.com/lulu-loopp/glance/releases/latest)
@@ -17,7 +15,7 @@ out with everything your PC is doing; move away and it slides back.
 
 [中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
 
-![Glance's panel in the frosted-glass look, over the desktop](docs/images/hero-en.jpg)
+![Glance's panel in the frosted-glass look, over the desktop](docs/images/desktop-en.webp)
 
 ## What it shows
 
@@ -36,7 +34,7 @@ Chart paper, frosted glass (the desktop behind bends at the rim of each
 piece) and Windows 11 (acrylic, as the Start menu draws it). Light or dark,
 or following the brightness of your wallpaper. Chinese or English.
 
-![The three looks: chart paper, frosted glass, Windows 11](docs/images/looks-en.jpg)
+![The three looks, dark: chart paper, frosted glass, Windows 11](docs/images/looks-en.webp)
 
 ## Small and quiet
 
@@ -105,7 +103,8 @@ without the driver's sensors.
 The pictures here and the promotional video are drawn by Glance itself:
 `cargo build --release --features studio` adds `glance --studio script.json
 out-folder`, which renders the panel off screen, frame by frame, from a
-script of shots (`studio\`).
+script of shots; `studio\readme.py` and `studio\compose.py` put the frames
+together (`studio\`).
 
 ## Licence
 
