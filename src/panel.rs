@@ -81,7 +81,7 @@ const SCROLL_EASE: f32 = 0.06;
 /// The panel slides in from past the edge and fades up, and goes the same way.
 pub(crate) const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
 pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
-const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
+pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
 

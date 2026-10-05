@@ -28,7 +28,7 @@ use crate::drives::DriveTemperature;
 use crate::metrics::{
     BatterySample, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample,
 };
-use crate::panel::{OPEN, OPEN_FADE, PEN_LAG_MS};
+use crate::panel::{CLOSE, OPEN, OPEN_FADE, PEN_LAG_MS};
 use crate::sensors::CpuSensors;
 use crate::settings::Edge;
 use crate::superio::BoardSensors;
@@ -67,6 +67,11 @@ struct Shot {
     seconds: f32,
     /// When the panel slides in; shown from the start if absent.
     slide_in: Option<f32>,
+    /// When it slides away again, if it does.
+    slide_out: Option<f32>,
+    /// How many times slower than life the sliding is filmed (1 if absent).
+    #[serde(default)]
+    slow: f32,
     /// The load, 0 (idle) to 1 (flat out), from the start to the end.
     #[serde(default)]
     load: (f32, f32),
@@ -170,15 +175,22 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             hover: None,
         };
         let lanes = view::lanes(&scene);
-        // Sliding in as the panel does: the same curve, the same fade.
-        let (shift, opacity) = match shot.slide_in {
+        // Sliding in and out as the panel does: the same curves, the same
+        // fades, slowed down `slow` times for the camera if asked.
+        let slow = shot.slow.max(1.0);
+        let (mut shift, mut opacity) = match shot.slide_in {
             Some(at) if t < at => (1.0, 0.0),
             Some(at) => {
-                let into = t - at;
+                let into = (t - at) / slow;
                 (1.0 - OPEN.1.at((into / OPEN.0.as_secs_f32()).min(1.0)), (into / OPEN_FADE.as_secs_f32()).min(1.0))
             }
             None => (0.0, 1.0),
         };
+        if let Some(at) = shot.slide_out.filter(|at| t >= *at) {
+            let out = ((t - at) / slow / CLOSE.0.as_secs_f32()).min(1.0);
+            shift = shift.max(CLOSE.1.at(out));
+            opacity = opacity.min(1.0 - out);
+        }
         let pixels = gfx
             .draw_offscreen((script.width, script.height), px, |frame| {
                 let bitmap = desktop.bitmap(&frame.dc, px).ok();

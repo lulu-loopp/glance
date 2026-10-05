@@ -1,0 +1,28 @@
+{
+  "width": 1350,
+  "height": 2400,
+  "scale": 2.5,
+  "fps": 30,
+  "wallpaper": "target/studio/wall-dark-detail.png",
+  "shots": [
+    {
+      "name": "detail",
+      "skin": "glass",
+      "seconds": 6.5,
+      "load": [
+        0.9,
+        0.9
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ]
+    }
+  ]
+}

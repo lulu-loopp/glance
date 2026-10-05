@@ -1,0 +1,133 @@
+{
+  "width": 1080,
+  "height": 1920,
+  "scale": 2.0,
+  "fps": 30,
+  "wallpaper": "target/studio/wall-dark.png",
+  "shots": [
+    {
+      "name": "intro",
+      "skin": "glass",
+      "seconds": 4.0,
+      "slide_in": 1.35,
+      "load": [
+        0.08,
+        0.08
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ],
+      "slow": 2.0
+    },
+    {
+      "name": "rise",
+      "skin": "glass",
+      "seconds": 5.5,
+      "load": [
+        0.08,
+        0.95
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ]
+    },
+    {
+      "name": "look-paper",
+      "skin": "paper",
+      "theme": "light",
+      "seconds": 1.7,
+      "load": [
+        0.6,
+        0.6
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ],
+      "slide_in": 0.05,
+      "slide_out": 1.36
+    },
+    {
+      "name": "look-glass",
+      "skin": "glass",
+      "seconds": 1.7,
+      "load": [
+        0.6,
+        0.6
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ],
+      "slide_in": 0.05,
+      "slide_out": 1.36
+    },
+    {
+      "name": "look-fluent",
+      "skin": "fluent",
+      "theme": "dark",
+      "seconds": 1.7,
+      "load": [
+        0.6,
+        0.6
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ],
+      "slide_in": 0.05,
+      "slide_out": 1.36
+    },
+    {
+      "name": "calm",
+      "skin": "glass",
+      "seconds": 9.5,
+      "load": [
+        0.25,
+        0.25
+      ],
+      "modules": [
+        "cpu",
+        "gpu:0",
+        "memory",
+        "network",
+        "disk",
+        "processes",
+        "storage",
+        "board"
+      ]
+    }
+  ]
+}
