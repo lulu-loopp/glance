@@ -28,10 +28,11 @@ slides back.
 
 The sensors need administrator rights. The first start asks once; Glance then
 registers a scheduled task that starts it elevated without asking again, and
-can start with Windows. It does both only from a folder no ordinary program
-can change: Program Files, or another folder the installer sets up the same
-way (a new folder at a drive's root, such as `D:\Glance`, works; a folder
-inside one your account owns does not, and the installer says so).
+can start with Windows. For that it must be where no ordinary program can
+change it, so the installer installs only there: into Program Files, or into
+a new folder at a drive's root such as `D:\Glance` (created changeable by
+administrators only); a folder inside one your account owns, an existing
+folder of other things or a link is refused, and left as it was.
 Left-click the tray icon for the panel, right-click it (or start Glance again)
 for the settings. Uninstall from Windows' Apps list or from the settings; it
 removes Glance, its scheduled tasks and its settings, and asks whether to
