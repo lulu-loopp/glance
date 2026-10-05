@@ -26,6 +26,14 @@ pub fn desktop(width: u32, height: u32) -> Capture {
     Capture::from_pixels(rect, pixels)
 }
 
+/// The picture at `path`, scaled to cover `width` × `height` pixels, as the
+/// desktop. For the studio, which films the panel over a chosen picture.
+#[cfg(feature = "studio")]
+pub fn picture(path: &str, width: u32, height: u32) -> Result<Capture> {
+    let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+    Ok(Capture::from_pixels(rect, cover(path, width, height)?))
+}
+
 /// The wallpaper's image file; `None` for a plain colour.
 fn wallpaper_path() -> Option<String> {
     let mut path = [0u16; 260];
