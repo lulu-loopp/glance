@@ -1,0 +1,241 @@
+// Draws the captured desktop behind the panel: as blurred acrylic, or bent
+// through glass at the rim of each piece.
+
+import { offsetWithin } from './chart';
+
+const SVG = 'http://www.w3.org/2000/svg';
+
+/** Width of the curved rim of a piece of glass, and how far it bends what is behind (px). */
+const RIM = 20;
+const BEND = 16;
+/** Backdrop luminance (0–1) above which glass carries dark text. */
+const LIGHT_BACKDROP = 0.55;
+
+export class Backdrop {
+  private image: HTMLImageElement | null = null;
+  private url: string | null = null;
+  private defs: SVGDefsElement;
+  private maps = new Map<string, string>();
+
+  constructor() {
+    const svg = document.createElementNS(SVG, 'svg');
+    svg.setAttribute('width', '0');
+    svg.setAttribute('height', '0');
+    svg.style.position = 'absolute';
+    this.defs = document.createElementNS(SVG, 'defs');
+    svg.append(this.defs);
+    document.body.append(svg);
+    document.body.style.setProperty('--noise', `url(${noiseTile()})`);
+  }
+
+  get present(): boolean {
+    return this.image !== null;
+  }
+
+  /** Loads a capture, resolving once it can be drawn without a delay. */
+  async load(url: string | null) {
+    if (url === this.url) return;
+    this.url = url;
+    if (url === null) {
+      this.image = null;
+      return;
+    }
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.src = url;
+    await image.decode();
+    // A newer capture may have been asked for meanwhile.
+    if (this.url === url) this.image = image;
+  }
+
+  /**
+   * Lays the capture under `panel` for the active skin. Positions are taken
+   * at rest, ignoring the entrance transform: the capture is aligned with the
+   * screen where the panel will settle.
+   */
+  dress(panel: HTMLElement, skin: string) {
+    const acrylic = panel.querySelector<HTMLElement>('.acrylic')!;
+    const pieces = [...panel.querySelectorAll<HTMLElement>('.lane, .bar, .settings')];
+    for (const lens of panel.querySelectorAll('.lens')) lens.remove();
+    this.defs.replaceChildren();
+    if (!this.image) {
+      acrylic.style.backgroundImage = '';
+      return;
+    }
+
+    const viewport = `${window.innerWidth}px ${window.innerHeight}px`;
+    const url = `url(${this.url})`;
+    const origin = { left: panel.offsetLeft, top: panel.offsetTop };
+
+    if (skin === 'fluent') {
+      acrylic.style.backgroundImage = url;
+      acrylic.style.backgroundSize = viewport;
+      acrylic.style.backgroundPosition = `${-origin.left}px ${-origin.top}px`;
+      this.defs.append(acrylicFilter(panel.offsetWidth, panel.offsetHeight));
+    }
+
+    if (skin === 'glass') {
+      pieces.forEach((piece, index) => {
+        if (piece.offsetParent === null) return;
+        const width = piece.offsetWidth;
+        const height = piece.offsetHeight;
+        const radius = parseFloat(getComputedStyle(piece).borderTopLeftRadius);
+        const within = offsetWithin(piece, panel);
+        const left = origin.left + within.left;
+        const top = origin.top + within.top;
+        const id = `lens-${index}`;
+        this.defs.append(lensFilter(id, width, height, this.map(width, height, radius)));
+
+        const lens = document.createElement('div');
+        lens.className = 'lens';
+        Object.assign(lens.style, {
+          left: `${-BEND}px`,
+          top: `${-BEND}px`,
+          width: `${width + 2 * BEND}px`,
+          height: `${height + 2 * BEND}px`,
+          backgroundImage: url,
+          backgroundSize: viewport,
+          backgroundPosition: `${BEND - left}px ${BEND - top}px`,
+          filter: `url(#${id})`,
+        });
+        piece.prepend(lens);
+      });
+    }
+  }
+
+  /** How bright the capture is behind a box of the viewport, from 0 to 1. */
+  luminance(box: { left: number; top: number; width: number; height: number }): number {
+    const image = this.image!;
+    const scale = image.naturalWidth / window.innerWidth;
+    const canvas = document.createElement('canvas');
+    canvas.width = 32;
+    canvas.height = 64;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.drawImage(image, box.left * scale, box.top * scale, box.width * scale, box.height * scale, 0, 0, 32, 64);
+    const { data } = ctx.getImageData(0, 0, 32, 64);
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      sum += (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+    }
+    return sum / (data.length / 4);
+  }
+
+  tone(box: { left: number; top: number; width: number; height: number }): 'light' | 'dark' {
+    return this.luminance(box) > LIGHT_BACKDROP ? 'light' : 'dark';
+  }
+
+  /** The displacement map for a rounded rectangle, cached by size. */
+  private map(width: number, height: number, radius: number): string {
+    const key = `${width}x${height}x${radius}`;
+    let url = this.maps.get(key);
+    if (!url) {
+      url = displacementMap(width, height, radius);
+      this.maps.set(key, url);
+    }
+    return url;
+  }
+}
+
+/**
+ * Encodes, for every point of a rounded rectangle, where the glass makes it
+ * look: unchanged in the middle, pulled outward across the rim, most at the
+ * very edge, the way a convex edge of glass bends light. Red is the x shift
+ * and green the y shift, 128 meaning none.
+ */
+function displacementMap(width: number, height: number, radius: number): string {
+  const w = Math.round(width);
+  const h = Math.round(height);
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  const image = ctx.createImageData(w, h);
+  const hx = w / 2;
+  const hy = h / 2;
+  const r = Math.min(radius, hx, hy);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const px = x + 0.5 - hx;
+      const py = y + 0.5 - hy;
+      const qx = Math.abs(px) - (hx - r);
+      const qy = Math.abs(py) - (hy - r);
+      // Distance in from the edge, and the outward direction there.
+      let depth: number;
+      let nx = 0;
+      let ny = 0;
+      if (qx > 0 && qy > 0) {
+        const length = Math.hypot(qx, qy);
+        depth = r - length;
+        nx = qx / length;
+        ny = qy / length;
+      } else if (qx > qy) {
+        depth = hx - Math.abs(px);
+        nx = 1;
+      } else {
+        depth = hy - Math.abs(py);
+        ny = 1;
+      }
+      nx *= Math.sign(px);
+      ny *= Math.sign(py);
+      const t = Math.min(Math.max(depth / RIM, 0), 1);
+      const strength = (1 - t) ** 2;
+      const i = (y * w + x) * 4;
+      image.data[i] = 128 + nx * strength * 127;
+      image.data[i + 1] = 128 + ny * strength * 127;
+      image.data[i + 2] = 128;
+      image.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas.toDataURL();
+}
+
+function lensFilter(id: string, width: number, height: number, map: string): SVGFilterElement {
+  const filter = document.createElementNS(SVG, 'filter');
+  const box = { x: 0, y: 0, width: width + 2 * BEND, height: height + 2 * BEND };
+  filter.id = id;
+  filter.setAttribute('filterUnits', 'userSpaceOnUse');
+  filter.setAttribute('primitiveUnits', 'userSpaceOnUse');
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+  for (const [key, value] of Object.entries(box)) filter.setAttribute(key, String(value));
+  filter.innerHTML = `
+    <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="soft"/>
+    <feImage href="${map}" x="${BEND}" y="${BEND}" width="${width}" height="${height}" preserveAspectRatio="none" result="map"/>
+    <feDisplacementMap in="soft" in2="map" scale="${2 * BEND}" xChannelSelector="R" yChannelSelector="G" result="bent"/>
+    <feColorMatrix in="bent" type="saturate" values="1.6"/>`;
+  return filter;
+}
+
+/** The Windows acrylic recipe: a wide blur and a lift in saturation. */
+function acrylicFilter(width: number, height: number): SVGFilterElement {
+  const filter = document.createElementNS(SVG, 'filter');
+  filter.id = 'acrylic';
+  filter.setAttribute('filterUnits', 'userSpaceOnUse');
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+  filter.setAttribute('x', '0');
+  filter.setAttribute('y', '0');
+  filter.setAttribute('width', String(width));
+  filter.setAttribute('height', String(height));
+  filter.innerHTML = `
+    <feGaussianBlur stdDeviation="30" edgeMode="duplicate"/>
+    <feColorMatrix type="saturate" values="1.25"/>`;
+  return filter;
+}
+
+/** A tile of faint grain, as acrylic carries to keep large blurs from banding. */
+function noiseTile(): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d')!;
+  const image = ctx.createImageData(64, 64);
+  for (let i = 0; i < image.data.length; i += 4) {
+    const v = Math.random() * 255;
+    image.data[i] = v;
+    image.data[i + 1] = v;
+    image.data[i + 2] = v;
+    image.data[i + 3] = 6;
+  }
+  ctx.putImageData(image, 0, 0);
+  return canvas.toDataURL();
+}

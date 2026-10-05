@@ -1,0 +1,211 @@
+/* 液态玻璃: separate pieces of glass floating over the desktop. Each one
+   bends what is behind it at its rim (the lens is built in glass.ts), carries
+   a light catch along its edge, and tints only as much as legibility needs.
+   Text tone follows what is behind the glass, not the system theme. */
+body[data-skin='glass'] {
+  --backdrop: snapshot;
+  --margin: 24;
+  --inset: 10;
+  --enter-shift: 36px;
+
+  --font: 'Inter Variable', 'Microsoft YaHei UI', sans-serif;
+  --figure-font: 600 40px 'Inter Variable', sans-serif;
+  --tile-radius: 24px;
+  --blue: #0a7aff;
+  --green: #24a148;
+  --orange: #e8890c;
+  --purple: #a64fd6;
+  --teal: #1491b8;
+  --trace: var(--blue);
+  --signal: #ff3b30;
+  --control-radius: 14px;
+  --switch-off-stroke: transparent;
+  --switch-off-knob: #ffffff;
+  --switch-on: #34c759;
+  --switch-on-knob: #ffffff;
+  --selection: var(--blue);
+}
+
+/* Glass over a light backdrop: dark text, a milky tint. */
+body[data-skin='glass'][data-tone='light'] {
+  --glass-tint: rgba(255, 255, 255, 0.3);
+  --text: rgba(0, 0, 0, 0.86);
+  --text-2: rgba(0, 0, 0, 0.58);
+  --text-3: rgba(0, 0, 0, 0.42);
+  --rule: rgba(0, 0, 0, 0.08);
+  --track: rgba(0, 0, 0, 0.1);
+  --hover: rgba(255, 255, 255, 0.35);
+  --control: rgba(0, 0, 0, 0.06);
+  --control-on: rgba(255, 255, 255, 0.9);
+  --control-on-text: rgba(0, 0, 0, 0.86);
+  --control-on-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  --switch-off: rgba(120, 120, 128, 0.2);
+  --legibility: 0 0 8px rgba(255, 255, 255, 0.6);
+  --tile-shadow: 0 10px 30px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Glass over a dark backdrop: light text, a smoky tint. */
+body[data-skin='glass'][data-tone='dark'] {
+  --glass-tint: rgba(28, 28, 34, 0.32);
+  --text: rgba(255, 255, 255, 0.95);
+  --text-2: rgba(255, 255, 255, 0.68);
+  --text-3: rgba(255, 255, 255, 0.46);
+  --rule: rgba(255, 255, 255, 0.1);
+  --track: rgba(255, 255, 255, 0.16);
+  --hover: rgba(255, 255, 255, 0.1);
+  --control: rgba(255, 255, 255, 0.1);
+  --control-on: rgba(255, 255, 255, 0.24);
+  --control-on-text: #ffffff;
+  --control-on-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  --switch-off: rgba(120, 120, 128, 0.36);
+  --blue: #3d9bff;
+  --green: #30d158;
+  --orange: #ff9f0a;
+  --purple: #c77dff;
+  --teal: #5ac8f5;
+  --signal: #ff6961;
+  --legibility: 0 0 8px rgba(0, 0, 0, 0.35);
+  --tile-shadow: 0 10px 30px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+[data-skin='glass'] .lanes {
+  display: grid;
+  row-gap: 8px;
+  margin-bottom: 8px;
+}
+
+/* Every piece of glass. Pieces do not nest, so there is no inner radius to
+   keep concentric with an outer one. */
+[data-skin='glass'] .lane,
+[data-skin='glass'] .bar,
+[data-skin='glass'] .settings {
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: var(--tile-radius);
+  box-shadow: var(--tile-shadow);
+  text-shadow: var(--legibility);
+}
+
+[data-skin='glass'] .lane {
+  padding: 14px 18px;
+}
+
+[data-skin='glass'] .bar {
+  min-height: 48px;
+  padding: 0 8px 0 20px;
+  border-radius: 24px;
+}
+
+[data-skin='glass'] .settings {
+  margin-bottom: 8px;
+  padding: 4px 18px 18px;
+}
+
+[data-skin='glass'] .lens {
+  display: block;
+}
+
+/* The tint, and the light catching the rim: brightest where light would
+   strike the top-left, again faintly at the bottom-right. */
+[data-skin='glass'] :is(.lane, .bar, .settings)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--glass-tint);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.55),
+    inset 0 -1px 1px rgba(255, 255, 255, 0.18);
+  pointer-events: none;
+}
+
+[data-skin='glass'] :is(.lane, .bar, .settings)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.95),
+    rgba(255, 255, 255, 0.25) 22%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.2) 78%,
+    rgba(255, 255, 255, 0.7)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+[data-skin='glass'] .lane {
+  --trace-2: color-mix(in srgb, var(--trace) 55%, transparent);
+  --wash: color-mix(in srgb, var(--trace) 34%, transparent);
+  --wash-end: color-mix(in srgb, var(--trace) 0%, transparent);
+}
+
+[data-skin='glass'] .lane-gpu {
+  --trace: var(--green);
+}
+
+[data-skin='glass'] .lane-memory {
+  --trace: var(--orange);
+}
+
+[data-skin='glass'] .lane-network {
+  --trace: var(--purple);
+}
+
+[data-skin='glass'] :is(.lane-disk, .lane-storage) {
+  --trace: var(--teal);
+}
+
+[data-skin='glass'] .figure {
+  letter-spacing: -0.035em;
+}
+
+[data-skin='glass'] .threads i {
+  border-radius: 2px;
+}
+
+[data-skin='glass'] .meter {
+  height: 6px;
+  border-radius: 3px;
+  background:
+    linear-gradient(var(--trace), var(--trace)) left / calc(var(--load, 0) * 100%) 100% no-repeat,
+    var(--track);
+}
+
+[data-skin='glass'] .segmented {
+  border-radius: 999px;
+}
+
+[data-skin='glass'] .segmented button {
+  border-radius: 999px;
+}
+
+[data-skin='glass'] .switch {
+  width: 42px;
+  height: 24px;
+  border-radius: 12px;
+}
+
+[data-skin='glass'] .switch::after {
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+[data-skin='glass'] .switch[aria-checked='true']::after {
+  transform: translateX(18px);
+}
+
+[data-skin='glass'] .bar-button {
+  border-radius: 999px;
+}
