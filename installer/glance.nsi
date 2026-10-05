@@ -52,16 +52,20 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
-LangString OpenFolder ${LANG_SIMPCHINESE} "Glance 不能装在这里。$\r$\n$\r$\n这个位置上面有你的账户（或其他程序）能改名、改权限的文件夹，装进去的 Glance 可能被别的程序换掉，再以管理员身份运行。$\r$\n$\r$\n请选 Program Files，或者磁盘根目录下的新文件夹，比如 D:\Glance。"
-LangString OpenFolder ${LANG_ENGLISH} "Glance cannot be installed here.$\r$\n$\r$\nA folder above this one can be renamed or re-permissioned by your account (or other programs), so Glance installed here could be replaced by another program and then run with administrator rights.$\r$\n$\r$\nChoose Program Files, or a new folder at a drive's root, such as D:\Glance."
-LangString OccupiedFolder ${LANG_SIMPCHINESE} "请选一个还不存在的新文件夹，比如 D:\Glance。$\r$\n$\r$\n这个文件夹已经存在，而且不是只有管理员能改动的旧版 Glance：里面的东西没法保证没被动过。"
-LangString OccupiedFolder ${LANG_ENGLISH} "Choose a folder that does not exist yet, such as D:\Glance.$\r$\n$\r$\nThis one exists and is not an earlier Glance only administrators could change: what is in it cannot be vouched for."
-LangString IndirectFolder ${LANG_SIMPCHINESE} "这个位置是联接点、符号链接或磁盘根目录，实际指向的不是这里。请选一个普通文件夹。"
-LangString IndirectFolder ${LANG_ENGLISH} "This is a junction, a symbolic link or a drive's root: it leads somewhere else. Choose an ordinary folder."
-LangString UnpreparedFolder ${LANG_SIMPCHINESE} "无法设置安装文件夹的权限，安装已停止。"
-LangString UnpreparedFolder ${LANG_ENGLISH} "The install folder's permissions could not be set; installation stopped."
-LangString RemovePawnIO ${LANG_SIMPCHINESE} "也要卸载 PawnIO 驱动吗？$\r$\n$\r$\n它是 Glance 安装的，用来读取温度和风扇。如果其他硬件监控或风扇控制软件（比如 HWiNFO、FanControl）也在用它，请保留。"
-LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver too?$\r$\n$\r$\nGlance installed it to read temperatures and fans. Keep it if other monitoring or fan control programs (such as HWiNFO or FanControl) use it."
+LangString OpenFolderAsk ${LANG_SIMPCHINESE} "所选位置不受保护。$\r$\n$\r$\n该位置的上级文件夹可由普通程序重命名或更改权限，因此安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都需要确认管理员权限；$\r$\n　· 无法启用“开机时启动”。$\r$\n$\r$\n建议安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此位置？"
+LangString OpenFolderAsk ${LANG_ENGLISH} "The selected location is not protected.$\r$\n$\r$\nA folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nTo keep it safe, when installed here:$\r$\n  · Glance asks for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" cannot be turned on.$\r$\n$\r$\nInstalling to Program Files, or to a new folder at the root of a drive (for example D:\Glance), is recommended.$\r$\n$\r$\nInstall to this location anyway?"
+LangString OccupiedFolderAsk ${LANG_SIMPCHINESE} "所选文件夹已存在，且无法确认其中的内容未被其他程序改动。$\r$\n$\r$\n安装程序不会更改该文件夹中原有内容的权限。为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都可能需要确认管理员权限；$\r$\n　· 可能无法启用“开机时启动”。$\r$\n$\r$\n建议选择一个尚不存在的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此文件夹？"
+LangString OccupiedFolderAsk ${LANG_ENGLISH} "The selected folder already exists, and it cannot be confirmed that its contents have not been changed by other programs.$\r$\n$\r$\nThe installer does not change the permissions of anything already in it. To keep it safe, when installed here:$\r$\n  · Glance may ask for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" may not be available.$\r$\n$\r$\nA folder that does not exist yet (for example D:\Glance) is recommended.$\r$\n$\r$\nInstall to this folder anyway?"
+LangString OpenFolderStop ${LANG_SIMPCHINESE} "所选位置不受保护，安装已停止。$\r$\n$\r$\n请安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。"
+LangString OpenFolderStop ${LANG_ENGLISH} "The selected location is not protected; installation has stopped.$\r$\n$\r$\nInstall to Program Files, or to a new folder at the root of a drive (for example D:\Glance)."
+LangString OccupiedFolderStop ${LANG_SIMPCHINESE} "所选文件夹已存在，且无法确认其中的内容未被其他程序改动，安装已停止。$\r$\n$\r$\n请选择一个尚不存在的新文件夹（例如 D:\Glance）。"
+LangString OccupiedFolderStop ${LANG_ENGLISH} "The selected folder already exists, and it cannot be confirmed that its contents have not been changed by other programs; installation has stopped.$\r$\n$\r$\nChoose a folder that does not exist yet (for example D:\Glance)."
+LangString IndirectFolder ${LANG_SIMPCHINESE} "无法安装到所选位置。$\r$\n$\r$\n所选位置是磁盘根目录、联接点或符号链接：文件将被写入其他位置，或与磁盘根目录中的其他文件混在一起，卸载时也无法完整清除。$\r$\n$\r$\n请选择一个普通文件夹（例如 D:\Glance）。"
+LangString IndirectFolder ${LANG_ENGLISH} "Glance cannot be installed to the selected location.$\r$\n$\r$\nIt is the root of a drive, a junction or a symbolic link: the files would be written elsewhere, or mixed with other files at the root of the drive, and could not be removed completely when uninstalling.$\r$\n$\r$\nChoose an ordinary folder (for example D:\Glance)."
+LangString UnpreparedFolder ${LANG_SIMPCHINESE} "无法准备安装文件夹，安装已停止。"
+LangString UnpreparedFolder ${LANG_ENGLISH} "The installation folder could not be prepared; installation has stopped."
+LangString RemovePawnIO ${LANG_SIMPCHINESE} "是否同时卸载 PawnIO 驱动？$\r$\n$\r$\nPawnIO 由 Glance 安装，用于读取温度和风扇转速。如果其他硬件监控或风扇控制软件（例如 HWiNFO、FanControl）也在使用它，请选择“否”予以保留。"
+LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n$\r$\nPawnIO was installed by Glance to read temperatures and fan speeds. If other monitoring or fan control software (for example HWiNFO or FanControl) also uses it, choose No to keep it."
 
 ; A running Glance holds its files.
 !macro StopGlance
@@ -87,14 +91,18 @@ FunctionEnd
   File "/oname=$PLUGINSDIR\${EXE}" "..\target\release\${EXE}"
 !macroend
 
+; Whether the user chose to install in an unprotected place all the same.
+Var Anyway
+
 ; Why a folder is refused, by Glance's answer: 1 a folder above it can be
 ; changed by others, 2 it exists and is not an earlier Glance only
-; administrators could change, 3 it is a link or a drive's root.
+; administrators could change, 3 it is a link or a drive's root, 4 Glance
+; could not answer.
 !macro Refuse code
   ${If} ${code} == 1
-    MessageBox MB_ICONSTOP "$(OpenFolder)" /SD IDOK
+    MessageBox MB_ICONSTOP "$(OpenFolderStop)" /SD IDOK
   ${ElseIf} ${code} == 2
-    MessageBox MB_ICONSTOP "$(OccupiedFolder)" /SD IDOK
+    MessageBox MB_ICONSTOP "$(OccupiedFolderStop)" /SD IDOK
   ${ElseIf} ${code} == 3
     MessageBox MB_ICONSTOP "$(IndirectFolder)" /SD IDOK
   ${Else}
@@ -115,10 +123,22 @@ FunctionEnd
   ${EndIf}
 !macroend
 
+; An unprotected place, or an existing folder, is the user's call: told
+; what it means, they may install there all the same (the default answer
+; is No). A link or a drive's root is refused.
 Function CheckFolder
+  StrCpy $Anyway 0
   !insertmacro Helper
   !insertmacro Ask --check-install-folder
-  ${If} $0 != 0
+  ${If} $0 == 1
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolderAsk)" /SD IDNO IDYES +2
+    Abort
+    StrCpy $Anyway 1
+  ${ElseIf} $0 == 2
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OccupiedFolderAsk)" /SD IDNO IDYES +2
+    Abort
+    StrCpy $Anyway 1
+  ${ElseIf} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}
 FunctionEnd
@@ -127,10 +147,14 @@ Section "Glance"
   !insertmacro StopGlance
   ; A new folder is created administrators' in one step, as Program Files'
   ; folders are; an earlier Glance's, which only administrators could ever
-  ; change, is used as it is. Anything else is refused and left alone (a
-  ; silent install given one with /D stops here).
+  ; change, is used as it is. Elsewhere only if the user chose so above;
+  ; otherwise (a silent install given such a folder with /D, say) it stops.
   !insertmacro Helper
-  !insertmacro Ask --prepare-install-folder
+  ${If} $Anyway == 1
+    !insertmacro Ask --prepare-install-folder-anyway
+  ${Else}
+    !insertmacro Ask --prepare-install-folder
+  ${EndIf}
   ${If} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}

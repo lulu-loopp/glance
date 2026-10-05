@@ -122,7 +122,11 @@ pub fn run() {
         let folder = std::path::Path::new(folder);
         match flag.as_str() {
             "--check-install-folder" => std::process::exit(code(elevation::install_folder(folder))),
-            "--prepare-install-folder" => std::process::exit(elevation::prepare_install_folder(folder).map_or_else(code, |_| 0)),
+            "--prepare-install-folder" => std::process::exit(elevation::prepare_install_folder(folder, false).map_or_else(code, |_| 0)),
+            // The user chose to install there all the same.
+            "--prepare-install-folder-anyway" => {
+                std::process::exit(elevation::prepare_install_folder(folder, true).map_or_else(code, |_| 0))
+            }
             _ => {}
         }
     }
