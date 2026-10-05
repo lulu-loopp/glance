@@ -752,7 +752,7 @@ impl Ui {
             Switch::CpuThreads => (p("CPU 线程", "CPU threads"), None, prefs.cpu.threads),
             Switch::CpuClock => (p("CPU 频率", "CPU clock"), None, prefs.cpu.clock),
             Switch::GpuMemory => (p("显存", "Video memory"), None, prefs.gpu.memory),
-            Switch::GpuSensors => (p("GPU 温度、频率和风扇", "GPU temperature, clock and fan"), None, prefs.gpu.sensors),
+            Switch::GpuSensors => (p("GPU 温度、频率、功耗和风扇", "GPU temperature, clock, power and fan"), None, prefs.gpu.sensors),
             Switch::GpuEngines => (p("GPU 各引擎", "GPU engines"), Some(p("3D、复制、视频编解码", "3D, copy, video")), prefs.gpu.engines),
             Switch::MemoryDetails => (p("内存提交量和缓存", "Committed and cached memory"), None, prefs.memory.details),
             Switch::NetworkDetails => (p("网卡、地址和累计流量", "Adapter, address and totals"), None, prefs.network.details),
