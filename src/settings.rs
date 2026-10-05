@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -113,7 +112,7 @@ impl Settings {
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
-        fs::create_dir_all(dir)?;
+        crate::elevation::ensure_folder(dir)?;
         crate::elevation::write_in_place(dir, FILE, serde_json::to_string_pretty(self).unwrap().as_bytes())
     }
 }
