@@ -126,6 +126,7 @@ pub fn run() {
             std::process::exit(code(elevation::install_folder(std::path::Path::new(folder))))
         }
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
+        [_, flag] if flag == "--remove-settings" => std::process::exit(if elevation::remove_settings() { 0 } else { 4 }),
         [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
             // "anyway": the user chose an unprotected place all the same.
             let anyway = flag == "--install-anyway";
