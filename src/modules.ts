@@ -252,11 +252,11 @@ function memory(info: StaticInfo): ModuleDef {
   };
 }
 
-function network(): ModuleDef {
+function network(info: StaticInfo): ModuleDef {
   return {
     id: 'network',
     title: t('network'),
-    detail: t('networkDetail'),
+    detail: info.network_adapter ?? t('networkDetail'),
     build(prefs) {
       const lane = rateLane({
         kind: 'network',
@@ -515,7 +515,7 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     cpu(info),
     ...info.gpus.map((_, index) => gpu(info, index)),
     memory(info),
-    network(),
+    network(info),
     disk(info),
     processes(),
     storage(),

@@ -177,7 +177,8 @@ body.settings-app[data-mica] {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 28px var(--gutter) 28px 0;
+  /* As far from the list's scroll bar as the list is from the window edge. */
+  padding: 28px var(--gutter);
 }
 
 .preview-head {
