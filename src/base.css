@@ -1,0 +1,632 @@
+/* Layout shared by every skin. A skin supplies the tokens used here (see
+   skins/paper.css for the full list) and restyles surfaces and controls. */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  color: var(--text);
+  font: 500 13px/1.3 var(--font);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+body[data-edge='left'] {
+  --dir: -1;
+}
+
+body[data-edge='right'] {
+  --dir: 1;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* ---- The panel and how it comes and goes ---- */
+
+.panel {
+  position: absolute;
+  box-sizing: border-box;
+  width: 356px;
+  isolation: isolate;
+  transition:
+    transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 140ms linear;
+}
+
+body[data-edge='left'] .panel {
+  left: calc(var(--inset) * 1px);
+}
+
+body[data-edge='right'] .panel {
+  right: calc(var(--inset) * 1px);
+}
+
+body:not([data-state='open']) .panel {
+  transform: translateX(calc(var(--dir) * var(--enter-shift)));
+  opacity: 0;
+  transition:
+    transform 180ms cubic-bezier(0.4, 0, 1, 1),
+    opacity 180ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body .panel,
+  body:not([data-state='open']) .panel {
+    transform: none;
+    transition: opacity 120ms linear;
+  }
+}
+
+#chart {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+body[data-view='settings'] #chart,
+body[data-view='settings'] .lanes,
+body[data-view='monitor'] .settings {
+  display: none;
+}
+
+/* Layers a skin can fill with the desktop behind the panel. */
+/* Below a skin's own tint (z-index -1). */
+.acrylic,
+.lens {
+  position: absolute;
+  z-index: -2;
+  display: none;
+  pointer-events: none;
+  background-repeat: no-repeat;
+}
+
+.lanes {
+  position: relative;
+}
+
+/* ---- Lanes ---- */
+
+.lane {
+  position: relative;
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  column-gap: 12px;
+  padding: 12px 18px;
+}
+
+.lane[hidden] {
+  display: none;
+}
+
+.lane > :not(.lane-head, .readout, .plot, .rates, .lens) {
+  grid-column: 1 / -1;
+}
+
+.lane-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.lane-head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.lane-device {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lane-aside {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.lane-aside[data-hot='true'],
+.lane[data-hot='true'] .figure {
+  color: var(--signal);
+}
+
+.readout {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.figure {
+  font: var(--figure-font);
+  line-height: 0.84;
+  letter-spacing: -0.01em;
+}
+
+.unit {
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.plot {
+  height: 40px;
+}
+
+.lane-rates .plot {
+  height: 36px;
+}
+
+.rates {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 4px;
+  margin: 0;
+}
+
+.rates div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.rates dt {
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* A stroke sample in front of each label says which trace it names. */
+.rates dt::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  margin-right: 5px;
+  border-top: 2px solid var(--trace);
+  vertical-align: middle;
+}
+
+.rates div + div dt::before {
+  border-top: 1px solid var(--trace-2);
+}
+
+.rates dd {
+  margin: 0 0 0 auto;
+  white-space: nowrap;
+}
+
+.threads {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  height: 14px;
+  margin-top: 10px;
+}
+
+.threads i {
+  background:
+    linear-gradient(var(--trace), var(--trace)) bottom / 100% calc(var(--load, 0) * 100%) no-repeat,
+    var(--track);
+  transition: background-size 400ms ease-out;
+}
+
+.threads i[data-hot='true'] {
+  background-image: linear-gradient(var(--signal), var(--signal));
+}
+
+.meter-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  margin-top: 8px;
+}
+
+.meter-label {
+  overflow: hidden;
+  color: var(--text-2);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meter {
+  height: 3px;
+  background:
+    linear-gradient(var(--trace), var(--trace)) left / calc(var(--load, 0) * 100%) 100% no-repeat,
+    var(--track);
+  transition: background-size 400ms ease-out;
+}
+
+.meter[data-hot='true'] {
+  background-image: linear-gradient(var(--signal), var(--signal));
+}
+
+.meter-value {
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.engines .meter-row {
+  margin-top: 6px;
+}
+
+.facts {
+  display: grid;
+  row-gap: 3px;
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.facts[hidden] {
+  display: none;
+}
+
+.facts div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  column-gap: 12px;
+}
+
+.facts dt {
+  color: var(--text-2);
+}
+
+.facts dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Lanes that are tables rather than traces. */
+.lane-list {
+  display: block;
+}
+
+.rows {
+  display: grid;
+  row-gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rows li,
+.lane-processes .lane-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px 64px;
+  align-items: baseline;
+  column-gap: 10px;
+}
+
+.lane-processes .lane-head .lane-device {
+  display: none;
+}
+
+.lane-processes .lane-head .lane-aside {
+  font-size: 12px;
+  text-align: right;
+}
+
+.lane-storage .meter-row:first-child {
+  margin-top: 0;
+}
+
+.row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-value {
+  color: var(--text-2);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ---- The bar along the bottom ---- */
+
+.bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 10px 0 18px;
+}
+
+.bar-text {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.bar-button {
+  display: grid;
+  place-items: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.bar-button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.glyph {
+  font: 16px/1 'Segoe Fluent Icons', 'Segoe MDL2 Assets';
+}
+
+/* ---- Settings ---- */
+
+.settings {
+  position: relative;
+  box-sizing: border-box;
+  height: 600px;
+  padding: 4px 18px 18px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-3) transparent;
+}
+
+.settings-section h3 {
+  margin: 18px 0 8px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+}
+
+.field-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.field-label small {
+  overflow: hidden;
+  color: var(--text-3);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmented {
+  display: flex;
+  flex-shrink: 0;
+  padding: 2px;
+  border-radius: var(--control-radius);
+  background: var(--control);
+}
+
+.segmented button {
+  min-width: 36px;
+  height: 26px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: calc(var(--control-radius) - 2px);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.segmented button:hover {
+  color: var(--text);
+}
+
+.segmented button[aria-checked='true'] {
+  background: var(--control-on);
+  box-shadow: var(--control-on-shadow);
+  color: var(--control-on-text);
+}
+
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--switch-off-stroke);
+  border-radius: 10px;
+  background: var(--switch-off);
+  transition: background 120ms linear, border-color 120ms linear;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--switch-off-knob);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.switch[aria-checked='true'] {
+  border-color: var(--switch-on);
+  background: var(--switch-on);
+}
+
+.switch[aria-checked='true']::after {
+  background: var(--switch-on-knob);
+  transform: translateX(20px);
+}
+
+.skins {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.skin-card {
+  display: grid;
+  gap: 6px;
+  padding: 6px 6px 8px;
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.skin-card:hover {
+  background: var(--hover);
+}
+
+.skin-card[aria-checked='true'] {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.skin-card[aria-checked='true'] .skin-preview {
+  box-shadow: 0 0 0 2px var(--selection);
+}
+
+/* Miniatures of each skin, drawn the same way whichever skin is active. */
+.skin-preview {
+  position: relative;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  height: 58px;
+  padding: 0 10px;
+  overflow: hidden;
+  border-radius: calc(var(--control-radius) - 2px);
+}
+
+.skin-preview i {
+  display: block;
+  height: 10px;
+}
+
+[data-preview='paper'] .skin-preview {
+  background: #eef2ec;
+}
+
+[data-preview='paper'] .skin-preview i {
+  height: 0;
+  margin: 6px 0;
+  border-top: 1.5px solid #16221e;
+}
+
+[data-preview='paper'] .skin-preview i:nth-child(2) {
+  border-color: #d23f1c;
+}
+
+[data-preview='glass'] .skin-preview {
+  background: linear-gradient(135deg, #7aa7ff, #c79bff 55%, #ffb38a);
+}
+
+[data-preview='glass'] .skin-preview i {
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.35);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+}
+
+[data-preview='fluent'] .skin-preview {
+  background: #eceef2;
+}
+
+[data-preview='fluent'] .skin-preview i {
+  height: 3px;
+  border-radius: 2px;
+  background: #c8ccd2;
+}
+
+[data-preview='fluent'] .skin-preview i:first-child {
+  width: 60%;
+  background: var(--accent-on-light);
+}
+
+.module-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.module-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--control-radius);
+}
+
+.module-row > .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.module-row[data-dragging='true'] {
+  background: var(--hover);
+}
+
+.grip {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 28px;
+  color: var(--text-3);
+  cursor: grab;
+  touch-action: none;
+}
+
+.grip svg {
+  width: 8px;
+  height: 14px;
+  fill: currentColor;
+}
+
+.module-row[data-dragging='true'] .grip {
+  cursor: grabbing;
+}
+
+.quit {
+  margin-top: 10px;
+  padding: 7px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: var(--signal);
+}
+
+.quit:hover {
+  background: var(--hover);
+}

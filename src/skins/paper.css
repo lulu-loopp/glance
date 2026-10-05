@@ -1,0 +1,84 @@
+/* 记录纸: chart paper and ink. Colour is reserved: the panel is one ink
+   until something runs hot, and only then does the signal colour appear. */
+body[data-skin='paper'] {
+  /* How the window is set up for this skin (read by main.ts). */
+  --backdrop: none;
+  --margin: 40;
+  --inset: 0;
+  --enter-shift: calc(100% + 40px);
+
+  --font: 'Archivo Variable', 'Microsoft YaHei UI', sans-serif;
+  --figure-font: 620 42px 'Archivo Variable', sans-serif;
+  --paper: #eef2ec;
+  --text: #16221e;
+  --text-2: #55645c;
+  --text-3: #8a9990;
+  --rule: #d3dbd2;
+  --trace: var(--text);
+  --trace-2: var(--text-3);
+  --wash: rgba(22, 34, 30, 0.07);
+  --wash-end: var(--wash);
+  --track: var(--wash);
+  --signal: #d23f1c;
+  --hover: rgba(22, 34, 30, 0.06);
+  --selection: var(--text);
+  --control: rgba(22, 34, 30, 0.07);
+  --control-on: var(--text);
+  --control-on-text: var(--paper);
+  --control-on-shadow: none;
+  --control-radius: 6px;
+  --switch-off: transparent;
+  --switch-off-stroke: var(--text-2);
+  --switch-off-knob: var(--text-2);
+  --switch-on: var(--text);
+  --switch-on-knob: var(--paper);
+  --shadow: 0 18px 40px -12px rgba(10, 20, 16, 0.35), 0 2px 6px rgba(10, 20, 16, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  body[data-skin='paper'] {
+    --paper: #14231f;
+    --text: #e7eee7;
+    --text-2: #a1b0a8;
+    --text-3: #6b7b73;
+    --rule: #263732;
+    --wash: rgba(231, 238, 231, 0.08);
+    --hover: rgba(231, 238, 231, 0.07);
+    --control: rgba(231, 238, 231, 0.08);
+    --signal: #ff7b4a;
+    --shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* One slab, flush with the screen edge, rounded only where it is free. */
+[data-skin='paper'] .panel {
+  background: var(--paper);
+  box-shadow: var(--shadow), 0 0 0 1px var(--rule);
+}
+
+[data-skin='paper'][data-edge='left'] .panel {
+  border-radius: 0 16px 16px 0;
+}
+
+[data-skin='paper'][data-edge='right'] .panel {
+  border-radius: 16px 0 0 16px;
+}
+
+[data-skin='paper'] .lane + .lane,
+[data-skin='paper'] .bar {
+  border-top: 1px solid var(--rule);
+}
+
+[data-skin='paper'] .figure {
+  font-stretch: 66%;
+}
+
+[data-skin='paper'] .unit {
+  font-stretch: 80%;
+}
+
+[data-skin='paper'] .rates dd,
+[data-skin='paper'] .row-value,
+[data-skin='paper'] .meter-value {
+  font-stretch: 85%;
+}
