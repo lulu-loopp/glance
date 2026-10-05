@@ -7,7 +7,7 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FOR
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
     WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -91,6 +91,12 @@ impl Window {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    /// Keeps the window out of every screen capture, or lets it back in.
+    pub fn exclude_from_capture(&self, exclude: bool) {
+        let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+        unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.expect("display affinity");
     }
 
     /// Lets clicks through to whatever is underneath, or takes them.
