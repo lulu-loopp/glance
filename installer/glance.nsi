@@ -103,9 +103,21 @@ FunctionEnd
   Abort
 !macroend
 
+; Runs Glance with `flag` on the chosen folder; $0 is its answer. A Glance
+; that did not run (deleted from the plugins folder, say) answers 4, which
+; refuses like any other failure.
+!macro Ask flag
+  StrCpy $0 4
+  ClearErrors
+  ExecWait '"$PLUGINSDIR\${EXE}" ${flag} "$INSTDIR"' $0
+  ${If} ${Errors}
+    StrCpy $0 4
+  ${EndIf}
+!macroend
+
 Function CheckFolder
   !insertmacro Helper
-  ExecWait '"$PLUGINSDIR\${EXE}" --check-install-folder "$INSTDIR"' $0
+  !insertmacro Ask --check-install-folder
   ${If} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}
@@ -118,7 +130,7 @@ Section "Glance"
   ; change, is used as it is. Anything else is refused and left alone (a
   ; silent install given one with /D stops here).
   !insertmacro Helper
-  ExecWait '"$PLUGINSDIR\${EXE}" --prepare-install-folder "$INSTDIR"' $0
+  !insertmacro Ask --prepare-install-folder
   ${If} $0 != 0
     !insertmacro Refuse $0
   ${EndIf}

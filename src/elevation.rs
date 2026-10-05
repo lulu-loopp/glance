@@ -25,7 +25,7 @@ use windows::Win32::Security::Authorization::{
 };
 use windows::Win32::Security::{
     GetAce, GetTokenInformation, MapGenericMask, TokenElevation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
-    DACL_SECURITY_INFORMATION, GENERIC_MAPPING, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    DACL_SECURITY_INFORMATION, CONTAINER_INHERIT_ACE, GENERIC_MAPPING, INHERIT_ONLY_ACE, OBJECT_INHERIT_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
     PSID, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
@@ -86,6 +86,8 @@ pub fn is_elevated() -> bool {
 /// The accounts that may change installed programs: SYSTEM, the
 /// Administrators group and TrustedInstaller.
 const TRUSTED: [&str; 3] = ["S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"];
+/// CREATOR OWNER: on an entry passed on, whoever creates the new object.
+const CREATOR_OWNER: &str = "S-1-3-0";
 
 fn sid_string(sid: PSID) -> Option<String> {
     let mut text = PWSTR::null();
@@ -99,6 +101,14 @@ fn sid_string(sid: PSID) -> Option<String> {
 /// owned by one (an owner may always re-permission), and its access list
 /// grants those rights to no one else. Fails closed on anything unexpected.
 fn only_trusted_can(path: &Path, forbidden: u32) -> bool {
+    only_trusted_can_now_and_after(path, forbidden, false)
+}
+
+/// As `only_trusted_can`; with `passed_on`, what the folder passes on to
+/// anything new in it must grant `forbidden` to no one else either. There
+/// the creator's own rights (CREATOR OWNER) count as trusted: only someone
+/// trusted can create in a folder that holds.
+fn only_trusted_can_now_and_after(path: &Path, forbidden: u32, passed_on: bool) -> bool {
     let wide = HSTRING::from(path.as_os_str());
     let (mut owner, mut dacl, mut descriptor) = (PSID::default(), std::ptr::null_mut::<ACL>(), PSECURITY_DESCRIPTOR::default());
     let read = unsafe {
@@ -133,17 +143,21 @@ fn only_trusted_can(path: &Path, forbidden: u32) -> bool {
                 break;
             }
             let header = unsafe { &*(ace as *const ACE_HEADER) };
+            let flags = header.AceFlags as u32;
+            let passes_on = flags & (OBJECT_INHERIT_ACE.0 | CONTAINER_INHERIT_ACE.0) != 0;
             // Entries that only pass on to children do not apply here.
-            if header.AceFlags as u32 & INHERIT_ONLY_ACE.0 != 0 {
+            if flags & INHERIT_ONLY_ACE.0 != 0 && !passed_on {
                 continue;
             }
             match header.AceType as u32 {
                 ACCESS_DENIED_ACE_TYPE => {}
                 ACCESS_ALLOWED_ACE_TYPE => {
                     let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+                    let sid = PSID(&allowed.SidStart as *const u32 as *mut _);
                     let mut mask = allowed.Mask;
                     unsafe { MapGenericMask(&mut mask, &mapping) };
-                    if mask & forbidden != 0 && !trusted(PSID(&allowed.SidStart as *const u32 as *mut _)) {
+                    let creator = passed_on && passes_on && sid_string(sid).as_deref() == Some(CREATOR_OWNER);
+                    if mask & forbidden != 0 && !trusted(sid) && !creator {
                         clear = false;
                         break;
                     }
@@ -243,7 +257,8 @@ const FILE_CHANGES: u32 = FILE_WRITE_DATA.0 | FILE_APPEND_DATA.0 | DELETE.0 | WR
 /// to change it now.
 fn only_trusted_inside(folder: &Path) -> bool {
     !is_link(folder)
-        && only_trusted_can(folder, FOLDER_CHANGES)
+        // What it passes on to what is extracted into it counts too.
+        && only_trusted_can_now_and_after(folder, FOLDER_CHANGES | FILE_CHANGES, true)
         && std::fs::read_dir(folder).is_ok_and(|entries| {
             entries.into_iter().all(|entry| {
                 entry.is_ok_and(|entry| {
