@@ -330,7 +330,9 @@ fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), sheet: Rect, lumin
     Ok((output(&crop)?, output(&clipped)?))
 }
 
-/// A tile of faint grey grain, repeated.
+/// A tile of faint grey grain, repeated: one grain to a device pixel, as
+/// Windows' acrylic has it (at 96 DPI each would be blown up 2x2 at 200%
+/// and read as noise).
 fn grain(frame: &Frame) -> Result<windows::Win32::Graphics::Direct2D::ID2D1BitmapBrush1> {
     // The same grain every time: a fixed sequence, not the clock.
     let mut seed = 0x2545_F491u32;
@@ -343,10 +345,12 @@ fn grain(frame: &Frame) -> Result<windows::Win32::Graphics::Direct2D::ID2D1Bitma
         let value = ((seed >> 24) as f32 * GRAIN_ALPHA).round() as u8;
         pixels.extend_from_slice(&[value, value, value, (GRAIN_ALPHA * 255.0).round() as u8]);
     }
+    let mut dpi = (0.0f32, 0.0f32);
+    unsafe { frame.dc.GetDpi(&mut dpi.0, &mut dpi.1) };
     let properties = D2D1_BITMAP_PROPERTIES1 {
         pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-        dpiX: 96.0,
-        dpiY: 96.0,
+        dpiX: dpi.0,
+        dpiY: dpi.1,
         bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
         ..Default::default()
     };

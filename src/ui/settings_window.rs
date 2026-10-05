@@ -28,6 +28,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
@@ -36,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
     PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, WM_CLOSE, WM_KEYDOWN, WM_SYSKEYDOWN,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
-    SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
+    SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
@@ -267,6 +268,7 @@ enum Target {
     Switch(Switch),
     Module(String),
     Grip(String),
+    Uninstall,
     Quit,
 }
 
@@ -277,6 +279,7 @@ enum Row {
     Choice(Field),
     Switch(Switch),
     Module(String),
+    Uninstall,
     Quit,
 }
 
@@ -312,6 +315,8 @@ struct Ui {
     autostart: bool,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
+    /// The installer's uninstaller beside this executable, if it was installed.
+    uninstaller: Option<std::path::PathBuf>,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -398,6 +403,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             prefs,
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
+            uninstaller: std::env::current_exe().ok().map(|exe| exe.with_file_name("uninstall.exe")).filter(|path| path.is_file()),
             scroll: 0.0,
             scroll_target: 0.0,
             motion: HashMap::new(),
@@ -607,8 +613,11 @@ impl Ui {
             Row::Choice(Field::TempAlert),
             Row::Heading("系统", "System"),
             Row::Switch(Switch::Startup),
-            Row::Quit,
         ]);
+        if self.uninstaller.is_some() {
+            rows.push(Row::Uninstall);
+        }
+        rows.push(Row::Quit);
         rows
     }
 
@@ -879,6 +888,13 @@ impl Ui {
                 }
                 self.save();
             }
+            // The uninstaller asks first and closes Glance itself.
+            Target::Uninstall => {
+                if let Some(uninstaller) = &self.uninstaller {
+                    let path = HSTRING::from(uninstaller.as_os_str());
+                    unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+                }
+            }
             Target::Quit => crate::quit(),
             Target::Grip(_) => {}
         }
@@ -908,6 +924,7 @@ impl Ui {
                 Row::Choice(field) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
                 Row::Switch(switch) => Some(Target::Switch(switch)),
                 Row::Module(id) => Some(Target::Module(id)),
+                Row::Uninstall => Some(Target::Uninstall),
                 Row::Quit => Some(Target::Quit),
                 Row::Title | Row::Heading(..) => None,
             })
@@ -1007,7 +1024,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n)) => m == n,
@@ -1250,19 +1267,32 @@ impl Ui {
                     }
                     self.module_row(frame, palette, &id, left, y + offset, width, row_height, now, &hovered, false);
                 }
-                Row::Quit => {
+                Row::Uninstall | Row::Quit => {
+                    let (target, name, detail, action) = if matches!(row, Row::Uninstall) {
+                        (
+                            Target::Uninstall,
+                            pick(lang, "卸载 Glance", "Uninstall Glance"),
+                            pick(lang, "连同设置一起删除，会先确认", "Removes it and its settings; asks first"),
+                            pick(lang, "卸载", "Uninstall"),
+                        )
+                    } else {
+                        (
+                            Target::Quit,
+                            pick(lang, "退出 Glance", "Quit Glance"),
+                            pick(lang, "面板和托盘图标都会关闭", "Closes the panel and the tray icon"),
+                            pick(lang, "退出", "Quit"),
+                        )
+                    };
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let (name, detail) = (pick(lang, "退出 Glance", "Quit Glance"), pick(lang, "面板和托盘图标都会关闭", "Closes the panel and the tray icon"));
                     field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
-                    let action = pick(lang, "退出", "Quit");
                     let button_w = frame.gfx.measure(action, label) + 32.0;
                     let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
-                    if hovered == Some(Target::Quit) {
+                    if hovered.as_ref() == Some(&target) {
                         fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
                     }
                     stroke_inside(frame, button, 6.0, palette.rule);
                     text_centred(frame, action, label, palette.signal, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
-                    self.targets.push((button, Target::Quit));
+                    self.targets.push((button, target));
                 }
             }
         }

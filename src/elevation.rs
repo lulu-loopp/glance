@@ -164,17 +164,34 @@ fn only_trusted_can(path: &Path, forbidden: u32) -> bool {
 fn checked(file: &Path) -> Option<PathBuf> {
     let file = std::fs::canonicalize(file).ok()?;
     let mut clear = only_trusted_can(&file, (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER).0);
-    let mut folder = file.parent();
-    let mut own = true;
-    while let Some(dir) = folder {
-        // Its own folder takes no new files; no folder above it can lose a
-        // child, be renamed or be re-permissioned.
-        let adding = if own { (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY).0 } else { 0 };
-        clear &= only_trusted_can(dir, adding | (FILE_DELETE_CHILD | DELETE | WRITE_DAC | WRITE_OWNER).0);
-        own = false;
-        folder = dir.parent();
+    if let Some(own) = file.parent() {
+        // Its own folder takes no new files.
+        clear &= only_trusted_can(own, (FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY).0) && folders_hold(own);
     }
     clear.then_some(file)
+}
+
+/// Whether no one but administrators can rename `folder` or any folder
+/// above it, take one of their children away, or re-permission them.
+fn folders_hold(folder: &Path) -> bool {
+    folder.ancestors().all(|dir| {
+        // A drive's root cannot be renamed or deleted: its own Delete right
+        // (which ordinary users hold on a second drive) changes nothing.
+        let delete = if dir.parent().is_some() { DELETE.0 } else { 0 };
+        only_trusted_can(dir, delete | (FILE_DELETE_CHILD | WRITE_DAC | WRITE_OWNER).0)
+    })
+}
+
+/// Whether Glance installed into `folder` could start elevated without
+/// asking: every folder above it already exists and holds (see `checked`);
+/// the installer makes `folder` itself writable by administrators only.
+pub fn install_folder_holds(folder: &Path) -> bool {
+    let Ok(folder) = std::path::absolute(folder) else { return false };
+    match folder.parent() {
+        Some(above) => std::fs::canonicalize(above).is_ok_and(|above| folders_hold(&above)),
+        // A drive's root is not a folder to install into.
+        None => false,
+    }
 }
 
 fn protected(file: &Path) -> bool {
@@ -475,5 +492,17 @@ mod tests {
         // Windows' own programs cannot be changed by the user; this build can.
         assert!(protected(Path::new(r"C:\Windows\System32\notepad.exe")));
         assert!(!protected(&std::env::current_exe().unwrap()));
+    }
+
+    #[test]
+    fn tells_where_an_install_would_hold() {
+        // A new folder in Program Files would; one beside this build would not.
+        assert!(install_folder_holds(Path::new(r"C:\Program Files\Glance-not-there")));
+        let beside = std::env::current_exe().unwrap().with_file_name("Glance-not-there");
+        assert!(!install_folder_holds(&beside));
+        // Nor would a drive's root, or a folder under one that is missing.
+        assert!(!install_folder_holds(Path::new(r"C:\")));
+        assert!(!install_folder_holds(Path::new(r"C:\no-such-folder\Glance")));
+        println!(r"D:\Glance would hold: {}", install_folder_holds(Path::new(r"D:\Glance")));
     }
 }
