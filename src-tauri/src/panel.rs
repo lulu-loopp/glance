@@ -275,10 +275,40 @@ impl Controller {
 
     /// The page laid the panel out, or changed skin.
     pub fn set_surface(&self, surface: Surface) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.surface = Some(surface);
-        if !matches!(inner.phase, Phase::Hidden) {
-            self.fit(&mut inner);
+        let first = {
+            let mut inner = self.inner.lock().unwrap();
+            let first = inner.surface.is_none();
+            inner.surface = Some(surface);
+            if !matches!(inner.phase, Phase::Hidden) {
+                self.fit(&mut inner);
+            }
+            first
+        };
+        if first {
+            self.warm_up();
+        }
+    }
+
+    /// Shows the window once, off every screen, as soon as its page has laid
+    /// out. A web view's first frame on screen is drawn before its page is:
+    /// without this, the first opening flashes an empty white window.
+    fn warm_up(&self) {
+        const OFF_SCREEN: i32 = -32000;
+        unsafe {
+            SetWindowPos(self.hwnd(), None, OFF_SCREEN, OFF_SCREEN, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER)
+        }
+        .unwrap();
+        self.window().show().unwrap();
+        // No lock held while the main thread carries the show out.
+        while !unsafe { IsWindowVisible(self.hwnd()) }.as_bool() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..3 {
+            let _ = unsafe { DwmFlush() };
+        }
+        // Opened meanwhile: the window is the panel's now.
+        if matches!(self.inner.lock().unwrap().phase, Phase::Hidden) {
+            self.hide_and_wait();
         }
     }
 

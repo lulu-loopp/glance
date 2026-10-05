@@ -16,6 +16,9 @@ import { PanelView, roomFor } from './panelView';
 import { buildSettings, resolvePrefs } from './settings';
 import type { Bootstrap, Sample, Settings } from './types';
 
+/** How long a choice's thumb takes to slide; matches base.css. */
+const THUMB_SLIDE_MS = 240;
+
 /** Desktop shown beside the panel in the preview (px of screen). */
 const PREVIEW_MARGIN = 160;
 
@@ -162,11 +165,15 @@ export async function settingsApp(boot: Bootstrap) {
         },
         relabel() {
           save();
-          setLanguage(prefs.language);
-          modules = catalog(boot.info);
-          view.modules = modules;
-          fill();
-          render();
+          // Everything is drawn again in the new language; first let the
+          // choice's thumb finish sliding, or it would be replaced mid-way.
+          setTimeout(() => {
+            setLanguage(prefs.language);
+            modules = catalog(boot.info);
+            view.modules = modules;
+            fill();
+            render();
+          }, THUMB_SLIDE_MS);
         },
         async autostart(enabled: boolean) {
           autostart = await invoke<boolean>('set_autostart', { enabled });
