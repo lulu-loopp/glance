@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::drives::DriveTemperature;
 use crate::sensors::{AmdCpu, CpuSensors};
+use crate::dimm::Dimms;
 use crate::superio::{BoardSensors, SuperIo};
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
@@ -89,6 +90,8 @@ pub struct Sample {
     pub board: Option<BoardSensors>,
     /// Drives that report their temperature to Windows directly.
     pub drive_temps: Vec<DriveTemperature>,
+    /// Each memory module's temperature, in slot order, read through the driver.
+    pub dimm_temps: Vec<f32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -196,6 +199,7 @@ pub struct Sampler {
     /// Readers that need the driver; absent without it or without rights.
     amd_cpu: Option<AmdCpu>,
     super_io: Option<SuperIo>,
+    dimms: Option<Dimms>,
     /// Each process's GPU use at the last sample, by process id.
     gpu_by_pid: HashMap<usize, f32>,
     buf: Vec<u64>,
@@ -260,6 +264,7 @@ impl Sampler {
                 w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
                 w!("BaseBoardManufacturer"),
             )),
+            dimms: Dimms::open(),
             gpu_by_pid: HashMap::new(),
             buf: Vec::new(),
             info,
@@ -336,6 +341,7 @@ impl Sampler {
             cpu_sensors: self.amd_cpu.as_mut().map(AmdCpu::read),
             board: self.super_io.as_ref().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
+            dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
         })
     }
 
