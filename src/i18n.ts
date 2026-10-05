@@ -109,6 +109,10 @@ const STRINGS = {
   tempAlert: { zh: '温度警示', en: 'Temperature alert' },
   startup: { zh: '开机时启动', en: 'Start with Windows' },
   quit: { zh: '退出 Glance', en: 'Quit Glance' },
+  quitDetail: { zh: '面板和托盘图标都会关闭', en: 'Closes the panel and the tray icon' },
+  quitAction: { zh: '退出', en: 'Quit' },
+  preview: { zh: '预览', en: 'Preview' },
+  previewDetail: { zh: '实时数据，桌面为当前壁纸', en: 'Live readings over your wallpaper' },
 } satisfies Record<string, Record<Language, string>>;
 
 export type Key = keyof typeof STRINGS;

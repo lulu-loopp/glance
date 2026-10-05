@@ -72,6 +72,7 @@ export async function settingsApp(boot: Bootstrap) {
     <div class="settings-layout">
       <div class="settings-pane"></div>
       <div class="preview-pane">
+        <header class="preview-head"><h2></h2><span></span></header>
         <div class="preview-frame"></div>
       </div>
     </div>`);
@@ -145,6 +146,8 @@ export async function settingsApp(boot: Bootstrap) {
   /** Draws the choices, in the current language. */
   const fill = () => {
     void getCurrentWindow().setTitle(t('windowTitle'));
+    layout.querySelector('.preview-head h2')!.textContent = t('preview');
+    layout.querySelector('.preview-head span')!.textContent = t('previewDetail');
     const scroll = pane.scrollTop;
     pane.replaceChildren(
       element(`<h1>${t('settings')}</h1>`),
