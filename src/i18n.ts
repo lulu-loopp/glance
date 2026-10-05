@@ -17,6 +17,8 @@ const STRINGS = {
   storageDetail: { zh: '各分区的空间', en: 'Space on each drive' },
   battery: { zh: '电池', en: 'Battery' },
   fans: { zh: '风扇', en: 'Fans' },
+  temperatures: { zh: '温度', en: 'Temperatures' },
+  temperaturesDetail: { zh: '硬盘；开启 HWiNFO 共享内存后另有 CPU、主板、内存', en: 'Drives; CPU, board and memory with HWiNFO' },
   fansDetail: { zh: '需要 HWiNFO 开启共享内存', en: 'Needs HWiNFO shared memory' },
   temperature: { zh: '温度', en: 'Temperature' },
   power: { zh: '功耗', en: 'Power' },

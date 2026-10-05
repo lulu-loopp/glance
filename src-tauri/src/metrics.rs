@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::drives::DriveTemperature;
 use crate::hwinfo::{HwSensors, Hwinfo};
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
@@ -75,6 +76,8 @@ pub struct Sample {
     pub battery: Option<BatterySample>,
     /// From HWiNFO, when it shares its sensors.
     pub hw: Option<HwSensors>,
+    /// Drives that report their temperature to Windows directly.
+    pub drive_temps: Vec<DriveTemperature>,
 }
 
 #[derive(Clone, Serialize)]
@@ -142,10 +145,12 @@ impl Sample {
         let mut rows: Vec<String> = self.volumes.iter().map(|volume| volume.name.clone()).collect();
         rows.push(format!("{} {}", self.by_cpu.len(), self.by_memory.len()));
         rows.push(format!("battery {}", self.battery.is_some()));
+        rows.extend(self.drive_temps.iter().map(|drive| format!("drive {}", drive.name)));
         match &self.hw {
             Some(hw) => {
                 rows.push(format!("cpu sensors {} {}", hw.cpu_temp.is_some(), hw.cpu_power.is_some()));
                 rows.extend(hw.fans.iter().map(|(name, _)| format!("fan {name}")));
+                rows.extend(hw.devices.iter().map(|(name, _)| format!("temp {name}")));
             }
             None => rows.push("no hwinfo".into()),
         }
@@ -323,6 +328,7 @@ impl Sampler {
             },
             battery: battery(),
             hw: self.hw_sensors(),
+            drive_temps: crate::drives::temperatures(),
         })
     }
 

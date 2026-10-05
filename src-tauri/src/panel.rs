@@ -53,6 +53,11 @@ const CORNER_EXCLUSION: f64 = 48.0;
 /// History is kept for the longest chart span the settings offer.
 const LONGEST_SPAN: Duration = Duration::from_secs(300);
 const TICK_MS: u32 = 16;
+/// Timers on the input loop: one that follows the pointer while the panel is
+/// up or the pointer rests on the edge, and the slow watch for blocked input.
+const TRACK_TIMER: usize = 1;
+const WATCH_TIMER: usize = 2;
+const WATCH_MS: u32 = 100;
 /// How often a live backdrop is captured again.
 const LIVE_INTERVAL: Duration = Duration::from_millis(250);
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
@@ -665,6 +670,14 @@ impl Controller {
         // gesture, not a new one.
         let mut armed = true;
         let mut ticking = false;
+        // Raw input stops reaching this process while a window of higher
+        // privilege (Task Manager, an installer) has the focus. A slow watch
+        // on the cursor notices that: it moved, and no raw input came. The
+        // pointer is then treated as one that cannot push, and opens the
+        // panel by resting on the edge.
+        let mut last_cursor = cursor_position();
+        let mut raw_since_watch = false;
+        unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         let mut msg = MSG::default();
         while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
             let now = Instant::now();
@@ -677,6 +690,7 @@ impl Controller {
             }
             match msg.message {
                 WM_INPUT if !self.is_open() => {
+                    raw_since_watch = true;
                     if let Some(motion) = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge) {
                         let cursor = cursor_position();
                         match edge_contact(cursor, edge) {
@@ -691,6 +705,24 @@ impl Controller {
                             }
                         }
                     }
+                }
+                WM_TIMER if msg.wParam.0 == WATCH_TIMER => {
+                    let cursor = cursor_position();
+                    let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
+                    if moved && !raw_since_watch && !self.is_open() {
+                        match edge_contact(cursor, edge) {
+                            Some(_) if armed => {
+                                detector.motion(Motion::Absolute, now, pressure);
+                            }
+                            Some(_) => {}
+                            None => {
+                                detector.reset();
+                                armed = !self.is_shown();
+                            }
+                        }
+                    }
+                    last_cursor = cursor;
+                    raw_since_watch = false;
                 }
                 WM_TIMER if self.is_open() => self.track(cursor_position(), now),
                 WM_TIMER => {
@@ -715,9 +747,9 @@ impl Controller {
                 ticking = needed;
                 unsafe {
                     if needed {
-                        SetTimer(Some(sink), 1, TICK_MS, None);
+                        SetTimer(Some(sink), TRACK_TIMER, TICK_MS, None);
                     } else {
-                        let _ = KillTimer(Some(sink), 1);
+                        let _ = KillTimer(Some(sink), TRACK_TIMER);
                     }
                 }
             }

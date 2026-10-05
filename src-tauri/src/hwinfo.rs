@@ -18,6 +18,9 @@ pub struct HwSensors {
     pub cpu_power: Option<f32>,
     /// Every fan that is turning, by the name HWiNFO shows, in RPM.
     pub fans: Vec<(String, f32)>,
+    /// Each device's hottest temperature, by the device's name, in the order
+    /// HWiNFO lists devices (CPU, board, memory modules, drives, GPUs…).
+    pub devices: Vec<(String, f32)>,
 }
 
 /// "HWiS" when the block holds live readings; HWiNFO writes "DEAD" on exit.
@@ -46,6 +49,15 @@ struct Header {
     reading_offset: u32,
     reading_size: u32,
     reading_count: u32,
+}
+
+/// The start of each device ("sensor" in HWiNFO's terms).
+#[repr(C, packed)]
+struct Sensor {
+    id: u32,
+    instance: u32,
+    name_original: [u8; 128],
+    name_user: [u8; 128],
 }
 
 /// The start of each reading; later revisions append fields, so readings
@@ -94,7 +106,14 @@ unsafe fn parse(base: *const u8) -> Option<HwSensors> {
         return None;
     }
     let mut temps: Vec<(usize, f32)> = Vec::new();
-    let mut sensors = HwSensors { cpu_temp: None, cpu_power: None, fans: Vec::new() };
+    let mut sensors = HwSensors { cpu_temp: None, cpu_power: None, fans: Vec::new(), devices: Vec::new() };
+    let device_name = |index: u32| {
+        let at = header.sensor_offset as usize + index as usize * header.sensor_size as usize;
+        let sensor = unsafe { std::ptr::read_unaligned(base.add(at) as *const Sensor) };
+        text(&sensor.name_user)
+    };
+    // Hottest temperature per device, by device index.
+    let mut hottest: Vec<Option<f32>> = vec![None; header.sensor_count as usize];
     for index in 0..header.reading_count as usize {
         let at = header.reading_offset as usize + index * header.reading_size as usize;
         let reading = unsafe { std::ptr::read_unaligned(base.add(at) as *const Reading) };
@@ -105,6 +124,9 @@ unsafe fn parse(base: *const u8) -> Option<HwSensors> {
                 if let Some(rank) = CPU_TEMPERATURES.iter().position(|name| *name == original) {
                     temps.push((rank, value));
                 }
+                if let Some(slot) = hottest.get_mut(reading.sensor_index as usize) {
+                    *slot = Some(slot.map_or(value, |known| known.max(value)));
+                }
             }
             POWER if original == CPU_POWER && sensors.cpu_power.is_none() => sensors.cpu_power = Some(value),
             FAN if value > 0.0 => sensors.fans.push((text(&reading.label_user), value)),
@@ -112,6 +134,11 @@ unsafe fn parse(base: *const u8) -> Option<HwSensors> {
         }
     }
     sensors.cpu_temp = temps.into_iter().min_by_key(|(rank, _)| *rank).map(|(_, value)| value);
+    sensors.devices = hottest
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| value.map(|value| (device_name(index as u32), value)))
+        .collect();
     Some(sensors)
 }
 
@@ -165,18 +192,24 @@ mod tests {
         ];
         let size = readings[0].len() as u32;
         let header_len = size_of::<Header>() as u32;
+        let sensor_len = size_of::<Sensor>() as u32;
+        let mut sensor = vec![0u8; sensor_len as usize];
+        sensor[8 + 128..8 + 128 + 3].copy_from_slice(b"CPU");
         let mut block = Vec::new();
         block.extend(SIGNATURE.to_le_bytes());
         block.extend(2u32.to_le_bytes());
         block.extend(0u32.to_le_bytes());
         block.extend(0i64.to_le_bytes());
-        block.extend([header_len, 0, 0, header_len, size, readings.len() as u32].iter().flat_map(|v| v.to_le_bytes()));
+        let readings_at = header_len + sensor_len;
+        block.extend([header_len, sensor_len, 1, readings_at, size, readings.len() as u32].iter().flat_map(|v| v.to_le_bytes()));
+        block.extend(&sensor);
         readings.iter().for_each(|r| block.extend(r));
 
         let sensors = unsafe { parse(block.as_ptr()) }.unwrap();
         assert_eq!(sensors.cpu_temp, Some(62.5));
         assert_eq!(sensors.cpu_power, Some(88.25));
         assert_eq!(sensors.fans, vec![("CPU".to_string(), 1200.0)]);
+        assert_eq!(sensors.devices, vec![("CPU".to_string(), 70.0)]);
 
         block[..4].copy_from_slice(b"DEAD");
         assert!(unsafe { parse(block.as_ptr()) }.is_none());
