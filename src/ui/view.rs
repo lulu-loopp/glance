@@ -258,6 +258,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 if let Some(clock) = reading.clock_mhz {
                     facts.push((lang.pick("频率", "Clock").into(), format!("{clock:.0} MHz"), false));
                 }
+                if let Some(power) = reading.power {
+                    facts.push((lang.pick("功耗", "Power").into(), format!("{power:.1} W"), false));
+                }
                 if let Some(rpm) = reading.fan_rpm {
                     facts.push((lang.pick("风扇", "Fan").into(), format!("{rpm} RPM"), false));
                 }

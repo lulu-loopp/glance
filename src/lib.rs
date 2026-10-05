@@ -2,6 +2,7 @@ mod detector;
 mod dimm;
 mod drives;
 mod elevation;
+mod gpu_power;
 mod metrics;
 mod panel;
 mod pawnio;

@@ -10,12 +10,13 @@ use serde::Serialize;
 use crate::drives::DriveTemperature;
 use crate::sensors::{CpuReader, CpuSensors};
 use crate::dimm::Dimms;
+use crate::gpu_power::{self, GpuPower};
 use crate::superio::{BoardSensors, SuperIo};
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
-    D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
-    KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_NODEPERFDATA,
+    D3DKMT_ADAPTERADDRESS, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
+    KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_NODEPERFDATA,
 };
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, LUID, UNICODE_STRING};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
@@ -112,6 +113,8 @@ pub struct GpuSample {
     pub temp: Option<f32>,
     pub clock_mhz: Option<f32>,
     pub fan_rpm: Option<u32>,
+    /// Watts, as a discrete card's driver reports them.
+    pub power: Option<f32>,
 }
 
 /// One program: every process sharing an executable name, added together.
@@ -172,6 +175,8 @@ const DRIVE_FIXED: u32 = 3;
 struct Adapter {
     luid: (u32, i32),
     kmt_handle: u32,
+    /// How its maker's driver gives its power, if it does.
+    power: Option<gpu_power::Reader>,
 }
 
 /// What is read less often than every sample (see `Sampler::sample`).
@@ -202,6 +207,7 @@ pub struct Sampler {
     slow: Slow,
     base_mhz: f64,
     adapters: Vec<Adapter>,
+    gpu_power: GpuPower,
     /// The totals at the last successful read of the interface table.
     net_prev: Option<(HashMap<u64, (u64, u64)>, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
@@ -239,7 +245,8 @@ impl Sampler {
         let mut processes = ProcessTable::default();
         processes.sample(1, &HashMap::new());
 
-        let (adapters, gpus) = enumerate_gpus();
+        let gpu_power = GpuPower::open();
+        let (adapters, gpus) = enumerate_gpus(&gpu_power);
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
@@ -267,6 +274,7 @@ impl Sampler {
             slow: Slow::default(),
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
             adapters,
+            gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors: CpuReader::open(),
             super_io: SuperIo::open(&reg_string(
@@ -453,6 +461,7 @@ impl Sampler {
                         temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)),
                         fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)),
                         clock_mhz: graphics_clock(adapter.kmt_handle),
+                        power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
                     }
                 })
                 .collect(),
@@ -759,7 +768,7 @@ fn parse_kind(instance: &str) -> Option<String> {
     Some(kind.replace(' ', ""))
 }
 
-fn enumerate_gpus() -> (Vec<Adapter>, Vec<GpuInfo>) {
+fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
     let mut adapters = Vec::new();
     let mut infos = Vec::new();
     let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return (adapters, infos) };
@@ -777,7 +786,8 @@ fn enumerate_gpus() -> (Vec<Adapter>, Vec<GpuInfo>) {
             continue;
         }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
-        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter });
+        let power = adapter_address(open.hAdapter).and_then(|address| power.reader(address));
+        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
             name: String::from_utf16_lossy(&desc.Description[..name_len]),
@@ -799,6 +809,18 @@ fn adapter_perf(kmt_handle: u32) -> Option<D3DKMT_ADAPTER_PERFDATA> {
         PrivateDriverDataSize: size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
     };
     unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some(perf)
+}
+
+/// Where the adapter sits on the PCI bus.
+fn adapter_address(kmt_handle: u32) -> Option<gpu_power::PciAddress> {
+    let mut address = D3DKMT_ADAPTERADDRESS::default();
+    let mut query = D3DKMT_QUERYADAPTERINFO {
+        hAdapter: kmt_handle,
+        Type: KMTQAITYPE_ADAPTERADDRESS,
+        pPrivateDriverData: &mut address as *mut _ as *mut _,
+        PrivateDriverDataSize: size_of::<D3DKMT_ADAPTERADDRESS>() as u32,
+    };
+    unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some((address.BusNumber, address.DeviceNumber, address.FunctionNumber))
 }
 
 /// Clock of the adapter's first engine (the graphics engine), in MHz.
