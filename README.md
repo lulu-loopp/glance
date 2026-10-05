@@ -47,7 +47,7 @@ makensis installer\glance.nsi
 ```
 
 The executable is `target\release\glance.exe`, the installer
-`target\Glance_0.1.2_x64-setup.exe`. `scripts\release.ps1` does both, and
+`target\Glance_0.1.3_x64-setup.exe`. `scripts\release.ps1` does both, and
 with `-Sign` signs the executable, the uninstaller and the installer
 (`scripts\sign.ps1`; needs an Azure sign-in allowed to use the signing
 account). A debug build runs without asking for administrator rights (and so
