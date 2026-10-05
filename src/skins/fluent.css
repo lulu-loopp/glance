@@ -3,7 +3,7 @@
    sits directly on the sheet, grouped by headings and space rather than
    boxes; a slightly darker footer strip; the user's accent colour for
    anything that is data or selected. */
-body[data-skin='fluent'] {
+[data-skin='fluent'] {
   --backdrop: snapshot;
   --margin: 32;
   --inset: 12;
@@ -44,7 +44,7 @@ body[data-skin='fluent'] {
 }
 
 @media (prefers-color-scheme: dark) {
-  body[data-skin='fluent'] {
+  [data-skin='fluent'] {
     --accent: var(--accent-on-dark);
     --sheet-luminosity: rgba(44, 44, 44, 0.96);
     --sheet-tint: rgba(44, 44, 44, 0.15);
@@ -136,11 +136,4 @@ body[data-skin='fluent'] {
   background: var(--footer);
 }
 
-[data-skin='fluent'] .settings {
-  padding: 6px 22px 18px;
-}
 
-[data-skin='fluent'] .settings-section h3 {
-  color: var(--text);
-  font-size: 14px;
-}

@@ -7,6 +7,7 @@
 //! nothing that moves on screen can feed back into that decision.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -61,9 +62,14 @@ pub enum Backdrop {
 /// How the current skin wants its window, as declared by the page.
 #[derive(Clone, Copy, Deserialize)]
 pub struct Surface {
-    /// Panel size at zoom 1 (logical px).
-    width: f64,
-    height: f64,
+    /// The lanes' height laid out in one column, and the height of what is
+    /// not lanes (the bar), at zoom 1 (logical px). How many columns the
+    /// lanes need depends on the screen, which only this side knows before
+    /// the panel opens; the page splits them by the same rule.
+    lanes_height: f64,
+    chrome_height: f64,
+    column_width: f64,
+    column_gap: f64,
     /// Transparent space the page needs around the panel for its shadow.
     margin: f64,
     /// Gap between the panel and the screen edge.
@@ -78,13 +84,6 @@ pub struct PageRect {
     top: f64,
     width: f64,
     height: f64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum View {
-    Monitor,
-    Settings,
 }
 
 enum Phase {
@@ -126,8 +125,6 @@ struct Inner {
     /// the page has placed the panel for the current opening.
     panel: Option<RECT>,
     reach: RECT,
-    /// The page asked the panel to stay open when the pointer leaves.
-    hold: bool,
     click_through: bool,
     history: VecDeque<Sample>,
     /// The rows the page last laid out (see `Sample::layout_rows`).
@@ -146,13 +143,17 @@ pub struct Controller {
     /// the main thread, which must never wait for a lock that a thread waiting
     /// on the main thread may hold.
     capture: Mutex<Option<(u64, Arc<Vec<u8>>)>>,
+    /// While the settings window is open it shows a live preview, and gets
+    /// every sample.
+    settings_open: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
 struct OpenPayload<'a> {
     epoch: u64,
     history: &'a VecDeque<Sample>,
-    view: View,
+    /// Height of the work area the panel has to fit in (logical px).
+    room: f64,
     /// Pointer height relative to the window (physical px).
     focus_y: i32,
     /// Where to fetch the capture of the screen behind the window.
@@ -162,6 +163,7 @@ struct OpenPayload<'a> {
 #[derive(Clone, Serialize)]
 struct BackdropPayload {
     epoch: u64,
+    room: f64,
     backdrop: Option<String>,
 }
 
@@ -208,6 +210,7 @@ impl Controller {
             hwnd: hwnd.0 as isize,
             config: Mutex::new(config_from(settings)),
             capture: Mutex::new(None),
+            settings_open: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 phase: Phase::Hidden,
                 epoch: 0,
@@ -215,7 +218,6 @@ impl Controller {
                 placement: None,
                 panel: None,
                 reach: RECT::default(),
-                hold: false,
                 click_through: false,
                 history: VecDeque::new(),
                 rows: None,
@@ -274,10 +276,6 @@ impl Controller {
         inner.reach = reach;
     }
 
-    pub fn set_hold(&self, hold: bool) {
-        self.inner.lock().unwrap().hold = hold;
-    }
-
     /// Stores a sample and forwards it to the page while the panel is on
     /// screen. A hidden page is left alone, except when a sample would change
     /// its layout: the panel has to be the right size the moment it opens.
@@ -288,11 +286,20 @@ impl Controller {
             inner.history.pop_front();
         }
         let rows = sample.layout_rows();
-        if !matches!(inner.phase, Phase::Hidden) || inner.rows.as_ref() != Some(&rows) {
+        let watched = !matches!(inner.phase, Phase::Hidden) || self.settings_open.load(Ordering::Relaxed);
+        if watched || inner.rows.as_ref() != Some(&rows) {
             self.app.emit("sample", &sample).unwrap();
             inner.rows = Some(rows);
         }
         inner.history.push_back(sample);
+    }
+
+    pub fn set_settings_open(&self, open: bool) {
+        self.settings_open.store(open, Ordering::Relaxed);
+    }
+
+    pub fn history(&self) -> Vec<Sample> {
+        self.inner.lock().unwrap().history.iter().cloned().collect()
     }
 
     pub fn is_shown(&self) -> bool {
@@ -336,15 +343,9 @@ impl Controller {
             Contact { monitor: placement.monitor, work: placement.work, scale: placement.scale }
         };
         // The window has to be off the screen for the capture not to contain
-        // it. Hiding is carried out on the main thread some time after the
-        // request, and reaches the screen at the next composed frame. No lock
-        // is held meanwhile: the main thread may need one to get there.
-        self.window().hide().unwrap();
-        while unsafe { IsWindowVisible(self.hwnd()) }.as_bool() {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let _ = unsafe { DwmFlush() };
-        let _ = unsafe { DwmFlush() };
+        // it. No lock is held meanwhile: the main thread may need one to get
+        // there.
+        self.hide_and_wait();
 
         let mut inner = self.inner.lock().unwrap();
         // The panel may have been dismissed while the window was going.
@@ -354,7 +355,7 @@ impl Controller {
         inner.panel = None;
         self.window().show().unwrap();
         self.app
-            .emit("panel-backdrop", BackdropPayload { epoch, backdrop: Self::backdrop_url(&inner) })
+            .emit("panel-backdrop", BackdropPayload { epoch, room: room(&contact), backdrop: Self::backdrop_url(&inner) })
             .unwrap();
     }
 
@@ -367,6 +368,35 @@ impl Controller {
             *self.capture.lock().unwrap() = None;
             self.window().hide().unwrap();
         }
+    }
+
+    /// Takes the panel off the screen at once, without its animation, and
+    /// returns once it is gone from what the screen shows.
+    pub fn dismiss(&self) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if matches!(inner.phase, Phase::Hidden) {
+                return;
+            }
+            inner.phase = Phase::Hidden;
+            inner.shot = None;
+            *self.capture.lock().unwrap() = None;
+            self.app.emit("panel-dismissed", inner.epoch).unwrap();
+        }
+        // No lock held: the main thread carries the hide out.
+        self.hide_and_wait();
+    }
+
+    /// Hides the window and waits until the screen no longer shows it.
+    /// Hiding is carried out on the main thread some time after the request,
+    /// and reaches the screen at the next composed frame.
+    fn hide_and_wait(&self) {
+        self.window().hide().unwrap();
+        while unsafe { IsWindowVisible(self.hwnd()) }.as_bool() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let _ = unsafe { DwmFlush() };
+        let _ = unsafe { DwmFlush() };
     }
 
     pub fn close(&self) {
@@ -385,26 +415,23 @@ impl Controller {
     }
 
     /// Opens the panel from the tray icon, on the monitor the pointer is on.
-    pub fn open_from_tray(&self, view: View) {
+    pub fn open_from_tray(&self) {
         let cursor = cursor_position();
         if let Some(contact) = monitor_at(cursor) {
-            self.open(cursor, &contact, view);
+            self.open(cursor, &contact);
         }
     }
 
-    fn open(&self, cursor: POINT, contact: &Contact, view: View) {
+    fn open(&self, cursor: POINT, contact: &Contact) {
         let mut inner = self.inner.lock().unwrap();
         let Some(surface) = inner.surface else { return };
         if matches!(inner.phase, Phase::Open { .. }) {
-            // Already up: only the view changes.
-            self.app.emit("panel-view", view).unwrap();
             return;
         }
         let reopening = matches!(inner.phase, Phase::Closing);
         inner.epoch += 1;
         inner.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
         inner.panel = None;
-        inner.hold = false;
         inner.click_through = false;
 
         // A reopen during the slide-out keeps the window, and the capture
@@ -424,7 +451,7 @@ impl Controller {
                 OpenPayload {
                     epoch,
                     history: &inner.history,
-                    view,
+                    room: room(contact),
                     focus_y: cursor.y - window.top,
                     backdrop: Self::backdrop_url(&inner),
                 },
@@ -435,8 +462,8 @@ impl Controller {
     /// Sizes and positions the (hidden) window for `contact`'s monitor.
     fn place(&self, inner: &mut Inner, surface: Surface, contact: &Contact) -> RECT {
         let work_height = (contact.work.bottom - contact.work.top) as f64 / contact.scale;
-        let zoom = zoom_for(surface, work_height);
-        let width = ((surface.width + surface.margin + surface.inset) * contact.scale * zoom).round() as i32;
+        let (panel_width, _, zoom) = fit_panel(surface, work_height);
+        let width = window_width(surface, panel_width, contact.scale, zoom);
         let left = match self.edge() {
             Edge::Left => contact.monitor.left,
             Edge::Right => contact.monitor.right - width,
@@ -472,8 +499,8 @@ impl Controller {
     fn fit(&self, inner: &mut Inner) {
         let (Some(surface), Some(placement)) = (inner.surface, inner.placement.as_mut()) else { return };
         let work_height = (placement.window.bottom - placement.window.top) as f64 / placement.scale;
-        let zoom = zoom_for(surface, work_height);
-        let width = ((surface.width + surface.margin + surface.inset) * placement.scale * zoom).round() as i32;
+        let (panel_width, _, zoom) = fit_panel(surface, work_height);
+        let width = window_width(surface, panel_width, placement.scale, zoom);
         if zoom == placement.zoom && width == placement.window.right - placement.window.left {
             return;
         }
@@ -516,7 +543,6 @@ impl Controller {
             None => (true, true),
         };
         let held = buttons_down();
-        let hold = inner.hold;
         let Phase::Open { entered, outside_since, dragging } = &mut inner.phase else { return };
 
         // A press that begins away from the panel dismisses it; one that
@@ -528,7 +554,7 @@ impl Controller {
             self.begin_close(&mut inner);
             return;
         }
-        if in_reach || *dragging || !*entered || hold {
+        if in_reach || *dragging || !*entered {
             *outside_since = None;
         } else if now.duration_since(*outside_since.get_or_insert(now)) >= close_delay {
             self.begin_close(&mut inner);
@@ -582,7 +608,7 @@ impl Controller {
                         match edge_contact(cursor, edge) {
                             Some(contact) if detector.motion(motion, now, pressure) => {
                                 detector.reset();
-                                self.open(cursor, &contact, View::Monitor);
+                                self.open(cursor, &contact);
                             }
                             Some(_) => {}
                             None => detector.reset(),
@@ -595,7 +621,7 @@ impl Controller {
                     match edge_contact(cursor, edge) {
                         Some(contact) if detector.dwell_elapsed(now) => {
                             detector.reset();
-                            self.open(cursor, &contact, View::Monitor);
+                            self.open(cursor, &contact);
                         }
                         Some(_) => {}
                         None => detector.reset(),
@@ -620,10 +646,37 @@ impl Controller {
     }
 }
 
+fn room(contact: &Contact) -> f64 {
+    (contact.work.bottom - contact.work.top) as f64 / contact.scale
+}
+
+/// The work area of the monitor under the pointer, and its scale factor.
+pub fn work_area_at_cursor() -> Option<(RECT, f64)> {
+    let contact = monitor_at(cursor_position())?;
+    Some((contact.work, contact.scale))
+}
+
 /// On a screen too short for the panel at full size, the page is zoomed out
 /// until it fits, exactly as if the display had a lower scale factor.
-fn zoom_for(surface: Surface, work_height: f64) -> f64 {
-    ((work_height - 2.0 * GAP) / surface.height).min(1.0)
+/// Columns a panel may spread over before the window has to zoom out instead.
+/// The page keeps the same limit.
+const MAX_COLUMNS: f64 = 3.0;
+
+/// The panel's size (logical px) and zoom on a work area `work_height` tall:
+/// as many columns as it takes to show the lanes at full size, and only if
+/// even the most columns are not enough, zoomed out until they fit.
+fn fit_panel(surface: Surface, work_height: f64) -> (f64, f64, f64) {
+    let space = work_height - 2.0 * GAP - surface.chrome_height;
+    let columns = (surface.lanes_height / space).ceil().clamp(1.0, MAX_COLUMNS);
+    let width = columns * surface.column_width + (columns - 1.0) * surface.column_gap;
+    let height = surface.lanes_height / columns + surface.chrome_height;
+    let zoom = ((work_height - 2.0 * GAP) / height).min(1.0);
+    (width, height, zoom)
+}
+
+/// Window width (physical px) for a panel `width` wide.
+fn window_width(surface: Surface, width: f64, scale: f64, zoom: f64) -> i32 {
+    ((width + surface.margin + surface.inset) * scale * zoom).round() as i32
 }
 
 fn contains(rect: &RECT, point: POINT) -> bool {

@@ -29,6 +29,7 @@ export class Backdrop {
   private url: string | null = null;
   private defs: SVGDefsElement;
   private maps = new Map<string, string>();
+  private stage: HTMLElement | null = null;
 
   constructor() {
     const svg = document.createElementNS(SVG, 'svg');
@@ -62,11 +63,13 @@ export class Backdrop {
   }
 
   /**
-   * Lays the capture under `panel` for the active skin. Positions are taken
+   * Lays the capture under `panel` for the active skin. The capture covers
+   * `stage` exactly. Positions are taken
    * at rest, ignoring the entrance transform: the capture is aligned with the
    * screen where the panel will settle.
    */
-  dress(panel: HTMLElement, skin: string) {
+  dress(panel: HTMLElement, skin: string, stage: HTMLElement) {
+    this.stage = stage;
     const acrylic = panel.querySelector<HTMLElement>('.acrylic')!;
     const pieces = [...panel.querySelectorAll<HTMLElement>('.lane, .bar, .settings')];
     for (const lens of panel.querySelectorAll('.lens')) lens.remove();
@@ -76,9 +79,9 @@ export class Backdrop {
       return;
     }
 
-    const viewport = `${window.innerWidth}px ${window.innerHeight}px`;
+    const viewport = `${stage.clientWidth}px ${stage.clientHeight}px`;
     const url = `url(${this.url})`;
-    const origin = { left: panel.offsetLeft, top: panel.offsetTop };
+    const origin = offsetWithin(panel, stage);
 
     if (skin === 'fluent') {
       acrylic.style.backgroundImage = url;
@@ -125,7 +128,7 @@ export class Backdrop {
   /** Mean and standard deviation of the capture's luminance behind a box of the viewport, 0–1. */
   measure(box: Box): { mean: number; spread: number } {
     const image = this.image!;
-    const scale = image.naturalWidth / window.innerWidth;
+    const scale = image.naturalWidth / this.stage!.clientWidth;
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(box.width * SAMPLING));
     canvas.height = Math.max(1, Math.round(box.height * SAMPLING));

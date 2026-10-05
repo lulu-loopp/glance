@@ -4,7 +4,7 @@
    the busier the backdrop behind a piece, the more it frosts (--frost, 0–1,
    measured per piece in glass.ts), so text stays legible over anything.
    Text tone follows what is behind the glass, not the system theme. */
-body[data-skin='glass'] {
+[data-skin='glass'] {
   --backdrop: snapshot;
   --margin: 24;
   --inset: 10;
@@ -80,17 +80,18 @@ body[data-skin='glass'] {
   --tile-shadow: 0 10px 30px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
-[data-skin='glass'] .lanes {
-  display: grid;
-  row-gap: 8px;
+[data-skin='glass'] {
+  --column-gap: 8px;
+}
+
+[data-skin='glass'] .lane {
   margin-bottom: 8px;
 }
 
 /* Every piece of glass. Pieces do not nest, so there is no inner radius to
    keep concentric with an outer one. */
 [data-skin='glass'] .lane,
-[data-skin='glass'] .bar,
-[data-skin='glass'] .settings {
+[data-skin='glass'] .bar {
   isolation: isolate;
   overflow: hidden;
   border-radius: var(--tile-radius);
@@ -108,10 +109,6 @@ body[data-skin='glass'] {
   border-radius: 24px;
 }
 
-[data-skin='glass'] .settings {
-  margin-bottom: 8px;
-  padding: 4px 18px 18px;
-}
 
 [data-skin='glass'] .lens {
   display: block;
@@ -119,7 +116,7 @@ body[data-skin='glass'] {
 
 /* The tint, and the light catching the rim: brightest where light would
    strike the top-left, again faintly at the bottom-right. */
-[data-skin='glass'] :is(.lane, .bar, .settings)::before {
+[data-skin='glass'] :is(.lane, .bar)::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -133,7 +130,7 @@ body[data-skin='glass'] {
   pointer-events: none;
 }
 
-[data-skin='glass'] :is(.lane, .bar, .settings)::after {
+[data-skin='glass'] :is(.lane, .bar)::after {
   content: '';
   position: absolute;
   inset: 0;
