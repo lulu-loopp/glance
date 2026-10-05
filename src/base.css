@@ -10,19 +10,23 @@ body {
 }
 
 body {
-  color: var(--text);
-  font: 500 13px/1.3 var(--font);
-  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   user-select: none;
   cursor: default;
 }
 
-body[data-edge='left'] {
+/* Whatever carries a skin: the panel window's body, or the preview stage. */
+[data-skin] {
+  color: var(--text);
+  font: 500 13px/1.3 var(--font);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-edge='left'] {
   --dir: -1;
 }
 
-body[data-edge='right'] {
+[data-edge='right'] {
   --dir: 1;
 }
 
@@ -33,25 +37,28 @@ button {
 
 /* ---- The panel and how it comes and goes ---- */
 
+/* A panel is one or more columns of lanes, as many as its screen needs to
+   show them all at full size (set by PanelView as --columns). */
 .panel {
+  --column-width: 356px;
   position: absolute;
   box-sizing: border-box;
-  width: 356px;
+  width: calc(var(--columns, 1) * var(--column-width) + (var(--columns, 1) - 1) * var(--column-gap, 0px));
   isolation: isolate;
   transition:
     transform 260ms cubic-bezier(0.16, 1, 0.3, 1),
     opacity 140ms linear;
 }
 
-body[data-edge='left'] .panel {
+[data-edge='left'] .panel {
   left: calc(var(--inset) * 1px);
 }
 
-body[data-edge='right'] .panel {
+[data-edge='right'] .panel {
   right: calc(var(--inset) * 1px);
 }
 
-body:not([data-state='open']) .panel {
+[data-state]:not([data-state='open']) .panel {
   transform: translateX(calc(var(--dir) * var(--enter-shift)));
   opacity: 0;
   transition:
@@ -60,26 +67,20 @@ body:not([data-state='open']) .panel {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  body .panel,
-  body:not([data-state='open']) .panel {
+  [data-state] .panel,
+  [data-state]:not([data-state='open']) .panel {
     transform: none;
     transition: opacity 120ms linear;
   }
 }
 
-#chart {
+.chart {
   position: absolute;
   inset: 0;
   z-index: 1;
   width: 100%;
   height: 100%;
   pointer-events: none;
-}
-
-body[data-view='settings'] #chart,
-body[data-view='settings'] .lanes,
-body[data-view='monitor'] .settings {
-  display: none;
 }
 
 /* Layers a skin can fill with the desktop behind the panel. */
@@ -95,12 +96,15 @@ body[data-view='monitor'] .settings {
 
 .lanes {
   position: relative;
+  column-count: var(--columns, 1);
+  column-gap: var(--column-gap, 0px);
 }
 
 /* ---- Lanes ---- */
 
 .lane {
   position: relative;
+  break-inside: avoid;
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
   column-gap: 12px;
@@ -386,16 +390,6 @@ body[data-view='monitor'] .settings {
 }
 
 /* ---- Settings ---- */
-
-.settings {
-  position: relative;
-  box-sizing: border-box;
-  height: 600px;
-  padding: 4px 18px 18px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--text-3) transparent;
-}
 
 .settings-section h3 {
   margin: 18px 0 8px;

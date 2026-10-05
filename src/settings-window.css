@@ -1,0 +1,113 @@
+/* The settings window: Mica shows through (the window is transparent), the
+   choices sit on the left, the live preview on the right. */
+
+body.settings-app {
+  overflow: hidden;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 420px) 1fr;
+  height: 100vh;
+}
+
+.settings-pane {
+  overflow-y: auto;
+  padding: 20px 28px 32px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--text-3) transparent;
+}
+
+.settings-pane h1 {
+  margin: 4px 0 4px;
+  font: 600 28px/1.2 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+}
+
+.settings-section {
+  margin-top: 8px;
+  padding: 4px 16px 10px;
+  border: 1px solid var(--card-stroke);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.settings-section h3 {
+  margin: 12px 0 6px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.settings-section + .settings-section {
+  margin-top: 12px;
+}
+
+.preview-pane {
+  padding: 16px 16px 16px 0;
+}
+
+/* A window onto the desktop the settings were opened over. */
+.preview-frame {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--card-stroke);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.stage {
+  position: absolute;
+  top: 0;
+  background-size: 100% 100%;
+  pointer-events: none;
+}
+
+/* The window's own controls, drawn in the Windows 11 style whatever skin
+   the panel wears. Not a skin: skins are scoped to the preview stage. */
+.settings-app {
+  --font: 'Segoe UI Variable Text', 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
+  --accent: var(--accent-on-light);
+  --text: rgba(0, 0, 0, 0.9);
+  --text-2: rgba(0, 0, 0, 0.6);
+  --text-3: rgba(0, 0, 0, 0.44);
+  --rule: rgba(0, 0, 0, 0.08);
+  --signal: #c42b1c;
+  --hover: rgba(0, 0, 0, 0.04);
+  --selection: var(--accent);
+  --control: rgba(0, 0, 0, 0.05);
+  --control-on: rgba(255, 255, 255, 0.95);
+  --control-on-text: var(--text);
+  --control-on-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.08);
+  --control-radius: 4px;
+  --switch-off: rgba(0, 0, 0, 0.03);
+  --switch-off-stroke: rgba(0, 0, 0, 0.6);
+  --switch-off-knob: rgba(0, 0, 0, 0.6);
+  --switch-on: var(--accent);
+  --switch-on-knob: #ffffff;
+  --card: rgba(255, 255, 255, 0.7);
+  --card-stroke: rgba(0, 0, 0, 0.06);
+  color: var(--text);
+  font: 400 14px/1.4 var(--font);
+}
+
+@media (prefers-color-scheme: dark) {
+  .settings-app {
+    --accent: var(--accent-on-dark);
+    --text: #ffffff;
+    --text-2: rgba(255, 255, 255, 0.76);
+    --text-3: rgba(255, 255, 255, 0.5);
+    --rule: rgba(255, 255, 255, 0.08);
+    --signal: #ff99a4;
+    --hover: rgba(255, 255, 255, 0.06);
+    --control: rgba(255, 255, 255, 0.06);
+    --control-on: rgba(255, 255, 255, 0.12);
+    --control-on-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+    --switch-off: rgba(0, 0, 0, 0.1);
+    --switch-off-stroke: rgba(255, 255, 255, 0.6);
+    --switch-off-knob: rgba(255, 255, 255, 0.8);
+    --switch-on-knob: #000000;
+    --card: rgba(255, 255, 255, 0.05);
+    --card-stroke: rgba(0, 0, 0, 0.2);
+  }
+}

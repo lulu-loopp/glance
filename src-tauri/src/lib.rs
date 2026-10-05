@@ -11,13 +11,21 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::http::{Response, StatusCode};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Manager, State};
+use tauri::window::{Effect, EffectsBuilder};
+use tauri::{
+    App, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindowBuilder,
+    WindowEvent,
+};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use windows::UI::ViewManagement::{UIColorType, UISettings};
 
 use metrics::{Sampler, StaticInfo};
-use panel::{Controller, PageRect, Surface, View};
+use panel::{Controller, PageRect, Surface};
 use settings::Settings;
+
+/// The settings window's size, and the least it can be resized to (logical px).
+const SETTINGS_SIZE: (f64, f64) = (1040.0, 720.0);
+const SETTINGS_MIN_SIZE: (f64, f64) = (860.0, 560.0);
 
 /// With the panel hidden, the process list and network adapter are read once
 /// in this many samples: often enough to be current when the panel opens.
@@ -27,6 +35,22 @@ struct AppState {
     info: StaticInfo,
     controller: Arc<Controller>,
     settings: Mutex<Settings>,
+    /// The desktop under the settings window when it opened, for its preview.
+    preview: Mutex<Option<Preview>>,
+}
+
+struct Preview {
+    bmp: Arc<Vec<u8>>,
+    /// Size of the captured work area in logical px.
+    width: f64,
+    height: f64,
+}
+
+#[derive(Serialize)]
+struct PreviewInfo {
+    url: String,
+    width: f64,
+    height: f64,
 }
 
 /// The Windows accent colour, in the shades the system pairs with each app theme.
@@ -70,7 +94,77 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) {
     if let Err(error) = settings.save(&app) {
         eprintln!("could not save settings: {error}");
     }
-    *state.settings.lock().unwrap() = settings;
+    *state.settings.lock().unwrap() = settings.clone();
+    app.emit_to("panel", "settings-changed", settings).unwrap();
+}
+
+#[tauri::command(async)]
+fn history(state: State<AppState>) -> Vec<metrics::Sample> {
+    state.controller.history()
+}
+
+#[tauri::command(async)]
+fn preview(state: State<AppState>) -> Option<PreviewInfo> {
+    let preview = state.preview.lock().unwrap();
+    preview.as_ref().map(|p| PreviewInfo {
+        url: format!("http://backdrop.localhost/preview/{}", Arc::as_ptr(&p.bmp) as usize),
+        width: p.width,
+        height: p.height,
+    })
+}
+
+#[tauri::command(async)]
+fn open_settings(app: AppHandle) {
+    show_settings(&app);
+}
+
+/// Brings the settings window up, creating it centred on the monitor the
+/// pointer is on, with a capture of that desktop for its preview.
+fn show_settings(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        return;
+    }
+    let state = app.state::<AppState>();
+    // The preview shows the desktop as it is without the panel.
+    state.controller.dismiss();
+    let Some((work, scale)) = panel::work_area_at_cursor() else { return };
+    *state.preview.lock().unwrap() = Some(Preview {
+        bmp: Arc::new(capture::screen_bmp(work)),
+        width: (work.right - work.left) as f64 / scale,
+        height: (work.bottom - work.top) as f64 / scale,
+    });
+    state.controller.set_settings_open(true);
+    let window = WebviewWindowBuilder::new(app, "settings", WebviewUrl::App("index.html?settings".into()))
+        .title("Glance 设置")
+        .visible(false)
+        .transparent(true)
+        .effects(EffectsBuilder::new().effect(Effect::Mica).build())
+        .build()
+        .expect("settings window");
+    // Sized and centred in physical pixels of the monitor it opens on: a
+    // logical size would be scaled by whichever monitor the window happens
+    // to be created on.
+    let px = |logical: f64| (logical * scale).round() as i32;
+    let (work_width, work_height) = (work.right - work.left, work.bottom - work.top);
+    let width = px(SETTINGS_SIZE.0).min(work_width * 9 / 10);
+    let height = px(SETTINGS_SIZE.1).min(work_height * 9 / 10);
+    window.set_min_size(Some(PhysicalSize::new(px(SETTINGS_MIN_SIZE.0), px(SETTINGS_MIN_SIZE.1)))).unwrap();
+    window
+        .set_position(PhysicalPosition::new(work.left + (work_width - width) / 2, work.top + (work_height - height) / 2))
+        .unwrap();
+    window.set_size(PhysicalSize::new(width, height)).unwrap();
+    window.show().unwrap();
+    window.set_focus().unwrap();
+    let controller = state.controller.clone();
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Destroyed = event {
+            controller.set_settings_open(false);
+            *handle.state::<AppState>().preview.lock().unwrap() = None;
+        }
+    });
 }
 
 #[tauri::command(async)]
@@ -91,11 +185,6 @@ fn set_surface(state: State<AppState>, surface: Surface) {
 #[tauri::command(async)]
 fn set_panel_rect(state: State<AppState>, epoch: u64, rect: PageRect) {
     state.controller.set_panel_rect(epoch, rect);
-}
-
-#[tauri::command(async)]
-fn set_hold(state: State<AppState>, hold: bool) {
-    state.controller.set_hold(hold);
 }
 
 #[tauri::command(async)]
@@ -129,6 +218,7 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         info: sampler.info.clone(),
         controller: controller.clone(),
         settings: Mutex::new(settings),
+        preview: Mutex::new(None),
     });
 
     thread::spawn({
@@ -151,19 +241,24 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Left click shows the readings, right click the settings; both open the
-    // panel itself, so there is one interface rather than a menu beside it.
+    // Left click shows the readings, right click the settings: one interface
+    // each, rather than a menu beside them.
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("Glance")
-        .on_tray_icon_event(move |_, event| {
+        .on_tray_icon_event(move |tray, event| {
             if let TrayIconEvent::Click { button, button_state: MouseButtonState::Up, .. } = event {
-                let view = if button == MouseButton::Right { View::Settings } else { View::Monitor };
                 // Not on this thread: this is the main thread, and placing the
-                // window from another thread waits on it while holding the
-                // panel's lock, which opening needs.
-                let controller = controller.clone();
-                thread::spawn(move || controller.open_from_tray(view));
+                // panel's window from another thread waits on it while
+                // holding the panel's lock, which opening needs; building a
+                // window waits on it too.
+                if button == MouseButton::Right {
+                    let app = tray.app_handle().clone();
+                    thread::spawn(move || show_settings(&app));
+                } else {
+                    let controller = controller.clone();
+                    thread::spawn(move || controller.open_from_tray());
+                }
             }
         })
         .build(app)?;
@@ -176,8 +271,13 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .register_uri_scheme_protocol("backdrop", |context, request| {
             let state = context.app_handle().state::<AppState>();
-            let shot = request.uri().path().trim_start_matches('/').parse().ok();
-            match shot.and_then(|shot| state.controller.snapshot(shot)) {
+            let path = request.uri().path().trim_start_matches('/');
+            let bytes = if path.starts_with("preview/") {
+                state.preview.lock().unwrap().as_ref().map(|preview| preview.bmp.clone())
+            } else {
+                path.parse().ok().and_then(|shot| state.controller.snapshot(shot))
+            };
+            match bytes {
                 Some(bytes) => Response::builder()
                     .header("Content-Type", "image/bmp")
                     .header("Cache-Control", "no-store")
@@ -194,8 +294,10 @@ pub fn run() {
             set_autostart,
             set_surface,
             set_panel_rect,
-            set_hold,
             close_panel,
+            history,
+            preview,
+            open_settings,
             relocate,
             panel_hidden,
             quit

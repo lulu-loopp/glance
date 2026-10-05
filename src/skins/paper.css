@@ -1,6 +1,6 @@
 /* 记录纸: chart paper and ink. Colour is reserved: the panel is one ink
    until something runs hot, and only then does the signal colour appear. */
-body[data-skin='paper'] {
+[data-skin='paper'] {
   /* How the window is set up for this skin (read by main.ts). */
   --backdrop: none;
   --margin: 40;
@@ -36,7 +36,7 @@ body[data-skin='paper'] {
 }
 
 @media (prefers-color-scheme: dark) {
-  body[data-skin='paper'] {
+  [data-skin='paper'] {
     --paper: #14231f;
     --text: #e7eee7;
     --text-2: #a1b0a8;
@@ -64,9 +64,14 @@ body[data-skin='paper'] {
   border-radius: 16px 0 0 16px;
 }
 
-[data-skin='paper'] .lane + .lane,
-[data-skin='paper'] .bar {
-  border-top: 1px solid var(--rule);
+/* Columns are ruled like the lanes within them. */
+[data-skin='paper'] .lanes {
+  column-rule: 1px solid var(--rule);
+}
+
+/* Each lane is ruled off below; the last rule also sets off the bar. */
+[data-skin='paper'] .lane {
+  border-bottom: 1px solid var(--rule);
 }
 
 [data-skin='paper'] .figure {

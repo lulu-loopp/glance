@@ -1,0 +1,148 @@
+// The panel window: a column along the screen edge that the backend shows
+// and hides. This page lays the panel out inside it and animates it.
+
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+
+import { Backdrop } from './glass';
+import { catalog } from './modules';
+import { PanelView } from './panelView';
+import { resolvePrefs } from './settings';
+import type { Bootstrap, Sample, Settings } from './types';
+
+/** Matches the closing transition in base.css. */
+const CLOSE_MS = 180;
+
+export async function panelApp(boot: Bootstrap) {
+  let settings: Settings = boot.settings;
+  const modules = catalog(boot.info);
+  let prefs = resolvePrefs(settings.view, modules);
+  const body = document.body;
+  const backdrop = new Backdrop();
+  const view = new PanelView(body, modules, backdrop, () => void invoke('open_settings'));
+
+  body.style.setProperty('--accent-on-light', boot.accent.on_light);
+  body.style.setProperty('--accent-on-dark', boot.accent.on_dark);
+  body.dataset.state = 'hidden';
+  const systemTone = () => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  body.dataset.tone = systemTone();
+
+  let epoch = 0;
+  let room = window.innerHeight;
+  let focusY = window.innerHeight / 2;
+  let drawing = false;
+
+  /** Tells the window host how the current skin wants its window. */
+  let reportedSurface = '';
+  const reportSurface = () => {
+    const style = getComputedStyle(body);
+    const token = (name: string) => style.getPropertyValue(name).trim();
+    const { lanesHeight, chromeHeight, columnWidth, columnGap } = view.measures;
+    const surface = {
+      lanes_height: lanesHeight,
+      chrome_height: chromeHeight,
+      column_width: columnWidth,
+      column_gap: columnGap,
+      margin: Number(token('--margin')),
+      inset: Number(token('--inset')),
+      backdrop: token('--backdrop'),
+    };
+    const key = JSON.stringify(surface);
+    if (key === reportedSurface) return;
+    reportedSurface = key;
+    void invoke('set_surface', { surface });
+  };
+
+  /** Lays the panel out and, while it is up, tells the host where it is. */
+  const relayout = () => {
+    view.layout(room, settings.anchor === 'center' ? window.innerHeight / 2 : focusY);
+    if (body.dataset.state === 'hidden') return;
+    view.dress();
+    void invoke('set_panel_rect', { epoch, rect: view.rect() });
+  };
+
+  const build = () => {
+    view.build(settings, prefs);
+    if (settings.skin !== 'glass') body.dataset.tone = systemTone();
+    relayout();
+    reportSurface();
+  };
+
+  const frame = () => {
+    drawing = body.dataset.state !== 'hidden';
+    if (!drawing) return;
+    view.draw(Date.now());
+    requestAnimationFrame(frame);
+  };
+
+  await listen<{ epoch: number; history: Sample[]; room: number; focus_y: number; backdrop: string | null }>(
+    'panel-open',
+    async ({ payload }) => {
+      const reopening = body.dataset.state === 'closing';
+      epoch = payload.epoch;
+      view.samples = payload.history;
+      room = payload.room;
+      if (!reopening) focusY = payload.focus_y / window.devicePixelRatio;
+      body.dataset.state = 'loading';
+      view.showLatest();
+      await backdrop.load(payload.backdrop);
+      if (epoch !== payload.epoch) return;
+      relayout();
+      body.dataset.state = 'open';
+      if (!drawing) frame();
+    },
+  );
+
+  await listen<{ epoch: number; room: number; backdrop: string | null }>('panel-backdrop', async ({ payload }) => {
+    room = payload.room;
+    await backdrop.load(payload.backdrop);
+    if (epoch === payload.epoch) relayout();
+  });
+
+  await listen<Sample>('sample', ({ payload }) => {
+    view.push(payload, 300_000 / settings.interval_ms + 16);
+  });
+
+  await listen<number>('panel-close', ({ payload: closing }) => {
+    body.dataset.state = 'closing';
+    setTimeout(() => {
+      // A reopen during the slide-out leaves the panel on screen.
+      if (epoch !== closing || body.dataset.state !== 'closing') return;
+      body.dataset.state = 'hidden';
+      void invoke('panel_hidden', { epoch: closing });
+    }, CLOSE_MS);
+  });
+
+  // Taken off the screen at once, as the settings window opens.
+  await listen<number>('panel-dismissed', () => {
+    body.dataset.state = 'hidden';
+  });
+
+  // Changed in the settings window.
+  await listen<Settings>('settings-changed', ({ payload }) => {
+    const moved = payload.skin !== settings.skin || payload.edge !== settings.edge;
+    settings = payload;
+    prefs = resolvePrefs(settings.view, modules);
+    build();
+    if (moved && body.dataset.state === 'open') void invoke('relocate', { epoch });
+  });
+
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (settings.skin !== 'glass') body.dataset.tone = systemTone();
+    view.recolor();
+  });
+  // A new zoom, or the window moved to another monitor.
+  window.addEventListener('resize', relayout);
+
+  await Promise.all(['Archivo Variable', 'Inter Variable'].map((family) => document.fonts.load(`13px "${family}"`)));
+  build();
+  // Rows come and go (drives, details switched on), and the window follows.
+  // A zoom change resizes the panel by rounding alone; reporting that would
+  // feed back into the zoom. Only a size change at a steady zoom is content.
+  let measuredAt = window.devicePixelRatio;
+  new ResizeObserver(() => {
+    if (window.devicePixelRatio === measuredAt) reportSurface();
+    measuredAt = window.devicePixelRatio;
+    relayout();
+  }).observe(view.panel);
+}
