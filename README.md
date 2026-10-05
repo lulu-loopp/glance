@@ -46,7 +46,7 @@ makensis installer\glance.nsi
 ```
 
 The executable is `target\release\glance.exe`, the installer
-`target\Glance_0.1.1_x64-setup.exe`. A debug build runs without asking for
+`target\Glance_0.1.2_x64-setup.exe`. A debug build runs without asking for
 administrator rights (and so without the driver's sensors).
 
 ## Licence
