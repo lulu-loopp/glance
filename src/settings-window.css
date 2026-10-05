@@ -90,6 +90,12 @@ body.settings-app[data-mica] {
   border-radius: 6px;
 }
 
+.settings .segmented-thumb {
+  top: 2px;
+  bottom: 2px;
+  border-radius: 4px;
+}
+
 .settings .segmented button {
   min-width: 44px;
   height: 28px;

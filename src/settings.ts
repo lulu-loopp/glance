@@ -43,18 +43,35 @@ export function resolvePrefs(stored: ViewPrefs | null, modules: ModuleDef[]): Vi
 type Choice<T> = { value: T; label: string };
 
 function segmented<T>(label: string, choices: Choice<T>[], current: T, pick: (value: T) => void): HTMLElement {
-  const row = element(`<div class="field"><span class="field-label">${label}</span><div class="segmented" role="radiogroup"></div></div>`);
+  const row = element(`<div class="field"><span class="field-label">${label}</span><div class="segmented" role="radiogroup"><span class="segmented-thumb"></span></div></div>`);
   const group = row.querySelector<HTMLElement>('.segmented')!;
+  const thumb = group.querySelector<HTMLElement>('.segmented-thumb')!;
+  // One thumb slides under the chosen option, rather than each option
+  // lighting up on its own.
+  const place = () => {
+    const chosen = buttons.find((b) => b.getAttribute('aria-checked') === 'true');
+    if (!chosen) return;
+    thumb.style.transform = `translateX(${chosen.offsetLeft}px)`;
+    thumb.style.width = `${chosen.offsetWidth}px`;
+  };
   const buttons = choices.map((choice) => {
     const button = element<HTMLButtonElement>(`<button type="button" role="radio">${choice.label}</button>`);
     button.addEventListener('click', () => {
       buttons.forEach((b, i) => b.setAttribute('aria-checked', String(choices[i].value === choice.value)));
+      place();
       pick(choice.value);
     });
     button.setAttribute('aria-checked', String(choice.value === current));
     return button;
   });
   group.append(...buttons);
+  // Placed once the row is laid out, without sliding in from the start.
+  new ResizeObserver(() => {
+    thumb.style.transition = 'none';
+    place();
+    void thumb.offsetWidth;
+    thumb.style.transition = '';
+  }).observe(group);
   return row;
 }
 
