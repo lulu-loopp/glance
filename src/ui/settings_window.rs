@@ -40,7 +40,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::backdrop::Capture;
-use super::gfx::{rect, Align, Color, Family, Font, Frame, Gfx, Surface};
+use super::gfx::{self, rect, Align, Color, Family, Font, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
 use super::prefs::{LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::render::{self, PanelLayers, GAP};
@@ -84,6 +84,8 @@ const SLIDE: (Duration, Easing) = (Duration::from_millis(240), Easing(0.16, 1.0,
 const FLIP: (Duration, Easing) = (Duration::from_millis(160), Easing(0.16, 1.0, 0.3, 1.0));
 const GLIDE: (Duration, Easing) = (Duration::from_millis(200), Easing(0.16, 1.0, 0.3, 1.0));
 const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0, 0.3, 1.0));
+/// How soon to try again when drawing failed for want of a device.
+const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// The pen of the preview's charts runs this far behind the newest sample
 /// beyond one interval, as the panel's does.
 const PEN_LAG_MS: f64 = 100.0;
@@ -116,10 +118,11 @@ pub fn show() {
 
 /// Makes the window, centred on the monitor the pointer is on, on the
 /// calling thread, which then carries it (see `tick`).
-pub fn open(gfx: Rc<Gfx>) {
+pub fn open() {
     if WINDOW.load(Ordering::Acquire) != 0 {
         return show();
     }
+    let Ok(gfx) = gfx::current() else { return };
     if let Some(hwnd) = make(gfx) {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
     }
@@ -320,6 +323,8 @@ struct Ui {
     layers: PanelLayers,
     last_frame: Instant,
     next_frame: Instant,
+    /// Drawing the preview failed this frame (the device was lost).
+    failed: bool,
 }
 
 /// Makes the window, draws its first frame, and shows it.
@@ -399,6 +404,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             layers: PanelLayers::default(),
             last_frame: Instant::now(),
             next_frame: Instant::now(),
+            failed: false,
         };
         ui.restyle();
         ui.draw(Instant::now());
@@ -912,6 +918,24 @@ impl Ui {
 
     // ---- Drawing ----
 
+    /// Takes up the thread's current graphics device if it is a new one,
+    /// making the window's surface and the preview's bitmaps again on it.
+    fn follow_device(&mut self) -> bool {
+        let Ok(current) = gfx::current() else { return false };
+        if Rc::ptr_eq(&current, &self.gfx) {
+            return true;
+        }
+        let Ok(surface) = Surface::new(&current, self.hwnd) else {
+            gfx::lost();
+            return false;
+        };
+        self.surface = Some(surface);
+        self.gfx = current;
+        self.layers.release();
+        self.stage.bitmap = None;
+        true
+    }
+
     fn draw(&mut self, now: Instant) {
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -924,15 +948,25 @@ impl Ui {
             let _ = GetClientRect(self.hwnd, &mut rect);
         }
         let size = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
+        if !self.follow_device() {
+            self.next_frame = now + DEVICE_RETRY;
+            return;
+        }
         let gfx = self.gfx.clone();
         let mut surface = self.surface.take().unwrap();
         let mut creep = None;
+        self.failed = false;
         let drawn = surface.draw(&gfx, size, self.scale, |frame| {
             frame.origin(0.0, 0.0);
             creep = self.paint(frame, now);
         });
         self.surface = Some(surface);
-        drawn.expect("settings frame");
+        // The device is gone; a new one is made for the next frame.
+        if drawn.is_err() || self.failed {
+            gfx::lost();
+            self.next_frame = now + DEVICE_RETRY;
+            return;
+        }
         self.gfx.sweep();
         let moving = self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.drag.is_some();
         self.settle_thumbs = false;
@@ -1250,8 +1284,10 @@ impl Ui {
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-        if drawn.is_ok_and(|drawn| drawn.grounded) {
-            self.gfx.clear_caches();
+        match drawn {
+            Ok(drawn) if drawn.grounded => self.gfx.clear_caches(),
+            Ok(_) => {}
+            Err(_) => self.failed = true,
         }
         Some(layout.plot_width(&theme) * self.scale * zoom * k / self.prefs.chart_seconds as f32)
     }

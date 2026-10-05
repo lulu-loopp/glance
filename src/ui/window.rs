@@ -96,7 +96,9 @@ impl Window {
     /// Keeps the window out of every screen capture, or lets it back in.
     pub fn exclude_from_capture(&self, exclude: bool) {
         let affinity = if exclude { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
-        unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) }.expect("display affinity");
+        // Before Windows 10 2004 there is no excluding; the panel then shows
+        // in its own captures, as without live refraction.
+        let _ = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) };
     }
 
     /// Lets clicks through to whatever is underneath, or takes them.

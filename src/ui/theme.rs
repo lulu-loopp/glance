@@ -221,8 +221,11 @@ fn paper(dark: bool) -> Theme {
 /// The user's accent colour, in the shade the system pairs with the theme.
 pub fn accent(dark: bool) -> Color {
     let shade = if dark { UIColorType::AccentLight2 } else { UIColorType::AccentDark1 };
-    let color = UISettings::new().and_then(|settings| settings.GetColorValue(shade)).expect("system accent colour");
-    Color::hex(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32, 1.0)
+    match UISettings::new().and_then(|settings| settings.GetColorValue(shade)) {
+        Ok(color) => Color::hex(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32, 1.0),
+        // Where the system will not say, Windows' default blue in that shade.
+        Err(_) => Color::hex(if dark { 0x99EBFF } else { 0x005FB8 }, 1.0),
+    }
 }
 
 /// Windows 11, as the Start menu and Quick Settings draw it: one acrylic

@@ -39,7 +39,7 @@ use crate::detector::{Detector, Motion};
 use crate::metrics::{Sample, StaticInfo};
 use crate::settings::{Anchor, Edge, Settings};
 use crate::ui::backdrop::Capture;
-use crate::ui::gfx::{Gfx, Surface};
+use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::render::{self, PanelLayers, GAP};
 use crate::ui::motion::{Easing, Transition, LINEAR};
 use crate::ui::prefs::Prefs;
@@ -69,6 +69,8 @@ const TRACK_TIMER: usize = 1;
 const WATCH_TIMER: usize = 2;
 const WATCH_MS: u32 = 100;
 const MOUSE_MOVE_ABSOLUTE: u16 = 1;
+/// How soon to try again when drawing failed for want of a device.
+const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// How often a live backdrop is captured again.
 const LIVE_INTERVAL: Duration = Duration::from_millis(250);
 /// Rows a wheel notch scrolls the process list by.
@@ -225,7 +227,7 @@ impl Controller {
         // on the cursor notices that: it moved, and no raw input came. The
         // pointer is then treated as one that cannot push, and opens the
         // panel by resting on the edge.
-        let mut last_cursor = cursor_position();
+        let mut last_cursor = cursor_position().unwrap_or_default();
         let mut raw_since_watch = false;
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         let mut msg = MSG::default();
@@ -274,13 +276,12 @@ impl Controller {
             }
             match msg.message {
                 OPEN_FROM_TRAY => {
-                    let cursor = cursor_position();
-                    if let Some(contact) = monitor_at(cursor) {
+                    if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
                         panel.open(cursor, contact, now);
                     }
                 }
                 DISMISS => panel.dismiss(),
-                OPEN_SETTINGS => settings_window::open(panel.gfx.clone()),
+                OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => panel.restyle(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
@@ -290,8 +291,8 @@ impl Controller {
                 }
                 WM_INPUT if !panel.is_open() => {
                     raw_since_watch = true;
-                    if let Some(motion) = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge) {
-                        let cursor = cursor_position();
+                    let motion = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge);
+                    if let (Some(motion), Some(cursor)) = (motion, cursor_position()) {
                         match edge_contact(cursor, edge) {
                             Some(contact) if armed && detector.motion(motion, now, pressure) => {
                                 detector.reset();
@@ -305,8 +306,10 @@ impl Controller {
                         }
                     }
                 }
+                // While another desktop has the input (a UAC prompt, the lock
+                // screen) the pointer cannot be read, and is left alone.
                 WM_TIMER if msg.wParam.0 == WATCH_TIMER => {
-                    let cursor = cursor_position();
+                    let Some(cursor) = cursor_position() else { continue };
                     let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
                     if moved && !raw_since_watch && !panel.is_open() {
                         match edge_contact(cursor, edge) {
@@ -324,7 +327,7 @@ impl Controller {
                     raw_since_watch = false;
                 }
                 WM_TIMER if msg.wParam.0 == TRACK_TIMER && !panel.is_open() => {
-                    let cursor = cursor_position();
+                    let Some(cursor) = cursor_position() else { continue };
                     match edge_contact(cursor, edge) {
                         Some(contact) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
@@ -450,7 +453,7 @@ struct Panel<'a> {
 
 impl<'a> Panel<'a> {
     fn new(controller: &'a Controller) -> windows::core::Result<Self> {
-        let gfx = Rc::new(Gfx::new()?);
+        let gfx = gfx::current()?;
         let window = Window::new()?;
         let surface = Surface::new(&gfx, window.hwnd)?;
         let mut panel = Panel {
@@ -547,7 +550,8 @@ impl<'a> Panel<'a> {
             if self.skin.sees_backdrop() {
                 self.arrange();
                 let placement = self.placement.as_ref().unwrap();
-                self.behind = Some(Behind::new(Capture::take(placement.window), placement, now));
+                // Unreadable (the lock screen): the glass goes without.
+                self.behind = Capture::take(placement.window).map(|capture| Behind::new(capture, placement, now));
                 self.dress();
             }
         }
@@ -597,8 +601,7 @@ impl<'a> Panel<'a> {
     /// Follows the pointer while the panel is open: closes it once the
     /// pointer has been away long enough, or on a press elsewhere.
     fn track(&mut self, now: Instant) {
-        let Some(placement) = &self.placement else { return };
-        let cursor = cursor_position();
+        let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
         let on_panel = contains(&placement.panel, cursor);
         let in_reach = contains(&placement.reach, cursor);
         let close_delay = self.controller.config.lock().unwrap().close_delay;
@@ -646,11 +649,12 @@ impl<'a> Panel<'a> {
         if now.duration_since(behind.taken) < LIVE_INTERVAL {
             return;
         }
+        // The same desktop as before, or none readable just now: the last stands.
         let capture = Capture::take(placement.window);
-        if capture.digest == behind.digest {
+        let Some(capture) = capture.filter(|capture| capture.digest != behind.digest) else {
             self.behind.as_mut().unwrap().taken = now;
             return;
-        }
+        };
         let behind = Behind::new(capture, placement, now);
         // The theme holds for the opening; only the frost follows.
         self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
@@ -678,10 +682,36 @@ impl<'a> Panel<'a> {
         (lanes, layout)
     }
 
+    /// Takes up this thread's current graphics device if it is a new one (the
+    /// last was lost), making the window's surface and layers again on it.
+    /// False while there is no device to be had.
+    fn follow_device(&mut self) -> bool {
+        let Ok(current) = gfx::current() else { return false };
+        if Rc::ptr_eq(&current, &self.gfx) {
+            return true;
+        }
+        let Ok(surface) = Surface::new(&current, self.window.hwnd) else {
+            gfx::lost();
+            return false;
+        };
+        self.surface = surface;
+        self.gfx = current;
+        self.layers.release();
+        // A desktop already made a bitmap on the lost device is gone with it.
+        if self.behind.as_ref().is_some_and(|behind| behind.capture.is_none()) {
+            self.behind = None;
+        }
+        true
+    }
+
     /// Draws the panel as it is at `now`, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
             return self.dismiss();
+        }
+        if !self.follow_device() {
+            self.next_frame = now + DEVICE_RETRY;
+            return;
         }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -721,22 +751,29 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            let backdrop = behind.as_mut().map(|behind| {
+            let backdrop = behind.as_mut().and_then(|behind| {
                 if let Some(capture) = behind.capture.take() {
-                    behind.bitmap = Some(capture.bitmap(&frame.dc, px).expect("backdrop bitmap"));
+                    behind.bitmap = capture.bitmap(&frame.dc, px).ok();
                 }
                 // Aligned with the screen where the panel rests.
-                (behind.bitmap.as_ref().unwrap(), Vector2 { X: rest.0, Y: rest.1 }, behind.digest)
+                Some((behind.bitmap.as_ref()?, Vector2 { X: rest.0, Y: rest.1 }, behind.digest))
             });
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
-            drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px).expect("panel"));
+            drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px));
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
             }
         });
         drop(history);
-        painted.expect("panel frame");
-        let drawn = drawn.unwrap();
+        let drawn = match (painted, drawn) {
+            (Ok(()), Some(Ok(drawn))) => drawn,
+            // The device is gone; a new one is made for the next frame.
+            _ => {
+                gfx::lost();
+                self.next_frame = now + DEVICE_RETRY;
+                return;
+            }
+        };
         let (hits, grounded) = (drawn.hits, drawn.grounded);
         self.gfx.sweep();
         // The effects that drew the ground are not needed again until it
@@ -887,7 +924,7 @@ fn reduced_motion() -> bool {
 
 /// The work area of the monitor under the pointer, and its scale factor.
 pub fn work_area_at_cursor() -> Option<(RECT, f64)> {
-    let contact = monitor_at(cursor_position())?;
+    let contact = monitor_at(cursor_position()?)?;
     Some((contact.work, contact.scale as f64))
 }
 
@@ -895,10 +932,11 @@ fn contains(rect: &RECT, point: POINT) -> bool {
     (rect.left..rect.right).contains(&point.x) && (rect.top..rect.bottom).contains(&point.y)
 }
 
-fn cursor_position() -> POINT {
+/// Where the pointer is; `None` while another desktop has the input (a UAC
+/// prompt, the lock screen).
+fn cursor_position() -> Option<POINT> {
     let mut point = POINT::default();
-    unsafe { GetCursorPos(&mut point) }.expect("cursor position");
-    point
+    unsafe { GetCursorPos(&mut point) }.ok().map(|_| point)
 }
 
 fn buttons_down() -> bool {

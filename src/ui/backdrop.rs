@@ -24,8 +24,9 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Copies the screen inside `rect`.
-    pub fn take(rect: RECT) -> Self {
+    /// Copies the screen inside `rect`; `None` while it cannot be read (the
+    /// lock screen or a UAC prompt has the display).
+    pub fn take(rect: RECT) -> Option<Self> {
         let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
         let header = BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -43,23 +44,30 @@ impl Capture {
             let screen = GetDC(None);
             let memory = CreateCompatibleDC(Some(screen));
             let mut bits = std::ptr::null_mut();
-            let bitmap = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).expect("capture bitmap");
-            let previous = SelectObject(memory, bitmap.into());
-            BitBlt(memory, 0, 0, width, height, Some(screen), rect.left, rect.top, SRCCOPY).expect("screen copy");
-            let length = pixels.len();
-            pixels.copy_from_slice(std::slice::from_raw_parts(bits as *const u8, length));
-            // The copy leaves alpha at zero; the screen is opaque.
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel[3] = 255;
-            }
-            SelectObject(memory, previous);
-            let _ = DeleteObject(bitmap.into());
+            let copied = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok().map(|bitmap| {
+                let previous = SelectObject(memory, bitmap.into());
+                let copied = BitBlt(memory, 0, 0, width, height, Some(screen), rect.left, rect.top, SRCCOPY).is_ok();
+                if copied {
+                    let length = pixels.len();
+                    pixels.copy_from_slice(std::slice::from_raw_parts(bits as *const u8, length));
+                }
+                SelectObject(memory, previous);
+                let _ = DeleteObject(bitmap.into());
+                copied
+            });
             let _ = DeleteDC(memory);
             ReleaseDC(None, screen);
+            if copied != Some(true) {
+                return None;
+            }
+        }
+        // The copy leaves alpha at zero; the screen is opaque.
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 255;
         }
         let mut hasher = DefaultHasher::new();
         pixels.hash(&mut hasher);
-        Capture { rect, pixels, digest: hasher.finish() }
+        Some(Capture { rect, pixels, digest: hasher.finish() })
     }
 
     /// A picture already in memory (BGRA, opaque, rows top to bottom),

@@ -219,7 +219,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 readout(s.cpu, Box::new(|s| s.cpu as f64)),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
-            if prefs.cpu.threads {
+            if prefs.cpu.threads && !s.threads.is_empty() {
                 blocks.push(Block::Threads(s.threads.iter().map(|&load| (load / 100.0, load > hot_load)).collect()));
             }
             blocks
