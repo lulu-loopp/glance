@@ -43,29 +43,27 @@
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
-@media (prefers-color-scheme: dark) {
-  [data-skin='fluent'] {
-    --accent: var(--accent-on-dark);
-    --sheet-luminosity: rgba(44, 44, 44, 0.96);
-    --sheet-tint: rgba(44, 44, 44, 0.15);
-    --sheet-stroke: rgba(255, 255, 255, 0.09);
-    --footer: rgba(0, 0, 0, 0.18);
-    --text: #ffffff;
-    --text-2: rgba(255, 255, 255, 0.76);
-    --text-3: rgba(255, 255, 255, 0.5);
-    --rule: rgba(255, 255, 255, 0.06);
-    --track: rgba(255, 255, 255, 0.14);
-    --signal: #ff99a4;
-    --hover: rgba(255, 255, 255, 0.06);
-    --control: rgba(255, 255, 255, 0.06);
-    --control-on: rgba(255, 255, 255, 0.12);
-    --control-on-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
-    --switch-off: rgba(0, 0, 0, 0.1);
-    --switch-off-stroke: rgba(255, 255, 255, 0.6);
-    --switch-off-knob: rgba(255, 255, 255, 0.8);
-    --switch-on-knob: #000000;
-    --shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.25);
-  }
+[data-skin='fluent'][data-theme='dark'] {
+  --accent: var(--accent-on-dark);
+  --sheet-luminosity: rgba(44, 44, 44, 0.96);
+  --sheet-tint: rgba(44, 44, 44, 0.15);
+  --sheet-stroke: rgba(255, 255, 255, 0.09);
+  --footer: rgba(0, 0, 0, 0.18);
+  --text: #ffffff;
+  --text-2: rgba(255, 255, 255, 0.76);
+  --text-3: rgba(255, 255, 255, 0.5);
+  --rule: rgba(255, 255, 255, 0.06);
+  --track: rgba(255, 255, 255, 0.14);
+  --signal: #ff99a4;
+  --hover: rgba(255, 255, 255, 0.06);
+  --control: rgba(255, 255, 255, 0.06);
+  --control-on: rgba(255, 255, 255, 0.12);
+  --control-on-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --switch-off: rgba(0, 0, 0, 0.1);
+  --switch-off-stroke: rgba(255, 255, 255, 0.6);
+  --switch-off-knob: rgba(255, 255, 255, 0.8);
+  --switch-on-knob: #000000;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 [data-skin='fluent'] .panel {

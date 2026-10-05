@@ -91,23 +91,21 @@ body.settings-app {
   font: 400 14px/1.4 var(--font);
 }
 
-@media (prefers-color-scheme: dark) {
-  .settings-app {
-    --accent: var(--accent-on-dark);
-    --text: #ffffff;
-    --text-2: rgba(255, 255, 255, 0.76);
-    --text-3: rgba(255, 255, 255, 0.5);
-    --rule: rgba(255, 255, 255, 0.08);
-    --signal: #ff99a4;
-    --hover: rgba(255, 255, 255, 0.06);
-    --control: rgba(255, 255, 255, 0.06);
-    --control-on: rgba(255, 255, 255, 0.12);
-    --control-on-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
-    --switch-off: rgba(0, 0, 0, 0.1);
-    --switch-off-stroke: rgba(255, 255, 255, 0.6);
-    --switch-off-knob: rgba(255, 255, 255, 0.8);
-    --switch-on-knob: #000000;
-    --card: rgba(255, 255, 255, 0.05);
-    --card-stroke: rgba(0, 0, 0, 0.2);
-  }
+.settings-app[data-theme='dark'] {
+  --accent: var(--accent-on-dark);
+  --text: #ffffff;
+  --text-2: rgba(255, 255, 255, 0.76);
+  --text-3: rgba(255, 255, 255, 0.5);
+  --rule: rgba(255, 255, 255, 0.08);
+  --signal: #ff99a4;
+  --hover: rgba(255, 255, 255, 0.06);
+  --control: rgba(255, 255, 255, 0.06);
+  --control-on: rgba(255, 255, 255, 0.12);
+  --control-on-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --switch-off: rgba(0, 0, 0, 0.1);
+  --switch-off-stroke: rgba(255, 255, 255, 0.6);
+  --switch-off-knob: rgba(255, 255, 255, 0.8);
+  --switch-on-knob: #000000;
+  --card: rgba(255, 255, 255, 0.05);
+  --card-stroke: rgba(0, 0, 0, 0.2);
 }

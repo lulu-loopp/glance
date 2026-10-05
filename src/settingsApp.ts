@@ -5,13 +5,16 @@ import './settings-window.css';
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import { element } from './format';
 import { Backdrop } from './glass';
+import { setLanguage, t } from './i18n';
 import { catalog } from './modules';
+import { onSystemTheme, resolveTheme } from './theme';
 import { PanelView } from './panelView';
 import { buildSettings, resolvePrefs } from './settings';
-import type { Bootstrap, Sample, Settings, Skin } from './types';
+import type { Bootstrap, Sample, Settings } from './types';
 
 /** Desktop shown beside the panel in the preview (px of screen). */
 const PREVIEW_MARGIN = 160;
@@ -52,9 +55,10 @@ async function desktopImage(info: PreviewInfo): Promise<string> {
 
 export async function settingsApp(boot: Bootstrap) {
   const settings: Settings = boot.settings;
-  const modules = catalog(boot.info);
-  const prefs = resolvePrefs(settings.view, modules);
+  const prefs = resolvePrefs(settings.view, catalog(boot.info));
   settings.view = prefs;
+  setLanguage(prefs.language);
+  let modules = catalog(boot.info);
   let autostart = boot.autostart;
 
   const body = document.body;
@@ -64,9 +68,7 @@ export async function settingsApp(boot: Bootstrap) {
 
   const layout = element(`
     <div class="settings-layout">
-      <div class="settings-pane">
-        <h1>设置</h1>
-      </div>
+      <div class="settings-pane"></div>
       <div class="preview-pane">
         <div class="preview-frame"></div>
       </div>
@@ -88,7 +90,6 @@ export async function settingsApp(boot: Bootstrap) {
   const backdrop = new Backdrop();
   await backdrop.load(desktop);
   const view = new PanelView(stage, modules, backdrop, () => {});
-  const systemTone = () => (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
 
   /**
    * Scales the stage to the frame, anchored at the edge the panel opens
@@ -108,8 +109,10 @@ export async function settingsApp(boot: Bootstrap) {
   };
 
   const render = () => {
+    const theme = resolveTheme(prefs.theme);
+    body.dataset.theme = theme;
+    stage.dataset.theme = theme;
     view.build(settings, prefs);
-    if (settings.skin !== 'glass') stage.dataset.tone = systemTone();
     view.layout(size.height, size.height / 2);
     view.dress();
     fit();
@@ -117,30 +120,41 @@ export async function settingsApp(boot: Bootstrap) {
 
   const save = () => void invoke('save_settings', { settings });
 
-  pane.append(
-    buildSettings(settings, prefs, modules, autostart, {
-      changed() {
-        save();
-        render();
-      },
-      skin(skin: Skin) {
-        settings.skin = skin;
-        save();
-        render();
-      },
-      edge() {
-        save();
-        render();
-      },
-      async autostart(enabled: boolean) {
-        autostart = await invoke<boolean>('set_autostart', { enabled });
-        return autostart;
-      },
-      quit() {
-        void invoke('quit');
-      },
-    }),
-  );
+  /** Draws the choices, in the current language. */
+  const fill = () => {
+    void getCurrentWindow().setTitle(t('windowTitle'));
+    const scroll = pane.scrollTop;
+    pane.replaceChildren(
+      element(`<h1>${t('settings')}</h1>`),
+      buildSettings(settings, prefs, modules, autostart, {
+        changed() {
+          save();
+          render();
+        },
+        moved() {
+          save();
+          render();
+        },
+        relabel() {
+          save();
+          setLanguage(prefs.language);
+          modules = catalog(boot.info);
+          view.modules = modules;
+          fill();
+          render();
+        },
+        async autostart(enabled: boolean) {
+          autostart = await invoke<boolean>('set_autostart', { enabled });
+          return autostart;
+        },
+        quit() {
+          void invoke('quit');
+        },
+      }),
+    );
+    pane.scrollTop = scroll;
+  };
+  fill();
 
   view.samples = await invoke<Sample[]>('history');
   await listen<Sample>('sample', ({ payload }) => view.push(payload, 300_000 / settings.interval_ms + 16));
@@ -148,7 +162,7 @@ export async function settingsApp(boot: Bootstrap) {
   await Promise.all(['Archivo Variable', 'Inter Variable'].map((family) => document.fonts.load(`13px "${family}"`)));
   render();
   new ResizeObserver(fit).observe(frame);
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+  onSystemTheme(render);
 
   const draw = () => {
     view.draw(Date.now());

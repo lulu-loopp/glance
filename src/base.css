@@ -94,17 +94,32 @@ button {
   background-repeat: no-repeat;
 }
 
+/* Lanes are dealt into columns in order (by PanelView). Columns run to the
+   same height, and the lanes in a shorter column share the extra, so every
+   column ends at the same line. */
 .lanes {
   position: relative;
-  column-count: var(--columns, 1);
-  column-gap: var(--column-gap, 0px);
+  display: flex;
+  gap: var(--column-gap, 0px);
+}
+
+.column {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--lane-gap, 0px);
+  min-width: 0;
+}
+
+.column > .lane {
+  flex-grow: 1;
+  align-content: start;
 }
 
 /* ---- Lanes ---- */
 
 .lane {
   position: relative;
-  break-inside: avoid;
   display: grid;
   grid-template-columns: 96px minmax(0, 1fr);
   column-gap: 12px;

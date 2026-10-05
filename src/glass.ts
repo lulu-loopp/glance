@@ -8,8 +8,13 @@ const SVG = 'http://www.w3.org/2000/svg';
 /** Width of the curved rim of a piece of glass, and how far it bends what is behind (px). */
 const RIM = 26;
 const BEND = 22;
-/** Backdrop luminance (0–1) above which glass carries dark text. */
-const LIGHT_BACKDROP = 0.55;
+/**
+ * Backdrop luminance (0–1) that each theme's glass reads well over without
+ * help, and the distance from it at which glass is fully frosted. Light
+ * glass carries dark text and wants a light backdrop, dark glass the reverse.
+ */
+const READS_WELL = { light: 0.6, dark: 0.4 };
+const CONTRAST_SPAN = 0.35;
 /**
  * Spread of backdrop luminance (standard deviation, 0–0.5) at which glass is
  * fully frosted, and below which it stays clear. Text, icons and photos
@@ -70,6 +75,7 @@ export class Backdrop {
    */
   dress(panel: HTMLElement, skin: string, stage: HTMLElement) {
     this.stage = stage;
+    const theme = stage.dataset.theme === 'dark' ? 'dark' : 'light';
     const acrylic = panel.querySelector<HTMLElement>('.acrylic')!;
     const pieces = [...panel.querySelectorAll<HTMLElement>('.lane, .bar, .settings')];
     for (const lens of panel.querySelectorAll('.lens')) lens.remove();
@@ -100,11 +106,14 @@ export class Backdrop {
         const left = origin.left + within.left;
         const top = origin.top + within.top;
         const id = `lens-${index}`;
-        // Each piece adapts to what is behind it: text tone to its
-        // brightness, and frosting to how busy it is.
+        // The theme sets the glass's colour; what is behind a piece sets how
+        // much it frosts: more when the backdrop is busy, and more when it is
+        // bright under dark glass or dark under light glass.
         const { mean, spread } = this.measure({ left, top, width, height });
-        const frost = Math.min(Math.max((spread - CALM) / (BUSY - CALM), 0), 1);
-        piece.dataset.tone = mean > LIGHT_BACKDROP ? 'light' : 'dark';
+        const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+        const busy = clamp((spread - CALM) / (BUSY - CALM));
+        const against = theme === 'light' ? READS_WELL.light - mean : mean - READS_WELL.dark;
+        const frost = Math.max(busy, clamp(against / CONTRAST_SPAN));
         piece.style.setProperty('--frost', frost.toFixed(3));
         this.defs.append(lensFilter(id, width, height, this.map(width, height, radius), frost * FROST_BLUR));
 
@@ -147,9 +156,6 @@ export class Backdrop {
     return { mean, spread: Math.sqrt(Math.max(squares / count - mean * mean, 0)) };
   }
 
-  tone(box: Box): 'light' | 'dark' {
-    return this.measure(box).mean > LIGHT_BACKDROP ? 'light' : 'dark';
-  }
 
   /** The displacement map for a rounded rectangle, cached by size. */
   private map(width: number, height: number, radius: number): string {
