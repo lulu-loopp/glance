@@ -85,6 +85,12 @@ pub fn run() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
+    // The uninstaller, elevated, asks the installed copy to remove every
+    // account's tasks: through Task Scheduler itself, nothing else loaded.
+    if std::env::args().any(|arg| arg == "--remove-tasks") {
+        elevation::remove_all_tasks();
+        return;
+    }
     // The sensors need administrator rights. An ordinary start hands over to
     // an elevated one and leaves; if the user declines, Glance runs without
     // the driver's sensors. A debug build runs as started, so that tools

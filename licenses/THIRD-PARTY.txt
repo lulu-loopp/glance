@@ -10,20 +10,23 @@ PawnIO driver setup (resources\PawnIO_setup.exe), version 2.2.0
   PawnIO - Input-output driver. Copyright (C) namazso <admin@namazso.eu>.
   Licence: GNU General Public License, version 2, with an exception for
   independent programs that talk to PawnIO only through its device I/O
-  control interface, as Glance does (PawnIO-GPL-2.0.txt).
+  control interface, as Glance does. The notice, with the exception in
+  full, is PawnIO-NOTICE.txt; the licence, PawnIO-GPL-2.0.txt.
   Glance redistributes the setup unmodified. Its source code, for this
   version: https://github.com/namazso/PawnIO/tree/2.2.0
-  The same source is attached, as an archive, to every Glance release that
-  includes the setup.
+  The same source, with the submodule it builds with, is attached as an
+  archive to every Glance release that includes the setup.
 
 PawnIO modules (AMDFamily17, LpcIO, SmbusPIIX4, SmbusI801), release 0.2.11
   Copyright (C) namazso and the PawnIO.Modules contributors.
   Licence: GNU Lesser General Public License, version 2.1
   (PawnIO-Modules-LGPL-2.1.txt).
   Built into glance.exe as compiled modules, loaded into the PawnIO driver
-  at run time, unmodified. Their source code is in the folder
-  pawnio-modules-source next to this file, and at
+  at run time, unmodified. Their source code, and how they are compiled, is
+  in the folder pawnio-modules-source next to this file (BUILD.md), and at
   https://github.com/namazso/PawnIO.Modules/tree/0.2.11
+  Glance's own source, to rebuild it with changed modules, is at
+  https://github.com/lulu-loopp/glance
 
 Archivo (fonts, Latin subset)
   Copyright 2020 The Archivo Project Authors.
@@ -33,6 +36,7 @@ Inter (fonts, Latin subset)
   Copyright 2016 The Inter Project Authors.
   Licence: SIL Open Font License 1.1 (Inter-OFL.txt).
 
-Rust crates
+Rust crates and the Rust standard library
   The crates compiled into glance.exe, each with the licence files it ships
-  with, are listed in RUST-CRATES.txt.
+  with, are listed in RUST-CRATES.txt; the standard library's notices are in
+  Rust-standard-library-COPYRIGHT.html (from the Rust 1.94.1 toolchain).

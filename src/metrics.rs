@@ -196,6 +196,8 @@ pub struct Sampler {
     disk_idle: Option<PDH_HCOUNTER>,
     /// The GPUs' last readings, kept through a momentary counter failure.
     last_gpus: Vec<GpuSample>,
+    /// The processors' idle and busy time at the last sample (100 ns units).
+    system_times: Option<(u64, u64)>,
     processes: ProcessTable,
     slow: Slow,
     base_mhz: f64,
@@ -237,7 +239,7 @@ impl Sampler {
         processes.sample(1, &HashMap::new());
 
         let (adapters, gpus) = enumerate_gpus();
-        let (down, up) = net_octets();
+        let (down, up) = net_octets().unwrap_or_default();
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
@@ -260,6 +262,7 @@ impl Sampler {
             disk_write,
             disk_idle,
             last_gpus: Vec::new(),
+            system_times: system_times(),
             processes,
             slow: Slow::default(),
             base_mhz: reg_dword(cpu_key, w!("~MHz")) as f64,
@@ -288,7 +291,8 @@ impl Sampler {
 
         let mut cpu = None;
         let mut threads: Vec<((u32, u32), f32)> = Vec::new();
-        for (name, value) in read_array(self.cpu_time?, &mut self.buf)? {
+        let per_thread = self.cpu_time.and_then(|counter| read_array(counter, &mut self.buf));
+        for (name, value) in per_thread.unwrap_or_default() {
             if name == "_Total" {
                 cpu = Some(value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
@@ -298,6 +302,15 @@ impl Sampler {
             }
         }
         threads.sort_by_key(|(key, _)| *key);
+        // Without the counters, the whole processor's use from the kernel's
+        // own account of its time (and no per-thread grid).
+        let times = system_times();
+        let cpu = cpu.or_else(|| {
+            let ((idle, busy), (idle_before, busy_before)) = (times?, self.system_times?);
+            let total = (idle - idle_before) + (busy - busy_before);
+            (total > 0).then(|| ((busy - busy_before) as f64 / total as f64 * 100.0) as f32)
+        });
+        self.system_times = times;
         // Without the performance counter, the clock reads as its base.
         let performance = self.cpu_performance.and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
@@ -314,9 +327,10 @@ impl Sampler {
             self.slow.network = default_interface();
         }
 
-        let (down, up) = net_octets();
         let now = Instant::now();
         let (prev_down, prev_up, prev_at) = self.net_prev;
+        // Unreadable for a moment: no traffic counted, rather than a jump.
+        let (down, up) = net_octets().unwrap_or((prev_down, prev_up));
         let dt = now.duration_since(prev_at).as_secs_f64();
         self.net_prev = (down, up, now);
 
@@ -324,7 +338,7 @@ impl Sampler {
         let page = perf.PageSize as u64;
         Some(Sample {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-            cpu: cpu?,
+            cpu: cpu.unwrap_or(0.0),
             threads: threads.into_iter().map(|(_, value)| value).collect(),
             ghz: (self.base_mhz * performance / 100_000.0) as f32,
             memory: MemorySample {
@@ -420,6 +434,18 @@ impl Sampler {
                 .collect(),
         )
     }
+}
+
+/// All processors' idle time, and their busy (kernel and user, less idle)
+/// time, since boot, in 100 ns units.
+fn system_times() -> Option<(u64, u64)> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetSystemTimes;
+    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.ok()?;
+    let ticks = |time: FILETIME| ((time.dwHighDateTime as u64) << 32) | time.dwLowDateTime as u64;
+    // Kernel time includes idle time.
+    Some((ticks(idle), ticks(kernel) + ticks(user) - ticks(idle)))
 }
 
 fn valid(status: u32) -> bool {
@@ -673,16 +699,20 @@ fn parse_kind(instance: &str) -> Option<String> {
 fn enumerate_gpus() -> (Vec<Adapter>, Vec<GpuInfo>) {
     let mut adapters = Vec::new();
     let mut infos = Vec::new();
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.expect("DXGI factory");
+    let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return (adapters, infos) };
     let mut index = 0;
     while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
         index += 1;
-        let desc = unsafe { adapter.GetDesc1() }.expect("adapter description");
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue };
         if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
             continue;
         }
+        // An adapter the kernel will not open for us (a remote session's,
+        // say) is left out.
         let mut open = D3DKMT_OPENADAPTERFROMLUID { AdapterLuid: desc.AdapterLuid, hAdapter: 0 };
-        unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.ok().expect("open adapter");
+        if unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.is_err() {
+            continue;
+        }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
         adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
@@ -723,9 +753,9 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
 
 /// Total octets (received, sent) across hardware network interfaces. Virtual
 /// and filter interfaces carry the same traffic again and are left out.
-fn net_octets() -> (u64, u64) {
+fn net_octets() -> Option<(u64, u64)> {
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
-    unsafe { GetIfTable2(&mut table) }.ok().expect("GetIfTable2");
+    unsafe { GetIfTable2(&mut table) }.ok().ok()?;
     let rows = unsafe { std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize) };
     const HARDWARE_INTERFACE: u8 = 1;
     let totals = rows
@@ -733,7 +763,7 @@ fn net_octets() -> (u64, u64) {
         .filter(|row| row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE != 0)
         .fold((0, 0), |(down, up), row| (down + row.InOctets, up + row.OutOctets));
     unsafe { FreeMibTable(table as *const _) };
-    totals
+    Some(totals)
 }
 
 /// The interface that traffic to the internet would leave by. Asking for the
@@ -802,25 +832,26 @@ fn battery() -> Option<BatterySample> {
     })
 }
 
+/// A number from the machine's registry; 0 where the value is missing.
 fn reg_dword(key: PCWSTR, value: PCWSTR) -> u32 {
     let mut data = 0u32;
     let mut size = 4u32;
-    unsafe {
+    let read = unsafe {
         RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_REG_DWORD, None, Some(&mut data as *mut _ as *mut _), Some(&mut size))
-    }
-    .ok()
-    .expect("registry read");
-    data
+    };
+    if read.is_ok() { data } else { 0 }
 }
 
+/// Text from the machine's registry; empty where the value is missing.
 pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
     let mut data = [0u16; 256];
     let mut size = size_of_val(&data) as u32;
-    unsafe {
+    let read = unsafe {
         RegGetValueW(HKEY_LOCAL_MACHINE, key, value, RRF_RT_REG_SZ, None, Some(data.as_mut_ptr() as *mut _), Some(&mut size))
+    };
+    if read.is_err() {
+        return String::new();
     }
-    .ok()
-    .expect("registry read");
     let len = data.iter().position(|&c| c == 0).unwrap_or(data.len());
     String::from_utf16_lossy(&data[..len]).trim().to_string()
 }

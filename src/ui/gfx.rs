@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// How long laid-out text no window draws is kept.
@@ -21,7 +22,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION};
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2,
@@ -130,6 +131,9 @@ pub struct Gfx {
     dxgi: IDXGIDevice3,
     pub dcomp: IDCompositionDesktopDevice,
     write: IDWriteFactory6,
+    /// Holds the shipped faces; registered with the shared factory for as
+    /// long as this device lives.
+    loader: IDWriteInMemoryFontFileLoader,
     /// The shipped faces: their collections and family names.
     archivo: (IDWriteFontCollection, HSTRING),
     inter: (IDWriteFontCollection, HSTRING),
@@ -143,23 +147,48 @@ pub struct Gfx {
 
 type LayoutKey = (String, FontKey, u32, bool);
 
+impl Drop for Gfx {
+    fn drop(&mut self) {
+        let _ = unsafe { self.write.UnregisterFontFileLoader(&self.loader) };
+    }
+}
+
+thread_local! {
+    static CURRENT: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
+}
+
+/// This thread's graphics device, which its windows share; made when first
+/// asked for, and again after it was lost.
+pub fn current() -> Result<Rc<Gfx>> {
+    CURRENT.with(|cell| {
+        if let Some(gfx) = cell.borrow().as_ref() {
+            return Ok(gfx.clone());
+        }
+        let gfx = Rc::new(Gfx::new()?);
+        *cell.borrow_mut() = Some(gfx.clone());
+        Ok(gfx)
+    })
+}
+
+/// Drawing failed: the device is gone (a driver update, a graphics reset).
+/// The next `current` makes a new one, and each window, seeing it, makes its
+/// surfaces again.
+pub fn lost() {
+    CURRENT.with(|cell| *cell.borrow_mut() = None);
+}
+
 impl Gfx {
     pub fn new() -> Result<Self> {
-        let mut d3d: Option<ID3D11Device> = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut d3d),
-                None,
-                None,
-            )?
+        // The graphics card; without a working one, Windows' software renderer.
+        let create = |kind| {
+            let mut d3d: Option<ID3D11Device> = None;
+            unsafe {
+                D3D11CreateDevice(None, kind, Default::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d), None, None)
+            }
+            .map(|_| d3d.unwrap())
         };
-        let dxgi: IDXGIDevice = d3d.unwrap().cast()?;
+        let d3d = create(D3D_DRIVER_TYPE_HARDWARE).or_else(|_| create(D3D_DRIVER_TYPE_WARP))?;
+        let dxgi: IDXGIDevice = d3d.cast()?;
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
         // Made from the Direct2D device, composition surfaces hand out device
@@ -176,7 +205,7 @@ impl Gfx {
             system.FindFamilyName(w!("Segoe Fluent Icons"), &mut index, &mut fluent)?;
             if fluent.as_bool() { w!("Segoe Fluent Icons") } else { w!("Segoe MDL2 Assets") }
         };
-        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
+        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, loader, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
     }
 
     fn format(&self, font: Font) -> IDWriteTextFormat3 {
@@ -414,7 +443,7 @@ impl Layer {
         area: (f32, f32, f32, f32),
         scale: f32,
         halo: Option<Color>,
-        paint: impl FnOnce(&Frame),
+        paint: impl FnOnce(&Frame) -> Result<()>,
     ) -> Result<()> {
         let (left, top, width, height) = area;
         let size = (width, height);
@@ -453,10 +482,11 @@ impl Layer {
                 dc.SetDpi(96.0 * scale, 96.0 * scale);
                 dc.SetTransform(&Matrix3x2::translation(-left, -top));
                 dc.Clear(Some(&D2D1_COLOR_F::default()));
-                paint(frame);
+                let painted = paint(frame);
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
                 dc.SetTransform(&transform);
+                painted?;
             }
             self.bitmap = Some((key, bitmap));
         }

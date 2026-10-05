@@ -120,13 +120,14 @@ impl PanelLayers {
             frost: picture.frost,
         };
         self.ground.draw(frame, ground_key, local, (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin), scale, None, |frame| {
-            skins::draw(frame, &below).expect("panel surface");
             grounded = true;
+            skins::draw(frame, &below)
         })?;
         let mut hits = None;
         let halo = (theme.skin == Skin::Glass).then_some(theme.legibility);
         self.content.draw(frame, content_key, local, (0.0, 0.0, width, height), scale, halo, |frame| {
             hits = Some(view::paint(frame, scene, picture.lanes, layout, Pass::Content));
+            Ok(())
         })?;
         // The charts, drawn afresh every frame.
         let mut parent = Matrix3x2::default();

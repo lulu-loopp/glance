@@ -36,7 +36,8 @@ use windows::Win32::System::Registry::{
     REG_OPTION_NON_VOLATILE, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::TaskScheduler::{
-    IExecAction, ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_LOGON_INTERACTIVE_TOKEN,
+    IExecAction, ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN,
+    TASK_LOGON_INTERACTIVE_TOKEN,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VARIANT;
@@ -155,12 +156,13 @@ fn only_trusted_can(path: &Path, forbidden: u32) -> bool {
     clear
 }
 
-/// Whether no one but administrators can change `file` or put anything else
-/// in its place: alter or replace it, add files beside it (which Windows
-/// might load with it), or rename or re-permission any folder above it.
-/// Checked where the file really is, through any links and junctions.
-fn protected(file: &Path) -> bool {
-    let Ok(file) = std::fs::canonicalize(file) else { return false };
+/// Where `file` really is, if no one but administrators can change it or
+/// put anything else in its place: alter or replace it, add files beside it
+/// (which Windows might load with it), or rename or re-permission any folder
+/// above it. Checked where the file really is, through any links and
+/// junctions; that path, not the one given, is what may then be run.
+fn checked(file: &Path) -> Option<PathBuf> {
+    let file = std::fs::canonicalize(file).ok()?;
     let mut clear = only_trusted_can(&file, (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE | WRITE_DAC | WRITE_OWNER).0);
     let mut folder = file.parent();
     let mut own = true;
@@ -172,7 +174,11 @@ fn protected(file: &Path) -> bool {
         own = false;
         folder = dir.parent();
     }
-    clear
+    clear.then_some(file)
+}
+
+fn protected(file: &Path) -> bool {
+    checked(file).is_some()
 }
 
 /// This executable as Task Scheduler should run it: where it really is,
@@ -219,6 +225,28 @@ fn task_folder() -> Option<ITaskFolder> {
         let none = VARIANT::default();
         service.Connect(&none, &none, &none, &none).ok()?;
         service.GetFolder(&BSTR::from("\\")).ok()
+    }
+}
+
+/// Whether a task is one of Glance's: under the names it gives tasks now
+/// (with an account's identifier) or gave them before.
+fn is_glance_task(name: &str) -> bool {
+    [LOGON_TASK, LAUNCH_TASK].iter().any(|base| {
+        name.strip_prefix(base).is_some_and(|rest| rest.is_empty() || rest.strip_prefix(" S-1-").is_some_and(|sid| !sid.is_empty() && sid.chars().all(|c| c.is_ascii_digit() || c == '-')))
+    })
+}
+
+/// Removes every account's Glance tasks: what the uninstaller asks of the
+/// installed, protected copy of Glance, run elevated.
+pub fn remove_all_tasks() {
+    let Some(folder) = task_folder() else { return };
+    let names: Vec<String> = unsafe {
+        let Ok(tasks) = folder.GetTasks(TASK_ENUM_HIDDEN.0) else { return };
+        let count = tasks.Count().unwrap_or(0);
+        (1..=count).filter_map(|i| tasks.get_Item(&VARIANT::from(i)).ok()?.Name().ok().map(|n| n.to_string())).collect()
+    };
+    for name in names.iter().filter(|name| is_glance_task(name)) {
+        delete_task(name);
     }
 }
 
@@ -324,8 +352,9 @@ fn delete_task(name: &str) {
 /// Keeps the launch task pointing at this executable, if it may start
 /// unasked; else makes sure no task starts it. Needs elevation.
 pub fn register_launch_task() {
-    // Tasks under the names earlier versions used, for every account, go
-    // if they run this copy.
+    // Tasks under the names earlier versions used go if they run this copy;
+    // starting at sign-in carries over to this account's own task.
+    let started_at_sign_in = runs_this(LOGON_TASK);
     for name in [LAUNCH_TASK, LOGON_TASK] {
         if runs_this(name) {
             delete_task(name);
@@ -333,6 +362,9 @@ pub fn register_launch_task() {
     }
     if may_start_unasked() {
         register_task(&launch_task(), false);
+        if started_at_sign_in {
+            register_task(&logon_task(), true);
+        }
     } else {
         // A copy that may not start unasked keeps no task that starts it.
         for name in [launch_task(), logon_task()] {
@@ -371,9 +403,11 @@ fn pawnio_installed() -> bool {
 /// program has installed it yet, and notes that Glance did. Needs elevation;
 /// the setup runs only from where the user cannot have changed it.
 pub fn ensure_pawnio(setup: &Path) {
-    if pawnio_installed() || !setup.exists() || !protected(setup) {
+    if pawnio_installed() {
         return;
     }
+    // Run from exactly the place that was checked.
+    let Some(setup) = checked(setup) else { return };
     let installed = Command::new(setup)
         .args(["-install", "-silent"])
         .creation_flags(NO_WINDOW)
@@ -402,6 +436,14 @@ fn mark_pawnio_ours() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_its_own_tasks() {
+        assert!(is_glance_task("Glance"));
+        assert!(is_glance_task("Glance at sign-in S-1-5-21-1-2-3-1001"));
+        assert!(!is_glance_task("Glance Updater"));
+        assert!(!is_glance_task("GlanceX"));
+    }
 
     #[test]
     fn tells_protected_places_from_writable_ones() {

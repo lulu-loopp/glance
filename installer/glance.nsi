@@ -79,6 +79,7 @@ Section "Glance"
   ; licence asks to come with them.
   SetOutPath "$INSTDIR\licenses"
   File "..\licenses\*.txt"
+  File "..\licenses\*.html"
   SetOutPath "$INSTDIR\licenses\pawnio-modules-source"
   File /r "..\pawnio-modules\source\*"
   SetOutPath "$INSTDIR"
@@ -106,9 +107,10 @@ FunctionEnd
 
 Section "Uninstall"
   !insertmacro StopGlance
-  ; Every account's tasks for Glance ("Glance <SID>", "Glance at sign-in
-  ; <SID>"), and those of earlier versions.
-  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -Command "Get-ScheduledTask -TaskPath '\' | Where-Object { $$_.TaskName -match '^Glance( at sign-in)?( S-1-[0-9-]+)?$$' } | Unregister-ScheduledTask -Confirm:$$false"`
+  ; Every account's tasks for Glance, removed by the installed copy itself
+  ; (in Program Files, where only administrators can change it) through
+  ; Task Scheduler: no shell or script host that could load anything else.
+  ExecWait '"$INSTDIR\${EXE}" --remove-tasks'
 
   ; The driver goes only if Glance put it there and the user agrees; a
   ; silent uninstall keeps it.
