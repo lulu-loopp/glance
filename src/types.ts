@@ -53,6 +53,8 @@ export interface Sample {
   by_memory: ProcessSample[];
   system: { uptime_s: number; processes: number; threads: number; handles: number };
   battery: { percent: number; charging: boolean; seconds_left: number | null } | null;
+  /** From HWiNFO, when it shares its sensors. */
+  hw: { cpu_temp: number | null; cpu_power: number | null; fans: [string, number][] } | null;
 }
 
 /** What the panel shows and how; stored by the backend without looking inside. */

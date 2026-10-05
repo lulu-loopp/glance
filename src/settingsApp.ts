@@ -63,6 +63,8 @@ export async function settingsApp(boot: Bootstrap) {
 
   const body = document.body;
   body.classList.add('settings-app');
+  // The window has the Windows 11 material behind it (see show_settings).
+  if (new URLSearchParams(location.search).has('mica')) body.dataset.mica = '';
   body.style.setProperty('--accent-on-light', boot.accent.on_light);
   body.style.setProperty('--accent-on-dark', boot.accent.on_dark);
 

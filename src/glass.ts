@@ -37,6 +37,8 @@ type Box = { left: number; top: number; width: number; height: number };
 
 export class Backdrop {
   private image: HTMLImageElement | null = null;
+  /** Where the current capture came from, and the blob address it is held under. */
+  private source: string | null = null;
   private url: string | null = null;
   private defs: SVGDefsElement;
   private maps = new Map<string, string>();
@@ -58,20 +60,75 @@ export class Backdrop {
   }
 
   /** Loads a capture, resolving once it can be drawn without a delay. */
-  async load(url: string | null) {
-    if (url === this.url) return;
-    this.url = url;
-    if (url === null) {
-      this.image = null;
+  /**
+   * Loads a capture, resolving once it is decoded. The picture is held in
+   * memory under a blob address, which the glass layers then use: they find
+   * it decoded and draw it at once, with no blank frame in between.
+   */
+  async load(source: string | null) {
+    if (source === this.source) return;
+    this.source = source;
+    if (source === null) {
+      this.drop(null, null);
       return;
     }
-    const image = new Image();
-    image.crossOrigin = 'anonymous';
-    image.src = url;
+    const response = await fetch(source).catch(() => null);
     // A live capture can be replaced before it is fetched; keep the last one.
-    if (!(await image.decode().then(() => true, () => false))) return;
+    if (!response?.ok || this.source !== source) return;
+    const url = URL.createObjectURL(await response.blob());
+    const image = new Image();
+    image.src = url;
+    const decoded = await image.decode().then(() => true, () => false);
     // A newer capture may have been asked for meanwhile.
-    if (this.url === url) this.image = image;
+    if (!decoded || this.source !== source) {
+      URL.revokeObjectURL(url);
+      return;
+    }
+    this.drop(url, image);
+  }
+
+  /** Takes `url` as the current picture, letting go of the one before. */
+  private drop(url: string | null, image: HTMLImageElement | null) {
+    const previous = this.url;
+    this.url = url;
+    this.image = image;
+    // The layers still show the old picture until they are given the new one.
+    if (previous) setTimeout(() => URL.revokeObjectURL(previous), 1000);
+  }
+
+  /**
+   * Puts a newer capture of the same desktop into the layers `dress` built,
+   * without rebuilding them, and frosts the glass for what it now shows.
+   */
+  retexture(panel: HTMLElement, skin: string, stage: HTMLElement) {
+    if (!this.image) return;
+    const url = `url(${this.url})`;
+    for (const layer of panel.querySelectorAll<HTMLElement>('.lens, .acrylic')) {
+      if (layer.style.backgroundImage) layer.style.backgroundImage = url;
+    }
+    if (skin === 'glass') {
+      const frost = this.frost(panel, stage);
+      panel.style.setProperty('--frost', frost.toFixed(3));
+      for (const blur of this.defs.querySelectorAll('feGaussianBlur[result="frosted"]')) {
+        blur.setAttribute('stdDeviation', (frost * FROST_BLUR).toFixed(2));
+      }
+    }
+  }
+
+  /**
+   * How frosted the glass over `panel` should be, 0–1: more when what is
+   * behind is busy, and more when it clashes with the theme (bright under
+   * dark glass, dark under light glass).
+   */
+  private frost(panel: HTMLElement, stage: HTMLElement): number {
+    this.stage = stage;
+    const theme = stage.dataset.theme === 'dark' ? 'dark' : 'light';
+    const origin = offsetWithin(panel, stage);
+    const { mean, spread } = this.measure({ ...origin, width: panel.offsetWidth, height: panel.offsetHeight });
+    const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
+    const busy = clamp((spread - CALM) / (BUSY - CALM));
+    const against = theme === 'light' ? READS_WELL.light - mean : mean - READS_WELL.dark;
+    return Math.max(busy, clamp(against / CONTRAST_SPAN));
   }
 
   /**
@@ -82,7 +139,6 @@ export class Backdrop {
    */
   dress(panel: HTMLElement, skin: string, stage: HTMLElement) {
     this.stage = stage;
-    const theme = stage.dataset.theme === 'dark' ? 'dark' : 'light';
     const acrylic = panel.querySelector<HTMLElement>('.acrylic')!;
     const pieces = [...panel.querySelectorAll<HTMLElement>('.lane, .bar, .settings')];
     for (const lens of panel.querySelectorAll('.lens')) lens.remove();
@@ -106,13 +162,7 @@ export class Backdrop {
     if (skin === 'glass') {
       // The pieces are one material: they frost alike, by what is behind the
       // panel as a whole. Deciding per piece made neighbours look unrelated.
-      // Busy backdrops frost more, and so do backdrops that clash with the
-      // theme (bright under dark glass, dark under light glass).
-      const { mean, spread } = this.measure({ ...origin, width: panel.offsetWidth, height: panel.offsetHeight });
-      const clamp = (value: number) => Math.min(Math.max(value, 0), 1);
-      const busy = clamp((spread - CALM) / (BUSY - CALM));
-      const against = theme === 'light' ? READS_WELL.light - mean : mean - READS_WELL.dark;
-      const frost = Math.max(busy, clamp(against / CONTRAST_SPAN));
+      const frost = this.frost(panel, stage);
       panel.style.setProperty('--frost', frost.toFixed(3));
       pieces.forEach((piece, index) => {
         if (piece.offsetParent === null) return;

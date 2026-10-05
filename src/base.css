@@ -362,6 +362,12 @@ button {
   text-align: right;
 }
 
+.lane-fans .rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px;
+}
+
 .lane-storage .meter-row:first-child {
   margin-top: 0;
 }

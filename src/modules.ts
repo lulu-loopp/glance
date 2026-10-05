@@ -136,6 +136,7 @@ function cpu(info: StaticInfo): ModuleDef {
     title: 'CPU',
     build(prefs) {
       const lane = percentLane({ kind: 'cpu', title: 'CPU', device: info.cpu_name, value: (s) => s.cpu, hotLoad: prefs.hotLoad });
+      const setFacts = facts(lane.root);
       let cells: HTMLElement[] = [];
       if (prefs.cpu.threads) {
         const grid = element(`<div class="threads" title="${t('threadsTitle', info.threads)}"></div>`);
@@ -148,7 +149,17 @@ function cpu(info: StaticInfo): ModuleDef {
         plots: [lane.plot],
         update(sample) {
           setFigure(lane, sample.cpu, prefs.hotLoad);
-          lane.aside.textContent = prefs.cpu.clock ? `${sample.ghz.toFixed(2)} GHz` : '';
+          // With HWiNFO's temperature, it takes the clock's place, as on the
+          // GPU lanes; the clock and the power move below.
+          const temp = sample.hw?.cpu_temp ?? null;
+          const clock = prefs.cpu.clock ? `${sample.ghz.toFixed(2)} GHz` : null;
+          lane.aside.textContent = temp !== null ? `${Math.round(temp)} °C` : (clock ?? '');
+          lane.aside.dataset.hot = String(temp !== null && temp > prefs.hotTemp);
+          const power = sample.hw?.cpu_power ?? null;
+          setFacts([
+            [t('clock'), temp !== null ? clock : null],
+            [t('power'), power !== null ? `${power.toFixed(1)} W` : null],
+          ]);
           sample.threads.forEach((load, i) => {
             if (!cells[i]) return;
             cells[i].style.setProperty('--load', String(load / 100));
@@ -375,6 +386,36 @@ function storage(): ModuleDef {
   };
 }
 
+function fans(): ModuleDef {
+  return {
+    id: 'fans',
+    title: t('fans'),
+    detail: t('fansDetail'),
+    build() {
+      const root = element(`
+        <section class="lane lane-list lane-fans">
+          <header class="lane-head"><h2>${t('fans')}</h2><span class="lane-device">HWiNFO</span></header>
+          <ol class="rows"></ol>
+        </section>`);
+      const list = root.querySelector('ol')!;
+      return {
+        root,
+        plots: [],
+        update(sample) {
+          const fans = sample.hw?.fans ?? [];
+          // Nothing to show without HWiNFO, or with every fan stopped.
+          root.hidden = fans.length === 0;
+          list.replaceChildren(
+            ...fans.map(([name, rpm]) =>
+              element(`<li><span class="row-name">${escapeHtml(name)}</span><span class="row-value">${Math.round(rpm)} RPM</span></li>`),
+            ),
+          );
+        },
+      };
+    },
+  };
+}
+
 /** Charge at or below which a battery on its own is shown in the signal colour. */
 const LOW_BATTERY = 20;
 
@@ -441,6 +482,7 @@ export function catalog(info: StaticInfo): ModuleDef[] {
     disk(),
     processes(),
     storage(),
+    fans(),
     battery(),
     system(),
   ];

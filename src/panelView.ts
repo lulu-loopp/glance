@@ -175,6 +175,11 @@ export class PanelView {
     this.backdrop.dress(this.panel, this.host.dataset.skin!, this.host);
   }
 
+  /** A newer capture of the same desktop: the glass takes it as it is. */
+  retexture() {
+    this.backdrop.retexture(this.panel, this.host.dataset.skin!, this.host);
+  }
+
   draw(now: number) {
     this.recorder.draw(this.samples, now);
   }
