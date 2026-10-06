@@ -8,7 +8,7 @@
 
 use std::cmp::Ordering;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -38,12 +38,11 @@ const SOURCES: [&str; 2] = [
     "https://api.github.com/repos/lulu-loopp/glance/releases/latest",
     "https://gitee.com/api/v5/repos/lulu-loopp/glance/releases/latest",
 ];
-/// How often to ask, and how soon after Glance starts (not while the
-/// desktop is still coming up); an ask that got no answer (offline, or
-/// GitHub out of reach) is made again sooner.
+/// How often to ask. Glance asks as soon as it starts; an ask that got no
+/// answer (offline, the network not yet up at sign-in, both sites out of
+/// reach) is made again after each of these in turn, then every last one.
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
-const RETRY: Duration = Duration::from_secs(60 * 60);
-const FIRST: Duration = Duration::from_secs(60);
+const RETRIES: [Duration; 3] = [Duration::from_secs(60), Duration::from_secs(5 * 60), Duration::from_secs(60 * 60)];
 /// More than any installer of Glance's: an answer this large is not one.
 const MOST: usize = 64 << 20;
 
@@ -72,39 +71,120 @@ pub enum State {
 
 static FOUND: Mutex<Option<(Release, State)>> = Mutex::new(None);
 
+/// How the last ask went, for the settings to tell.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Check {
+    /// Not asked yet.
+    Idle,
+    Checking,
+    /// The sites answered; nothing newer, or what `available` tells.
+    Answered,
+    /// Neither site answered.
+    Unanswered,
+}
+
+/// The last ask, and whether one has been asked for now (and by whom: the
+/// tray's asker is told the outcome in a notification).
+struct Asking {
+    check: Check,
+    now: Option<Asker>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Asker {
+    Settings,
+    Tray,
+}
+
+static ASKING: Mutex<Asking> = Mutex::new(Asking { check: Check::Idle, now: None });
+static WAKE: Condvar = Condvar::new();
+
+/// How the last ask for a newer release went.
+pub fn check() -> Check {
+    ASKING.lock().unwrap().check
+}
+
+/// Asks for the latest release at once, whatever the daily asking is set
+/// to.
+pub fn check_now(asker: Asker) {
+    let mut asking = ASKING.lock().unwrap();
+    if asking.check == Check::Checking {
+        return;
+    }
+    asking.now = Some(asker);
+    asking.check = Check::Checking;
+    WAKE.notify_all();
+}
+
 /// The newer release found, if any, and where taking it stands.
 pub fn available() -> Option<(String, State)> {
     FOUND.lock().unwrap().as_ref().map(|(release, state)| (release.version.clone(), *state))
 }
 
-/// Asks for the latest release now and then, for as long as Glance runs.
+/// Asks for the latest release now and then, for as long as Glance runs,
+/// and whenever asked to.
 pub fn watch() {
-    // When to ask next.
+    // When to ask next, and how many asks in a row went unanswered.
     let mut due = Instant::now();
-    thread::sleep(FIRST);
+    let mut unanswered = 0usize;
     loop {
-        let wanted = crate::app().settings.lock().unwrap().check_updates;
-        if wanted && Instant::now() >= due {
-            let answer = latest();
-            due = Instant::now() + if answer.is_some() { EVERY } else { RETRY };
-            if let Some(release) = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION"))) {
-                let mut found = FOUND.lock().unwrap();
-                let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
-                if new {
-                    let version = release.version.clone();
-                    crate::journal::note(format!("update available: {version}"));
-                    *found = Some((release, State::Ready));
-                    drop(found);
-                    let (title, text) = match language() {
-                        Lang::Zh => (format!("Glance {version} 可用"), "右键单击托盘图标，在设置中更新。".to_string()),
-                        Lang::En => (format!("Glance {version} is available"), "Right-click the tray icon to update from the settings.".to_string()),
+        // Asked for now, or due and wanted. Otherwise a minute's wait at
+        // most, so that turning the daily asking on is soon heard.
+        let asker = {
+            let mut asking = ASKING.lock().unwrap();
+            loop {
+                if let Some(asker) = asking.now.take() {
+                    break Some(asker);
+                }
+                let wanted = crate::app().settings.lock().unwrap().check_updates;
+                if wanted && Instant::now() >= due {
+                    asking.check = Check::Checking;
+                    break None;
+                }
+                let wait = due.saturating_duration_since(Instant::now()).min(Duration::from_secs(60)).max(Duration::from_secs(1));
+                asking = WAKE.wait_timeout(asking, wait).unwrap().0;
+            }
+        };
+        let answer = latest();
+        if answer.is_some() {
+            unanswered = 0;
+            due = Instant::now() + EVERY;
+        } else {
+            due = Instant::now() + RETRIES[unanswered.min(RETRIES.len() - 1)];
+            unanswered += 1;
+        }
+        let answered = answer.is_some();
+        ASKING.lock().unwrap().check = if answered { Check::Answered } else { Check::Unanswered };
+        let newer_release = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION")));
+        let lang = language();
+        if let Some(release) = newer_release {
+            let mut found = FOUND.lock().unwrap();
+            let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
+            if new {
+                let version = release.version.clone();
+                crate::journal::note(format!("update available: {version}"));
+                *found = Some((release, State::Ready));
+                drop(found);
+                // Asked from the settings, the settings show it.
+                if asker != Some(Asker::Settings) {
+                    let (title, text) = match lang {
+                        Lang::Zh => (format!("Glance {version} 可用"), "点这里，在设置中更新。".to_string()),
+                        Lang::En => (format!("Glance {version} is available"), "Click here to update from the settings.".to_string()),
                     };
                     crate::tray::notify(&title, &text);
                 }
             }
+        } else if asker == Some(Asker::Tray) {
+            // Asked from the tray: the answer, either way.
+            let version = env!("CARGO_PKG_VERSION");
+            let (title, text) = match (lang, answered) {
+                (Lang::Zh, true) => ("Glance 已是最新版本".to_string(), format!("当前版本 {version}。")),
+                (Lang::En, true) => ("Glance is up to date".to_string(), format!("You have {version}.")),
+                (Lang::Zh, false) => ("没能检查更新".to_string(), "GitHub 和 Gitee 都没有回应，请稍后再试。".to_string()),
+                (Lang::En, false) => ("Couldn't check for updates".to_string(), "Neither GitHub nor Gitee answered; try again later.".to_string()),
+            };
+            crate::tray::notify(&title, &text);
         }
-        // A minute at a time, so that turning the setting on is soon heard.
-        thread::sleep(Duration::from_secs(60));
     }
 }
 
@@ -232,7 +312,7 @@ fn program_data() -> Option<std::path::PathBuf> {
 }
 
 /// The language the user reads Glance in.
-fn language() -> Lang {
+pub(crate) fn language() -> Lang {
     let settings = crate::app().settings.lock().unwrap();
     Lang::resolve(serde_json::from_value::<LanguagePref>(settings.view["language"].clone()).unwrap_or_default())
 }

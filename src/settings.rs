@@ -116,10 +116,13 @@ pub struct Settings {
     pub live_backdrop: bool,
     /// Ask GitHub once a day whether a newer Glance is out.
     pub check_updates: bool,
-    /// The shortcut (Ctrl+Alt+G unless another is chosen) opens and closes
-    /// the panel.
-    pub hotkey: bool,
-    pub shortcut: Shortcut,
+    /// The shortcut that opens and closes the panel (Ctrl+Alt+G unless
+    /// another is chosen); none, when it is cleared.
+    pub shortcut: Option<Shortcut>,
+    /// Up to 0.1.8, the shortcut's own switch: off, it reads as cleared.
+    /// Read once, not written again.
+    #[serde(skip_serializing)]
+    hotkey: Option<bool>,
     /// What opens the panel over a game holding the screen in exclusive
     /// fullscreen, which the panel showing sends to the background.
     pub over_fullscreen: OverFullscreen,
@@ -141,8 +144,8 @@ impl Default for Settings {
             interval_ms: 1000,
             live_backdrop: false,
             check_updates: true,
-            hotkey: true,
-            shortcut: Shortcut::default(),
+            shortcut: Some(Shortcut::default()),
+            hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
             view: serde_json::Value::Null,
@@ -182,10 +185,19 @@ impl Settings {
             crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
-        if !settings.shortcut.usable() {
-            settings.shortcut = Shortcut::default();
-        }
+        settings.carry_over();
         settings
+    }
+
+    /// Settings from before, in today's terms; a shortcut that cannot be one
+    /// (a file not written by Glance) is the default.
+    fn carry_over(&mut self) {
+        if self.hotkey.take() == Some(false) {
+            self.shortcut = None;
+        }
+        if self.shortcut.is_some_and(|shortcut| !shortcut.usable()) {
+            self.shortcut = Some(Shortcut::default());
+        }
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -214,9 +226,19 @@ mod tests {
 
     #[test]
     fn settings_from_before_take_the_defaults() {
-        let settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
-        assert_eq!(settings.shortcut, Shortcut::default());
+        let mut settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.shortcut, Some(Shortcut::default()));
         assert!(settings.over_fullscreen == OverFullscreen::Shortcut);
         assert_eq!(settings.columns, None);
+        // The shortcut switched off before is cleared; one cleared stays so,
+        // and its switch is not written again.
+        let mut settings: Settings = serde_json::from_str(r#"{"hotkey":false}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.shortcut, None);
+        let mut settings: Settings = serde_json::from_str(r#"{"shortcut":null}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.shortcut, None);
+        assert!(!serde_json::to_string(&settings).unwrap().contains("hotkey"));
     }
 }

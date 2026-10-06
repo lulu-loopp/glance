@@ -1,10 +1,11 @@
-//! The tray icon, on the main thread. A left click shows the readings, a
-//! right click the settings: one interface each, rather than a menu.
+//! The tray icon, on the main thread. A left click shows the readings; a
+//! right click, a short menu: the readings, the settings, a check for
+//! updates, and quitting.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use windows::core::{w, PCWSTR};
+use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
@@ -21,6 +22,10 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, ReleaseDC, SelectObject, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow, TrackPopupMenuEx, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_NULL,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyNameTextW, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
 };
@@ -94,7 +99,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             // Version 4: the event in the low word.
             match (lparam.0 & 0xFFFF) as u32 {
                 WM_LBUTTONUP => crate::app().controller.open_from_tray(),
-                WM_CONTEXTMENU => crate::show_settings(),
+                // Version 4: where to put the menu, in the WPARAM.
+                WM_CONTEXTMENU => menu(hwnd, (wparam.0 & 0xFFFF) as u16 as i16 as i32, ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32),
                 // A notification of ours (a new version) clicked.
                 NIN_BALLOONUSERCLICK => crate::show_settings(),
                 _ => {}
@@ -208,6 +214,47 @@ fn put(into: &mut [u16], text: &str) {
     into[..units.len()].copy_from_slice(&units);
 }
 
+/// The icon's menu, at `(x, y)` on the screen, and what was chosen in it.
+fn menu(hwnd: HWND, x: i32, y: i32) {
+    const OPEN: usize = 1;
+    const SETTINGS: usize = 2;
+    const CHECK: usize = 3;
+    const QUIT: usize = 4;
+    let zh = crate::update::language() == crate::ui::text::Lang::Zh;
+    let items = [
+        (OPEN, if zh { "打开面板" } else { "Open the panel" }),
+        (SETTINGS, if zh { "设置" } else { "Settings" }),
+        (CHECK, if zh { "检查更新" } else { "Check for updates" }),
+        (0, ""),
+        (QUIT, if zh { "退出 Glance" } else { "Quit Glance" }),
+    ];
+    let chosen = unsafe {
+        let Ok(menu) = CreatePopupMenu() else { return };
+        for (id, text) in items {
+            if id == 0 {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            } else {
+                let text = HSTRING::from(text);
+                let _ = AppendMenuW(menu, MF_STRING, id, &text);
+            }
+        }
+        // The menu closes on a click elsewhere only while its window is in
+        // front; and is followed by a message, as the documentation asks.
+        let _ = SetForegroundWindow(hwnd);
+        let chosen = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0, x, y, hwnd, None).0 as usize;
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+        let _ = DestroyMenu(menu);
+        chosen
+    };
+    match chosen {
+        OPEN => crate::app().controller.open_from_tray(),
+        SETTINGS => crate::show_settings(),
+        CHECK => crate::update::check_now(crate::update::Asker::Tray),
+        QUIT => crate::quit(),
+        _ => {}
+    }
+}
+
 /// Sets the icon's tooltip, from any thread.
 pub fn set_tip(text: &str) {
     *TIP.lock().unwrap() = text.to_string();
@@ -302,15 +349,16 @@ fn in_tooltip_font<R>(act: impl FnOnce(&dyn Fn(&str) -> i32) -> R) -> R {
     }
 }
 
-/// Registers the shortcut if the settings want it (and it is not held back
-/// while a new one is being chosen), or lets it go.
+/// Registers the shortcut if there is one (and it is not held back while a
+/// new one is being chosen), or lets it go.
 fn register_hotkey(hwnd: HWND) {
     unsafe {
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
     }
-    let (wanted, shortcut) = {
-        let settings = crate::app().settings.lock().unwrap();
-        (settings.hotkey && !HOTKEY_HELD.load(Ordering::Relaxed), settings.shortcut)
+    let shortcut = crate::app().settings.lock().unwrap().shortcut.filter(|_| !HOTKEY_HELD.load(Ordering::Relaxed));
+    let Some(shortcut) = shortcut else {
+        HOTKEY_TAKEN.store(false, Ordering::Relaxed);
+        return;
     };
     let mut modifiers = MOD_NOREPEAT;
     for (held, flag) in [(shortcut.ctrl, MOD_CONTROL), (shortcut.alt, MOD_ALT), (shortcut.shift, MOD_SHIFT), (shortcut.win, MOD_WIN)] {
@@ -318,7 +366,7 @@ fn register_hotkey(hwnd: HWND) {
             modifiers |= flag;
         }
     }
-    let taken = wanted && unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
+    let taken = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
     if taken && !HOTKEY_TAKEN.load(Ordering::Relaxed) {
         crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
     }

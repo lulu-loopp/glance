@@ -31,7 +31,7 @@ use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
@@ -174,7 +174,6 @@ struct Palette {
     text2: Color,
     text3: Color,
     rule: Color,
-    signal: Color,
     hover: Color,
     control: Color,
     control_on: Color,
@@ -208,7 +207,6 @@ impl Palette {
                 text2: white(0.76),
                 text3: white(0.5),
                 rule: white(0.08),
-                signal: Color::hex(0xFF99A4, 1.0),
                 hover: white(0.06),
                 control: white(0.06),
                 control_on: white(0.16),
@@ -231,7 +229,6 @@ impl Palette {
                 text2: black(0.6),
                 text3: black(0.44),
                 rule: black(0.08),
-                signal: Color::hex(0xC42B1C, 1.0),
                 hover: black(0.04),
                 control: black(0.05),
                 control_on: white(0.95),
@@ -281,13 +278,22 @@ enum Field {
     TempAlert,
 }
 
+/// How a button looks: outlined; filled in the accent (the one thing to
+/// press); waiting for keys; or busy, greyed and not to be pressed.
+#[derive(Clone, Copy, PartialEq)]
+enum Button {
+    Plain,
+    Accent,
+    Taking,
+    Quiet,
+}
+
 /// A row that is on or off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
     Live,
     Startup,
     Updates,
-    Hotkey,
     HeatAlert,
 }
 
@@ -306,6 +312,8 @@ enum Target {
     Grip(String),
     /// The shortcut's keys: pressed, the next combination becomes them.
     Shortcut,
+    /// Asks for a newer release now.
+    CheckNow,
     Diagnostics,
     Update,
     Uninstall,
@@ -658,7 +666,6 @@ impl Ui {
             Row::Choice(Field::Columns),
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
-            Row::Switch(Switch::Hotkey),
             Row::Shortcut,
             Row::Choice(Field::OverFullscreen),
             Row::Heading("显示内容", "Shown"),
@@ -881,14 +888,20 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
-    /// A key pressed while taking a new shortcut: Escape gives up, a modifier
-    /// alone waits for the key it goes with, and a key with Ctrl, Alt or Win
-    /// held becomes the shortcut.
+    /// A key pressed while taking a new shortcut: Escape gives up, Backspace
+    /// clears the shortcut, a modifier alone waits for the key it goes with,
+    /// and a key with Ctrl, Alt or Win held becomes the shortcut.
     fn take_shortcut(&mut self, key: VIRTUAL_KEY) {
         self.next_frame = Instant::now();
         let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(key.0 as i32) } < 0;
         let modifiers = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN];
         if key == VK_ESCAPE {
+            self.record(false);
+            return;
+        }
+        if key == VK_BACK {
+            self.settings.shortcut = None;
+            self.save();
             self.record(false);
             return;
         }
@@ -900,7 +913,7 @@ impl Ui {
             self.needs_modifier = true;
             return;
         }
-        self.settings.shortcut = shortcut;
+        self.settings.shortcut = Some(shortcut);
         self.save();
         self.record(false);
     }
@@ -928,15 +941,6 @@ impl Ui {
                 }),
                 self.autostart,
             ),
-            Switch::Hotkey => (
-                p("快捷键", "Shortcut"),
-                Some(if crate::tray::hotkey_taken() {
-                    p("已被其他程序占用，暂时无法使用", "Another program is using it")
-                } else {
-                    p("打开或收起面板，也可收起已固定的面板", "Opens and closes the panel, pinned or not")
-                }),
-                self.settings.hotkey,
-            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
@@ -945,9 +949,18 @@ impl Ui {
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
                 let version = env!("CARGO_PKG_VERSION");
-                let hint = match lang {
-                    Lang::Zh => format!("当前版本 {version}，每天检查一次"),
-                    Lang::En => format!("Version {version}; checks once a day"),
+                let newer = update::available().is_some();
+                let hint = match (lang, update::check(), newer) {
+                    (Lang::Zh, update::Check::Checking, _) => format!("当前版本 {version}，正在检查…"),
+                    (Lang::En, update::Check::Checking, _) => format!("Version {version}; checking…"),
+                    (Lang::Zh, update::Check::Answered, false) => format!("当前版本 {version}，已是最新"),
+                    (Lang::En, update::Check::Answered, false) => format!("Version {version}, the latest"),
+                    (Lang::Zh, update::Check::Answered, true) => format!("当前版本 {version}，有新版本"),
+                    (Lang::En, update::Check::Answered, true) => format!("Version {version}; a newer one is out"),
+                    (Lang::Zh, update::Check::Unanswered, _) => format!("当前版本 {version}，没能连上 GitHub 和 Gitee"),
+                    (Lang::En, update::Check::Unanswered, _) => format!("Version {version}; GitHub and Gitee did not answer"),
+                    (Lang::Zh, update::Check::Idle, _) => format!("当前版本 {version}，每天检查一次"),
+                    (Lang::En, update::Check::Idle, _) => format!("Version {version}; checks once a day"),
                 };
                 return (p("检查更新", "Check for updates"), Some(Cow::Owned(hint)), self.settings.check_updates);
             }
@@ -980,7 +993,6 @@ impl Ui {
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Updates => settings.check_updates ^= true,
-            Switch::Hotkey => settings.hotkey ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
@@ -1190,6 +1202,7 @@ impl Ui {
             Target::Choice(field, index) => self.choose(field, index),
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
+            Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 if let Some(entry) = self.prefs.modules.iter_mut().find(|entry| entry.id == id) {
                     entry.on ^= true;
@@ -1248,6 +1261,9 @@ impl Ui {
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
+                // A switch's own button comes first.
+                Row::Shortcut => vec![Target::Shortcut],
+                Row::Switch(Switch::Updates) => vec![Target::CheckNow, Target::Switch(Switch::Updates)],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
@@ -1256,7 +1272,6 @@ impl Ui {
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update => vec![Target::Update],
-                Row::Shortcut => vec![Target::Shortcut],
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
@@ -1637,7 +1652,18 @@ impl Ui {
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, detail, on) = self.switch(switch);
-                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
+                    // Left of the switch, the asking for updates now.
+                    let switch_left = left + width - ROW_SIDE - 40.0;
+                    let own = match switch {
+                        Switch::Updates if update::check() == update::Check::Checking => Some((pick(lang, "检查中", "Checking").to_string(), Target::CheckNow, Button::Quiet)),
+                        Switch::Updates => Some((pick(lang, "立即检查", "Check now").to_string(), Target::CheckNow, Button::Plain)),
+                        _ => None,
+                    };
+                    let text_right = match own {
+                        Some((text, target, kind)) => self.button(frame, palette, &text, switch_left - 16.0, y + row_height / 2.0, target, kind, &hovered),
+                        None => switch_left,
+                    };
+                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, text_right - 16.0 - left - ROW_SIDE);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
                     self.toggle(frame, palette, key, on, true, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
@@ -1703,35 +1729,27 @@ impl Ui {
                         ),
                     };
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
-                    let button_w = frame.gfx.measure(action, label) + 32.0;
-                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
-                    let busy = state == update::State::Downloading;
-                    if hovered == Some(Target::Update) && !busy {
-                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
-                    }
-                    stroke_inside(frame, button, 6.0, palette.rule);
-                    text_centred(frame, action, label, if busy { palette.text2 } else { palette.signal }, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
-                    self.targets.push((button, Target::Update));
+                    let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
+                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Update, kind, &hovered);
+                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
                 Row::Shortcut => {
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let name = pick(lang, "组合键", "Key combination");
-                    let detail = match (self.recording, self.needs_modifier) {
-                        (true, true) => pick(lang, "要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
-                        (true, false) => pick(lang, "按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
-                        (false, _) => pick(lang, "点右边的按钮更换", "Click the button to change it"),
+                    let name = pick(lang, "快捷键", "Shortcut");
+                    let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
+                        (true, true, _) => pick(lang, "要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
+                        (true, false, _) => pick(lang, "按下新的组合键；Backspace 清除，Esc 取消", "Press the new keys; Backspace clears, Esc cancels"),
+                        (false, _, None) => pick(lang, "未设置，点右边的按钮设置", "None; click the button to set one"),
+                        (false, _, Some(_)) if crate::tray::hotkey_taken() => pick(lang, "已被其他程序占用，请换一个", "Another program is using it; choose another"),
+                        (false, _, Some(_)) => pick(lang, "打开或收起面板，点右边的按钮更换", "Opens and closes the panel; click to change"),
                     };
-                    let action = if self.recording { pick(lang, "请按键…", "Press keys…").to_string() } else { crate::tray::shortcut_name(self.settings.shortcut) };
-                    let button_w = frame.gfx.measure(&action, label) + 32.0;
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - button_w - 16.0);
-                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
-                    if hovered == Some(Target::Shortcut) || self.recording {
-                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
-                    }
-                    stroke_inside(frame, button, 6.0, if self.recording { palette.selection } else { palette.rule });
-                    text_centred(frame, &action, label, palette.text, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
-                    self.targets.push((button, Target::Shortcut));
+                    let (action, kind) = match (self.recording, self.settings.shortcut) {
+                        (true, _) => (pick(lang, "请按键…", "Press keys…").to_string(), Button::Taking),
+                        (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Button::Plain),
+                        (false, None) => (pick(lang, "未设置", "None").to_string(), Button::Plain),
+                    };
+                    let button_left = self.button(frame, palette, &action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
                 Row::Diagnostics => {
                     // "Copied" for a moment after the press.
@@ -1740,15 +1758,8 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let name = pick(lang, "诊断信息", "Diagnostics");
                     let detail = pick(lang, "反馈问题时复制附上", "To paste into a problem report");
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
-                    let button_w = frame.gfx.measure(action, label) + 32.0;
-                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
-                    if hovered == Some(Target::Diagnostics) {
-                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
-                    }
-                    stroke_inside(frame, button, 6.0, palette.rule);
-                    text_centred(frame, action, label, palette.signal, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
-                    self.targets.push((button, Target::Diagnostics));
+                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Diagnostics, Button::Plain, &hovered);
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
                 Row::Uninstall | Row::Quit => {
                     let (target, name, detail, action) = if matches!(row, Row::Uninstall) {
@@ -1767,15 +1778,8 @@ impl Ui {
                         )
                     };
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
-                    let button_w = frame.gfx.measure(action, label) + 32.0;
-                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
-                    if hovered.as_ref() == Some(&target) {
-                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
-                    }
-                    stroke_inside(frame, button, 6.0, palette.rule);
-                    text_centred(frame, action, label, palette.signal, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
-                    self.targets.push((button, target));
+                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, target, Button::Plain, &hovered);
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
             }
             if inside.is_some() {
@@ -1867,6 +1871,35 @@ impl Ui {
             let row = Rect { x: left, y, w: width, h: height };
             self.targets.push((row, if opens { Target::Expand(id.to_string()) } else { Target::Module(id.to_string()) }));
         }
+    }
+
+    /// A button right-aligned at `right` and centred on `cy`, pressed as
+    /// `target`: outlined in the card's hairline, or, the one thing a row
+    /// asks for, filled in the accent; returns where its left edge is.
+    #[allow(clippy::too_many_arguments)]
+    fn button(&mut self, frame: &Frame, palette: &Palette, text: &str, right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
+        let font = Font::new(Family::Segoe, 14.0, 400.0);
+        let w = frame.gfx.measure(text, font) + 32.0;
+        let rect = Rect { x: right - w, y: cy - 16.0, w, h: 32.0 };
+        let hover = kind != Button::Quiet && hovered.as_ref() == Some(&target);
+        let ink = match kind {
+            Button::Accent => {
+                fill(frame, if hover { palette.switch_on.alpha(0.9) } else { palette.switch_on }, rect.x, rect.y, rect.w, rect.h, 6.0);
+                Color::hex(0xFFFFFF, 1.0)
+            }
+            _ => {
+                if hover || kind == Button::Taking {
+                    fill(frame, palette.hover, rect.x, rect.y, rect.w, rect.h, 6.0);
+                }
+                stroke_inside(frame, rect, 6.0, if kind == Button::Taking { palette.selection } else { palette.rule });
+                if kind == Button::Quiet { palette.text2 } else { palette.text }
+            }
+        };
+        text_centred(frame, text, font, ink, rect.x + 16.0, cy, w, Align::Start);
+        if kind != Button::Quiet {
+            self.targets.push((rect, target));
+        }
+        rect.x
     }
 
     /// A row of options with one thumb that slides under the chosen one,
