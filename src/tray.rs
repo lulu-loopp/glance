@@ -126,18 +126,25 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
+/// The tray's window class, which another start of the same Glance finds
+/// (a debug build's is its own).
+#[cfg(not(debug_assertions))]
+const TRAY_CLASS: PCWSTR = w!("GlanceTray");
+#[cfg(debug_assertions)]
+const TRAY_CLASS: PCWSTR = w!("GlanceTray.Debug");
+
 /// Shows the icon and runs the main thread's messages until Glance quits.
 pub fn run() {
     unsafe {
         let instance = GetModuleHandleW(None).unwrap();
-        let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: w!("GlanceTray"), ..Default::default() };
+        let class = WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: instance.into(), lpszClassName: TRAY_CLASS, ..Default::default() };
         RegisterClassW(&class);
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
         // A top-level window, though never shown: message-only windows do not
         // hear that the taskbar was created again.
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("GlanceTray"),
+            TRAY_CLASS,
             w!("Glance"),
             WINDOW_STYLE(0),
             0,
@@ -166,7 +173,7 @@ pub fn run() {
 
 /// Asks the Glance already running to open its settings.
 pub fn ask_for_settings() {
-    if let Ok(hwnd) = unsafe { FindWindowW(w!("GlanceTray"), None) } {
+    if let Ok(hwnd) = unsafe { FindWindowW(TRAY_CLASS, None) } {
         // This start was the user's doing and may bring a window forward;
         // the running Glance may too.
         let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };

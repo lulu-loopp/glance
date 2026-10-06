@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::E;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -49,7 +49,7 @@ use super::backdrop::Capture;
 use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
-use super::prefs::{LanguagePref, Prefs, ProcessSort, ThemePref};
+use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
 use super::render::{self, PanelLayers};
 use super::skins;
@@ -80,6 +80,9 @@ const GUTTER: f32 = 8.0;
 const ROW: f32 = 56.0;
 const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
+/// A row inside a module's open card, and how far in it starts.
+const ITEM_ROW: f32 = 44.0;
+const ITEM_INDENT: f32 = 32.0;
 const GROUP_GAP: f32 = 32.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
@@ -235,6 +238,15 @@ impl Palette {
     }
 }
 
+/// The choices of module `id`'s own, shown in its card.
+fn module_fields(id: &str) -> &'static [Field] {
+    match id {
+        "network" => &[Field::RateUnit],
+        "processes" => &[Field::ProcessCount, Field::ProcessSort],
+        _ => &[],
+    }
+}
+
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
@@ -257,14 +269,6 @@ enum Field {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
     Live,
-    CpuThreads,
-    CpuClock,
-    GpuMemory,
-    GpuSensors,
-    GpuEngines,
-    MemoryDetails,
-    NetworkDetails,
-    DiskActive,
     Startup,
     Updates,
     Hotkey,
@@ -277,7 +281,12 @@ enum Target {
     Skin(Skin),
     Choice(Field, usize),
     Switch(Switch),
+    /// A module's switch, and the rest of its row, which opens and closes
+    /// its card.
     Module(String),
+    Expand(String),
+    /// One of a module's items.
+    Item(String, &'static str),
     Grip(String),
     Diagnostics,
     Update,
@@ -292,6 +301,9 @@ enum Row {
     Choice(Field),
     Switch(Switch),
     Module(String),
+    /// In a module's open card: one of its items, or a choice of its own.
+    Item(String, &'static str),
+    ModuleChoice(String, Field),
     Diagnostics,
     Update,
     Uninstall,
@@ -347,6 +359,8 @@ struct Ui {
     focus: Option<Target>,
     keyboard: bool,
     drag: Option<Drag>,
+    /// The modules whose cards are open (all closed as the window opens).
+    expanded: HashSet<String>,
     targets: Vec<(Rect, Target)>,
     relabel_at: Option<Instant>,
     stage: Stage,
@@ -433,6 +447,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             focus: None,
             keyboard: false,
             drag: None,
+            expanded: HashSet::new(),
             targets: Vec::new(),
             relabel_at: None,
             stage,
@@ -613,20 +628,14 @@ impl Ui {
             Row::Switch(Switch::Hotkey),
             Row::Heading("显示内容", "Shown"),
         ];
-        rows.extend(self.prefs.modules.iter().map(|entry| Row::Module(entry.id.clone())));
+        for entry in &self.prefs.modules {
+            rows.push(Row::Module(entry.id.clone()));
+            if self.expanded.contains(&entry.id) {
+                rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
+                rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
+            }
+        }
         rows.extend([
-            Row::Heading("细节", "Details"),
-            Row::Switch(Switch::CpuThreads),
-            Row::Switch(Switch::CpuClock),
-            Row::Switch(Switch::GpuMemory),
-            Row::Switch(Switch::GpuSensors),
-            Row::Switch(Switch::GpuEngines),
-            Row::Switch(Switch::MemoryDetails),
-            Row::Switch(Switch::NetworkDetails),
-            Row::Switch(Switch::DiskActive),
-            Row::Choice(Field::RateUnit),
-            Row::Choice(Field::ProcessCount),
-            Row::Choice(Field::ProcessSort),
             Row::Heading("数据", "Data"),
             Row::Choice(Field::Interval),
             Row::Choice(Field::Span),
@@ -660,6 +669,7 @@ impl Ui {
                 Row::Title => (0.0, 36.0),
                 Row::Heading(..) => (GROUP_GAP, 20.0),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
+                Row::Item(..) | Row::ModuleChoice(..) => (2.0, ITEM_ROW),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
             };
             y += before;
@@ -772,18 +782,10 @@ impl Ui {
 
     /// A switch's label, its hint, and whether it is on.
     fn switch(&self, switch: Switch) -> (&'static str, Option<Cow<'static, str>>, bool) {
-        let (lang, prefs) = (self.lang, &self.prefs);
+        let lang = self.lang;
         let p = |zh, en| pick(lang, zh, en);
         let (name, hint, on) = match switch {
             Switch::Live => (p("实时折射", "Live refraction"), Some(p("开启后截图里不会出现面板", "The panel then stays out of screenshots")), self.settings.live_backdrop),
-            Switch::CpuThreads => (p("CPU 线程", "CPU threads"), None, prefs.cpu.threads),
-            Switch::CpuClock => (p("CPU 频率", "CPU clock"), None, prefs.cpu.clock),
-            Switch::GpuMemory => (p("显存", "Video memory"), None, prefs.gpu.memory),
-            Switch::GpuSensors => (p("GPU 温度、频率、功耗和风扇", "GPU temperature, clock, power and fan"), None, prefs.gpu.sensors),
-            Switch::GpuEngines => (p("GPU 各引擎", "GPU engines"), Some(p("3D、复制、视频编解码", "3D, copy, video")), prefs.gpu.engines),
-            Switch::MemoryDetails => (p("内存提交量和缓存", "Committed and cached memory"), None, prefs.memory.details),
-            Switch::NetworkDetails => (p("网卡、地址和累计流量", "Adapter, address and totals"), None, prefs.network.details),
-            Switch::DiskActive => (p("磁盘活动时间", "Disk active time"), None, prefs.disk.active),
             // Only a copy no ordinary program can replace (one the installer
             // put in Program Files) may start elevated unasked.
             Switch::Startup => (
@@ -841,17 +843,9 @@ impl Ui {
     }
 
     fn flip(&mut self, switch: Switch) {
-        let (settings, prefs) = (&mut self.settings, &mut self.prefs);
+        let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
-            Switch::CpuThreads => prefs.cpu.threads ^= true,
-            Switch::CpuClock => prefs.cpu.clock ^= true,
-            Switch::GpuMemory => prefs.gpu.memory ^= true,
-            Switch::GpuSensors => prefs.gpu.sensors ^= true,
-            Switch::GpuEngines => prefs.gpu.engines ^= true,
-            Switch::MemoryDetails => prefs.memory.details ^= true,
-            Switch::NetworkDetails => prefs.network.details ^= true,
-            Switch::DiskActive => prefs.disk.active ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::Hotkey => settings.hotkey ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
@@ -887,6 +881,95 @@ impl Ui {
         }
     }
 
+    /// Whether module `id` is on.
+    fn module_on(&self, id: &str) -> bool {
+        self.prefs.modules.iter().any(|entry| entry.id == id && entry.on)
+    }
+
+    /// The items of module `id` this machine has shown it can read: only
+    /// those are listed.
+    fn items_here(&self, id: &str) -> Vec<&'static str> {
+        let app = crate::app();
+        let seen = app.controller.seen.lock().unwrap();
+        let info = &app.info;
+        let gpu = info.gpu_of(id).map(|index| (&info.gpus[index], seen.gpus.get(index).cloned().unwrap_or_default()));
+        // A module this machine has shown nothing of (no battery, no board
+        // sensors, a GPU not read) has no lane, and nothing to set.
+        let present = match id.split(':').next().unwrap_or(id) {
+            "battery" => seen.battery,
+            "board" => seen.board.is_some(),
+            "gpu" => gpu.as_ref().is_some_and(|(_, seen)| seen.present),
+            _ => true,
+        };
+        if !present {
+            return Vec::new();
+        }
+        prefs::items(id)
+            .iter()
+            .map(|item| item.name)
+            .filter(|name| match (id.split(':').next().unwrap_or(id), *name) {
+                (_, "chart") => true,
+                ("cpu", "temp") => seen.cpu_temp,
+                ("cpu", "clock") => seen.cpu_clock,
+                ("cpu", "power") => seen.cpu_power,
+                ("cpu", "ccds") => seen.ccds.len() > 1,
+                ("cpu", "threads") => seen.threads > 0,
+                ("gpu", name) => gpu.as_ref().is_some_and(|(info, seen)| match name {
+                    "temp" => seen.temp,
+                    "vram" => info.mem_total > 0,
+                    "clock" => seen.clock,
+                    "power" => seen.power,
+                    "fan" => seen.fan,
+                    "shared" => info.shared_total > 0,
+                    _ => !seen.engines.is_empty(),
+                }),
+                ("memory", "dimms") => seen.dimms > 0,
+                ("network", "address") => seen.address,
+                ("network", "link") => seen.link,
+                ("disk", "drives") => !seen.drives.is_empty(),
+                ("disk", "active") => seen.disk_active,
+                ("board", "temps") => seen.board.as_ref().is_some_and(|board| !board.temps.is_empty()),
+                ("board", "fans") => seen.board.as_ref().is_some_and(|board| !board.fans.is_empty()),
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// What an item of module `id` is called, and a word on it.
+    fn item_label(&self, id: &str, name: &str) -> (&'static str, Option<&'static str>) {
+        let p = |zh, en| pick(self.lang, zh, en);
+        match (id.split(':').next().unwrap_or(id), name) {
+            ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
+            ("battery", "chart") => (p("电量图表", "Charge chart"), None),
+            (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
+            ("board", "temps") => (p("温度传感器", "Temperature sensors"), None),
+            ("board", "fans") => (p("风扇", "Fans"), None),
+            ("system", "uptime") => (p("开机时长", "Uptime"), None),
+            ("system", "processes") => (p("进程数", "Processes"), None),
+            ("system", "threads") => (p("线程数", "Threads"), None),
+            ("system", "handles") => (p("句柄数", "Handles"), None),
+            (_, "temp") => (p("温度", "Temperature"), None),
+            (_, "clock") => (p("频率", "Clock"), None),
+            (_, "power") => (p("功耗", "Power"), None),
+            (_, "ccds") => (p("各 CCD 温度", "Each CCD's temperature"), None),
+            (_, "threads") => (p("线程", "Threads"), Some(p("每个线程的占用", "Each thread's load"))),
+            (_, "vram") => (p("显存", "Video memory"), None),
+            (_, "fan") => (p("风扇", "Fan"), None),
+            (_, "shared") => (p("共享显存", "Shared memory"), Some(p("从内存借用的部分", "Borrowed from system memory"))),
+            (_, "engines") => (p("各引擎", "Engines"), Some(p("3D、复制、视频编解码", "3D, copy, video"))),
+            (_, "dimms") => (p("内存条温度", "Module temperatures"), None),
+            (_, "committed") => (p("已提交", "Committed"), None),
+            (_, "cached") => (p("缓存", "Cached"), None),
+            (_, "adapter") => (p("网卡名称", "Adapter"), None),
+            (_, "address") => (p("地址", "Address"), None),
+            (_, "link") => (p("链路速度", "Link speed"), None),
+            (_, "totals") => (p("开机以来的流量", "Traffic since boot"), None),
+            (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
+            (_, "active") => (p("活动时间", "Active time"), None),
+            _ => (p("其他", "Other"), None),
+        }
+    }
+
     // ---- Input ----
 
     fn hovered(&self) -> Option<Target> {
@@ -912,6 +995,8 @@ impl Ui {
             self.focus = Some(self.stop_for(target));
         }
         if let Some(Target::Grip(id)) = &self.pressed {
+            // A card travels closed.
+            self.expanded.remove(id);
             let top = self.row_top(id);
             self.drag = Some(Drag { id: id.clone(), grab: y + self.scroll - top, pointer: y + self.scroll });
             unsafe { SetCapture(self.hwnd) };
@@ -966,6 +1051,18 @@ impl Ui {
                 }
                 self.save();
             }
+            Target::Expand(id) => {
+                if !self.expanded.remove(&id) {
+                    self.expanded.insert(id);
+                }
+            }
+            // An item is changed only while its module is on.
+            Target::Item(id, name) if self.module_on(&id) => {
+                let on = self.prefs.shows(&id, name);
+                self.prefs.set_item(&id, name, !on);
+                self.save();
+            }
+            Target::Item(..) => {}
             // The uninstaller asks first and closes Glance itself.
             Target::Uninstall => {
                 // Checked again as it is run: the window may have been open a while.
@@ -1009,6 +1106,9 @@ impl Ui {
                 Row::Choice(field) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
                 Row::Switch(switch) => Some(Target::Switch(switch)),
                 Row::Module(id) => Some(Target::Module(id)),
+                Row::Item(id, name) if self.module_on(&id) => Some(Target::Item(id, name)),
+                Row::ModuleChoice(id, field) if self.module_on(&id) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
+                Row::Item(..) | Row::ModuleChoice(..) => None,
                 Row::Update => Some(Target::Update),
                 Row::Diagnostics => Some(Target::Diagnostics),
                 Row::Uninstall => Some(Target::Uninstall),
@@ -1114,7 +1214,9 @@ impl Ui {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
-            (Row::Module(m), Target::Module(n)) => m == n,
+            (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
+            (Row::Item(m, a), Target::Item(n, b)) => m == n && a == b,
+            (Row::ModuleChoice(_, f), Target::Choice(g, _)) => f == g,
             _ => false,
         });
         let Some((_, top, height)) = row else { return };
@@ -1354,6 +1456,39 @@ impl Ui {
                     }
                     self.module_row(frame, palette, &id, left, y + offset, width, row_height, now, &hovered, false);
                 }
+                // A card's rows glide with its module's, set in under it;
+                // while the module is off they are greyed and do nothing,
+                // and keep their state.
+                Row::Item(id, name) => {
+                    let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
+                    let (x, w) = (left + ITEM_INDENT, width - ITEM_INDENT);
+                    card(frame, palette, x, y, w, row_height, palette.card);
+                    let active = self.module_on(&id);
+                    let (name_text, detail) = self.item_label(&id, name);
+                    let target = Target::Item(id.clone(), name);
+                    field_label(frame, palette, name_text, detail, label, hint, x + ROW_SIDE, y + row_height / 2.0, w - 2.0 * ROW_SIDE - 64.0);
+                    let pressed = self.pressed == Some(target.clone());
+                    let on = self.prefs.shows(&id, name);
+                    self.toggle(frame, palette, format!("item:{id}:{name}"), on, x + w - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
+                    if active {
+                        self.targets.push((Rect { x, y, w, h: row_height }, target));
+                    } else {
+                        fill(frame, palette.window.alpha(0.55), x, y, w, row_height, 6.0);
+                    }
+                }
+                Row::ModuleChoice(id, field) => {
+                    let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
+                    let (x, w) = (left + ITEM_INDENT, width - ITEM_INDENT);
+                    card(frame, palette, x, y, w, row_height, palette.card);
+                    let (name, options, chosen) = self.choices(field);
+                    text_centred(frame, name, label, palette.text, x + ROW_SIDE, y + row_height / 2.0, w / 2.0, Align::Start);
+                    let targets = self.targets.len();
+                    self.segmented(frame, palette, field, &options, chosen, x + w - ROW_SIDE, y + row_height / 2.0, now, &hovered);
+                    if !self.module_on(&id) {
+                        self.targets.truncate(targets);
+                        fill(frame, palette.window.alpha(0.55), x, y, w, row_height, 6.0);
+                    }
+                }
                 Row::Update => {
                     let Some((version, state)) = update::available() else { continue };
                     let name = match lang {
@@ -1483,12 +1618,41 @@ impl Ui {
             unsafe { frame.dc.FillEllipse(&dot, frame.brush(palette.text3)) };
         }
         let text_left = grip.x + grip.w + 12.0;
-        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, y + height / 2.0, left + width - ROW_SIDE - 64.0 - text_left);
+        // A card with something in it opens: a chevron, and while closed,
+        // how many of its items are on.
+        let items = self.items_here(id);
+        let opens = !items.is_empty() || !module_fields(id).is_empty();
+        let open = self.expanded.contains(id);
+        let switch_left = left + width - ROW_SIDE - 40.0;
+        let mut right = switch_left - 12.0;
+        if opens {
+            let chevron = Font::new(Family::Icons, 12.0, 400.0);
+            let glyph = if open { "\u{E70E}" } else { "\u{E70D}" };
+            let glyph_w = frame.gfx.measure(glyph, chevron);
+            right -= 20.0;
+            text_centred(frame, glyph, chevron, palette.text2, right + (20.0 - glyph_w) / 2.0, y + height / 2.0, 20.0, Align::Start);
+            if !open && !items.is_empty() {
+                let shown = items.iter().filter(|name| self.prefs.shows(id, name)).count();
+                let summary = match self.lang {
+                    Lang::Zh => format!("已开 {shown}/{} 项", items.len()),
+                    Lang::En => format!("{shown} of {} on", items.len()),
+                };
+                let small = Font::new(Family::Segoe, 12.0, 400.0);
+                let summary_w = frame.gfx.measure(&summary, small);
+                right -= summary_w + 10.0;
+                text_centred(frame, &summary, small, palette.text3, right, y + height / 2.0, summary_w + 4.0, Align::Start);
+            }
+            right -= 8.0;
+        }
+        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, y + height / 2.0, right - text_left);
         let pressed = self.pressed == Some(Target::Module(id.to_string()));
-        self.toggle(frame, palette, format!("module:{id}"), on, left + width - ROW_SIDE - 40.0, y + height / 2.0, now, pressed);
+        self.toggle(frame, palette, format!("module:{id}"), on, switch_left, y + height / 2.0, now, pressed);
         if !held {
             self.targets.push((grip, Target::Grip(id.to_string())));
-            self.targets.push((Rect { x: grip.x + grip.w, y, w: left + width - grip.x - grip.w, h: height }, Target::Module(id.to_string())));
+            let switch_area = Rect { x: switch_left - 12.0, y, w: left + width - switch_left + 12.0, h: height };
+            self.targets.push((switch_area, Target::Module(id.to_string())));
+            let rest = Rect { x: grip.x + grip.w, y, w: switch_area.x - grip.x - grip.w, h: height };
+            self.targets.push((rest, if opens { Target::Expand(id.to_string()) } else { Target::Module(id.to_string()) }));
         }
     }
 

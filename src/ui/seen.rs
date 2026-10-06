@@ -23,6 +23,8 @@ pub struct Seen {
     /// Each of the machine's GPUs, as `StaticInfo::gpus` lists them.
     pub gpus: Vec<GpuSeen>,
     pub dimms: usize,
+    /// The disks' busy time (which macOS does not keep).
+    pub disk_active: bool,
     pub address: bool,
     pub link: bool,
     /// The drives that give their temperature: number, and name.
@@ -78,6 +80,7 @@ impl Seen {
             merge(&mut seen.engines, gpu.engines.iter().flatten().map(|(kind, _)| kind.clone()), |a, b| a == b);
         }
         self.dimms = self.dimms.max(s.dimm_temps.len());
+        self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
             self.link |= network.link_bps > 0;

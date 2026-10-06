@@ -128,9 +128,13 @@ pub(crate) fn quit() {
     tray::quit();
 }
 
-/// The mutex a running Glance holds, one per sign-in session.
-#[cfg(windows)]
+/// The mutex a running Glance holds, one per sign-in session. A debug build
+/// is a Glance of its own (its own settings too, see `settings::config_dir`):
+/// it runs beside an installed one without either taking the other's place.
+#[cfg(all(windows, not(debug_assertions)))]
 const SINGLE_INSTANCE: PCWSTR = w!("Local\\Glance.SingleInstance");
+#[cfg(all(windows, debug_assertions))]
+const SINGLE_INSTANCE: PCWSTR = w!("Local\\Glance.SingleInstance.Debug");
 
 /// Whether Glance already runs in this session.
 #[cfg(windows)]

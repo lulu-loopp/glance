@@ -107,13 +107,14 @@ impl Settings {
 }
 
 /// Where Glance keeps its settings: the user's roaming application data,
-/// under Glance's identifier.
+/// under Glance's identifier (a debug build's, under its own, so it never
+/// rewrites an installed Glance's).
 #[cfg(windows)]
 pub fn config_dir() -> PathBuf {
     let roaming = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.expect("application data folder");
     let path = PathBuf::from(unsafe { roaming.to_string() }.expect("folder path"));
     unsafe { CoTaskMemFree(Some(roaming.0 as *const _)) };
-    path.join("dev.weiyi.glance")
+    path.join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
 }
 
 #[cfg(windows)]

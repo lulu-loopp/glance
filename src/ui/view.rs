@@ -105,8 +105,9 @@ pub enum Pass {
 
 enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
-    Readout { figure: String, unit: &'static str, hot: bool, plot: Plot },
-    Rates { rows: Vec<(String, String)>, plot: Plot },
+    /// A figure, and its chart unless the module's chart is switched off.
+    Readout { figure: String, unit: &'static str, hot: bool, plot: Option<Plot> },
+    Rates { rows: Vec<(String, String)>, plot: Option<Plot> },
     /// Each thread's load (0–1), unread where `None`, and whether it is hot.
     Threads(Vec<(Option<f32>, bool)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
@@ -137,7 +138,7 @@ impl Hash for Block {
         match self {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
-            Block::Rates { rows, plot } => (rows, plot.max.to_bits()).hash(state),
+            Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
@@ -207,19 +208,22 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
     let hot_load = prefs.hot_load;
     let hot_temp = prefs.hot_temp;
+    // Whether the module's item is switched on.
+    let on = |item: &str| prefs.shows(id, item);
+    let chart = on("chart");
     let readout = |value: Option<f32>, read: Series| Block::Readout {
         figure: shown(value, |value| format!("{value:.0}")),
         unit: "%",
         hot: value.is_some_and(|value| value > hot_load),
-        plot: Plot::new(scene, vec![read], Some(100.0), Some(hot_load as f64)),
+        plot: chart.then(|| Plot::new(scene, vec![read], Some(100.0), Some(hot_load as f64))),
     };
     Some(match id {
         "cpu" => {
             let sensors = s.cpu_sensors.as_ref();
             let temp = sensors.and_then(|c| c.temp);
-            let had_temp = scene.seen.cpu_temp;
+            let had_temp = on("temp") && scene.seen.cpu_temp;
             let clock = s.ghz.map(|ghz| format!("{ghz:.2} GHz"));
-            let had_clock = prefs.cpu.clock && scene.seen.cpu_clock;
+            let had_clock = on("clock") && scene.seen.cpu_clock;
             // The temperature takes the corner, as on the GPU lanes; the
             // clock, the power and each chiplet's temperature go below.
             let aside = if had_temp {
@@ -233,23 +237,23 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if had_temp && had_clock {
                 facts.push((lang.pick("频率", "Clock").into(), clock.unwrap_or_else(|| UNREAD.into()), false));
             }
-            if scene.seen.cpu_power {
+            if on("power") && scene.seen.cpu_power {
                 facts.push((lang.pick("功耗", "Power").into(), shown(sensors.and_then(|c| c.power), |power| format!("{power:.1} W")), false));
             }
             let chiplets = &scene.seen.ccds;
-            if chiplets.len() > 1 {
+            if on("ccds") && chiplets.len() > 1 {
                 for &ccd in chiplets {
                     let value = sensors.and_then(|c| c.ccds.iter().find(|(read, _)| *read == ccd)).map(|(_, value)| *value);
                     facts.push((format!("CCD {}", ccd + 1), shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
                 }
             }
             let mut blocks = vec![
-                head("CPU", &info.cpu_name, aside, temp.is_some_and(|t| t > hot_temp)),
+                head("CPU", &info.cpu_name, aside, had_temp && temp.is_some_and(|t| t > hot_temp)),
                 readout(s.cpu, Box::new(|s| s.cpu.map(f64::from))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.seen.threads;
-            if prefs.cpu.threads && threads > 0 {
+            if on("threads") && threads > 0 {
                 let load = |i: usize| s.threads.get(i).copied().flatten();
                 blocks.push(Block::Threads((0..threads).map(|i| (load(i).map(|load| load / 100.0), load(i).is_some_and(|load| load > hot_load))).collect()));
             }
@@ -260,14 +264,15 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let gpu = &info.gpus[index];
             let had = scene.seen.gpus.get(index).filter(|seen| seen.present)?;
             let reading = s.gpus.get(index);
-            let temp = reading.and_then(|g| g.temp).filter(|_| prefs.gpu.sensors);
-            let aside = if prefs.gpu.sensors && had.temp { shown(temp, celsius) } else { String::new() };
+            let shows_temp = on("temp") && had.temp;
+            let temp = reading.and_then(|g| g.temp).filter(|_| shows_temp);
+            let aside = if shows_temp { shown(temp, celsius) } else { String::new() };
             let usage = reading.and_then(|g| g.usage);
             let mut blocks = vec![
                 head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
                 readout(usage, Box::new(move |s| s.gpus.get(index)?.usage.map(f64::from))),
             ];
-            if prefs.gpu.memory {
+            if on("vram") {
                 let used = reading.and_then(|g| g.mem_used);
                 blocks.push(Block::Meter {
                     label: lang.pick("显存", "VRAM").into(),
@@ -277,7 +282,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     gap: 8.0,
                 });
             }
-            if prefs.gpu.engines {
+            if on("engines") {
                 // An engine the counters no longer list has nothing running
                 // on it; with the engines unread, none is known.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
@@ -293,21 +298,19 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 }
             }
             let mut facts = Vec::new();
-            if prefs.gpu.sensors {
-                if had.clock {
-                    facts.push((lang.pick("频率", "Clock").into(), shown(reading.and_then(|g| g.clock_mhz), |clock| format!("{clock:.0} MHz")), false));
-                }
-                if had.power {
-                    facts.push((lang.pick("功耗", "Power").into(), shown(reading.and_then(|g| g.power), |power| format!("{power:.1} W")), false));
-                }
-                if had.fan {
-                    facts.push((lang.pick("风扇", "Fan").into(), shown(reading.and_then(|g| g.fan_rpm), |rpm| format!("{rpm} RPM")), false));
-                }
-                // Memory the card borrows from the system's, where it has its own
-                // besides (not where all of it is the system's, as on a Mac).
-                if gpu.shared_total > 0 {
-                    facts.push((lang.pick("共享显存", "Shared").into(), shown(reading.and_then(|g| g.shared_used), |used| text::usage(used, gpu.shared_total)), false));
-                }
+            if on("clock") && had.clock {
+                facts.push((lang.pick("频率", "Clock").into(), shown(reading.and_then(|g| g.clock_mhz), |clock| format!("{clock:.0} MHz")), false));
+            }
+            if on("power") && had.power {
+                facts.push((lang.pick("功耗", "Power").into(), shown(reading.and_then(|g| g.power), |power| format!("{power:.1} W")), false));
+            }
+            if on("fan") && had.fan {
+                facts.push((lang.pick("风扇", "Fan").into(), shown(reading.and_then(|g| g.fan_rpm), |rpm| format!("{rpm} RPM")), false));
+            }
+            // Memory the card borrows from the system's, where it has its own
+            // besides (not where all of it is the system's, as on a Mac).
+            if on("shared") && gpu.shared_total > 0 {
+                facts.push((lang.pick("共享显存", "Shared").into(), shown(reading.and_then(|g| g.shared_used), |used| text::usage(used, gpu.shared_total)), false));
             }
             blocks.push(Block::Facts { rows: facts, gap: 10.0 });
             blocks
@@ -317,13 +320,15 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let percent = (s.memory.used as f64 / total * 100.0) as f32;
             let mut facts = Vec::new();
             // Each module's own temperature, as each chiplet's on the CPU lane.
-            for i in 0..scene.seen.dimms {
+            for i in 0..if on("dimms") { scene.seen.dimms } else { 0 } {
                 let name = if lang == Lang::Zh { format!("内存条 {}", i + 1) } else { format!("Module {}", i + 1) };
                 let value = s.dimm_temps.get(i).copied();
                 facts.push((name, shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
             }
-            if prefs.memory.details {
+            if on("committed") {
                 facts.push((lang.pick("已提交", "Committed").into(), text::usage(s.memory.committed, s.memory.commit_limit), false));
+            }
+            if on("cached") {
                 facts.push((lang.pick("缓存", "Cached").into(), text::size(s.memory.cached), false));
             }
             vec![
@@ -332,7 +337,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     figure: format!("{percent:.0}"),
                     unit: "%",
                     hot: percent > hot_load,
-                    plot: Plot::new(scene, vec![Box::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64)),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64))),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -342,29 +347,32 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let plot = Plot::new(scene, vec![Box::new(|s| s.net_down), Box::new(|s| s.net_up)], None, None);
             let scale = plot.max;
             let mut facts = Vec::new();
-            if prefs.network.details {
-                let adapter = s.network.as_ref();
+            let adapter = s.network.as_ref();
+            if on("adapter") {
                 facts.push((lang.pick("网卡", "Adapter").into(), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.name.clone()), false));
-                if scene.seen.address {
-                    facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
-                }
-                let link = |s: &Sample| s.network.as_ref().map(|a| a.link_bps).filter(|bps| *bps > 0);
-                if scene.seen.link {
-                    facts.push((lang.pick("链路", "Link").into(), shown(link(s), text::link_speed), false));
-                }
+            }
+            if on("address") && scene.seen.address {
+                facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
+            }
+            let link = |s: &Sample| s.network.as_ref().map(|a| a.link_bps).filter(|bps| *bps > 0);
+            if on("link") && scene.seen.link {
+                facts.push((lang.pick("链路", "Link").into(), shown(link(s), text::link_speed), false));
+            }
+            if on("totals") {
                 let (down, up) = (text::bytes(s.net_total_down as f64), text::bytes(s.net_total_up as f64));
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
                 facts.push((lang.pick("开机以来", "Since boot").into(), total, false));
             }
             vec![
                 // The adapter traffic leaves by now, which may have changed.
-                head(lang.pick("网络", "Network"), s.network.as_ref().map(|a| a.model.clone()).unwrap_or_default(), full_scale_text(lang, scale, bits), false),
+                // The chart's scale goes with the chart.
+                head(lang.pick("网络", "Network"), s.network.as_ref().map(|a| a.model.clone()).unwrap_or_default(), if chart { full_scale_text(lang, scale, bits) } else { String::new() }, false),
                 Block::Rates {
                     rows: vec![
                         (lang.pick("下载", "Down").into(), shown(s.net_down, |rate| text::rate(rate, bits))),
                         (lang.pick("上传", "Up").into(), shown(s.net_up, |rate| text::rate(rate, bits))),
                     ],
-                    plot,
+                    plot: chart.then_some(plot),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -372,9 +380,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         "disk" => {
             let plot = Plot::new(scene, vec![Box::new(|s| s.disk_read), Box::new(|s| s.disk_write)], None, None);
             let scale = plot.max;
-            let drives = &scene.seen.drives;
+            let drives: &[(u32, String)] = if on("drives") { &scene.seen.drives } else { &[] };
             let temp = |id: u32| s.drive_temps.iter().find(|d| d.id == id).map(|d| d.celsius);
-            let hottest = s.drive_temps.iter().map(|d| d.celsius).fold(None, |max: Option<f32>, t| Some(max.map_or(t, |m| m.max(t))));
+            let hottest = drives.iter().filter_map(|(id, _)| temp(*id)).fold(None, |max: Option<f32>, t| Some(max.map_or(t, |m| m.max(t))));
             // A drive's temperature takes the corner, as a GPU's does, and the
             // chart's scale moves below.
             let mut facts: Vec<(String, String, bool)> = Vec::new();
@@ -384,13 +392,16 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     facts.push((name.clone(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
                 }
             }
-            if prefs.disk.active {
+            if on("active") {
                 facts.push((lang.pick("活动时间", "Active time").into(), shown(s.disk_active, text::percent), false));
             }
+            // The chart's scale goes with the chart.
             let aside = if drives.is_empty() {
-                full_scale_text(lang, scale, false)
+                if chart { full_scale_text(lang, scale, false) } else { String::new() }
             } else {
-                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
+                if chart {
+                    facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
+                }
                 shown(hottest, celsius)
             };
             vec![
@@ -400,7 +411,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         (lang.pick("读取", "Read").into(), shown(s.disk_read, |rate| text::rate(rate, false))),
                         (lang.pick("写入", "Write").into(), shown(s.disk_write, |rate| text::rate(rate, false))),
                     ],
-                    plot,
+                    plot: chart.then_some(plot),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -445,7 +456,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let named = |name: &str, numbered: (&str, &str)| {
                 if name.parse::<u32>().is_ok() { format!("{} {name}", lang.pick(numbered.0, numbered.1)) } else { lang.name(name) }
             };
-            let (temps, fans) = (&had.temps, &had.fans);
+            let none = Vec::new();
+            let temps = if on("temps") { &had.temps } else { &none };
+            let fans = if on("fans") { &had.fans } else { &none };
             let value = |list: Option<&Vec<(String, f32)>>, name: &str| list.and_then(|list| list.iter().find(|(n, _)| n == name)).map(|(_, v)| *v);
             vec![
                 head(lang.pick("主板", "Motherboard"), &info.board, "", false),
@@ -490,22 +503,22 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     figure: shown(battery, |b| b.percent.to_string()),
                     unit: "%",
                     hot: battery.is_some_and(|b| !b.charging && b.percent <= 20),
-                    plot: Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
             ]
         }
-        "system" => vec![
-            head(lang.pick("系统", "System"), "", "", false),
-            Block::Facts {
-                rows: vec![
-                    (lang.pick("开机时长", "Uptime").into(), lang.duration(s.system.uptime_s), false),
-                    (lang.pick("进程", "Processes").into(), s.system.processes.to_string(), false),
-                    (lang.pick("线程", "Threads").into(), s.system.threads.to_string(), false),
-                    (lang.pick("句柄", "Handles").into(), s.system.handles.to_string(), false),
-                ],
-                gap: 0.0,
-            },
-        ],
+        "system" => {
+            let rows = [
+                ("uptime", lang.pick("开机时长", "Uptime"), lang.duration(s.system.uptime_s)),
+                ("processes", lang.pick("进程", "Processes"), s.system.processes.to_string()),
+                ("threads", lang.pick("线程", "Threads"), s.system.threads.to_string()),
+                ("handles", lang.pick("句柄", "Handles"), s.system.handles.to_string()),
+            ];
+            vec![
+                head(lang.pick("系统", "System"), "", "", false),
+                Block::Facts { rows: rows.into_iter().filter(|(item, ..)| on(item)).map(|(_, label, value)| (label.into(), value, false)).collect(), gap: 0.0 },
+            ]
+        }
         _ => return None,
     })
 }
@@ -729,8 +742,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
     for block in &lane.blocks {
         let height = block.height();
         match (block, pass) {
-            (Block::Readout { plot, .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
-            (Block::Rates { plot, .. }, Pass::Plots) => {
+            (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
+            (Block::Rates { plot: Some(plot), .. }, Pass::Plots) => {
                 paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height)
             }
             (_, Pass::Plots) => {}
