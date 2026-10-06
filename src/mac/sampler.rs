@@ -138,7 +138,7 @@ impl Sampler {
             let (was_busy, was_total) = self.previous.cores.get(i).copied().unwrap_or((0, 0));
             (busy + now_busy.saturating_sub(was_busy), total + now_total.saturating_sub(was_total))
         });
-        let cpu = if total == 0 { 0.0 } else { (busy as f64 / total as f64 * 100.0) as f32 };
+        let cpu = (total > 0).then(|| (busy as f64 / total as f64 * 100.0) as f32);
 
         let interfaces = interfaces();
         let net = hardware_bytes(&interfaces);
@@ -167,14 +167,15 @@ impl Sampler {
             ghz: report.cpu_mhz.map(|mhz| mhz / 1000.0),
             memory: memory(self.info.mem_total),
             gpus,
-            net_down,
-            net_up,
+            net_down: Some(net_down),
+            net_up: Some(net_up),
             net_total_down: net.0,
             net_total_up: net.1,
             network: primary_interface(self.network.as_ref(), &interfaces),
-            disk_read,
-            disk_write,
-            disk_active: 0.0,
+            disk_read: Some(disk_read),
+            disk_write: Some(disk_write),
+            // macOS does not keep the disks' busy time.
+            disk_active: None,
             volumes: volumes(),
             processes,
             system: SystemSample { uptime_s: uptime(), processes: counted, threads: 0, handles: 0 },

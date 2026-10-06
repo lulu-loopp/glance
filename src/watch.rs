@@ -101,7 +101,7 @@ fn temperatures(sample: &Sample, info: &StaticInfo) -> Vec<(String, Option<f32>)
 /// The tooltip: Glance's name, then the CPU, each graphics card and the
 /// memory, a line each.
 fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
-    let mut rows = vec![("CPU".to_string(), Some(sample.cpu), sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))];
+    let mut rows = vec![("CPU".to_string(), sample.cpu, sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))];
     let several = sample.gpus.len() > 1;
     for (i, gpu) in sample.gpus.iter().enumerate() {
         let name = if several { format!("GPU {}", i + 1) } else { "GPU".to_string() };

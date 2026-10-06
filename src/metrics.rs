@@ -64,10 +64,6 @@ struct Slow {
 /// unreported, rather than everything else with it.
 pub struct Sampler {
     query: PDH_HQUERY,
-    /// Each processor group's first processor, counted across the groups,
-    /// and how many processors there are.
-    group_starts: Vec<usize>,
-    processors: usize,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
     gpu_engine: Option<PDH_HCOUNTER>,
@@ -150,11 +146,8 @@ impl Sampler {
             gpus,
             found,
         };
-        let (group_starts, processors) = processor_groups();
         Sampler {
             query,
-            group_starts,
-            processors,
             cpu_time,
             cpu_performance,
             gpu_engine,
@@ -194,13 +187,15 @@ impl Sampler {
         // number in the group); one not read this time, or not listed,
         // stays unread there.
         let per_thread = counter(self.cpu_time).and_then(|counter| read_array(counter, &mut self.buf));
-        let mut threads: Vec<Option<f32>> = if per_thread.is_some() { vec![None; self.processors] } else { Vec::new() };
+        // Looked up each time: processors can be added while Glance runs.
+        let (group_starts, processors) = processor_groups();
+        let mut threads: Vec<Option<f32>> = if per_thread.is_some() { vec![None; processors] } else { Vec::new() };
         for (name, value) in per_thread.unwrap_or_default() {
             if name == "_Total" {
                 cpu = value.map(|value| value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
                 if let (Ok(group), Ok(index)) = (group.parse::<usize>(), index.parse::<usize>()) {
-                    let place = self.group_starts.get(group).map(|start| start + index);
+                    let place = group_starts.get(group).map(|start| start + index);
                     if let Some(cell) = place.and_then(|place| threads.get_mut(place)) {
                         *cell = value.map(|value| value as f32);
                     }
@@ -233,6 +228,7 @@ impl Sampler {
         // from zero.
         let now = Instant::now();
         let octets = net_octets();
+        // No rate without two reads to take it between.
         let (net_down, net_up) = match (&octets, &self.net_prev) {
             (Some(adapters), Some((before, at))) => {
                 let dt = now.duration_since(*at).as_secs_f64();
@@ -241,9 +237,9 @@ impl Sampler {
                     Some((rx_then, tx_then)) => (down + moved(*rx, *rx_then), up + moved(*tx, *tx_then)),
                     None => (down, up),
                 });
-                (down as f64 / dt, up as f64 / dt)
+                (Some(down as f64 / dt), Some(up as f64 / dt))
             }
-            _ => (0.0, 0.0),
+            _ => (None, None),
         };
         if let Some(adapters) = octets {
             self.net_prev = Some((adapters, now));
@@ -257,7 +253,7 @@ impl Sampler {
         let page = perf.PageSize as u64;
         Some(Sample {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
-            cpu: cpu.unwrap_or(0.0),
+            cpu,
             threads,
             ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
             memory: MemorySample {
@@ -272,9 +268,9 @@ impl Sampler {
             net_total_down: down,
             net_total_up: up,
             network: self.slow.network.clone(),
-            disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
-            disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).unwrap_or(0.0),
-            disk_active: counter(self.disk_idle).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map_or(0.0, |idle| (100.0 - idle).clamp(0.0, 100.0)) as f32,
+            disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
+            disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
+            disk_active: counter(self.disk_idle).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map(|idle| (100.0 - idle).clamp(0.0, 100.0) as f32),
             volumes: volumes(),
             processes: self.slow.processes.clone(),
             system: SystemSample {
@@ -970,7 +966,7 @@ mod tests {
         assert_eq!(sample.threads.len(), sampler.info.threads);
         // Every processor's thread read, each in its place.
         assert!(sample.threads.iter().all(Option::is_some));
-        assert!((0.0..=100.0).contains(&sample.cpu));
+        assert!(sample.cpu.is_some_and(|cpu| (0.0..=100.0).contains(&cpu)));
         assert!(sample.memory.used > 0 && sample.memory.used < sampler.info.mem_total);
         assert!(sample.memory.committed <= sample.memory.commit_limit);
         assert_eq!(sample.gpus.len(), sampler.info.gpus.len());

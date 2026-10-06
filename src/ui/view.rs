@@ -245,7 +245,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             }
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(Some(s.cpu), Box::new(|s| Some(s.cpu as f64))),
+                readout(s.cpu, Box::new(|s| s.cpu.map(f64::from))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.seen.threads;
@@ -339,7 +339,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         }
         "network" => {
             let bits = prefs.network.bits;
-            let plot = Plot::new(scene, vec![Box::new(|s| Some(s.net_down)), Box::new(|s| Some(s.net_up))], None, None);
+            let plot = Plot::new(scene, vec![Box::new(|s| s.net_down), Box::new(|s| s.net_up)], None, None);
             let scale = plot.max;
             let mut facts = Vec::new();
             if prefs.network.details {
@@ -361,8 +361,8 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 head(lang.pick("网络", "Network"), s.network.as_ref().map(|a| a.model.clone()).unwrap_or_default(), full_scale_text(lang, scale, bits), false),
                 Block::Rates {
                     rows: vec![
-                        (lang.pick("下载", "Down").into(), text::rate(s.net_down, bits)),
-                        (lang.pick("上传", "Up").into(), text::rate(s.net_up, bits)),
+                        (lang.pick("下载", "Down").into(), shown(s.net_down, |rate| text::rate(rate, bits))),
+                        (lang.pick("上传", "Up").into(), shown(s.net_up, |rate| text::rate(rate, bits))),
                     ],
                     plot,
                 },
@@ -370,7 +370,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ]
         }
         "disk" => {
-            let plot = Plot::new(scene, vec![Box::new(|s| Some(s.disk_read)), Box::new(|s| Some(s.disk_write))], None, None);
+            let plot = Plot::new(scene, vec![Box::new(|s| s.disk_read), Box::new(|s| s.disk_write)], None, None);
             let scale = plot.max;
             let drives = &scene.seen.drives;
             let temp = |id: u32| s.drive_temps.iter().find(|d| d.id == id).map(|d| d.celsius);
@@ -385,7 +385,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 }
             }
             if prefs.disk.active {
-                facts.push((lang.pick("活动时间", "Active time").into(), text::percent(s.disk_active), false));
+                facts.push((lang.pick("活动时间", "Active time").into(), shown(s.disk_active, text::percent), false));
             }
             let aside = if drives.is_empty() {
                 full_scale_text(lang, scale, false)
@@ -397,8 +397,8 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 head(lang.pick("磁盘", "Disk"), info.drives.join(", "), aside, hottest.is_some_and(|t| t > hot_temp)),
                 Block::Rates {
                     rows: vec![
-                        (lang.pick("读取", "Read").into(), text::rate(s.disk_read, false)),
-                        (lang.pick("写入", "Write").into(), text::rate(s.disk_write, false)),
+                        (lang.pick("读取", "Read").into(), shown(s.disk_read, |rate| text::rate(rate, false))),
+                        (lang.pick("写入", "Write").into(), shown(s.disk_write, |rate| text::rate(rate, false))),
                     ],
                     plot,
                 },
@@ -1017,19 +1017,19 @@ mod tests {
         use crate::reading::*;
         Sample {
             t: 0,
-            cpu: 10.0,
+            cpu: Some(10.0),
             threads: vec![Some(10.0); 4],
             ghz: Some(3.0),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
             gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
-            net_down: 0.0,
-            net_up: 0.0,
+            net_down: Some(0.0),
+            net_up: Some(0.0),
             net_total_down: 0,
             net_total_up: 0,
             network: None,
-            disk_read: 0.0,
-            disk_write: 0.0,
-            disk_active: 0.0,
+            disk_read: Some(0.0),
+            disk_write: Some(0.0),
+            disk_active: Some(0.0),
             volumes: Vec::new(),
             processes: Vec::new(),
             system: SystemSample { uptime_s: 60, processes: 1, threads: 1, handles: 1 },

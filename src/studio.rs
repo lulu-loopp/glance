@@ -351,13 +351,13 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
     let (ghz, cpu_power) = (4.3 + 1.0 * busy + 0.1 * noise(), 22.0 + 150.0 * busy + 6.0 * noise());
     Sample {
         t: t_ms as u64,
-        cpu,
+        cpu: Some(cpu),
         threads,
         ghz: Some(ghz),
         memory: MemorySample { used, committed: used + 6 * gb, commit_limit: info.mem_total + 8 * gb, cached: 12 * gb },
         gpus,
-        net_down,
-        net_up,
+        net_down: Some(net_down),
+        net_up: Some(net_up),
         net_total_down: 38 * gb + seed * 900_000,
         net_total_up: 4 * gb + seed * 120_000,
         network: Some(NetworkInfo {
@@ -366,9 +366,9 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
             ipv4: Some("192.168.1.23".into()),
             link_bps: 2_401_000_000,
         }),
-        disk_read,
-        disk_write,
-        disk_active: 2.0 + 30.0 * busy,
+        disk_read: Some(disk_read),
+        disk_write: Some(disk_write),
+        disk_active: Some(2.0 + 30.0 * busy),
         volumes: vec![
             VolumeSample { name: "C:".into(), used: 205 * gb, total: 600 * gb },
             VolumeSample { name: "D:".into(), used: 268 * gb, total: 1262 * gb },

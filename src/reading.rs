@@ -52,7 +52,9 @@ pub struct GpuInfo {
 pub struct Sample {
     /// Milliseconds since the Unix epoch.
     pub t: u64,
-    pub cpu: f32,
+    /// The whole processor's use (%); `None` (as for each reading that may
+    /// be) where it was not read this time.
+    pub cpu: Option<f32>,
     /// Each logical processor's use (%), in order; `None` where it was not
     /// read this time.
     pub threads: Vec<Option<f32>>,
@@ -60,16 +62,16 @@ pub struct Sample {
     pub ghz: Option<f32>,
     pub memory: MemorySample,
     pub gpus: Vec<GpuSample>,
-    pub net_down: f64,
-    pub net_up: f64,
+    pub net_down: Option<f64>,
+    pub net_up: Option<f64>,
     /// Bytes moved since the interfaces came up.
     pub net_total_down: u64,
     pub net_total_up: u64,
     pub network: Option<NetworkInfo>,
-    pub disk_read: f64,
-    pub disk_write: f64,
+    pub disk_read: Option<f64>,
+    pub disk_write: Option<f64>,
     /// Percent of the time the disks were busy.
-    pub disk_active: f32,
+    pub disk_active: Option<f32>,
     pub volumes: Vec<VolumeSample>,
     /// The busiest programs by CPU, and by memory.
     /// The busiest programs by each measure, together (see `ProcessTable`).
