@@ -719,14 +719,15 @@ pub fn remove_settings() -> bool {
         return true;
     }
     let Some(held) = held_where_it_says(&folder) else { return false };
-    let file_gone = match Held::open(&folder.join("settings.json")) {
+    // The settings and the log, each by its handle.
+    let gone = ["settings.json", crate::journal::FILE].map(|name| match Held::open(&folder.join(name)) {
         Some(file) if file.lies_in(&held) => file.delete(),
         Some(_) => false,
         // Not opened: gone already, or held by another program.
-        None => folder.join("settings.json").symlink_metadata().is_err(),
-    };
+        None => folder.join(name).symlink_metadata().is_err(),
+    });
     held.delete();
-    file_gone
+    gone.iter().all(|gone| *gone)
 }
 
 /// `file` where it really is, if Glance may run it elevated without asking
@@ -1009,6 +1010,8 @@ pub fn ensure_pawnio(setup: &Path) {
         .is_ok_and(|status| status.success());
     if installed && pawnio_installed() {
         mark_pawnio_ours();
+    } else {
+        crate::journal::note("the PawnIO driver could not be installed; temperatures, power and fans will be missing");
     }
 }
 

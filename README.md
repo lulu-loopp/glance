@@ -97,7 +97,9 @@ for administrator rights at every start and cannot start with Windows.
 
 Reports from Intel and Nuvoton machines are welcome: **Settings → Diagnostics
 → Copy** puts what Glance found on your machine, and which readings it gets,
-on the clipboard, ready to paste into an issue (no paths or names in it). On laptops, fans and
+on the clipboard, with the latest lines of its log, ready to paste into an
+issue (no paths or names in it). The log itself is `glance.log`, beside the
+settings in `%APPDATA%\dev.weiyi.glance`. On laptops, fans and
 board temperatures belong to the laptop's embedded controller and are not
 shown; integrated graphics draw from the CPU package, whose power the CPU
 lane shows.

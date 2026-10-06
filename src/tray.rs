@@ -16,6 +16,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, HICON, IMAGE_ICON, LR_SHARED, MSG, SM_CXSMICON, SM_CYSMICON,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WNDCLASSW,
 };
+use windows::Win32::Foundation::RECT;
+use windows::Win32::Graphics::Gdi::{
+    CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, ReleaseDC, SelectObject, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS};
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT};
 
 /// The icon's messages to its window, and another start of Glance asking
@@ -203,6 +208,72 @@ pub fn set_tip(text: &str) {
     let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
 }
 
+/// Rows of cells set as columns in the tooltip, in the tooltip's own font
+/// (the system's status and tooltip font): the first cell of each row at the
+/// left, every later one ending where the longest of its column ends, at
+/// least a space after what comes before it. The room is filled with the
+/// widest spaces that fit, then narrower ones (the tooltip holds only 127
+/// characters), and every step measures the whole line as the tooltip draws
+/// it: a space after Chinese is drawn in the font that lends the Chinese,
+/// and figure spaces are not always as wide as digits.
+pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
+    // Em, en, thin and hair spaces, widest first.
+    const SPACES: [&str; 4] = ["\u{2003}", "\u{2002}", "\u{2009}", "\u{200A}"];
+    in_tooltip_font(|width| {
+        let mut lines: Vec<String> = rows.iter().map(|cells| cells.first().cloned().unwrap_or_default()).collect();
+        let count = rows.iter().map(Vec::len).max().unwrap_or(0);
+        for column in 1..count {
+            let end = rows
+                .iter()
+                .zip(&lines)
+                .filter_map(|(cells, line)| cells.get(column).map(|cell| width(&format!("{line} {cell}"))))
+                .max()
+                .unwrap_or(0);
+            for (cells, line) in rows.iter().zip(lines.iter_mut()) {
+                let Some(cell) = cells.get(column) else { continue };
+                let reach = |pad: &str| width(&format!("{line}{pad}{cell}"));
+                let mut pad = String::new();
+                for fill in SPACES {
+                    while reach(&(pad.clone() + fill)) <= end {
+                        pad.push_str(fill);
+                    }
+                }
+                // One more hair space if that comes nearer the end.
+                if reach(&(pad.clone() + SPACES[3])) - end < end - reach(&pad) {
+                    pad.push_str(SPACES[3]);
+                }
+                line.push_str(&pad);
+                line.push_str(cell);
+            }
+        }
+        lines
+    })
+}
+
+/// Runs `act` with a measure of text in the tooltip font, in pixels, as
+/// DrawText (which the tooltip draws with) lays it out: GetTextExtentPoint32
+/// measures some spaces apart from Latin text otherwise than it draws them.
+fn in_tooltip_font<R>(act: impl FnOnce(&dyn Fn(&str) -> i32) -> R) -> R {
+    unsafe {
+        let mut metrics = NONCLIENTMETRICSW { cbSize: size_of::<NONCLIENTMETRICSW>() as u32, ..Default::default() };
+        let _ = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, metrics.cbSize, Some((&mut metrics as *mut NONCLIENTMETRICSW).cast()), Default::default());
+        let screen = GetDC(None);
+        let font = CreateFontIndirectW(&metrics.lfStatusFont);
+        let previous = SelectObject(screen, font.into());
+        let width = |text: &str| {
+            let mut units: Vec<u16> = text.encode_utf16().collect();
+            let mut bounds = RECT::default();
+            DrawTextW(screen, &mut units, &mut bounds, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            bounds.right - bounds.left
+        };
+        let result = act(&width);
+        SelectObject(screen, previous);
+        let _ = DeleteObject(font.into());
+        ReleaseDC(None, screen);
+        result
+    }
+}
+
 /// Registers Ctrl+Alt+G if the settings want it, or lets it go.
 fn register_hotkey(hwnd: HWND) {
     unsafe {
@@ -210,6 +281,9 @@ fn register_hotkey(hwnd: HWND) {
     }
     let wanted = crate::app().settings.lock().unwrap().hotkey;
     let taken = wanted && unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, u32::from(b'G')) }.is_err();
+    if taken && !HOTKEY_TAKEN.load(Ordering::Relaxed) {
+        crate::journal::note("Ctrl+Alt+G is taken by another program");
+    }
     HOTKEY_TAKEN.store(taken, Ordering::Relaxed);
 }
 
@@ -230,4 +304,63 @@ pub fn follow_settings() {
 pub fn quit() {
     let hwnd = WINDOW.load(Ordering::Acquire);
     let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|cell| cell.to_string()).collect()
+    }
+
+    fn sample() -> Vec<Vec<String>> {
+        vec![
+            row(&["CPU", "3%", "· 60 °C"]),
+            row(&["GPU 1", "0%", "· 41 °C"]),
+            row(&["GPU 2", "12%", "· 49 °C"]),
+            row(&["内存", "100%"]),
+            row(&["Memory", "40%"]),
+        ]
+    }
+
+    #[test]
+    fn lines_up_columns_in_the_tooltip_font() {
+        let rows = sample();
+        let lines = columns(&rows);
+        // Where each cell after the first ends, measured as the tooltip draws.
+        let (ends, hair) = in_tooltip_font(|width| {
+            let ends: Vec<Vec<i32>> = rows
+                .iter()
+                .zip(&lines)
+                .map(|(cells, line)| {
+                    let mut upto = 0;
+                    cells
+                        .iter()
+                        .skip(1)
+                        .map(|cell| {
+                            upto += line[upto..].find(cell.as_str()).unwrap() + cell.len();
+                            width(&line[..upto])
+                        })
+                        .collect()
+                })
+                .collect();
+            (ends, width("\u{200A}").max(1))
+        });
+        for column in 0..2 {
+            let at: Vec<i32> = ends.iter().filter_map(|row| row.get(column).copied()).collect();
+            let (low, high) = (*at.iter().min().unwrap(), *at.iter().max().unwrap());
+            assert!(high - low <= hair, "column {column}: {at:?}");
+        }
+        // "Glance" and the lines fit the tooltip's 127 characters.
+        assert!(7 + lines.iter().map(|line| line.encode_utf16().count() + 1).sum::<usize>() <= 127);
+    }
+
+    /// Writes a tooltip's text, as Glance makes it, for a look at it drawn.
+    #[test]
+    #[ignore]
+    fn writes_a_sample_tooltip() {
+        let text = std::iter::once("Glance".to_string()).chain(columns(&sample())).collect::<Vec<_>>().join("\r\n");
+        std::fs::write(std::env::var("TIP_OUT").unwrap(), text).unwrap();
+    }
 }

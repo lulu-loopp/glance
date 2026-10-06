@@ -101,20 +101,24 @@ fn temperatures(sample: &Sample, info: &StaticInfo) -> Vec<(String, Option<f32>)
 /// The tooltip: Glance's name, then the CPU, each graphics card and the
 /// memory, a line each.
 fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
-    let with_temp = |usage: f32, temp: Option<f32>| match temp {
-        Some(temp) => format!("{usage:.0}% · {temp:.0} °C"),
-        None => format!("{usage:.0}%"),
-    };
-    let mut lines = vec!["Glance".to_string()];
-    lines.push(format!("CPU {}", with_temp(sample.cpu, sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))));
+    let mut rows = vec![("CPU".to_string(), sample.cpu, sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))];
     let several = sample.gpus.len() > 1;
     for (i, gpu) in sample.gpus.iter().enumerate() {
         let name = if several { format!("GPU {}", i + 1) } else { "GPU".to_string() };
-        lines.push(format!("{name} {}", with_temp(gpu.usage, gpu.temp)));
+        rows.push((name, gpu.usage, gpu.temp));
     }
-    let memory = sample.memory.used as f64 / info.mem_total.max(1) as f64 * 100.0;
-    lines.push(format!("{} {memory:.0}%", lang.pick("内存", "Memory")));
-    lines.join("\n")
+    let memory = sample.memory.used as f32 / info.mem_total.max(1) as f32 * 100.0;
+    rows.push((lang.pick("内存", "Memory").to_string(), memory, None));
+    // The name, then the use and the temperature, each lined up at its end.
+    let cells: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|(label, usage, temp)| {
+            let mut cells = vec![label, format!("{usage:.0}%")];
+            cells.extend(temp.map(|temp| format!("· {temp:.0} °C")));
+            cells
+        })
+        .collect();
+    std::iter::once("Glance".to_string()).chain(crate::tray::columns(&cells)).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]

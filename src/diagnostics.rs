@@ -29,6 +29,9 @@ pub fn report() -> String {
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.extend(info.found.iter().cloned());
+    let log = crate::journal::recent(15);
+    lines.push(format!("Recent log ({} lines):", log.len()));
+    lines.extend(log.into_iter().map(|line| format!("  {line}")));
     lines.push("Latest readings:".into());
     match app.controller.history.lock().unwrap().back() {
         Some(sample) => lines.extend(readings(sample, info).into_iter().map(|line| format!("  {line}"))),

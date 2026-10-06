@@ -4,6 +4,7 @@ mod dimm;
 mod drives;
 mod elevation;
 mod gpu_power;
+mod journal;
 mod metrics;
 mod panel;
 mod pawnio;
@@ -57,7 +58,7 @@ impl App {
     pub fn save(&self, settings: Settings) {
         self.controller.apply(&settings);
         if let Err(error) = settings.save(&self.config) {
-            eprintln!("could not save settings: {error}");
+            journal::note(format!("could not save settings: {error}"));
         }
         *self.settings.lock().unwrap() = settings;
         // The tray reads the shortcut's setting from here: told once it is in.
@@ -173,6 +174,7 @@ pub fn run() {
         return;
     }
 
+    journal::note_crashes();
     let config = settings::config_dir();
     let settings = Settings::load(&config);
 

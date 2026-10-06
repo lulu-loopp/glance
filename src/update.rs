@@ -77,6 +77,7 @@ pub fn watch() {
                 let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
                 if new {
                     let version = release.version.clone();
+                    crate::journal::note(format!("update available: {version}"));
                     *found = Some((release, State::Ready));
                     drop(found);
                     let (title, text) = match language() {
@@ -114,31 +115,45 @@ pub fn install() {
 }
 
 fn fetch_and_run(release: &Release) -> State {
-    let Some(bytes) = get(&release.installer) else { return State::Failed };
+    let note = |what: &str| crate::journal::note(format!("update to {}: {what}", release.version));
+    let Some(bytes) = get(&release.installer) else {
+        note("the installer could not be downloaded");
+        return State::Failed;
+    };
     // The one downloaded before, if it is still there.
     crate::elevation::forget_download();
     // In ProgramData, where no one but administrators can move anything
     // aside: a folder made there new, administrators' only, named afresh
     // each time, stays where it is while the installer is written, checked
     // and started, and after, while the installer reads itself again.
-    let Some(program_data) = program_data() else { return State::Failed };
+    let Some(program_data) = program_data() else {
+        note("ProgramData could not be found");
+        return State::Failed;
+    };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let name = format!("Glance-update-{}-{stamp}", std::process::id());
-    let Some(folder) = crate::elevation::private_folder(&program_data, &name) else { return State::Failed };
+    let Some(folder) = crate::elevation::private_folder(&program_data, &name) else {
+        note("no folder of administrators' alone could be made in ProgramData");
+        return State::Failed;
+    };
     let installer = folder.path().join(format!("Glance_{}_x64-setup.exe", release.version));
     if !crate::elevation::remember_download(&installer) || std::fs::write(&installer, bytes).is_err() {
+        note("the installer could not be written");
         return State::Failed;
     }
     let Ok(running) = std::env::current_exe() else { return State::Failed };
     if !same_signer(&installer, &running) {
+        note("the installer is not signed as this Glance is; not run");
         return State::Unsigned;
     }
     let path = HSTRING::from(installer.as_os_str());
     let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     // Above 32: the installer is running.
     if started.0 as usize > 32 {
+        note("installer started");
         State::Ready
     } else {
+        note("the installer could not be started");
         State::Failed
     }
 }

@@ -174,7 +174,9 @@ pub fn current() -> Result<Rc<Gfx>> {
 /// The next `current` makes a new one, and each window, seeing it, makes its
 /// surfaces again.
 pub fn lost() {
-    CURRENT.with(|cell| *cell.borrow_mut() = None);
+    if CURRENT.with(|cell| cell.borrow_mut().take()).is_some() {
+        crate::journal::note("the graphics device was lost; drawing on a new one");
+    }
 }
 
 impl Gfx {
