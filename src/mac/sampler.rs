@@ -46,12 +46,14 @@ const TOP_PROCESSES: usize = 40;
 /// What the next sample is measured against.
 struct Previous {
     at: Instant,
-    /// Each core's busy and total ticks.
-    cores: Vec<(u64, u64)>,
-    /// Bytes in and out over the physical interfaces.
-    net: (u64, u64),
-    /// Bytes read and written by the drives.
-    disk: (u64, u64),
+    /// Each core's busy and total ticks, as last read: a read that fails
+    /// leaves them, and the next spans both.
+    cores: Option<Vec<(u64, u64)>>,
+    /// Bytes in and out over the physical interfaces, and when they were
+    /// last read (likewise).
+    net: Option<((u64, u64), Instant)>,
+    /// Bytes read and written by the drives, and when (likewise).
+    disk: Option<((u64, u64), Instant)>,
     /// Each process's CPU time (ns) and bytes moved, by its id.
     processes: HashMap<i32, (u64, u64)>,
 }
@@ -80,7 +82,7 @@ impl Sampler {
         unsafe { mach2::mach_time::mach_timebase_info(&mut timebase) };
         let threads = sysctl_number("hw.logicalcpu").unwrap_or(1) as usize;
         let network = Network::open();
-        let primary = primary_interface(network.as_ref(), &interfaces());
+        let primary = primary_interface(network.as_ref(), interfaces().as_ref());
         let found_gpus = graphics();
         let info = StaticInfo {
             cpu_name: sysctl_string("machdep.cpu.brand_string").unwrap_or_default(),
@@ -95,7 +97,7 @@ impl Sampler {
         };
         let mut sampler = Sampler {
             info,
-            previous: Previous { at: Instant::now(), cores: Vec::new(), net: (0, 0), disk: (0, 0), processes: HashMap::new() },
+            previous: Previous { at: Instant::now(), cores: None, net: None, disk: None, processes: HashMap::new() },
             timebase: (timebase.numer as u64, timebase.denom.max(1) as u64),
             sensors: Sensors::open(),
             smc: Smc::open(),
@@ -121,31 +123,45 @@ impl Sampler {
         let now = Instant::now();
         let seconds = now.duration_since(self.previous.at).as_secs_f64().max(1e-3);
 
+        // Each core's use since the last look at it; one not read now, or not
+        // read then (a core added since), is unread, and with no cores read
+        // there is no grid.
         let cores = core_ticks();
-        // A core with no ticks since the last look has no use to tell.
+        let since = |i: usize| self.previous.cores.as_ref().and_then(|was| was.get(i).copied());
         let threads: Vec<Option<f32>> = cores
             .iter()
+            .flatten()
             .enumerate()
-            .map(|(i, (busy, total))| {
-                let (was_busy, was_total) = self.previous.cores.get(i).copied().unwrap_or((0, 0));
+            .map(|(i, &(busy, total))| {
+                let (was_busy, was_total) = since(i)?;
                 let span = total.saturating_sub(was_total);
+                // A core with no ticks since has no use to tell.
                 (span > 0).then(|| (busy.saturating_sub(was_busy) as f64 / span as f64 * 100.0) as f32)
             })
             .collect();
-        // The whole processor's use: all cores' busy time over all their
-        // time, since the last look.
-        let (busy, total) = cores.iter().enumerate().fold((0u64, 0u64), |(busy, total), (i, (now_busy, now_total))| {
-            let (was_busy, was_total) = self.previous.cores.get(i).copied().unwrap_or((0, 0));
-            (busy + now_busy.saturating_sub(was_busy), total + now_total.saturating_sub(was_total))
-        });
+        // The whole processor's use: the busy time over all the time of the
+        // cores read both now and then.
+        let (busy, total) = cores.iter().flatten().enumerate().filter_map(|(i, now)| Some((now, since(i)?))).fold(
+            (0u64, 0u64),
+            |(busy, total), (&(now_busy, now_total), (was_busy, was_total))| {
+                (busy + now_busy.saturating_sub(was_busy), total + now_total.saturating_sub(was_total))
+            },
+        );
         let cpu = (total > 0).then(|| (busy as f64 / total as f64 * 100.0) as f32);
 
+        // Bytes moved since the last read that worked, over the time since
+        // then: a read that fails tells nothing, and the next spans both.
+        let read_at = Instant::now();
+        let rates = |now: Option<(u64, u64)>, was: Option<((u64, u64), Instant)>| {
+            let (now, (was, then)) = (now?, was?);
+            let seconds = read_at.duration_since(then).as_secs_f64().max(1e-3);
+            Some((now.0.saturating_sub(was.0) as f64 / seconds, now.1.saturating_sub(was.1) as f64 / seconds))
+        };
         let interfaces = interfaces();
-        let net = hardware_bytes(&interfaces);
-        let rate = |now: u64, was: u64| now.saturating_sub(was) as f64 / seconds;
-        let (net_down, net_up) = (rate(net.0, self.previous.net.0), rate(net.1, self.previous.net.1));
+        let net = interfaces.as_ref().map(hardware_bytes);
+        let net_rates = rates(net, self.previous.net);
         let disk = drive_bytes();
-        let (disk_read, disk_write) = (rate(disk.0, self.previous.disk.0), rate(disk.1, self.previous.disk.1));
+        let disk_rates = rates(disk, self.previous.disk);
 
         let (processes, counted, times) = self.processes(seconds);
         let temperatures = self.sensors.as_ref().map_or_else(Vec::new, Sensors::read);
@@ -167,13 +183,14 @@ impl Sampler {
             ghz: report.cpu_mhz.map(|mhz| mhz / 1000.0),
             memory: memory(self.info.mem_total),
             gpus,
-            net_down: Some(net_down),
-            net_up: Some(net_up),
-            net_total_down: net.0,
-            net_total_up: net.1,
-            network: primary_interface(self.network.as_ref(), &interfaces),
-            disk_read: Some(disk_read),
-            disk_write: Some(disk_write),
+            net_down: net_rates.map(|rates| rates.0),
+            net_up: net_rates.map(|rates| rates.1),
+            // The totals as last read.
+            net_total_down: net.or(self.previous.net.map(|(bytes, _)| bytes)).map_or(0, |bytes| bytes.0),
+            net_total_up: net.or(self.previous.net.map(|(bytes, _)| bytes)).map_or(0, |bytes| bytes.1),
+            network: primary_interface(self.network.as_ref(), interfaces.as_ref()),
+            disk_read: disk_rates.map(|rates| rates.0),
+            disk_write: disk_rates.map(|rates| rates.1),
             // macOS does not keep the disks' busy time.
             disk_active: None,
             volumes: volumes(),
@@ -190,7 +207,13 @@ impl Sampler {
                 .collect(),
             dimm_temps: Vec::new(),
         };
-        self.previous = Previous { at: now, cores, net, disk, processes: times };
+        self.previous = Previous {
+            at: now,
+            cores: cores.or(self.previous.cores.take()),
+            net: net.map(|bytes| (bytes, read_at)).or(self.previous.net),
+            disk: disk.map(|bytes| (bytes, read_at)).or(self.previous.disk),
+            processes: times,
+        };
         sample
     }
 
@@ -292,15 +315,16 @@ fn sysctl_number(name: &str) -> Option<u64> {
     (read == 0).then_some(value)
 }
 
-/// Each core's busy (user, system and nice) and total ticks.
-fn core_ticks() -> Vec<(u64, u64)> {
+/// Each core's busy (user, system and nice) and total ticks; `None` when
+/// they cannot be read.
+fn core_ticks() -> Option<Vec<(u64, u64)>> {
     let mut count = 0u32;
     let mut info: *mut i32 = std::ptr::null_mut();
     let mut info_count = 0u32;
     let host = unsafe { mach2::mach_init::mach_host_self() };
     let status = unsafe { host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &mut count, &mut info, &mut info_count) };
     if status != 0 || info.is_null() {
-        return Vec::new();
+        return None;
     }
     let loads = unsafe { std::slice::from_raw_parts(info as *const CpuLoad, count as usize) };
     let ticks = loads
@@ -314,7 +338,7 @@ fn core_ticks() -> Vec<(u64, u64)> {
     unsafe {
         mach2::vm::mach_vm_deallocate(mach2::traps::mach_task_self(), info as u64, info_count as u64 * size_of::<i32>() as u64);
     }
-    ticks
+    Some(ticks)
 }
 
 /// Memory as Activity Monitor counts it: used is the apps' memory, the
@@ -343,18 +367,18 @@ fn memory(total: u64) -> MemorySample {
 }
 
 /// Each interface's bytes in and out and its link speed (bit/s), from the
-/// 64-bit counters, by BSD name.
-fn interfaces() -> HashMap<String, (u64, u64, u64)> {
+/// 64-bit counters, by BSD name; `None` when the list cannot be read.
+fn interfaces() -> Option<HashMap<String, (u64, u64, u64)>> {
     let mut found = HashMap::new();
     let mut mib = [libc::CTL_NET, libc::PF_ROUTE, 0, 0, libc::NET_RT_IFLIST2, 0];
     let mut size = 0usize;
     unsafe {
         if libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
-            return found;
+            return None;
         }
         let mut buffer = vec![0u8; size];
         if libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, buffer.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
-            return found;
+            return None;
         }
         let mut offset = 0usize;
         while offset + size_of::<libc::if_msghdr>() <= size {
@@ -375,7 +399,7 @@ fn interfaces() -> HashMap<String, (u64, u64, u64)> {
             offset += length;
         }
     }
-    found
+    Some(found)
 }
 
 /// Bytes in and out over the interfaces that are hardware (Ethernet and
@@ -386,10 +410,11 @@ fn hardware_bytes(interfaces: &HashMap<String, (u64, u64, u64)>) -> (u64, u64) {
 
 /// The interface the default route uses now, named as System Settings
 /// names it, with its IPv4 address and link speed.
-fn primary_interface(network: Option<&Network>, interfaces: &HashMap<String, (u64, u64, u64)>) -> Option<NetworkInfo> {
+fn primary_interface(network: Option<&Network>, interfaces: Option<&HashMap<String, (u64, u64, u64)>>) -> Option<NetworkInfo> {
     let bsd = network?.primary()?;
     let shown = display_name(&bsd).unwrap_or_else(|| bsd.clone());
-    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), link_bps: interfaces.get(&bsd).map_or(0, |(_, _, speed)| *speed) })
+    let link_bps = interfaces.and_then(|interfaces| interfaces.get(&bsd)).map_or(0, |(_, _, speed)| *speed);
+    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), link_bps })
 }
 
 /// An interface's IPv4 address.
@@ -475,12 +500,18 @@ fn unread_gpu() -> GpuSample {
     GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, clock_mhz: None, fan_rpm: None, power: None }
 }
 
-/// Bytes read and written by every drive, from their drivers' statistics.
-fn drive_bytes() -> (u64, u64) {
-    iokit::services("IOBlockStorageDriver").iter().fold((0, 0), |(read, written), driver| {
-        let Some(statistics) = driver.dictionary("Statistics") else { return (read, written) };
-        let value = |key| iokit::number(&statistics, key).unwrap_or(0).max(0) as u64;
-        (read + value("Bytes (Read)"), written + value("Bytes (Write)"))
+/// Bytes read and written by every drive, from their drivers' statistics;
+/// `None` when there are none, or a drive's cannot be read (a total short
+/// of a drive would read as a drop, then a burst).
+fn drive_bytes() -> Option<(u64, u64)> {
+    let drivers = iokit::services("IOBlockStorageDriver");
+    if drivers.is_empty() {
+        return None;
+    }
+    drivers.iter().try_fold((0, 0), |(read, written), driver| {
+        let statistics = driver.dictionary("Statistics")?;
+        let value = |key| iokit::number(&statistics, key).map(|bytes| bytes.max(0) as u64);
+        Some((read + value("Bytes (Read)")?, written + value("Bytes (Write)")?))
     })
 }
 

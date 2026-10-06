@@ -217,7 +217,8 @@ impl Sampler {
         let gpus = self.sample_gpus(collected);
 
         if refresh_slow {
-            self.slow.processes = self.processes.sample(self.info.threads, self.gpu_by_pid.as_ref());
+            // A process's share of every processor there is now.
+            self.slow.processes = self.processes.sample(processors, self.gpu_by_pid.as_ref());
             self.slow.network = default_interface();
         }
 
