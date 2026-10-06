@@ -59,6 +59,9 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
 pub struct Shape {
     columns: Option<usize>,
     heights: HashMap<String, f32>,
+    /// The smallest zoom so far: a panel that came to fit by zooming out
+    /// does not grow again while up (wider than the desktop taken behind it).
+    zoom: Option<f32>,
 }
 
 impl Shape {
@@ -77,6 +80,8 @@ impl Shape {
         // The columns chosen first stand: fewer lanes for a moment (one
         // missing) lay out in fewer, and do not lower them for later.
         self.columns.get_or_insert(layout.columns);
+        let zoom = self.zoom.map_or(zoom, |held| held.min(zoom));
+        self.zoom = Some(zoom);
         (layout, zoom)
     }
 }
@@ -136,6 +141,11 @@ mod tests {
         assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
         assert_eq!(shape.arrange(&theme, Edge::Right, &pair[..1], work).0.columns, 1);
         assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
+        // Zoomed out to fit, it stays so when a lane goes for a moment.
+        let mut shape = Shape::default();
+        let (_, fitted) = shape.arrange(&theme, Edge::Right, &[("cpu", 1500.0), ("memory", 1500.0)], work);
+        assert!(fitted < 1.0);
+        assert_eq!(shape.arrange(&theme, Edge::Right, &[("cpu", 1500.0)], work).1, fitted);
     }
 }
 
