@@ -253,7 +253,12 @@ impl Controller {
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         // What a frame in motion waits on: the screen's next refresh, or a
         // message, whichever comes first.
-        let refresh = unsafe { CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0) }.expect("frame timer");
+        // High resolution from Windows 10 1803 on; before, an ordinary one.
+        let refresh = unsafe {
+            CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+                .or_else(|_| CreateWaitableTimerExW(None, None, 0, TIMER_ALL_ACCESS.0))
+        }
+        .expect("frame timer");
         let mut msg = MSG::default();
         loop {
             // The panel, while it is up, and the settings window, while it is
@@ -714,9 +719,15 @@ impl<'a> Panel<'a> {
             return;
         }
         // Open, it opens again, laid out for the screens as they are now,
-        // pinned if it was, and still with the game to bring back.
-        let (open, pinned, game) = (self.is_open(), self.pinned, self.game);
+        // pinned if it was, and still with the game to bring back; on its
+        // way out, it is gone at once, and the game comes back as when it
+        // has closed (the game's own display mode change can come as late as
+        // that).
+        let (open, closing, pinned, game) = (self.is_open(), matches!(self.phase, Phase::Closing), self.pinned, self.game);
         self.dismiss();
+        if closing {
+            bring_back(game);
+        }
         if open {
             if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
                 self.open(cursor, contact, now);
@@ -890,21 +901,10 @@ impl<'a> Panel<'a> {
     /// Draws the panel as it is at `now`, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
-            // Closed: a game the panel sent to the background comes back to
-            // the front, if it is not there already. One that went down
-            // (minimized) is restored as a click on its taskbar button does
-            // it: it restores itself (a protected game's window refuses
-            // ShowWindow from another process) and takes the screen back.
+            // Closed: a game the panel sent to the background comes back.
             let game = self.game.take();
             self.dismiss();
-            if let Some(game) = game.filter(|&game| unsafe { GetForegroundWindow() } != game) {
-                unsafe {
-                    let _ = SetForegroundWindow(game);
-                    if IsIconic(game).as_bool() {
-                        let _ = PostMessageW(Some(game), WM_SYSCOMMAND, WPARAM(SC_RESTORE as usize), LPARAM(0));
-                    }
-                }
-            }
+            bring_back(game);
             return;
         }
         if !self.follow_device() {
@@ -1145,6 +1145,21 @@ fn contains(rect: &RECT, point: POINT) -> bool {
 
 /// Where the pointer is; `None` while another desktop has the input (a UAC
 /// prompt, the lock screen).
+/// Brings a game the panel sent to the background back to the front, if it
+/// is not there already. One that went down (minimized) is restored as a
+/// click on its taskbar button does it: it restores itself (a protected
+/// game's window refuses ShowWindow from another process) and takes the
+/// screen back.
+fn bring_back(game: Option<HWND>) {
+    let Some(game) = game.filter(|&game| unsafe { GetForegroundWindow() } != game) else { return };
+    unsafe {
+        let _ = SetForegroundWindow(game);
+        if IsIconic(game).as_bool() {
+            let _ = PostMessageW(Some(game), WM_SYSCOMMAND, WPARAM(SC_RESTORE as usize), LPARAM(0));
+        }
+    }
+}
+
 /// The time to the screen's next refresh, as the desktop compositor keeps
 /// it; one tick of the pointer's watch when it cannot tell.
 fn until_refresh() -> Duration {
