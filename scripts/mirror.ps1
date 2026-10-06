@@ -32,6 +32,9 @@ $release = gh release view $tag --repo lulu-loopp/glance --json name,body,tagNam
 if ($LASTEXITCODE -ne 0) { throw "no release $tag on GitHub" }
 $commit = (git rev-list -n 1 $tag).Trim()
 if ($LASTEXITCODE -ne 0) { throw "no tag $tag here" }
+# The source mirrored is the one the release was made from.
+$published = ((git ls-remote https://github.com/lulu-loopp/glance.git "refs/tags/$tag^{}") -split '\s+')[0]
+if ($published -ne $commit) { throw "GitHub's $tag is on $published, this checkout's on $commit" }
 
 # The commit and tag on Gitee, pushed with the token in git's environment
 # (not on its command line). The mirror pulls the same from GitHub in time;

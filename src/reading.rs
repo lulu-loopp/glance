@@ -23,8 +23,26 @@ pub struct StaticInfo {
     pub found: Vec<String>,
 }
 
+impl StaticInfo {
+    /// The modules of the GPUs, in order ("gpu:0", …).
+    pub fn gpu_modules(&self) -> impl Iterator<Item = String> + '_ {
+        self.gpus.iter().map(|gpu| format!("gpu:{}", gpu.slot))
+    }
+
+    /// Which of `gpus` (and of each sample's) module `id` shows.
+    pub fn gpu_of(&self, id: &str) -> Option<usize> {
+        let slot: usize = id.strip_prefix("gpu:")?.parse().ok()?;
+        self.gpus.iter().position(|gpu| gpu.slot == slot)
+    }
+}
+
 #[derive(Clone, Serialize)]
 pub struct GpuInfo {
+    /// Its number in the module that shows it ("gpu:N"). Numbers stay with
+    /// the GPUs they were given to, adapters since left out (display-only
+    /// ones) keeping theirs, so that each GPU's lane keeps the settings
+    /// made for it.
+    pub slot: usize,
     pub name: String,
     pub mem_total: u64,
     pub shared_total: u64,
@@ -155,4 +173,30 @@ pub struct BoardSensors {
 pub struct DriveTemperature {
     pub name: String,
     pub celsius: f32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GpuInfo, StaticInfo};
+
+    #[test]
+    fn finds_gpus_by_the_number_they_were_given() {
+        let gpu = |slot| GpuInfo { slot, name: format!("GPU {slot}"), mem_total: 0, shared_total: 0 };
+        // The second adapter (a virtual display's) left out: the third keeps "gpu:2".
+        let info = StaticInfo {
+            cpu_name: String::new(),
+            memory_modules: None,
+            drives: Vec::new(),
+            network_adapter: None,
+            board: String::new(),
+            threads: 1,
+            mem_total: 0,
+            gpus: vec![gpu(0), gpu(2)],
+            found: Vec::new(),
+        };
+        assert_eq!(info.gpu_modules().collect::<Vec<_>>(), ["gpu:0", "gpu:2"]);
+        assert_eq!(info.gpu_of("gpu:2"), Some(1));
+        assert_eq!(info.gpu_of("gpu:1"), None);
+        assert_eq!(info.gpu_of("cpu"), None);
+    }
 }

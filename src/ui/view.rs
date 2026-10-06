@@ -221,7 +221,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             blocks
         }
         _ if id.starts_with("gpu:") => {
-            let index: usize = id[4..].parse().ok()?;
+            let index = info.gpu_of(id)?;
             let (gpu, reading) = (info.gpus.get(index)?, s.gpus.get(index)?);
             let temp = reading.temp.filter(|_| prefs.gpu.sensors);
             let mut blocks = vec![

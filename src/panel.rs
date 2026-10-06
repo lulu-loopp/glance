@@ -189,7 +189,7 @@ impl Controller {
     /// The modules this machine has, in their default order.
     pub fn known_modules(&self) -> Vec<String> {
         let mut known = vec!["cpu".to_string()];
-        known.extend((0..self.info.gpus.len()).map(|i| format!("gpu:{i}")));
+        known.extend(self.info.gpu_modules());
         known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system"].map(String::from));
         known
     }

@@ -109,7 +109,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let px = script.scale;
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["cpu".to_string()];
-    known.extend((0..info.gpus.len()).map(|i| format!("gpu:{i}")));
+    known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {

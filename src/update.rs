@@ -24,6 +24,7 @@ use windows::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
     WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
+use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, ShellExecuteW, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -61,8 +62,9 @@ pub enum State {
     Downloading,
     /// It could not be downloaded; it may be tried again.
     Failed,
-    /// What was downloaded is not signed as this Glance is: not run.
-    Unsigned,
+    /// What was downloaded is not signed as this Glance is, or is not the
+    /// version announced: not run.
+    Rejected,
 }
 
 static FOUND: Mutex<Option<(Release, State)>> = Mutex::new(None);
@@ -126,10 +128,6 @@ pub fn install() {
 
 fn fetch_and_run(release: &Release) -> State {
     let note = |what: &str| crate::journal::note(format!("update to {}: {what}", release.version));
-    let Some(bytes) = release.installers.iter().find_map(|url| get(url)) else {
-        note("the installer could not be downloaded");
-        return State::Failed;
-    };
     // The one downloaded before, if it is still there.
     crate::elevation::forget_download();
     // In ProgramData, where no one but administrators can move anything
@@ -147,14 +145,43 @@ fn fetch_and_run(release: &Release) -> State {
         return State::Failed;
     };
     let installer = folder.path().join(format!("Glance_{}_x64-setup.exe", release.version));
-    if !crate::elevation::remember_download(&installer) || std::fs::write(&installer, bytes).is_err() {
+    if !crate::elevation::remember_download(&installer) {
         note("the installer could not be written");
         return State::Failed;
     }
     let Ok(running) = std::env::current_exe() else { return State::Failed };
-    if !same_signer(&installer, &running) {
-        note("the installer is not signed as this Glance is; not run");
-        return State::Unsigned;
+    // From each site in turn, until one gives an installer that is what it
+    // should be: signed as this Glance is, and of the version announced (a
+    // site is trusted for neither, so an older signed installer under a
+    // newer name would take Glance back).
+    let mut outcome = State::Failed;
+    for url in &release.installers {
+        let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
+        let Some(bytes) = get(url) else {
+            note(&format!("the installer could not be downloaded from {host}"));
+            continue;
+        };
+        if std::fs::write(&installer, bytes).is_err() {
+            note("the installer could not be written");
+            return State::Failed;
+        }
+        if !same_signer(&installer, &running) {
+            note(&format!("the installer from {host} is not signed as this Glance is; not run"));
+            outcome = State::Rejected;
+            continue;
+        }
+        let version = installer_version(&installer);
+        let announced = version.as_deref().is_some_and(|version| !newer(version, &release.version) && !newer(&release.version, version));
+        if !announced || !newer(&release.version, env!("CARGO_PKG_VERSION")) {
+            note(&format!("the installer from {host} is version {}, not {}; not run", version.as_deref().unwrap_or("unknown"), release.version));
+            outcome = State::Rejected;
+            continue;
+        }
+        outcome = State::Ready;
+        break;
+    }
+    if outcome != State::Ready {
+        return outcome;
     }
     let path = HSTRING::from(installer.as_os_str());
     let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
@@ -166,6 +193,29 @@ fn fetch_and_run(release: &Release) -> State {
         note("the installer could not be started");
         State::Failed
     }
+}
+
+/// The product version an installer carries in its version resource
+/// ("0.1.7" for 0.1.7.0).
+fn installer_version(file: &Path) -> Option<String> {
+    let path = HSTRING::from(file.as_os_str());
+    let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
+    if size == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; size as usize];
+    unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
+    let (mut fixed, mut length) = (std::ptr::null_mut(), 0u32);
+    if !unsafe { VerQueryValueW(data.as_ptr().cast(), w!("\\"), &mut fixed, &mut length) }.as_bool() || (length as usize) < size_of::<VS_FIXEDFILEINFO>() {
+        return None;
+    }
+    let fixed = unsafe { &*(fixed as *const VS_FIXEDFILEINFO) };
+    let parts = [fixed.dwProductVersionMS >> 16, fixed.dwProductVersionMS & 0xFFFF, fixed.dwProductVersionLS >> 16, fixed.dwProductVersionLS & 0xFFFF];
+    let mut parts: Vec<String> = parts.iter().map(u32::to_string).collect();
+    while parts.len() > 1 && parts.last().is_some_and(|part| part == "0") {
+        parts.pop();
+    }
+    Some(parts.join("."))
 }
 
 /// The machine's ProgramData folder.
@@ -374,7 +424,7 @@ fn same_signer(file: &Path, reference: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{get, latest, newer, release, same_signer};
+    use super::{get, installer_version, latest, newer, release, same_signer};
     use std::path::Path;
 
     /// Over the network: the latest release is found, its installer
@@ -397,6 +447,17 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert!(ours, "{} not signed as {installed}", release.version);
         assert!(!theirs);
+    }
+
+    /// The version an installer (`GLANCE_INSTALLER`, a released one) carries.
+    #[test]
+    #[ignore]
+    fn reads_an_installers_version() {
+        let installer = std::env::var("GLANCE_INSTALLER").unwrap();
+        let version = std::env::var("GLANCE_INSTALLER_VERSION").unwrap();
+        assert_eq!(installer_version(Path::new(&installer)).as_deref(), Some(version.as_str()));
+        // A file with no version resource.
+        assert_eq!(installer_version(Path::new("Cargo.toml")), None);
     }
 
     #[test]

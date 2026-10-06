@@ -13,7 +13,7 @@ use crate::sensors::CpuReader;
 use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
-    D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
+    D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER,
     D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
     KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERTYPE, KMTQAITYPE_NODEPERFDATA,
 };
@@ -656,6 +656,9 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
     let mut infos = Vec::new();
     let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return (adapters, infos) };
     let mut index = 0;
+    // Each adapter's number, as Glance has counted them since its first
+    // version: those the kernel opens, whether or not they render.
+    let mut slots = 0;
     while let Ok(adapter) = unsafe { factory.EnumAdapters1(index) } {
         index += 1;
         let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue };
@@ -671,7 +674,10 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
         // A display-only adapter (a virtual display's, as Parsec's or a
         // streaming tool's) goes by the name of the GPU that draws for it,
         // and has no work of its own to show: that GPU is listed already.
+        let slot = slots;
+        slots += 1;
         if !renders(open.hAdapter) {
+            let _ = unsafe { D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER { hAdapter: open.hAdapter }) };
             continue;
         }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
@@ -679,6 +685,7 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
         adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
+            slot,
             name: String::from_utf16_lossy(&desc.Description[..name_len]),
             mem_total: desc.DedicatedVideoMemory as u64,
             shared_total: desc.SharedSystemMemory as u64,

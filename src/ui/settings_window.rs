@@ -875,7 +875,7 @@ impl Ui {
         let p = |zh, en| pick(lang, zh, en).to_string();
         match id {
             "cpu" => ("CPU".into(), Some(info.cpu_name.clone())),
-            _ if id.starts_with("gpu:") => ("GPU".into(), id[4..].parse::<usize>().ok().and_then(|i| info.gpus.get(i)).map(|g| g.name.clone())),
+            _ if id.starts_with("gpu:") => ("GPU".into(), info.gpu_of(id).map(|i| info.gpus[i].name.clone())),
             "memory" => (p("内存", "Memory"), info.memory_modules.clone()),
             "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上下行速度", "Traffic over every physical adapter")))),
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
@@ -1367,8 +1367,8 @@ impl Ui {
                         ),
                         update::State::Downloading => (pick(lang, "正在下载安装程序", "Downloading the installer"), pick(lang, "下载中", "Downloading")),
                         update::State::Failed => (pick(lang, "下载失败，请稍后重试", "Download failed; try again later"), pick(lang, "重试", "Retry")),
-                        update::State::Unsigned => (
-                            pick(lang, "签名不符，未运行；请从 GitHub 下载", "Signature did not match; get it from GitHub"),
+                        update::State::Rejected => (
+                            pick(lang, "签名或版本不符，未运行；请手动下载", "Signature or version did not match; not run. Download it yourself"),
                             pick(lang, "重试", "Retry"),
                         ),
                     };

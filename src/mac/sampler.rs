@@ -436,7 +436,7 @@ fn graphics() -> Vec<(GpuInfo, GpuSample)> {
             let model = accelerator.string("model")?;
             let statistics = accelerator.dictionary("PerformanceStatistics")?;
             let percent = |key| iokit::number(&statistics, key).unwrap_or(0).clamp(0, 100) as f32;
-            let info = GpuInfo { name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
+            let info = GpuInfo { slot: 0, name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
             let reading = GpuSample {
                 usage: percent("Device Utilization %"),
                 engines: vec![("3D".into(), percent("Renderer Utilization %"))],
@@ -449,6 +449,8 @@ fn graphics() -> Vec<(GpuInfo, GpuSample)> {
             };
             Some((info, reading))
         })
+        .enumerate()
+        .map(|(slot, (info, reading))| (GpuInfo { slot, ..info }, reading))
         .collect()
 }
 
