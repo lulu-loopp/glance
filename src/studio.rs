@@ -32,7 +32,8 @@ use crate::reading::{
 use crate::settings::Edge;
 use crate::ui::gfx::Gfx;
 use crate::ui::prefs::Prefs;
-use crate::ui::render::{self, PanelLayers, GAP};
+use crate::ui::arrange::{self, GAP};
+use crate::ui::render::{self, PanelLayers};
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
@@ -131,9 +132,9 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
 
     // Laid out and placed as the panel would be on a screen this size, for
     // the readings of the moment, and held through the shot as the panel
-    // holds its shape while it is up (see `render::Shape`).
+    // holds its shape while it is up (see `arrange::Shape`).
     let edge = Edge::Right;
-    let shape = std::cell::RefCell::new(render::Shape::default());
+    let shape = std::cell::RefCell::new(arrange::Shape::default());
     let place = |lanes: &[view::Lane], theme: &Theme| {
         let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
         let (layout, zoom) = shape.borrow_mut().arrange(theme, edge, &heights, (sw, sh));

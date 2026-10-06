@@ -641,6 +641,7 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
 
 /// Draws `text` so that its baseline sits where a CSS line box `line` DIPs
 /// tall, aligned to `bottom`, would put it.
+#[allow(clippy::too_many_arguments)]
 fn text_on_line(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, bottom: f32, line: f32, width: f32) {
     let (ascent, descent) = frame.baseline(font);
     // The glyphs' ascent and descent centred in the line box.

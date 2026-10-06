@@ -49,7 +49,8 @@ use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
 use super::prefs::{LanguagePref, Prefs, ProcessSort, ThemePref};
-use super::render::{self, PanelLayers, GAP};
+use super::arrange::{self, GAP};
+use super::render::{self, PanelLayers};
 use super::skins;
 use super::text::Lang;
 use super::theme::{self, Shadow, Skin, Theme};
@@ -569,7 +570,7 @@ impl Ui {
         self.dark = match self.prefs.theme {
             ThemePref::Light => false,
             ThemePref::Dark => true,
-            ThemePref::System | ThemePref::Backdrop => theme::system_dark(),
+            ThemePref::System | ThemePref::Backdrop => crate::os::apps_dark(),
         };
         self.palette = Palette::new(self.dark);
         unsafe {
@@ -1577,7 +1578,7 @@ impl Ui {
         let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
-        let (layout, zoom) = render::arrange(&measure, edge, heights, (sw, sh), None);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), None);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);

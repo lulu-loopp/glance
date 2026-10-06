@@ -97,6 +97,7 @@ pub enum Fill {
 pub trait Canvas {
     /// `text` on one line from (`x`, `y`), at the start or end of `width`,
     /// cut short with an ellipsis if it does not fit.
+    #[allow(clippy::too_many_arguments)]
     fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align);
     /// How wide `text` is in `font`.
     fn measure(&self, text: &str, font: Font) -> f32;

@@ -40,7 +40,8 @@ use crate::reading::{Sample, StaticInfo};
 use crate::settings::{Anchor, Edge, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
-use crate::ui::render::{self, PanelLayers, GAP};
+use crate::ui::arrange::{self, GAP};
+use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
 use crate::ui::prefs::Prefs;
 use crate::ui::skins;
@@ -468,7 +469,7 @@ struct Panel<'a> {
     pinned: bool,
     /// The shape the panel opened with, held while it is up, and the
     /// settings it was made for.
-    shape: render::Shape,
+    shape: arrange::Shape,
     style: String,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
@@ -508,7 +509,7 @@ impl<'a> Panel<'a> {
             scroll_target: 0.0,
             hover: None,
             pinned: false,
-            shape: render::Shape::default(),
+            shape: arrange::Shape::default(),
             style: String::new(),
             hits: Vec::new(),
             corner: (0.0, 0.0),
@@ -544,7 +545,7 @@ impl<'a> Panel<'a> {
         let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
-            self.shape = render::Shape::default();
+            self.shape = arrange::Shape::default();
         }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
@@ -571,7 +572,7 @@ impl<'a> Panel<'a> {
         if !self.is_shown() {
             self.restyle();
             // A new opening takes the shape the readings now give it.
-            self.shape = render::Shape::default();
+            self.shape = arrange::Shape::default();
             let work = contact.work;
             let anchor = match self.controller.config.lock().unwrap().anchor {
                 Anchor::Pointer => cursor,

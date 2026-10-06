@@ -1,12 +1,17 @@
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use windows::Win32::System::Com::CoTaskMemFree;
+#[cfg(windows)]
 use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
+#[cfg(windows)]
 const FILE: &str = "settings.json";
 /// Larger than this, a settings file is not one Glance wrote.
+#[cfg(windows)]
 const MOST: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -103,6 +108,7 @@ impl Settings {
 
 /// Where Glance keeps its settings: the user's roaming application data,
 /// under Glance's identifier.
+#[cfg(windows)]
 pub fn config_dir() -> PathBuf {
     let roaming = unsafe { SHGetKnownFolderPath(&FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, None) }.expect("application data folder");
     let path = PathBuf::from(unsafe { roaming.to_string() }.expect("folder path"));
@@ -110,6 +116,7 @@ pub fn config_dir() -> PathBuf {
     path.join("dev.weiyi.glance")
 }
 
+#[cfg(windows)]
 impl Settings {
     /// A missing or hand-edited file that no longer parses means defaults;
     /// numbers outside what the settings offer are brought within it.

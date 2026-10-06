@@ -19,9 +19,12 @@ studio = []
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Windows' own APIs: everything Glance does there, and only there.
+[target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
 
-[dependencies.windows]
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
     "Wdk_Graphics_Direct3D",

@@ -1,6 +1,5 @@
 //! The panel's words, in Chinese and English, and how readings are written.
 
-use windows::Win32::Globalization::GetUserDefaultUILanguage;
 
 use super::prefs::LanguagePref;
 
@@ -15,9 +14,8 @@ impl Lang {
         match pref {
             LanguagePref::Zh => Lang::Zh,
             LanguagePref::En => Lang::En,
-            // The primary language id of Chinese, in any of its variants.
             LanguagePref::System => {
-                if unsafe { GetUserDefaultUILanguage() } & 0x3FF == 0x04 {
+                if crate::os::speaks_chinese() {
                     Lang::Zh
                 } else {
                     Lang::En

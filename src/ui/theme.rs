@@ -1,9 +1,5 @@
 //! The skins: each one's colours, faces and measures.
 
-use windows::core::w;
-use windows::UI::ViewManagement::{UIColorType, UISettings};
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-
 use super::canvas::{Color, Family, Font};
 use super::prefs::ThemePref;
 
@@ -220,12 +216,8 @@ fn paper(dark: bool) -> Theme {
 
 /// The user's accent colour, in the shade the system pairs with the theme.
 pub fn accent(dark: bool) -> Color {
-    let shade = if dark { UIColorType::AccentLight2 } else { UIColorType::AccentDark1 };
-    match UISettings::new().and_then(|settings| settings.GetColorValue(shade)) {
-        Ok(color) => Color::hex(((color.R as u32) << 16) | ((color.G as u32) << 8) | color.B as u32, 1.0),
-        // Where the system will not say, Windows' default blue in that shade.
-        Err(_) => Color::hex(if dark { 0x99EBFF } else { 0x005FB8 }, 1.0),
-    }
+    // Where the system will not say, Windows' default blue in that shade.
+    Color::hex(crate::os::accent(dark).unwrap_or(if dark { 0x99EBFF } else { 0x005FB8 }), 1.0)
 }
 
 /// Windows 11, as the Start menu and Quick Settings draw it: one acrylic
@@ -375,24 +367,6 @@ fn glass(dark: bool) -> Theme {
     }
 }
 
-/// Whether the system's apps are dark.
-pub fn system_dark() -> bool {
-    let mut light = 1u32;
-    let mut size = 4u32;
-    let read = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
-            w!("AppsUseLightTheme"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut light as *mut _ as *mut _),
-            Some(&mut size),
-        )
-    };
-    read.is_ok() && light == 0
-}
-
 /// Whether the panel is dark: as chosen, as the system's apps are, or, to
 /// follow the backdrop, as the desktop behind it is (`backdrop`, its mean
 /// luminance 0–1, when the skin sees it).
@@ -401,6 +375,6 @@ pub fn is_dark(pref: ThemePref, backdrop: Option<f32>) -> bool {
         ThemePref::Light => false,
         ThemePref::Dark => true,
         ThemePref::Backdrop if backdrop.is_some() => backdrop.unwrap() <= 0.5,
-        ThemePref::System | ThemePref::Backdrop => system_dark(),
+        ThemePref::System | ThemePref::Backdrop => crate::os::apps_dark(),
     }
 }

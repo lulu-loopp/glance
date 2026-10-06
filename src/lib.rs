@@ -1,45 +1,80 @@
+// On macOS and Linux the shared parts (readings, layout, the panel's
+// content) have no program to use them yet: the ports are under way.
+#![cfg_attr(not(windows), allow(dead_code))]
+
 mod detector;
+#[cfg(windows)]
 mod diagnostics;
+#[cfg(windows)]
 mod dimm;
+#[cfg(windows)]
 mod drives;
+#[cfg(windows)]
 mod elevation;
+#[cfg(windows)]
 mod gpu_power;
+#[cfg(windows)]
 mod journal;
+#[cfg(windows)]
 mod metrics;
+#[cfg(windows)]
 mod panel;
+#[cfg(windows)]
 mod pawnio;
+mod os;
 mod reading;
+#[cfg(windows)]
 mod sensors;
-#[cfg(feature = "studio")]
+#[cfg(all(windows, feature = "studio"))]
 mod studio;
 mod settings;
+#[cfg(windows)]
 mod smbios;
+#[cfg(windows)]
 mod superio;
+#[cfg(windows)]
 mod tray;
 mod ui;
+#[cfg(windows)]
 mod update;
+#[cfg(windows)]
 mod watch;
 
+
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(windows)]
 use std::thread;
+#[cfg(windows)]
 use std::time::Instant;
 
+#[cfg(windows)]
 use windows::core::{w, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS};
+#[cfg(windows)]
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+#[cfg(windows)]
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 
+#[cfg(windows)]
 use metrics::Sampler;
+#[cfg(windows)]
 use reading::StaticInfo;
+#[cfg(windows)]
 use panel::Controller;
+#[cfg(windows)]
 use settings::Settings;
 
 /// With the panel hidden, the process list and network adapter are read once
 /// in this many samples: often enough to be current when the panel opens.
+#[cfg(windows)]
 const HIDDEN_SLOW_TICKS: u64 = 5;
 
 /// What every part of Glance shares.
+#[cfg(windows)]
 pub(crate) struct App {
     pub info: StaticInfo,
     pub controller: Arc<Controller>,
@@ -48,12 +83,15 @@ pub(crate) struct App {
     pub config: PathBuf,
 }
 
+#[cfg(windows)]
 static APP: OnceLock<App> = OnceLock::new();
 
+#[cfg(windows)]
 pub(crate) fn app() -> &'static App {
     APP.get().unwrap()
 }
 
+#[cfg(windows)]
 impl App {
     /// Takes new settings: the panel follows them at once, and they are kept
     /// for next time.
@@ -79,19 +117,23 @@ impl App {
 }
 
 /// Brings the settings window up; the panel gives way to it.
+#[cfg(windows)]
 pub(crate) fn show_settings() {
     app().controller.dismiss();
     ui::settings_window::show();
 }
 
+#[cfg(windows)]
 pub(crate) fn quit() {
     tray::quit();
 }
 
 /// The mutex a running Glance holds, one per sign-in session.
+#[cfg(windows)]
 const SINGLE_INSTANCE: PCWSTR = w!("Local\\Glance.SingleInstance");
 
 /// Whether Glance already runs in this session.
+#[cfg(windows)]
 fn already_running() -> bool {
     match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, SINGLE_INSTANCE) } {
         Ok(mutex) => {
@@ -103,6 +145,7 @@ fn already_running() -> bool {
     }
 }
 
+#[cfg(windows)]
 pub fn run() {
     // One multithreaded COM apartment for the life of the process: every
     // thread that uses COM or WinRT (the panel's and the settings' threads)
@@ -220,4 +263,12 @@ pub fn run() {
         }
     });
     tray::run();
+}
+
+/// Glance does not run on this system yet: the macOS and Linux ports are
+/// under way (see the README).
+#[cfg(not(windows))]
+pub fn run() {
+    eprintln!("Glance runs on Windows for now; the macOS and Linux versions are on their way.");
+    std::process::exit(1);
 }
