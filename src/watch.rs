@@ -110,10 +110,13 @@ fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
     let memory = sample.memory.used as f32 / info.mem_total.max(1) as f32 * 100.0;
     rows.push((lang.pick("内存", "Memory").to_string(), Some(memory), None));
     // The name, then the use and the temperature, each lined up at its end.
+    // The name ends in a colon: a card's number would read as part of its use
+    // ("GPU 1  1%").
+    let colon = lang.pick("：", ":");
     let cells: Vec<Vec<String>> = rows
         .into_iter()
         .map(|(label, usage, temp)| {
-            let mut cells = vec![label, usage.map_or_else(|| "—".to_string(), |usage| format!("{usage:.0}%"))];
+            let mut cells = vec![format!("{label}{colon}"), usage.map_or_else(|| "—".to_string(), |usage| format!("{usage:.0}%"))];
             cells.extend(temp.map(|temp| format!("· {temp:.0} °C")));
             cells
         })

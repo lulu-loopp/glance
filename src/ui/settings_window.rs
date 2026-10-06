@@ -643,7 +643,8 @@ impl Ui {
         ];
         for entry in &self.prefs.modules {
             rows.push(Row::Module(entry.id.clone()));
-            if self.expanded.contains(&entry.id) {
+            // A card's rows, while it is open or still closing.
+            if self.opened(&entry.id) > 0.0 {
                 rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
                 rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
             }
@@ -675,7 +676,22 @@ impl Ui {
         let mut y = PAD_TOP;
         let mut after_heading = false;
         let mut placed = Vec::new();
+        // The card whose rows are being placed: its module, where its rows
+        // start, and how open it is. Its rows keep their places inside it;
+        // what follows it moves up by the part of them still hidden.
+        let mut card: Option<(String, f32, f32)> = None;
         for row in self.rows() {
+            let inside = match &row {
+                Row::Item(id, _) | Row::ModuleChoice(id, _) => Some(id.clone()),
+                _ => None,
+            };
+            if card.as_ref().is_some_and(|(id, ..)| Some(id) != inside.as_ref()) {
+                let (_, start, open) = card.take().unwrap();
+                y -= (1.0 - open) * (y - start);
+            }
+            if let Some(id) = inside.filter(|_| card.is_none()) {
+                card = Some((id.clone(), y, self.opened(&id)));
+            }
             // A heading's space above it takes in the title's below; the
             // first row of a group sits 8 under its heading, the rest 4 apart.
             let (before, height) = match &row {
@@ -691,7 +707,29 @@ impl Ui {
             placed.push((row, y, height));
             y += height;
         }
+        if let Some((_, start, open)) = card {
+            y -= (1.0 - open) * (y - start);
+        }
+        let _ = y;
         placed
+    }
+
+    /// How open module `id`'s card is: 0 closed, 1 open, between while it
+    /// slides.
+    fn opened(&self, id: &str) -> f32 {
+        let open = if self.expanded.contains(id) { 1.0 } else { 0.0 };
+        self.motion.get(&format!("open:{id}")).map_or(open, |t| t.value(Instant::now()).clamp(0.0, 1.0))
+    }
+
+    /// Opens or closes module `id`'s card, sliding unless `at_once`.
+    fn set_open(&mut self, id: &str, open: bool, at_once: bool) {
+        if open {
+            self.expanded.insert(id.to_string());
+        } else {
+            self.expanded.remove(id);
+        }
+        self.animate(format!("open:{id}"), if open { 1.0 } else { 0.0 }, SLIDE, Instant::now(), at_once);
+        self.next_frame = Instant::now();
     }
 
     fn content_height(&self) -> f32 {
@@ -1021,7 +1059,9 @@ impl Ui {
         }
         if let Some(Target::Grip(id)) = &self.pressed {
             // A card travels closed.
-            self.expanded.remove(id);
+            let id = id.clone();
+            self.set_open(&id, false, true);
+            let id = &id;
             let top = self.row_top(id);
             self.drag = Some(Drag { id: id.clone(), grab: y + self.scroll - top, pointer: y + self.scroll });
             unsafe { SetCapture(self.hwnd) };
@@ -1077,9 +1117,8 @@ impl Ui {
                 self.save();
             }
             Target::Expand(id) => {
-                if !self.expanded.remove(&id) {
-                    self.expanded.insert(id);
-                }
+                let open = !self.expanded.contains(&id);
+                self.set_open(&id, open, false);
             }
             // An item is changed only while its module is on.
             Target::Item(id, name) if self.module_on(&id) => {
@@ -1133,8 +1172,8 @@ impl Ui {
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
-                Row::Item(id, name) if self.module_on(&id) => vec![Target::Item(id, name)],
-                Row::ModuleChoice(id, field) if self.module_on(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
+                Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
+                Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update => vec![Target::Update],
                 Row::Diagnostics => vec![Target::Diagnostics],
@@ -1422,22 +1461,26 @@ impl Ui {
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
         let placed = self.layout();
-        // How far each module's card reaches down: its row, and while it is
-        // open the rows inside it.
+        // How far each module's card reaches down: its row, and as it opens,
+        // that share of the rows inside it; and where the card's top is.
         // A card's rows follow its module's.
         let mut reach: HashMap<String, f32> = HashMap::new();
-        let mut module_top = 0.0;
+        let mut card_top: HashMap<String, f32> = HashMap::new();
         for (row, top, row_height) in &placed {
             match row {
                 Row::Module(id) => {
-                    module_top = *top;
+                    card_top.insert(id.clone(), *top);
                     reach.insert(id.clone(), *row_height);
                 }
                 Row::Item(id, _) | Row::ModuleChoice(id, _) => {
-                    reach.insert(id.clone(), top + row_height - module_top);
+                    reach.insert(id.clone(), top + row_height - card_top[id]);
                 }
                 _ => {}
             }
+        }
+        let open: HashMap<String, f32> = card_top.keys().map(|id| (id.clone(), self.opened(id))).collect();
+        for (id, extent) in reach.iter_mut() {
+            *extent = ROW + (*extent - ROW) * open[id];
         }
         for (row, top, row_height) in placed {
             let y = top - scroll;
@@ -1445,6 +1488,18 @@ impl Ui {
             if y > height || y + extent + 60.0 < 0.0 {
                 continue;
             }
+            // A row inside a card shows only within the card as far as it
+            // has opened, and takes clicks once it is open.
+            let inside = match &row {
+                Row::Item(id, _) | Row::ModuleChoice(id, _) => {
+                    let glide = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
+                    let top = card_top[id] - scroll + glide;
+                    unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, reach[id]), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                    Some(open[id] >= 1.0)
+                }
+                _ => None,
+            };
+            let usable = inside.unwrap_or(true);
             match row {
                 Row::Title => {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
@@ -1517,7 +1572,7 @@ impl Ui {
                     let pressed = self.pressed == Some(target.clone());
                     let on = self.prefs.shows(&id, name);
                     self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
-                    if active {
+                    if active && usable {
                         self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
                     }
                 }
@@ -1529,7 +1584,11 @@ impl Ui {
                     let color = if active { palette.text } else { palette.text3 };
                     text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
+                    let targets = self.targets.len();
                     self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, now, &hovered);
+                    if !usable {
+                        self.targets.truncate(targets);
+                    }
                 }
                 Row::Update => {
                     let Some((version, state)) = update::available() else { continue };
@@ -1605,6 +1664,9 @@ impl Ui {
                     text_centred(frame, action, label, palette.signal, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
                     self.targets.push((button, target));
                 }
+            }
+            if inside.is_some() {
+                unsafe { frame.dc.PopAxisAlignedClip() };
             }
         }
         // The dragged row passes over the others.
