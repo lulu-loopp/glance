@@ -13,6 +13,7 @@
 //! Program Files, not a copy in Downloads or a build folder. From anywhere
 //! else every start asks.
 
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,7 +40,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegGetValueW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
+    REG_DWORD, REG_SZ,
     REG_OPTION_NON_VOLATILE, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::TaskScheduler::{
@@ -432,25 +434,82 @@ impl Private {
 
 /// Makes a `Private` folder `name` in `parent`, where `parent` really is
 /// (as Windows resolves it, held): new (it must not exist yet), and checked
-/// by handle to lie in that held folder.
+/// by handle to lie in that held folder. Only in a parent that no one but
+/// administrators can take children from or re-permission, nor any folder
+/// above it (`folders_hold`): then no one else can move the new folder
+/// aside, from the moment it is made until long after it is let go.
 pub fn private_folder(parent: &Path, name: &str) -> Option<Private> {
     let parent_held = pin(parent)?;
-    let path = parent_held.place()?.join(name);
+    let real = plain(&parent_held.place()?);
+    if !folders_hold(&real) {
+        return None;
+    }
+    let path = real.join(name);
     let held = create_held_as(&path, &parent_held, w!("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")).ok()?;
     Some(Private { _held: held, path })
 }
 
-/// Removes the folders in `parent` whose names start with `prefix` that
-/// only administrators could change (`Private` folders left from before),
-/// links among them taken as links, never followed.
-pub fn sweep_private(parent: &Path, prefix: &str) {
-    let Ok(entries) = std::fs::read_dir(parent) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_name().to_string_lossy().starts_with(prefix) && !is_link(&path) && path.is_dir() && only_trusted_inside(&path) {
-            let _ = std::fs::remove_dir_all(&path);
+/// The value naming the update installer last downloaded, in Glance's key,
+/// which only administrators can write.
+const UPDATE_DOWNLOAD: PCWSTR = w!("UpdateDownload");
+
+/// Notes `file` (in a `Private` folder) as the update installer downloaded,
+/// for `forget_download` to remove later. Noted before it is written, so
+/// that nothing Glance puts there goes unrecorded.
+pub fn remember_download(file: &Path) -> bool {
+    let mut key = HKEY::default();
+    let created = unsafe { RegCreateKeyExW(HKEY_LOCAL_MACHINE, GLANCE_KEY, None, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None) };
+    if created.is_err() {
+        return false;
+    }
+    let text: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
+    let bytes: Vec<u8> = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+    let written = unsafe { RegSetValueExW(key, UPDATE_DOWNLOAD, None, REG_SZ, Some(&bytes)) }.is_ok();
+    unsafe {
+        let _ = RegCloseKey(key);
+    }
+    written
+}
+
+/// Removes the update installer `remember_download` noted, and its folder,
+/// one file and one empty folder, nothing else: only while the folder is
+/// still administrators' alone (no one else's made in its place since);
+/// the note goes once both are gone.
+pub fn forget_download() {
+    let Some(file) = noted_download() else { return };
+    let Some(folder) = file.parent() else { return };
+    if folder.exists() {
+        if is_link(folder) || !only_trusted_can(folder, FOLDER_CHANGES) {
+            return;
+        }
+        // Still in use (the installer running): left for next time.
+        if file.exists() && std::fs::remove_file(&file).is_err() {
+            return;
+        }
+        if std::fs::remove_dir(folder).is_err() {
+            return;
         }
     }
+    let mut key = HKEY::default();
+    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, GLANCE_KEY, None, KEY_WRITE, &mut key) }.is_ok() {
+        unsafe {
+            let _ = RegDeleteValueW(key, UPDATE_DOWNLOAD);
+            let _ = RegCloseKey(key);
+        }
+    }
+}
+
+fn noted_download() -> Option<PathBuf> {
+    let mut size = 0u32;
+    unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, None, Some(&mut size)) }.ok().ok()?;
+    let mut data = vec![0u16; size as usize / 2];
+    unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, Some(data.as_mut_ptr().cast()), Some(&mut size))
+    }
+    .ok()
+    .ok()?;
+    let text = String::from_utf16_lossy(&data[..(size as usize / 2).saturating_sub(1)]);
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 /// Puts the files the installer laid out in `payload` into `folder`. A new
@@ -955,29 +1014,32 @@ mod tests {
         assert!(!protected(&std::env::current_exe().unwrap()));
     }
 
-    /// Needs administrator rights (a folder is made owned by them): a
-    /// private folder is new, administrators' alone inside, cannot be moved
-    /// aside while held, and is swept away afterwards.
+    /// Needs administrator rights (a folder is made owned by them, and
+    /// Glance's key written): a private folder is made only where no one
+    /// else can move it aside (ProgramData, not the user's temporary
+    /// folder), new, administrators' alone inside; the download noted in it
+    /// is removed with its folder, and the note with them.
     #[test]
     #[ignore]
     fn makes_private_folders_elevated() {
-        let temp = std::env::temp_dir();
-        let name = format!("glance-private-test-{}-", std::process::id());
-        let folder = private_folder(&temp, &format!("{name}a")).expect("made");
-        std::fs::write(folder.path().join("file"), b"x").unwrap();
+        let name = format!("glance-private-test-{}", std::process::id());
+        assert!(private_folder(&std::env::temp_dir(), &name).is_none());
+        let program_data = PathBuf::from(std::env::var("ProgramData").unwrap());
+        let folder = private_folder(&program_data, &name).expect("made");
+        let file = folder.path().join("setup.exe");
+        assert!(remember_download(&file));
+        std::fs::write(&file, b"x").unwrap();
         assert!(only_trusted_inside(folder.path()));
         // Not made over something already there.
-        assert!(private_folder(&temp, &format!("{name}a")).is_none());
-        // Held: it cannot be renamed.
-        assert!(std::fs::rename(folder.path(), temp.join(format!("{name}moved"))).is_err());
+        assert!(private_folder(&program_data, &name).is_none());
+        // Held: it cannot be renamed, even by an administrator.
+        assert!(std::fs::rename(folder.path(), program_data.join(format!("{name}-moved"))).is_err());
+        let path = folder.path().to_path_buf();
         drop(folder);
-        // Let go, it is swept; an ordinary folder of the same prefix is not.
-        let ordinary = temp.join(format!("{name}b"));
-        std::fs::create_dir(&ordinary).unwrap();
-        sweep_private(&temp, &name);
-        assert!(!temp.join(format!("{name}a")).exists());
-        assert!(ordinary.exists());
-        std::fs::remove_dir(&ordinary).unwrap();
+        assert_eq!(noted_download(), Some(file.clone()));
+        forget_download();
+        assert!(!file.exists() && !path.exists());
+        assert_eq!(noted_download(), None);
     }
 
     #[test]

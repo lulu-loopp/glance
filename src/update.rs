@@ -23,7 +23,8 @@ use windows::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
     WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, ShellExecuteW, KF_FLAG_DEFAULT};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 use crate::ui::prefs::LanguagePref;
@@ -114,14 +115,18 @@ pub fn install() {
 
 fn fetch_and_run(release: &Release) -> State {
     let Some(bytes) = get(&release.installer) else { return State::Failed };
-    let temp = std::env::temp_dir();
-    crate::elevation::sweep_private(&temp, PRIVATE);
-    // Named afresh each time; the folder is made new, administrators' only,
-    // and held while the installer is written, checked and started.
+    // The one downloaded before, if it is still there.
+    crate::elevation::forget_download();
+    // In ProgramData, where no one but administrators can move anything
+    // aside: a folder made there new, administrators' only, named afresh
+    // each time, stays where it is while the installer is written, checked
+    // and started, and after, while the installer reads itself again.
+    let Some(program_data) = program_data() else { return State::Failed };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let Some(folder) = crate::elevation::private_folder(&temp, &format!("{PRIVATE}{}-{stamp}", std::process::id())) else { return State::Failed };
+    let name = format!("Glance-update-{}-{stamp}", std::process::id());
+    let Some(folder) = crate::elevation::private_folder(&program_data, &name) else { return State::Failed };
     let installer = folder.path().join(format!("Glance_{}_x64-setup.exe", release.version));
-    if std::fs::write(&installer, bytes).is_err() {
+    if !crate::elevation::remember_download(&installer) || std::fs::write(&installer, bytes).is_err() {
         return State::Failed;
     }
     let Ok(running) = std::env::current_exe() else { return State::Failed };
@@ -138,8 +143,13 @@ fn fetch_and_run(release: &Release) -> State {
     }
 }
 
-/// What the private download folders' names start with.
-const PRIVATE: &str = "Glance-update-";
+/// The machine's ProgramData folder.
+fn program_data() -> Option<std::path::PathBuf> {
+    let path = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }.ok()?;
+    let text = unsafe { path.to_string() }.ok();
+    unsafe { CoTaskMemFree(Some(path.0 as *const _)) };
+    text.map(std::path::PathBuf::from)
+}
 
 /// The language the user reads Glance in.
 fn language() -> Lang {

@@ -108,6 +108,8 @@ pub fn run() {
     // account's tasks: through Task Scheduler itself, nothing else loaded.
     if std::env::args().any(|arg| arg == "--remove-tasks") {
         elevation::remove_all_tasks();
+        // And an update's installer, if one was left behind.
+        elevation::forget_download();
         return;
     }
     // The installer and uninstaller, elevated, have their own copy of Glance
@@ -174,6 +176,8 @@ pub fn run() {
     // put the sensor driver in place before the sensors are looked for.
     if elevation::is_elevated() {
         elevation::register_launch_task();
+        // The installer of an update taken last time, once it has run.
+        elevation::forget_download();
         let exe = std::env::current_exe().expect("own path");
         elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));
     }
