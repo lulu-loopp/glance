@@ -554,6 +554,18 @@ impl Layout {
             }
         }
         let (columns, (cuts, tallest)) = chosen;
+        Layout::built(heights, columns, cuts, tallest, theme)
+    }
+
+    /// The lanes in exactly `columns` columns (at least one, and no more
+    /// than there are lanes), however tall that makes them.
+    pub fn with_columns(heights: Vec<f32>, columns: usize, theme: &Theme) -> Self {
+        let columns = columns.min(heights.len()).max(1);
+        let (cuts, tallest) = split(&heights, columns, theme.lane_gap);
+        Layout::built(heights, columns, cuts, tallest, theme)
+    }
+
+    fn built(heights: Vec<f32>, columns: usize, cuts: Vec<usize>, tallest: f32, theme: &Theme) -> Self {
         Layout {
             columns,
             cuts,

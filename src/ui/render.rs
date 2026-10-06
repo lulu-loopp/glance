@@ -24,7 +24,10 @@ const TOP_SHARE: f32 = 0.6;
 /// fits the panel into it: as many columns as the lanes need to show at full
 /// size, up to what the screen allows, and zoomed out only if even that is
 /// too little.
-pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32)) -> (Layout, f32) {
+///
+/// `columns`, when given, is kept instead (a panel already on screen keeps
+/// its shape), as far as the screen allows it.
+pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>) -> (Layout, f32) {
     // The room the panel has: across from its edge it keeps a gap from the
     // far side; along its edge, from both ends.
     let (room_width, room) = match edge {
@@ -36,10 +39,40 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32)) -
     // As many columns as fit across, and along a side no more than a few.
     let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
     let max_columns = if edge == Edge::Top { fit } else { fit.min(MAX_COLUMNS) };
-    let layout = Layout::new(heights, room, max_columns, theme);
+    let layout = match columns {
+        Some(columns) => Layout::with_columns(heights, columns.min(max_columns), theme),
+        None => Layout::new(heights, room, max_columns, theme),
+    };
     // Zoomed out only if even the most columns are too tall, or one is too wide.
     let zoom = (room / layout.height()).min(room_width / layout.width()).min(1.0);
     (layout, zoom)
+}
+
+/// A panel's shape while it is on screen: the columns it opened with, and
+/// each lane as tall as it has been since. Readings come and go (a fan that
+/// stops, a sensor read now and then), and a lane that grew and shrank with
+/// them would change the columns, or the zoom, under the pointer.
+#[derive(Default)]
+pub struct Shape {
+    columns: Option<usize>,
+    heights: Vec<f32>,
+}
+
+impl Shape {
+    /// `arrange`, keeping the columns and never letting a lane shrink; a
+    /// different number of lanes (the settings changed) starts afresh.
+    pub fn arrange(&mut self, theme: &Theme, edge: Edge, mut heights: Vec<f32>, work: (f32, f32)) -> (Layout, f32) {
+        if self.heights.len() != heights.len() {
+            *self = Shape::default();
+        }
+        for (height, held) in heights.iter_mut().zip(&self.heights) {
+            *height = height.max(*held);
+        }
+        let (layout, zoom) = arrange(theme, edge, heights.clone(), work, self.columns);
+        self.columns = Some(layout.columns);
+        self.heights = heights;
+        (layout, zoom)
+    }
 }
 
 #[cfg(test)]
@@ -51,13 +84,39 @@ mod tests {
     fn fits_narrow_and_short_screens() {
         let theme = Theme::new(Skin::Paper, false);
         // A portrait screen 600 DIPs wide holds one column, not three.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0));
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0), None);
         assert_eq!(layout.columns, 1);
         assert!(zoom < 1.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
         // Narrower than a column: the column is zoomed to fit across.
-        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0));
+        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0), None);
         assert!(layout.width() * zoom <= 300.0 - 2.0 * GAP + 0.01);
         assert!(zoom.is_finite() && zoom > 0.0);
+    }
+
+    #[test]
+    fn keeps_its_shape_while_readings_come_and_go() {
+        let theme = Theme::new(Skin::Glass, false);
+        let work = (1400.0, 900.0);
+        // Four lanes as tall as two columns can hold: the next row tips the
+        // layout into a third.
+        let columns = |height: f32| arrange(&theme, Edge::Right, vec![height; 4], work, None).0.columns;
+        let most = (100..900).map(|h| h as f32).take_while(|h| columns(*h) <= 2).last().unwrap();
+        let lanes = vec![most; 4];
+        let mut shape = Shape::default();
+        let (opened, _) = shape.arrange(&theme, Edge::Right, lanes.clone(), work);
+        assert_eq!(opened.columns, 2);
+        // A row more in one lane would take another column if laid out
+        // afresh; held, the panel keeps its columns.
+        let taller = vec![most, most, most + 30.0, most];
+        assert_ne!(arrange(&theme, Edge::Right, taller.clone(), work, None).0.columns, opened.columns);
+        let (held, _) = shape.arrange(&theme, Edge::Right, taller, work);
+        assert_eq!(held.columns, opened.columns);
+        // The row gone again: the lane keeps its height.
+        let (after, _) = shape.arrange(&theme, Edge::Right, lanes, work);
+        assert_eq!(after.height(), held.height());
+        // Other lanes (the settings changed): afresh.
+        let (fresh, _) = shape.arrange(&theme, Edge::Right, vec![100.0], work);
+        assert_eq!(fresh.columns, 1);
     }
 }
 

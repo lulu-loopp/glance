@@ -132,12 +132,13 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         .collect();
 
     // Laid out and placed as the panel would be on a screen this size, for
-    // the readings of the moment: as the panel does, a lane grows when a
-    // reading appears (a fan starting) and shrinks when it goes.
+    // the readings of the moment, and held through the shot as the panel
+    // holds its shape while it is up (see `render::Shape`).
     let edge = Edge::Right;
+    let shape = std::cell::RefCell::new(render::Shape::default());
     let place = |lanes: &[view::Lane], theme: &Theme| {
         let heights = lanes.iter().map(|lane| lane.height(theme)).collect();
-        let (layout, zoom) = render::arrange(theme, edge, heights, (sw, sh));
+        let (layout, zoom) = shape.borrow_mut().arrange(theme, edge, heights, (sw, sh));
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
         (layout, zoom, rest)

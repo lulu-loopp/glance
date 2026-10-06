@@ -458,6 +458,8 @@ struct Panel<'a> {
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
+    /// The shape the panel opened with, held while it is up.
+    shape: render::Shape,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
@@ -495,6 +497,7 @@ impl<'a> Panel<'a> {
             scroll_target: 0.0,
             hover: None,
             pinned: false,
+            shape: render::Shape::default(),
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -545,6 +548,8 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
+            // A new opening takes the shape the readings now give it.
+            self.shape = render::Shape::default();
             let work = contact.work;
             let anchor = match self.controller.config.lock().unwrap().anchor {
                 Anchor::Pointer => cursor,
@@ -702,7 +707,7 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let (layout, zoom) = render::arrange(&self.theme, self.edge, heights, work);
+        let (layout, zoom) = self.shape.arrange(&self.theme, self.edge, heights, work);
         let placement = self.placement.as_mut().unwrap();
         place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
         (lanes, layout)
