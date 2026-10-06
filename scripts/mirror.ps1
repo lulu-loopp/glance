@@ -99,7 +99,8 @@ finally {
 }
 
 # What installed copies will read: the newest release, and its installer.
-$latest = Invoke-RestMethod -Uri "$api/releases/latest"
+# With the token: anonymous calls from one address are rate limited.
+$latest = Invoke-RestMethod -Uri "$api/releases/latest" -Headers $auth
 $installer = $latest.assets | Where-Object { $_.name -eq "Glance_${Version}_x64-setup.exe" }
 if (-not $installer) { throw "Gitee's latest release does not offer Glance_${Version}_x64-setup.exe" }
 Write-Host "latest on Gitee: $($latest.tag_name), installer $($installer.browser_download_url)"
