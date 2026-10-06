@@ -33,7 +33,12 @@ if ($LASTEXITCODE -ne 0) { throw "no release $tag on GitHub" }
 $commit = (git rev-list -n 1 $tag).Trim()
 if ($LASTEXITCODE -ne 0) { throw "no tag $tag here" }
 # The source mirrored is the one the release was made from.
-$published = ((git ls-remote https://github.com/lulu-loopp/glance.git "refs/tags/$tag^{}") -split '\s+')[0]
+# An annotated tag is listed with its commit ("^{}"); a lightweight one is
+# its commit.
+$listed = @(git ls-remote https://github.com/lulu-loopp/glance.git "refs/tags/$tag" "refs/tags/$tag^{}")
+$line = $listed | Where-Object { $_ -match '\^\{\}$' } | Select-Object -First 1
+if (-not $line) { $line = $listed | Select-Object -First 1 }
+$published = if ($line) { ($line -split '\s+')[0] } else { '' }
 if ($published -ne $commit) { throw "GitHub's $tag is on $published, this checkout's on $commit" }
 
 # The commit and tag on Gitee, pushed with the token in git's environment

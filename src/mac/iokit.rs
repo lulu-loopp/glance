@@ -6,7 +6,7 @@ use std::ffi::{c_void, CString};
 use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_io_kit::{
     io_object_t, kIOMainPortDefault, IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IORegistryEntryGetName,
-    IORegistryEntryGetParentEntry,
+    IORegistryEntryGetParentEntry, IORegistryEntryGetRegistryEntryID,
     IOServiceGetMatchingServices, IOServiceMatching,
 };
 
@@ -43,6 +43,13 @@ impl Entry {
             return String::new();
         }
         unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned()
+    }
+
+    /// The number the registry knows it by for as long as it is there.
+    pub fn id(&self) -> u64 {
+        let mut id = 0;
+        unsafe { IORegistryEntryGetRegistryEntryID(self.0, &mut id) };
+        id
     }
 
     /// A property that is a dictionary.

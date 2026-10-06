@@ -6,6 +6,7 @@
 //! administrators' alone and run only if it is signed by whoever signed the
 //! Glance that is running.
 
+use std::cmp::Ordering;
 use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
@@ -50,9 +51,11 @@ const MOST: usize = 64 << 20;
 #[derive(Clone)]
 pub struct Release {
     pub version: String,
-    /// Its installer, from each site that offers it, the site that answered
-    /// soonest first: the one most easily reached from where the user is.
-    installers: Vec<String>,
+    /// Each site's latest version and where its installer is: the newest
+    /// first and, of the same version, the site that answered soonest (the
+    /// one most easily reached from where the user is). `version` is the
+    /// first's.
+    installers: Vec<(String, String)>,
 }
 
 /// Where taking an update stands.
@@ -144,23 +147,27 @@ fn fetch_and_run(release: &Release) -> State {
         note("no folder of administrators' alone could be made in ProgramData");
         return State::Failed;
     };
-    let installer = folder.path().join(format!("Glance_{}_x64-setup.exe", release.version));
-    if !crate::elevation::remember_download(&installer) {
+    let path_for = |version: &str| folder.path().join(format!("Glance_{version}_x64-setup.exe"));
+    if !crate::elevation::remember_download(&path_for(&release.version)) {
         note("the installer could not be written");
         return State::Failed;
     }
     let Ok(running) = std::env::current_exe() else { return State::Failed };
     // From each site in turn, until one gives an installer that is what it
-    // should be: signed as this Glance is, and of the version announced (a
-    // site is trusted for neither, so an older signed installer under a
-    // newer name would take Glance back).
+    // should be: signed as this Glance is, of the version that site
+    // announced, and newer than this one. No site is trusted for any of it:
+    // an older signed installer under a newer name would take Glance back,
+    // and a site claiming a version that is not out keeps no other from
+    // being tried.
+    let mut chosen = None;
     let mut outcome = State::Failed;
-    for url in &release.installers {
+    for (version, url) in &release.installers {
         let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
         let Some(bytes) = get(url) else {
             note(&format!("the installer could not be downloaded from {host}"));
             continue;
         };
+        let installer = path_for(version);
         if std::fs::write(&installer, bytes).is_err() {
             note("the installer could not be written");
             return State::Failed;
@@ -170,19 +177,17 @@ fn fetch_and_run(release: &Release) -> State {
             outcome = State::Rejected;
             continue;
         }
-        let version = installer_version(&installer);
-        let announced = version.as_deref().is_some_and(|version| !newer(version, &release.version) && !newer(&release.version, version));
-        if !announced || !newer(&release.version, env!("CARGO_PKG_VERSION")) {
-            note(&format!("the installer from {host} is version {}, not {}; not run", version.as_deref().unwrap_or("unknown"), release.version));
+        let carried = installer_version(&installer);
+        let announced = carried.as_deref().is_some_and(|carried| !newer(carried, version) && !newer(version, carried));
+        if !announced || !newer(version, env!("CARGO_PKG_VERSION")) {
+            note(&format!("the installer from {host} is version {}, not {version}; not run", carried.as_deref().unwrap_or("unknown")));
             outcome = State::Rejected;
             continue;
         }
-        outcome = State::Ready;
+        chosen = Some(installer);
         break;
     }
-    if outcome != State::Ready {
-        return outcome;
-    }
+    let Some(installer) = chosen else { return outcome };
     let path = HSTRING::from(installer.as_os_str());
     let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     // Above 32: the installer is running.
@@ -232,9 +237,9 @@ fn language() -> Lang {
     Lang::resolve(serde_json::from_value::<LanguagePref>(settings.view["language"].clone()).unwrap_or_default())
 }
 
-/// The latest release either site knows of, and its installer from each
-/// site that has it. A site that does not answer (out of reach from where
-/// the user is) is noted, and the other one serves.
+/// The latest release each site knows of, the newest first. A site that
+/// does not answer (out of reach from where the user is) is noted, and the
+/// other one serves.
 fn latest() -> Option<Release> {
     let mut answers: Vec<(Duration, (String, String))> = SOURCES
         .iter()
@@ -249,13 +254,10 @@ fn latest() -> Option<Release> {
         })
         .collect();
     answers.sort_by_key(|(took, _)| *took);
-    let answers: Vec<(String, String)> = answers.into_iter().map(|(_, answer)| answer).collect();
-    let version = answers.iter().map(|(version, _)| version).fold(None, |best: Option<&String>, version| match best {
-        Some(best) if !newer(version, best) => Some(best),
-        _ => Some(version),
-    })?;
-    let version = version.clone();
-    let installers = answers.into_iter().filter(|(found, _)| *found == version).map(|(_, installer)| installer).collect();
+    let mut installers: Vec<(String, String)> = answers.into_iter().map(|(_, answer)| answer).collect();
+    // The newest first; of the same version, still the sooner site first.
+    installers.sort_by(|(a, _), (b, _)| if newer(a, b) { Ordering::Less } else if newer(b, a) { Ordering::Greater } else { Ordering::Equal });
+    let version = installers.first()?.0.clone();
     Some(Release { version, installers })
 }
 
@@ -436,7 +438,7 @@ mod tests {
     fn finds_downloads_and_checks_the_latest_release() {
         let release = latest().expect("latest release");
         assert_eq!(release.installers.len(), 2, "both sites offer {}", release.version);
-        let mirror = release.installers.iter().find(|url| url.starts_with("https://gitee.com/")).expect("the mirror's installer");
+        let (_, mirror) = release.installers.iter().find(|(_, url)| url.starts_with("https://gitee.com/")).expect("the mirror's installer");
         let bytes = get(mirror).expect("installer from the mirror");
         let file = std::env::temp_dir().join(format!("glance-update-test-{}.exe", std::process::id()));
         std::fs::write(&file, bytes).unwrap();

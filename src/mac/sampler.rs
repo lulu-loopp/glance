@@ -69,6 +69,9 @@ pub struct Sampler {
     report: Option<Report>,
     /// The system's network configuration, for the interface in use.
     network: Option<Network>,
+    /// The registry's number for each of `info.gpus`: each sample's readings
+    /// are put with the GPU they are of, whichever have come or gone since.
+    gpu_ids: Vec<u64>,
 }
 
 impl Sampler {
@@ -78,6 +81,7 @@ impl Sampler {
         let threads = sysctl_number("hw.logicalcpu").unwrap_or(1) as usize;
         let network = Network::open();
         let primary = primary_interface(network.as_ref(), &interfaces());
+        let found_gpus = graphics();
         let info = StaticInfo {
             cpu_name: sysctl_string("machdep.cpu.brand_string").unwrap_or_default(),
             memory_modules: None,
@@ -86,7 +90,7 @@ impl Sampler {
             board: sysctl_string("hw.model").unwrap_or_default(),
             threads,
             mem_total: sysctl_number("hw.memsize").unwrap_or(0),
-            gpus: graphics().iter().map(|(info, _)| info.clone()).collect(),
+            gpus: found_gpus.iter().map(|(_, info, _)| info.clone()).collect(),
             found: Vec::new(),
         };
         let mut sampler = Sampler {
@@ -97,6 +101,7 @@ impl Sampler {
             smc: Smc::open(),
             report: Report::open(),
             network,
+            gpu_ids: found_gpus.iter().map(|(id, _, _)| *id).collect(),
         };
         sampler.info.found = vec![
             format!(
@@ -139,7 +144,9 @@ impl Sampler {
         let temperatures = self.sensors.as_ref().map_or_else(Vec::new, Sensors::read);
         let report = self.report.as_mut().map(|report| report.read(seconds)).unwrap_or_default();
         let chip = hottest(&temperatures, "PMU tdie");
-        let mut gpus: Vec<GpuSample> = graphics().into_iter().map(|(_, reading)| reading).collect();
+        let mut readings: HashMap<u64, GpuSample> = graphics().into_iter().map(|(id, _, reading)| (id, reading)).collect();
+        // A GPU since gone (an eGPU unplugged) reads as idle.
+        let mut gpus: Vec<GpuSample> = self.gpu_ids.iter().map(|id| readings.remove(id).unwrap_or_else(idle_gpu)).collect();
         // Apple silicon has one GPU: IOReport's power and clock are its.
         if let Some(gpu) = gpus.first_mut() {
             gpu.power = report.gpu_power;
@@ -428,7 +435,7 @@ fn battery() -> Option<BatterySample> {
 /// Each graphics processor and its readings now, from its driver's
 /// statistics. On Apple silicon its memory is the system's: what it has in
 /// use, of all there is, with no separate pool to borrow from.
-fn graphics() -> Vec<(GpuInfo, GpuSample)> {
+fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
     let memory = sysctl_number("hw.memsize").unwrap_or(0);
     iokit::services("IOAccelerator")
         .iter()
@@ -447,11 +454,16 @@ fn graphics() -> Vec<(GpuInfo, GpuSample)> {
                 fan_rpm: None,
                 power: None,
             };
-            Some((info, reading))
+            Some((accelerator.id(), info, reading))
         })
         .enumerate()
-        .map(|(slot, (info, reading))| (GpuInfo { slot, ..info }, reading))
+        .map(|(slot, (id, info, reading))| (id, GpuInfo { slot, ..info }, reading))
         .collect()
+}
+
+/// The readings of a GPU that is not there to read.
+fn idle_gpu() -> GpuSample {
+    GpuSample { usage: 0.0, engines: Vec::new(), mem_used: 0, shared_used: 0, temp: None, clock_mhz: None, fan_rpm: None, power: None }
 }
 
 /// Bytes read and written by every drive, from their drivers' statistics.
