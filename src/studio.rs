@@ -151,14 +151,14 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
-        (layout, zoom, rest)
+        (layout, zoom, rest, opening.seen.clone())
     };
     // Toned by the desktop where it first rests.
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
     let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
-    let (layout, zoom, rest) = place(&probe, &view::lanes(&probe), &measure);
+    let (layout, zoom, rest, _) = place(&probe, &view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
         left: (rest.0 * px) as i32,
@@ -195,8 +195,10 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             hover: None,
             pinned: false,
         };
+        let (layout, zoom, rest, held) = place(&scene, &view::lanes(&scene), &theme);
+        // What the panel holds as it has been up: drawn in the boxes it opened with.
+        let scene = Scene { seen: &held, ..scene };
         let lanes = view::lanes(&scene);
-        let (layout, zoom, rest) = place(&scene, &lanes, &theme);
         let travel = match theme.entrance {
             Entrance::Beyond(extra) => layout.width() + extra,
             Entrance::Slide(distance) => distance,

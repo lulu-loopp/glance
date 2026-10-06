@@ -71,10 +71,13 @@ impl Opening {
     pub fn grow(&mut self, now: &Seen, info: &StaticInfo, height: impl Fn(&str, &Seen) -> Option<f32>) {
         let boxes = self.layout.lanes();
         for (id, area) in self.lanes.iter().zip(&boxes) {
-            let mut grown = self.seen.clone();
-            grown.adopt(now, id, info);
-            if grown != self.seen && height(id, &grown).is_some_and(|height| height <= area.h) {
-                self.seen = grown;
+            // A reading at a time: each that fits is taken, whether or not
+            // the others do.
+            for item in self.seen.news(now, id, info) {
+                let grown = self.seen.with(&item, now);
+                if height(id, &grown).is_some_and(|height| height <= area.h) {
+                    self.seen = grown;
+                }
             }
         }
     }
@@ -121,16 +124,15 @@ mod tests {
         let mut opening = Opening::new(&theme, Edge::Right, &lanes, (1400.0, 900.0), opened.clone());
         assert_eq!(opening.layout.columns, 2);
         let (layout, zoom) = (opening.layout.height(), opening.zoom);
-        // The GPU's clock read for the first time: one row more fits its box.
+        // The GPU's clock and power read for the first time together: the
+        // clock's row fits its box, both rows would not. The clock is taken,
+        // the power waits; the outline never moves.
         let mut now = opened.clone();
         now.gpus[0].clock = true;
-        let row = |seen: &Seen| if seen.gpus[0].clock { 119.0 } else { 100.0 };
-        let height = |id: &str, seen: &Seen| Some(if id == "gpu:0" { row(seen) } else { lanes.iter().find(|lane| lane.0 == id).unwrap().1 });
-        opening.grow(&now, &info, height);
-        assert!(opening.seen.gpus[0].clock);
-        // A reading that would not fit waits; the outline never moves.
         now.gpus[0].power = true;
-        opening.grow(&now, &info, |id, seen| if id == "gpu:0" && seen.gpus[0].power { Some(5000.0) } else { height(id, seen) });
+        let gpu = |seen: &Seen| 100.0 + if seen.gpus[0].clock { 19.0 } else { 0.0 } + if seen.gpus[0].power { 5000.0 } else { 0.0 };
+        opening.grow(&now, &info, |id, seen| Some(if id == "gpu:0" { gpu(seen) } else { lanes.iter().find(|lane| lane.0 == id).unwrap().1 }));
+        assert!(opening.seen.gpus[0].clock);
         assert!(!opening.seen.gpus[0].power);
         assert_eq!((opening.layout.height(), opening.zoom), (layout, zoom));
     }

@@ -92,49 +92,132 @@ impl Seen {
         self.battery |= s.battery.is_some();
     }
 
-    /// Takes in what `other` holds for the lane of module `id` (and only
-    /// for it), keeping what this holds besides: a volume gone in `other`
-    /// stays, unread.
-    pub fn adopt(&mut self, other: &Seen, id: &str, info: &StaticInfo) {
+    /// The readings `other` holds for the lane of module `id` that this
+    /// does not, one at a time.
+    pub fn news(&self, other: &Seen, id: &str, info: &StaticInfo) -> Vec<Item> {
+        let mut news = Vec::new();
+        let mut flag = |ours: bool, theirs: bool, item: Item| {
+            if theirs && !ours {
+                news.push(item);
+            }
+        };
         match id {
             "cpu" => {
-                self.cpu_temp |= other.cpu_temp;
-                self.cpu_power |= other.cpu_power;
-                self.cpu_clock |= other.cpu_clock;
-                merge(&mut self.ccds, other.ccds.iter().copied(), |a, b| a == b);
-                self.threads = self.threads.max(other.threads);
+                flag(self.cpu_temp, other.cpu_temp, Item::CpuTemp);
+                flag(self.cpu_power, other.cpu_power, Item::CpuPower);
+                flag(self.cpu_clock, other.cpu_clock, Item::CpuClock);
+                flag(self.threads >= other.threads, true, Item::Threads(other.threads));
+                news.extend(other.ccds.iter().filter(|ccd| !self.ccds.contains(ccd)).map(|ccd| Item::Ccd(*ccd)));
             }
-            "memory" => self.dimms = self.dimms.max(other.dimms),
+            "memory" => flag(self.dimms >= other.dimms, true, Item::Dimms(other.dimms)),
             "network" => {
-                self.address |= other.address;
-                self.link |= other.link;
+                flag(self.address, other.address, Item::Address);
+                flag(self.link, other.link, Item::Link);
             }
-            "disk" => merge(&mut self.drives, other.drives.iter().cloned(), |a, b| a.0 == b.0),
-            "storage" => merge(&mut self.volumes, other.volumes.iter().cloned(), |a, b| a == b),
+            "disk" => news.extend(other.drives.iter().filter(|(id, _)| !self.drives.iter().any(|(ours, _)| ours == id)).map(|(id, _)| Item::Drive(*id))),
+            "storage" => news.extend(other.volumes.iter().filter(|name| !self.volumes.contains(name)).cloned().map(Item::Volume)),
             "board" => {
-                if let Some(theirs) = &other.board {
-                    let ours = self.board.get_or_insert_with(BoardSeen::default);
-                    merge(&mut ours.temps, theirs.temps.iter().cloned(), |a, b| a == b);
-                    merge(&mut ours.fans, theirs.fans.iter().cloned(), |a, b| a == b);
-                }
+                let (ours, theirs) = (self.board.clone().unwrap_or_default(), other.board.clone().unwrap_or_default());
+                news.extend(theirs.temps.into_iter().filter(|name| !ours.temps.contains(name)).map(Item::BoardTemp));
+                news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
             }
-            "battery" => self.battery |= other.battery,
+            "battery" => flag(self.battery, other.battery, Item::Battery),
             _ => {
-                let Some(theirs) = info.gpu_of(id).and_then(|index| Some((index, other.gpus.get(index)?))) else { return };
-                let (index, theirs) = theirs;
-                if self.gpus.len() <= index {
-                    self.gpus.resize(index + 1, GpuSeen::default());
-                }
-                let ours = &mut self.gpus[index];
-                ours.present |= theirs.present;
-                ours.temp |= theirs.temp;
-                ours.clock |= theirs.clock;
-                ours.power |= theirs.power;
-                ours.fan |= theirs.fan;
-                merge(&mut ours.engines, theirs.engines.iter().cloned(), |a, b| a == b);
+                let Some(index) = info.gpu_of(id) else { return news };
+                let (ours, theirs) = (self.gpus.get(index).cloned().unwrap_or_default(), other.gpus.get(index).cloned().unwrap_or_default());
+                flag(ours.present, theirs.present, Item::Gpu(index, GpuItem::Present));
+                flag(ours.temp, theirs.temp, Item::Gpu(index, GpuItem::Temp));
+                flag(ours.clock, theirs.clock, Item::Gpu(index, GpuItem::Clock));
+                flag(ours.power, theirs.power, Item::Gpu(index, GpuItem::Power));
+                flag(ours.fan, theirs.fan, Item::Gpu(index, GpuItem::Fan));
+                news.extend(theirs.engines.iter().filter(|kind| !ours.engines.contains(kind)).cloned().map(|kind| Item::Gpu(index, GpuItem::Engine(kind))));
             }
         }
+        news
     }
+
+    /// This with one more reading, `item` (one of `other`'s news), placed
+    /// where `other` has it among what this holds.
+    pub fn with(&self, item: &Item, other: &Seen) -> Seen {
+        let mut seen = self.clone();
+        // A list's new entry goes in after what precedes it in `other`.
+        fn add<K: Clone>(ours: &mut Vec<K>, theirs: &[K], new: impl Fn(&K) -> bool, same: impl Fn(&K, &K) -> bool) {
+            let kept: Vec<K> = theirs.iter().filter(|key| new(key) || ours.iter().any(|our| same(our, key))).cloned().collect();
+            merge(ours, kept, same);
+        }
+        match item {
+            Item::CpuTemp => seen.cpu_temp = true,
+            Item::CpuPower => seen.cpu_power = true,
+            Item::CpuClock => seen.cpu_clock = true,
+            Item::Threads(count) => seen.threads = *count,
+            Item::Ccd(ccd) => add(&mut seen.ccds, &other.ccds, |key| key == ccd, |a, b| a == b),
+            Item::Dimms(count) => seen.dimms = *count,
+            Item::Address => seen.address = true,
+            Item::Link => seen.link = true,
+            Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
+            Item::Volume(name) => add(&mut seen.volumes, &other.volumes, |key| key == name, |a, b| a == b),
+            Item::BoardTemp(name) | Item::BoardFan(name) => {
+                let theirs = other.board.clone().unwrap_or_default();
+                let ours = seen.board.get_or_insert_with(BoardSeen::default);
+                if matches!(item, Item::BoardTemp(_)) {
+                    add(&mut ours.temps, &theirs.temps, |key| key == name, |a, b| a == b);
+                } else {
+                    add(&mut ours.fans, &theirs.fans, |key| key == name, |a, b| a == b);
+                }
+            }
+            Item::Battery => seen.battery = true,
+            Item::Gpu(index, gpu) => {
+                if seen.gpus.len() <= *index {
+                    seen.gpus.resize(index + 1, GpuSeen::default());
+                }
+                let ours = &mut seen.gpus[*index];
+                match gpu {
+                    GpuItem::Present => ours.present = true,
+                    GpuItem::Temp => ours.temp = true,
+                    GpuItem::Clock => ours.clock = true,
+                    GpuItem::Power => ours.power = true,
+                    GpuItem::Fan => ours.fan = true,
+                    GpuItem::Engine(kind) => {
+                        let theirs = other.gpus.get(*index).map_or(&[][..], |g| g.engines.as_slice());
+                        add(&mut ours.engines, theirs, |key| key == kind, |a, b| a == b);
+                    }
+                }
+            }
+        }
+        seen
+    }
+}
+
+/// One reading a lane holds, as a panel already up takes it in.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Item {
+    CpuTemp,
+    CpuPower,
+    CpuClock,
+    /// The CPU's threads, this many.
+    Threads(usize),
+    Ccd(usize),
+    /// The memory modules' temperatures, this many.
+    Dimms(usize),
+    Address,
+    Link,
+    Drive(u32),
+    Volume(String),
+    BoardTemp(String),
+    BoardFan(String),
+    Battery,
+    /// Of the GPU at this place in `StaticInfo::gpus`.
+    Gpu(usize, GpuItem),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GpuItem {
+    Present,
+    Temp,
+    Clock,
+    Power,
+    Fan,
+    Engine(String),
 }
 
 /// Takes `now`, in its order, into `known`, which keeps its own: one not

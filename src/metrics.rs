@@ -206,13 +206,15 @@ impl Sampler {
         // Without the performance counter, the clock reads as its base.
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
-        // Uncollected, the counters would only repeat their last values.
+        // Uncollected, the counters would only repeat their last values:
+        // the use and memory stand as last read, and what each driver
+        // gives (temperature, fan, clock, power) is read afresh.
         let gpus = match if collected { self.sample_gpus() } else { None } {
             Some(gpus) => {
                 self.last_gpus = gpus.clone();
                 gpus
             }
-            None => self.last_gpus.clone(),
+            None => self.last_gpus.iter().zip(&self.adapters).map(|(last, adapter)| self.from_driver(adapter, last.clone())).collect(),
         };
 
         if refresh_slow {
@@ -335,20 +337,33 @@ impl Sampler {
                         }
                     }
                     kinds.sort_by(|a, b| a.0.cmp(&b.0));
-                    let perf = adapter_perf(adapter.kmt_handle);
-                    GpuSample {
+                    let counted = GpuSample {
                         usage: kinds.iter().map(|(_, usage)| *usage).fold(0.0, f32::max),
                         engines: kinds,
                         mem_used: dedicated.get(&adapter.luid).copied().unwrap_or(0),
                         shared_used: shared.get(&adapter.luid).copied().unwrap_or(0),
-                        temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)),
-                        fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)),
-                        clock_mhz: graphics_clock(adapter.kmt_handle),
-                        power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
-                    }
+                        temp: None,
+                        fan_rpm: None,
+                        clock_mhz: None,
+                        power: None,
+                    };
+                    self.from_driver(adapter, counted)
                 })
                 .collect(),
         )
+    }
+
+    /// `gpu` with what the adapter's driver gives now: its temperature,
+    /// fan, clock and power.
+    fn from_driver(&self, adapter: &Adapter, gpu: GpuSample) -> GpuSample {
+        let perf = adapter_perf(adapter.kmt_handle);
+        GpuSample {
+            temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)),
+            fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)),
+            clock_mhz: graphics_clock(adapter.kmt_handle),
+            power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
+            ..gpu
+        }
     }
 }
 
