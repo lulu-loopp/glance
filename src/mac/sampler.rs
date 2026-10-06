@@ -9,7 +9,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::hid::Sensors;
 use super::iokit;
-use crate::reading::{CpuSensors, DriveTemperature, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
+use super::ioreport::Report;
+use super::smc::Smc;
+use crate::reading::{BoardSensors, CpuSensors, DriveTemperature, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
 
 // The Mach calls libc no longer recommends and mach2 does not have.
 extern "C" {
@@ -57,6 +59,10 @@ pub struct Sampler {
     timebase: (u64, u64),
     /// The temperature sensors, where the system offers them.
     sensors: Option<Sensors>,
+    /// The System Management Controller, for the fans.
+    smc: Option<Smc>,
+    /// IOReport, for power and clocks.
+    report: Option<Report>,
 }
 
 impl Sampler {
@@ -81,11 +87,17 @@ impl Sampler {
             previous: Previous { at: Instant::now(), cores: Vec::new(), net: (0, 0), disk: (0, 0), processes: HashMap::new() },
             timebase: (timebase.numer as u64, timebase.denom.max(1) as u64),
             sensors: Sensors::open(),
+            smc: Smc::open(),
+            report: Report::open(),
         };
-        sampler.info.found = vec![format!(
-            "Temperature sensors: {}",
-            sampler.sensors.as_ref().map_or_else(|| "not found".to_string(), |sensors| format!("{} (HID)", sensors.read().len()))
-        )];
+        sampler.info.found = vec![
+            format!(
+                "Temperature sensors: {}",
+                sampler.sensors.as_ref().map_or_else(|| "not found".to_string(), |sensors| format!("{} (HID)", sensors.read().len()))
+            ),
+            format!("Fans: {}", sampler.smc.as_ref().map_or_else(|| "SMC not opened".to_string(), |smc| format!("{} (SMC)", smc.fans().len()))),
+            format!("Power and clocks: {}", if sampler.report.is_some() { "IOReport" } else { "not available" }),
+        ];
         // A first look, for the first sample's rates to be measured against.
         sampler.sample();
         sampler
@@ -116,14 +128,22 @@ impl Sampler {
 
         let (processes, counted, times) = self.processes(seconds);
         let temperatures = self.sensors.as_ref().map_or_else(Vec::new, Sensors::read);
+        let report = self.report.as_mut().map(|report| report.read(seconds)).unwrap_or_default();
+        let chip = hottest(&temperatures, "PMU tdie");
+        let mut gpus: Vec<GpuSample> = graphics().into_iter().map(|(_, reading)| reading).collect();
+        // Apple silicon has one GPU: IOReport's power and clock are its.
+        if let Some(gpu) = gpus.first_mut() {
+            gpu.power = report.gpu_power;
+            gpu.clock_mhz = report.gpu_mhz;
+        }
 
         let sample = Sample {
             t: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
             cpu,
             threads,
-            ghz: None,
+            ghz: report.cpu_mhz.map(|mhz| mhz / 1000.0),
             memory: memory(self.info.mem_total),
-            gpus: graphics().into_iter().map(|(_, reading)| reading).collect(),
+            gpus,
             net_down,
             net_up,
             net_total_down: net.0,
@@ -136,8 +156,9 @@ impl Sampler {
             processes,
             system: SystemSample { uptime_s: uptime(), processes: counted, threads: 0, handles: 0 },
             battery: None,
-            cpu_sensors: hottest(&temperatures, "PMU tdie").map(|temp| CpuSensors { temp: Some(temp), ccds: Vec::new(), power: None }),
-            board: None,
+            cpu_sensors: (chip.is_some() || report.cpu_power.is_some()).then(|| CpuSensors { temp: chip, ccds: Vec::new(), power: report.cpu_power }),
+            // A Mac's fans, where it has any.
+            board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans }),
             // The internal SSD's, by its NAND channels' sensors.
             drive_temps: hottest(&temperatures, "NAND")
                 .map(|celsius| DriveTemperature { name: self.info.drives.first().cloned().unwrap_or_default(), celsius })

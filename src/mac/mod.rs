@@ -3,7 +3,9 @@
 
 mod hid;
 mod iokit;
+mod ioreport;
 mod sampler;
+mod smc;
 
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();

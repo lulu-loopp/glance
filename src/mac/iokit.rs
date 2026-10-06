@@ -3,9 +3,10 @@
 
 use std::ffi::{c_void, CString};
 
-use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_io_kit::{
-    io_object_t, kIOMainPortDefault, IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IORegistryEntryGetParentEntry,
+    io_object_t, kIOMainPortDefault, IOIteratorNext, IOObjectRelease, IORegistryEntryCreateCFProperty, IORegistryEntryGetName,
+    IORegistryEntryGetParentEntry,
     IOServiceGetMatchingServices, IOServiceMatching,
 };
 
@@ -28,6 +29,20 @@ impl Entry {
     /// A property that is a string.
     pub fn string(&self, key: &str) -> Option<String> {
         self.property(key)?.downcast::<CFString>().ok().map(|s| s.to_string())
+    }
+
+    /// A property that is raw bytes.
+    pub fn data(&self, key: &str) -> Option<Vec<u8>> {
+        self.property(key)?.downcast::<CFData>().ok().map(|data| data.to_vec())
+    }
+
+    /// Its name in the registry.
+    pub fn name(&self) -> String {
+        let mut name = [0 as std::ffi::c_char; 128];
+        if unsafe { IORegistryEntryGetName(self.0, &mut name) } != 0 {
+            return String::new();
+        }
+        unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy().into_owned()
     }
 
     /// A property that is a dictionary.
