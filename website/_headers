@@ -1,0 +1,30 @@
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src https://api.github.com https://gitee.com; base-uri 'self'; form-action 'none'; frame-ancestors 'none'; object-src 'none'
+
+# Pages are revalidated on every visit, so a new version shows at once.
+/
+  Cache-Control: public, max-age=0, must-revalidate
+/en/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+# Stylesheet and script keep their names across edits: cache briefly.
+/assets/site.css
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/assets/site.js
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+
+# Images and the font change name when their content changes.
+/assets/img/*
+  Cache-Control: public, max-age=2592000, immutable
+/assets/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+/favicon.ico
+  Cache-Control: public, max-age=604800
+/apple-touch-icon.png
+  Cache-Control: public, max-age=604800
