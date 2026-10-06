@@ -30,6 +30,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
@@ -331,6 +332,8 @@ enum Row {
     Item(String, &'static str),
     ModuleChoice(String, Field),
     Shortcut,
+    /// This Glance's version, how the last asking went, and asking now.
+    Version,
     Diagnostics,
     Update,
     Uninstall,
@@ -439,6 +442,10 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             None,
         )
         .ok()?;
+        // Nothing in the window is typed: no input method, which would take
+        // the keys of a shortcut being chosen for itself (they come as
+        // VK_PROCESSKEY while it is on).
+        let _ = ImmAssociateContextEx(hwnd, HIMC::default(), 0);
         // Mica, the Windows 11 window material, where the system has it: the
         // window's content leaves it showing through.
         let mica = windows_build() >= FIRST_MICA_BUILD;
@@ -687,6 +694,7 @@ impl Ui {
             Row::Switch(Switch::HeatAlert),
             Row::Heading("系统", "System"),
             Row::Switch(Switch::Startup),
+            Row::Version,
             Row::Switch(Switch::Updates),
         ]);
         if update::available().is_some() {
@@ -948,21 +956,7 @@ impl Ui {
             ),
             // The version this is, where the user looks for a newer one.
             Switch::Updates => {
-                let version = env!("CARGO_PKG_VERSION");
-                let newer = update::available().is_some();
-                let hint = match (lang, update::check(), newer) {
-                    (Lang::Zh, update::Check::Checking, _) => format!("当前版本 {version}，正在检查…"),
-                    (Lang::En, update::Check::Checking, _) => format!("Version {version}; checking…"),
-                    (Lang::Zh, update::Check::Answered, false) => format!("当前版本 {version}，已是最新"),
-                    (Lang::En, update::Check::Answered, false) => format!("Version {version}, the latest"),
-                    (Lang::Zh, update::Check::Answered, true) => format!("当前版本 {version}，有新版本"),
-                    (Lang::En, update::Check::Answered, true) => format!("Version {version}; a newer one is out"),
-                    (Lang::Zh, update::Check::Unanswered, _) => format!("当前版本 {version}，没能连上 GitHub 和 Gitee"),
-                    (Lang::En, update::Check::Unanswered, _) => format!("Version {version}; GitHub and Gitee did not answer"),
-                    (Lang::Zh, update::Check::Idle, _) => format!("当前版本 {version}，每天检查一次"),
-                    (Lang::En, update::Check::Idle, _) => format!("Version {version}; checks once a day"),
-                };
-                return (p("检查更新", "Check for updates"), Some(Cow::Owned(hint)), self.settings.check_updates);
+                return (p("自动检查更新", "Check for updates by itself"), Some(Cow::Borrowed(p("每天检查一次", "Once a day"))), self.settings.check_updates);
             }
         };
         (name, hint.map(Cow::Borrowed), on)
@@ -1263,7 +1257,7 @@ impl Ui {
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
                 Row::Shortcut => vec![Target::Shortcut],
-                Row::Switch(Switch::Updates) => vec![Target::CheckNow, Target::Switch(Switch::Updates)],
+                Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
@@ -1652,18 +1646,8 @@ impl Ui {
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, detail, on) = self.switch(switch);
-                    // Left of the switch, the asking for updates now.
                     let switch_left = left + width - ROW_SIDE - 40.0;
-                    let own = match switch {
-                        Switch::Updates if update::check() == update::Check::Checking => Some((pick(lang, "检查中", "Checking").to_string(), Target::CheckNow, Button::Quiet)),
-                        Switch::Updates => Some((pick(lang, "立即检查", "Check now").to_string(), Target::CheckNow, Button::Plain)),
-                        _ => None,
-                    };
-                    let text_right = match own {
-                        Some((text, target, kind)) => self.button(frame, palette, &text, switch_left - 16.0, y + row_height / 2.0, target, kind, &hovered),
-                        None => switch_left,
-                    };
-                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, text_right - 16.0 - left - ROW_SIDE);
+                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, switch_left - 16.0 - left - ROW_SIDE);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
                     self.toggle(frame, palette, key, on, true, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
@@ -1731,6 +1715,28 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
                     let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Update, kind, &hovered);
+                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
+                }
+                Row::Version => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let version = env!("CARGO_PKG_VERSION");
+                    let name = match lang {
+                        Lang::Zh => format!("当前版本 {version}"),
+                        Lang::En => format!("Version {version}"),
+                    };
+                    let detail = match update::check() {
+                        update::Check::Checking => pick(lang, "正在检查…", "Checking…"),
+                        update::Check::Answered if update::available().is_some() => pick(lang, "有新版本，见下方", "A newer one is out; see below"),
+                        update::Check::Answered => pick(lang, "已是最新", "The latest"),
+                        update::Check::Unanswered => pick(lang, "没能连上 GitHub 和 Gitee，稍后再试", "GitHub and Gitee did not answer; try later"),
+                        update::Check::Idle => pick(lang, "还没有检查过", "Not checked yet"),
+                    };
+                    let (action, kind) = if update::check() == update::Check::Checking {
+                        (pick(lang, "检查中", "Checking"), Button::Quiet)
+                    } else {
+                        (pick(lang, "检查更新", "Check for updates"), Button::Plain)
+                    };
+                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::CheckNow, kind, &hovered);
                     field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
                 Row::Shortcut => {
