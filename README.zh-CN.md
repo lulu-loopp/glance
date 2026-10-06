@@ -10,7 +10,7 @@
 
 Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标推到屏幕边缘，面板滑出，电脑此刻的状态一目了然；移开鼠标，面板收回。
 
-[English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest) · [硬件支持](#硬件支持) · [构建](#构建)
+[English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest)（[国内镜像](https://gitee.com/lulu-loopp/glance/releases)） · [硬件支持](#硬件支持) · [构建](#构建)
 
 ![Glance 磨砂玻璃外观的面板，叠在桌面上](docs/images/desktop-zh.webp)
 
@@ -37,7 +37,7 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 
 ## 安装
 
-1. 从[最新版本](https://github.com/lulu-loopp/glance/releases/latest)下载 `Glance_<版本>_x64-setup.exe` 并运行。
+1. 从[最新版本](https://github.com/lulu-loopp/glance/releases/latest)下载 `Glance_<版本>_x64-setup.exe` 并运行。GitHub 打不开时，可以从 [Gitee 镜像](https://gitee.com/lulu-loopp/glance/releases)下载同一个安装程序。
 2. 安装程序已签名（发布者：Weiyi Shi）。由于签名刚开始使用，最初的一段时间里 Windows SmartScreen 仍可能提示“Windows 已保护你的电脑”，点击“更多信息”→“仍要运行”即可。
 3. Glance 第一次启动时会请求一次管理员权限：读取温度、功耗和风扇需要它，通过安装程序装好的已签名驱动 [PawnIO](https://github.com/namazso/PawnIO) 完成。此后启动不再询问，也可以设置为开机时启动。
 
@@ -50,7 +50,7 @@ Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标�
 - **固定面板**：点面板底栏的图钉，面板会一直显示，方便边做别的事边看；再点一次图钉或按 Ctrl+Alt+G 即可收起。
 - **随时一瞥**：鼠标悬停在托盘图标上，会显示 CPU、显卡和内存的简要读数。开启“过热提醒”（默认关闭）后，CPU 或显卡持续 30 秒达到温度警示值时，托盘会弹出提醒。
 - **设置**：右键单击托盘图标，或再次启动 Glance。设置窗口也可以用键盘操作（Tab、方向键、空格）。
-- **更新**：有新版本时，托盘会提示，设置中会出现更新按钮。Glance 下载安装程序后，只有确认其签名与当前 Glance 出自同一发布者，才会运行它。
+- **更新**：Glance 每天向 GitHub 和它在 Gitee 的镜像查询一次新版本，哪边连得上就用哪边。有新版本时，托盘会提示，设置中会出现更新按钮。Glance 下载安装程序后，只有确认其签名与当前 Glance 出自同一发布者，才会运行它。
 - **卸载**：在“设置 → 应用 → 已安装的应用”中卸载，或在 Glance 的设置中卸载。卸载会删除 Glance、它的计划任务和设置，并询问是否一并卸载 PawnIO 驱动（其他监控软件可能也在使用它）。
 
 ## 硬件支持

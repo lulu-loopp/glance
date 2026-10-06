@@ -47,7 +47,9 @@ turn off.
 ## Install
 
 1. Download `Glance_<version>_x64-setup.exe` from the
-   [latest release](https://github.com/lulu-loopp/glance/releases/latest) and run it.
+   [latest release](https://github.com/lulu-loopp/glance/releases/latest) and run it
+   (the same installer is mirrored on [Gitee](https://gitee.com/lulu-loopp/glance/releases)
+   for mainland China).
 2. The installer is signed (publisher: Weiyi Shi). As the signature is new,
    Windows SmartScreen may still say "Windows protected your PC" for the first
    downloads; choose **More info → Run anyway**.
@@ -78,8 +80,9 @@ for administrator rights at every start and cannot start with Windows.
   30 seconds.
 - **Settings**: right-click the tray icon, or start Glance again. The settings
   window works with the keyboard as well (Tab, the arrow keys, Space).
-- **Update**: when a new version is out, the tray says so and the settings
-  offer it. Glance downloads the installer and runs it only if it is signed
+- **Update**: once a day Glance asks GitHub, and its mirror on Gitee, for a
+  new version, using whichever it can reach. When one is out, the tray says
+  so and the settings offer it. Glance downloads the installer and runs it only if it is signed
   by the same publisher as the Glance you have.
 - **Uninstall**: from Windows' Apps list, or from the settings. It removes
   Glance, its scheduled tasks and its settings, and asks whether to remove the

@@ -1,5 +1,6 @@
-//! Update checks: once a day, while the setting allows, Glance asks GitHub
-//! for its latest release; nothing else of the user's is sent. A newer one
+//! Update checks: once a day, while the setting allows, Glance asks GitHub,
+//! and its mirror on Gitee (which mainland China can reach), for the latest
+//! release; nothing else of the user's is sent. A newer one
 //! is offered in the settings (and once by the tray), and taken only when
 //! the user asks: its installer is downloaded into a folder of
 //! administrators' alone and run only if it is signed by whoever signed the
@@ -30,8 +31,11 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use crate::ui::prefs::LanguagePref;
 use crate::ui::text::Lang;
 
-const HOST: &str = "api.github.com";
-const LATEST: &str = "/repos/lulu-loopp/glance/releases/latest";
+/// Where each site describes the latest release, in the same terms.
+const SOURCES: [&str; 2] = [
+    "https://api.github.com/repos/lulu-loopp/glance/releases/latest",
+    "https://gitee.com/api/v5/repos/lulu-loopp/glance/releases/latest",
+];
 /// How often to ask, and how soon after Glance starts (not while the
 /// desktop is still coming up); an ask that got no answer (offline, or
 /// GitHub out of reach) is made again sooner.
@@ -45,7 +49,9 @@ const MOST: usize = 64 << 20;
 #[derive(Clone)]
 pub struct Release {
     pub version: String,
-    installer: String,
+    /// Its installer, from each site that offers it, the site that answered
+    /// soonest first: the one most easily reached from where the user is.
+    installers: Vec<String>,
 }
 
 /// Where taking an update stands.
@@ -76,9 +82,6 @@ pub fn watch() {
         if wanted && Instant::now() >= due {
             let answer = latest();
             due = Instant::now() + if answer.is_some() { EVERY } else { RETRY };
-            if answer.is_none() {
-                crate::journal::note("update check: no answer from GitHub");
-            }
             if let Some(release) = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION"))) {
                 let mut found = FOUND.lock().unwrap();
                 let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
@@ -123,7 +126,7 @@ pub fn install() {
 
 fn fetch_and_run(release: &Release) -> State {
     let note = |what: &str| crate::journal::note(format!("update to {}: {what}", release.version));
-    let Some(bytes) = get(&release.installer) else {
+    let Some(bytes) = release.installers.iter().find_map(|url| get(url)) else {
         note("the installer could not be downloaded");
         return State::Failed;
     };
@@ -179,10 +182,37 @@ fn language() -> Lang {
     Lang::resolve(serde_json::from_value::<LanguagePref>(settings.view["language"].clone()).unwrap_or_default())
 }
 
-/// The latest release, as GitHub describes it, and its installer.
+/// The latest release either site knows of, and its installer from each
+/// site that has it. A site that does not answer (out of reach from where
+/// the user is) is noted, and the other one serves.
 fn latest() -> Option<Release> {
-    let body = get(&format!("https://{HOST}{LATEST}"))?;
-    let release: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    let mut answers: Vec<(Duration, (String, String))> = SOURCES
+        .iter()
+        .filter_map(|url| {
+            let asked = Instant::now();
+            let answer = get(url).and_then(|body| release(&body));
+            if answer.is_none() {
+                let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
+                crate::journal::note(format!("update check: no answer from {host}"));
+            }
+            Some((asked.elapsed(), answer?))
+        })
+        .collect();
+    answers.sort_by_key(|(took, _)| *took);
+    let answers: Vec<(String, String)> = answers.into_iter().map(|(_, answer)| answer).collect();
+    let version = answers.iter().map(|(version, _)| version).fold(None, |best: Option<&String>, version| match best {
+        Some(best) if !newer(version, best) => Some(best),
+        _ => Some(version),
+    })?;
+    let version = version.clone();
+    let installers = answers.into_iter().filter(|(found, _)| *found == version).map(|(_, installer)| installer).collect();
+    Some(Release { version, installers })
+}
+
+/// A site's description of a release (GitHub's and Gitee's read alike):
+/// its version, and where its installer is.
+fn release(body: &[u8]) -> Option<(String, String)> {
+    let release: serde_json::Value = serde_json::from_slice(body).ok()?;
     let version = release["tag_name"].as_str()?.trim_start_matches('v').to_string();
     let name = format!("Glance_{version}_x64-setup.exe");
     let installer = release["assets"]
@@ -191,7 +221,7 @@ fn latest() -> Option<Release> {
         .find(|asset| asset["name"].as_str() == Some(name.as_str()))?["browser_download_url"]
         .as_str()?
         .to_string();
-    installer.starts_with("https://").then_some(Release { version, installer })
+    installer.starts_with("https://").then_some((version, installer))
 }
 
 /// Whether version `a` comes after `b`, compared number by number (1.10
@@ -344,7 +374,7 @@ fn same_signer(file: &Path, reference: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{get, latest, newer, same_signer};
+    use super::{get, latest, newer, release, same_signer};
     use std::path::Path;
 
     /// Over the network: the latest release is found, its installer
@@ -355,7 +385,9 @@ mod tests {
     #[ignore]
     fn finds_downloads_and_checks_the_latest_release() {
         let release = latest().expect("latest release");
-        let bytes = get(&release.installer).expect("installer");
+        assert_eq!(release.installers.len(), 2, "both sites offer {}", release.version);
+        let mirror = release.installers.iter().find(|url| url.starts_with("https://gitee.com/")).expect("the mirror's installer");
+        let bytes = get(mirror).expect("installer from the mirror");
         let file = std::env::temp_dir().join(format!("glance-update-test-{}.exe", std::process::id()));
         std::fs::write(&file, bytes).unwrap();
         let installed = std::env::var("GLANCE_INSTALLED").unwrap();
@@ -365,6 +397,22 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert!(ours, "{} not signed as {installed}", release.version);
         assert!(!theirs);
+    }
+
+    #[test]
+    fn reads_either_sites_release() {
+        // As Gitee answers: its own archives besides the files uploaded.
+        let gitee = br#"{"tag_name":"v0.1.6","assets":[
+            {"name":"Glance_0.1.6_x64-setup.exe","browser_download_url":"https://gitee.com/lulu-loopp/glance/releases/download/v0.1.6/Glance_0.1.6_x64-setup.exe"},
+            {"name":"v0.1.6.zip","browser_download_url":"https://gitee.com/lulu-loopp/glance/archive/refs/tags/v0.1.6.zip"}]}"#;
+        let (version, installer) = release(gitee).unwrap();
+        assert_eq!(version, "0.1.6");
+        assert!(installer.ends_with("/v0.1.6/Glance_0.1.6_x64-setup.exe"));
+        // No installer for the version, or one not over HTTPS: nothing.
+        assert!(release(br#"{"tag_name":"v0.1.7","assets":[{"name":"SHA256SUMS.txt","browser_download_url":"https://x/y"}]}"#).is_none());
+        assert!(release(br#"{"tag_name":"v0.1.7","assets":[{"name":"Glance_0.1.7_x64-setup.exe","browser_download_url":"http://x/y"}]}"#).is_none());
+        // An error page.
+        assert!(release(br#"{"message":"Not Found"}"#).is_none());
     }
 
     #[test]
