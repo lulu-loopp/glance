@@ -903,7 +903,7 @@ impl Ui {
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
-            Field::OverFullscreen => Some(pick(self.lang, "呼出时游戏会退到后台", "Sends the game to the background")),
+            Field::OverFullscreen => Some(pick(self.lang, "游戏会退到后台，无边框模式不会", "The game goes to the background; borderless does not")),
             _ => None,
         }
     }

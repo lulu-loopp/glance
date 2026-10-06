@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow, SC_RESTORE, WM_SYSCOMMAND};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
@@ -315,8 +316,8 @@ impl Controller {
                 }
                 DISMISS => panel.dismiss(),
                 // Placed, zoomed and backed for screens that are no longer
-                // so: taken down, and opened afresh next time.
-                crate::ui::window::SCREENS_CHANGED => panel.screens_changed(msg.wParam.0 as u32),
+                // so: taken down, and opened afresh.
+                crate::ui::window::SCREENS_CHANGED => panel.screens_changed(msg.wParam.0 as u32, now),
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => panel.restyle(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
@@ -422,7 +423,7 @@ enum Phase {
     Closing,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Contact {
     monitor: RECT,
     work: RECT,
@@ -498,6 +499,10 @@ struct Panel<'a> {
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
+    /// A game holding the screen in exclusive fullscreen when the panel
+    /// opened over it, which sent it to the background: brought back when
+    /// the panel has closed, unless a press elsewhere closed it.
+    game: Option<HWND>,
     /// The panel as it opened, held while it is up (laid out afresh at the
     /// next frame when `None`), and the settings it was made for.
     opening: Option<arrange::Opening>,
@@ -544,6 +549,7 @@ impl<'a> Panel<'a> {
             scroll_target: 0.0,
             hover: None,
             pinned: false,
+            game: None,
             opening: None,
             held: None,
             style: String::new(),
@@ -631,6 +637,7 @@ impl<'a> Panel<'a> {
             self.scroll = 0.0;
             self.scroll_target = 0.0;
             self.hover = None;
+            self.game = exclusive_fullscreen().then(|| unsafe { GetForegroundWindow() }).filter(|game| !game.is_invalid());
             self.shift.jump(1.0);
             self.opacity.jump(0.0);
             // The desktop where the panel will be, taken while the window is
@@ -682,18 +689,39 @@ impl<'a> Panel<'a> {
     /// a panel placed, zoomed and backed for screens no longer so is taken
     /// down, to be opened afresh. Its own move to a monitor of another scale
     /// as it opens tells a scale it was already placed for, and is no change.
-    fn screens_changed(&mut self, dpi: u32) {
-        let scale = self.placement.as_ref().map(|placement| placement.contact.scale);
-        if dpi == 0 || scale.is_some_and(|scale| (dpi as f32 / 96.0 - scale).abs() > 0.001) {
-            self.dismiss();
+    fn screens_changed(&mut self, dpi: u32, now: Instant) {
+        let Some(placement) = &self.placement else { return };
+        let changed = if dpi == 0 {
+            // A game leaving exclusive fullscreen sets the display mode back
+            // just as the panel comes up over it, often to what it was: a
+            // panel whose screen is as it was stays as it is.
+            monitor_at(placement.anchor) != Some(placement.contact)
+        } else {
+            (dpi as f32 / 96.0 - placement.contact.scale).abs() > 0.001
+        };
+        if !changed {
+            return;
+        }
+        // Open, it opens again, laid out for the screens as they are now,
+        // pinned if it was, and still with the game to bring back.
+        let (open, pinned, game) = (self.is_open(), self.pinned, self.game);
+        self.dismiss();
+        if open {
+            if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
+                self.open(cursor, contact, now);
+                self.pinned = pinned;
+                self.game = game;
+            }
         }
     }
 
-    /// Takes the panel down at once.
+    /// Takes the panel down at once (for the settings, or screens no longer
+    /// as they were): a game it opened over stays where it went.
     fn dismiss(&mut self) {
         if !self.is_shown() {
             return;
         }
+        self.game = None;
         self.phase = Phase::Hidden;
         self.pinned = false;
         self.window.hide();
@@ -733,6 +761,8 @@ impl<'a> Panel<'a> {
         *dragging = held && (*dragging || in_reach);
         *entered |= in_reach;
         if pressed_outside {
+            // Something else was chosen: the game stays where it went.
+            self.game = None;
             return self.begin_close(now);
         }
         if in_reach || *dragging || !*entered {
@@ -849,7 +879,22 @@ impl<'a> Panel<'a> {
     /// Draws the panel as it is at `now`, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
         if matches!(self.phase, Phase::Closing) && self.shift.done(now) && self.opacity.done(now) {
-            return self.dismiss();
+            // Closed: a game the panel sent to the background comes back to
+            // the front, if it is not there already. One that went down
+            // (minimized) is restored as a click on its taskbar button does
+            // it: it restores itself (a protected game's window refuses
+            // ShowWindow from another process) and takes the screen back.
+            let game = self.game.take();
+            self.dismiss();
+            if let Some(game) = game.filter(|&game| unsafe { GetForegroundWindow() } != game) {
+                unsafe {
+                    let _ = SetForegroundWindow(game);
+                    if IsIconic(game).as_bool() {
+                        let _ = PostMessageW(Some(game), WM_SYSCOMMAND, WPARAM(SC_RESTORE as usize), LPARAM(0));
+                    }
+                }
+            }
+            return;
         }
         if !self.follow_device() {
             self.next_frame = now + DEVICE_RETRY;

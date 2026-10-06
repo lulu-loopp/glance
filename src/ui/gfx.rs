@@ -394,7 +394,12 @@ impl<'a> Frame<'a> {
             let path = self.gfx.factory.CreatePathGeometry().ok()?;
             let sink = path.Open().ok()?;
             sink.BeginFigure(Vector2 { X: first.x, Y: first.y }, if closed { D2D1_FIGURE_BEGIN_FILLED } else { D2D1_FIGURE_BEGIN_HOLLOW });
-            sink.AddLines(&rest);
+            // A lone point (a reading between two gaps) has no lines: an empty
+            // slice's pointer is a dangling placeholder, which Direct2D reads
+            // all the same, and faults on.
+            if !rest.is_empty() {
+                sink.AddLines(&rest);
+            }
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close().ok()?;
             Some(path)
