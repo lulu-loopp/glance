@@ -1,0 +1,7 @@
+{
+  "width": 1242, "height": 1656, "scale": 2.0, "fps": 30,
+  "wallpaper": "target/studio/wall-xhs-dark.png",
+  "shots": [
+    { "name": "xhs-cover", "skin": "glass", "seconds": 0.034, "load": [0.55, 0.55], "modules": ["cpu", "gpu:0", "memory", "network", "disk", "processes", "storage", "board"] }
+  ]
+}
