@@ -5,11 +5,16 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let root = std::env::var("CARGO_MANIFEST_DIR").unwrap().replace('\\', "/");
         let version = std::env::var("CARGO_PKG_VERSION").unwrap();
-        let mut numbers: Vec<u16> = version.split(['.', '-']).filter_map(|part| part.parse().ok()).take(4).collect();
+        // Major, minor and patch, before any pre-release or build suffix.
+        let core = version.split(['-', '+']).next().unwrap();
+        let mut numbers: Vec<u16> = core.split('.').map(|part| part.parse().unwrap()).collect();
         numbers.resize(4, 0);
         let numbers = numbers.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
         let script = format!(
-            r#"#define RT_MANIFEST 24
+            // The script is UTF-8: so are the paths in it, whatever
+            // language the checkout's folders are named in.
+            r#"#pragma code_page(65001)
+#define RT_MANIFEST 24
 1 ICON "{root}/icons/icon.ico"
 1 RT_MANIFEST "{root}/glance.manifest"
 
