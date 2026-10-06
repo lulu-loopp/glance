@@ -7,7 +7,7 @@ use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::prefs::{Prefs, ProcessSort};
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
-use crate::reading::{ProcessSample, Sample, StaticInfo};
+use crate::reading::{GpuSample, ProcessSample, Sample, StaticInfo};
 
 /// A column's width (DIPs), whatever the skin.
 pub const COLUMN_WIDTH: f32 = 356.0;
@@ -180,6 +180,48 @@ fn celsius(value: f32) -> String {
     format!("{value:.0} °C")
 }
 
+/// What a reading shows while it is not there to read.
+const UNREAD: &str = "—";
+
+/// Readings come and go with what the hardware is doing: a fan stops, a
+/// resting GPU stops its clock, a sensor misses a read, an engine idles out
+/// of the counters, the battery is not answered for a moment. What a lane
+/// holds is decided by what the history (the longest chart's span) has
+/// had, and only the values by the latest sample: a row stays where it was,
+/// showing "—" while its reading is missing, and the panel keeps its shape
+/// whatever the readings did just before it opened. Only a reading gone
+/// for the whole span leaves.
+impl Scene<'_> {
+    /// Whether any sample in the history has the reading.
+    fn had<'s, T>(&'s self, read: impl Fn(&'s Sample) -> Option<T>) -> bool {
+        self.history.iter().any(|sample| read(sample).is_some())
+    }
+
+    /// The names any sample in the history has, in the order they first
+    /// came.
+    fn names<'s>(&'s self, read: impl Fn(&'s Sample) -> Vec<&'s str>) -> Vec<&'s str> {
+        let mut names: Vec<&str> = Vec::new();
+        for sample in self.history {
+            for name in read(sample) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// The most of something any sample in the history has had.
+    fn most(&self, count: impl Fn(&Sample) -> usize) -> usize {
+        self.history.iter().map(count).max().unwrap_or(0)
+    }
+}
+
+/// A reading as a fact's value: as `show` writes it, or "—".
+fn shown<T>(value: Option<T>, show: impl Fn(T) -> String) -> String {
+    value.map_or_else(|| UNREAD.to_string(), show)
+}
+
 fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
     let hot_load = prefs.hot_load;
@@ -194,20 +236,30 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         "cpu" => {
             let sensors = s.cpu_sensors.as_ref();
             let temp = sensors.and_then(|c| c.temp);
-            let clock = s.ghz.filter(|_| prefs.cpu.clock).map(|ghz| format!("{ghz:.2} GHz"));
+            let had_temp = scene.had(|s| s.cpu_sensors.as_ref()?.temp);
+            let clock = s.ghz.map(|ghz| format!("{ghz:.2} GHz"));
+            let had_clock = prefs.cpu.clock && scene.had(|s| s.ghz);
             // The temperature takes the corner, as on the GPU lanes; the
             // clock, the power and each chiplet's temperature go below.
-            let aside = temp.map(celsius).or(clock.clone()).unwrap_or_default();
+            let aside = if had_temp {
+                shown(temp, celsius)
+            } else if had_clock {
+                clock.clone().unwrap_or_else(|| UNREAD.into())
+            } else {
+                String::new()
+            };
             let mut facts = Vec::new();
-            if let (Some(_), Some(clock)) = (temp, clock) {
-                facts.push((lang.pick("频率", "Clock").into(), clock, false));
+            if had_temp && had_clock {
+                facts.push((lang.pick("频率", "Clock").into(), clock.unwrap_or_else(|| UNREAD.into()), false));
             }
-            if let Some(power) = sensors.and_then(|c| c.power) {
-                facts.push((lang.pick("功耗", "Power").into(), format!("{power:.1} W"), false));
+            if scene.had(|s| s.cpu_sensors.as_ref()?.power) {
+                facts.push((lang.pick("功耗", "Power").into(), shown(sensors.and_then(|c| c.power), |power| format!("{power:.1} W")), false));
             }
-            if let Some(ccds) = sensors.map(|c| &c.ccds).filter(|ccds| ccds.len() > 1) {
-                for (i, value) in ccds.iter().enumerate() {
-                    facts.push((format!("CCD {}", i + 1), celsius(*value), *value > hot_temp));
+            let chiplets = scene.most(|s| s.cpu_sensors.as_ref().map_or(0, |c| c.ccds.len()));
+            if chiplets > 1 {
+                for i in 0..chiplets {
+                    let value = sensors.and_then(|c| c.ccds.get(i)).copied();
+                    facts.push((format!("CCD {}", i + 1), shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
                 }
             }
             let mut blocks = vec![
@@ -215,55 +267,68 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 readout(s.cpu, Box::new(|s| s.cpu as f64)),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
-            if prefs.cpu.threads && !s.threads.is_empty() {
-                blocks.push(Block::Threads(s.threads.iter().map(|&load| (load / 100.0, load > hot_load)).collect()));
+            let threads = scene.most(|s| s.threads.len());
+            if prefs.cpu.threads && threads > 0 {
+                let load = |i: usize| s.threads.get(i).copied().unwrap_or(0.0);
+                blocks.push(Block::Threads((0..threads).map(|i| (load(i) / 100.0, load(i) > hot_load)).collect()));
             }
             blocks
         }
         _ if id.starts_with("gpu:") => {
             let index = info.gpu_of(id)?;
-            let (gpu, reading) = (info.gpus.get(index)?, s.gpus.get(index)?);
-            let temp = reading.temp.filter(|_| prefs.gpu.sensors);
+            let gpu = &info.gpus[index];
+            if !scene.had(|s| s.gpus.get(index)) {
+                return None;
+            }
+            let reading = s.gpus.get(index);
+            let had = |read: fn(&GpuSample) -> bool| scene.history.iter().any(|s| s.gpus.get(index).is_some_and(read));
+            let temp = reading.and_then(|g| g.temp).filter(|_| prefs.gpu.sensors);
+            let aside = if prefs.gpu.sensors && had(|g| g.temp.is_some()) { shown(temp, celsius) } else { String::new() };
+            let usage = reading.map_or(0.0, |g| g.usage);
             let mut blocks = vec![
-                head("GPU", &gpu.name, temp.map(celsius).unwrap_or_default(), temp.is_some_and(|t| t > hot_temp)),
-                readout(reading.usage, Box::new(move |s| s.gpus.get(index).map_or(0.0, |g| g.usage as f64))),
+                head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
+                readout(usage, Box::new(move |s| s.gpus.get(index).map_or(0.0, |g| g.usage as f64))),
             ];
             if prefs.gpu.memory {
+                let used = reading.map_or(0, |g| g.mem_used);
                 blocks.push(Block::Meter {
                     label: lang.pick("显存", "VRAM").into(),
-                    fraction: reading.mem_used as f32 / gpu.mem_total.max(1) as f32,
-                    value: text::usage(reading.mem_used, gpu.mem_total),
+                    fraction: used as f32 / gpu.mem_total.max(1) as f32,
+                    value: text::usage(used, gpu.mem_total),
                     hot: false,
                     gap: 8.0,
                 });
             }
             if prefs.gpu.engines {
+                // An engine the counters no longer list has nothing running on it.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
-                for (kind, load) in reading.engines.iter().filter(|(kind, _)| SHOWN.contains(&kind.as_str())) {
+                let kinds = scene.names(|s| s.gpus.get(index).map_or(Vec::new(), |g| g.engines.iter().map(|(kind, _)| kind.as_str()).collect()));
+                for kind in kinds.into_iter().filter(|kind| SHOWN.contains(kind)) {
+                    let load = reading.and_then(|g| g.engines.iter().find(|(known, _)| known == kind)).map_or(0.0, |(_, load)| *load);
                     blocks.push(Block::Meter {
                         label: lang.name(kind),
                         fraction: load / 100.0,
-                        value: text::percent(*load),
-                        hot: *load > hot_load,
+                        value: text::percent(load),
+                        hot: load > hot_load,
                         gap: 6.0,
                     });
                 }
             }
             let mut facts = Vec::new();
             if prefs.gpu.sensors {
-                if let Some(clock) = reading.clock_mhz {
-                    facts.push((lang.pick("频率", "Clock").into(), format!("{clock:.0} MHz"), false));
+                if had(|g| g.clock_mhz.is_some()) {
+                    facts.push((lang.pick("频率", "Clock").into(), shown(reading.and_then(|g| g.clock_mhz), |clock| format!("{clock:.0} MHz")), false));
                 }
-                if let Some(power) = reading.power {
-                    facts.push((lang.pick("功耗", "Power").into(), format!("{power:.1} W"), false));
+                if had(|g| g.power.is_some()) {
+                    facts.push((lang.pick("功耗", "Power").into(), shown(reading.and_then(|g| g.power), |power| format!("{power:.1} W")), false));
                 }
-                if let Some(rpm) = reading.fan_rpm {
-                    facts.push((lang.pick("风扇", "Fan").into(), format!("{rpm} RPM"), false));
+                if had(|g| g.fan_rpm.is_some()) {
+                    facts.push((lang.pick("风扇", "Fan").into(), shown(reading.and_then(|g| g.fan_rpm), |rpm| format!("{rpm} RPM")), false));
                 }
                 // Memory the card borrows from the system's, where it has its own
                 // besides (not where all of it is the system's, as on a Mac).
                 if gpu.shared_total > 0 {
-                    facts.push((lang.pick("共享显存", "Shared").into(), text::usage(reading.shared_used, gpu.shared_total), false));
+                    facts.push((lang.pick("共享显存", "Shared").into(), text::usage(reading.map_or(0, |g| g.shared_used), gpu.shared_total), false));
                 }
             }
             blocks.push(Block::Facts { rows: facts, gap: 10.0 });
@@ -274,9 +339,10 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let percent = (s.memory.used as f64 / total * 100.0) as f32;
             let mut facts = Vec::new();
             // Each module's own temperature, as each chiplet's on the CPU lane.
-            for (i, value) in s.dimm_temps.iter().enumerate() {
+            for i in 0..scene.most(|s| s.dimm_temps.len()) {
                 let name = if lang == Lang::Zh { format!("内存条 {}", i + 1) } else { format!("Module {}", i + 1) };
-                facts.push((name, celsius(*value), *value > hot_temp));
+                let value = s.dimm_temps.get(i).copied();
+                facts.push((name, shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
             }
             if prefs.memory.details {
                 facts.push((lang.pick("已提交", "Committed").into(), text::usage(s.memory.committed, s.memory.commit_limit), false));
@@ -301,11 +367,12 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if prefs.network.details {
                 let adapter = s.network.as_ref();
                 facts.push((lang.pick("网卡", "Adapter").into(), adapter.map_or(lang.pick("未连接", "Not connected").into(), |a| a.name.clone()), false));
-                if let Some(ip) = adapter.and_then(|a| a.ipv4.clone()) {
-                    facts.push((lang.pick("地址", "Address").into(), ip, false));
+                if scene.had(|s| s.network.as_ref()?.ipv4.as_ref()) {
+                    facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
                 }
-                if let Some(link) = adapter.filter(|a| a.link_bps > 0) {
-                    facts.push((lang.pick("链路", "Link").into(), text::link_speed(link.link_bps), false));
+                let link = |s: &Sample| s.network.as_ref().map(|a| a.link_bps).filter(|bps| *bps > 0);
+                if scene.had(link) {
+                    facts.push((lang.pick("链路", "Link").into(), shown(link(s), text::link_speed), false));
                 }
                 let (down, up) = (text::bytes(s.net_total_down as f64), text::bytes(s.net_total_up as f64));
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
@@ -327,24 +394,26 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         "disk" => {
             let plot = Plot::new(scene, vec![Box::new(|s| s.disk_read), Box::new(|s| s.disk_write)], None, None);
             let scale = plot.max;
+            let drives = scene.names(|s| s.drive_temps.iter().map(|d| d.name.as_str()).collect());
+            let temp = |name: &str| s.drive_temps.iter().find(|d| d.name == name).map(|d| d.celsius);
             let hottest = s.drive_temps.iter().map(|d| d.celsius).fold(None, |max: Option<f32>, t| Some(max.map_or(t, |m| m.max(t))));
             // A drive's temperature takes the corner, as a GPU's does, and the
             // chart's scale moves below.
             let mut facts: Vec<(String, String, bool)> = Vec::new();
-            if s.drive_temps.len() > 1 {
-                for drive in &s.drive_temps {
-                    facts.push((drive.name.clone(), celsius(drive.celsius), drive.celsius > hot_temp));
+            if drives.len() > 1 {
+                for name in &drives {
+                    let value = temp(name);
+                    facts.push((name.to_string(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
                 }
             }
             if prefs.disk.active {
                 facts.push((lang.pick("活动时间", "Active time").into(), text::percent(s.disk_active), false));
             }
-            let aside = match hottest {
-                Some(t) => {
-                    facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
-                    celsius(t)
-                }
-                None => full_scale_text(lang, scale, false),
+            let aside = if drives.is_empty() {
+                full_scale_text(lang, scale, false)
+            } else {
+                facts.push((lang.pick("满刻度", "Scale").into(), text::rate(scale, false), false));
+                shown(hottest, celsius)
             };
             vec![
                 head(lang.pick("磁盘", "Disk"), info.drives.join(", "), aside, hottest.is_some_and(|t| t > hot_temp)),
@@ -379,12 +448,13 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         }
         "storage" => {
             let mut blocks = vec![head(lang.pick("存储", "Storage"), "", "", false)];
-            for (i, volume) in s.volumes.iter().enumerate() {
-                let fraction = volume.used as f32 / volume.total.max(1) as f32;
+            for (i, name) in scene.names(|s| s.volumes.iter().map(|v| v.name.as_str()).collect()).into_iter().enumerate() {
+                let volume = s.volumes.iter().find(|v| v.name == name);
+                let fraction = volume.map_or(0.0, |v| v.used as f32 / v.total.max(1) as f32);
                 blocks.push(Block::Meter {
-                    label: volume.name.clone(),
+                    label: name.to_string(),
                     fraction,
-                    value: text::usage(volume.used, volume.total),
+                    value: shown(volume, |v| text::usage(v.used, v.total)),
                     hot: fraction * 100.0 > hot_load,
                     gap: if i == 0 { 0.0 } else { 8.0 },
                 });
@@ -392,41 +462,59 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             blocks
         }
         "board" => {
-            let board = s.board.as_ref()?;
+            if !scene.had(|s| s.board.as_ref()) {
+                return None;
+            }
+            let board = s.board.as_ref();
             let named = |name: &str, numbered: (&str, &str)| {
                 if name.parse::<u32>().is_ok() { format!("{} {name}", lang.pick(numbered.0, numbered.1)) } else { lang.name(name) }
             };
+            let temps = scene.names(|s| s.board.as_ref().map_or(Vec::new(), |b| b.temps.iter().map(|(n, _)| n.as_str()).collect()));
+            let fans = scene.names(|s| s.board.as_ref().map_or(Vec::new(), |b| b.fans.iter().map(|(n, _)| n.as_str()).collect()));
+            let value = |list: Option<&Vec<(String, f32)>>, name: &str| list.and_then(|list| list.iter().find(|(n, _)| n == name)).map(|(_, v)| *v);
             vec![
                 head(lang.pick("主板", "Motherboard"), &info.board, "", false),
                 Block::Facts {
-                    rows: board.temps.iter().map(|(n, t)| (named(n, ("传感器", "Sensor")), celsius(*t), *t > hot_temp)).collect(),
+                    rows: temps
+                        .iter()
+                        .map(|n| {
+                            let t = value(board.map(|b| &b.temps), n);
+                            (named(n, ("传感器", "Sensor")), shown(t, celsius), t.is_some_and(|t| t > hot_temp))
+                        })
+                        .collect(),
                     gap: 0.0,
                 },
                 Block::Facts {
-                    rows: board.fans.iter().map(|(n, rpm)| (named(n, ("风扇", "Fan")), format!("{rpm:.0} RPM"), false)).collect(),
+                    rows: fans
+                        .iter()
+                        .map(|n| (named(n, ("风扇", "Fan")), shown(value(board.map(|b| &b.fans), n), |rpm| format!("{rpm:.0} RPM")), false))
+                        .collect(),
                     gap: 10.0,
                 },
             ]
         }
         "battery" => {
-            let battery = s.battery.as_ref()?;
-            let state = if battery.charging {
-                lang.pick("正在充电", "Charging").to_string()
-            } else {
-                match battery.seconds_left {
+            if !scene.had(|s| s.battery.as_ref()) {
+                return None;
+            }
+            let battery = s.battery.as_ref();
+            let state = match battery {
+                Some(battery) if battery.charging => lang.pick("正在充电", "Charging").to_string(),
+                Some(battery) => match battery.seconds_left {
                     Some(left) => {
                         let left = lang.duration(left as u64);
                         if lang == Lang::Zh { format!("剩余 {left}") } else { format!("{left} left") }
                     }
                     None => lang.pick("使用电池", "On battery").into(),
-                }
+                },
+                None => UNREAD.into(),
             };
             vec![
                 head(lang.pick("电池", "Battery"), "", state, false),
                 Block::Readout {
-                    figure: battery.percent.to_string(),
+                    figure: shown(battery, |b| b.percent.to_string()),
                     unit: "%",
-                    hot: !battery.charging && battery.percent <= 20,
+                    hot: battery.is_some_and(|b| !b.charging && b.percent <= 20),
                     plot: Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map_or(0.0, |b| b.percent as f64))], Some(100.0), None),
                 },
             ]
@@ -933,6 +1021,84 @@ mod tests {
         let end = |r: &Rect| r.y + r.h;
         assert_eq!(end(&boxes[1]), end(&boxes[3]));
         assert_eq!(layout.width(), 2.0 * COLUMN_WIDTH + theme.column_gap);
+    }
+
+    fn sample(clock: Option<f32>, battery: Option<u8>, fan: Option<f32>) -> Sample {
+        use crate::reading::*;
+        Sample {
+            t: 0,
+            cpu: 10.0,
+            threads: vec![10.0; 4],
+            ghz: Some(3.0),
+            memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
+            gpus: vec![GpuSample { usage: 5.0, engines: Vec::new(), mem_used: 0, shared_used: 0, temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
+            net_down: 0.0,
+            net_up: 0.0,
+            net_total_down: 0,
+            net_total_up: 0,
+            network: None,
+            disk_read: 0.0,
+            disk_write: 0.0,
+            disk_active: 0.0,
+            volumes: Vec::new(),
+            processes: Vec::new(),
+            system: SystemSample { uptime_s: 60, processes: 1, threads: 1, handles: 1 },
+            battery: battery.map(|percent| BatterySample { percent, charging: false, seconds_left: None }),
+            cpu_sensors: None,
+            board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
+            drive_temps: Vec::new(),
+            dimm_temps: Vec::new(),
+        }
+    }
+
+    fn info() -> StaticInfo {
+        use crate::reading::GpuInfo;
+        StaticInfo {
+            cpu_name: "CPU".into(),
+            memory_modules: None,
+            drives: Vec::new(),
+            network_adapter: None,
+            board: "Board".into(),
+            threads: 4,
+            mem_total: 1 << 32,
+            gpus: vec![GpuInfo { slot: 0, name: "GPU".into(), mem_total: 1 << 30, shared_total: 0 }],
+            found: Vec::new(),
+        }
+    }
+
+    /// The facts of a lane: label and value of each row.
+    fn facts(blocks: &[Block]) -> Vec<(String, String)> {
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Facts { rows, .. } => Some(rows.iter().map(|(label, value, _)| (label.clone(), value.clone()))),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn keeps_a_reading_in_place_while_it_is_missing() {
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        // The GPU's clock, the battery and a fan read a moment ago, and not now.
+        let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
+        let gpu = lane(&scene(history), "gpu:0").unwrap();
+        assert!(facts(&gpu).contains(&("Clock".into(), UNREAD.into())));
+        let battery = lane(&scene(history), "battery").expect("the battery lane stays");
+        assert!(matches!(&battery[1], Block::Readout { figure, .. } if figure == UNREAD));
+        let board = lane(&scene(history), "board").expect("the board lane stays");
+        assert_eq!(facts(&board), vec![("Fan 1".to_string(), UNREAD.to_string())]);
+        // Read again: shown.
+        let history = leak(vec![sample(None, None, None), sample(Some(1350.0), Some(80), Some(900.0))]);
+        assert!(facts(&lane(&scene(history), "gpu:0").unwrap()).contains(&("Clock".into(), "1350 MHz".into())));
+        // Never read in the span: no row, no lane.
+        let history = leak(vec![sample(None, None, None), sample(None, None, None)]);
+        assert!(!facts(&lane(&scene(history), "gpu:0").unwrap()).iter().any(|(label, _)| label == "Clock"));
+        assert!(lane(&scene(history), "battery").is_none());
+        assert!(lane(&scene(history), "board").is_none());
     }
 
     #[test]

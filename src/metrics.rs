@@ -1,7 +1,6 @@
 //! System metrics: one PDH query for every rate counter, plus the direct APIs
 //! PDH has no counter for (memory, NIC octets, GPU sensors, process list).
 
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -51,9 +50,6 @@ struct Adapter {
     kmt_handle: u32,
     /// How its maker's driver gives its power, if it does.
     power: Option<gpu_power::Reader>,
-    /// Its driver has given the graphics clock: from then on the clock is
-    /// always shown, as 0 while the GPU rests.
-    clock_given: Cell<bool>,
 }
 
 /// What is read less often than every sample (see `Sampler::sample`).
@@ -347,7 +343,7 @@ impl Sampler {
                         shared_used: shared.get(&adapter.luid).copied().unwrap_or(0),
                         temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)),
                         fan_rpm: perf.and_then(|p| (p.FanRPM != 0).then_some(p.FanRPM)),
-                        clock_mhz: adapter.clock(),
+                        clock_mhz: graphics_clock(adapter.kmt_handle),
                         power: adapter.power.and_then(|reader| self.gpu_power.read(reader)),
                     }
                 })
@@ -686,7 +682,7 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
         }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
         let power = adapter_address(open.hAdapter).and_then(|address| power.reader(address));
-        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power, clock_given: Cell::new(false) });
+        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
             slot,
@@ -737,23 +733,7 @@ fn adapter_address(kmt_handle: u32) -> Option<gpu_power::PciAddress> {
     unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some((address.BusNumber, address.DeviceNumber, address.FunctionNumber))
 }
 
-impl Adapter {
-    /// The graphics clock (MHz). A GPU at rest stops it, and its driver then
-    /// gives 0, or does not answer while the GPU is powered off: once the
-    /// driver has given the clock, that is 0, not a reading that comes and
-    /// goes (the GPU's lane would grow and shrink with it). A driver that
-    /// has never given it has none to show.
-    fn clock(&self) -> Option<f32> {
-        let clock = graphics_clock(self.kmt_handle).filter(|mhz| *mhz > 0.0);
-        if clock.is_some() {
-            self.clock_given.set(true);
-        }
-        clock.or(self.clock_given.get().then_some(0.0))
-    }
-}
-
-/// Clock of the adapter's first engine (the graphics engine), in MHz, if
-/// the driver answers.
+/// Clock of the adapter's first engine (the graphics engine), in MHz.
 fn graphics_clock(kmt_handle: u32) -> Option<f32> {
     let mut perf = D3DKMT_NODE_PERFDATA::default();
     let mut query = D3DKMT_QUERYADAPTERINFO {
@@ -763,7 +743,7 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
         PrivateDriverDataSize: size_of::<D3DKMT_NODE_PERFDATA>() as u32,
     };
     let answered = unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok();
-    answered.then(|| (perf.Frequency as f64 / 1e6) as f32)
+    (answered && perf.Frequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
 }
 
 /// Octets received and sent by each hardware network interface, by its LUID. Virtual
