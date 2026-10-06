@@ -1,10 +1,10 @@
 //! How the panel is laid out for a screen, on any platform: how many
 //! columns, at what zoom, and the shape it keeps while it is up.
 
-use std::collections::HashMap;
-
+use super::seen::Seen;
 use super::theme::Theme;
 use super::view::{Layout, COLUMN_WIDTH};
+use crate::reading::StaticInfo;
 use crate::settings::Edge;
 
 /// Closest the panel gets to the ends of the work area (DIPs).
@@ -42,40 +42,41 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
     (layout, zoom)
 }
 
-/// A panel's shape while it is on screen: the columns it opened with, and
-/// each lane, by its module, as tall as it has been since. Readings come and
-/// go (a fan that stops, a sensor read now and then, a battery lane missed
-/// once), and a panel laid out afresh with them would change its columns,
-/// or its zoom, under the pointer. Made anew for each opening, and when the
-/// settings change.
-#[derive(Default)]
-pub struct Shape {
-    columns: Option<usize>,
-    heights: HashMap<String, f32>,
-    /// The smallest zoom so far: a panel that came to fit by zooming out
-    /// does not grow again while up (wider than the desktop taken behind it).
-    zoom: Option<f32>,
+/// A panel while it is up: laid out once, as it opened, and held. Its
+/// size, its columns, its zoom and each lane's box stay as they were; a
+/// reading the machine shows for the first time joins its lane at once
+/// only where the lane's box has room for it, and anything that would need
+/// more waits for the next opening. A reading gone stays in its place,
+/// unread. (Settings changed while it is up lay it out afresh.)
+pub struct Opening {
+    pub layout: Layout,
+    pub zoom: f32,
+    /// The lanes it opened with, by module.
+    lanes: Vec<String>,
+    /// What its lanes hold.
+    pub seen: Seen,
 }
 
-impl Shape {
-    /// `arrange` for the lanes there are now (each by its module, with its
-    /// height), keeping the columns, and no lane shorter than it has been.
-    pub fn arrange(&mut self, theme: &Theme, edge: Edge, lanes: &[(&str, f32)], work: (f32, f32)) -> (Layout, f32) {
-        let heights: Vec<f32> = lanes
-            .iter()
-            .map(|(id, height)| {
-                let held = self.heights.entry(id.to_string()).or_insert(*height);
-                *held = held.max(*height);
-                *held
-            })
-            .collect();
-        let (layout, zoom) = arrange(theme, edge, heights, work, self.columns);
-        // The columns chosen first stand: fewer lanes for a moment (one
-        // missing) lay out in fewer, and do not lower them for later.
-        self.columns.get_or_insert(layout.columns);
-        let zoom = self.zoom.map_or(zoom, |held| held.min(zoom));
-        self.zoom = Some(zoom);
-        (layout, zoom)
+impl Opening {
+    /// Lays out `lanes` (each by module, with its height when holding what
+    /// `seen` holds) for a work area `work` DIPs large.
+    pub fn new(theme: &Theme, edge: Edge, lanes: &[(&str, f32)], work: (f32, f32), seen: Seen) -> Self {
+        let (layout, zoom) = arrange(theme, edge, lanes.iter().map(|(_, height)| *height).collect(), work, None);
+        Opening { layout, zoom, lanes: lanes.iter().map(|(id, _)| id.to_string()).collect(), seen }
+    }
+
+    /// Takes in what the machine has shown since (`now`), lane by lane,
+    /// where it fits the lane's box: `height` is a lane's height holding a
+    /// given set of readings.
+    pub fn grow(&mut self, now: &Seen, info: &StaticInfo, height: impl Fn(&str, &Seen) -> Option<f32>) {
+        let boxes = self.layout.lanes();
+        for (id, area) in self.lanes.iter().zip(&boxes) {
+            let mut grown = self.seen.clone();
+            grown.adopt(now, id, info);
+            if grown != self.seen && height(id, &grown).is_some_and(|height| height <= area.h) {
+                self.seen = grown;
+            }
+        }
     }
 }
 
@@ -98,46 +99,39 @@ mod tests {
     }
 
     #[test]
-    fn keeps_its_shape_while_readings_come_and_go() {
-        let theme = Theme::new(Skin::Glass, false);
-        let work = (1400.0, 900.0);
-        // Four lanes as tall as two columns can hold: the next row tips the
-        // layout into a third.
-        let columns = |height: f32| arrange(&theme, Edge::Right, vec![height; 4], work, None).0.columns;
-        let most = (100..900).map(|h| h as f32).take_while(|h| columns(*h) <= 2).last().unwrap();
-        let lanes = [("cpu", most), ("gpu:0", most), ("memory", most), ("battery", most)];
-        let mut shape = Shape::default();
-        let (opened, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
-        assert_eq!(opened.columns, 2);
-        // A row more in one lane would take another column if laid out
-        // afresh; held, the panel keeps its columns.
-        let taller = [("cpu", most), ("gpu:0", most), ("memory", most + 30.0), ("battery", most)];
-        assert_ne!(arrange(&theme, Edge::Right, taller.iter().map(|lane| lane.1).collect(), work, None).0.columns, opened.columns);
-        let (held, _) = shape.arrange(&theme, Edge::Right, &taller, work);
-        assert_eq!(held.columns, opened.columns);
-        // The row gone again: the lane keeps its height.
-        let (after, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
-        assert_eq!(after.height(), held.height());
-        // A lane missing for a moment (the battery not read once), then back:
-        // the columns hold throughout, and the lanes keep their heights.
-        let (missing, _) = shape.arrange(&theme, Edge::Right, &lanes[..3], work);
-        assert_eq!(missing.columns, opened.columns);
-        let (back, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
-        assert_eq!((back.columns, back.height()), (held.columns, held.height()));
-        // Each lane's height is its own module's, wherever the lane stands.
-        let reordered = [("memory", most), ("cpu", most), ("gpu:0", most), ("battery", most)];
-        assert_eq!(shape.arrange(&theme, Edge::Right, &reordered, work).0.heights[0], most + 30.0);
-        // Two lanes too tall to share a column, one of them missed for a
-        // moment: back, they stand in their two columns again.
-        let pair = [("cpu", 2.0 * most), ("battery", 2.0 * most)];
-        let mut shape = Shape::default();
-        assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
-        assert_eq!(shape.arrange(&theme, Edge::Right, &pair[..1], work).0.columns, 1);
-        assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
-        // Zoomed out to fit, it stays so when a lane goes for a moment.
-        let mut shape = Shape::default();
-        let (_, fitted) = shape.arrange(&theme, Edge::Right, &[("cpu", 1500.0), ("memory", 1500.0)], work);
-        assert!(fitted < 1.0);
-        assert_eq!(shape.arrange(&theme, Edge::Right, &[("cpu", 1500.0)], work).1, fitted);
+    fn holds_its_outline_while_up() {
+        use crate::reading::GpuInfo;
+        let theme = Theme::new(Skin::Paper, false);
+        let info = StaticInfo {
+            cpu_name: String::new(),
+            memory_modules: None,
+            drives: Vec::new(),
+            network_adapter: None,
+            board: String::new(),
+            threads: 1,
+            mem_total: 1,
+            gpus: vec![GpuInfo { slot: 0, name: String::new(), mem_total: 0, shared_total: 0 }],
+            found: Vec::new(),
+        };
+        // The CPU's lane a column of its own; the GPU's and the memory's
+        // share the other, and the room it has below them.
+        let mut opened = Seen::default();
+        opened.gpus.push(crate::ui::seen::GpuSeen { present: true, ..Default::default() });
+        let lanes = [("cpu", 700.0), ("gpu:0", 100.0), ("memory", 100.0)];
+        let mut opening = Opening::new(&theme, Edge::Right, &lanes, (1400.0, 900.0), opened.clone());
+        assert_eq!(opening.layout.columns, 2);
+        let (layout, zoom) = (opening.layout.height(), opening.zoom);
+        // The GPU's clock read for the first time: one row more fits its box.
+        let mut now = opened.clone();
+        now.gpus[0].clock = true;
+        let row = |seen: &Seen| if seen.gpus[0].clock { 119.0 } else { 100.0 };
+        let height = |id: &str, seen: &Seen| Some(if id == "gpu:0" { row(seen) } else { lanes.iter().find(|lane| lane.0 == id).unwrap().1 });
+        opening.grow(&now, &info, height);
+        assert!(opening.seen.gpus[0].clock);
+        // A reading that would not fit waits; the outline never moves.
+        now.gpus[0].power = true;
+        opening.grow(&now, &info, |id, seen| if id == "gpu:0" && seen.gpus[0].power { Some(5000.0) } else { height(id, seen) });
+        assert!(!opening.seen.gpus[0].power);
+        assert_eq!((opening.layout.height(), opening.zoom), (layout, zoom));
     }
 }

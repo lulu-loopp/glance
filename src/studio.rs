@@ -34,6 +34,7 @@ use crate::ui::gfx::Gfx;
 use crate::ui::prefs::Prefs;
 use crate::ui::arrange::{self, GAP};
 use crate::ui::render::{self, PanelLayers};
+use crate::ui::seen::Seen;
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
@@ -132,12 +133,22 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
 
     // Laid out and placed as the panel would be on a screen this size, for
     // the readings of the moment, and held through the shot as the panel
-    // holds its shape while it is up (see `arrange::Shape`).
+    // holds its outline while it is up (see `arrange::Opening`).
     let edge = Edge::Right;
-    let shape = std::cell::RefCell::new(arrange::Shape::default());
-    let place = |lanes: &[view::Lane], theme: &Theme| {
-        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
-        let (layout, zoom) = shape.borrow_mut().arrange(theme, edge, &heights, (sw, sh));
+    let opening: std::cell::RefCell<Option<arrange::Opening>> = std::cell::RefCell::new(None);
+    let place = |scene: &Scene, lanes: &[view::Lane], theme: &Theme| {
+        let mut held = opening.borrow_mut();
+        let opening = match held.as_mut() {
+            Some(opening) => {
+                opening.grow(scene.seen, info, |id, seen| view::lane_height(scene, id, seen));
+                opening
+            }
+            None => {
+                let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
+                held.insert(arrange::Opening::new(theme, edge, &heights, (sw, sh), scene.seen.clone()))
+            }
+        };
+        let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
         (layout, zoom, rest)
@@ -145,8 +156,9 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     // Toned by the desktop where it first rests.
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
-    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
-    let (layout, zoom, rest) = place(&view::lanes(&probe), &measure);
+    let first_seen = Seen::of(first);
+    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+    let (layout, zoom, rest) = place(&probe, &view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
         left: (rest.0 * px) as i32,
@@ -169,20 +181,22 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     for index in 0..frames {
         let t = index as f32 / script.fps;
         let now_ms = start_ms + t as f64 * 1000.0;
-        let seen = history.iter().take_while(|sample| sample.t as f64 <= now_ms).count().max(1);
+        let read = history.iter().take_while(|sample| sample.t as f64 <= now_ms).count().max(1);
+        let seen = Seen::of(&history[..read]);
         let scene = Scene {
             info,
             prefs: &prefs,
             theme: &theme,
             lang,
-            history: &history[..seen],
+            history: &history[..read],
+            seen: &seen,
             pen_ms: now_ms - interval - PEN_LAG_MS,
             process_scroll: 0.0,
             hover: None,
             pinned: false,
         };
         let lanes = view::lanes(&scene);
-        let (layout, zoom, rest) = place(&lanes, &theme);
+        let (layout, zoom, rest) = place(&scene, &lanes, &theme);
         let travel = match theme.entrance {
             Entrance::Beyond(extra) => layout.width() + extra,
             Entrance::Slide(distance) => distance,

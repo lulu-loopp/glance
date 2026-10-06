@@ -41,6 +41,7 @@ use crate::settings::{Anchor, Edge, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, GAP};
+use crate::ui::seen::Seen;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
 use crate::ui::prefs::Prefs;
@@ -124,6 +125,8 @@ pub struct Controller {
     config: Mutex<Config>,
     /// The samples of the longest chart span, oldest first.
     pub history: Mutex<VecDeque<Sample>>,
+    /// What the machine has shown it can read since Glance started.
+    pub seen: Mutex<Seen>,
     /// The input thread's message window, once it has one.
     sink: AtomicIsize,
     shown: AtomicBool,
@@ -135,6 +138,7 @@ impl Controller {
             info,
             config: Mutex::new(config_from(settings)),
             history: Mutex::new(VecDeque::new()),
+            seen: Mutex::new(Seen::default()),
             sink: AtomicIsize::new(0),
             shown: AtomicBool::new(false),
         }
@@ -153,6 +157,7 @@ impl Controller {
     }
 
     pub fn record(&self, sample: Sample) {
+        self.seen.lock().unwrap().note(&sample);
         let keep = self.config.lock().unwrap().history;
         let mut history = self.history.lock().unwrap();
         while history.len() >= keep {
@@ -467,12 +472,10 @@ struct Panel<'a> {
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
-    /// The shape the panel opened with, held while it is up, and the
-    /// settings it was made for.
-    shape: arrange::Shape,
+    /// The panel as it opened, held while it is up (laid out afresh at the
+    /// next frame when `None`), and the settings it was made for.
+    opening: Option<arrange::Opening>,
     style: String,
-    /// The size (DIPs) and zoom the panel was last laid out at, this opening.
-    size: Option<(f32, f32, f32)>,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
@@ -511,9 +514,8 @@ impl<'a> Panel<'a> {
             scroll_target: 0.0,
             hover: None,
             pinned: false,
-            shape: arrange::Shape::default(),
+            opening: None,
             style: String::new(),
-            size: None,
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -540,7 +542,7 @@ impl<'a> Panel<'a> {
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
-        // What is shown, and how, changed: the shape is made anew. The
+        // What is shown, and how, changed: it is laid out anew. The
         // process list's order (sorted from the panel itself) changes no
         // lane's size, and leaves it be.
         let mut sized = self.prefs.clone();
@@ -548,8 +550,7 @@ impl<'a> Panel<'a> {
         let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
-            self.shape = arrange::Shape::default();
-            self.size = None;
+            self.opening = None;
         }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
@@ -575,9 +576,8 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
-            // A new opening takes the shape the readings now give it.
-            self.shape = arrange::Shape::default();
-            self.size = None;
+            // A new opening is laid out for what the machine shows now.
+            self.opening = None;
             let work = contact.work;
             let anchor = match self.controller.config.lock().unwrap().anchor {
                 Anchor::Pointer => cursor,
@@ -745,34 +745,37 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
-    /// Lays the panel out for the current readings and places the window.
+    /// The panel's lanes, laid out (once each opening, and held), and the
+    /// window placed for them.
     fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
+        let now = controller.seen.lock().unwrap().clone();
         let mut history = controller.history.lock().unwrap();
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous());
-        let lanes = view::lanes(&scene);
-        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(&self.theme))).collect();
-        drop(history);
-
+        let samples = history.make_contiguous();
         let contact = self.placement.as_ref().unwrap().contact;
         let work = (
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let (layout, zoom) = self.shape.arrange(&self.theme, self.edge, &heights, work);
-        // A panel that changes shape while up is noted, with what it was
-        // laid out from: the log is what a user's diagnostics bring back.
-        let size = (layout.width(), layout.height(), zoom);
-        if self.size.is_some_and(|was| was != size) {
-            let lanes: Vec<String> = heights.iter().map(|(id, height)| format!("{id} {height}")).collect();
-            crate::journal::note(format!(
-                "the open panel changed shape: {:?} to {size:?} ({} columns, work area {work:?}; lanes {})",
-                self.size.unwrap(),
-                layout.columns,
-                lanes.join(", ")
-            ));
-        }
-        self.size = Some(size);
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
+        let opening = match &mut self.opening {
+            Some(opening) => {
+                // What the machine has shown since joins its lane where it
+                // fits (each lane measured holding what it would hold).
+                let probe = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
+                opening.grow(&now, &controller.info, |id, seen| view::lane_height(&probe, id, seen));
+                opening
+            }
+            None => {
+                let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
+                let lanes = view::lanes(&scene);
+                let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, now.clone()))
+            }
+        };
+        let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));
+        let (layout, zoom) = (opening.layout.clone(), opening.zoom);
+        drop(history);
         let placement = self.placement.as_mut().unwrap();
         place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
         (lanes, layout)
@@ -839,7 +842,8 @@ impl<'a> Panel<'a> {
 
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous());
+        let seen = &self.opening.as_ref().unwrap().seen;
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
@@ -959,6 +963,7 @@ fn scene<'s>(
     hover: Option<Hit>,
     pinned: bool,
     history: &'s [Sample],
+    seen: &'s Seen,
 ) -> Scene<'s> {
     let interval = controller.config.lock().unwrap().interval;
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
@@ -968,6 +973,7 @@ fn scene<'s>(
         theme,
         lang,
         history,
+        seen,
         pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
         process_scroll: scroll,
         hover,

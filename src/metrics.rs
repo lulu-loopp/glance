@@ -733,7 +733,10 @@ fn adapter_address(kmt_handle: u32) -> Option<gpu_power::PciAddress> {
     unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some((address.BusNumber, address.DeviceNumber, address.FunctionNumber))
 }
 
-/// Clock of the adapter's first engine (the graphics engine), in MHz.
+/// Clock of the adapter's first engine (the graphics engine), in MHz. A
+/// driver that gives the engine's top clock gives its clock: 0 is a GPU at
+/// rest, its clock stopped, not one without a clock to read (a GPU powered
+/// off does not answer at all).
 fn graphics_clock(kmt_handle: u32) -> Option<f32> {
     let mut perf = D3DKMT_NODE_PERFDATA::default();
     let mut query = D3DKMT_QUERYADAPTERINFO {
@@ -743,7 +746,7 @@ fn graphics_clock(kmt_handle: u32) -> Option<f32> {
         PrivateDriverDataSize: size_of::<D3DKMT_NODE_PERFDATA>() as u32,
     };
     let answered = unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok();
-    (answered && perf.Frequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
+    (answered && perf.MaxFrequency != 0).then(|| (perf.Frequency as f64 / 1e6) as f32)
 }
 
 /// Octets received and sent by each hardware network interface, by its LUID. Virtual

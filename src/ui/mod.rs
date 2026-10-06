@@ -10,6 +10,7 @@ pub mod canvas;
 pub mod gfx;
 pub mod motion;
 pub mod prefs;
+pub mod seen;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]

@@ -1581,7 +1581,9 @@ impl Ui {
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
         let measure = Theme::new(skin, false);
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
+        // The preview shows what the panel would hold if it opened now.
+        let seen = app.controller.seen.lock().unwrap().clone();
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), None);
@@ -1600,7 +1602,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of
