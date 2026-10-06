@@ -13,7 +13,7 @@ Glance is a free, open-source system monitor for Windows that stays out of
 the way. Push the pointer against the edge of the screen and a panel slides
 out with everything your PC is doing; move away and it slides back.
 
-[中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
+[Website](https://glancepc.com/en/) · [中文说明](README.zh-CN.md) · [Download](https://github.com/lulu-loopp/glance/releases/latest) · [Hardware](#hardware) · [Build](#build)
 
 ![Glance's panel in the frosted-glass look, over the desktop](docs/images/desktop-en.webp)
 

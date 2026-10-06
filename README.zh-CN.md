@@ -10,7 +10,7 @@
 
 Glance 是一个免费开源、不打扰你的 Windows 系统监控。把鼠标推到屏幕边缘，面板滑出，电脑此刻的状态一目了然；移开鼠标，面板收回。
 
-[English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest)（[国内镜像](https://gitee.com/lulu-loopp/glance/releases)） · [硬件支持](#硬件支持) · [构建](#构建)
+[官网](https://glancepc.com) · [English](README.md) · [下载](https://github.com/lulu-loopp/glance/releases/latest)（[国内镜像](https://gitee.com/lulu-loopp/glance/releases)） · [硬件支持](#硬件支持) · [构建](#构建)
 
 ![Glance 磨砂玻璃外观的面板，叠在桌面上](docs/images/desktop-zh.webp)
 
