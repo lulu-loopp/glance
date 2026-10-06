@@ -20,6 +20,8 @@ pub struct Watch {
     /// Each part's heat, by its place in `temperatures`: the CPU and each
     /// graphics card count their own stretches.
     heat: HashMap<usize, Heat>,
+    /// The alert's temperature the counts were kept against.
+    limit: f32,
     tip: String,
 }
 
@@ -37,12 +39,16 @@ impl Watch {
             crate::tray::set_tip(&tip);
             self.tip = tip;
         }
-        // Off, nothing is counted: turned on, a stretch starts afresh.
-        if !alert {
+        // Off, nothing is counted: turned on, a stretch starts afresh; so
+        // too when the alert's temperature changes.
+        let limit = prefs.hot_temp;
+        if !alert || limit != self.limit {
             self.heat.clear();
+            self.limit = limit;
+        }
+        if !alert {
             return;
         }
-        let limit = prefs.hot_temp;
         for (i, (part, temp)) in temperatures(sample, &app.info).into_iter().enumerate() {
             let tell = self.heat.entry(i).or_default().step(temp, limit, now);
             let Some(temp) = temp.filter(|_| tell) else { continue };
