@@ -14,7 +14,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Posted to the panel's thread when the screens changed (a resolution, a
-/// scale, a monitor gone): the panel was placed and drawn for the old ones.
+/// monitor gone; WPARAM 0) or the window's scale did (WPARAM its new DPI,
+/// which the panel's own move to another monitor causes too).
 pub const SCREENS_CHANGED: u32 = WM_APP + 6;
 
 pub struct Window {
@@ -27,8 +28,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Clicking the panel must leave the focus where it was.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
-        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+        WM_DISPLAYCHANGE => {
             let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(wparam.0 & 0xFFFF), LPARAM(0)) };
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },

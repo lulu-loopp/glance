@@ -296,7 +296,7 @@ impl Controller {
                 DISMISS => panel.dismiss(),
                 // Placed, zoomed and backed for screens that are no longer
                 // so: taken down, and opened afresh next time.
-                crate::ui::window::SCREENS_CHANGED => panel.dismiss(),
+                crate::ui::window::SCREENS_CHANGED => panel.screens_changed(msg.wParam.0 as u32),
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => panel.restyle(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
@@ -457,6 +457,8 @@ struct Panel<'a> {
     /// Refresh the desktop behind the glass while the panel is open.
     live: bool,
     behind: Option<Behind>,
+    /// When live refraction last tried to take the desktop.
+    tried_behind: Instant,
     frost: f32,
     scroll: f32,
     scroll_target: f32,
@@ -500,6 +502,7 @@ impl<'a> Panel<'a> {
             edge: Edge::Right,
             live: false,
             behind: None,
+            tried_behind: Instant::now(),
             frost: 0.0,
             scroll: 0.0,
             scroll_target: 0.0,
@@ -592,8 +595,15 @@ impl<'a> Panel<'a> {
             if self.skin.sees_backdrop() {
                 self.arrange();
                 let placement = self.placement.as_ref().unwrap();
-                // Unreadable (the lock screen): the glass goes without.
-                self.behind = Capture::take(placement.window).map(|capture| Behind::new(capture, placement, now));
+                // Unreadable (the lock screen): the glass goes without. All
+                // the screen the panel may grow into while it is up: the
+                // strip along its edge (it grows along it, never across).
+                let monitor = placement.contact.monitor;
+                let area = match self.edge {
+                    Edge::Left | Edge::Right => RECT { top: monitor.top, bottom: monitor.bottom, ..placement.window },
+                    Edge::Top => RECT { left: monitor.left, right: monitor.right, bottom: monitor.bottom, ..placement.window },
+                };
+                self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now));
                 self.dress();
             }
         }
@@ -622,6 +632,17 @@ impl<'a> Panel<'a> {
         } else {
             self.shift.retarget(1.0, CLOSE.0, CLOSE.1, now);
             self.opacity.retarget(0.0, CLOSE.0, LINEAR, now);
+        }
+    }
+
+    /// The screens changed (`dpi` 0), or the window's scale did (to `dpi`):
+    /// a panel placed, zoomed and backed for screens no longer so is taken
+    /// down, to be opened afresh. Its own move to a monitor of another scale
+    /// as it opens tells a scale it was already placed for, and is no change.
+    fn screens_changed(&mut self, dpi: u32) {
+        let scale = self.placement.as_ref().map(|placement| placement.contact.scale);
+        if dpi == 0 || scale.is_some_and(|scale| (dpi as f32 / 96.0 - scale).abs() > 0.001) {
+            self.dismiss();
         }
     }
 
@@ -695,14 +716,20 @@ impl<'a> Panel<'a> {
     /// With live refraction, captures the desktop behind the window again
     /// every so often; only a capture that differs from the last is used.
     fn refresh_behind(&mut self, now: Instant) {
-        let (Some(behind), Some(placement)) = (&self.behind, &self.placement) else { return };
-        if now.duration_since(behind.taken) < LIVE_INTERVAL {
+        let Some(placement) = &self.placement else { return };
+        // Tried again every so often, with or without a capture so far (the
+        // first may have found the screen unreadable).
+        let last = self.behind.as_ref().map_or(self.tried_behind, |behind| behind.taken);
+        if now.duration_since(last) < LIVE_INTERVAL {
             return;
         }
+        self.tried_behind = now;
         // The same desktop as before, or none readable just now: the last stands.
         let capture = Capture::take(placement.window);
-        let Some(capture) = capture.filter(|capture| capture.digest != behind.digest) else {
-            self.behind.as_mut().unwrap().taken = now;
+        let Some(capture) = capture.filter(|capture| self.behind.as_ref().is_none_or(|behind| capture.digest != behind.digest)) else {
+            if let Some(behind) = &mut self.behind {
+                behind.taken = now;
+            }
             return;
         };
         let behind = Behind::new(capture, placement, now);

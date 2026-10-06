@@ -74,7 +74,9 @@ impl Shape {
             })
             .collect();
         let (layout, zoom) = arrange(theme, edge, heights, work, self.columns);
-        self.columns = Some(layout.columns);
+        // The columns chosen first stand: fewer lanes for a moment (one
+        // missing) lay out in fewer, and do not lower them for later.
+        self.columns.get_or_insert(layout.columns);
         (layout, zoom)
     }
 }
@@ -127,6 +129,13 @@ mod tests {
         // Each lane's height is its own module's, wherever the lane stands.
         let reordered = [("memory", most), ("cpu", most), ("gpu:0", most), ("battery", most)];
         assert_eq!(shape.arrange(&theme, Edge::Right, &reordered, work).0.heights[0], most + 30.0);
+        // Two lanes too tall to share a column, one of them missed for a
+        // moment: back, they stand in their two columns again.
+        let pair = [("cpu", 2.0 * most), ("battery", 2.0 * most)];
+        let mut shape = Shape::default();
+        assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
+        assert_eq!(shape.arrange(&theme, Edge::Right, &pair[..1], work).0.columns, 1);
+        assert_eq!(shape.arrange(&theme, Edge::Right, &pair, work).0.columns, 2);
     }
 }
 
