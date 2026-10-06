@@ -173,7 +173,7 @@ pub struct AmdCpu {
     /// Each package's processors and energy counter.
     packages: Vec<(Processors, EnergyCounter)>,
     /// The latest temperatures, kept while another program has the PCI bus.
-    last: (Option<f32>, Vec<f32>),
+    last: (Option<f32>, Vec<(usize, f32)>),
 }
 
 impl AmdCpu {
@@ -213,7 +213,7 @@ impl AmdCpu {
                 let celsius = raw as f32 * 0.125 - 305.0;
                 // An absent CCD reads zero.
                 if raw > 0 && celsius < 125.0 {
-                    ccds.push(celsius);
+                    ccds.push((ccd as usize, celsius));
                 }
             }
             self.last = (temp, ccds);

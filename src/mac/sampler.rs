@@ -177,7 +177,7 @@ impl Sampler {
             board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans }),
             // The internal SSD's, by its NAND channels' sensors.
             drive_temps: hottest(&temperatures, "NAND")
-                .map(|celsius| DriveTemperature { name: self.info.drives.first().cloned().unwrap_or_default(), celsius })
+                .map(|celsius| DriveTemperature { id: 0, name: self.info.drives.first().cloned().unwrap_or_default(), celsius })
                 .into_iter()
                 .collect(),
             dimm_temps: Vec::new(),

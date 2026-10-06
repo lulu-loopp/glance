@@ -360,7 +360,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
         processes,
         system: SystemSample { uptime_s: 3 * 3600 + 25 * 60 + seed, processes: 312, threads: 4810, handles: 168_000 },
         battery: None::<BatterySample>,
-        cpu_sensors: Some(CpuSensors { temp: Some(package), ccds: vec![package + 2.0, package - 14.0], power: Some(cpu_power) }),
+        cpu_sensors: Some(CpuSensors { temp: Some(package), ccds: vec![(0, package + 2.0), (1, package - 14.0)], power: Some(cpu_power) }),
         board: Some(BoardSensors {
             temps: vec![
                 ("system".into(), 33.0 + 3.0 * busy),
@@ -372,7 +372,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
             ],
             fans: vec![("cpu_fan".into(), 950.0 + 900.0 * busy), ("system_fan_2".into(), 880.0 + 500.0 * busy)],
         }),
-        drive_temps: info.drives.first().map(|name| DriveTemperature { name: name.clone(), celsius: 34.0 + 9.0 * busy }).into_iter().collect(),
+        drive_temps: info.drives.first().map(|name| DriveTemperature { id: 0, name: name.clone(), celsius: 34.0 + 9.0 * busy }).into_iter().collect(),
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
     }
 }

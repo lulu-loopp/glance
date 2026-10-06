@@ -74,16 +74,19 @@ impl Scene<'_> {
     }
 }
 
+/// One line of a chart: its reading in a sample, if the sample has it.
+type Series = Box<dyn Fn(&Sample) -> Option<f64>>;
+
 /// A chart: series read from samples, drawn against a full scale.
 struct Plot {
-    series: Vec<Box<dyn Fn(&Sample) -> f64>>,
+    series: Vec<Series>,
     max: f64,
     hot: Option<f64>,
 }
 
 impl Plot {
     /// A chart against `max`, or with `None`, against the busiest moment on screen.
-    fn new(scene: &Scene, series: Vec<Box<dyn Fn(&Sample) -> f64>>, max: Option<f64>, hot: Option<f64>) -> Self {
+    fn new(scene: &Scene, series: Vec<Series>, max: Option<f64>, hot: Option<f64>) -> Self {
         let max = max.unwrap_or_else(|| full_scale(scene, &series));
         Plot { series, max, hot }
     }
@@ -197,18 +200,27 @@ impl Scene<'_> {
         self.history.iter().any(|sample| read(sample).is_some())
     }
 
-    /// The names any sample in the history has, in the order they first
-    /// came.
-    fn names<'s>(&'s self, read: impl Fn(&'s Sample) -> Vec<&'s str>) -> Vec<&'s str> {
-        let mut names: Vec<&str> = Vec::new();
-        for sample in self.history {
-            for name in read(sample) {
-                if !names.contains(&name) {
-                    names.push(name);
-                }
+    /// Everything any sample in the history lists (its fans, volumes,
+    /// engines…), in the latest sample's order; one it no longer lists goes
+    /// after what came before it the last time it was listed. The order
+    /// holds while the history moves on.
+    fn union<'s, K: PartialEq>(&'s self, read: impl Fn(&'s Sample) -> Vec<K>) -> Vec<K> {
+        let mut keys: Vec<K> = Vec::new();
+        for sample in self.history.iter().rev() {
+            let mut after = None;
+            for key in read(sample) {
+                let at = match keys.iter().position(|known| *known == key) {
+                    Some(at) => at,
+                    None => {
+                        let at = after.map_or(0, |after| after + 1);
+                        keys.insert(at, key);
+                        at
+                    }
+                };
+                after = Some(at);
             }
         }
-        names
+        keys
     }
 
     /// The most of something any sample in the history has had.
@@ -226,7 +238,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
     let hot_load = prefs.hot_load;
     let hot_temp = prefs.hot_temp;
-    let readout = |value: f32, read: Box<dyn Fn(&Sample) -> f64>| Block::Readout {
+    let readout = |value: f32, read: Series| Block::Readout {
         figure: format!("{value:.0}"),
         unit: "%",
         hot: value > hot_load,
@@ -255,16 +267,16 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if scene.had(|s| s.cpu_sensors.as_ref()?.power) {
                 facts.push((lang.pick("功耗", "Power").into(), shown(sensors.and_then(|c| c.power), |power| format!("{power:.1} W")), false));
             }
-            let chiplets = scene.most(|s| s.cpu_sensors.as_ref().map_or(0, |c| c.ccds.len()));
-            if chiplets > 1 {
-                for i in 0..chiplets {
-                    let value = sensors.and_then(|c| c.ccds.get(i)).copied();
-                    facts.push((format!("CCD {}", i + 1), shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
+            let chiplets = scene.union(|s| s.cpu_sensors.as_ref().map_or(Vec::new(), |c| c.ccds.iter().map(|(ccd, _)| *ccd).collect()));
+            if chiplets.len() > 1 {
+                for ccd in chiplets {
+                    let value = sensors.and_then(|c| c.ccds.iter().find(|(read, _)| *read == ccd)).map(|(_, value)| *value);
+                    facts.push((format!("CCD {}", ccd + 1), shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
                 }
             }
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(s.cpu, Box::new(|s| s.cpu as f64)),
+                readout(s.cpu, Box::new(|s| Some(s.cpu as f64))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.most(|s| s.threads.len());
@@ -287,7 +299,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let usage = reading.map_or(0.0, |g| g.usage);
             let mut blocks = vec![
                 head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(usage, Box::new(move |s| s.gpus.get(index).map_or(0.0, |g| g.usage as f64))),
+                readout(usage, Box::new(move |s| s.gpus.get(index).map(|g| g.usage as f64))),
             ];
             if prefs.gpu.memory {
                 let used = reading.map_or(0, |g| g.mem_used);
@@ -302,7 +314,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if prefs.gpu.engines {
                 // An engine the counters no longer list has nothing running on it.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
-                let kinds = scene.names(|s| s.gpus.get(index).map_or(Vec::new(), |g| g.engines.iter().map(|(kind, _)| kind.as_str()).collect()));
+                let kinds = scene.union(|s| s.gpus.get(index).map_or(Vec::new(), |g| g.engines.iter().map(|(kind, _)| kind.as_str()).collect()));
                 for kind in kinds.into_iter().filter(|kind| SHOWN.contains(kind)) {
                     let load = reading.and_then(|g| g.engines.iter().find(|(known, _)| known == kind)).map_or(0.0, |(_, load)| *load);
                     blocks.push(Block::Meter {
@@ -354,14 +366,14 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     figure: format!("{percent:.0}"),
                     unit: "%",
                     hot: percent > hot_load,
-                    plot: Plot::new(scene, vec![Box::new(move |s| s.memory.used as f64 / total * 100.0)], Some(100.0), Some(hot_load as f64)),
+                    plot: Plot::new(scene, vec![Box::new(move |s| Some(s.memory.used as f64 / total * 100.0))], Some(100.0), Some(hot_load as f64)),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
         }
         "network" => {
             let bits = prefs.network.bits;
-            let plot = Plot::new(scene, vec![Box::new(|s| s.net_down), Box::new(|s| s.net_up)], None, None);
+            let plot = Plot::new(scene, vec![Box::new(|s| Some(s.net_down)), Box::new(|s| Some(s.net_up))], None, None);
             let scale = plot.max;
             let mut facts = Vec::new();
             if prefs.network.details {
@@ -392,18 +404,20 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ]
         }
         "disk" => {
-            let plot = Plot::new(scene, vec![Box::new(|s| s.disk_read), Box::new(|s| s.disk_write)], None, None);
+            let plot = Plot::new(scene, vec![Box::new(|s| Some(s.disk_read)), Box::new(|s| Some(s.disk_write))], None, None);
             let scale = plot.max;
-            let drives = scene.names(|s| s.drive_temps.iter().map(|d| d.name.as_str()).collect());
-            let temp = |name: &str| s.drive_temps.iter().find(|d| d.name == name).map(|d| d.celsius);
+            let drives = scene.union(|s| s.drive_temps.iter().map(|d| d.id).collect());
+            let temp = |id: u32| s.drive_temps.iter().find(|d| d.id == id).map(|d| d.celsius);
+            // A drive's name as it was last read.
+            let name = |id: u32| scene.history.iter().rev().find_map(|s| s.drive_temps.iter().find(|d| d.id == id)).map_or("", |d| d.name.as_str());
             let hottest = s.drive_temps.iter().map(|d| d.celsius).fold(None, |max: Option<f32>, t| Some(max.map_or(t, |m| m.max(t))));
             // A drive's temperature takes the corner, as a GPU's does, and the
             // chart's scale moves below.
             let mut facts: Vec<(String, String, bool)> = Vec::new();
             if drives.len() > 1 {
-                for name in &drives {
-                    let value = temp(name);
-                    facts.push((name.to_string(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
+                for id in &drives {
+                    let value = temp(*id);
+                    facts.push((name(*id).to_string(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
                 }
             }
             if prefs.disk.active {
@@ -448,7 +462,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         }
         "storage" => {
             let mut blocks = vec![head(lang.pick("存储", "Storage"), "", "", false)];
-            for (i, name) in scene.names(|s| s.volumes.iter().map(|v| v.name.as_str()).collect()).into_iter().enumerate() {
+            for (i, name) in scene.union(|s| s.volumes.iter().map(|v| v.name.as_str()).collect()).into_iter().enumerate() {
                 let volume = s.volumes.iter().find(|v| v.name == name);
                 let fraction = volume.map_or(0.0, |v| v.used as f32 / v.total.max(1) as f32);
                 blocks.push(Block::Meter {
@@ -469,8 +483,8 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let named = |name: &str, numbered: (&str, &str)| {
                 if name.parse::<u32>().is_ok() { format!("{} {name}", lang.pick(numbered.0, numbered.1)) } else { lang.name(name) }
             };
-            let temps = scene.names(|s| s.board.as_ref().map_or(Vec::new(), |b| b.temps.iter().map(|(n, _)| n.as_str()).collect()));
-            let fans = scene.names(|s| s.board.as_ref().map_or(Vec::new(), |b| b.fans.iter().map(|(n, _)| n.as_str()).collect()));
+            let temps = scene.union(|s| s.board.as_ref().map_or(Vec::new(), |b| b.temps.iter().map(|(n, _)| n.as_str()).collect()));
+            let fans = scene.union(|s| s.board.as_ref().map_or(Vec::new(), |b| b.fans.iter().map(|(n, _)| n.as_str()).collect()));
             let value = |list: Option<&Vec<(String, f32)>>, name: &str| list.and_then(|list| list.iter().find(|(n, _)| n == name)).map(|(_, v)| *v);
             vec![
                 head(lang.pick("主板", "Motherboard"), &info.board, "", false),
@@ -515,7 +529,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     figure: shown(battery, |b| b.percent.to_string()),
                     unit: "%",
                     hot: battery.is_some_and(|b| !b.charging && b.percent <= 20),
-                    plot: Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map_or(0.0, |b| b.percent as f64))], Some(100.0), None),
+                    plot: Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None),
                 },
             ]
         }
@@ -558,13 +572,13 @@ fn round_up_rate(value: f64) -> f64 {
     step * magnitude * unit
 }
 
-fn full_scale(scene: &Scene, series: &[Box<dyn Fn(&Sample) -> f64>]) -> f64 {
+fn full_scale(scene: &Scene, series: &[Series]) -> f64 {
     let oldest = scene.pen_ms - scene.prefs.chart_seconds * 1000.0;
     let peak = scene
         .history
         .iter()
         .filter(|s| s.t as f64 >= oldest)
-        .flat_map(|s| series.iter().map(move |read| read(s)))
+        .flat_map(|s| series.iter().filter_map(move |read| read(s)))
         .fold(MIN_RATE_SCALE, f64::max);
     round_up_rate(peak)
 }
@@ -909,25 +923,34 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
     let last = visible.last().unwrap();
     frame.clip(left, top - 2.0, width, height + 2.0);
     for (order, read) in plot.series.iter().enumerate() {
-        let mut points: Vec<Point> = visible.iter().map(|s| Point { x: x(s.t as f64), y: y(read(s)) }).collect();
+        let mut points: Vec<Option<Point>> = visible.iter().map(|s| read(s).map(|value| Point { x: x(s.t as f64), y: y(value) })).collect();
         // The pen holds its position if the next sample is late.
         if (last.t as f64) < pen {
-            points.push(Point { x: right, y: y(read(last)) });
+            points.push(read(last).map(|value| Point { x: right, y: y(value) }));
         }
-        if order == 0 {
-            let mut area = points.clone();
-            area.push(Point { x: points.last().unwrap().x.max(right), y: bottom });
-            area.push(Point { x: points[0].x, y: bottom });
-            // The wash under the trace, fading where the skin's fades.
-            let wash = if ink.wash == ink.wash_end { Fill::Solid(ink.wash) } else { Fill::Down { top, from: ink.wash, bottom, to: ink.wash_end } };
-            frame.fill_shape(&area, wash);
-        }
-        let (color, stroke) = if order == 0 { (ink.trace, 1.5) } else { (ink.trace2, 1.0) };
-        frame.stroke(&points, color, stroke);
-        if let (0, Some(hot)) = (order, plot.hot) {
-            frame.clip(left, top - 2.0, width, y(hot) - top + 2.0);
-            frame.stroke(&points, theme.signal, stroke);
-            frame.unclip();
+        // A sample without the reading breaks the line: each stretch of
+        // readings is drawn on its own, the last one to the pen.
+        let stretches: Vec<&[Option<Point>]> = points.split(Option::is_none).collect();
+        let last_stretch = stretches.len() - 1;
+        for (i, stretch) in stretches.into_iter().enumerate().filter(|(_, stretch)| !stretch.is_empty()) {
+            let stretch: Vec<Point> = stretch.iter().flatten().copied().collect();
+            let to_pen = i == last_stretch;
+            if order == 0 {
+                let mut area = stretch.clone();
+                let end = stretch.last().unwrap().x;
+                area.push(Point { x: if to_pen { end.max(right) } else { end }, y: bottom });
+                area.push(Point { x: stretch[0].x, y: bottom });
+                // The wash under the trace, fading where the skin's fades.
+                let wash = if ink.wash == ink.wash_end { Fill::Solid(ink.wash) } else { Fill::Down { top, from: ink.wash, bottom, to: ink.wash_end } };
+                frame.fill_shape(&area, wash);
+            }
+            let (color, stroke) = if order == 0 { (ink.trace, 1.5) } else { (ink.trace2, 1.0) };
+            frame.stroke(&stretch, color, stroke);
+            if let (0, Some(hot)) = (order, plot.hot) {
+                frame.clip(left, top - 2.0, width, y(hot) - top + 2.0);
+                frame.stroke(&stretch, theme.signal, stroke);
+                frame.unclip();
+            }
         }
     }
     frame.unclip();
@@ -940,7 +963,12 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
         Some(i) => (&visible[i - 1], &visible[i]),
     };
     let progress = if after.t == before.t { 0.0 } else { (pen - before.t as f64) / (after.t - before.t) as f64 };
-    let value = read(before) + (read(after) - read(before)) * progress;
+    // No tip while the reading is missing.
+    let value = match (read(before), read(after)) {
+        (Some(from), Some(to)) => from + (to - from) * progress,
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => return,
+    };
     let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { ink.trace };
     frame.fill_circle(color, Point { x: right, y: y(value) }, 2.5);
 }
@@ -1099,6 +1127,52 @@ mod tests {
         assert!(!facts(&lane(&scene(history), "gpu:0").unwrap()).iter().any(|(label, _)| label == "Clock"));
         assert!(lane(&scene(history), "battery").is_none());
         assert!(lane(&scene(history), "board").is_none());
+    }
+
+    #[test]
+    fn tells_readings_apart_by_what_they_are_of() {
+        use crate::reading::{CpuSensors, DriveTemperature};
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
+            let mut s = sample(None, None, None);
+            s.cpu_sensors = Some(CpuSensors { temp: Some(50.0), ccds, power: None });
+            s.drive_temps = drives.into_iter().map(|(id, celsius)| DriveTemperature { id, name: "SSD".into(), celsius }).collect();
+            s
+        };
+        // Two drives of one model: a row each.
+        let history = leak(vec![with(Vec::new(), vec![(0, 35.0), (1, 95.0)])]);
+        let disk = facts(&lane(&scene(history), "disk").unwrap());
+        assert_eq!(&disk[..2], [("SSD".to_string(), "35 °C".to_string()), ("SSD".to_string(), "95 °C".to_string())]);
+        // The first chiplet missed this time: the second's reading stays its own.
+        let history = leak(vec![with(vec![(0, 40.0), (1, 95.0)], Vec::new()), with(vec![(1, 95.0)], Vec::new())]);
+        let cpu = facts(&lane(&scene(history), "cpu").unwrap());
+        assert!(cpu.contains(&("CCD 1".into(), UNREAD.into())));
+        assert!(cpu.contains(&("CCD 2".into(), "95 °C".into())));
+    }
+
+    #[test]
+    fn keeps_the_order_while_the_history_moves_on() {
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let fans = |names: &[&str]| {
+            let mut s = sample(None, None, None);
+            s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: names.iter().map(|n| (n.to_string(), 900.0)).collect() });
+            s
+        };
+        let order = |history: &'static [Sample]| -> Vec<String> {
+            let scene = scene(history);
+            let names = scene.union(|s| s.board.as_ref().map_or(Vec::new(), |b| b.fans.iter().map(|(n, _)| n.as_str()).collect()));
+            names.into_iter().map(str::to_string).collect()
+        };
+        // Fan 2 alone at first, then both: the latest order, before and after the first sample leaves.
+        assert_eq!(order(leak(vec![fans(&["2"]), fans(&["1", "2"])])), ["1", "2"]);
+        assert_eq!(order(leak(vec![fans(&["1", "2"])])), ["1", "2"]);
+        // One missing now goes back beside what came before it.
+        assert_eq!(order(leak(vec![fans(&["1", "2", "3"]), fans(&["1", "3"])])), ["1", "2", "3"]);
+        assert_eq!(order(leak(vec![fans(&["1", "2", "3"]), fans(&["2", "3"])])), ["1", "2", "3"]);
     }
 
     #[test]

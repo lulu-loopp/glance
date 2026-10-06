@@ -155,8 +155,9 @@ pub struct BatterySample {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CpuSensors {
     pub temp: Option<f32>,
-    /// Each chiplet's temperature, on CPUs that have several.
-    pub ccds: Vec<f32>,
+    /// Each chiplet's temperature, by its number from 0, on CPUs that have
+    /// several; one not read this time is left out.
+    pub ccds: Vec<(usize, f32)>,
     pub power: Option<f32>,
 }
 
@@ -171,6 +172,8 @@ pub struct BoardSensors {
 
 #[derive(Clone, Serialize)]
 pub struct DriveTemperature {
+    /// Which physical drive it is: drives of one model have one name.
+    pub id: u32,
     pub name: String,
     pub celsius: f32,
 }

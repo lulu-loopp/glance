@@ -30,7 +30,7 @@ pub fn temperatures() -> Vec<DriveTemperature> {
     let mut found = Vec::new();
     each_drive(|index, handle| {
         if let Some(celsius) = temperature(handle) {
-            found.push(DriveTemperature { name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
+            found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
     });
     found
