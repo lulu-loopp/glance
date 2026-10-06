@@ -152,6 +152,8 @@ impl Hash for Block {
 }
 
 pub struct Lane {
+    /// The module it shows ("cpu", "gpu:0", …).
+    pub id: String,
     blocks: Vec<Block>,
     ink: Ink,
 }
@@ -175,7 +177,7 @@ pub fn lanes(scene: &Scene) -> Vec<Lane> {
         .modules
         .iter()
         .filter(|entry| entry.on)
-        .filter_map(|entry| Some(Lane { blocks: lane(scene, &entry.id)?, ink: scene.theme.ink(&entry.id) }))
+        .filter_map(|entry| Some(Lane { id: entry.id.clone(), blocks: lane(scene, &entry.id)?, ink: scene.theme.ink(&entry.id) }))
         .collect()
 }
 

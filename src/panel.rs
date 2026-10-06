@@ -294,6 +294,9 @@ impl Controller {
                     }
                 }
                 DISMISS => panel.dismiss(),
+                // Placed, zoomed and backed for screens that are no longer
+                // so: taken down, and opened afresh next time.
+                crate::ui::window::SCREENS_CHANGED => panel.dismiss(),
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => panel.restyle(),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
@@ -417,16 +420,19 @@ struct Behind {
     digest: u64,
     /// The luminance behind the panel: its mean and spread.
     tone: (f32, f32),
-    /// The capture, until it is first drawn and becomes the bitmap.
-    capture: Option<Capture>,
-    bitmap: Option<ID2D1Bitmap1>,
+    /// The capture, kept: where it was taken on screen places it under the
+    /// panel wherever the panel has since grown or moved to.
+    capture: Capture,
+    /// The capture as drawn, and the physical pixels per DIP it was made
+    /// for: made again when the zoom changes, or the device was lost.
+    bitmap: Option<(ID2D1Bitmap1, f32)>,
     taken: Instant,
 }
 
 impl Behind {
     fn new(capture: Capture, placement: &Placement, now: Instant) -> Self {
         let tone = capture.luminance(placement.panel, placement.px);
-        Behind { digest: capture.digest, tone, capture: Some(capture), bitmap: None, taken: now }
+        Behind { digest: capture.digest, tone, capture, bitmap: None, taken: now }
     }
 }
 
@@ -458,8 +464,10 @@ struct Panel<'a> {
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
-    /// The shape the panel opened with, held while it is up.
+    /// The shape the panel opened with, held while it is up, and the
+    /// settings it was made for.
     shape: render::Shape,
+    style: String,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
@@ -498,6 +506,7 @@ impl<'a> Panel<'a> {
             hover: None,
             pinned: false,
             shape: render::Shape::default(),
+            style: String::new(),
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -524,6 +533,16 @@ impl<'a> Panel<'a> {
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
+        // What is shown, and how, changed: the shape is made anew. The
+        // process list's order (sorted from the panel itself) changes no
+        // lane's size, and leaves it be.
+        let mut sized = self.prefs.clone();
+        sized.processes.sort = Default::default();
+        let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
+        if style != self.style {
+            self.style = style;
+            self.shape = render::Shape::default();
+        }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
         // captures of what is behind it; the system offers that only as
@@ -699,7 +718,7 @@ impl<'a> Panel<'a> {
         let mut history = controller.history.lock().unwrap();
         let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous());
         let lanes = view::lanes(&scene);
-        let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&self.theme)).collect();
+        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(&self.theme))).collect();
         drop(history);
 
         let contact = self.placement.as_ref().unwrap().contact;
@@ -707,7 +726,7 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let (layout, zoom) = self.shape.arrange(&self.theme, self.edge, heights, work);
+        let (layout, zoom) = self.shape.arrange(&self.theme, self.edge, &heights, work);
         let placement = self.placement.as_mut().unwrap();
         place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
         (lanes, layout)
@@ -731,8 +750,8 @@ impl<'a> Panel<'a> {
         self.gfx = current;
         self.layers.release();
         // A desktop already made a bitmap on the lost device is gone with it.
-        if self.behind.as_ref().is_some_and(|behind| behind.capture.is_none()) {
-            self.behind = None;
+        if let Some(behind) = &mut self.behind {
+            behind.bitmap = None;
         }
         true
     }
@@ -786,11 +805,17 @@ impl<'a> Panel<'a> {
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
             let backdrop = behind.as_mut().and_then(|behind| {
-                if let Some(capture) = behind.capture.take() {
-                    behind.bitmap = capture.bitmap(&frame.dc, px).ok();
+                if behind.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
+                    behind.bitmap = behind.capture.bitmap(&frame.dc, px).ok().map(|bitmap| (bitmap, px));
                 }
-                // Aligned with the screen where the panel rests.
-                Some((behind.bitmap.as_ref()?, Vector2 { X: rest.0, Y: rest.1 }, behind.digest))
+                // Aligned with the screen where the panel rests: the window
+                // may have moved or grown since the capture was taken.
+                let from = behind.capture.rect;
+                let at = Vector2 {
+                    X: (window.left - from.left) as f32 / px + rest.0,
+                    Y: (window.top - from.top) as f32 / px + rest.1,
+                };
+                Some((&behind.bitmap.as_ref()?.0, at, behind.digest))
             });
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
             drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px));

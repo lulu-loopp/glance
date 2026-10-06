@@ -9,9 +9,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
-    WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    PostMessageW, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
+
+/// Posted to the panel's thread when the screens changed (a resolution, a
+/// scale, a monitor gone): the panel was placed and drawn for the old ones.
+pub const SCREENS_CHANGED: u32 = WM_APP + 6;
 
 pub struct Window {
     pub hwnd: HWND,
@@ -23,6 +27,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Clicking the panel must leave the focus where it was.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }

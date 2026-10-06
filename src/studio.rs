@@ -137,8 +137,8 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let edge = Edge::Right;
     let shape = std::cell::RefCell::new(render::Shape::default());
     let place = |lanes: &[view::Lane], theme: &Theme| {
-        let heights = lanes.iter().map(|lane| lane.height(theme)).collect();
-        let (layout, zoom) = shape.borrow_mut().arrange(theme, edge, heights, (sw, sh));
+        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
+        let (layout, zoom) = shape.borrow_mut().arrange(theme, edge, &heights, (sw, sh));
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let rest = (sw - theme.inset * zoom - pw, ((sh - ph) / 2.0).max(GAP));
         (layout, zoom, rest)

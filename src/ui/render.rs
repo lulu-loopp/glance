@@ -1,6 +1,7 @@
 //! The panel as a picture: laid out for a screen, and drawn wherever and at
 //! whatever size it is wanted, on screen or in the settings' preview.
 
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use windows::core::Result;
@@ -49,28 +50,31 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
 }
 
 /// A panel's shape while it is on screen: the columns it opened with, and
-/// each lane as tall as it has been since. Readings come and go (a fan that
-/// stops, a sensor read now and then), and a lane that grew and shrank with
-/// them would change the columns, or the zoom, under the pointer.
+/// each lane, by its module, as tall as it has been since. Readings come and
+/// go (a fan that stops, a sensor read now and then, a battery lane missed
+/// once), and a panel laid out afresh with them would change its columns,
+/// or its zoom, under the pointer. Made anew for each opening, and when the
+/// settings change.
 #[derive(Default)]
 pub struct Shape {
     columns: Option<usize>,
-    heights: Vec<f32>,
+    heights: HashMap<String, f32>,
 }
 
 impl Shape {
-    /// `arrange`, keeping the columns and never letting a lane shrink; a
-    /// different number of lanes (the settings changed) starts afresh.
-    pub fn arrange(&mut self, theme: &Theme, edge: Edge, mut heights: Vec<f32>, work: (f32, f32)) -> (Layout, f32) {
-        if self.heights.len() != heights.len() {
-            *self = Shape::default();
-        }
-        for (height, held) in heights.iter_mut().zip(&self.heights) {
-            *height = height.max(*held);
-        }
-        let (layout, zoom) = arrange(theme, edge, heights.clone(), work, self.columns);
+    /// `arrange` for the lanes there are now (each by its module, with its
+    /// height), keeping the columns, and no lane shorter than it has been.
+    pub fn arrange(&mut self, theme: &Theme, edge: Edge, lanes: &[(&str, f32)], work: (f32, f32)) -> (Layout, f32) {
+        let heights: Vec<f32> = lanes
+            .iter()
+            .map(|(id, height)| {
+                let held = self.heights.entry(id.to_string()).or_insert(*height);
+                *held = held.max(*height);
+                *held
+            })
+            .collect();
+        let (layout, zoom) = arrange(theme, edge, heights, work, self.columns);
         self.columns = Some(layout.columns);
-        self.heights = heights;
         (layout, zoom)
     }
 }
@@ -101,22 +105,28 @@ mod tests {
         // layout into a third.
         let columns = |height: f32| arrange(&theme, Edge::Right, vec![height; 4], work, None).0.columns;
         let most = (100..900).map(|h| h as f32).take_while(|h| columns(*h) <= 2).last().unwrap();
-        let lanes = vec![most; 4];
+        let lanes = [("cpu", most), ("gpu:0", most), ("memory", most), ("battery", most)];
         let mut shape = Shape::default();
-        let (opened, _) = shape.arrange(&theme, Edge::Right, lanes.clone(), work);
+        let (opened, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
         assert_eq!(opened.columns, 2);
         // A row more in one lane would take another column if laid out
         // afresh; held, the panel keeps its columns.
-        let taller = vec![most, most, most + 30.0, most];
-        assert_ne!(arrange(&theme, Edge::Right, taller.clone(), work, None).0.columns, opened.columns);
-        let (held, _) = shape.arrange(&theme, Edge::Right, taller, work);
+        let taller = [("cpu", most), ("gpu:0", most), ("memory", most + 30.0), ("battery", most)];
+        assert_ne!(arrange(&theme, Edge::Right, taller.iter().map(|lane| lane.1).collect(), work, None).0.columns, opened.columns);
+        let (held, _) = shape.arrange(&theme, Edge::Right, &taller, work);
         assert_eq!(held.columns, opened.columns);
         // The row gone again: the lane keeps its height.
-        let (after, _) = shape.arrange(&theme, Edge::Right, lanes, work);
+        let (after, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
         assert_eq!(after.height(), held.height());
-        // Other lanes (the settings changed): afresh.
-        let (fresh, _) = shape.arrange(&theme, Edge::Right, vec![100.0], work);
-        assert_eq!(fresh.columns, 1);
+        // A lane missing for a moment (the battery not read once), then back:
+        // the columns hold throughout, and the lanes keep their heights.
+        let (missing, _) = shape.arrange(&theme, Edge::Right, &lanes[..3], work);
+        assert_eq!(missing.columns, opened.columns);
+        let (back, _) = shape.arrange(&theme, Edge::Right, &lanes, work);
+        assert_eq!((back.columns, back.height()), (held.columns, held.height()));
+        // Each lane's height is its own module's, wherever the lane stands.
+        let reordered = [("memory", most), ("cpu", most), ("gpu:0", most), ("battery", most)];
+        assert_eq!(shape.arrange(&theme, Edge::Right, &reordered, work).0.heights[0], most + 30.0);
     }
 }
 
