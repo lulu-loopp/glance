@@ -4,6 +4,7 @@
 mod hid;
 mod iokit;
 mod ioreport;
+mod network;
 mod sampler;
 mod smc;
 

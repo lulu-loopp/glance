@@ -7,11 +7,15 @@ use std::ffi::{c_void, CStr, CString};
 use std::mem::{size_of, zeroed};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use objc2_core_foundation::{CFBoolean, CFString, CFType};
+use objc2_io_kit::{IOPSCopyPowerSourcesInfo, IOPSCopyPowerSourcesList, IOPSGetPowerSourceDescription};
+
 use super::hid::Sensors;
 use super::iokit;
+use super::network::{display_name, Network};
 use super::ioreport::Report;
 use super::smc::Smc;
-use crate::reading::{BoardSensors, CpuSensors, DriveTemperature, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
+use crate::reading::{BatterySample, BoardSensors, CpuSensors, DriveTemperature, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
 
 // The Mach calls libc no longer recommends and mach2 does not have.
 extern "C" {
@@ -63,6 +67,8 @@ pub struct Sampler {
     smc: Option<Smc>,
     /// IOReport, for power and clocks.
     report: Option<Report>,
+    /// The system's network configuration, for the interface in use.
+    network: Option<Network>,
 }
 
 impl Sampler {
@@ -70,7 +76,8 @@ impl Sampler {
         let mut timebase = mach2::mach_time::mach_timebase_info { numer: 1, denom: 1 };
         unsafe { mach2::mach_time::mach_timebase_info(&mut timebase) };
         let threads = sysctl_number("hw.logicalcpu").unwrap_or(1) as usize;
-        let primary = primary_interface();
+        let network = Network::open();
+        let primary = primary_interface(network.as_ref(), &interfaces());
         let info = StaticInfo {
             cpu_name: sysctl_string("machdep.cpu.brand_string").unwrap_or_default(),
             memory_modules: None,
@@ -89,6 +96,7 @@ impl Sampler {
             sensors: Sensors::open(),
             smc: Smc::open(),
             report: Report::open(),
+            network,
         };
         sampler.info.found = vec![
             format!(
@@ -120,7 +128,8 @@ impl Sampler {
             .collect();
         let cpu = if threads.is_empty() { 0.0 } else { threads.iter().sum::<f32>() / threads.len() as f32 };
 
-        let net = interface_bytes();
+        let interfaces = interfaces();
+        let net = hardware_bytes(&interfaces);
         let rate = |now: u64, was: u64| now.saturating_sub(was) as f64 / seconds;
         let (net_down, net_up) = (rate(net.0, self.previous.net.0), rate(net.1, self.previous.net.1));
         let disk = drive_bytes();
@@ -148,14 +157,14 @@ impl Sampler {
             net_up,
             net_total_down: net.0,
             net_total_up: net.1,
-            network: primary_interface(),
+            network: primary_interface(self.network.as_ref(), &interfaces),
             disk_read,
             disk_write,
             disk_active: 0.0,
             volumes: volumes(),
             processes,
             system: SystemSample { uptime_s: uptime(), processes: counted, threads: 0, handles: 0 },
-            battery: None,
+            battery: battery(),
             cpu_sensors: (chip.is_some() || report.cpu_power.is_some()).then(|| CpuSensors { temp: chip, ccds: Vec::new(), power: report.cpu_power }),
             // A Mac's fans, where it has any.
             board: self.smc.as_ref().map(Smc::fans).filter(|fans| !fans.is_empty()).map(|fans| BoardSensors { temps: Vec::new(), fans }),
@@ -306,20 +315,20 @@ fn memory(total: u64) -> MemorySample {
     }
 }
 
-/// Bytes in and out over the interfaces that are hardware (Ethernet and
-/// Wi-Fi, en*), from their 64-bit counters.
-fn interface_bytes() -> (u64, u64) {
+/// Each interface's bytes in and out and its link speed (bit/s), from the
+/// 64-bit counters, by BSD name.
+fn interfaces() -> HashMap<String, (u64, u64, u64)> {
+    let mut found = HashMap::new();
     let mut mib = [libc::CTL_NET, libc::PF_ROUTE, 0, 0, libc::NET_RT_IFLIST2, 0];
     let mut size = 0usize;
     unsafe {
         if libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) != 0 {
-            return (0, 0);
+            return found;
         }
         let mut buffer = vec![0u8; size];
         if libc::sysctl(mib.as_mut_ptr(), mib.len() as u32, buffer.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) != 0 {
-            return (0, 0);
+            return found;
         }
-        let (mut down, mut up) = (0u64, 0u64);
         let mut offset = 0usize;
         while offset + size_of::<libc::if_msghdr>() <= size {
             let header = buffer.as_ptr().add(offset) as *const libc::if_msghdr;
@@ -330,23 +339,34 @@ fn interface_bytes() -> (u64, u64) {
             if (*header).ifm_type as i32 == libc::RTM_IFINFO2 {
                 let message = std::ptr::read_unaligned(buffer.as_ptr().add(offset) as *const libc::if_msghdr2);
                 let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
-                if !libc::if_indextoname(message.ifm_index as u32, name.as_mut_ptr()).is_null()
-                    && CStr::from_ptr(name.as_ptr()).to_bytes().starts_with(b"en")
-                {
+                if !libc::if_indextoname(message.ifm_index as u32, name.as_mut_ptr()).is_null() {
                     let data = message.ifm_data;
-                    down += data.ifi_ibytes;
-                    up += data.ifi_obytes;
+                    let name = CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned();
+                    found.insert(name, (data.ifi_ibytes, data.ifi_obytes, data.ifi_baudrate));
                 }
             }
             offset += length;
         }
-        (down, up)
     }
+    found
 }
 
-/// The hardware interface (en*) that is up and has an IPv4 address: the one
-/// traffic leaves by.
-fn primary_interface() -> Option<NetworkInfo> {
+/// Bytes in and out over the interfaces that are hardware (Ethernet and
+/// Wi-Fi, en*).
+fn hardware_bytes(interfaces: &HashMap<String, (u64, u64, u64)>) -> (u64, u64) {
+    interfaces.iter().filter(|(name, _)| name.starts_with("en")).fold((0, 0), |(down, up), (_, (i, o, _))| (down + i, up + o))
+}
+
+/// The interface the default route uses now, named as System Settings
+/// names it, with its IPv4 address and link speed.
+fn primary_interface(network: Option<&Network>, interfaces: &HashMap<String, (u64, u64, u64)>) -> Option<NetworkInfo> {
+    let bsd = network?.primary()?;
+    let shown = display_name(&bsd).unwrap_or_else(|| bsd.clone());
+    Some(NetworkInfo { name: shown.clone(), model: shown, ipv4: ipv4(&bsd), link_bps: interfaces.get(&bsd).map_or(0, |(_, _, speed)| *speed) })
+}
+
+/// An interface's IPv4 address.
+fn ipv4(bsd: &str) -> Option<String> {
     let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut list) } != 0 {
         return None;
@@ -356,18 +376,41 @@ fn primary_interface() -> Option<NetworkInfo> {
     while !entry.is_null() {
         let item = unsafe { &*entry };
         entry = item.ifa_next;
-        let name = unsafe { CStr::from_ptr(item.ifa_name) }.to_string_lossy().into_owned();
-        let up = item.ifa_flags & (libc::IFF_UP | libc::IFF_RUNNING) as u32 == (libc::IFF_UP | libc::IFF_RUNNING) as u32;
-        if !name.starts_with("en") || !up || item.ifa_addr.is_null() || unsafe { (*item.ifa_addr).sa_family } as i32 != libc::AF_INET {
+        let name = unsafe { CStr::from_ptr(item.ifa_name) }.to_string_lossy();
+        if name != bsd || item.ifa_addr.is_null() || unsafe { (*item.ifa_addr).sa_family } as i32 != libc::AF_INET {
             continue;
         }
         let address = unsafe { &*(item.ifa_addr as *const libc::sockaddr_in) };
-        let ip = std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr));
-        found = Some(NetworkInfo { name: name.clone(), model: name, ipv4: Some(ip.to_string()), link_bps: 0 });
+        found = Some(std::net::Ipv4Addr::from(u32::from_be(address.sin_addr.s_addr)).to_string());
         break;
     }
     unsafe { libc::freeifaddrs(list) };
     found
+}
+
+/// The battery, where there is one: its charge, whether it is charging,
+/// and, on battery power, how long it has left.
+fn battery() -> Option<BatterySample> {
+    let blob = IOPSCopyPowerSourcesInfo()?;
+    let sources = unsafe { IOPSCopyPowerSourcesList(Some(&blob)) }?;
+    (0..sources.count()).find_map(|i| {
+        let source = unsafe { sources.value_at_index(i) } as *const CFType;
+        let description = unsafe { IOPSGetPowerSourceDescription(Some(&blob), source.as_ref()) }?;
+        let text = |key| iokit::get(&description, key)?.downcast::<CFString>().ok().map(|value| value.to_string());
+        if text("Type").as_deref() != Some("InternalBattery") {
+            return None;
+        }
+        let flag = |key| iokit::get(&description, key).and_then(|value| value.downcast::<CFBoolean>().ok()).is_some_and(|value| value.value());
+        let (current, most) = (iokit::number(&description, "Current Capacity")?, iokit::number(&description, "Max Capacity")?.max(1));
+        let on_battery = text("Power Source State").as_deref() == Some("Battery Power");
+        // Minutes, or -1 while the system is still working it out.
+        let left = iokit::number(&description, "Time to Empty").filter(|minutes| on_battery && *minutes > 0);
+        Some(BatterySample {
+            percent: (current * 100 / most).clamp(0, 100) as u8,
+            charging: flag("Is Charging"),
+            seconds_left: left.map(|minutes| minutes as u32 * 60),
+        })
+    })
 }
 
 /// Each graphics processor and its readings now, from its driver's
