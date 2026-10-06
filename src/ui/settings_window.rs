@@ -18,7 +18,7 @@ use windows::core::{w, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT,
 };
@@ -80,9 +80,12 @@ const GUTTER: f32 = 8.0;
 const ROW: f32 = 56.0;
 const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
-/// A row inside a module's open card, and how far in it starts.
-const ITEM_ROW: f32 = 44.0;
-const ITEM_INDENT: f32 = 32.0;
+/// A row inside a module's open card, and how far in from the card's edge
+/// its label starts: under the module's name, past the grip.
+const ITEM_ROW: f32 = 48.0;
+const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
+/// Room at the right of a module's row for its chevron, after its switch.
+const CHEVRON_ROOM: f32 = 28.0;
 const GROUP_GAP: f32 = 32.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
@@ -180,7 +183,13 @@ struct Palette {
     switch_knob: Color,
     window: Color,
     card: Color,
+    /// An open module card's inside, under its row.
+    card_inside: Color,
     card_stroke: Color,
+    /// A switch that does nothing for now: its outline or track, and its
+    /// knob when on.
+    disabled: Color,
+    disabled_knob: Color,
     /// The accent in the shade for this theme, and the deeper one switches
     /// take in either (the pale dark-mode shade cannot carry a white knob).
     selection: Color,
@@ -209,7 +218,10 @@ impl Palette {
                 switch_knob: white(0.8),
                 window: Color::hex(0x202020, 1.0),
                 card: white(0.05),
+                card_inside: white(0.03),
                 card_stroke: black(0.2),
+                disabled: white(0.16),
+                disabled_knob: white(0.53),
                 selection: off,
                 switch_on: on,
             }
@@ -230,7 +242,10 @@ impl Palette {
                 switch_knob: black(0.6),
                 window: Color::hex(0xF3F3F3, 1.0),
                 card: white(0.7),
+                card_inside: Color::hex(0xF6F6F6, 0.5),
                 card_stroke: black(0.06),
+                disabled: black(0.22),
+                disabled_knob: white(1.0),
                 selection: on,
                 switch_on: on,
             }
@@ -669,7 +684,8 @@ impl Ui {
                 Row::Title => (0.0, 36.0),
                 Row::Heading(..) => (GROUP_GAP, 20.0),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
-                Row::Item(..) | Row::ModuleChoice(..) => (2.0, ITEM_ROW),
+                // Inside its module's card, right under the row above.
+                Row::Item(..) | Row::ModuleChoice(..) => (0.0, ITEM_ROW),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
             };
             y += before;
@@ -935,6 +951,11 @@ impl Ui {
             .collect()
     }
 
+    /// Whether module `id` has a card to open: items, or choices of its own.
+    fn opens(&self, id: &str) -> bool {
+        !module_fields(id).is_empty() || !self.items_here(id).is_empty()
+    }
+
     /// What an item of module `id` is called, and a word on it.
     fn item_label(&self, id: &str, name: &str) -> (&'static str, Option<&'static str>) {
         let p = |zh, en| pick(self.lang, zh, en);
@@ -1101,19 +1122,21 @@ impl Ui {
     fn stops(&self) -> Vec<Target> {
         self.layout()
             .into_iter()
-            .filter_map(|(row, ..)| match row {
-                Row::Skins => Some(Target::Skin(Skin::named(&self.settings.skin))),
-                Row::Choice(field) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
-                Row::Switch(switch) => Some(Target::Switch(switch)),
-                Row::Module(id) => Some(Target::Module(id)),
-                Row::Item(id, name) if self.module_on(&id) => Some(Target::Item(id, name)),
-                Row::ModuleChoice(id, field) if self.module_on(&id) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
-                Row::Item(..) | Row::ModuleChoice(..) => None,
-                Row::Update => Some(Target::Update),
-                Row::Diagnostics => Some(Target::Diagnostics),
-                Row::Uninstall => Some(Target::Uninstall),
-                Row::Quit => Some(Target::Quit),
-                Row::Title | Row::Heading(..) => None,
+            .flat_map(|(row, ..)| match row {
+                Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
+                Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
+                Row::Switch(switch) => vec![Target::Switch(switch)],
+                // A module's row, which opens its card if it has one, then its switch.
+                Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
+                Row::Module(id) => vec![Target::Module(id)],
+                Row::Item(id, name) if self.module_on(&id) => vec![Target::Item(id, name)],
+                Row::ModuleChoice(id, field) if self.module_on(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
+                Row::Item(..) | Row::ModuleChoice(..) => vec![],
+                Row::Update => vec![Target::Update],
+                Row::Diagnostics => vec![Target::Diagnostics],
+                Row::Uninstall => vec![Target::Uninstall],
+                Row::Quit => vec![Target::Quit],
+                Row::Title | Row::Heading(..) => vec![],
             })
             .collect()
     }
@@ -1124,7 +1147,7 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
-        let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_)));
+        let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_) | Target::Expand(_)));
         if alt && !moves_module {
             return false;
         }
@@ -1156,7 +1179,7 @@ impl Ui {
             VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN => {
                 let forward = key == VK_RIGHT || key == VK_DOWN;
                 match self.focus.clone() {
-                    Some(Target::Module(id)) if moves_module => self.shift_module(&id, forward),
+                    Some(Target::Module(id) | Target::Expand(id)) if moves_module => self.shift_module(&id, forward),
                     Some(Target::Choice(field, index)) => {
                         let count = self.choices(field).1.len();
                         let next = if forward { (index + 1).min(count - 1) } else { index.saturating_sub(1) };
@@ -1394,9 +1417,28 @@ impl Ui {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         let mut dragged = None;
-        for (row, top, row_height) in self.layout() {
+        let placed = self.layout();
+        // How far each module's card reaches down: its row, and while it is
+        // open the rows inside it.
+        // A card's rows follow its module's.
+        let mut reach: HashMap<String, f32> = HashMap::new();
+        let mut module_top = 0.0;
+        for (row, top, row_height) in &placed {
+            match row {
+                Row::Module(id) => {
+                    module_top = *top;
+                    reach.insert(id.clone(), *row_height);
+                }
+                Row::Item(id, _) | Row::ModuleChoice(id, _) => {
+                    reach.insert(id.clone(), top + row_height - module_top);
+                }
+                _ => {}
+            }
+        }
+        for (row, top, row_height) in placed {
             let y = top - scroll;
-            if y > height || y + row_height + 60.0 < 0.0 {
+            let extent = if let Row::Module(id) = &row { reach[id] } else { row_height };
+            if y > height || y + extent + 60.0 < 0.0 {
                 continue;
             }
             match row {
@@ -1437,7 +1479,7 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, options, chosen) = self.choices(field);
                     text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
-                    self.segmented(frame, palette, field, &options, chosen, left + width - ROW_SIDE, y + row_height / 2.0, now, &hovered);
+                    self.segmented(frame, palette, field, &options, chosen, true, left + width - ROW_SIDE, y + row_height / 2.0, now, &hovered);
                 }
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
@@ -1445,7 +1487,7 @@ impl Ui {
                     field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
-                    self.toggle(frame, palette, key, on, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
+                    self.toggle(frame, palette, key, on, true, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
                     self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::Switch(switch)));
                 }
                 Row::Module(id) => {
@@ -1454,40 +1496,36 @@ impl Ui {
                         dragged = Some((id, row_height));
                         continue;
                     }
-                    self.module_row(frame, palette, &id, left, y + offset, width, row_height, now, &hovered, false);
+                    self.module_row(frame, palette, &id, left, y + offset, width, row_height, reach[&id], now, &hovered, false);
                 }
-                // A card's rows glide with its module's, set in under it;
-                // while the module is off they are greyed and do nothing,
-                // and keep their state.
+                // The rows inside a module's card (drawn with its row) glide
+                // with it, each under a hairline; while the module is off they
+                // are dimmed and do nothing, and keep their state.
                 Row::Item(id, name) => {
                     let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
-                    let (x, w) = (left + ITEM_INDENT, width - ITEM_INDENT);
-                    card(frame, palette, x, y, w, row_height, palette.card);
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
                     let active = self.module_on(&id);
                     let (name_text, detail) = self.item_label(&id, name);
                     let target = Target::Item(id.clone(), name);
-                    field_label(frame, palette, name_text, detail, label, hint, x + ROW_SIDE, y + row_height / 2.0, w - 2.0 * ROW_SIDE - 64.0);
+                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+                    let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
+                    field_label_in(frame, colors, name_text, detail, label, hint, left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
                     let pressed = self.pressed == Some(target.clone());
                     let on = self.prefs.shows(&id, name);
-                    self.toggle(frame, palette, format!("item:{id}:{name}"), on, x + w - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
+                    self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
                     if active {
-                        self.targets.push((Rect { x, y, w, h: row_height }, target));
-                    } else {
-                        fill(frame, palette.window.alpha(0.55), x, y, w, row_height, 6.0);
+                        self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
                     }
                 }
                 Row::ModuleChoice(id, field) => {
                     let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
-                    let (x, w) = (left + ITEM_INDENT, width - ITEM_INDENT);
-                    card(frame, palette, x, y, w, row_height, palette.card);
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let active = self.module_on(&id);
                     let (name, options, chosen) = self.choices(field);
-                    text_centred(frame, name, label, palette.text, x + ROW_SIDE, y + row_height / 2.0, w / 2.0, Align::Start);
-                    let targets = self.targets.len();
-                    self.segmented(frame, palette, field, &options, chosen, x + w - ROW_SIDE, y + row_height / 2.0, now, &hovered);
-                    if !self.module_on(&id) {
-                        self.targets.truncate(targets);
-                        fill(frame, palette.window.alpha(0.55), x, y, w, row_height, 6.0);
-                    }
+                    let color = if active { palette.text } else { palette.text3 };
+                    text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
+                    let right = left + width - ROW_SIDE - CHEVRON_ROOM;
+                    self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, now, &hovered);
                 }
                 Row::Update => {
                     let Some((version, state)) = update::available() else { continue };
@@ -1569,7 +1607,7 @@ impl Ui {
         if let Some((id, row_height)) = dragged {
             let drag = self.drag.as_ref().unwrap();
             let y = drag.pointer - drag.grab - scroll;
-            self.module_row(frame, palette, &id, left, y, width, row_height, now, &hovered, true);
+            self.module_row(frame, palette, &id, left, y, width, row_height, row_height, now, &hovered, true);
         }
         // The focus, shown once the keyboard is in use.
         if self.keyboard {
@@ -1593,7 +1631,10 @@ impl Ui {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn module_row(&mut self, frame: &Frame, palette: &Palette, id: &str, left: f32, y: f32, width: f32, height: f32, now: Instant, hovered: &Option<Target>, held: bool) {
+    /// A module's row, and when its card is open (`reach` below the row's
+    /// top), the card around the rows inside it: one rounded box, the row on
+    /// top, a shade of its own below.
+    fn module_row(&mut self, frame: &Frame, palette: &Palette, id: &str, left: f32, y: f32, width: f32, height: f32, reach: f32, now: Instant, hovered: &Option<Target>, held: bool) {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
         if held {
@@ -1603,6 +1644,15 @@ impl Ui {
             fill(frame, palette.window, left, y, width, height, 6.0);
             card(frame, palette, left, y, width, height, palette.card);
             stroke_inside(frame, shape, 6.0, palette.selection);
+        } else if reach > height {
+            // The whole card's rounded shape, cut at the row's foot: the row's
+            // shade above, the inside's below.
+            for (top, h, color) in [(y, height, palette.card), (y + height, reach - height, palette.card_inside)] {
+                unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, h), D2D1_ANTIALIAS_MODE_ALIASED) };
+                fill(frame, color, left, y, width, reach, 6.0);
+                unsafe { frame.dc.PopAxisAlignedClip() };
+            }
+            stroke_inside(frame, Rect { x: left, y, w: width, h: reach }, 6.0, palette.card_stroke);
         } else {
             card(frame, palette, left, y, width, height, palette.card);
         }
@@ -1617,49 +1667,42 @@ impl Ui {
             let dot = D2D1_ELLIPSE { point: Vector2 { X: grip.x + 10.0 + dx, Y: grip.y + 16.0 + dy }, radiusX: 1.2, radiusY: 1.2 };
             unsafe { frame.dc.FillEllipse(&dot, frame.brush(palette.text3)) };
         }
-        let text_left = grip.x + grip.w + 12.0;
-        // A card with something in it opens: a chevron, and while closed,
-        // how many of its items are on.
-        let items = self.items_here(id);
-        let opens = !items.is_empty() || !module_fields(id).is_empty();
+        let text_left = left + ITEM_INSET;
+        // The switch, and right of it, if the module has a card to open, a
+        // chevron that turns over as it opens.
+        let opens = self.opens(id);
         let open = self.expanded.contains(id);
-        let switch_left = left + width - ROW_SIDE - 40.0;
-        let mut right = switch_left - 12.0;
+        let cy = y + height / 2.0;
+        let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
         if opens {
+            let turn = self.animate(format!("chevron:{id}"), if open { 180.0 } else { 0.0 }, SLIDE, now, false);
             let chevron = Font::new(Family::Icons, 12.0, 400.0);
-            let glyph = if open { "\u{E70E}" } else { "\u{E70D}" };
+            let glyph = "\u{E70D}";
             let glyph_w = frame.gfx.measure(glyph, chevron);
-            right -= 20.0;
-            text_centred(frame, glyph, chevron, palette.text2, right + (20.0 - glyph_w) / 2.0, y + height / 2.0, 20.0, Align::Start);
-            if !open && !items.is_empty() {
-                let shown = items.iter().filter(|name| self.prefs.shows(id, name)).count();
-                let summary = match self.lang {
-                    Lang::Zh => format!("已开 {shown}/{} 项", items.len()),
-                    Lang::En => format!("{shown} of {} on", items.len()),
-                };
-                let small = Font::new(Family::Segoe, 12.0, 400.0);
-                let summary_w = frame.gfx.measure(&summary, small);
-                right -= summary_w + 10.0;
-                text_centred(frame, &summary, small, palette.text3, right, y + height / 2.0, summary_w + 4.0, Align::Start);
-            }
-            right -= 8.0;
+            let cx = left + width - ROW_SIDE - 6.0;
+            frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
+            text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
+            frame.origin(0.0, 0.0);
         }
-        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, y + height / 2.0, right - text_left);
+        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
         let pressed = self.pressed == Some(Target::Module(id.to_string()));
-        self.toggle(frame, palette, format!("module:{id}"), on, switch_left, y + height / 2.0, now, pressed);
+        self.toggle(frame, palette, format!("module:{id}"), on, true, switch_left, cy, now, pressed);
         if !held {
+            // The grip drags, the switch switches, and the rest of the row
+            // opens and closes the card (or, with none, switches too).
             self.targets.push((grip, Target::Grip(id.to_string())));
-            let switch_area = Rect { x: switch_left - 12.0, y, w: left + width - switch_left + 12.0, h: height };
+            let switch_area = Rect { x: switch_left - 12.0, y, w: 40.0 + 24.0, h: height };
             self.targets.push((switch_area, Target::Module(id.to_string())));
-            let rest = Rect { x: grip.x + grip.w, y, w: switch_area.x - grip.x - grip.w, h: height };
-            self.targets.push((rest, if opens { Target::Expand(id.to_string()) } else { Target::Module(id.to_string()) }));
+            let row = Rect { x: left, y, w: width, h: height };
+            self.targets.push((row, if opens { Target::Expand(id.to_string()) } else { Target::Module(id.to_string()) }));
         }
     }
 
     /// A row of options with one thumb that slides under the chosen one,
-    /// right-aligned at `right` and centred on `cy`.
+    /// right-aligned at `right` and centred on `cy`; unless `enabled`, dimmed
+    /// and not to be pressed.
     #[allow(clippy::too_many_arguments)]
-    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
+    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
         let font = Font::new(Family::Segoe, 13.0, 400.0);
         let widths: Vec<f32> = options.iter().map(|o| (frame.gfx.measure(o, font) + 24.0).max(44.0)).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
@@ -1686,31 +1729,43 @@ impl Ui {
         for (i, ((sx, sw), option)) in spans.iter().zip(options).enumerate() {
             let target = Target::Choice(field, i);
             let lit = chosen == Some(i) || *hovered == Some(target.clone());
+            let color = match (enabled, lit) {
+                (false, _) => palette.text3,
+                (true, true) => palette.text,
+                (true, false) => palette.text2,
+            };
             let text_w = frame.gfx.measure(option, font);
-            text_centred(frame, option, font, if lit { palette.text } else { palette.text2 }, sx + (sw - text_w) / 2.0, cy, *sw, Align::Start);
-            self.targets.push((Rect { x: *sx, y: y0, w: *sw, h: 32.0 }, target));
+            text_centred(frame, option, font, color, sx + (sw - text_w) / 2.0, cy, *sw, Align::Start);
+            if enabled {
+                self.targets.push((Rect { x: *sx, y: y0, w: *sw, h: 32.0 }, target));
+            }
         }
     }
 
-    /// A switch, 40 × 22, with its left edge at `x` and centred on `cy`.
+    /// A switch, 40 × 22, with its left edge at `x` and centred on `cy`;
+    /// unless `enabled`, in the greys of one that does nothing for now.
     #[allow(clippy::too_many_arguments)]
-    fn toggle(&mut self, frame: &Frame, palette: &Palette, key: String, on: bool, x: f32, cy: f32, now: Instant, pressed: bool) {
+    fn toggle(&mut self, frame: &Frame, palette: &Palette, key: String, on: bool, enabled: bool, x: f32, cy: f32, now: Instant, pressed: bool) {
+        let dim = 1.0 - self.animate(format!("{key}:enabled"), if enabled { 1.0 } else { 0.0 }, FLIP, now, false).clamp(0.0, 1.0);
         let t = self.animate(key, if on { 1.0 } else { 0.0 }, FLIP, now, false).clamp(0.0, 1.0);
         let track = Rect { x, y: cy - 11.0, w: 40.0, h: 22.0 };
-        // Off: an outlined track; on: a filled one. Between, the two cross-fade.
+        // Off: an outlined track; on: a filled one. Between, the two
+        // cross-fade. Disabled, the off track is outline alone, and both
+        // take the disabled grey.
         if t < 1.0 {
-            fill(frame, palette.switch_off.alpha(1.0 - t), track.x, track.y, track.w, track.h, 11.0);
-            stroke_inside(frame, track, 11.0, palette.switch_stroke.alpha(1.0 - t));
+            fill(frame, palette.switch_off.alpha((1.0 - t) * (1.0 - dim)), track.x, track.y, track.w, track.h, 11.0);
+            stroke_inside(frame, track, 11.0, mix(palette.switch_stroke, palette.disabled, dim).alpha(1.0 - t));
         }
         if t > 0.0 {
-            fill(frame, palette.switch_on.alpha(t), track.x, track.y, track.w, track.h, 11.0);
+            fill(frame, mix(palette.switch_on, palette.disabled, dim).alpha(t), track.x, track.y, track.w, track.h, 11.0);
         }
         // The knob grows as it crosses, and stretches while pressed.
         let size = 12.0 + 2.0 * t;
-        let stretch = if pressed { 16.0 - size } else { 0.0 };
+        let stretch = if pressed && enabled { 16.0 - size } else { 0.0 };
         let left = x + 4.0 + 17.0 * t - if on { stretch } else { 0.0 };
-        let knob_color = mix(palette.switch_knob, Color::hex(0xFFFFFF, 1.0), t);
-        fill(frame, knob_color, left, cy - size / 2.0, size + stretch, size, size / 2.0);
+        let knob_off = mix(palette.switch_knob, palette.disabled, dim);
+        let knob_on = mix(Color::hex(0xFFFFFF, 1.0), palette.disabled_knob, dim);
+        fill(frame, mix(knob_off, knob_on, t), left, cy - size / 2.0, size + stretch, size, size / 2.0);
     }
 
     /// The preview: the panel as it will look over the desktop, running live.
@@ -1862,13 +1917,19 @@ fn text_centred(frame: &Frame, text: &str, font: Font, color: Color, x: f32, cy:
 /// A row's label, and below it, if there is one, its hint, centred together on `cy`.
 #[allow(clippy::too_many_arguments)]
 fn field_label(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
+    field_label_in(frame, (palette.text, palette.text2), label, hint, label_font, hint_font, x, cy, width);
+}
+
+/// A row's label and hint in the colours given (label, hint).
+#[allow(clippy::too_many_arguments)]
+fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
     match hint {
-        None => text_centred(frame, label, label_font, palette.text, x, cy, width, Align::Start),
+        None => text_centred(frame, label, label_font, colors.0, x, cy, width, Align::Start),
         Some(hint) => {
             // A 20 DIP line, 2 apart, then a 16 DIP one.
             let top = cy - 19.0;
-            text_centred(frame, label, label_font, palette.text, x, top + 10.0, width, Align::Start);
-            text_centred(frame, hint, hint_font, palette.text2, x, top + 22.0 + 8.0, width, Align::Start);
+            text_centred(frame, label, label_font, colors.0, x, top + 10.0, width, Align::Start);
+            text_centred(frame, hint, hint_font, colors.1, x, top + 22.0 + 8.0, width, Align::Start);
         }
     }
 }
