@@ -94,9 +94,9 @@ fn private(text: &str) -> String {
         let after = at + USERS.len();
         out.push_str(&rest[..after]);
         out.push_str("<user>");
-        // A user's name may hold spaces: it ends at the next separator or
-        // quote, or with the text.
-        let name = rest[after..].find(['\\', '/', '"', '\'']).unwrap_or(rest.len() - after);
+        // A user's name may hold spaces and apostrophes: it ends at the next
+        // separator or double quote, or with the text.
+        let name = rest[after..].find(['\\', '/', '"']).unwrap_or(rest.len() - after);
         rest = &rest[after + name..];
     }
     out.push_str(rest);
@@ -149,7 +149,7 @@ mod tests {
         for _ in 0..3 {
             note_in(&dir, "again");
         }
-        note_in(&dir, r"could not read C:\Users\Someone Else\AppData\x and D:\Users\me/y");
+        note_in(&dir, r"could not read C:\Users\Someone O'Else\AppData\x and D:\Users\me/y");
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), KEPT);
