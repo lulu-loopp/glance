@@ -206,10 +206,10 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
     let hot_load = prefs.hot_load;
     let hot_temp = prefs.hot_temp;
-    let readout = |value: f32, read: Series| Block::Readout {
-        figure: format!("{value:.0}"),
+    let readout = |value: Option<f32>, read: Series| Block::Readout {
+        figure: shown(value, |value| format!("{value:.0}")),
         unit: "%",
-        hot: value > hot_load,
+        hot: value.is_some_and(|value| value > hot_load),
         plot: Plot::new(scene, vec![read], Some(100.0), Some(hot_load as f64)),
     };
     Some(match id {
@@ -244,7 +244,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             }
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(s.cpu, Box::new(|s| Some(s.cpu as f64))),
+                readout(Some(s.cpu), Box::new(|s| Some(s.cpu as f64))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.seen.threads;
@@ -261,31 +261,32 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let reading = s.gpus.get(index);
             let temp = reading.and_then(|g| g.temp).filter(|_| prefs.gpu.sensors);
             let aside = if prefs.gpu.sensors && had.temp { shown(temp, celsius) } else { String::new() };
-            let usage = reading.map_or(0.0, |g| g.usage);
+            let usage = reading.and_then(|g| g.usage);
             let mut blocks = vec![
                 head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
-                readout(usage, Box::new(move |s| s.gpus.get(index).map(|g| g.usage as f64))),
+                readout(usage, Box::new(move |s| s.gpus.get(index)?.usage.map(f64::from))),
             ];
             if prefs.gpu.memory {
-                let used = reading.map_or(0, |g| g.mem_used);
+                let used = reading.and_then(|g| g.mem_used);
                 blocks.push(Block::Meter {
                     label: lang.pick("显存", "VRAM").into(),
-                    fraction: used as f32 / gpu.mem_total.max(1) as f32,
-                    value: text::usage(used, gpu.mem_total),
+                    fraction: used.map_or(0.0, |used| used as f32 / gpu.mem_total.max(1) as f32),
+                    value: shown(used, |used| text::usage(used, gpu.mem_total)),
                     hot: false,
                     gap: 8.0,
                 });
             }
             if prefs.gpu.engines {
-                // An engine the counters no longer list has nothing running on it.
+                // An engine the counters no longer list has nothing running
+                // on it; with the counters unread (no use), none is known.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
                 for kind in had.engines.iter().map(String::as_str).filter(|kind| SHOWN.contains(kind)) {
-                    let load = reading.and_then(|g| g.engines.iter().find(|(known, _)| known == kind)).map_or(0.0, |(_, load)| *load);
+                    let load = reading.filter(|g| g.usage.is_some()).map(|g| g.engines.iter().find(|(known, _)| known == kind).map_or(0.0, |(_, load)| *load));
                     blocks.push(Block::Meter {
                         label: lang.name(kind),
-                        fraction: load / 100.0,
-                        value: text::percent(load),
-                        hot: load > hot_load,
+                        fraction: load.unwrap_or(0.0) / 100.0,
+                        value: shown(load, text::percent),
+                        hot: load.is_some_and(|load| load > hot_load),
                         gap: 6.0,
                     });
                 }
@@ -304,7 +305,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 // Memory the card borrows from the system's, where it has its own
                 // besides (not where all of it is the system's, as on a Mac).
                 if gpu.shared_total > 0 {
-                    facts.push((lang.pick("共享显存", "Shared").into(), text::usage(reading.map_or(0, |g| g.shared_used), gpu.shared_total), false));
+                    facts.push((lang.pick("共享显存", "Shared").into(), shown(reading.and_then(|g| g.shared_used), |used| text::usage(used, gpu.shared_total)), false));
                 }
             }
             blocks.push(Block::Facts { rows: facts, gap: 10.0 });
@@ -1016,7 +1017,7 @@ mod tests {
             threads: vec![10.0; 4],
             ghz: Some(3.0),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
-            gpus: vec![GpuSample { usage: 5.0, engines: Vec::new(), mem_used: 0, shared_used: 0, temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
+            gpus: vec![GpuSample { usage: Some(5.0), engines: Vec::new(), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
             net_down: 0.0,
             net_up: 0.0,
             net_total_down: 0,

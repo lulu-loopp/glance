@@ -101,19 +101,19 @@ fn temperatures(sample: &Sample, info: &StaticInfo) -> Vec<(String, Option<f32>)
 /// The tooltip: Glance's name, then the CPU, each graphics card and the
 /// memory, a line each.
 fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
-    let mut rows = vec![("CPU".to_string(), sample.cpu, sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))];
+    let mut rows = vec![("CPU".to_string(), Some(sample.cpu), sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp))];
     let several = sample.gpus.len() > 1;
     for (i, gpu) in sample.gpus.iter().enumerate() {
         let name = if several { format!("GPU {}", i + 1) } else { "GPU".to_string() };
         rows.push((name, gpu.usage, gpu.temp));
     }
     let memory = sample.memory.used as f32 / info.mem_total.max(1) as f32 * 100.0;
-    rows.push((lang.pick("内存", "Memory").to_string(), memory, None));
+    rows.push((lang.pick("内存", "Memory").to_string(), Some(memory), None));
     // The name, then the use and the temperature, each lined up at its end.
     let cells: Vec<Vec<String>> = rows
         .into_iter()
         .map(|(label, usage, temp)| {
-            let mut cells = vec![label, format!("{usage:.0}%")];
+            let mut cells = vec![label, usage.map_or_else(|| "—".to_string(), |usage| format!("{usage:.0}%"))];
             cells.extend(temp.map(|temp| format!("· {temp:.0} °C")));
             cells
         })

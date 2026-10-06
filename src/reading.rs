@@ -94,11 +94,13 @@ pub struct MemorySample {
 
 #[derive(Clone, Serialize)]
 pub struct GpuSample {
-    pub usage: f32,
+    /// Percent, as busy as its busiest engine; `None` (as the memory's)
+    /// where the counters could not be read this time.
+    pub usage: Option<f32>,
     /// Busiest engine of each kind (3D, Copy, VideoDecode, …).
     pub engines: Vec<(String, f32)>,
-    pub mem_used: u64,
-    pub shared_used: u64,
+    pub mem_used: Option<u64>,
+    pub shared_used: Option<u64>,
     pub temp: Option<f32>,
     pub clock_mhz: Option<f32>,
     pub fan_rpm: Option<u32>,

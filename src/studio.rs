@@ -311,10 +311,10 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
             let g = if i == 0 { busy } else { 0.02 };
             let usage = (2.0 + 92.0 * g + 4.0 * wave(5.0, 0.3) * g + 2.0 * noise()).clamp(0.0, 100.0);
             GpuSample {
-                usage,
+                usage: Some(usage),
                 engines: vec![("3D".into(), usage), ("Copy".into(), 3.0 * g), ("VideoDecode".into(), 0.0)],
-                mem_used: ((0.12 + 0.55 * g) * gpu.mem_total as f32) as u64,
-                shared_used: (0.2 * gb as f32) as u64,
+                mem_used: Some(((0.12 + 0.55 * g) * gpu.mem_total as f32) as u64),
+                shared_used: Some((0.2 * gb as f32) as u64),
                 temp: Some(36.0 + 34.0 * g + 1.5 * noise()),
                 clock_mhz: Some(if g > 0.05 { 2400.0 + 300.0 * g + 30.0 * noise() } else { 210.0 + 40.0 * noise() }),
                 // A card whose fans turn even at rest, so that its lane

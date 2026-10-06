@@ -475,6 +475,9 @@ struct Panel<'a> {
     /// The panel as it opened, held while it is up (laid out afresh at the
     /// next frame when `None`), and the settings it was made for.
     opening: Option<arrange::Opening>,
+    /// What a panel laid out afresh while up (the settings changed) still
+    /// holds from before: a volume unplugged stays until it closes.
+    held: Option<Seen>,
     style: String,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
@@ -515,6 +518,7 @@ impl<'a> Panel<'a> {
             hover: None,
             pinned: false,
             opening: None,
+            held: None,
             style: String::new(),
             hits: Vec::new(),
             corner: (0.0, 0.0),
@@ -550,7 +554,7 @@ impl<'a> Panel<'a> {
         let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
-            self.opening = None;
+            self.held = self.opening.take().map(|opening| opening.seen).filter(|_| self.is_shown());
         }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
@@ -578,6 +582,7 @@ impl<'a> Panel<'a> {
             self.restyle();
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
+            self.held = None;
             let work = contact.work;
             let anchor = match self.controller.config.lock().unwrap().anchor {
                 Anchor::Pointer => cursor,
@@ -767,6 +772,10 @@ impl<'a> Panel<'a> {
                 opening
             }
             None => {
+                let now = match self.held.take() {
+                    Some(held) => held.join(&now, &controller.info),
+                    None => now,
+                };
                 let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
                 let lanes = view::lanes(&scene);
                 let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();

@@ -47,7 +47,8 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
 /// reading the machine shows for the first time joins its lane at once
 /// only where the lane's box has room for it, and anything that would need
 /// more waits for the next opening. A reading gone stays in its place,
-/// unread. (Settings changed while it is up lay it out afresh.)
+/// unread. (Settings changed while it is up lay it out afresh, holding
+/// what it held: see `Seen::join`.)
 pub struct Opening {
     pub layout: Layout,
     pub zoom: f32,
@@ -69,6 +70,7 @@ impl Opening {
     /// where it fits the lane's box: `height` is a lane's height holding a
     /// given set of readings.
     pub fn grow(&mut self, now: &Seen, info: &StaticInfo, height: impl Fn(&str, &Seen) -> Option<f32>) {
+        self.seen.rename(now);
         let boxes = self.layout.lanes();
         for (id, area) in self.lanes.iter().zip(&boxes) {
             // A reading at a time: each that fits is taken, whether or not

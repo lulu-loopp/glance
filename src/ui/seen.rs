@@ -109,7 +109,8 @@ impl Seen {
                 flag(self.threads >= other.threads, true, Item::Threads(other.threads));
                 news.extend(other.ccds.iter().filter(|ccd| !self.ccds.contains(ccd)).map(|ccd| Item::Ccd(*ccd)));
             }
-            "memory" => flag(self.dimms >= other.dimms, true, Item::Dimms(other.dimms)),
+            // A module's temperature at a time.
+            "memory" => news.extend((self.dimms + 1..=other.dimms).map(Item::Dimms)),
             "network" => {
                 flag(self.address, other.address, Item::Address);
                 flag(self.link, other.link, Item::Link);
@@ -134,6 +135,30 @@ impl Seen {
             }
         }
         news
+    }
+
+    /// The names of the drives this holds, as `other` has them now (a
+    /// model read late): a name takes no more room than the one before.
+    pub fn rename(&mut self, other: &Seen) {
+        for (id, name) in &mut self.drives {
+            if let Some((_, now)) = other.drives.iter().find(|(theirs, _)| theirs == id) {
+                name.clone_from(now);
+            }
+        }
+    }
+
+    /// This and `other` together: everything either holds.
+    pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
+        let mut joined = self.clone();
+        let mut lanes: Vec<String> = ["cpu", "memory", "network", "disk", "storage", "board", "battery"].map(String::from).to_vec();
+        lanes.extend(info.gpu_modules());
+        for id in &lanes {
+            for item in joined.news(other, id, info) {
+                joined = joined.with(&item, other);
+            }
+        }
+        joined.rename(other);
+        joined
     }
 
     /// This with one more reading, `item` (one of `other`'s news), placed
@@ -197,7 +222,7 @@ pub enum Item {
     /// The CPU's threads, this many.
     Threads(usize),
     Ccd(usize),
-    /// The memory modules' temperatures, this many.
+    /// The memory modules' temperatures, this many (one more).
     Dimms(usize),
     Address,
     Link,
@@ -238,5 +263,50 @@ fn merge<K>(known: &mut Vec<K>, now: impl IntoIterator<Item = K>, same: impl Fn(
             }
         };
         after = Some(at);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info() -> StaticInfo {
+        StaticInfo {
+            cpu_name: String::new(),
+            memory_modules: None,
+            drives: Vec::new(),
+            network_adapter: None,
+            board: String::new(),
+            threads: 1,
+            mem_total: 1,
+            gpus: Vec::new(),
+            found: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn takes_news_a_reading_at_a_time() {
+        let (ours, mut theirs) = (Seen::default(), Seen::default());
+        theirs.dimms = 2;
+        // Two modules' temperatures: one, then the other.
+        assert_eq!(ours.news(&theirs, "memory", &info()), [Item::Dimms(1), Item::Dimms(2)]);
+        assert_eq!(ours.with(&Item::Dimms(1), &theirs).dimms, 1);
+        // A volume goes in where `theirs` has it among ours.
+        let ours = Seen { volumes: vec!["C:".into(), "E:".into()], ..Seen::default() };
+        let theirs = Seen { volumes: vec!["C:".into(), "D:".into(), "E:".into()], ..Seen::default() };
+        assert_eq!(ours.news(&theirs, "storage", &info()), [Item::Volume("D:".into())]);
+        assert_eq!(ours.with(&Item::Volume("D:".into()), &theirs).volumes, ["C:", "D:", "E:"]);
+    }
+
+    #[test]
+    fn joins_what_either_holds() {
+        // D: unplugged since; the panel laid out again while up keeps it.
+        let held = Seen { volumes: vec!["C:".into(), "D:".into()], drives: vec![(0, "Disk 0".into())], ..Seen::default() };
+        let now = Seen { volumes: vec!["C:".into()], drives: vec![(0, "Samsung SSD".into())], battery: true, ..Seen::default() };
+        let joined = held.join(&now, &info());
+        assert_eq!(joined.volumes, ["C:", "D:"]);
+        assert!(joined.battery);
+        // A drive's model read late: its name, not a second row.
+        assert_eq!(joined.drives, [(0, "Samsung SSD".to_string())]);
     }
 }

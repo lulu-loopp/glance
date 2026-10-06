@@ -73,7 +73,6 @@ pub struct Sampler {
     disk_write: Option<PDH_HCOUNTER>,
     disk_idle: Option<PDH_HCOUNTER>,
     /// The GPUs' last readings, kept through a momentary counter failure.
-    last_gpus: Vec<GpuSample>,
     /// The processors' idle and busy time at the last sample (100 ns units).
     system_times: Option<(u64, u64)>,
     processes: ProcessTable,
@@ -154,7 +153,6 @@ impl Sampler {
             disk_read,
             disk_write,
             disk_idle,
-            last_gpus: Vec::new(),
             system_times: system_times(),
             processes,
             slow: Slow::default(),
@@ -206,16 +204,7 @@ impl Sampler {
         // Without the performance counter, the clock reads as its base.
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).unwrap_or(100.0);
 
-        // Uncollected, the counters would only repeat their last values:
-        // the use and memory stand as last read, and what each driver
-        // gives (temperature, fan, clock, power) is read afresh.
-        let gpus = match if collected { self.sample_gpus() } else { None } {
-            Some(gpus) => {
-                self.last_gpus = gpus.clone();
-                gpus
-            }
-            None => self.last_gpus.iter().zip(&self.adapters).map(|(last, adapter)| self.from_driver(adapter, last.clone())).collect(),
-        };
+        let gpus = self.sample_gpus(collected);
 
         if refresh_slow {
             self.slow.processes = self.processes.sample(self.info.threads, &self.gpu_by_pid);
@@ -287,7 +276,61 @@ impl Sampler {
         })
     }
 
-    fn sample_gpus(&mut self) -> Option<Vec<GpuSample>> {
+    /// Each adapter's readings. Each counter is read on its own: one that
+    /// cannot be read leaves its readings unread ("—"), and the others and
+    /// what each driver gives (temperature, fan, clock, power) stand.
+    /// Uncollected (`collected` false), the counters would only repeat their
+    /// last values, and all of theirs are unread.
+    fn sample_gpus(&mut self, collected: bool) -> Vec<GpuSample> {
+        let engines = if collected { self.engine_use() } else { None };
+        let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), u64>> {
+            let mut per_adapter = HashMap::new();
+            for (name, value) in read_array(counter?, &mut self.buf)? {
+                if let Some(luid) = parse_luid(&name) {
+                    *per_adapter.entry(luid).or_default() += value as u64;
+                }
+            }
+            Some(per_adapter)
+        };
+        let (dedicated, shared) = if collected { (memory(self.gpu_dedicated), memory(self.gpu_shared)) } else { (None, None) };
+        self.adapters
+            .iter()
+            .map(|adapter| {
+                // An adapter the counters list nothing for has nothing running.
+                let kinds: Option<Vec<(String, f32)>> = engines.as_ref().map(|engines| {
+                    let mut kinds: Vec<(String, f32)> = Vec::new();
+                    for ((luid, _), (kind, usage)) in engines {
+                        if *luid != adapter.luid {
+                            continue;
+                        }
+                        let usage = usage.min(100.0) as f32;
+                        match kinds.iter_mut().find(|(known, _)| known == kind) {
+                            Some((_, busiest)) => *busiest = busiest.max(usage),
+                            None => kinds.push((kind.clone(), usage)),
+                        }
+                    }
+                    kinds.sort_by(|a, b| a.0.cmp(&b.0));
+                    kinds
+                });
+                let counted = GpuSample {
+                    usage: kinds.as_ref().map(|kinds| kinds.iter().map(|(_, usage)| *usage).fold(0.0, f32::max)),
+                    engines: kinds.unwrap_or_default(),
+                    mem_used: dedicated.as_ref().map(|used| used.get(&adapter.luid).copied().unwrap_or(0)),
+                    shared_used: shared.as_ref().map(|used| used.get(&adapter.luid).copied().unwrap_or(0)),
+                    temp: None,
+                    fan_rpm: None,
+                    clock_mhz: None,
+                    power: None,
+                };
+                self.from_driver(adapter, counted)
+            })
+            .collect()
+    }
+
+    /// Each engine's use (its kind, and percent), by adapter and engine;
+    /// each process's use of the GPUs is kept besides. `None` when the
+    /// counters cannot be read.
+    fn engine_use(&mut self) -> Option<HashMap<((u32, i32), u32), (String, f64)>> {
         // An engine's utilisation is the sum over the processes using it; a
         // kind of engine is as busy as its busiest engine; an adapter is as
         // busy as its busiest kind.
@@ -307,50 +350,7 @@ impl Sampler {
             let use_ = self.gpu_by_pid.entry(pid).or_default();
             *use_ = use_.max(value.min(100.0) as f32);
         }
-        // Memory use is shown as none where its counters are missing; the
-        // driver's own temperature, fan and clock are read regardless.
-        let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), u64>> {
-            let mut per_adapter = HashMap::new();
-            for (name, value) in read_array(counter?, &mut self.buf)? {
-                if let Some(luid) = parse_luid(&name) {
-                    *per_adapter.entry(luid).or_default() += value as u64;
-                }
-            }
-            Some(per_adapter)
-        };
-        let dedicated = memory(self.gpu_dedicated).unwrap_or_default();
-        let shared = memory(self.gpu_shared).unwrap_or_default();
-
-        Some(
-            self.adapters
-                .iter()
-                .map(|adapter| {
-                    let mut kinds: Vec<(String, f32)> = Vec::new();
-                    for ((luid, _), (kind, usage)) in &engines {
-                        if *luid != adapter.luid {
-                            continue;
-                        }
-                        let usage = usage.min(100.0) as f32;
-                        match kinds.iter_mut().find(|(known, _)| known == kind) {
-                            Some((_, busiest)) => *busiest = busiest.max(usage),
-                            None => kinds.push((kind.clone(), usage)),
-                        }
-                    }
-                    kinds.sort_by(|a, b| a.0.cmp(&b.0));
-                    let counted = GpuSample {
-                        usage: kinds.iter().map(|(_, usage)| *usage).fold(0.0, f32::max),
-                        engines: kinds,
-                        mem_used: dedicated.get(&adapter.luid).copied().unwrap_or(0),
-                        shared_used: shared.get(&adapter.luid).copied().unwrap_or(0),
-                        temp: None,
-                        fan_rpm: None,
-                        clock_mhz: None,
-                        power: None,
-                    };
-                    self.from_driver(adapter, counted)
-                })
-                .collect(),
-        )
+        Some(engines)
     }
 
     /// `gpu` with what the adapter's driver gives now: its temperature,

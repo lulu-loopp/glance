@@ -145,8 +145,8 @@ impl Sampler {
         let report = self.report.as_mut().map(|report| report.read(seconds)).unwrap_or_default();
         let chip = hottest(&temperatures, "PMU tdie");
         let mut readings: HashMap<u64, GpuSample> = graphics().into_iter().map(|(id, _, reading)| (id, reading)).collect();
-        // A GPU since gone (an eGPU unplugged) reads as idle.
-        let mut gpus: Vec<GpuSample> = self.gpu_ids.iter().map(|id| readings.remove(id).unwrap_or_else(idle_gpu)).collect();
+        // A GPU since gone (an eGPU unplugged) is not read.
+        let mut gpus: Vec<GpuSample> = self.gpu_ids.iter().map(|id| readings.remove(id).unwrap_or_else(unread_gpu)).collect();
         // Apple silicon has one GPU: IOReport's power and clock are its.
         if let Some(gpu) = gpus.first_mut() {
             gpu.power = report.gpu_power;
@@ -445,10 +445,10 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
             let percent = |key| iokit::number(&statistics, key).unwrap_or(0).clamp(0, 100) as f32;
             let info = GpuInfo { slot: 0, name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
             let reading = GpuSample {
-                usage: percent("Device Utilization %"),
+                usage: Some(percent("Device Utilization %")),
                 engines: vec![("3D".into(), percent("Renderer Utilization %"))],
-                mem_used: iokit::number(&statistics, "In use system memory").unwrap_or(0).max(0) as u64,
-                shared_used: 0,
+                mem_used: iokit::number(&statistics, "In use system memory").map(|used| used.max(0) as u64),
+                shared_used: Some(0),
                 temp: None,
                 clock_mhz: None,
                 fan_rpm: None,
@@ -461,9 +461,9 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
         .collect()
 }
 
-/// The readings of a GPU that is not there to read.
-fn idle_gpu() -> GpuSample {
-    GpuSample { usage: 0.0, engines: Vec::new(), mem_used: 0, shared_used: 0, temp: None, clock_mhz: None, fan_rpm: None, power: None }
+/// The readings of a GPU that is not there to read: none.
+fn unread_gpu() -> GpuSample {
+    GpuSample { usage: None, engines: Vec::new(), mem_used: None, shared_used: None, temp: None, clock_mhz: None, fan_rpm: None, power: None }
 }
 
 /// Bytes read and written by every drive, from their drivers' statistics.
