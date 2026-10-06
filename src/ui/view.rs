@@ -107,7 +107,8 @@ enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
     Readout { figure: String, unit: &'static str, hot: bool, plot: Plot },
     Rates { rows: Vec<(String, String)>, plot: Plot },
-    Threads(Vec<(f32, bool)>),
+    /// Each thread's load (0–1), unread where `None`, and whether it is hot.
+    Threads(Vec<(Option<f32>, bool)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
     Table { headings: Vec<(String, ProcessSort)>, sort: ProcessSort, rows: Vec<[String; 5]>, visible: usize },
@@ -137,7 +138,7 @@ impl Hash for Block {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
             Block::Rates { rows, plot } => (rows, plot.max.to_bits()).hash(state),
-            Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.to_bits(), hot).hash(state)),
+            Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Table { headings, sort, rows, visible } => {
@@ -249,8 +250,8 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ];
             let threads = scene.seen.threads;
             if prefs.cpu.threads && threads > 0 {
-                let load = |i: usize| s.threads.get(i).copied().unwrap_or(0.0);
-                blocks.push(Block::Threads((0..threads).map(|i| (load(i) / 100.0, load(i) > hot_load)).collect()));
+                let load = |i: usize| s.threads.get(i).copied().flatten();
+                blocks.push(Block::Threads((0..threads).map(|i| (load(i).map(|load| load / 100.0), load(i).is_some_and(|load| load > hot_load))).collect()));
             }
             blocks
         }
@@ -278,10 +279,10 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             }
             if prefs.gpu.engines {
                 // An engine the counters no longer list has nothing running
-                // on it; with the counters unread (no use), none is known.
+                // on it; with the engines unread, none is known.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
                 for kind in had.engines.iter().map(String::as_str).filter(|kind| SHOWN.contains(kind)) {
-                    let load = reading.filter(|g| g.usage.is_some()).map(|g| g.engines.iter().find(|(known, _)| known == kind).map_or(0.0, |(_, load)| *load));
+                    let load = reading.and_then(|g| g.engines.as_ref()).map(|engines| engines.iter().find(|(known, _)| known == kind).map_or(0.0, |(_, load)| *load));
                     blocks.push(Block::Meter {
                         label: lang.name(kind),
                         fraction: load.unwrap_or(0.0) / 100.0,
@@ -768,6 +769,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                 let cell = (width - gap * (count - 1.0)) / count;
                 let radius = theme.thread_radius;
                 for (i, (load, hot)) in cells.iter().enumerate() {
+                    // A thread not read leaves its cell empty.
+                    let Some(load) = load else { continue };
                     let cx = left + i as f32 * (cell + gap);
                     let cy = y + 10.0;
                     frame.fill_rounded(theme.track, cx, cy, cell, 14.0, radius);
@@ -1015,10 +1018,10 @@ mod tests {
         Sample {
             t: 0,
             cpu: 10.0,
-            threads: vec![10.0; 4],
+            threads: vec![Some(10.0); 4],
             ghz: Some(3.0),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
-            gpus: vec![GpuSample { usage: Some(5.0), engines: Vec::new(), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
+            gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
             net_down: 0.0,
             net_up: 0.0,
             net_total_down: 0,

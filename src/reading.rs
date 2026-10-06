@@ -53,7 +53,9 @@ pub struct Sample {
     /// Milliseconds since the Unix epoch.
     pub t: u64,
     pub cpu: f32,
-    pub threads: Vec<f32>,
+    /// Each logical processor's use (%), in order; `None` where it was not
+    /// read this time.
+    pub threads: Vec<Option<f32>>,
     /// The cores' clock, where the system says it.
     pub ghz: Option<f32>,
     pub memory: MemorySample,
@@ -97,8 +99,9 @@ pub struct GpuSample {
     /// Percent, as busy as its busiest engine; `None` (as the memory's)
     /// where the counters could not be read this time.
     pub usage: Option<f32>,
-    /// Busiest engine of each kind (3D, Copy, VideoDecode, …).
-    pub engines: Vec<(String, f32)>,
+    /// Busiest engine of each kind (3D, Copy, VideoDecode, …); a kind not
+    /// listed has nothing running. `None` where the engines were not read.
+    pub engines: Option<Vec<(String, f32)>>,
     pub mem_used: Option<u64>,
     pub shared_used: Option<u64>,
     pub temp: Option<f32>,

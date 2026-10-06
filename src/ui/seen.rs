@@ -75,7 +75,7 @@ impl Seen {
             seen.clock |= gpu.clock_mhz.is_some();
             seen.power |= gpu.power.is_some();
             seen.fan |= gpu.fan_rpm.is_some();
-            merge(&mut seen.engines, gpu.engines.iter().map(|(kind, _)| kind.clone()), |a, b| a == b);
+            merge(&mut seen.engines, gpu.engines.iter().flatten().map(|(kind, _)| kind.clone()), |a, b| a == b);
         }
         self.dimms = self.dimms.max(s.dimm_temps.len());
         if let Some(network) = &s.network {

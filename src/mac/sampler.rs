@@ -122,16 +122,18 @@ impl Sampler {
         let seconds = now.duration_since(self.previous.at).as_secs_f64().max(1e-3);
 
         let cores = core_ticks();
-        let threads: Vec<f32> = cores
+        // A core with no ticks since the last look has no use to tell.
+        let threads: Vec<Option<f32>> = cores
             .iter()
             .enumerate()
             .map(|(i, (busy, total))| {
                 let (was_busy, was_total) = self.previous.cores.get(i).copied().unwrap_or((0, 0));
                 let span = total.saturating_sub(was_total);
-                if span == 0 { 0.0 } else { (busy.saturating_sub(was_busy) as f64 / span as f64 * 100.0) as f32 }
+                (span > 0).then(|| (busy.saturating_sub(was_busy) as f64 / span as f64 * 100.0) as f32)
             })
             .collect();
-        let cpu = if threads.is_empty() { 0.0 } else { threads.iter().sum::<f32>() / threads.len() as f32 };
+        let read: Vec<f32> = threads.iter().flatten().copied().collect();
+        let cpu = if read.is_empty() { 0.0 } else { read.iter().sum::<f32>() / read.len() as f32 };
 
         let interfaces = interfaces();
         let net = hardware_bytes(&interfaces);
@@ -447,7 +449,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
             let info = GpuInfo { slot: 0, name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
             let reading = GpuSample {
                 usage: percent("Device Utilization %"),
-                engines: percent("Renderer Utilization %").map(|load| ("3D".to_string(), load)).into_iter().collect(),
+                engines: percent("Renderer Utilization %").map(|load| vec![("3D".to_string(), load)]),
                 mem_used: iokit::number(&statistics, "In use system memory").map(|used| used.max(0) as u64),
                 shared_used: Some(0),
                 temp: None,
@@ -464,7 +466,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
 
 /// The readings of a GPU that is not there to read: none.
 fn unread_gpu() -> GpuSample {
-    GpuSample { usage: None, engines: Vec::new(), mem_used: None, shared_used: None, temp: None, clock_mhz: None, fan_rpm: None, power: None }
+    GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, clock_mhz: None, fan_rpm: None, power: None }
 }
 
 /// Bytes read and written by every drive, from their drivers' statistics.

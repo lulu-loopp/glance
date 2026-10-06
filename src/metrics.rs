@@ -87,9 +87,10 @@ pub struct Sampler {
     super_io: Option<SuperIo>,
     dimms: Option<Dimms>,
     /// Each process's GPU use at the last sample, by process id.
-    /// Each process's use of the GPUs, from the last reading of the engine
-    /// counters; `None` while they cannot be read.
-    gpu_by_pid: Option<HashMap<usize, f32>>,
+    /// Each process's use of the GPUs (unread where an instance of its
+    /// was), from the last reading of the engine counters; `None` while
+    /// they cannot be read.
+    gpu_by_pid: Option<HashMap<usize, Option<f32>>>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -182,14 +183,15 @@ impl Sampler {
         let counter = |counter: Option<PDH_HCOUNTER>| counter.filter(|_| collected);
 
         let mut cpu = None;
-        let mut threads: Vec<((u32, u32), f32)> = Vec::new();
+        // A thread not read this time keeps its place, unread.
+        let mut threads: Vec<((u32, u32), Option<f32>)> = Vec::new();
         let per_thread = counter(self.cpu_time).and_then(|counter| read_array(counter, &mut self.buf));
-        for (name, value) in per_thread.unwrap_or_default().into_iter().filter_map(|(name, value)| Some((name, value?))) {
+        for (name, value) in per_thread.unwrap_or_default() {
             if name == "_Total" {
-                cpu = Some(value as f32);
+                cpu = value.map(|value| value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
                 if let (Ok(group), Ok(index)) = (group.parse(), index.parse()) {
-                    threads.push(((group, index), value as f32));
+                    threads.push(((group, index), value.map(|value| value as f32)));
                 }
             }
         }
@@ -286,7 +288,9 @@ impl Sampler {
     fn sample_gpus(&mut self, collected: bool) -> Vec<GpuSample> {
         let engines = if collected { self.engine_use() } else { None };
         if engines.is_none() {
+            // The processes kept from an earlier look no longer know theirs.
             self.gpu_by_pid = None;
+            self.slow.processes.iter_mut().for_each(|process| process.gpu = None);
         }
         // Each adapter's memory in use, unread where any of its instances is.
         let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), Option<u64>>> {
@@ -322,7 +326,7 @@ impl Sampler {
                 });
                 let counted = GpuSample {
                     usage: kinds.as_ref().map(|kinds| kinds.iter().map(|(_, usage)| *usage).fold(0.0, f32::max)),
-                    engines: kinds.unwrap_or_default(),
+                    engines: kinds,
                     mem_used: dedicated.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
                     shared_used: shared.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
                     temp: None,
@@ -345,24 +349,26 @@ impl Sampler {
         // busy as its busiest kind.
         let mut engines: HashMap<((u32, i32), u32), (String, f64)> = HashMap::new();
         // A process's use is that of the engine it uses most.
-        let mut by_process: HashMap<(usize, (u32, i32), u32), f64> = HashMap::new();
+        // Each process's use of each engine; unread where an instance of it is.
+        let mut by_process: HashMap<(usize, (u32, i32), u32), Option<f64>> = HashMap::new();
         let mut unread = HashSet::new();
         for (name, value) in read_array(self.gpu_engine?, &mut self.buf)? {
             if let (Some(luid), Some(engine), Some(kind)) = (parse_luid(&name), parse_engine(&name), parse_kind(&name)) {
+                if let Some(pid) = parse_pid(&name) {
+                    let total = by_process.entry((pid, luid, engine)).or_insert(Some(0.0));
+                    *total = total.zip(value).map(|(total, value)| total + value);
+                }
                 let Some(value) = value else {
                     unread.insert(luid);
                     continue;
                 };
                 engines.entry((luid, engine)).or_insert_with(|| (kind, 0.0)).1 += value;
-                if let Some(pid) = parse_pid(&name) {
-                    *by_process.entry((pid, luid, engine)).or_default() += value;
-                }
             }
         }
-        let mut by_pid: HashMap<usize, f32> = HashMap::new();
+        let mut by_pid: HashMap<usize, Option<f32>> = HashMap::new();
         for ((pid, _, _), value) in by_process {
-            let use_ = by_pid.entry(pid).or_default();
-            *use_ = use_.max(value.min(100.0) as f32);
+            let use_ = by_pid.entry(pid).or_insert(Some(0.0));
+            *use_ = use_.zip(value).map(|(most, value)| most.max(value.min(100.0) as f32));
         }
         self.gpu_by_pid = Some(by_pid);
         Some((engines, unread))
@@ -538,7 +544,7 @@ impl ProcessTable {
     /// The busiest programs since the previous call: the top of the ranking
     /// by CPU, by memory, by I/O and by GPU, together. Processes sharing an
     /// executable name are added together.
-    fn sample(&mut self, processors: usize, gpu_by_pid: Option<&HashMap<usize, f32>>) -> Vec<ProcessSample> {
+    fn sample(&mut self, processors: usize, gpu_by_pid: Option<&HashMap<usize, Option<f32>>>) -> Vec<ProcessSample> {
         let mut returned = 0u32;
         loop {
             let status = unsafe {
@@ -592,9 +598,9 @@ impl ProcessTable {
                 });
                 program.cpu += (time - time_before) as f32;
                 program.mem += record.working_set_private as u64;
-                if let (Some(gpu), Some(by_pid)) = (&mut program.gpu, gpu_by_pid) {
-                    *gpu += by_pid.get(&record.process_id).copied().unwrap_or(0.0);
-                }
+                // A process the counters list nothing for uses no GPU.
+                let used = gpu_by_pid.map(|by_pid| by_pid.get(&record.process_id).copied().unwrap_or(Some(0.0)));
+                program.gpu = program.gpu.zip(used.flatten()).map(|(total, used)| total + used);
             }
             if record.next_entry_offset == 0 {
                 break;

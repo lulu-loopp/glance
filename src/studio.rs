@@ -299,7 +299,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
     let busy = load.clamp(0.0, 1.0);
     let cpu = (4.0 + 62.0 * busy + 8.0 * wave(9.0, 0.1) * busy + 3.0 * noise()).clamp(0.0, 100.0);
     let threads = (0..info.threads)
-        .map(|i| (cpu * (0.4 + 1.2 * ((i as f32 * 0.61 + seed as f32 * 0.07).sin() * 0.5 + 0.5)) + 4.0 * noise()).clamp(0.0, 100.0))
+        .map(|i| Some((cpu * (0.4 + 1.2 * ((i as f32 * 0.61 + seed as f32 * 0.07).sin() * 0.5 + 0.5)) + 4.0 * noise()).clamp(0.0, 100.0)))
         .collect();
     let gb = 1u64 << 30;
     let gpus = info
@@ -312,7 +312,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
             let usage = (2.0 + 92.0 * g + 4.0 * wave(5.0, 0.3) * g + 2.0 * noise()).clamp(0.0, 100.0);
             GpuSample {
                 usage: Some(usage),
-                engines: vec![("3D".into(), usage), ("Copy".into(), 3.0 * g), ("VideoDecode".into(), 0.0)],
+                engines: Some(vec![("3D".into(), usage), ("Copy".into(), 3.0 * g), ("VideoDecode".into(), 0.0)]),
                 mem_used: Some(((0.12 + 0.55 * g) * gpu.mem_total as f32) as u64),
                 shared_used: Some((0.2 * gb as f32) as u64),
                 temp: Some(36.0 + 34.0 * g + 1.5 * noise()),
