@@ -40,7 +40,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE,
     REG_DWORD, REG_SZ,
     REG_OPTION_NON_VOLATILE, RRF_RT_REG_SZ,
 };
@@ -449,67 +449,80 @@ pub fn private_folder(parent: &Path, name: &str) -> Option<Private> {
     Some(Private { _held: held, path })
 }
 
-/// The value naming the update installer last downloaded, in Glance's key,
-/// which only administrators can write.
+/// The value naming the update installers downloaded and not yet removed,
+/// in Glance's key, which only administrators can write: their paths, each
+/// ended by a `|` (which no Windows path holds).
 const UPDATE_DOWNLOAD: PCWSTR = w!("UpdateDownload");
 
-/// Notes `file` (in a `Private` folder) as the update installer downloaded,
-/// for `forget_download` to remove later. Noted before it is written, so
-/// that nothing Glance puts there goes unrecorded.
+/// Notes `file` (in a `Private` folder) as an update installer downloaded,
+/// beside any not yet removed, for `forget_download` to remove later. Noted
+/// before it is written, so that nothing Glance puts there goes unrecorded.
 pub fn remember_download(file: &Path) -> bool {
+    let mut noted = noted_downloads();
+    noted.push(file.to_path_buf());
+    note_downloads(&noted)
+}
+
+/// Removes each update installer `remember_download` noted, and its folder,
+/// one file and one empty folder each, nothing else. A file still in use
+/// (its installer running) stays noted for next time; a folder no longer
+/// administrators' alone is no longer the one Glance made (that one was
+/// removed, and someone else's made in its place) and is left alone, its
+/// note dropped.
+pub fn forget_download() {
+    let noted = noted_downloads();
+    if noted.is_empty() {
+        return;
+    }
+    let left: Vec<PathBuf> = noted
+        .into_iter()
+        .filter(|file| {
+            let Some(folder) = file.parent() else { return false };
+            if !folder.exists() || is_link(folder) || !only_trusted_can(folder, FOLDER_CHANGES) {
+                return false;
+            }
+            let removed = (!file.exists() || std::fs::remove_file(file).is_ok()) && std::fs::remove_dir(folder).is_ok();
+            !removed
+        })
+        .collect();
+    note_downloads(&left);
+}
+
+/// Writes the note of downloads, or removes it when there are none.
+fn note_downloads(files: &[PathBuf]) -> bool {
     let mut key = HKEY::default();
     let created = unsafe { RegCreateKeyExW(HKEY_LOCAL_MACHINE, GLANCE_KEY, None, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None) };
     if created.is_err() {
         return false;
     }
-    let text: Vec<u16> = file.as_os_str().encode_wide().chain([0]).collect();
-    let bytes: Vec<u8> = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
-    let written = unsafe { RegSetValueExW(key, UPDATE_DOWNLOAD, None, REG_SZ, Some(&bytes)) }.is_ok();
+    let written = if files.is_empty() {
+        let _ = unsafe { RegDeleteValueW(key, UPDATE_DOWNLOAD) };
+        true
+    } else {
+        let text: Vec<u16> = files.iter().flat_map(|file| file.as_os_str().encode_wide().chain("|".encode_utf16())).chain([0]).collect();
+        let bytes: Vec<u8> = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+        unsafe { RegSetValueExW(key, UPDATE_DOWNLOAD, None, REG_SZ, Some(&bytes)) }.is_ok()
+    };
     unsafe {
         let _ = RegCloseKey(key);
     }
     written
 }
 
-/// Removes the update installer `remember_download` noted, and its folder,
-/// one file and one empty folder, nothing else: only while the folder is
-/// still administrators' alone (no one else's made in its place since);
-/// the note goes once both are gone.
-pub fn forget_download() {
-    let Some(file) = noted_download() else { return };
-    let Some(folder) = file.parent() else { return };
-    if folder.exists() {
-        if is_link(folder) || !only_trusted_can(folder, FOLDER_CHANGES) {
-            return;
-        }
-        // Still in use (the installer running): left for next time.
-        if file.exists() && std::fs::remove_file(&file).is_err() {
-            return;
-        }
-        if std::fs::remove_dir(folder).is_err() {
-            return;
-        }
-    }
-    let mut key = HKEY::default();
-    if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, GLANCE_KEY, None, KEY_WRITE, &mut key) }.is_ok() {
-        unsafe {
-            let _ = RegDeleteValueW(key, UPDATE_DOWNLOAD);
-            let _ = RegCloseKey(key);
-        }
-    }
-}
-
-fn noted_download() -> Option<PathBuf> {
+fn noted_downloads() -> Vec<PathBuf> {
     let mut size = 0u32;
-    unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, None, Some(&mut size)) }.ok().ok()?;
-    let mut data = vec![0u16; size as usize / 2];
-    unsafe {
-        RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, Some(data.as_mut_ptr().cast()), Some(&mut size))
+    if unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, None, Some(&mut size)) }.is_err() {
+        return Vec::new();
     }
-    .ok()
-    .ok()?;
+    let mut data = vec![0u16; size as usize / 2];
+    let read = unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, GLANCE_KEY, UPDATE_DOWNLOAD, RRF_RT_REG_SZ, None, Some(data.as_mut_ptr().cast()), Some(&mut size))
+    };
+    if read.is_err() {
+        return Vec::new();
+    }
     let text = String::from_utf16_lossy(&data[..(size as usize / 2).saturating_sub(1)]);
-    (!text.is_empty()).then(|| PathBuf::from(text))
+    text.split('|').filter(|path| !path.is_empty()).map(PathBuf::from).collect()
 }
 
 /// Puts the files the installer laid out in `payload` into `folder`. A new
@@ -1042,10 +1055,23 @@ mod tests {
         assert!(std::fs::rename(folder.path(), program_data.join(format!("{name}-moved"))).is_err());
         let path = folder.path().to_path_buf();
         drop(folder);
-        assert_eq!(noted_download(), Some(file.clone()));
+        // A second download while the first is still in use (its installer
+        // running): the first stays noted until it can go.
+        let second = private_folder(&program_data, &format!("{name}-2")).expect("made");
+        let second_file = second.path().join("setup.exe");
+        // Held as a running installer holds itself: shared for reading only.
+        use std::os::windows::fs::OpenOptionsExt;
+        let in_use = std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(&file).unwrap();
         forget_download();
-        assert!(!file.exists() && !path.exists());
-        assert_eq!(noted_download(), None);
+        assert_eq!(noted_downloads(), vec![file.clone()]);
+        assert!(remember_download(&second_file));
+        std::fs::write(&second_file, b"y").unwrap();
+        drop(second);
+        assert_eq!(noted_downloads(), vec![file.clone(), second_file.clone()]);
+        drop(in_use);
+        forget_download();
+        assert!(!file.exists() && !path.exists() && !second_file.exists());
+        assert_eq!(noted_downloads(), Vec::<PathBuf>::new());
     }
 
     #[test]

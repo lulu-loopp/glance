@@ -2,6 +2,7 @@
 //! as the icon's tooltip, and, when asked, a warning that the CPU or a
 //! graphics card has stayed hot.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::metrics::{Sample, StaticInfo};
@@ -16,7 +17,9 @@ const COOL_BY: f32 = 5.0;
 /// Follows the readings, one sample at a time, on the sampling thread.
 #[derive(Default)]
 pub struct Watch {
-    heat: Heat,
+    /// Each part's heat, by its place in `temperatures`: the CPU and each
+    /// graphics card count their own stretches.
+    heat: HashMap<usize, Heat>,
     tip: String,
 }
 
@@ -34,10 +37,15 @@ impl Watch {
             crate::tray::set_tip(&tip);
             self.tip = tip;
         }
-        let hottest = hottest(sample, &app.info);
-        let tell = self.heat.step(hottest.as_ref().map(|(_, temp)| *temp), prefs.hot_temp, now);
-        if let (true, true, Some((part, temp))) = (alert, tell, hottest) {
-            let limit = prefs.hot_temp;
+        // Off, nothing is counted: turned on, a stretch starts afresh.
+        if !alert {
+            self.heat.clear();
+            return;
+        }
+        let limit = prefs.hot_temp;
+        for (i, (part, temp)) in temperatures(sample, &app.info).into_iter().enumerate() {
+            let tell = self.heat.entry(i).or_default().step(temp, limit, now);
+            let Some(temp) = temp.filter(|_| tell) else { continue };
             let (title, text) = match lang {
                 Lang::Zh => ("Glance：温度过高".to_string(), format!("{part} 已持续 30 秒在 {temp:.0} °C，高于警示值 {limit:.0} °C。")),
                 Lang::En => ("Glance: running hot".to_string(), format!("{part} has stayed at {temp:.0} °C for 30 seconds, above the {limit:.0} °C alert.")),
@@ -76,11 +84,12 @@ impl Heat {
     }
 }
 
-/// The hottest of the CPU and the graphics cards, and its name.
-fn hottest(sample: &Sample, info: &StaticInfo) -> Option<(String, f32)> {
-    let cpu = sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp).map(|temp| ("CPU".to_string(), temp));
-    let gpus = sample.gpus.iter().zip(&info.gpus).filter_map(|(reading, gpu)| reading.temp.map(|temp| (gpu.name.clone(), temp)));
-    cpu.into_iter().chain(gpus).max_by(|a, b| a.1.total_cmp(&b.1))
+/// The CPU's temperature and each graphics card's, by name (`None` where
+/// it cannot be read just now).
+fn temperatures(sample: &Sample, info: &StaticInfo) -> Vec<(String, Option<f32>)> {
+    let cpu = ("CPU".to_string(), sample.cpu_sensors.as_ref().and_then(|sensors| sensors.temp));
+    let gpus = sample.gpus.iter().zip(&info.gpus).map(|(reading, gpu)| (gpu.name.clone(), reading.temp));
+    std::iter::once(cpu).chain(gpus).collect()
 }
 
 /// The tooltip: Glance's name, then the CPU, each graphics card and the

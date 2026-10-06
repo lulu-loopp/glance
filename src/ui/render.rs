@@ -105,7 +105,7 @@ impl PanelLayers {
         boxes.iter().chain([&bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut key));
         picture.backdrop.map(|(_, at, digest)| (digest, at.X.to_bits(), at.Y.to_bits())).hash(&mut key);
         let ground_key = key.finish();
-        (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.process_scroll.to_bits(), scene.hover).hash(&mut key);
+        (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.process_scroll.to_bits(), scene.hover, scene.pinned).hash(&mut key);
         let content_key = key.finish();
 
         let mut grounded = false;

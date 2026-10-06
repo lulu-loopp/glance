@@ -56,11 +56,12 @@ impl App {
     /// for next time.
     pub fn save(&self, settings: Settings) {
         self.controller.apply(&settings);
-        tray::follow_settings();
         if let Err(error) = settings.save(&self.config) {
             eprintln!("could not save settings: {error}");
         }
         *self.settings.lock().unwrap() = settings;
+        // The tray reads the shortcut's setting from here: told once it is in.
+        tray::follow_settings();
     }
 
     /// The process list was sorted from the panel: kept, as if chosen in the

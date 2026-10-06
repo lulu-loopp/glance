@@ -19,13 +19,7 @@ pub fn report() -> String {
     let yes = |b: bool| if b { "yes" } else { "no" };
     let mut lines = vec![
         format!("Glance {}", env!("CARGO_PKG_VERSION")),
-        format!(
-            "Windows: {} {} (build {}.{})",
-            reg_string(windows_key, w!("ProductName")),
-            reg_string(windows_key, w!("DisplayVersion")),
-            reg_string(windows_key, w!("CurrentBuild")),
-            crate::metrics::reg_dword(windows_key, w!("UBR")),
-        ),
+        windows(windows_key),
         format!("Running elevated: {}", yes(crate::elevation::is_elevated())),
         format!("Installed in a protected folder: {}", yes(crate::elevation::may_start_unasked())),
         format!("PawnIO driver: {}", crate::elevation::pawnio_version().unwrap_or_else(|| "not installed".into())),
@@ -41,6 +35,17 @@ pub fn report() -> String {
         None => lines.push("  none yet".into()),
     }
     lines.join("\n")
+}
+
+/// Windows' name, release and build. Windows 11 keeps "Windows 10" in its
+/// product name; its builds, from 22000, tell it apart.
+fn windows(key: windows::core::PCWSTR) -> String {
+    let build = reg_string(key, w!("CurrentBuild"));
+    let mut name = reg_string(key, w!("ProductName"));
+    if build.parse::<u32>().is_ok_and(|build| build >= 22000) {
+        name = name.replace("Windows 10", "Windows 11");
+    }
+    format!("Windows: {name} {} (build {build}.{})", reg_string(key, w!("DisplayVersion")), crate::metrics::reg_dword(key, w!("UBR")))
 }
 
 /// Which readings arrive, and what they are now.

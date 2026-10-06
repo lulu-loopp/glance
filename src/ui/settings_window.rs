@@ -801,7 +801,7 @@ impl Ui {
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
-                Some(p("CPU 或显卡持续 30 秒达到温度警示值时，从托盘提醒", "Tells from the tray when the CPU or a graphics card stays at the temperature alert for 30 s")),
+                Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
                 self.settings.heat_alert,
             ),
             Switch::Updates => (
@@ -1382,7 +1382,7 @@ impl Ui {
                     let action = if copied { pick(lang, "已复制", "Copied") } else { pick(lang, "复制", "Copy") };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let name = pick(lang, "诊断信息", "Diagnostics");
-                    let detail = pick(lang, "反馈问题时附上：硬件、驱动和读数情况", "For a problem report: hardware, driver and readings");
+                    let detail = pick(lang, "反馈问题时复制附上", "To paste into a problem report");
                     field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
                     let button_w = frame.gfx.measure(action, label) + 32.0;
                     let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
