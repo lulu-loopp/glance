@@ -19,7 +19,9 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
-use windows::Win32::Graphics::Dwm::DwmFlush;
+use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
@@ -249,6 +251,9 @@ impl Controller {
         let mut last_cursor = cursor_position().unwrap_or_default();
         let mut raw_since_watch = false;
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
+        // What a frame in motion waits on: the screen's next refresh, or a
+        // message, whichever comes first.
+        let refresh = unsafe { CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0) }.expect("frame timer");
         let mut msg = MSG::default();
         loop {
             // The panel, while it is up, and the settings window, while it is
@@ -269,10 +274,16 @@ impl Controller {
                     wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                 }
                 match wait {
-                    // In motion: the next frame comes with the screen's.
-                    Some(wait) if wait.is_zero() => {
-                        let _ = unsafe { DwmFlush() };
-                    }
+                    // In motion: the next frame comes with the screen's, and
+                    // the wait for it never outlasts one (DwmFlush, which
+                    // waits for the desktop to be composed again, waits as
+                    // long as nothing on screen changes), nor holds back a
+                    // message.
+                    Some(wait) if wait.is_zero() => unsafe {
+                        let due = -((until_refresh().as_nanos() / 100) as i64).max(1);
+                        let _ = SetWaitableTimer(refresh, &due, 0, None, None, false);
+                        MsgWaitForMultipleObjects(Some(&[refresh]), false, INFINITE, QS_ALLINPUT);
+                    },
                     Some(wait) => unsafe {
                         MsgWaitForMultipleObjects(None, false, wait.as_millis() as u32, QS_ALLINPUT);
                     },
@@ -1134,6 +1145,21 @@ fn contains(rect: &RECT, point: POINT) -> bool {
 
 /// Where the pointer is; `None` while another desktop has the input (a UAC
 /// prompt, the lock screen).
+/// The time to the screen's next refresh, as the desktop compositor keeps
+/// it; one tick of the pointer's watch when it cannot tell.
+fn until_refresh() -> Duration {
+    let mut timing = DWM_TIMING_INFO { cbSize: size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+    let (mut now, mut frequency) = (0i64, 0i64);
+    let known = unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing).is_ok() && QueryPerformanceCounter(&mut now).is_ok() && QueryPerformanceFrequency(&mut frequency).is_ok() };
+    let (period, last) = (timing.qpcRefreshPeriod as i64, timing.qpcVBlank as i64);
+    if !known || period <= 0 || frequency <= 0 {
+        return Duration::from_millis(TICK_MS as u64);
+    }
+    // The first refresh after now.
+    let next = last + ((now - last).div_euclid(period) + 1) * period;
+    Duration::from_nanos(((next - now) as i128 * 1_000_000_000 / frequency as i128) as u64)
+}
+
 /// Whether a program holds the screen in exclusive fullscreen (Direct3D's
 /// own, not a borderless window): a window shown over it sends it to the
 /// background.
