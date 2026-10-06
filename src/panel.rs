@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
@@ -101,6 +102,8 @@ struct Config {
     anchor: Anchor,
     columns: Option<usize>,
     pressure: i32,
+    fullscreen_edge: bool,
+    fullscreen_hotkey: bool,
     close_delay: Duration,
     interval: Duration,
     history: usize,
@@ -115,6 +118,8 @@ fn config_from(settings: &Settings) -> Config {
         anchor: settings.anchor,
         columns: settings.columns,
         pressure: settings.sensitivity.pressure(),
+        fullscreen_edge: settings.fullscreen_edge,
+        fullscreen_hotkey: settings.fullscreen_hotkey,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
         history: (LONGEST_SPAN.as_millis() / settings.interval().as_millis()) as usize + 16,
@@ -282,10 +287,13 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (edge, pressure) = {
+            let (edge, pressure, fullscreen_edge, fullscreen_hotkey) = {
                 let config = self.config.lock().unwrap();
-                (config.edge, config.pressure)
+                (config.edge, config.pressure, config.fullscreen_edge, config.fullscreen_hotkey)
             };
+            // Over a game in exclusive fullscreen the panel sends the game to
+            // the background: it opens there only as the settings allow.
+            let may_open = |allowed: bool| allowed || !exclusive_fullscreen();
             if panel.is_shown() {
                 armed = false;
             }
@@ -296,6 +304,7 @@ impl Controller {
                     }
                 }
                 TOGGLE if panel.is_open() => panel.begin_close(now),
+                TOGGLE if !may_open(fullscreen_hotkey) => {}
                 TOGGLE => {
                     if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
                         panel.open(cursor, contact, now);
@@ -320,7 +329,13 @@ impl Controller {
                         match edge_contact(cursor, edge) {
                             Some(contact) if armed && detector.motion(motion, now, pressure) => {
                                 detector.reset();
-                                panel.open(cursor, contact, now);
+                                // Not over this game: not again until the
+                                // pointer has left the edge.
+                                if may_open(fullscreen_edge) {
+                                    panel.open(cursor, contact, now);
+                                } else {
+                                    armed = false;
+                                }
                             }
                             Some(_) => {}
                             None => {
@@ -355,7 +370,11 @@ impl Controller {
                     match edge_contact(cursor, edge) {
                         Some(contact) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
-                            panel.open(cursor, contact, now);
+                            if may_open(fullscreen_edge) {
+                                panel.open(cursor, contact, now);
+                            } else {
+                                armed = false;
+                            }
                         }
                         Some(_) => {}
                         None => {
@@ -1067,6 +1086,13 @@ fn contains(rect: &RECT, point: POINT) -> bool {
 
 /// Where the pointer is; `None` while another desktop has the input (a UAC
 /// prompt, the lock screen).
+/// Whether a program holds the screen in exclusive fullscreen (Direct3D's
+/// own, not a borderless window): a window shown over it sends it to the
+/// background.
+fn exclusive_fullscreen() -> bool {
+    unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
+}
+
 fn cursor_position() -> Option<POINT> {
     let mut point = POINT::default();
     unsafe { GetCursorPos(&mut point) }.ok().map(|_| point)

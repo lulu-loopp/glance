@@ -284,6 +284,8 @@ enum Switch {
     Startup,
     Updates,
     Hotkey,
+    FullscreenEdge,
+    FullscreenHotkey,
     HeatAlert,
 }
 
@@ -639,6 +641,8 @@ impl Ui {
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
             Row::Switch(Switch::Hotkey),
+            Row::Switch(Switch::FullscreenEdge),
+            Row::Switch(Switch::FullscreenHotkey),
             Row::Heading("显示内容", "Shown"),
         ];
         for entry in &self.prefs.modules {
@@ -862,6 +866,16 @@ impl Ui {
                 }),
                 self.settings.hotkey,
             ),
+            Switch::FullscreenEdge => (
+                p("独占全屏游戏中推边缘呼出", "Edge push over exclusive fullscreen"),
+                Some(p("呼出时游戏会切到后台；无边框游戏不受影响", "Sends the game to the background; borderless games are unaffected")),
+                self.settings.fullscreen_edge,
+            ),
+            Switch::FullscreenHotkey => (
+                p("独占全屏游戏中快捷键呼出", "Shortcut over exclusive fullscreen"),
+                Some(p("呼出时游戏会切到后台；无边框游戏不受影响", "Sends the game to the background; borderless games are unaffected")),
+                self.settings.fullscreen_hotkey,
+            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
@@ -900,12 +914,21 @@ impl Ui {
         unsafe { MessageBoxW(Some(self.hwnd), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONINFORMATION) };
     }
 
+    /// Whether a switch does anything just now: the shortcut's over fullscreen
+    /// games only while the shortcut is on. One that does not is dimmed, and
+    /// keeps its state.
+    fn switch_active(&self, switch: Switch) -> bool {
+        switch != Switch::FullscreenHotkey || self.settings.hotkey
+    }
+
     fn flip(&mut self, switch: Switch) {
         let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::Hotkey => settings.hotkey ^= true,
+            Switch::FullscreenEdge => settings.fullscreen_edge ^= true,
+            Switch::FullscreenHotkey => settings.fullscreen_hotkey ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
@@ -1168,7 +1191,8 @@ impl Ui {
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
-                Row::Switch(switch) => vec![Target::Switch(switch)],
+                Row::Switch(switch) if self.switch_active(switch) => vec![Target::Switch(switch)],
+                Row::Switch(_) => vec![],
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
@@ -1543,11 +1567,15 @@ impl Ui {
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, detail, on) = self.switch(switch);
-                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
+                    let active = self.switch_active(switch);
+                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+                    field_label_in(frame, colors, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
-                    self.toggle(frame, palette, key, on, true, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
-                    self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::Switch(switch)));
+                    self.toggle(frame, palette, key, on, active, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
+                    if active {
+                        self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::Switch(switch)));
+                    }
                 }
                 Row::Module(id) => {
                     let offset = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));

@@ -75,6 +75,11 @@ pub struct Settings {
     pub check_updates: bool,
     /// Ctrl+Alt+G opens and closes the panel.
     pub hotkey: bool,
+    /// While a game holds the screen in exclusive fullscreen, the panel
+    /// showing sends it to the background: whether pushing into the edge,
+    /// and the shortcut, open the panel all the same.
+    pub fullscreen_edge: bool,
+    pub fullscreen_hotkey: bool,
     /// Tell from the tray when the CPU or a graphics card stays at or above
     /// the temperature alert.
     pub heat_alert: bool,
@@ -94,6 +99,8 @@ impl Default for Settings {
             live_backdrop: false,
             check_updates: true,
             hotkey: true,
+            fullscreen_edge: false,
+            fullscreen_hotkey: true,
             heat_alert: false,
             view: serde_json::Value::Null,
         }
