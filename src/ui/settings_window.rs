@@ -81,6 +81,8 @@ const GUTTER: f32 = 8.0;
 const ROW: f32 = 56.0;
 const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
+/// The line of its own a row of choices with a word on it takes below.
+const CHOICE_LINE: f32 = 40.0;
 /// A row inside a module's open card, and how far in from the card's edge
 /// its label starts: under the module's name, past the grip.
 const ITEM_ROW: f32 = 48.0;
@@ -718,6 +720,9 @@ impl Ui {
                 Row::Title => (0.0, 36.0),
                 Row::Heading(..) => (GROUP_GAP, 20.0),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
+                // A choice with a word on it: the word above, the choices on
+                // a line of their own.
+                Row::Choice(field) if self.choice_hint(*field).is_some() => (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE),
                 // Inside its module's card, right under the row above.
                 Row::Item(..) | Row::ModuleChoice(..) => (0.0, ITEM_ROW),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
@@ -786,8 +791,8 @@ impl Ui {
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
             Field::OverFullscreen => (
-                pick(lang, "独占全屏游戏中呼出", "Over exclusive fullscreen"),
-                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("都可以", "Both")],
+                pick(lang, "全屏游戏中呼出", "Over fullscreen games"),
+                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("快捷键和推边缘", "Shortcut and edge")],
                 [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both].iter().position(|&o| o == settings.over_fullscreen),
             ),
             Field::Columns => (
@@ -903,7 +908,7 @@ impl Ui {
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
-            Field::OverFullscreen => Some(pick(self.lang, "游戏会退到后台，无边框模式不会", "The game goes to the background; borderless does not")),
+            Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
         }
     }
@@ -1618,9 +1623,16 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, options, chosen) = self.choices(field);
                     let right = left + width - ROW_SIDE;
-                    let options_left = self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
-                    let room = options_left - 16.0 - left - ROW_SIDE;
-                    field_label(frame, palette, name, self.choice_hint(field), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
+                    match self.choice_hint(field) {
+                        Some(word) => {
+                            field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + ROW / 2.0, width - 2.0 * ROW_SIDE);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height - CHOICE_LINE / 2.0 - 8.0, now, &hovered);
+                        }
+                        None => {
+                            text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
+                        }
+                    }
                 }
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
@@ -1859,9 +1871,9 @@ impl Ui {
 
     /// A row of options with one thumb that slides under the chosen one,
     /// right-aligned at `right` and centred on `cy`; unless `enabled`, dimmed
-    /// and not to be pressed. Returns where it starts.
+    /// and not to be pressed.
     #[allow(clippy::too_many_arguments)]
-    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) -> f32 {
+    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
         let font = Font::new(Family::Segoe, 13.0, 400.0);
         let widths: Vec<f32> = options.iter().map(|o| (frame.gfx.measure(o, font) + 24.0).max(44.0)).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
@@ -1899,7 +1911,6 @@ impl Ui {
                 self.targets.push((Rect { x: *sx, y: y0, w: *sw, h: 32.0 }, target));
             }
         }
-        x0
     }
 
     /// A switch, 40 × 22, with its left edge at `x` and centred on `cy`;
