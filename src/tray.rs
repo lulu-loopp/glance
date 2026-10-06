@@ -216,10 +216,19 @@ pub fn set_tip(text: &str) {
 /// characters), and every step measures the whole line as the tooltip draws
 /// it: a space after Chinese is drawn in the font that lends the Chinese,
 /// and figure spaces are not always as wide as digits.
-pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
+///
+/// Lined up, the lines take more characters than with a space between
+/// cells: if they would not fit `budget` (newlines between them counted),
+/// or the text cannot be measured, the cells are joined by a space.
+pub fn columns(rows: &[Vec<String>], budget: usize) -> Vec<String> {
     // Em, en, thin and hair spaces, widest first.
     const SPACES: [&str; 4] = ["\u{2003}", "\u{2002}", "\u{2009}", "\u{200A}"];
-    in_tooltip_font(|width| {
+    let plain: Vec<String> = rows.iter().map(|cells| cells.join(" ")).collect();
+    let fits = |lines: &[String]| lines.iter().map(|line| line.encode_utf16().count()).sum::<usize>() + lines.len().saturating_sub(1) <= budget;
+    let lined = in_tooltip_font(|width| {
+        if width(" ") <= 0 {
+            return None;
+        }
         let mut lines: Vec<String> = rows.iter().map(|cells| cells.first().cloned().unwrap_or_default()).collect();
         let count = rows.iter().map(Vec::len).max().unwrap_or(0);
         for column in 1..count {
@@ -234,7 +243,12 @@ pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
                 let reach = |pad: &str| width(&format!("{line}{pad}{cell}"));
                 let mut pad = String::new();
                 for fill in SPACES {
-                    while reach(&(pad.clone() + fill)) <= end {
+                    // A space that measures as nothing would never reach the end.
+                    loop {
+                        let (now, next) = (reach(&pad), reach(&(pad.clone() + fill)));
+                        if next > end || next <= now {
+                            break;
+                        }
                         pad.push_str(fill);
                     }
                 }
@@ -246,8 +260,9 @@ pub fn columns(rows: &[Vec<String>]) -> Vec<String> {
                 line.push_str(cell);
             }
         }
-        lines
-    })
+        Some(lines)
+    });
+    lined.filter(|lines| fits(lines)).unwrap_or(plain)
 }
 
 /// Runs `act` with a measure of text in the tooltip font, in pixels, as
@@ -327,7 +342,7 @@ mod tests {
     #[test]
     fn lines_up_columns_in_the_tooltip_font() {
         let rows = sample();
-        let lines = columns(&rows);
+        let lines = columns(&rows, 120);
         // Where each cell after the first ends, measured as the tooltip draws.
         let (ends, hair) = in_tooltip_font(|width| {
             let ends: Vec<Vec<i32>> = rows
@@ -353,14 +368,29 @@ mod tests {
             assert!(high - low <= hair, "column {column}: {at:?}");
         }
         // "Glance" and the lines fit the tooltip's 127 characters.
-        assert!(7 + lines.iter().map(|line| line.encode_utf16().count() + 1).sum::<usize>() <= 127);
+        assert!(7 + lines.iter().map(|line| line.encode_utf16().count() + 1).sum::<usize>() <= 128);
+    }
+
+    #[test]
+    fn falls_back_to_spaces_beyond_the_budget() {
+        let size = |lines: &[String]| lines.iter().map(|line| line.encode_utf16().count()).sum::<usize>() + lines.len() - 1;
+        let gpus: Vec<Vec<String>> = (1..=5).map(|i| row(&[&format!("GPU {i}"), &format!("{}%", i * 19), "· 40 °C"])).collect();
+        for rows in [sample(), gpus] {
+            let joined: Vec<String> = rows.iter().map(|cells| cells.join(" ")).collect();
+            // Whatever the budget, what fits joined fits as given.
+            for budget in size(&joined)..size(&joined) + 60 {
+                assert!(size(&columns(&rows, budget)) <= budget, "{budget}");
+            }
+            // Too little for either: joined.
+            assert_eq!(columns(&rows, 0), joined);
+        }
     }
 
     /// Writes a tooltip's text, as Glance makes it, for a look at it drawn.
     #[test]
     #[ignore]
     fn writes_a_sample_tooltip() {
-        let text = std::iter::once("Glance".to_string()).chain(columns(&sample())).collect::<Vec<_>>().join("\r\n");
+        let text = std::iter::once("Glance".to_string()).chain(columns(&sample(), 120)).collect::<Vec<_>>().join("\r\n");
         std::fs::write(std::env::var("TIP_OUT").unwrap(), text).unwrap();
     }
 }

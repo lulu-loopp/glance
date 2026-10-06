@@ -118,7 +118,8 @@ fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
             cells
         })
         .collect();
-    std::iter::once("Glance".to_string()).chain(crate::tray::columns(&cells)).collect::<Vec<_>>().join("\n")
+    // The tooltip holds 127 characters, "Glance" and its line break among them.
+    std::iter::once("Glance".to_string()).chain(crate::tray::columns(&cells, 127 - 7)).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]

@@ -6,6 +6,8 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
 
 const FILE: &str = "settings.json";
+/// Larger than this, a settings file is not one Glance wrote.
+const MOST: u64 = 1 << 20;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -115,7 +117,7 @@ impl Settings {
     /// link someone put in the user's folder (see `elevation::read_in_place`).
     pub fn load(dir: &Path) -> Self {
         let mut settings: Settings =
-            crate::elevation::read_in_place(dir, FILE).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+            crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
         settings

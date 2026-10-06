@@ -644,17 +644,19 @@ fn held_where_it_says(folder: &Path) -> Option<Held> {
 
 /// Reads `name` in `folder`, both held and checked by handle (the folder
 /// where its path says, the file in it and not a link), so that Glance,
-/// running elevated, reads nothing a link in a user's folder leads to.
-pub fn read_in_place(folder: &Path, name: &str) -> Option<String> {
+/// running elevated, reads nothing a link in a user's folder leads to; and
+/// nothing larger than `most` bytes (a file anyone could have filled).
+pub fn read_in_place(folder: &Path, name: &str, most: u64) -> Option<String> {
     use std::io::Read;
     let held = held_where_it_says(folder)?;
     let mut file = Held::open(&folder.join(name))?;
     if file.is_folder() || is_link(&folder.join(name)) || !file.lies_in(&held) {
         return None;
     }
+    // Larger than `most`: not one Glance wrote, and not read whole.
     let mut text = String::new();
-    file.0.read_to_string(&mut text).ok()?;
-    Some(text)
+    file.0.by_ref().take(most + 1).read_to_string(&mut text).ok()?;
+    (text.len() as u64 <= most).then_some(text)
 }
 
 /// Writes `contents` as `name` in `folder`, for Glance running elevated: the
@@ -1171,7 +1173,7 @@ mod tests {
     fn finds_this_accounts_settings() {
         let folder = crate::settings::config_dir();
         println!("{} held where it says: {}", folder.display(), held_where_it_says(&folder).is_some());
-        println!("settings: {:?}", read_in_place(&folder, "settings.json").map(|text| text.len()));
+        println!("settings: {:?}", read_in_place(&folder, "settings.json", 1 << 20).map(|text| text.len()));
     }
 
     #[test]
@@ -1184,7 +1186,7 @@ mod tests {
         // Where the path says: written, replaced, read back.
         write_in_place(&folder, "settings.json", b"one").unwrap();
         write_in_place(&folder, "settings.json", b"two").unwrap();
-        assert_eq!(read_in_place(&folder, "settings.json").as_deref(), Some("two"));
+        assert_eq!(read_in_place(&folder, "settings.json", 1 << 20).as_deref(), Some("two"));
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
         // Through a junction, and through a junction above: refused, the
         // place it leads to untouched.
@@ -1193,7 +1195,7 @@ mod tests {
         let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&target).output().unwrap();
         assert!(made.status.success());
         assert!(write_in_place(&link, "settings.json", b"mine").is_err());
-        assert!(read_in_place(&link, "settings.json").is_none());
+        assert!(read_in_place(&link, "settings.json", 1 << 20).is_none());
         std::fs::create_dir(target.join("inner")).unwrap();
         assert!(write_in_place(&link.join("inner"), "settings.json", b"mine").is_err());
         assert_eq!(std::fs::read(target.join("settings.json")).unwrap(), b"theirs");
