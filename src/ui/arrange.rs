@@ -19,8 +19,9 @@ const TOP_SHARE: f32 = 0.6;
 /// size, up to what the screen allows, and zoomed out only if even that is
 /// too little.
 ///
-/// `columns`, when given, is kept instead (a panel already on screen keeps
-/// its shape), as far as the screen allows it.
+/// `columns`, when given (chosen in the settings), is kept instead, as far
+/// as the screen's width allows it: chosen, it may be more than a panel
+/// along a side takes by itself.
 pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>) -> (Layout, f32) {
     // The room the panel has: across from its edge it keeps a gap from the
     // far side; along its edge, from both ends.
@@ -34,7 +35,7 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
     let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
     let max_columns = if edge == Edge::Top { fit } else { fit.min(MAX_COLUMNS) };
     let layout = match columns {
-        Some(columns) => Layout::with_columns(heights, columns.min(max_columns), theme),
+        Some(columns) => Layout::with_columns(heights, columns.min(fit), theme),
         None => Layout::new(heights, room, max_columns, theme),
     };
     // Zoomed out only if even the most columns are too tall, or one is too wide.
@@ -60,9 +61,10 @@ pub struct Opening {
 
 impl Opening {
     /// Lays out `lanes` (each by module, with its height when holding what
-    /// `seen` holds) for a work area `work` DIPs large.
-    pub fn new(theme: &Theme, edge: Edge, lanes: &[(&str, f32)], work: (f32, f32), seen: Seen) -> Self {
-        let (layout, zoom) = arrange(theme, edge, lanes.iter().map(|(_, height)| *height).collect(), work, None);
+    /// `seen` holds) for a work area `work` DIPs large, in `columns` if
+    /// chosen.
+    pub fn new(theme: &Theme, edge: Edge, lanes: &[(&str, f32)], work: (f32, f32), columns: Option<usize>, seen: Seen) -> Self {
+        let (layout, zoom) = arrange(theme, edge, lanes.iter().map(|(_, height)| *height).collect(), work, columns);
         Opening { layout, zoom, lanes: lanes.iter().map(|(id, _)| id.to_string()).collect(), seen }
     }
 
@@ -104,6 +106,23 @@ mod tests {
     }
 
     #[test]
+    fn keeps_the_columns_chosen_as_far_as_the_screen_is_wide() {
+        let theme = Theme::new(Skin::Paper, false);
+        // Lanes that fit one column on a tall screen: four chosen, four taken,
+        // more than a side takes by itself.
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (3000.0, 2000.0), Some(4));
+        assert_eq!(layout.columns, 4);
+        // On a screen that holds two across, two.
+        let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset + 1.0;
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two, 2000.0), Some(4));
+        assert_eq!(layout.columns, 2);
+        // One chosen and too tall for the screen: one, zoomed out.
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (3000.0, 1000.0), Some(1));
+        assert_eq!(layout.columns, 1);
+        assert!(zoom < 1.0);
+    }
+
+    #[test]
     fn holds_its_outline_while_up() {
         use crate::reading::GpuInfo;
         let theme = Theme::new(Skin::Paper, false);
@@ -123,7 +142,7 @@ mod tests {
         let mut opened = Seen::default();
         opened.gpus.push(crate::ui::seen::GpuSeen { present: true, ..Default::default() });
         let lanes = [("cpu", 700.0), ("gpu:0", 100.0), ("memory", 100.0)];
-        let mut opening = Opening::new(&theme, Edge::Right, &lanes, (1400.0, 900.0), opened.clone());
+        let mut opening = Opening::new(&theme, Edge::Right, &lanes, (1400.0, 900.0), None, opened.clone());
         assert_eq!(opening.layout.columns, 2);
         let (layout, zoom) = (opening.layout.height(), opening.zoom);
         // The GPU's clock and power read for the first time together: the

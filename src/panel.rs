@@ -99,6 +99,7 @@ struct Config {
     skin: String,
     live: bool,
     anchor: Anchor,
+    columns: Option<usize>,
     pressure: i32,
     close_delay: Duration,
     interval: Duration,
@@ -112,6 +113,7 @@ fn config_from(settings: &Settings) -> Config {
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
         anchor: settings.anchor,
+        columns: settings.columns,
         pressure: settings.sensitivity.pressure(),
         close_delay: settings.close_delay(),
         interval: settings.interval(),
@@ -460,6 +462,8 @@ struct Panel<'a> {
     theme: Theme,
     lang: Lang,
     edge: Edge,
+    /// The columns chosen in the settings; none, as few as fit.
+    columns: Option<usize>,
     /// Refresh the desktop behind the glass while the panel is open.
     live: bool,
     behind: Option<Behind>,
@@ -509,6 +513,7 @@ impl<'a> Panel<'a> {
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
             edge: Edge::Right,
+            columns: None,
             live: false,
             behind: None,
             tried_behind: Instant::now(),
@@ -543,6 +548,7 @@ impl<'a> Panel<'a> {
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.edge = config.edge;
+        self.columns = config.columns;
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
@@ -551,7 +557,7 @@ impl<'a> Panel<'a> {
         // lane's size, and leaves it be.
         let mut sized = self.prefs.clone();
         sized.processes.sort = Default::default();
-        let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
+        let style = format!("{} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
             // A second change before a frame laid it out keeps what the
@@ -783,7 +789,7 @@ impl<'a> Panel<'a> {
                 let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
                 let lanes = view::lanes(&scene);
                 let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
-                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, now.clone()))
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, self.columns, now.clone()))
             }
         };
         let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));

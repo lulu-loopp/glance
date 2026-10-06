@@ -62,6 +62,9 @@ pub struct Settings {
     pub edge: Edge,
     pub skin: String,
     pub anchor: Anchor,
+    /// How many columns the panel's lanes are dealt into; none chosen, as
+    /// few as fit the screen's height.
+    pub columns: Option<usize>,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -84,6 +87,7 @@ impl Default for Settings {
             edge: Edge::default(),
             skin: "paper".into(),
             anchor: Anchor::default(),
+            columns: None,
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,

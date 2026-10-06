@@ -18,7 +18,7 @@ use windows::core::{w, BOOL, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_GRADIENT_STOP;
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    ID2D1Bitmap1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_GAMMA_2_2, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT,
 };
@@ -183,8 +183,6 @@ struct Palette {
     switch_knob: Color,
     window: Color,
     card: Color,
-    /// An open module card's inside, under its row.
-    card_inside: Color,
     card_stroke: Color,
     /// A switch that does nothing for now: its outline or track, and its
     /// knob when on.
@@ -218,7 +216,6 @@ impl Palette {
                 switch_knob: white(0.8),
                 window: Color::hex(0x202020, 1.0),
                 card: white(0.05),
-                card_inside: white(0.03),
                 card_stroke: black(0.2),
                 disabled: white(0.16),
                 disabled_knob: white(0.53),
@@ -242,7 +239,6 @@ impl Palette {
                 switch_knob: black(0.6),
                 window: Color::hex(0xF3F3F3, 1.0),
                 card: white(0.7),
-                card_inside: Color::hex(0xF6F6F6, 0.5),
                 card_stroke: black(0.06),
                 disabled: black(0.22),
                 disabled_knob: white(1.0),
@@ -269,6 +265,7 @@ enum Field {
     Language,
     Edge,
     Anchor,
+    Columns,
     Push,
     CloseDelay,
     RateUnit,
@@ -638,6 +635,7 @@ impl Ui {
             Row::Heading("呼出", "Opening"),
             Row::Choice(Field::Edge),
             Row::Choice(Field::Anchor),
+            Row::Choice(Field::Columns),
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
             Row::Switch(Switch::Hotkey),
@@ -729,6 +727,11 @@ impl Ui {
                 vec![s("跟随指针", "At pointer"), s("居中", "Centred")],
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
+            Field::Columns => (
+                pick(lang, "面板栏数", "Columns"),
+                vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
+                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns),
+            ),
             Field::Push => (
                 pick(lang, "推入力度", "Push"),
                 vec![s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
@@ -776,6 +779,7 @@ impl Ui {
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
+            Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
@@ -1630,10 +1634,9 @@ impl Ui {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// A module's row, and when its card is open (`reach` below the row's
-    /// top), the card around the rows inside it: one rounded box, the row on
-    /// top, a shade of its own below.
+    /// top), the card around the rows inside it: one rounded box.
+    #[allow(clippy::too_many_arguments)]
     fn module_row(&mut self, frame: &Frame, palette: &Palette, id: &str, left: f32, y: f32, width: f32, height: f32, reach: f32, now: Instant, hovered: &Option<Target>, held: bool) {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, 12.0, 400.0);
@@ -1644,17 +1647,10 @@ impl Ui {
             fill(frame, palette.window, left, y, width, height, 6.0);
             card(frame, palette, left, y, width, height, palette.card);
             stroke_inside(frame, shape, 6.0, palette.selection);
-        } else if reach > height {
-            // The whole card's rounded shape, cut at the row's foot: the row's
-            // shade above, the inside's below.
-            for (top, h, color) in [(y, height, palette.card), (y + height, reach - height, palette.card_inside)] {
-                unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, h), D2D1_ANTIALIAS_MODE_ALIASED) };
-                fill(frame, color, left, y, width, reach, 6.0);
-                unsafe { frame.dc.PopAxisAlignedClip() };
-            }
-            stroke_inside(frame, Rect { x: left, y, w: width, h: reach }, 6.0, palette.card_stroke);
         } else {
-            card(frame, palette, left, y, width, height, palette.card);
+            // The whole card, its rows inside it in the same shade, as
+            // Windows' own settings draw an open one.
+            card(frame, palette, left, y, width, reach, palette.card);
         }
         let on = self.prefs.modules.iter().find(|entry| entry.id == id).is_some_and(|entry| entry.on);
         let (title, detail) = self.module(id);
@@ -1805,7 +1801,7 @@ impl Ui {
         let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), None);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
