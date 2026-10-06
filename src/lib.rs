@@ -265,9 +265,17 @@ pub fn run() {
     tray::run();
 }
 
-/// Glance does not run on this system yet: the macOS and Linux ports are
-/// under way (see the README).
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod mac;
+
+#[cfg(target_os = "macos")]
+pub fn run() {
+    mac::run()
+}
+
+/// Glance does not run on this system yet: the Linux port comes after the
+/// macOS one.
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn run() {
     eprintln!("Glance runs on Windows for now; the macOS and Linux versions are on their way.");
     std::process::exit(1);

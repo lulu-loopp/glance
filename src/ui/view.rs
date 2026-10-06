@@ -194,7 +194,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         "cpu" => {
             let sensors = s.cpu_sensors.as_ref();
             let temp = sensors.and_then(|c| c.temp);
-            let clock = prefs.cpu.clock.then(|| format!("{:.2} GHz", s.ghz));
+            let clock = s.ghz.filter(|_| prefs.cpu.clock).map(|ghz| format!("{ghz:.2} GHz"));
             // The temperature takes the corner, as on the GPU lanes; the
             // clock, the power and each chiplet's temperature go below.
             let aside = temp.map(celsius).or(clock.clone()).unwrap_or_default();
@@ -260,7 +260,11 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 if let Some(rpm) = reading.fan_rpm {
                     facts.push((lang.pick("风扇", "Fan").into(), format!("{rpm} RPM"), false));
                 }
-                facts.push((lang.pick("共享显存", "Shared").into(), text::usage(reading.shared_used, gpu.shared_total), false));
+                // Memory the card borrows from the system's, where it has its own
+                // besides (not where all of it is the system's, as on a Mac).
+                if gpu.shared_total > 0 {
+                    facts.push((lang.pick("共享显存", "Shared").into(), text::usage(reading.shared_used, gpu.shared_total), false));
+                }
             }
             blocks.push(Block::Facts { rows: facts, gap: 10.0 });
             blocks

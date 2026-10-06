@@ -36,7 +36,8 @@ pub struct Sample {
     pub t: u64,
     pub cpu: f32,
     pub threads: Vec<f32>,
-    pub ghz: f32,
+    /// The cores' clock, where the system says it.
+    pub ghz: Option<f32>,
     pub memory: MemorySample,
     pub gpus: Vec<GpuSample>,
     pub net_down: f64,

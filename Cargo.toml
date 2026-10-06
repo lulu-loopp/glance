@@ -20,6 +20,14 @@ studio = []
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# macOS's own APIs: the kernel's counters, and IOKit for drives, graphics,
+# sensors and power.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+mach2 = "0.7"
+objc2-core-foundation = "0.3"
+objc2-io-kit = "0.3"
+
 # Windows' own APIs: everything Glance does there, and only there.
 [target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"

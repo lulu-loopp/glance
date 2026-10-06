@@ -253,7 +253,7 @@ impl Sampler {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
             cpu: cpu.unwrap_or(0.0),
             threads: threads.into_iter().map(|(_, value)| value).collect(),
-            ghz: (self.base_mhz * performance / 100_000.0) as f32,
+            ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
             memory: MemorySample {
                 used: (perf.PhysicalTotal - perf.PhysicalAvailable) as u64 * page,
                 committed: perf.CommitTotal as u64 * page,
