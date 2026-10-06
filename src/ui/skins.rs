@@ -23,7 +23,8 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows_numerics::{Matrix3x2, Vector2};
 
-use super::gfx::{effect_input, Color, Frame};
+use super::canvas::Color;
+use super::gfx::{effect_input, Frame};
 use super::theme::{Shadow, Skin, Theme};
 use super::view::Rect;
 use crate::settings::Edge;

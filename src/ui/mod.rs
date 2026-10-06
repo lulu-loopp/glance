@@ -2,6 +2,7 @@
 //! surface of the panel's own window.
 
 pub mod backdrop;
+pub mod canvas;
 pub mod gfx;
 pub mod motion;
 pub mod prefs;

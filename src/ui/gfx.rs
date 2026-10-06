@@ -37,7 +37,16 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
-use windows_numerics::Matrix3x2;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1PathGeometry1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+};
+use windows_numerics::{Matrix3x2, Vector2};
+
+use super::canvas::{Align, Canvas, Color, Family, Fill, Font, FontKey, Point};
 
 /// The faces shipped inside the program, Latin only (the system supplies
 /// Chinese): Archivo, with its weight and width axes, for chart paper, and
@@ -45,83 +54,11 @@ use windows_numerics::Matrix3x2;
 const ARCHIVO: &[u8] = include_bytes!("../../fonts/Archivo-latin.woff2");
 const INTER: &[u8] = include_bytes!("../../fonts/Inter-latin.woff2");
 
-/// A colour as a CSS-style straight (not premultiplied) RGBA.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Color {
-    pub r: f32,
-    pub g: f32,
-    pub b: f32,
-    pub a: f32,
-}
-
 impl Color {
-    pub const CLEAR: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
-
-    pub const fn hex(rgb: u32, a: f32) -> Self {
-        Color {
-            r: ((rgb >> 16) & 0xFF) as f32 / 255.0,
-            g: ((rgb >> 8) & 0xFF) as f32 / 255.0,
-            b: (rgb & 0xFF) as f32 / 255.0,
-            a,
-        }
-    }
-
-    pub fn alpha(self, a: f32) -> Self {
-        Color { a: self.a * a, ..self }
-    }
-
     /// For Direct2D, which takes colours straight and premultiplies itself.
     pub fn d2d(self) -> D2D1_COLOR_F {
         D2D1_COLOR_F { r: self.r, g: self.g, b: self.b, a: self.a }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Family {
-    Archivo,
-    Inter,
-    Segoe,
-    SegoeDisplay,
-    /// The system's icon font: Segoe Fluent Icons on Windows 11, Segoe MDL2
-    /// Assets before it; both put the same glyphs at the same code points.
-    Icons,
-}
-
-/// A text style: face, size in DIPs, weight (100–900), width (% of normal)
-/// and letter spacing (em).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Font {
-    pub family: Family,
-    pub size: f32,
-    pub weight: f32,
-    pub width: f32,
-    pub tracking: f32,
-}
-
-impl Font {
-    pub const fn new(family: Family, size: f32, weight: f32) -> Self {
-        Font { family, size, weight, width: 100.0, tracking: 0.0 }
-    }
-
-    pub const fn width(self, width: f32) -> Self {
-        Font { width, ..self }
-    }
-
-    pub const fn tracking(self, tracking: f32) -> Self {
-        Font { tracking, ..self }
-    }
-
-    fn key(&self) -> FontKey {
-        (self.family, self.size.to_bits(), self.weight.to_bits(), self.width.to_bits(), self.tracking.to_bits())
-    }
-}
-
-type FontKey = (Family, u32, u32, u32, u32);
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Align {
-    Start,
-    End,
 }
 
 /// Devices and factories shared by every surface.
@@ -384,7 +321,86 @@ pub struct Frame<'a> {
     base: Matrix3x2,
 }
 
+impl Canvas for Frame<'_> {
+    fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
+        Frame::text(self, text, font, color, x, y, width, align);
+    }
+
+    fn measure(&self, text: &str, font: Font) -> f32 {
+        self.gfx.measure(text, font)
+    }
+
+    fn baseline(&self, font: Font) -> (f32, f32) {
+        self.gfx.baseline(font)
+    }
+
+    fn clip(&self, x: f32, y: f32, width: f32, height: f32) {
+        unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    }
+
+    fn unclip(&self) {
+        unsafe { self.dc.PopAxisAlignedClip() };
+    }
+
+    fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32) {
+        unsafe { self.dc.FillRectangle(&rect(x, y, width, height), self.brush(color)) };
+    }
+
+    fn fill_rounded(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32) {
+        if radius == 0.0 {
+            return Canvas::fill(self, color, x, y, width, height);
+        }
+        let radius = radius.min(width / 2.0).min(height / 2.0);
+        let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
+        unsafe { self.dc.FillRoundedRectangle(&shape, self.brush(color)) };
+    }
+
+    fn fill_circle(&self, color: Color, centre: Point, radius: f32) {
+        let dot = D2D1_ELLIPSE { point: Vector2 { X: centre.x, Y: centre.y }, radiusX: radius, radiusY: radius };
+        unsafe { self.dc.FillEllipse(&dot, self.brush(color)) };
+    }
+
+    fn stroke(&self, points: &[Point], color: Color, width: f32) {
+        if let Some(path) = self.path(points, false) {
+            unsafe { self.dc.DrawGeometry(&path, self.brush(color), width, None) };
+        }
+    }
+
+    fn fill_shape(&self, points: &[Point], fill: Fill) {
+        let Some(path) = self.path(points, true) else { return };
+        match fill {
+            Fill::Solid(color) => unsafe { self.dc.FillGeometry(&path, self.brush(color), None) },
+            Fill::Down { top, from, bottom, to } => {
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
+                unsafe {
+                    let Ok(collection) = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
+                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
+                    if let Ok(brush) = self.dc.CreateLinearGradientBrush(&line, None, &collection) {
+                        self.dc.FillGeometry(&path, &brush, None);
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl<'a> Frame<'a> {
+    /// The path through `points`, closed as a shape or open as a line;
+    /// `None` without points, or if Direct2D cannot make it.
+    fn path(&self, points: &[Point], closed: bool) -> Option<ID2D1PathGeometry1> {
+        let (first, rest) = points.split_first()?;
+        let rest: Vec<Vector2> = rest.iter().map(|p| Vector2 { X: p.x, Y: p.y }).collect();
+        unsafe {
+            let path = self.gfx.factory.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
+            sink.BeginFigure(Vector2 { X: first.x, Y: first.y }, if closed { D2D1_FIGURE_BEGIN_FILLED } else { D2D1_FIGURE_BEGIN_HOLLOW });
+            sink.AddLines(&rest);
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close().ok()?;
+            Some(path)
+        }
+    }
+
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
     pub fn origin(&self, x: f32, y: f32) {
         self.place(Matrix3x2::translation(x, y));

@@ -4,7 +4,7 @@ use windows::core::w;
 use windows::UI::ViewManagement::{UIColorType, UISettings};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
-use super::gfx::{Color, Family, Font};
+use super::canvas::{Color, Family, Font};
 use super::prefs::ThemePref;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

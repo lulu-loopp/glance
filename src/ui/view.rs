@@ -3,16 +3,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
-};
-use windows::Win32::Graphics::Direct2D::{
-    ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
-    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-};
-use windows_numerics::Vector2;
-
-use super::gfx::{rect, Align, Color, Family, Font, Frame};
+use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::prefs::{Prefs, ProcessSort};
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
@@ -624,7 +615,7 @@ impl Layout {
 
 /// Draws one pass over the panel with its top-left corner at the origin,
 /// and returns where clicks and wheel turns land.
-pub fn paint(frame: &Frame, scene: &Scene, lanes: &[Lane], layout: &Layout, pass: Pass) -> Vec<HitBox> {
+pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, pass: Pass) -> Vec<HitBox> {
     let theme = scene.theme;
     let mut hits = Vec::new();
     let boxes = layout.lanes();
@@ -633,14 +624,14 @@ pub fn paint(frame: &Frame, scene: &Scene, lanes: &[Lane], layout: &Layout, pass
         // Chart paper rules each lane off below; the last rule in a column
         // also sets off the bar.
         if pass == Pass::Content && theme.ruled {
-            fill(frame, theme.rule, area.x, area.y + area.h - 1.0, area.w, 1.0);
+            frame.fill(theme.rule, area.x, area.y + area.h - 1.0, area.w, 1.0);
         }
     }
     if pass == Pass::Content {
         if theme.ruled {
             for column in 1..layout.columns {
                 let x = boxes[layout.cuts[column]].x;
-                fill(frame, theme.rule, x, 0.0, 1.0, layout.lanes_height);
+                frame.fill(theme.rule, x, 0.0, 1.0, layout.lanes_height);
             }
         }
         paint_bar(frame, scene, layout, &mut hits);
@@ -648,29 +639,16 @@ pub fn paint(frame: &Frame, scene: &Scene, lanes: &[Lane], layout: &Layout, pass
     hits
 }
 
-fn fill(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32) {
-    unsafe { frame.dc.FillRectangle(&rect(x, y, w, h), frame.brush(color)) };
-}
-
-fn fill_rounded(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32) {
-    if radius == 0.0 {
-        return fill(frame, color, x, y, w, h);
-    }
-    let radius = radius.min(w / 2.0).min(h / 2.0);
-    let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius };
-    unsafe { frame.dc.FillRoundedRectangle(&shape, frame.brush(color)) };
-}
-
 /// Draws `text` so that its baseline sits where a CSS line box `line` DIPs
 /// tall, aligned to `bottom`, would put it.
-fn text_on_line(frame: &Frame, text: &str, font: Font, color: Color, x: f32, bottom: f32, line: f32, width: f32) {
-    let (ascent, descent) = frame.gfx.baseline(font);
+fn text_on_line(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, bottom: f32, line: f32, width: f32) {
+    let (ascent, descent) = frame.baseline(font);
     // The glyphs' ascent and descent centred in the line box.
     let baseline = bottom - line / 2.0 + (ascent - descent) / 2.0;
     frame.text(text, font, color, x, baseline - ascent, width, Align::Start);
 }
 
-fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass, hits: &mut Vec<HitBox>) {
+fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: Pass, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let ink = lane.ink;
     let left = area.x + theme.pad_x;
@@ -687,10 +665,10 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
             }
             (_, Pass::Plots) => {}
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
-                let title_width = frame.gfx.measure(title, theme.title);
+                let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
                 frame.text(title, theme.title, theme.text, left, row, width, Align::Start);
-                let aside_width = if aside.is_empty() { 0.0 } else { frame.gfx.measure(aside, theme.body) };
+                let aside_width = if aside.is_empty() { 0.0 } else { frame.measure(aside, theme.body) };
                 let device_left = left + title_width + 8.0;
                 let device_width = width - title_width - 8.0 - if aside_width > 0.0 { aside_width + 8.0 } else { 0.0 };
                 frame.text(device, theme.small, theme.text3, device_left, row + 1.0, device_width, Align::Start);
@@ -700,7 +678,7 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
             (Block::Readout { figure, unit, hot, .. }, Pass::Content) => {
                 let color = if *hot { theme.signal } else { theme.text };
                 // The figure and its unit stand on the chart's baseline.
-                let figure_width = frame.gfx.measure(figure, theme.figure);
+                let figure_width = frame.measure(figure, theme.figure);
                 let bottom = y + height;
                 text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, LABEL);
                 text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, 30.0);
@@ -710,7 +688,7 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
                     let row_y = y + height - (rows.len() - i) as f32 * (LINE + 2.0) + 1.0;
                     // A stroke sample in front of each label says which trace it names.
                     let stroke = if i == 0 { (ink.trace, 2.0) } else { (ink.trace2, 1.0) };
-                    fill(frame, stroke.0, left, row_y + LINE / 2.0, 10.0, stroke.1);
+                    frame.fill(stroke.0, left, row_y + LINE / 2.0, 10.0, stroke.1);
                     frame.text(label, theme.small, theme.text2, left + 15.0, row_y + 1.0, 40.0, Align::Start);
                     frame.text(value, theme.value, theme.text, left, row_y, LABEL + RATE_INDENT, Align::End);
                 }
@@ -723,30 +701,30 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
                 for (i, (load, hot)) in cells.iter().enumerate() {
                     let cx = left + i as f32 * (cell + gap);
                     let cy = y + 10.0;
-                    fill_rounded(frame, theme.track, cx, cy, cell, 14.0, radius);
+                    frame.fill_rounded(theme.track, cx, cy, cell, 14.0, radius);
                     let filled = 14.0 * load.clamp(0.0, 1.0);
                     if filled > 0.0 {
                         // The load fills from the bottom, inside the cell's rounding.
-                        unsafe { frame.dc.PushAxisAlignedClip(&rect(cx, cy + 14.0 - filled, cell, filled), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                        fill_rounded(frame, if *hot { theme.signal } else { ink.trace }, cx, cy, cell, 14.0, radius);
-                        unsafe { frame.dc.PopAxisAlignedClip() };
+                        frame.clip(cx, cy + 14.0 - filled, cell, filled);
+                        frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, cx, cy, cell, 14.0, radius);
+                        frame.unclip();
                     }
                 }
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {
                 let row_y = y + gap;
                 frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
-                let value_width = frame.gfx.measure(value, theme.small);
+                let value_width = frame.measure(value, theme.small);
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
                 let bar_width = left + width - value_width - LABEL_GAP - plot_left;
                 let bar_y = row_y + (LINE - theme.meter_height) / 2.0;
                 let (height, radius) = (theme.meter_height, theme.meter_radius);
-                fill_rounded(frame, theme.track, plot_left, bar_y, bar_width, height, radius);
+                frame.fill_rounded(theme.track, plot_left, bar_y, bar_width, height, radius);
                 let filled = bar_width * fraction.clamp(0.0, 1.0);
                 if filled > 0.0 {
-                    unsafe { frame.dc.PushAxisAlignedClip(&rect(plot_left, bar_y, filled, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                    fill_rounded(frame, if *hot { theme.signal } else { ink.trace }, plot_left, bar_y, bar_width, height, radius);
-                    unsafe { frame.dc.PopAxisAlignedClip() };
+                    frame.clip(plot_left, bar_y, filled, height);
+                    frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, plot_left, bar_y, bar_width, height, radius);
+                    frame.unclip();
                 }
             }
             (Block::Facts { rows, gap }, Pass::Content) => {
@@ -772,7 +750,7 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
                 let max_scroll = (rows.len().saturating_sub(*visible)) as f32 * TABLE_ROW;
                 hits.push((left, y, width, list_height, Hit::Processes(max_scroll.to_bits())));
                 let scroll = scene.process_scroll.clamp(0.0, max_scroll);
-                unsafe { frame.dc.PushAxisAlignedClip(&rect(left, y, width, list_height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                frame.clip(left, y, width, list_height);
                 for (i, row) in rows.iter().enumerate() {
                     let row_y = y + i as f32 * TABLE_ROW - scroll;
                     if row_y + TABLE_ROW < y || row_y > y + list_height {
@@ -784,12 +762,12 @@ fn paint_lane(frame: &Frame, scene: &Scene, lane: &Lane, area: Rect, pass: Pass,
                         frame.text(&row[j], font, color, *cx, text_y, *cw, align);
                     }
                 }
-                unsafe { frame.dc.PopAxisAlignedClip() };
+                frame.unclip();
                 // A thin thumb shows where in the list the view is.
                 if max_scroll > 0.0 {
                     let thumb = (list_height * *visible as f32 / rows.len() as f32).max(12.0);
                     let at = y + (list_height - thumb) * scroll / max_scroll;
-                    fill_rounded(frame, theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
+                    frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
                 }
             }
         }
@@ -812,7 +790,7 @@ fn table_columns(left: f32, width: f32) -> [(f32, f32); 5] {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paint_plot(frame: &Frame, scene: &Scene, ink: Ink, plot: &Plot, left: f32, top: f32, width: f32, height: f32) {
+fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f32, top: f32, width: f32, height: f32) {
     let theme = scene.theme;
     let span = scene.prefs.chart_seconds * 1000.0;
     let pen = scene.pen_ms;
@@ -826,43 +804,40 @@ fn paint_plot(frame: &Frame, scene: &Scene, ink: Ink, plot: &Plot, left: f32, to
     let rule_ms = span / 6.0;
     let mut t = (pen / rule_ms).floor() * rule_ms;
     while x(t) > left {
-        fill(frame, theme.rule, x(t).round(), top, 1.0, height);
+        frame.fill(theme.rule, x(t).round(), top, 1.0, height);
         t -= rule_ms;
     }
-    fill(frame, theme.rule, left, bottom, width, 1.0);
+    frame.fill(theme.rule, left, bottom, width, 1.0);
 
     // One sample beyond each end, so the trace runs off both sides.
     let history = scene.history;
     let Some(first) = history.iter().position(|s| s.t as f64 >= pen - span) else { return };
     let visible = &history[first.saturating_sub(1)..];
     let last = visible.last().unwrap();
-    unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top - 2.0, width, height + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+    frame.clip(left, top - 2.0, width, height + 2.0);
     for (order, read) in plot.series.iter().enumerate() {
-        let mut points: Vec<Vector2> = visible.iter().map(|s| Vector2 { X: x(s.t as f64), Y: y(read(s)) }).collect();
+        let mut points: Vec<Point> = visible.iter().map(|s| Point { x: x(s.t as f64), y: y(read(s)) }).collect();
         // The pen holds its position if the next sample is late.
         if (last.t as f64) < pen {
-            points.push(Vector2 { X: right, Y: y(read(last)) });
+            points.push(Point { x: right, y: y(read(last)) });
         }
         if order == 0 {
             let mut area = points.clone();
-            area.push(Vector2 { X: points.last().unwrap().X.max(right), Y: bottom });
-            area.push(Vector2 { X: points[0].X, Y: bottom });
-            if let Ok(path) = polyline(frame, &area, true) {
-                fill_wash(frame, &path, ink, top, bottom);
-            }
+            area.push(Point { x: points.last().unwrap().x.max(right), y: bottom });
+            area.push(Point { x: points[0].x, y: bottom });
+            // The wash under the trace, fading where the skin's fades.
+            let wash = if ink.wash == ink.wash_end { Fill::Solid(ink.wash) } else { Fill::Down { top, from: ink.wash, bottom, to: ink.wash_end } };
+            frame.fill_shape(&area, wash);
         }
-        let Ok(path) = polyline(frame, &points, false) else { continue };
         let (color, stroke) = if order == 0 { (ink.trace, 1.5) } else { (ink.trace2, 1.0) };
-        unsafe { frame.dc.DrawGeometry(&path, frame.brush(color), stroke, None) };
+        frame.stroke(&points, color, stroke);
         if let (0, Some(hot)) = (order, plot.hot) {
-            unsafe {
-                frame.dc.PushAxisAlignedClip(&rect(left, top - 2.0, width, y(hot) - top + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                frame.dc.DrawGeometry(&path, frame.brush(theme.signal), stroke, None);
-                frame.dc.PopAxisAlignedClip();
-            }
+            frame.clip(left, top - 2.0, width, y(hot) - top + 2.0);
+            frame.stroke(&points, theme.signal, stroke);
+            frame.unclip();
         }
     }
-    unsafe { frame.dc.PopAxisAlignedClip() };
+    frame.unclip();
 
     // The pen tip sits at the moment being drawn.
     let read = &plot.series[0];
@@ -874,49 +849,16 @@ fn paint_plot(frame: &Frame, scene: &Scene, ink: Ink, plot: &Plot, left: f32, to
     let progress = if after.t == before.t { 0.0 } else { (pen - before.t as f64) / (after.t - before.t) as f64 };
     let value = read(before) + (read(after) - read(before)) * progress;
     let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { ink.trace };
-    let dot = D2D1_ELLIPSE { point: Vector2 { X: right, Y: y(value) }, radiusX: 2.5, radiusY: 2.5 };
-    unsafe { frame.dc.FillEllipse(&dot, frame.brush(color)) };
+    frame.fill_circle(color, Point { x: right, y: y(value) }, 2.5);
 }
 
-/// Fills the area under a chart's trace with its wash, fading from the top
-/// of the chart to the bottom where the skin's wash fades.
-fn fill_wash(frame: &Frame, path: &windows::Win32::Graphics::Direct2D::ID2D1PathGeometry1, ink: Ink, top: f32, bottom: f32) {
-    if ink.wash == ink.wash_end {
-        unsafe { frame.dc.FillGeometry(path, frame.brush(ink.wash), None) };
-        return;
-    }
-    let stops = [
-        D2D1_GRADIENT_STOP { position: 0.0, color: ink.wash.d2d() },
-        D2D1_GRADIENT_STOP { position: 1.0, color: ink.wash_end.d2d() },
-    ];
-    unsafe {
-        let Ok(collection) = ID2D1RenderTarget::CreateGradientStopCollection(&frame.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
-        let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
-        if let Ok(brush) = frame.dc.CreateLinearGradientBrush(&line, None, &collection) {
-            frame.dc.FillGeometry(path, &brush, None);
-        }
-    }
-}
-
-fn polyline(frame: &Frame, points: &[Vector2], closed: bool) -> windows::core::Result<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry1> {
-    let path = unsafe { frame.gfx.factory.CreatePathGeometry()? };
-    let sink = unsafe { path.Open()? };
-    unsafe {
-        sink.BeginFigure(points[0], if closed { D2D1_FIGURE_BEGIN_FILLED } else { D2D1_FIGURE_BEGIN_HOLLOW });
-        sink.AddLines(&points[1..]);
-        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-        sink.Close()?;
-    }
-    Ok(path)
-}
-
-fn paint_bar(frame: &Frame, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBox>) {
+fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let bar = layout.bar();
     // Windows 11 sets the bar off as a slightly darker footer strip.
     if theme.skin == Skin::Fluent {
-        fill(frame, theme.footer, bar.x, bar.y, bar.w, bar.h);
-        fill(frame, theme.rule, bar.x, bar.y, bar.w, 1.0);
+        frame.fill(theme.footer, bar.x, bar.y, bar.w, bar.h);
+        frame.fill(theme.rule, bar.x, bar.y, bar.w, 1.0);
     }
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
@@ -930,10 +872,10 @@ fn paint_bar(frame: &Frame, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBo
     for (left, glyph, hit, lit) in [(pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)] {
         let hovered = scene.hover == Some(hit);
         if hovered || lit {
-            fill_rounded(frame, theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+            frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
         }
         let icon = Font::new(Family::Icons, 16.0, 400.0);
-        let glyph_left = left + (BUTTON - frame.gfx.measure(glyph, icon)) / 2.0;
+        let glyph_left = left + (BUTTON - frame.measure(glyph, icon)) / 2.0;
         frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, glyph_left, top + 8.0, BUTTON, Align::Start);
         hits.push((left, top, BUTTON, BUTTON, hit));
     }

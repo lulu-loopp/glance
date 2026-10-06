@@ -45,7 +45,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::backdrop::Capture;
-use super::gfx::{self, rect, Align, Color, Family, Font, Frame, Gfx, Surface};
+use super::canvas::{Align, Color, Family, Font};
+use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
 use super::prefs::{LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::render::{self, PanelLayers, GAP};
