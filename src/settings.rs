@@ -33,6 +33,49 @@ pub enum Anchor {
     Center,
 }
 
+/// A key combination: modifier keys held, and one other key, by its
+/// Windows virtual-key code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Shortcut {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub win: bool,
+    pub key: u16,
+}
+
+impl Default for Shortcut {
+    /// Ctrl+Alt+G.
+    fn default() -> Self {
+        Shortcut { ctrl: true, alt: true, shift: false, win: false, key: u16::from(b'G') }
+    }
+}
+
+impl Shortcut {
+    /// Whether it can be a shortcut: a key that is not itself a modifier,
+    /// with Ctrl, Alt or Win held (Shift alone would take a key from typing).
+    pub fn usable(&self) -> bool {
+        // Shift, Ctrl, Alt (either side or neither) and the Windows keys.
+        const MODIFIERS: [u16; 9] = [0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5];
+        let key = self.key != 0 && !MODIFIERS.contains(&self.key) && self.key != 0x5B && self.key != 0x5C;
+        key && (self.ctrl || self.alt || self.win)
+    }
+}
+
+/// What opens the panel over a game in exclusive fullscreen.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverFullscreen {
+    /// Nothing: the game keeps the screen.
+    Never,
+    /// The shortcut, which is asked for; a push into the edge may be an
+    /// accident mid-game.
+    #[default]
+    Shortcut,
+    /// The shortcut and a push into the edge.
+    Both,
+}
+
 /// How hard the pointer has to push into the edge.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,13 +116,13 @@ pub struct Settings {
     pub live_backdrop: bool,
     /// Ask GitHub once a day whether a newer Glance is out.
     pub check_updates: bool,
-    /// Ctrl+Alt+G opens and closes the panel.
+    /// The shortcut (Ctrl+Alt+G unless another is chosen) opens and closes
+    /// the panel.
     pub hotkey: bool,
-    /// While a game holds the screen in exclusive fullscreen, the panel
-    /// showing sends it to the background: whether pushing into the edge,
-    /// and the shortcut, open the panel all the same.
-    pub fullscreen_edge: bool,
-    pub fullscreen_hotkey: bool,
+    pub shortcut: Shortcut,
+    /// What opens the panel over a game holding the screen in exclusive
+    /// fullscreen, which the panel showing sends to the background.
+    pub over_fullscreen: OverFullscreen,
     /// Tell from the tray when the CPU or a graphics card stays at or above
     /// the temperature alert.
     pub heat_alert: bool,
@@ -99,8 +142,8 @@ impl Default for Settings {
             live_backdrop: false,
             check_updates: true,
             hotkey: true,
-            fullscreen_edge: false,
-            fullscreen_hotkey: true,
+            shortcut: Shortcut::default(),
+            over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
             view: serde_json::Value::Null,
         }
@@ -139,11 +182,41 @@ impl Settings {
             crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
+        if !settings.shortcut.usable() {
+            settings.shortcut = Shortcut::default();
+        }
         settings
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         crate::elevation::ensure_folder(dir)?;
         crate::elevation::write_in_place(dir, FILE, serde_json::to_string_pretty(self).unwrap().as_bytes())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn takes_only_shortcuts_that_leave_typing_alone() {
+        let key = |ctrl, alt, shift, win, key| Shortcut { ctrl, alt, shift, win, key }.usable();
+        assert!(Shortcut::default().usable());
+        assert!(key(true, false, true, false, u16::from(b'K')));
+        assert!(key(false, false, false, true, 0x70));
+        // A key alone, or with Shift alone, is typing.
+        assert!(!key(false, false, false, false, u16::from(b'K')));
+        assert!(!key(false, false, true, false, u16::from(b'K')));
+        // Modifiers alone are no shortcut.
+        assert!(!key(true, true, false, false, 0x12));
+        assert!(!key(true, false, false, false, 0x5B));
+    }
+
+    #[test]
+    fn settings_from_before_take_the_defaults() {
+        let settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
+        assert_eq!(settings.shortcut, Shortcut::default());
+        assert!(settings.over_fullscreen == OverFullscreen::Shortcut);
+        assert_eq!(settings.columns, None);
     }
 }

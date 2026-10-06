@@ -38,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::detector::{Detector, Motion};
 use crate::reading::{Sample, StaticInfo};
-use crate::settings::{Anchor, Edge, Settings};
+use crate::settings::{Anchor, Edge, OverFullscreen, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, GAP};
@@ -102,8 +102,7 @@ struct Config {
     anchor: Anchor,
     columns: Option<usize>,
     pressure: i32,
-    fullscreen_edge: bool,
-    fullscreen_hotkey: bool,
+    over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
     history: usize,
@@ -118,8 +117,7 @@ fn config_from(settings: &Settings) -> Config {
         anchor: settings.anchor,
         columns: settings.columns,
         pressure: settings.sensitivity.pressure(),
-        fullscreen_edge: settings.fullscreen_edge,
-        fullscreen_hotkey: settings.fullscreen_hotkey,
+        over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
         history: (LONGEST_SPAN.as_millis() / settings.interval().as_millis()) as usize + 16,
@@ -287,9 +285,14 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (edge, pressure, fullscreen_edge, fullscreen_hotkey) = {
+            let (edge, pressure, over_fullscreen) = {
                 let config = self.config.lock().unwrap();
-                (config.edge, config.pressure, config.fullscreen_edge, config.fullscreen_hotkey)
+                (config.edge, config.pressure, config.over_fullscreen)
+            };
+            let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
+                OverFullscreen::Never => (false, false),
+                OverFullscreen::Shortcut => (true, false),
+                OverFullscreen::Both => (true, true),
             };
             // Over a game in exclusive fullscreen the panel sends the game to
             // the background: it opens there only as the settings allow.

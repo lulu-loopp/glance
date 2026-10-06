@@ -21,7 +21,11 @@ use windows::Win32::Graphics::Gdi::{
     CreateFontIndirectW, DeleteObject, DrawTextW, GetDC, ReleaseDC, SelectObject, DT_CALCRECT, DT_NOPREFIX, DT_SINGLELINE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS};
-use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyNameTextW, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
+};
+
+use crate::settings::Shortcut;
 
 /// The icon's messages to its window, and another start of Glance asking
 /// for the settings.
@@ -36,6 +40,8 @@ const HOTKEY_ID: i32 = 1;
 static TIP: Mutex<String> = Mutex::new(String::new());
 /// The shortcut is wanted but another program has it.
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
+/// The shortcut is let go while the settings take a new one.
+static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Sent to every top-level window when the taskbar is created again (after
@@ -296,17 +302,69 @@ fn in_tooltip_font<R>(act: impl FnOnce(&dyn Fn(&str) -> i32) -> R) -> R {
     }
 }
 
-/// Registers Ctrl+Alt+G if the settings want it, or lets it go.
+/// Registers the shortcut if the settings want it (and it is not held back
+/// while a new one is being chosen), or lets it go.
 fn register_hotkey(hwnd: HWND) {
     unsafe {
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
     }
-    let wanted = crate::app().settings.lock().unwrap().hotkey;
-    let taken = wanted && unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, u32::from(b'G')) }.is_err();
+    let (wanted, shortcut) = {
+        let settings = crate::app().settings.lock().unwrap();
+        (settings.hotkey && !HOTKEY_HELD.load(Ordering::Relaxed), settings.shortcut)
+    };
+    let mut modifiers = MOD_NOREPEAT;
+    for (held, flag) in [(shortcut.ctrl, MOD_CONTROL), (shortcut.alt, MOD_ALT), (shortcut.shift, MOD_SHIFT), (shortcut.win, MOD_WIN)] {
+        if held {
+            modifiers |= flag;
+        }
+    }
+    let taken = wanted && unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
     if taken && !HOTKEY_TAKEN.load(Ordering::Relaxed) {
-        crate::journal::note("Ctrl+Alt+G is taken by another program");
+        crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
     }
     HOTKEY_TAKEN.store(taken, Ordering::Relaxed);
+}
+
+/// Lets the shortcut go while a new one is being chosen (its keys would
+/// otherwise never reach the settings), or takes it up again.
+pub fn hold_hotkey(held: bool) {
+    HOTKEY_HELD.store(held, Ordering::Relaxed);
+    follow_settings();
+}
+
+/// A shortcut as it is written: "Ctrl+Alt+G", the key by the name the
+/// keyboard's layout gives it.
+pub fn shortcut_name(shortcut: Shortcut) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (held, name) in [(shortcut.ctrl, "Ctrl"), (shortcut.alt, "Alt"), (shortcut.shift, "Shift"), (shortcut.win, "Win")] {
+        if held {
+            parts.push(name.to_string());
+        }
+    }
+    parts.push(key_name(shortcut.key));
+    parts.join("+")
+}
+
+fn key_name(key: u16) -> String {
+    match key {
+        // Letters and digits as they are; the function keys by number.
+        0x30..=0x39 | 0x41..=0x5A => char::from(key as u8).to_string(),
+        0x70..=0x87 => format!("F{}", key - 0x6F),
+        _ => {
+            let scan = unsafe { MapVirtualKeyW(u32::from(key), MAPVK_VK_TO_VSC) };
+            // The keys of the navigation block and the arrows are "extended":
+            // without the flag their names are the number pad's.
+            let extended = matches!(key, 0x21..=0x2E | 0x5B..=0x5D | 0x6F | 0x90);
+            let lparam = ((scan as i32) << 16) | if extended { 1 << 24 } else { 0 };
+            let mut name = [0u16; 64];
+            let length = unsafe { GetKeyNameTextW(lparam, &mut name) };
+            if length > 0 {
+                String::from_utf16_lossy(&name[..length as usize])
+            } else {
+                format!("0x{key:02X}")
+            }
+        }
+    }
 }
 
 /// Whether the shortcut is wanted but another program already has it.

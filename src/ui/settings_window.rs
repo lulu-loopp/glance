@@ -32,12 +32,13 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
-    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+    VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
     MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
-    WM_KEYDOWN, WM_SYSKEYDOWN,
+    WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -59,7 +60,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, Sensitivity, Settings};
+use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
 use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
@@ -266,6 +267,7 @@ enum Field {
     Edge,
     Anchor,
     Columns,
+    OverFullscreen,
     Push,
     CloseDelay,
     RateUnit,
@@ -284,8 +286,6 @@ enum Switch {
     Startup,
     Updates,
     Hotkey,
-    FullscreenEdge,
-    FullscreenHotkey,
     HeatAlert,
 }
 
@@ -302,6 +302,8 @@ enum Target {
     /// One of a module's items.
     Item(String, &'static str),
     Grip(String),
+    /// The shortcut's keys: pressed, the next combination becomes them.
+    Shortcut,
     Diagnostics,
     Update,
     Uninstall,
@@ -318,6 +320,7 @@ enum Row {
     /// In a module's open card: one of its items, or a choice of its own.
     Item(String, &'static str),
     ModuleChoice(String, Field),
+    Shortcut,
     Diagnostics,
     Update,
     Uninstall,
@@ -366,6 +369,10 @@ struct Ui {
     motion: HashMap<String, Transition>,
     /// Thumbs land where they belong without sliding (after relabelling).
     settle_thumbs: bool,
+    /// Taking a new shortcut: the next key combination pressed, and whether
+    /// the last one lacked Ctrl, Alt or Win.
+    recording: bool,
+    needs_modifier: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
     /// The control the keyboard acts on, and whether the keyboard has been
@@ -456,6 +463,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             scroll_target: 0.0,
             motion: HashMap::new(),
             settle_thumbs: true,
+            recording: false,
+            needs_modifier: false,
             pointer: None,
             pressed: None,
             focus: None,
@@ -572,7 +581,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // Closed: everything it drew with is let go; the device stays with
         // the panel.
+        // Gone to another window: a new shortcut is no longer being taken.
+        WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
+            with_ui(|ui| ui.record(false));
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_DESTROY => {
+            // The shortcut, if let go while a new one was taken, is taken up again.
+            crate::tray::hold_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back
             // what they held.
             let ui = UI.with(|cell| cell.borrow_mut().take());
@@ -641,8 +657,8 @@ impl Ui {
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
             Row::Switch(Switch::Hotkey),
-            Row::Switch(Switch::FullscreenEdge),
-            Row::Switch(Switch::FullscreenHotkey),
+            Row::Shortcut,
+            Row::Choice(Field::OverFullscreen),
             Row::Heading("显示内容", "Shown"),
         ];
         for entry in &self.prefs.modules {
@@ -769,6 +785,11 @@ impl Ui {
                 vec![s("跟随指针", "At pointer"), s("居中", "Centred")],
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
+            Field::OverFullscreen => (
+                pick(lang, "独占全屏游戏中呼出", "Over exclusive fullscreen"),
+                vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("都可以", "Both")],
+                [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both].iter().position(|&o| o == settings.over_fullscreen),
+            ),
             Field::Columns => (
                 pick(lang, "面板栏数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
@@ -822,6 +843,7 @@ impl Ui {
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
+            Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
@@ -842,6 +864,50 @@ impl Ui {
         }
     }
 
+    /// Starts or stops taking a new shortcut. Meanwhile the old one is let
+    /// go, or its keys would never come here.
+    fn record(&mut self, on: bool) {
+        if on == self.recording {
+            return;
+        }
+        self.recording = on;
+        self.needs_modifier = false;
+        crate::tray::hold_hotkey(on);
+        self.next_frame = Instant::now();
+    }
+
+    /// A key pressed while taking a new shortcut: Escape gives up, a modifier
+    /// alone waits for the key it goes with, and a key with Ctrl, Alt or Win
+    /// held becomes the shortcut.
+    fn take_shortcut(&mut self, key: VIRTUAL_KEY) {
+        self.next_frame = Instant::now();
+        let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(key.0 as i32) } < 0;
+        let modifiers = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN];
+        if key == VK_ESCAPE {
+            self.record(false);
+            return;
+        }
+        if modifiers.contains(&key) {
+            return;
+        }
+        let shortcut = Shortcut { ctrl: down(VK_CONTROL), alt: down(VK_MENU), shift: down(VK_SHIFT), win: down(VK_LWIN) || down(VK_RWIN), key: key.0 };
+        if !shortcut.usable() {
+            self.needs_modifier = true;
+            return;
+        }
+        self.settings.shortcut = shortcut;
+        self.save();
+        self.record(false);
+    }
+
+    /// A word under a row of choices' name, for the few that need one.
+    fn choice_hint(&self, field: Field) -> Option<&'static str> {
+        match field {
+            Field::OverFullscreen => Some(pick(self.lang, "呼出时游戏会退到后台", "Sends the game to the background")),
+            _ => None,
+        }
+    }
+
     /// A switch's label, its hint, and whether it is on.
     fn switch(&self, switch: Switch) -> (&'static str, Option<Cow<'static, str>>, bool) {
         let lang = self.lang;
@@ -858,23 +924,13 @@ impl Ui {
                 self.autostart,
             ),
             Switch::Hotkey => (
-                p("快捷键 Ctrl+Alt+G", "Shortcut Ctrl+Alt+G"),
+                p("快捷键", "Shortcut"),
                 Some(if crate::tray::hotkey_taken() {
                     p("已被其他程序占用，暂时无法使用", "Another program is using it")
                 } else {
                     p("打开或收起面板，也可收起已固定的面板", "Opens and closes the panel, pinned or not")
                 }),
                 self.settings.hotkey,
-            ),
-            Switch::FullscreenEdge => (
-                p("独占全屏游戏中推边缘呼出", "Edge push over exclusive fullscreen"),
-                Some(p("呼出时游戏会切到后台；无边框游戏不受影响", "Sends the game to the background; borderless games are unaffected")),
-                self.settings.fullscreen_edge,
-            ),
-            Switch::FullscreenHotkey => (
-                p("独占全屏游戏中快捷键呼出", "Shortcut over exclusive fullscreen"),
-                Some(p("呼出时游戏会切到后台；无边框游戏不受影响", "Sends the game to the background; borderless games are unaffected")),
-                self.settings.fullscreen_hotkey,
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
@@ -914,21 +970,12 @@ impl Ui {
         unsafe { MessageBoxW(Some(self.hwnd), &HSTRING::from(text), &HSTRING::from(title), MB_OK | MB_ICONINFORMATION) };
     }
 
-    /// Whether a switch does anything just now: the shortcut's over fullscreen
-    /// games only while the shortcut is on. One that does not is dimmed, and
-    /// keeps its state.
-    fn switch_active(&self, switch: Switch) -> bool {
-        switch != Switch::FullscreenHotkey || self.settings.hotkey
-    }
-
     fn flip(&mut self, switch: Switch) {
         let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::Hotkey => settings.hotkey ^= true,
-            Switch::FullscreenEdge => settings.fullscreen_edge ^= true,
-            Switch::FullscreenHotkey => settings.fullscreen_hotkey ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
@@ -1075,6 +1122,10 @@ impl Ui {
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.pressed = self.hovered();
+        // A press anywhere else gives up taking a new shortcut.
+        if self.recording && self.pressed != Some(Target::Shortcut) {
+            self.record(false);
+        }
         // A press moves the focus there too, without showing it.
         if let Some(target) = &self.pressed {
             self.keyboard = false;
@@ -1133,6 +1184,7 @@ impl Ui {
             }
             Target::Choice(field, index) => self.choose(field, index),
             Target::Switch(switch) => self.flip(switch),
+            Target::Shortcut => self.record(!self.recording),
             Target::Module(id) => {
                 if let Some(entry) = self.prefs.modules.iter_mut().find(|entry| entry.id == id) {
                     entry.on ^= true;
@@ -1191,8 +1243,7 @@ impl Ui {
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
-                Row::Switch(switch) if self.switch_active(switch) => vec![Target::Switch(switch)],
-                Row::Switch(_) => vec![],
+                Row::Switch(switch) => vec![Target::Switch(switch)],
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
@@ -1200,6 +1251,7 @@ impl Ui {
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update => vec![Target::Update],
+                Row::Shortcut => vec![Target::Shortcut],
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
@@ -1214,6 +1266,10 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
+        if self.recording {
+            self.take_shortcut(key);
+            return true;
+        }
         let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_) | Target::Expand(_)));
         if alt && !moves_module {
             return false;
@@ -1561,21 +1617,19 @@ impl Ui {
                 Row::Choice(field) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, options, chosen) = self.choices(field);
-                    text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
-                    self.segmented(frame, palette, field, &options, chosen, true, left + width - ROW_SIDE, y + row_height / 2.0, now, &hovered);
+                    let right = left + width - ROW_SIDE;
+                    let options_left = self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
+                    let room = options_left - 16.0 - left - ROW_SIDE;
+                    field_label(frame, palette, name, self.choice_hint(field), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
                 }
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, detail, on) = self.switch(switch);
-                    let active = self.switch_active(switch);
-                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
-                    field_label_in(frame, colors, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
+                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
-                    self.toggle(frame, palette, key, on, active, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
-                    if active {
-                        self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::Switch(switch)));
-                    }
+                    self.toggle(frame, palette, key, on, true, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
+                    self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::Switch(switch)));
                 }
                 Row::Module(id) => {
                     let offset = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
@@ -1647,6 +1701,25 @@ impl Ui {
                     stroke_inside(frame, button, 6.0, palette.rule);
                     text_centred(frame, action, label, if busy { palette.text2 } else { palette.signal }, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
                     self.targets.push((button, Target::Update));
+                }
+                Row::Shortcut => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let name = pick(lang, "组合键", "Key combination");
+                    let detail = match (self.recording, self.needs_modifier) {
+                        (true, true) => pick(lang, "要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
+                        (true, false) => pick(lang, "按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
+                        (false, _) => pick(lang, "点右边的按钮更换", "Click the button to change it"),
+                    };
+                    let action = if self.recording { pick(lang, "请按键…", "Press keys…").to_string() } else { crate::tray::shortcut_name(self.settings.shortcut) };
+                    let button_w = frame.gfx.measure(&action, label) + 32.0;
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - button_w - 16.0);
+                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
+                    if hovered == Some(Target::Shortcut) || self.recording {
+                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
+                    }
+                    stroke_inside(frame, button, 6.0, if self.recording { palette.selection } else { palette.rule });
+                    text_centred(frame, &action, label, palette.text, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
+                    self.targets.push((button, Target::Shortcut));
                 }
                 Row::Diagnostics => {
                     // "Copied" for a moment after the press.
@@ -1786,9 +1859,9 @@ impl Ui {
 
     /// A row of options with one thumb that slides under the chosen one,
     /// right-aligned at `right` and centred on `cy`; unless `enabled`, dimmed
-    /// and not to be pressed.
+    /// and not to be pressed. Returns where it starts.
     #[allow(clippy::too_many_arguments)]
-    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
+    fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) -> f32 {
         let font = Font::new(Family::Segoe, 13.0, 400.0);
         let widths: Vec<f32> = options.iter().map(|o| (frame.gfx.measure(o, font) + 24.0).max(44.0)).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
@@ -1826,6 +1899,7 @@ impl Ui {
                 self.targets.push((Rect { x: *sx, y: y0, w: *sw, h: 32.0 }, target));
             }
         }
+        x0
     }
 
     /// A switch, 40 × 22, with its left edge at `x` and centred on `cy`;
