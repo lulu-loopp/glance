@@ -471,6 +471,8 @@ struct Panel<'a> {
     /// settings it was made for.
     shape: arrange::Shape,
     style: String,
+    /// The size (DIPs) and zoom the panel was last laid out at, this opening.
+    size: Option<(f32, f32, f32)>,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
@@ -511,6 +513,7 @@ impl<'a> Panel<'a> {
             pinned: false,
             shape: arrange::Shape::default(),
             style: String::new(),
+            size: None,
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -546,6 +549,7 @@ impl<'a> Panel<'a> {
         if style != self.style {
             self.style = style;
             self.shape = arrange::Shape::default();
+            self.size = None;
         }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
@@ -573,6 +577,7 @@ impl<'a> Panel<'a> {
             self.restyle();
             // A new opening takes the shape the readings now give it.
             self.shape = arrange::Shape::default();
+            self.size = None;
             let work = contact.work;
             let anchor = match self.controller.config.lock().unwrap().anchor {
                 Anchor::Pointer => cursor,
@@ -755,6 +760,19 @@ impl<'a> Panel<'a> {
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
         let (layout, zoom) = self.shape.arrange(&self.theme, self.edge, &heights, work);
+        // A panel that changes shape while up is noted, with what it was
+        // laid out from: the log is what a user's diagnostics bring back.
+        let size = (layout.width(), layout.height(), zoom);
+        if self.size.is_some_and(|was| was != size) {
+            let lanes: Vec<String> = heights.iter().map(|(id, height)| format!("{id} {height}")).collect();
+            crate::journal::note(format!(
+                "the open panel changed shape: {:?} to {size:?} ({} columns, work area {work:?}; lanes {})",
+                self.size.unwrap(),
+                layout.columns,
+                lanes.join(", ")
+            ));
+        }
+        self.size = Some(size);
         let placement = self.placement.as_mut().unwrap();
         place(placement, &self.window, self.edge, &self.theme, (layout.width(), layout.height()), zoom);
         (lanes, layout)

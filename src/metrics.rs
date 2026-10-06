@@ -14,8 +14,8 @@ use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
-    D3DKMT_ADAPTERADDRESS, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
-    KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_NODEPERFDATA,
+    D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
+    KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERTYPE, KMTQAITYPE_NODEPERFDATA,
 };
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, LUID, UNICODE_STRING};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
@@ -668,6 +668,12 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
         if unsafe { D3DKMTOpenAdapterFromLuid(&mut open) }.is_err() {
             continue;
         }
+        // A display-only adapter (a virtual display's, as Parsec's or a
+        // streaming tool's) goes by the name of the GPU that draws for it,
+        // and has no work of its own to show: that GPU is listed already.
+        if !renders(open.hAdapter) {
+            continue;
+        }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
         let power = adapter_address(open.hAdapter).and_then(|address| power.reader(address));
         adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
@@ -692,6 +698,20 @@ fn adapter_perf(kmt_handle: u32) -> Option<D3DKMT_ADAPTER_PERFDATA> {
         PrivateDriverDataSize: size_of::<D3DKMT_ADAPTER_PERFDATA>() as u32,
     };
     unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some(perf)
+}
+
+/// Whether the adapter renders, as the kernel classes it; one that does not
+/// say is taken to.
+fn renders(kmt_handle: u32) -> bool {
+    const RENDER_SUPPORTED: u32 = 1;
+    let mut kind = D3DKMT_ADAPTERTYPE::default();
+    let mut query = D3DKMT_QUERYADAPTERINFO {
+        hAdapter: kmt_handle,
+        Type: KMTQAITYPE_ADAPTERTYPE,
+        pPrivateDriverData: &mut kind as *mut _ as *mut _,
+        PrivateDriverDataSize: size_of::<D3DKMT_ADAPTERTYPE>() as u32,
+    };
+    unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_err() || unsafe { kind.Anonymous.Value } & RENDER_SUPPORTED != 0
 }
 
 /// Where the adapter sits on the PCI bus.

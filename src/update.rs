@@ -33,8 +33,10 @@ use crate::ui::text::Lang;
 const HOST: &str = "api.github.com";
 const LATEST: &str = "/repos/lulu-loopp/glance/releases/latest";
 /// How often to ask, and how soon after Glance starts (not while the
-/// desktop is still coming up).
+/// desktop is still coming up); an ask that got no answer (offline, or
+/// GitHub out of reach) is made again sooner.
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const RETRY: Duration = Duration::from_secs(60 * 60);
 const FIRST: Duration = Duration::from_secs(60);
 /// More than any installer of Glance's: an answer this large is not one.
 const MOST: usize = 64 << 20;
@@ -66,13 +68,18 @@ pub fn available() -> Option<(String, State)> {
 
 /// Asks for the latest release now and then, for as long as Glance runs.
 pub fn watch() {
-    let mut last: Option<Instant> = None;
+    // When to ask next.
+    let mut due = Instant::now();
     thread::sleep(FIRST);
     loop {
         let wanted = crate::app().settings.lock().unwrap().check_updates;
-        if wanted && last.is_none_or(|at| at.elapsed() >= EVERY) {
-            last = Some(Instant::now());
-            if let Some(release) = latest().filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION"))) {
+        if wanted && Instant::now() >= due {
+            let answer = latest();
+            due = Instant::now() + if answer.is_some() { EVERY } else { RETRY };
+            if answer.is_none() {
+                crate::journal::note("update check: no answer from GitHub");
+            }
+            if let Some(release) = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION"))) {
                 let mut found = FOUND.lock().unwrap();
                 let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
                 if new {

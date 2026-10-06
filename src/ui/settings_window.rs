@@ -6,6 +6,7 @@
 //! choice's thumb, a switch's knob, rows making way for a dragged one) is
 //! kept from frame to frame as transitions.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::f32::consts::E;
@@ -770,10 +771,10 @@ impl Ui {
     }
 
     /// A switch's label, its hint, and whether it is on.
-    fn switch(&self, switch: Switch) -> (&'static str, Option<&'static str>, bool) {
+    fn switch(&self, switch: Switch) -> (&'static str, Option<Cow<'static, str>>, bool) {
         let (lang, prefs) = (self.lang, &self.prefs);
         let p = |zh, en| pick(lang, zh, en);
-        match switch {
+        let (name, hint, on) = match switch {
             Switch::Live => (p("实时折射", "Live refraction"), Some(p("开启后截图里不会出现面板", "The panel then stays out of screenshots")), self.settings.live_backdrop),
             Switch::CpuThreads => (p("CPU 线程", "CPU threads"), None, prefs.cpu.threads),
             Switch::CpuClock => (p("CPU 频率", "CPU clock"), None, prefs.cpu.clock),
@@ -806,12 +807,17 @@ impl Ui {
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
                 self.settings.heat_alert,
             ),
-            Switch::Updates => (
-                p("检查更新", "Check for updates"),
-                Some(p("每天向 GitHub 查询一次是否有新版本", "Asks GitHub once a day whether there is a new version")),
-                self.settings.check_updates,
-            ),
-        }
+            // The version this is, where the user looks for a newer one.
+            Switch::Updates => {
+                let version = env!("CARGO_PKG_VERSION");
+                let hint = match lang {
+                    Lang::Zh => format!("当前版本 {version}，每天向 GitHub 查询一次是否有新版本"),
+                    Lang::En => format!("Version {version}; asks GitHub once a day whether there is a new one"),
+                };
+                return (p("检查更新", "Check for updates"), Some(Cow::Owned(hint)), self.settings.check_updates);
+            }
+        };
+        (name, hint.map(Cow::Borrowed), on)
     }
 
     /// Why Start with Windows cannot be turned on for this copy, and how it can.
@@ -1334,7 +1340,7 @@ impl Ui {
                 Row::Switch(switch) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, detail, on) = self.switch(switch);
-                    field_label(frame, palette, name, detail, label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
+                    field_label(frame, palette, name, detail.as_deref(), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE - 64.0);
                     let key = format!("switch:{switch:?}");
                     let pressed = self.pressed == Some(Target::Switch(switch));
                     self.toggle(frame, palette, key, on, left + width - ROW_SIDE - 40.0, y + row_height / 2.0, now, pressed);
