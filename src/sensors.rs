@@ -343,6 +343,14 @@ impl CpuReader {
             CpuReader::Intel(cpu) => cpu.read(),
         }
     }
+
+    /// Which way the CPU is read, for a report.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            CpuReader::Amd(_) => "AMD (SMN temperatures, RAPL energy)",
+            CpuReader::Intel(_) => "Intel (MSR temperatures and energy)",
+        }
+    }
 }
 
 /// The CPU's family and model, as AMD defines them from CPUID leaf 1.

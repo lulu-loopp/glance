@@ -90,6 +90,7 @@ const OPEN_FROM_TRAY: u32 = WM_APP + 1;
 const DISMISS: u32 = WM_APP + 2;
 const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
+const TOGGLE: u32 = WM_APP + 5;
 
 struct Config {
     edge: Edge,
@@ -166,6 +167,12 @@ impl Controller {
     /// Opens the panel from the tray icon, on the monitor the pointer is on.
     pub fn open_from_tray(&self) {
         self.post(OPEN_FROM_TRAY);
+    }
+
+    /// Opens the panel at the pointer as the tray does, or closes it if it
+    /// is open (pinned or not): the keyboard shortcut.
+    pub fn toggle(&self) {
+        self.post(TOGGLE);
     }
 
     /// Takes the panel off the screen at once, without its animation.
@@ -276,6 +283,12 @@ impl Controller {
             }
             match msg.message {
                 OPEN_FROM_TRAY => {
+                    if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
+                        panel.open(cursor, contact, now);
+                    }
+                }
+                TOGGLE if panel.is_open() => panel.begin_close(now),
+                TOGGLE => {
                     if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
                         panel.open(cursor, contact, now);
                     }
@@ -442,6 +455,9 @@ struct Panel<'a> {
     scroll: f32,
     scroll_target: f32,
     hover: Option<Hit>,
+    /// Pinned open: the pointer leaving, or a press elsewhere, does not
+    /// close it; unpinning, the shortcut or the tray's settings do.
+    pinned: bool,
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
@@ -478,6 +494,7 @@ impl<'a> Panel<'a> {
             scroll: 0.0,
             scroll_target: 0.0,
             hover: None,
+            pinned: false,
             hits: Vec::new(),
             corner: (0.0, 0.0),
             last_frame: Instant::now(),
@@ -574,6 +591,7 @@ impl<'a> Panel<'a> {
 
     fn begin_close(&mut self, now: Instant) {
         self.phase = Phase::Closing;
+        self.pinned = false;
         self.window.set_click_through(true);
         if reduced_motion() {
             self.opacity.retarget(0.0, PLAIN_FADE, LINEAR, now);
@@ -589,6 +607,7 @@ impl<'a> Panel<'a> {
             return;
         }
         self.phase = Phase::Hidden;
+        self.pinned = false;
         self.window.hide();
         // The drawing memory is given back while the panel is away.
         if let Some(surface) = &mut self.surface {
@@ -612,7 +631,14 @@ impl<'a> Panel<'a> {
         if !on_panel && self.hover.take().is_some() {
             self.next_frame = now;
         }
+        // Around the panel the window is only shadow; clicks there belong
+        // to whatever is underneath.
+        self.window.set_click_through(!on_panel);
         let Phase::Open { entered, outside_since, dragging } = &mut self.phase else { return };
+        if self.pinned {
+            *outside_since = None;
+            return;
+        }
         // A press that begins away from the panel dismisses it; one that
         // begins on it keeps it open wherever the pointer then goes.
         let pressed_outside = held && !*dragging && !in_reach;
@@ -624,11 +650,8 @@ impl<'a> Panel<'a> {
         if in_reach || *dragging || !*entered {
             *outside_since = None;
         } else if now.duration_since(*outside_since.get_or_insert(now)) >= close_delay {
-            return self.begin_close(now);
+            self.begin_close(now);
         }
-        // Around the panel the window is only shadow; clicks there belong
-        // to whatever is underneath.
-        self.window.set_click_through(!on_panel);
     }
 
     /// Follows the pointer, takes the desktop behind the glass again when
@@ -669,7 +692,7 @@ impl<'a> Panel<'a> {
     fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, history.make_contiguous());
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous());
         let lanes = view::lanes(&scene);
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&self.theme)).collect();
         drop(history);
@@ -746,7 +769,7 @@ impl<'a> Panel<'a> {
 
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, history.make_contiguous());
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous());
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
@@ -825,6 +848,7 @@ impl<'a> Panel<'a> {
             Some(Hit::Settings) => {
                 crate::show_settings();
             }
+            Some(Hit::Pin) => self.pinned ^= true,
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.scroll = 0.0;
@@ -857,6 +881,7 @@ fn scene<'s>(
     lang: Lang,
     scroll: f32,
     hover: Option<Hit>,
+    pinned: bool,
     history: &'s [Sample],
 ) -> Scene<'s> {
     let interval = controller.config.lock().unwrap().interval;
@@ -870,6 +895,7 @@ fn scene<'s>(
         pen_ms: wall - interval.as_secs_f64() * 1000.0 - PEN_LAG_MS,
         process_scroll: scroll,
         hover,
+        pinned,
     }
 }
 

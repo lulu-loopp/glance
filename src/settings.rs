@@ -63,6 +63,11 @@ pub struct Settings {
     pub live_backdrop: bool,
     /// Ask GitHub once a day whether a newer Glance is out.
     pub check_updates: bool,
+    /// Ctrl+Alt+G opens and closes the panel.
+    pub hotkey: bool,
+    /// Tell from the tray when the CPU or a graphics card stays at or above
+    /// the temperature alert.
+    pub heat_alert: bool,
     pub view: serde_json::Value,
 }
 
@@ -77,6 +82,8 @@ impl Default for Settings {
             interval_ms: 1000,
             live_backdrop: false,
             check_updates: true,
+            hotkey: true,
+            heat_alert: false,
             view: serde_json::Value::Null,
         }
     }

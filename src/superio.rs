@@ -76,6 +76,8 @@ enum Kind {
 pub struct SuperIo {
     module: Module,
     kind: Kind,
+    /// The chip's identifier, as it reports it.
+    chip: u16,
     layout: Option<&'static Layout>,
     base: u64,
     /// The latest readings, kept while another program has the ISA bus.
@@ -83,6 +85,17 @@ pub struct SuperIo {
 }
 
 impl SuperIo {
+    /// What chip was found, where, and whether this board's wiring of it is
+    /// known (else its inputs go by the chip's names), for a report.
+    pub fn describe(&self) -> String {
+        let maker = match self.kind {
+            Kind::Ite { .. } => "ITE",
+            Kind::Nuvoton { .. } => "Nuvoton",
+        };
+        let wiring = if self.layout.is_some() { "board layout known" } else { "generic input names" };
+        format!("{maker} chip {:04X} at {:#X}, {wiring}", self.chip, self.base)
+    }
+
     /// Finds a supported chip at either configuration port.
     /// `vendor` is the board's maker, which decides what the inputs are named.
     pub fn open(vendor: &str) -> Option<Self> {
@@ -97,7 +110,7 @@ impl SuperIo {
             if base < 0x100 || base & 0xF007 != 0 {
                 continue;
             }
-            let chip = SuperIo { module, kind, layout: layout(vendor, chip), base, last: BoardSensors::default() };
+            let chip = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, last: BoardSensors::default() };
             // A Nuvoton monitor that answers is one from Nuvoton.
             if let Kind::Nuvoton { .. } = kind {
                 let vendor = chip.register(NUVOTON_VENDOR.0).zip(chip.register(NUVOTON_VENDOR.1));

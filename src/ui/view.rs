@@ -41,6 +41,7 @@ const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
 #[derive(Clone, Copy, PartialEq, Hash)]
 pub enum Hit {
     Settings,
+    Pin,
     Sort(ProcessSort),
     /// The process list, and how far it scrolls.
     Processes(u32),
@@ -72,6 +73,8 @@ pub struct Scene<'a> {
     pub process_scroll: f32,
     /// What the pointer is over.
     pub hover: Option<Hit>,
+    /// The panel is pinned open.
+    pub pinned: bool,
 }
 
 impl Scene<'_> {
@@ -904,17 +907,22 @@ fn paint_bar(frame: &Frame, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBo
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     frame.text(&label, theme.small, theme.text2, bar.x + theme.bar_pad.0, bar.y + (bar.h - LINE) / 2.0, bar.w / 2.0, Align::Start);
-    // The Settings glyph of the system's icon font, centred in its button.
-    let button = (bar.x + bar.w - theme.bar_pad.1 - BUTTON, bar.y + (bar.h - BUTTON) / 2.0);
-    let hovered = scene.hover == Some(Hit::Settings);
-    if hovered {
-        fill_rounded(frame, theme.hover, button.0, button.1, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+    // Settings at the end, and the pin before it: glyphs of the system's
+    // icon font, each centred in its button. A pinned pin stays lit.
+    let top = bar.y + (bar.h - BUTTON) / 2.0;
+    let settings = bar.x + bar.w - theme.bar_pad.1 - BUTTON;
+    let pin = settings - BUTTON;
+    let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
+    for (left, glyph, hit, lit) in [(pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)] {
+        let hovered = scene.hover == Some(hit);
+        if hovered || lit {
+            fill_rounded(frame, theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+        }
+        let icon = Font::new(Family::Icons, 16.0, 400.0);
+        let glyph_left = left + (BUTTON - frame.gfx.measure(glyph, icon)) / 2.0;
+        frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, glyph_left, top + 8.0, BUTTON, Align::Start);
+        hits.push((left, top, BUTTON, BUTTON, hit));
     }
-    let glyph = "\u{E713}";
-    let icon = Font::new(Family::Icons, 16.0, 400.0);
-    let glyph_left = button.0 + (BUTTON - frame.gfx.measure(glyph, icon)) / 2.0;
-    frame.text(glyph, icon, if hovered { theme.text } else { theme.text2 }, glyph_left, button.1 + 8.0, BUTTON, Align::Start);
-    hits.push((button.0, button.1, BUTTON, BUTTON, Hit::Settings));
 }
 
 #[cfg(test)]

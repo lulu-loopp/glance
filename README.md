@@ -67,8 +67,15 @@ for administrator rights at every start and cannot start with Windows.
 - **Open the panel**: push the pointer against the screen's right edge (the
   edge, the push needed and where the panel appears are in the settings). It
   opens over fullscreen apps too. A deliberate push is needed, so scroll bars
-  at the edge stay usable.
+  at the edge stay usable. Or press **Ctrl+Alt+G**, which opens it at the
+  pointer and closes it again.
 - **Close it**: move the pointer away.
+- **Keep it open**: the pin in its bottom bar holds it on screen while you
+  work elsewhere; unpin it, or press Ctrl+Alt+G, to let it go.
+- **At a glance**: hovering over the tray icon shows the CPU, graphics and
+  memory in brief. A heat alert (off unless you turn it on) tells from the
+  tray when the CPU or a graphics card stays at the temperature alert for
+  30 seconds.
 - **Settings**: right-click the tray icon, or start Glance again. The settings
   window works with the keyboard as well (Tab, the arrow keys, Space).
 - **Update**: when a new version is out, the tray says so and the settings
@@ -88,7 +95,9 @@ for administrator rights at every start and cannot start with Windows.
 | Graphics power | NVIDIA (NVML), AMD (ADL) discrete cards | NVIDIA RTX 5070 Ti |
 | Everything else | through Windows (the sources Task Manager uses) | |
 
-Reports from Intel and Nuvoton machines are welcome. On laptops, fans and
+Reports from Intel and Nuvoton machines are welcome: **Settings → Diagnostics
+→ Copy** puts what Glance found on your machine, and which readings it gets,
+on the clipboard, ready to paste into an issue (no paths or names in it). On laptops, fans and
 board temperatures belong to the laptop's embedded controller and are not
 shown; integrated graphics draw from the CPU package, whose power the CPU
 lane shows.

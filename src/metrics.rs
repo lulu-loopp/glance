@@ -51,6 +51,9 @@ pub struct StaticInfo {
     pub threads: usize,
     pub mem_total: u64,
     pub gpus: Vec<GpuInfo>,
+    /// What of the hardware Glance found to read, and how, a line each:
+    /// for the diagnostics the settings copy.
+    pub found: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -248,6 +251,18 @@ impl Sampler {
         let gpu_power = GpuPower::open();
         let (adapters, gpus) = enumerate_gpus(&gpu_power);
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+        let cpu_sensors = CpuReader::open();
+        let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
+        let dimms = Dimms::open();
+        let missing = || "not found".to_string();
+        let mut found = vec![
+            format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
+            format!("Motherboard chip: {}", super_io.as_ref().map_or_else(missing, SuperIo::describe)),
+            format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
+        ];
+        found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
+            format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
+        }));
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
@@ -257,6 +272,7 @@ impl Sampler {
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
             gpus,
+            found,
         };
         Sampler {
             query,
@@ -276,12 +292,9 @@ impl Sampler {
             adapters,
             gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
-            cpu_sensors: CpuReader::open(),
-            super_io: SuperIo::open(&reg_string(
-                w!(r"HARDWARE\DESCRIPTION\System\BIOS"),
-                w!("BaseBoardManufacturer"),
-            )),
-            dimms: Dimms::open(),
+            cpu_sensors,
+            super_io,
+            dimms,
             gpu_by_pid: HashMap::new(),
             buf: Vec::new(),
             info,
@@ -919,7 +932,7 @@ fn battery() -> Option<BatterySample> {
 }
 
 /// A number from the machine's registry; 0 where the value is missing.
-fn reg_dword(key: PCWSTR, value: PCWSTR) -> u32 {
+pub fn reg_dword(key: PCWSTR, value: PCWSTR) -> u32 {
     let mut data = 0u32;
     let mut size = 4u32;
     let read = unsafe {

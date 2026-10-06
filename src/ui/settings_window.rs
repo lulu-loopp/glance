@@ -96,6 +96,9 @@ const DEVICE_RETRY: Duration = Duration::from_millis(250);
 /// beyond one interval, as the panel's does.
 const PEN_LAG_MS: f64 = 100.0;
 
+/// How long the diagnostics' button says they were copied.
+const COPIED_FOR: Duration = Duration::from_secs(2);
+
 /// The window, while it is open.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 
@@ -261,6 +264,8 @@ enum Switch {
     DiskActive,
     Startup,
     Updates,
+    Hotkey,
+    HeatAlert,
 }
 
 /// What a press lands on.
@@ -271,6 +276,7 @@ enum Target {
     Switch(Switch),
     Module(String),
     Grip(String),
+    Diagnostics,
     Update,
     Uninstall,
     Quit,
@@ -283,6 +289,7 @@ enum Row {
     Choice(Field),
     Switch(Switch),
     Module(String),
+    Diagnostics,
     Update,
     Uninstall,
     Quit,
@@ -323,6 +330,8 @@ struct Ui {
     /// The installer's uninstaller beside this executable, if it was
     /// installed somewhere ordinary programs cannot change.
     uninstaller: Option<std::path::PathBuf>,
+    /// When the diagnostics were last copied.
+    copied_at: Option<Instant>,
     scroll: f32,
     scroll_target: f32,
     motion: HashMap<String, Transition>,
@@ -410,6 +419,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
+            copied_at: None,
             uninstaller: std::env::current_exe().ok().and_then(|exe| elevation::trusted(&exe.with_file_name("uninstall.exe"))),
             scroll: 0.0,
             scroll_target: 0.0,
@@ -597,6 +607,7 @@ impl Ui {
             Row::Choice(Field::Anchor),
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
+            Row::Switch(Switch::Hotkey),
             Row::Heading("显示内容", "Shown"),
         ];
         rows.extend(self.prefs.modules.iter().map(|entry| Row::Module(entry.id.clone())));
@@ -618,6 +629,7 @@ impl Ui {
             Row::Choice(Field::Span),
             Row::Choice(Field::LoadAlert),
             Row::Choice(Field::TempAlert),
+            Row::Switch(Switch::HeatAlert),
             Row::Heading("系统", "System"),
             Row::Switch(Switch::Startup),
             Row::Switch(Switch::Updates),
@@ -625,6 +637,7 @@ impl Ui {
         if update::available().is_some() {
             rows.push(Row::Update);
         }
+        rows.push(Row::Diagnostics);
         if self.uninstaller.is_some() {
             rows.push(Row::Uninstall);
         }
@@ -777,6 +790,20 @@ impl Ui {
                 }),
                 self.autostart,
             ),
+            Switch::Hotkey => (
+                p("快捷键 Ctrl+Alt+G", "Shortcut Ctrl+Alt+G"),
+                Some(if crate::tray::hotkey_taken() {
+                    p("已被其他程序占用，暂时无法使用", "Another program is using it")
+                } else {
+                    p("打开或收起面板，也可收起已固定的面板", "Opens and closes the panel, pinned or not")
+                }),
+                self.settings.hotkey,
+            ),
+            Switch::HeatAlert => (
+                p("过热提醒", "Heat alert"),
+                Some(p("CPU 或显卡持续 30 秒达到温度警示值时，从托盘提醒", "Tells from the tray when the CPU or a graphics card stays at the temperature alert for 30 s")),
+                self.settings.heat_alert,
+            ),
             Switch::Updates => (
                 p("检查更新", "Check for updates"),
                 Some(p("每天向 GitHub 查询一次是否有新版本", "Asks GitHub once a day whether there is a new version")),
@@ -818,6 +845,8 @@ impl Ui {
             Switch::NetworkDetails => prefs.network.details ^= true,
             Switch::DiskActive => prefs.disk.active ^= true,
             Switch::Updates => settings.check_updates ^= true,
+            Switch::Hotkey => settings.hotkey ^= true,
+            Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -938,6 +967,11 @@ impl Ui {
                 }
             }
             Target::Update => update::install(),
+            Target::Diagnostics => {
+                if crate::diagnostics::copy(self.hwnd, &crate::diagnostics::report()) {
+                    self.copied_at = Some(Instant::now());
+                }
+            }
             Target::Quit => crate::quit(),
             Target::Grip(_) => {}
         }
@@ -968,6 +1002,7 @@ impl Ui {
                 Row::Switch(switch) => Some(Target::Switch(switch)),
                 Row::Module(id) => Some(Target::Module(id)),
                 Row::Update => Some(Target::Update),
+                Row::Diagnostics => Some(Target::Diagnostics),
                 Row::Uninstall => Some(Target::Uninstall),
                 Row::Quit => Some(Target::Quit),
                 Row::Title | Row::Heading(..) => None,
@@ -1068,7 +1103,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n)) => m == n,
@@ -1341,6 +1376,23 @@ impl Ui {
                     text_centred(frame, action, label, if busy { palette.text2 } else { palette.signal }, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
                     self.targets.push((button, Target::Update));
                 }
+                Row::Diagnostics => {
+                    // "Copied" for a moment after the press.
+                    let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
+                    let action = if copied { pick(lang, "已复制", "Copied") } else { pick(lang, "复制", "Copy") };
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let name = pick(lang, "诊断信息", "Diagnostics");
+                    let detail = pick(lang, "反馈问题时附上：硬件、驱动和读数情况", "For a problem report: hardware, driver and readings");
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
+                    let button_w = frame.gfx.measure(action, label) + 32.0;
+                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
+                    if hovered == Some(Target::Diagnostics) {
+                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
+                    }
+                    stroke_inside(frame, button, 6.0, palette.rule);
+                    text_centred(frame, action, label, palette.signal, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
+                    self.targets.push((button, Target::Diagnostics));
+                }
                 Row::Uninstall | Row::Quit => {
                     let (target, name, detail, action) = if matches!(row, Row::Uninstall) {
                         (
@@ -1521,7 +1573,7 @@ impl Ui {
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
         let measure = Theme::new(skin, false);
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = render::arrange(&measure, edge, heights, (sw, sh));
@@ -1540,7 +1592,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

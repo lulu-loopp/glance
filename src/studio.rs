@@ -145,7 +145,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     // Toned by the desktop where it first rests.
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
-    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, pen_ms: 0.0, process_scroll: 0.0, hover: None };
+    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
     let (layout, zoom, rest) = place(&view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -179,6 +179,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             pen_ms: now_ms - interval - PEN_LAG_MS,
             process_scroll: 0.0,
             hover: None,
+            pinned: false,
         };
         let lanes = view::lanes(&scene);
         let (layout, zoom, rest) = place(&lanes, &theme);

@@ -1,4 +1,5 @@
 mod detector;
+mod diagnostics;
 mod dimm;
 mod drives;
 mod elevation;
@@ -15,6 +16,7 @@ mod superio;
 mod tray;
 mod ui;
 mod update;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -54,6 +56,7 @@ impl App {
     /// for next time.
     pub fn save(&self, settings: Settings) {
         self.controller.apply(&settings);
+        tray::follow_settings();
         if let Err(error) = settings.save(&self.config) {
             eprintln!("could not save settings: {error}");
         }
@@ -192,6 +195,7 @@ pub fn run() {
     });
     thread::spawn(update::watch);
     thread::spawn(move || {
+        let mut watch = watch::Watch::default();
         let mut next = Instant::now();
         for tick in 0u64.. {
             let interval = app().settings.lock().unwrap().interval();
@@ -205,6 +209,7 @@ pub fn run() {
             thread::sleep(next.saturating_duration_since(now));
             let refresh_slow = controller.is_shown() || ui::settings_window::is_open() || tick % HIDDEN_SLOW_TICKS == 0;
             if let Some(sample) = sampler.sample(refresh_slow) {
+                watch.sample(&sample, Instant::now());
                 controller.record(sample);
             }
         }

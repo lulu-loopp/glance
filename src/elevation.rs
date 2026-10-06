@@ -955,6 +955,12 @@ pub fn set_autostart(enabled: bool) -> bool {
 
 // ---- The driver ----
 
+/// The PawnIO driver's version, if it is installed.
+pub fn pawnio_version() -> Option<String> {
+    let version = crate::metrics::reg_string(PAWNIO_UNINSTALL_KEY, w!("DisplayVersion"));
+    (!version.is_empty()).then_some(version)
+}
+
 fn pawnio_installed() -> bool {
     let mut size = 0u32;
     unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, PAWNIO_UNINSTALL_KEY, w!("DisplayVersion"), RRF_RT_REG_SZ, None, None, Some(&mut size)) }

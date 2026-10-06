@@ -51,6 +51,15 @@ pub struct Dimms {
 }
 
 impl Dimms {
+    /// What was found, for a report.
+    pub fn describe(&self) -> String {
+        let kind = match self.kind {
+            Kind::Spd5118 => "DDR5 SPD5118",
+            Kind::Jc42 => "DDR4 JC-42.4",
+        };
+        format!("{} {kind} sensor(s)", self.sensors.len())
+    }
+
     /// Finds the modules' sensors, if the chipset's SMBus can be reached.
     pub fn open() -> Option<Self> {
         let module = Module::load(SMBUS_PIIX4).or_else(|_| Module::load(SMBUS_I801)).ok()?;

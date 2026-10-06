@@ -15,7 +15,7 @@ Unicode true
 !include "x64.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.1.3"
+!define VERSION "0.1.4"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"

@@ -24,6 +24,16 @@ pub enum Reader {
     Amd(usize),
 }
 
+impl Reader {
+    /// Where a card's power comes from, for a report.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Reader::Nvidia(_) => "NVML",
+            Reader::Amd(_) => "ADL",
+        }
+    }
+}
+
 /// The vendors' libraries, those the machine has.
 pub struct GpuPower {
     nvml: Option<Nvml>,
