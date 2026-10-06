@@ -67,13 +67,21 @@ for administrator rights at every start and cannot start with Windows.
 ## Use
 
 - **Open the panel**: push the pointer against the screen's right edge (the
-  edge, the push needed and where the panel appears are in the settings). It
-  opens over fullscreen apps too. A deliberate push is needed, so scroll bars
-  at the edge stay usable. Or press **Ctrl+Alt+G**, which opens it at the
-  pointer and closes it again.
+  edge, the push needed, where the panel appears and how many columns it
+  takes are in the settings). A deliberate push is needed, so scroll bars at
+  the edge stay usable. Or press **Ctrl+Alt+G** (or a shortcut of your own),
+  which opens it at the pointer and closes it again.
+- **Games**: the panel shows over borderless and windowed games as over
+  anything else. A game set to exclusive "Fullscreen" steps out while
+  anything shows over it, as Windows works; the settings choose what may open
+  the panel over one (the shortcut only, by default), and the game comes back
+  when the panel closes.
+- **Choose what it shows**: in the settings, each module (CPU, each graphics
+  card, memory, network, disk…) opens to its own items, each switched on or
+  off; drag modules to change their order.
 - **Close it**: move the pointer away.
 - **Keep it open**: the pin in its bottom bar holds it on screen while you
-  work elsewhere; unpin it, or press Ctrl+Alt+G, to let it go.
+  work elsewhere; unpin it, or press the shortcut, to let it go.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the
   tray when the CPU or a graphics card stays at the temperature alert for
