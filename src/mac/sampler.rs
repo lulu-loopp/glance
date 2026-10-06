@@ -186,11 +186,24 @@ impl Sampler {
         let cores = self.info.threads.max(1) as f64;
         let mut times = HashMap::with_capacity(pids.len());
         let mut programs: HashMap<String, ProcessSample> = HashMap::new();
+        // Others' processes (root's, the system's users') are not a user's to
+        // read; /bin/ps, the system's own and privileged, tells their CPU
+        // time, memory and name (not what they read and write).
+        let mut others = None;
         for pid in &pids {
-            // Others' processes (root's, other users') are not ours to read.
-            let Some(usage) = rusage(*pid) else { continue };
-            let cpu_ns = (usage.ri_user_time + usage.ri_system_time) * self.timebase.0 / self.timebase.1;
-            let moved = usage.ri_diskio_bytesread + usage.ri_diskio_byteswritten;
+            let (cpu_ns, moved, memory, name) = match rusage(*pid) {
+                Some(usage) => (
+                    (usage.ri_user_time + usage.ri_system_time) * self.timebase.0 / self.timebase.1,
+                    usage.ri_diskio_bytesread + usage.ri_diskio_byteswritten,
+                    usage.ri_phys_footprint,
+                    process_name(*pid),
+                ),
+                None => match others.get_or_insert_with(listed).get(pid) {
+                    Some(other) => (other.cpu_ns, 0, other.resident, Some(process_name(*pid).unwrap_or_else(|| other.name.clone()))),
+                    None => continue,
+                },
+            };
+            let Some(name) = name else { continue };
             times.insert(*pid, (cpu_ns, moved));
             let (cpu, io) = match self.previous.processes.get(pid) {
                 Some((was_ns, was_moved)) => (
@@ -199,10 +212,9 @@ impl Sampler {
                 ),
                 None => (0.0, 0.0),
             };
-            let name = process_name(*pid);
             let program = programs.entry(name.clone()).or_insert(ProcessSample { name, cpu: 0.0, mem: 0, io: 0.0, gpu: 0.0 });
             program.cpu += cpu as f32;
-            program.mem += usage.ri_phys_footprint;
+            program.mem += memory;
             program.io += io;
         }
         // The busiest by each measure, together.
@@ -522,19 +534,56 @@ fn all_pids() -> Vec<i32> {
     pids
 }
 
+/// A process as /bin/ps tells it.
+struct Listed {
+    cpu_ns: u64,
+    /// Bytes.
+    resident: u64,
+    name: String,
+}
+
+/// Every process /bin/ps sees, by its id.
+fn listed() -> HashMap<i32, Listed> {
+    let Ok(output) = std::process::Command::new("/bin/ps").args(["-axo", "pid=,time=,rss=,comm="]).output() else { return HashMap::new() };
+    String::from_utf8_lossy(&output.stdout).lines().filter_map(listing).collect()
+}
+
+/// One line of ps: id, CPU time, resident KB, and the command's path, which
+/// may hold spaces, last.
+fn listing(line: &str) -> Option<(i32, Listed)> {
+    let mut rest = line.trim_start();
+    let mut field = || {
+        let (value, after) = rest.split_once(char::is_whitespace)?;
+        rest = after.trim_start();
+        Some(value)
+    };
+    let pid = field()?.parse().ok()?;
+    let cpu_ns = cpu_time(field()?)?;
+    let resident = field()?.parse::<u64>().ok()? * 1024;
+    let name = rest.rsplit('/').next().filter(|name| !name.is_empty())?.to_string();
+    Some((pid, Listed { cpu_ns, resident, name }))
+}
+
+/// ps's CPU time, "[[days-]hours:]minutes:seconds.hundredths", in ns.
+fn cpu_time(text: &str) -> Option<u64> {
+    let (days, rest) = match text.split_once('-') {
+        Some((days, rest)) => (days.parse::<f64>().ok()?, rest),
+        None => (0.0, text),
+    };
+    let seconds = rest.split(':').try_fold(0.0, |total, part| part.parse::<f64>().ok().map(|value| total * 60.0 + value))?;
+    Some(((days * 86_400.0 + seconds) * 1e9) as u64)
+}
+
 fn rusage(pid: i32) -> Option<libc::rusage_info_v2> {
     let mut usage: libc::rusage_info_v2 = unsafe { zeroed() };
     let read = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, (&mut usage as *mut libc::rusage_info_v2).cast()) };
     (read == 0).then_some(usage)
 }
 
-fn process_name(pid: i32) -> String {
+fn process_name(pid: i32) -> Option<String> {
     let mut buffer = [0u8; 256];
     let length = unsafe { libc::proc_name(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
-    if length <= 0 {
-        return format!("{pid}");
-    }
-    String::from_utf8_lossy(&buffer[..length as usize]).into_owned()
+    (length > 0).then(|| String::from_utf8_lossy(&buffer[..length as usize]).into_owned())
 }
 
 /// Seconds since the system started.
@@ -545,4 +594,25 @@ fn uptime() -> u64 {
     let read = unsafe { libc::sysctl(mib.as_mut_ptr(), 2, (&mut boot as *mut libc::timeval).cast(), &mut size, std::ptr::null_mut(), 0) };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     if read == 0 { now.saturating_sub(boot.tv_sec as u64) } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cpu_time, listing};
+
+    #[test]
+    fn reads_ps_times() {
+        assert_eq!(cpu_time("0:07.81"), Some(7_810_000_000));
+        assert_eq!(cpu_time("510:03.03"), Some(30_603_030_000_000));
+        assert_eq!(cpu_time("1:02:03.50"), Some(3_723_500_000_000));
+        assert_eq!(cpu_time("2-00:00:01.00"), Some(172_801_000_000_000));
+        assert_eq!(cpu_time("n/a"), None);
+    }
+
+    #[test]
+    fn reads_ps_lines() {
+        let (pid, process) = listing("  412  12:03.50  20480 /System/Library/Private Frameworks/X.framework/Support/Some Daemon").unwrap();
+        assert_eq!((pid, process.cpu_ns, process.resident, process.name.as_str()), (412, 723_500_000_000, 20_971_520, "Some Daemon"));
+        assert!(listing("  9 0:00.01 16").is_none());
+    }
 }
