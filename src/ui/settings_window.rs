@@ -57,6 +57,7 @@ use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
 use crate::settings::{Anchor, Edge, Sensitivity, Settings};
+use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
 const SIZE: (f32, f32) = (1120.0, 760.0);
@@ -259,6 +260,7 @@ enum Switch {
     NetworkDetails,
     DiskActive,
     Startup,
+    Updates,
 }
 
 /// What a press lands on.
@@ -269,6 +271,7 @@ enum Target {
     Switch(Switch),
     Module(String),
     Grip(String),
+    Update,
     Uninstall,
     Quit,
 }
@@ -280,6 +283,7 @@ enum Row {
     Choice(Field),
     Switch(Switch),
     Module(String),
+    Update,
     Uninstall,
     Quit,
 }
@@ -616,7 +620,11 @@ impl Ui {
             Row::Choice(Field::TempAlert),
             Row::Heading("系统", "System"),
             Row::Switch(Switch::Startup),
+            Row::Switch(Switch::Updates),
         ]);
+        if update::available().is_some() {
+            rows.push(Row::Update);
+        }
         if self.uninstaller.is_some() {
             rows.push(Row::Uninstall);
         }
@@ -769,6 +777,11 @@ impl Ui {
                 }),
                 self.autostart,
             ),
+            Switch::Updates => (
+                p("检查更新", "Check for updates"),
+                Some(p("每天向 GitHub 查询一次是否有新版本", "Asks GitHub once a day whether there is a new version")),
+                self.settings.check_updates,
+            ),
         }
     }
 
@@ -804,6 +817,7 @@ impl Ui {
             Switch::MemoryDetails => prefs.memory.details ^= true,
             Switch::NetworkDetails => prefs.network.details ^= true,
             Switch::DiskActive => prefs.disk.active ^= true,
+            Switch::Updates => settings.check_updates ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -923,6 +937,7 @@ impl Ui {
                     unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
                 }
             }
+            Target::Update => update::install(),
             Target::Quit => crate::quit(),
             Target::Grip(_) => {}
         }
@@ -952,6 +967,7 @@ impl Ui {
                 Row::Choice(field) => Some(Target::Choice(field, self.choices(field).2.unwrap_or(0))),
                 Row::Switch(switch) => Some(Target::Switch(switch)),
                 Row::Module(id) => Some(Target::Module(id)),
+                Row::Update => Some(Target::Update),
                 Row::Uninstall => Some(Target::Uninstall),
                 Row::Quit => Some(Target::Quit),
                 Row::Title | Row::Heading(..) => None,
@@ -1052,7 +1068,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n)) => m == n,
@@ -1294,6 +1310,36 @@ impl Ui {
                         continue;
                     }
                     self.module_row(frame, palette, &id, left, y + offset, width, row_height, now, &hovered, false);
+                }
+                Row::Update => {
+                    let Some((version, state)) = update::available() else { continue };
+                    let name = match lang {
+                        Lang::Zh => format!("Glance {version} 可用"),
+                        Lang::En => format!("Glance {version} is available"),
+                    };
+                    let (detail, action) = match state {
+                        update::State::Ready => (
+                            pick(lang, "下载并运行已签名的安装程序", "Downloads and runs the signed installer"),
+                            pick(lang, "更新", "Update"),
+                        ),
+                        update::State::Downloading => (pick(lang, "正在下载安装程序", "Downloading the installer"), pick(lang, "下载中", "Downloading")),
+                        update::State::Failed => (pick(lang, "下载失败，请稍后重试", "Download failed; try again later"), pick(lang, "重试", "Retry")),
+                        update::State::Unsigned => (
+                            pick(lang, "签名不符，未运行；请从 GitHub 下载", "Signature did not match; get it from GitHub"),
+                            pick(lang, "重试", "Retry"),
+                        ),
+                    };
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 160.0);
+                    let button_w = frame.gfx.measure(action, label) + 32.0;
+                    let button = Rect { x: left + width - ROW_SIDE - button_w, y: y + row_height / 2.0 - 16.0, w: button_w, h: 32.0 };
+                    let busy = state == update::State::Downloading;
+                    if hovered == Some(Target::Update) && !busy {
+                        fill(frame, palette.hover, button.x, button.y, button.w, button.h, 6.0);
+                    }
+                    stroke_inside(frame, button, 6.0, palette.rule);
+                    text_centred(frame, action, label, if busy { palette.text2 } else { palette.signal }, button.x + 16.0, button.y + 16.0, button_w, Align::Start);
+                    self.targets.push((button, Target::Update));
                 }
                 Row::Uninstall | Row::Quit => {
                     let (target, name, detail, action) = if matches!(row, Row::Uninstall) {

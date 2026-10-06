@@ -61,6 +61,8 @@ pub struct Settings {
     /// Refresh the desktop behind the glass while the panel is open. The
     /// panel then hides itself from every screen capture, screenshots too.
     pub live_backdrop: bool,
+    /// Ask GitHub once a day whether a newer Glance is out.
+    pub check_updates: bool,
     pub view: serde_json::Value,
 }
 
@@ -74,6 +76,7 @@ impl Default for Settings {
             close_delay_ms: 200,
             interval_ms: 1000,
             live_backdrop: false,
+            check_updates: true,
             view: serde_json::Value::Null,
         }
     }

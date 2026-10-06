@@ -401,6 +401,58 @@ fn create_held(folder: &Path, parent: &Held, attributes: Option<&SECURITY_ATTRIB
     }
 }
 
+/// `create_held` with the security descriptor `sddl`, set in the one step
+/// that creates the folder.
+fn create_held_as(folder: &Path, parent: &Held, sddl: PCWSTR) -> Result<Held, InstallFolder> {
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }.map_err(|_| InstallFolder::Failed)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: false.into(),
+    };
+    let made = create_held(folder, parent, Some(&attributes));
+    unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+    made
+}
+
+/// A new folder that only administrators and the system can open, held: no
+/// one else can put anything in it, change what is put there, or move it
+/// (or a folder above it) aside while it is held.
+pub struct Private {
+    _held: Held,
+    path: PathBuf,
+}
+
+impl Private {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Makes a `Private` folder `name` in `parent`, where `parent` really is
+/// (as Windows resolves it, held): new (it must not exist yet), and checked
+/// by handle to lie in that held folder.
+pub fn private_folder(parent: &Path, name: &str) -> Option<Private> {
+    let parent_held = pin(parent)?;
+    let path = parent_held.place()?.join(name);
+    let held = create_held_as(&path, &parent_held, w!("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")).ok()?;
+    Some(Private { _held: held, path })
+}
+
+/// Removes the folders in `parent` whose names start with `prefix` that
+/// only administrators could change (`Private` folders left from before),
+/// links among them taken as links, never followed.
+pub fn sweep_private(parent: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with(prefix) && !is_link(&path) && path.is_dir() && only_trusted_inside(&path) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// Puts the files the installer laid out in `payload` into `folder`. A new
 /// folder is created owned by the administrators, changed only by them and
 /// the system, and read by everyone (as Program Files' folders are), in the
@@ -431,18 +483,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     for dir in missing.iter().rev() {
         let parent = held.last().unwrap();
         let next = if *dir == folder.as_path() {
-            let sddl = w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)");
-            let mut descriptor = PSECURITY_DESCRIPTOR::default();
-            unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut descriptor, None) }
-                .map_err(|_| InstallFolder::Failed)?;
-            let attributes = SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lpSecurityDescriptor: descriptor.0,
-                bInheritHandle: false.into(),
-            };
-            let made = create_held(dir, parent, Some(&attributes));
-            unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
-            made?
+            create_held_as(dir, parent, w!("O:BAD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)"))?
         } else {
             create_held(dir, parent, None)?
         };
@@ -912,6 +953,31 @@ mod tests {
         // Windows' own programs cannot be changed by the user; this build can.
         assert!(protected(Path::new(r"C:\Windows\System32\notepad.exe")));
         assert!(!protected(&std::env::current_exe().unwrap()));
+    }
+
+    /// Needs administrator rights (a folder is made owned by them): a
+    /// private folder is new, administrators' alone inside, cannot be moved
+    /// aside while held, and is swept away afterwards.
+    #[test]
+    #[ignore]
+    fn makes_private_folders_elevated() {
+        let temp = std::env::temp_dir();
+        let name = format!("glance-private-test-{}-", std::process::id());
+        let folder = private_folder(&temp, &format!("{name}a")).expect("made");
+        std::fs::write(folder.path().join("file"), b"x").unwrap();
+        assert!(only_trusted_inside(folder.path()));
+        // Not made over something already there.
+        assert!(private_folder(&temp, &format!("{name}a")).is_none());
+        // Held: it cannot be renamed.
+        assert!(std::fs::rename(folder.path(), temp.join(format!("{name}moved"))).is_err());
+        drop(folder);
+        // Let go, it is swept; an ordinary folder of the same prefix is not.
+        let ordinary = temp.join(format!("{name}b"));
+        std::fs::create_dir(&ordinary).unwrap();
+        sweep_private(&temp, &name);
+        assert!(!temp.join(format!("{name}a")).exists());
+        assert!(ordinary.exists());
+        std::fs::remove_dir(&ordinary).unwrap();
     }
 
     #[test]

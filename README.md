@@ -40,7 +40,9 @@ or following the brightness of your wallpaper. Chinese or English.
 
 One executable of about 1 MB, drawn natively with Direct2D and
 DirectComposition. About 55 MB of memory and well under 1% of a CPU core
-while the panel is hidden. No network access, no account, no ads.
+while the panel is hidden. No account, no ads, and no network access but
+one daily question to GitHub about a newer version, which the settings can
+turn off.
 
 ## Install
 
@@ -69,6 +71,9 @@ for administrator rights at every start and cannot start with Windows.
 - **Close it**: move the pointer away.
 - **Settings**: right-click the tray icon, or start Glance again. The settings
   window works with the keyboard as well (Tab, the arrow keys, Space).
+- **Update**: when a new version is out, the tray says so and the settings
+  offer it. Glance downloads the installer and runs it only if it is signed
+  by the same publisher as the Glance you have.
 - **Uninstall**: from Windows' Apps list, or from the settings. It removes
   Glance, its scheduled tasks and its settings, and asks whether to remove the
   PawnIO driver too (other monitoring tools may use it).

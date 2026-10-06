@@ -14,6 +14,7 @@ mod smbios;
 mod superio;
 mod tray;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -185,6 +186,7 @@ pub fn run() {
         let controller = controller.clone();
         move || controller.run()
     });
+    thread::spawn(update::watch);
     thread::spawn(move || {
         let mut next = Instant::now();
         for tick in 0u64.. {

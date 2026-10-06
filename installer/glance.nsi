@@ -24,7 +24,6 @@ Unicode true
 Name "${NAME}"
 OutFile "..\target\${NAME}_${VERSION}_x64-setup.exe"
 InstallDir "$PROGRAMFILES64\${NAME}"
-InstallDirRegKey HKLM "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel admin
 
 ; A release build (scripts\release.ps1 -Sign, which defines SIGN) signs the
@@ -96,6 +95,15 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
+  ; Where an earlier Glance was put, so that installing again (an update)
+  ; replaces it there. Read here, in the 64-bit view it was written in:
+  ; InstallDirRegKey looks in the 32-bit one. A folder given with /D stands.
+  ${If} $INSTDIR == "$PROGRAMFILES64\${NAME}"
+    ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
+    ${If} $0 != ""
+      StrCpy $INSTDIR $0
+    ${EndIf}
+  ${EndIf}
 FunctionEnd
 
 ; Everything that touches the install folder is done by a copy of Glance

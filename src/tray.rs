@@ -7,8 +7,8 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION, NOTIFYICONDATAW,
-    NOTIFYICON_VERSION_4,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
+    NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, CreateWindowExW, ASFW_ANY, DefWindowProcW, DestroyWindow, FindWindowW, MSGFLT_ALLOW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW,
@@ -74,6 +74,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             match (lparam.0 & 0xFFFF) as u32 {
                 WM_LBUTTONUP => crate::app().controller.open_from_tray(),
                 WM_CONTEXTMENU => crate::show_settings(),
+                // A notification of ours (a new version) clicked.
+                NIN_BALLOONUSERCLICK => crate::show_settings(),
                 _ => {}
             }
             LRESULT(0)
@@ -146,6 +148,26 @@ pub fn ask_for_settings() {
         let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
         let _ = unsafe { PostMessageW(Some(hwnd), SHOW_SETTINGS, WPARAM(0), LPARAM(0)) };
     }
+}
+
+/// Shows a notification from the icon, from any thread; clicking it opens
+/// the settings.
+pub fn notify(title: &str, text: &str) {
+    let hwnd = WINDOW.load(Ordering::Acquire);
+    if hwnd == 0 {
+        return;
+    }
+    let mut data = icon_data(HWND(hwnd as *mut _));
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO;
+    // Cut to fit, a terminating nul left in place.
+    let put = |into: &mut [u16], text: &str| {
+        let units: Vec<u16> = text.encode_utf16().take(into.len() - 1).collect();
+        into[..units.len()].copy_from_slice(&units);
+    };
+    put(&mut data.szInfoTitle, title);
+    put(&mut data.szInfo, text);
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
 }
 
 /// Removes the icon and ends Glance.

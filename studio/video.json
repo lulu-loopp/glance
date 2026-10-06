@@ -2,7 +2,7 @@
   "fps": 30,
   "frames": "target/studio/frames",
   "wallpaper": "target/studio/wall-dark.png",
-  "out": "target/studio/glance-promo-v7.mp4",
+  "out": "target/studio/glance-promo-v8.mp4",
   "scenes": [
     {
       "kind": "intro", "shot": "intro", "seconds": 4.4,
@@ -31,7 +31,7 @@
     {
       "kind": "stats", "shot": "calm", "seconds": 4.4,
       "title": "轻到感觉不到",
-      "stats": [["≈1 MB", "程序大小"], ["≈55 MB", "内存占用"], ["<1%", "CPU 占用（面板收起时）"], ["不联网", "无账号 · 无广告"]]
+      "stats": [["≈1 MB", "程序大小"], ["≈55 MB", "内存占用"], ["<1%", "CPU 占用（面板收起时）"], ["无广告", "无账号 · 检查更新可关闭"]]
     },
     {
       "kind": "end", "shot": "calm", "seconds": 4.6,
