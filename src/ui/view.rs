@@ -418,7 +418,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 sort,
                 rows: ranked
                     .iter()
-                    .map(|p| [p.name.clone(), text::percent(p.cpu), text::size(p.mem), text::rate(p.io, false), text::percent(p.gpu)])
+                    .map(|p| [p.name.clone(), text::percent(p.cpu), text::size(p.mem), text::rate(p.io, false), shown(p.gpu, text::percent)])
                     .collect(),
                 visible: prefs.processes.count,
             }]
@@ -514,7 +514,8 @@ fn sort_value(p: &ProcessSample, sort: ProcessSort) -> f64 {
         ProcessSort::Cpu => p.cpu as f64,
         ProcessSort::Memory => p.mem as f64,
         ProcessSort::Io => p.io,
-        ProcessSort::Gpu => p.gpu as f64,
+        // Not read sorts last.
+        ProcessSort::Gpu => p.gpu.map_or(-1.0, f64::from),
     }
 }
 

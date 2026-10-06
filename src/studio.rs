@@ -337,7 +337,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
                 cpu: cpu * share * (0.8 + 0.4 * noise()),
                 mem: ((0.5 + 3.0 * share) * gb as f32) as u64,
                 io: (2.0e6 * share * (0.5 + noise())) as f64,
-                gpu: if i == 0 { 60.0 * busy } else { 2.0 * share },
+                gpu: Some(if i == 0 { 60.0 * busy } else { 2.0 * share }),
             }
         })
         .collect();

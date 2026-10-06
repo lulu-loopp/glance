@@ -219,7 +219,7 @@ impl Sampler {
                 ),
                 None => (0.0, 0.0),
             };
-            let program = programs.entry(name.clone()).or_insert(ProcessSample { name, cpu: 0.0, mem: 0, io: 0.0, gpu: 0.0 });
+            let program = programs.entry(name.clone()).or_insert(ProcessSample { name, cpu: 0.0, mem: 0, io: 0.0, gpu: None });
             program.cpu += cpu as f32;
             program.mem += memory;
             program.io += io;
@@ -442,11 +442,12 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
         .filter_map(|accelerator| {
             let model = accelerator.string("model")?;
             let statistics = accelerator.dictionary("PerformanceStatistics")?;
-            let percent = |key| iokit::number(&statistics, key).unwrap_or(0).clamp(0, 100) as f32;
+            // A figure the driver does not give is not read, not 0.
+            let percent = |key| iokit::number(&statistics, key).map(|value| value.clamp(0, 100) as f32);
             let info = GpuInfo { slot: 0, name: format!("{model} GPU"), mem_total: memory, shared_total: 0 };
             let reading = GpuSample {
-                usage: Some(percent("Device Utilization %")),
-                engines: vec![("3D".into(), percent("Renderer Utilization %"))],
+                usage: percent("Device Utilization %"),
+                engines: percent("Renderer Utilization %").map(|load| ("3D".to_string(), load)).into_iter().collect(),
                 mem_used: iokit::number(&statistics, "In use system memory").map(|used| used.max(0) as u64),
                 shared_used: Some(0),
                 temp: None,

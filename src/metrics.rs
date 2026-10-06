@@ -1,7 +1,7 @@
 //! System metrics: one PDH query for every rate counter, plus the direct APIs
 //! PDH has no counter for (memory, NIC octets, GPU sensors, process list).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -87,7 +87,9 @@ pub struct Sampler {
     super_io: Option<SuperIo>,
     dimms: Option<Dimms>,
     /// Each process's GPU use at the last sample, by process id.
-    gpu_by_pid: HashMap<usize, f32>,
+    /// Each process's use of the GPUs, from the last reading of the engine
+    /// counters; `None` while they cannot be read.
+    gpu_by_pid: Option<HashMap<usize, f32>>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -115,7 +117,7 @@ impl Sampler {
         // Rate counters need a first collection to diff against.
         unsafe { PdhCollectQueryData(query) };
         let mut processes = ProcessTable::default();
-        processes.sample(1, &HashMap::new());
+        processes.sample(1, None);
 
         let gpu_power = GpuPower::open();
         let (adapters, gpus) = enumerate_gpus(&gpu_power);
@@ -163,7 +165,7 @@ impl Sampler {
             cpu_sensors,
             super_io,
             dimms,
-            gpu_by_pid: HashMap::new(),
+            gpu_by_pid: None,
             buf: Vec::new(),
             info,
         }
@@ -182,7 +184,7 @@ impl Sampler {
         let mut cpu = None;
         let mut threads: Vec<((u32, u32), f32)> = Vec::new();
         let per_thread = counter(self.cpu_time).and_then(|counter| read_array(counter, &mut self.buf));
-        for (name, value) in per_thread.unwrap_or_default() {
+        for (name, value) in per_thread.unwrap_or_default().into_iter().filter_map(|(name, value)| Some((name, value?))) {
             if name == "_Total" {
                 cpu = Some(value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
@@ -207,7 +209,7 @@ impl Sampler {
         let gpus = self.sample_gpus(collected);
 
         if refresh_slow {
-            self.slow.processes = self.processes.sample(self.info.threads, &self.gpu_by_pid);
+            self.slow.processes = self.processes.sample(self.info.threads, self.gpu_by_pid.as_ref());
             self.slow.network = default_interface();
         }
 
@@ -283,11 +285,16 @@ impl Sampler {
     /// last values, and all of theirs are unread.
     fn sample_gpus(&mut self, collected: bool) -> Vec<GpuSample> {
         let engines = if collected { self.engine_use() } else { None };
-        let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), u64>> {
-            let mut per_adapter = HashMap::new();
+        if engines.is_none() {
+            self.gpu_by_pid = None;
+        }
+        // Each adapter's memory in use, unread where any of its instances is.
+        let mut memory = |counter: Option<PDH_HCOUNTER>| -> Option<HashMap<(u32, i32), Option<u64>>> {
+            let mut per_adapter: HashMap<(u32, i32), Option<u64>> = HashMap::new();
             for (name, value) in read_array(counter?, &mut self.buf)? {
                 if let Some(luid) = parse_luid(&name) {
-                    *per_adapter.entry(luid).or_default() += value as u64;
+                    let total = per_adapter.entry(luid).or_insert(Some(0));
+                    *total = total.zip(value).map(|(total, value)| total + value as u64);
                 }
             }
             Some(per_adapter)
@@ -296,8 +303,9 @@ impl Sampler {
         self.adapters
             .iter()
             .map(|adapter| {
-                // An adapter the counters list nothing for has nothing running.
-                let kinds: Option<Vec<(String, f32)>> = engines.as_ref().map(|engines| {
+                // An adapter the counters list nothing for has nothing
+                // running; one with an instance not read has no use known.
+                let kinds: Option<Vec<(String, f32)>> = engines.as_ref().filter(|(_, unread)| !unread.contains(&adapter.luid)).map(|(engines, _)| {
                     let mut kinds: Vec<(String, f32)> = Vec::new();
                     for ((luid, _), (kind, usage)) in engines {
                         if *luid != adapter.luid {
@@ -315,8 +323,8 @@ impl Sampler {
                 let counted = GpuSample {
                     usage: kinds.as_ref().map(|kinds| kinds.iter().map(|(_, usage)| *usage).fold(0.0, f32::max)),
                     engines: kinds.unwrap_or_default(),
-                    mem_used: dedicated.as_ref().map(|used| used.get(&adapter.luid).copied().unwrap_or(0)),
-                    shared_used: shared.as_ref().map(|used| used.get(&adapter.luid).copied().unwrap_or(0)),
+                    mem_used: dedicated.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
+                    shared_used: shared.as_ref().and_then(|used| used.get(&adapter.luid).copied().unwrap_or(Some(0))),
                     temp: None,
                     fan_rpm: None,
                     clock_mhz: None,
@@ -327,30 +335,37 @@ impl Sampler {
             .collect()
     }
 
-    /// Each engine's use (its kind, and percent), by adapter and engine;
-    /// each process's use of the GPUs is kept besides. `None` when the
-    /// counters cannot be read.
-    fn engine_use(&mut self) -> Option<HashMap<((u32, i32), u32), (String, f64)>> {
+    /// Each engine's use (its kind, and percent), by adapter and engine,
+    /// and the adapters with an instance not read this time; each process's
+    /// use of the GPUs is kept besides. `None` when the counters cannot be
+    /// read.
+    fn engine_use(&mut self) -> Option<Engines> {
         // An engine's utilisation is the sum over the processes using it; a
         // kind of engine is as busy as its busiest engine; an adapter is as
         // busy as its busiest kind.
         let mut engines: HashMap<((u32, i32), u32), (String, f64)> = HashMap::new();
         // A process's use is that of the engine it uses most.
         let mut by_process: HashMap<(usize, (u32, i32), u32), f64> = HashMap::new();
+        let mut unread = HashSet::new();
         for (name, value) in read_array(self.gpu_engine?, &mut self.buf)? {
             if let (Some(luid), Some(engine), Some(kind)) = (parse_luid(&name), parse_engine(&name), parse_kind(&name)) {
+                let Some(value) = value else {
+                    unread.insert(luid);
+                    continue;
+                };
                 engines.entry((luid, engine)).or_insert_with(|| (kind, 0.0)).1 += value;
                 if let Some(pid) = parse_pid(&name) {
                     *by_process.entry((pid, luid, engine)).or_default() += value;
                 }
             }
         }
-        self.gpu_by_pid.clear();
+        let mut by_pid: HashMap<usize, f32> = HashMap::new();
         for ((pid, _, _), value) in by_process {
-            let use_ = self.gpu_by_pid.entry(pid).or_default();
+            let use_ = by_pid.entry(pid).or_default();
             *use_ = use_.max(value.min(100.0) as f32);
         }
-        Some(engines)
+        self.gpu_by_pid = Some(by_pid);
+        Some((engines, unread))
     }
 
     /// `gpu` with what the adapter's driver gives now: its temperature,
@@ -428,8 +443,9 @@ fn read_scalar(counter: PDH_HCOUNTER, format: PDH_FMT) -> Option<f64> {
     (status == ERROR_SUCCESS.0 && valid(value.CStatus)).then(|| unsafe { value.Anonymous.doubleValue })
 }
 
-/// Reads every instance of a wildcard counter as (instance name, value).
-fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Vec<(String, f64)>> {
+/// Reads every instance of a wildcard counter as (instance name, value); an
+/// instance whose data is not valid this time has no value.
+fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Vec<(String, Option<f64>)>> {
     loop {
         let mut bytes = (buf.len() * 8) as u32;
         let mut count = 0u32;
@@ -449,9 +465,9 @@ fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Vec<(String, 
         return Some(
             items
                 .iter()
-                .filter(|item| valid(item.FmtValue.CStatus))
                 .map(|item| unsafe {
-                    (item.szName.to_string().unwrap_or_default(), item.FmtValue.Anonymous.doubleValue)
+                    let value = valid(item.FmtValue.CStatus).then(|| item.FmtValue.Anonymous.doubleValue);
+                    (item.szName.to_string().unwrap_or_default(), value)
                 })
                 .collect(),
         );
@@ -522,7 +538,7 @@ impl ProcessTable {
     /// The busiest programs since the previous call: the top of the ranking
     /// by CPU, by memory, by I/O and by GPU, together. Processes sharing an
     /// executable name are added together.
-    fn sample(&mut self, processors: usize, gpu_by_pid: &HashMap<usize, f32>) -> Vec<ProcessSample> {
+    fn sample(&mut self, processors: usize, gpu_by_pid: Option<&HashMap<usize, f32>>) -> Vec<ProcessSample> {
         let mut returned = 0u32;
         loop {
             let status = unsafe {
@@ -572,11 +588,13 @@ impl ProcessTable {
                     cpu: 0.0,
                     mem: 0,
                     io: 0.0,
-                    gpu: 0.0,
+                    gpu: gpu_by_pid.map(|_| 0.0),
                 });
                 program.cpu += (time - time_before) as f32;
                 program.mem += record.working_set_private as u64;
-                program.gpu += gpu_by_pid.get(&record.process_id).copied().unwrap_or(0.0);
+                if let (Some(gpu), Some(by_pid)) = (&mut program.gpu, gpu_by_pid) {
+                    *gpu += by_pid.get(&record.process_id).copied().unwrap_or(0.0);
+                }
             }
             if record.next_entry_offset == 0 {
                 break;
@@ -593,7 +611,7 @@ impl ProcessTable {
             .map(|mut program| {
                 program.cpu = (program.cpu as f64 / (interval * processors as f64) * 100.0) as f32;
                 program.io = moved[&program.name] as f64 / (interval / 1e7);
-                program.gpu = program.gpu.min(100.0);
+                program.gpu = program.gpu.map(|gpu| gpu.min(100.0));
                 program
             })
             .collect();
@@ -603,7 +621,7 @@ impl ProcessTable {
             |a, b| b.cpu.total_cmp(&a.cpu),
             |a, b| b.mem.cmp(&a.mem),
             |a, b| b.io.total_cmp(&a.io),
-            |a, b| b.gpu.total_cmp(&a.gpu),
+            |a, b| b.gpu.unwrap_or(-1.0).total_cmp(&a.gpu.unwrap_or(-1.0)),
         ];
         for ranking in rankings {
             all.sort_by(ranking);
@@ -747,6 +765,10 @@ fn adapter_address(kmt_handle: u32) -> Option<gpu_power::PciAddress> {
     };
     unsafe { D3DKMTQueryAdapterInfo(&mut query) }.is_ok().then_some((address.BusNumber, address.DeviceNumber, address.FunctionNumber))
 }
+
+/// Each engine's use (kind, and percent) by adapter and engine, and the
+/// adapters with an instance not read.
+type Engines = (HashMap<((u32, i32), u32), (String, f64)>, HashSet<(u32, i32)>);
 
 /// Clock of the adapter's first engine (the graphics engine), in MHz. A
 /// driver that gives the engine's top clock gives its clock: 0 is a GPU at

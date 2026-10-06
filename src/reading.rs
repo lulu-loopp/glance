@@ -118,8 +118,10 @@ pub struct ProcessSample {
     /// Bytes read and written per second, to disk and to the network alike
     /// (Windows counts a process's I/O without telling them apart).
     pub io: f64,
-    /// Percent of its busiest GPU engine, as Task Manager shows it.
-    pub gpu: f32,
+    /// Percent of its busiest GPU engine, as Task Manager shows it; `None`
+    /// where the GPUs' counters could not be read (or the system offers
+    /// none per process).
+    pub gpu: Option<f32>,
 }
 
 #[derive(Clone, Serialize)]

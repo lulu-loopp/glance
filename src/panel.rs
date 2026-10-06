@@ -554,7 +554,11 @@ impl<'a> Panel<'a> {
         let style = format!("{} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
-            self.held = self.opening.take().map(|opening| opening.seen).filter(|_| self.is_shown());
+            // A second change before a frame laid it out keeps what the
+            // first took from the opening.
+            if let Some(opening) = self.opening.take().filter(|_| self.is_shown()) {
+                self.held = Some(opening.seen);
+            }
         }
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
