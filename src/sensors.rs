@@ -2,6 +2,7 @@
 //! temperature and power. Needs administrator rights and the PawnIO driver;
 //! without either there are simply no readings.
 
+use crate::reading::CpuSensors;
 use std::time::Instant;
 
 use windows::core::{w, PCWSTR};
@@ -28,13 +29,6 @@ const MAX_CCDS: u64 = 8;
 const MSR_PWR_UNIT: u64 = 0xC001_0299;
 const MSR_PKG_ENERGY_STAT: u64 = 0xC001_029B;
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
-pub struct CpuSensors {
-    pub temp: Option<f32>,
-    /// Each chiplet's temperature, on CPUs that have several.
-    pub ccds: Vec<f32>,
-    pub power: Option<f32>,
-}
 
 /// A lock that every hardware monitor on Windows agrees to take before
 /// touching a shared piece of hardware: the PCI configuration registers

@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::detector::{Detector, Motion};
-use crate::metrics::{Sample, StaticInfo};
+use crate::reading::{Sample, StaticInfo};
 use crate::settings::{Anchor, Edge, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};

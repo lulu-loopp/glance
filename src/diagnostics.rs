@@ -8,7 +8,8 @@ use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenC
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
-use crate::metrics::{reg_string, Sample, StaticInfo};
+use crate::metrics::reg_string;
+use crate::reading::{Sample, StaticInfo};
 
 /// The report, in English (it is for an issue on GitHub).
 pub fn report() -> String {

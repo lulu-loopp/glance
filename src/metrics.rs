@@ -5,13 +5,12 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
 
-use crate::drives::DriveTemperature;
-use crate::sensors::{CpuReader, CpuSensors};
 use crate::dimm::Dimms;
 use crate::gpu_power::{self, GpuPower};
-use crate::superio::{BoardSensors, SuperIo};
+use crate::reading::{BatterySample, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
+use crate::sensors::CpuReader;
+use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
     D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
@@ -36,135 +35,6 @@ use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::ProcessStatus::{GetPerformanceInfo, PERFORMANCE_INFORMATION};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
 use windows::Win32::System::SystemInformation::GetTickCount64;
-
-#[derive(Clone, Serialize)]
-pub struct StaticInfo {
-    pub cpu_name: String,
-    /// The memory modules, as "2 × 32 GB DDR5-6000", when the firmware says.
-    pub memory_modules: Option<String>,
-    /// The model of each physical drive.
-    pub drives: Vec<String>,
-    /// The model of the adapter internet traffic leaves by, when the app started.
-    pub network_adapter: Option<String>,
-    /// The motherboard's model, as its firmware names it.
-    pub board: String,
-    pub threads: usize,
-    pub mem_total: u64,
-    pub gpus: Vec<GpuInfo>,
-    /// What of the hardware Glance found to read, and how, a line each:
-    /// for the diagnostics the settings copy.
-    pub found: Vec<String>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct GpuInfo {
-    pub name: String,
-    pub mem_total: u64,
-    pub shared_total: u64,
-}
-
-#[derive(Clone, Serialize)]
-pub struct Sample {
-    /// Milliseconds since the Unix epoch.
-    pub t: u64,
-    pub cpu: f32,
-    pub threads: Vec<f32>,
-    pub ghz: f32,
-    pub memory: MemorySample,
-    pub gpus: Vec<GpuSample>,
-    pub net_down: f64,
-    pub net_up: f64,
-    /// Bytes moved since the interfaces came up.
-    pub net_total_down: u64,
-    pub net_total_up: u64,
-    pub network: Option<NetworkInfo>,
-    pub disk_read: f64,
-    pub disk_write: f64,
-    /// Percent of the time the disks were busy.
-    pub disk_active: f32,
-    pub volumes: Vec<VolumeSample>,
-    /// The busiest programs by CPU, and by memory.
-    /// The busiest programs by each measure, together (see `ProcessTable`).
-    pub processes: Vec<ProcessSample>,
-    pub system: SystemSample,
-    pub battery: Option<BatterySample>,
-    /// The CPU's own temperatures and power, read through the driver.
-    pub cpu_sensors: Option<CpuSensors>,
-    /// The motherboard's temperatures and fans, read through the driver.
-    pub board: Option<BoardSensors>,
-    /// Drives that report their temperature to Windows directly.
-    pub drive_temps: Vec<DriveTemperature>,
-    /// Each memory module's temperature, in slot order, read through the driver.
-    pub dimm_temps: Vec<f32>,
-}
-
-#[derive(Clone, Serialize)]
-pub struct MemorySample {
-    pub used: u64,
-    pub committed: u64,
-    pub commit_limit: u64,
-    pub cached: u64,
-}
-
-#[derive(Clone, Serialize)]
-pub struct GpuSample {
-    pub usage: f32,
-    /// Busiest engine of each kind (3D, Copy, VideoDecode, …).
-    pub engines: Vec<(String, f32)>,
-    pub mem_used: u64,
-    pub shared_used: u64,
-    pub temp: Option<f32>,
-    pub clock_mhz: Option<f32>,
-    pub fan_rpm: Option<u32>,
-    /// Watts, as a discrete card's driver reports them.
-    pub power: Option<f32>,
-}
-
-/// One program: every process sharing an executable name, added together.
-#[derive(Clone, Serialize)]
-pub struct ProcessSample {
-    pub name: String,
-    /// Percent of the whole machine.
-    pub cpu: f32,
-    pub mem: u64,
-    /// Bytes read and written per second, to disk and to the network alike
-    /// (Windows counts a process's I/O without telling them apart).
-    pub io: f64,
-    /// Percent of its busiest GPU engine, as Task Manager shows it.
-    pub gpu: f32,
-}
-
-#[derive(Clone, Serialize)]
-pub struct VolumeSample {
-    pub name: String,
-    pub used: u64,
-    pub total: u64,
-}
-
-/// The interface the default route goes through.
-#[derive(Clone, Serialize)]
-pub struct NetworkInfo {
-    /// The connection's name ("WLAN", "Ethernet"), and the adapter's model.
-    pub name: String,
-    pub model: String,
-    pub ipv4: Option<String>,
-    pub link_bps: u64,
-}
-
-#[derive(Clone, Serialize)]
-pub struct SystemSample {
-    pub uptime_s: u64,
-    pub processes: u32,
-    pub threads: u32,
-    pub handles: u32,
-}
-
-#[derive(Clone, Serialize)]
-pub struct BatterySample {
-    pub percent: u8,
-    pub charging: bool,
-    pub seconds_left: Option<u32>,
-}
 
 /// PDH_FMT_DOUBLE with PDH_FMT_NOCAP100, which lets a percentage counter
 /// report above 100 (turbo frequencies do).

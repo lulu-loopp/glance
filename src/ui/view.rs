@@ -16,7 +16,7 @@ use super::gfx::{rect, Align, Color, Family, Font, Frame};
 use super::prefs::{Prefs, ProcessSort};
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
-use crate::metrics::{ProcessSample, Sample, StaticInfo};
+use crate::reading::{ProcessSample, Sample, StaticInfo};
 
 /// A column's width (DIPs), whatever the skin.
 pub const COLUMN_WIDTH: f32 = 356.0;

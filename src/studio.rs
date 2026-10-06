@@ -24,14 +24,12 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::drives::DriveTemperature;
-use crate::metrics::{
-    BatterySample, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample,
-};
 use crate::panel::{CLOSE, OPEN, OPEN_FADE, PEN_LAG_MS};
-use crate::sensors::CpuSensors;
+use crate::reading::{
+    BatterySample, BoardSensors, CpuSensors, DriveTemperature, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo,
+    SystemSample, VolumeSample,
+};
 use crate::settings::Edge;
-use crate::superio::BoardSensors;
 use crate::ui::gfx::Gfx;
 use crate::ui::prefs::Prefs;
 use crate::ui::render::{self, PanelLayers, GAP};

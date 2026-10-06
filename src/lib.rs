@@ -8,6 +8,7 @@ mod journal;
 mod metrics;
 mod panel;
 mod pawnio;
+mod reading;
 mod sensors;
 #[cfg(feature = "studio")]
 mod studio;
@@ -29,7 +30,8 @@ use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ACCESS_DENIED,
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 
-use metrics::{Sampler, StaticInfo};
+use metrics::Sampler;
+use reading::StaticInfo;
 use panel::Controller;
 use settings::Settings;
 

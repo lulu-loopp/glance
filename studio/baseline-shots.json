@@ -1,0 +1,13 @@
+{
+  "width": 1600, "height": 1000, "scale": 1.25, "fps": 30,
+  "wallpaper": "target/studio/wall-baseline.png",
+  "shots": [
+    { "name": "base-paper-light-zh", "skin": "paper", "theme": "light", "seconds": 0.034, "load": [0.3, 0.3] },
+    { "name": "base-paper-dark-en", "skin": "paper", "theme": "dark", "lang": "en", "seconds": 0.034, "load": [0.9, 0.9] },
+    { "name": "base-glass-zh", "skin": "glass", "seconds": 0.034, "load": [0.55, 0.55] },
+    { "name": "base-glass-light-en", "skin": "glass", "theme": "light", "lang": "en", "seconds": 0.034, "load": [0.1, 0.1] },
+    { "name": "base-fluent-dark-zh", "skin": "fluent", "theme": "dark", "seconds": 0.034, "load": [0.7, 0.7] },
+    { "name": "base-fluent-light-en", "skin": "fluent", "theme": "light", "lang": "en", "seconds": 0.034, "load": [0.4, 0.4] },
+    { "name": "base-glass-slide", "skin": "glass", "seconds": 0.5, "slide_in": 0.05, "load": [0.5, 0.5] }
+  ]
+}

@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::metrics::{Sample, StaticInfo};
+use crate::reading::{Sample, StaticInfo};
 use crate::ui::prefs::Prefs;
 use crate::ui::text::Lang;
 

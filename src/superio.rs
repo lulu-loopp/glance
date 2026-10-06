@@ -3,6 +3,7 @@
 //! chips (Gigabyte, ASRock and others) and Nuvoton's NCT6779D and NCT679x
 //! (ASUS, ASRock, some MSI and Gigabyte boards) are supported.
 
+use crate::reading::BoardSensors;
 use crate::pawnio::Module;
 use crate::sensors::{NamedLock, LOCK_WAIT};
 
@@ -38,14 +39,6 @@ const NUVOTON_FANS: [u16; 7] = [0x4C0, 0x4C2, 0x4C4, 0x4C6, 0x4C8, 0x4CA, 0x4CE]
 const NUVOTON_VENDOR: (u16, u16) = (0x804F, 0x004F);
 const NUVOTON_VENDOR_ID: u16 = 0x5CA3;
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
-pub struct BoardSensors {
-    /// Temperatures by what they measure: a name from the board's layout
-    /// (see `layout`), the chip's name for the input, or its number.
-    pub temps: Vec<(String, f32)>,
-    /// Fan headers that report a speed, named the same way, in RPM.
-    pub fans: Vec<(String, f32)>,
-}
 
 /// What each of the chip's inputs is wired to on a given board, as the
 /// board's maker labels them. Names are keys the page translates.

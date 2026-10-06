@@ -1,7 +1,7 @@
 //! Drive temperatures, as the drives report them to Windows. Asking for a
 //! drive's properties needs no access to its data, so no administrator rights.
 
-use serde::Serialize;
+use crate::reading::DriveTemperature;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -14,11 +14,6 @@ use windows::Win32::System::Ioctl::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-#[derive(Clone, Serialize)]
-pub struct DriveTemperature {
-    pub name: String,
-    pub celsius: f32,
-}
 
 /// Physical drives are numbered from zero; a gap this long means no more.
 const MAX_GAP: u32 = 4;
