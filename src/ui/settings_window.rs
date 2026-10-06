@@ -811,8 +811,8 @@ impl Ui {
             Switch::Updates => {
                 let version = env!("CARGO_PKG_VERSION");
                 let hint = match lang {
-                    Lang::Zh => format!("当前版本 {version}，每天向 GitHub 查询一次是否有新版本"),
-                    Lang::En => format!("Version {version}; asks GitHub once a day whether there is a new one"),
+                    Lang::Zh => format!("当前版本 {version}，每天检查一次"),
+                    Lang::En => format!("Version {version}; checks once a day"),
                 };
                 return (p("检查更新", "Check for updates"), Some(Cow::Owned(hint)), self.settings.check_updates);
             }
