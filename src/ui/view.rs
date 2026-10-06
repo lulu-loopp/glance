@@ -963,12 +963,9 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
         Some(i) => (&visible[i - 1], &visible[i]),
     };
     let progress = if after.t == before.t { 0.0 } else { (pen - before.t as f64) / (after.t - before.t) as f64 };
-    // No tip while the reading is missing.
-    let value = match (read(before), read(after)) {
-        (Some(from), Some(to)) => from + (to - from) * progress,
-        (Some(value), None) | (None, Some(value)) => value,
-        (None, None) => return,
-    };
+    // No tip in a gap: the line is not there to have one.
+    let (Some(from), Some(to)) = (read(before), read(after)) else { return };
+    let value = from + (to - from) * progress;
     let color = if plot.hot.is_some_and(|hot| value > hot) { theme.signal } else { ink.trace };
     frame.fill_circle(color, Point { x: right, y: y(value) }, 2.5);
 }
