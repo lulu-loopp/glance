@@ -64,6 +64,10 @@ struct Slow {
 /// unreported, rather than everything else with it.
 pub struct Sampler {
     query: PDH_HQUERY,
+    /// Each processor group's first processor, counted across the groups,
+    /// and how many processors there are.
+    group_starts: Vec<usize>,
+    processors: usize,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
     gpu_engine: Option<PDH_HCOUNTER>,
@@ -146,8 +150,11 @@ impl Sampler {
             gpus,
             found,
         };
+        let (group_starts, processors) = processor_groups();
         Sampler {
             query,
+            group_starts,
+            processors,
             cpu_time,
             cpu_performance,
             gpu_engine,
@@ -183,19 +190,23 @@ impl Sampler {
         let counter = |counter: Option<PDH_HCOUNTER>| counter.filter(|_| collected);
 
         let mut cpu = None;
-        // A thread not read this time keeps its place, unread.
-        let mut threads: Vec<((u32, u32), Option<f32>)> = Vec::new();
+        // Each thread in its processor's place (its group's first, and its
+        // number in the group); one not read this time, or not listed,
+        // stays unread there.
         let per_thread = counter(self.cpu_time).and_then(|counter| read_array(counter, &mut self.buf));
+        let mut threads: Vec<Option<f32>> = if per_thread.is_some() { vec![None; self.processors] } else { Vec::new() };
         for (name, value) in per_thread.unwrap_or_default() {
             if name == "_Total" {
                 cpu = value.map(|value| value as f32);
             } else if let Some((group, index)) = name.split_once(',') {
-                if let (Ok(group), Ok(index)) = (group.parse(), index.parse()) {
-                    threads.push(((group, index), value.map(|value| value as f32)));
+                if let (Ok(group), Ok(index)) = (group.parse::<usize>(), index.parse::<usize>()) {
+                    let place = self.group_starts.get(group).map(|start| start + index);
+                    if let Some(cell) = place.and_then(|place| threads.get_mut(place)) {
+                        *cell = value.map(|value| value as f32);
+                    }
                 }
             }
         }
-        threads.sort_by_key(|(key, _)| *key);
         // Without the counters, the whole processor's use from the kernel's
         // own account of its time (and no per-thread grid).
         let times = system_times();
@@ -247,7 +258,7 @@ impl Sampler {
         Some(Sample {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
             cpu: cpu.unwrap_or(0.0),
-            threads: threads.into_iter().map(|(_, value)| value).collect(),
+            threads,
             ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
             memory: MemorySample {
                 used: (perf.PhysicalTotal - perf.PhysicalAvailable) as u64 * page,
@@ -407,6 +418,19 @@ const PROCESSOR_TIMES: u32 = 8;
 #[link(name = "ntdll")]
 unsafe extern "system" {
     fn NtQuerySystemInformationEx(class: u32, input: *const core::ffi::c_void, input_length: u32, output: *mut core::ffi::c_void, output_length: u32, returned: *mut u32) -> i32;
+}
+
+/// Each active processor group's first processor, counted across the
+/// groups, and how many active processors there are in all.
+fn processor_groups() -> (Vec<usize>, usize) {
+    use windows::Win32::System::Threading::{GetActiveProcessorCount, GetActiveProcessorGroupCount};
+    let mut starts = Vec::new();
+    let mut total = 0;
+    for group in 0..unsafe { GetActiveProcessorGroupCount() } {
+        starts.push(total);
+        total += unsafe { GetActiveProcessorCount(group) } as usize;
+    }
+    (starts, total)
 }
 
 /// All processors' idle time, and their busy (kernel and user, less idle)
@@ -944,6 +968,8 @@ mod tests {
         println!("{}", serde_json::to_string_pretty(&sampler.info).unwrap());
         println!("{}", serde_json::to_string_pretty(&sample).unwrap());
         assert_eq!(sample.threads.len(), sampler.info.threads);
+        // Every processor's thread read, each in its place.
+        assert!(sample.threads.iter().all(Option::is_some));
         assert!((0.0..=100.0).contains(&sample.cpu));
         assert!(sample.memory.used > 0 && sample.memory.used < sampler.info.mem_total);
         assert!(sample.memory.committed <= sample.memory.commit_limit);

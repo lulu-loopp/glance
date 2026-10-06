@@ -132,8 +132,13 @@ impl Sampler {
                 (span > 0).then(|| (busy.saturating_sub(was_busy) as f64 / span as f64 * 100.0) as f32)
             })
             .collect();
-        let read: Vec<f32> = threads.iter().flatten().copied().collect();
-        let cpu = if read.is_empty() { 0.0 } else { read.iter().sum::<f32>() / read.len() as f32 };
+        // The whole processor's use: all cores' busy time over all their
+        // time, since the last look.
+        let (busy, total) = cores.iter().enumerate().fold((0u64, 0u64), |(busy, total), (i, (now_busy, now_total))| {
+            let (was_busy, was_total) = self.previous.cores.get(i).copied().unwrap_or((0, 0));
+            (busy + now_busy.saturating_sub(was_busy), total + now_total.saturating_sub(was_total))
+        });
+        let cpu = if total == 0 { 0.0 } else { (busy as f64 / total as f64 * 100.0) as f32 };
 
         let interfaces = interfaces();
         let net = hardware_bytes(&interfaces);
