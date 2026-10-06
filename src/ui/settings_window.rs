@@ -693,9 +693,10 @@ impl Ui {
             Row::Choice(Field::TempAlert),
             Row::Switch(Switch::HeatAlert),
             Row::Heading("系统", "System"),
+            // The switches together, then the buttons.
             Row::Switch(Switch::Startup),
-            Row::Version,
             Row::Switch(Switch::Updates),
+            Row::Version,
         ]);
         if update::available().is_some() {
             rows.push(Row::Update);
