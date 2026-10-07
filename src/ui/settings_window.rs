@@ -61,7 +61,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
+use crate::settings::{Anchor, Corner, Detail, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
 use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
@@ -279,6 +279,8 @@ enum Field {
     Span,
     LoadAlert,
     TempAlert,
+    OverlayCorner,
+    OverlayDetail,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -299,6 +301,7 @@ enum Switch {
     Updates,
     HeatAlert,
     AutoGame,
+    Overlay,
 }
 
 /// What a press lands on.
@@ -711,7 +714,13 @@ impl Ui {
                 rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
             }
         }
-        rows.extend([Row::Heading("游戏模式", "Game mode"), Row::Switch(Switch::AutoGame)]);
+        rows.extend([
+            Row::Heading("游戏模式", "Game mode"),
+            Row::Switch(Switch::AutoGame),
+            Row::Switch(Switch::Overlay),
+            Row::Choice(Field::OverlayCorner),
+            Row::Choice(Field::OverlayDetail),
+        ]);
         let marks = &self.settings.games;
         rows.extend(marks.always.iter().map(|name| Row::Mark(name.clone(), true)));
         rows.extend(marks.never.iter().map(|name| Row::Mark(name.clone(), false)));
@@ -881,6 +890,16 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
+            Field::OverlayCorner => (
+                pick(lang, "悬浮窗位置", "Overlay corner"),
+                vec![s("左上", "Top left"), s("右上", "Top right"), s("左下", "Bottom left"), s("右下", "Bottom right")],
+                [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight].iter().position(|&c| c == settings.overlay.corner),
+            ),
+            Field::OverlayDetail => (
+                pick(lang, "悬浮窗内容", "Overlay shows"),
+                vec![s("简洁", "Simple"), s("标准", "Standard"), s("详细", "Detailed")],
+                [Detail::Simple, Detail::Standard, Detail::Detailed].iter().position(|&d| d == settings.overlay.detail),
+            ),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -925,6 +944,8 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
+            Field::OverlayCorner => settings.overlay.corner = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight][index],
+            Field::OverlayDetail => settings.overlay.detail = [Detail::Simple, Detail::Standard, Detail::Detailed][index],
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -998,6 +1019,11 @@ impl Ui {
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
             Field::Mode => Some(pick(self.lang, "两种模式各有自己的模块、顺序和栏数", "Each mode has its own modules, order and columns")),
+            Field::OverlayDetail => Some(pick(
+                self.lang,
+                "简洁：帧率；标准：加上 1% low、CPU 和 GPU 的占用与温度；详细：再加帧时间、功耗和内存",
+                "Simple: the frame rate. Standard: its 1% low, the CPU's and GPU's use and heat. Detailed: frame time, power and memory too",
+            )),
             Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
         }
@@ -1026,6 +1052,11 @@ impl Ui {
                 p("自动切换到游戏模式", "Switch to game mode by itself"),
                 Some(p("游戏开始时切换，结束后切回日常；面板底部也能手动切换", "When a game starts, and back when it ends; the panel's bar switches too")),
                 self.settings.auto_game_mode,
+            ),
+            Switch::Overlay => (
+                p("游戏悬浮窗", "Game overlay"),
+                Some(p("游戏运行时在画面角落显示帧率等，鼠标点击会穿过它；独占全屏的游戏上可能看不到", "Readings in a corner while a game runs; clicks pass through. May not show over exclusive fullscreen")),
+                self.settings.overlay.on,
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
@@ -1067,6 +1098,10 @@ impl Ui {
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::AutoGame => settings.auto_game_mode ^= true,
+            Switch::Overlay => {
+                settings.overlay.on ^= true;
+                settings.overlay.offered = true;
+            }
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -2134,7 +2169,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
@@ -2153,7 +2188,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

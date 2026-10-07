@@ -153,6 +153,8 @@ pub struct Presenting {
     /// Whether it is the window in front.
     pub in_front: bool,
     pub refresh_hz: Option<u32>,
+    /// Its screen, in physical pixels: left, top, right, bottom.
+    pub screen: Option<[i32; 4]>,
 }
 
 /// Every program presenting frames now, by its topmost window, topmost
@@ -200,9 +202,10 @@ pub fn presenting() -> Vec<Presenting> {
             stats: frames,
             title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
             fills_screen,
-            under_pointer: monitor.is_some() && monitor == pointer_screen,
+            under_pointer: monitor.is_some() && monitor.map(|(monitor, _)| monitor) == pointer_screen,
             in_front: window == front,
             refresh_hz,
+            screen: monitor.map(|(_, r)| [r.left, r.top, r.right, r.bottom]),
         });
     }
     found
@@ -210,7 +213,7 @@ pub fn presenting() -> Vec<Presenting> {
 
 /// Whether `window` covers its monitor, not maximized, the monitor's
 /// refresh rate, and the monitor.
-fn screen_of(window: HWND) -> (bool, Option<u32>, Option<HMONITOR>) {
+fn screen_of(window: HWND) -> (bool, Option<u32>, Option<(HMONITOR, RECT)>) {
     unsafe {
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
         let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
@@ -228,7 +231,7 @@ fn screen_of(window: HWND) -> (bool, Option<u32>, Option<HMONITOR>) {
             .then_some(mode.dmDisplayFrequency)
             // 0 and 1 stand for the hardware's default.
             .filter(|&hz| hz > 1);
-        (fills, refresh, Some(monitor))
+        (fills, refresh, Some((monitor, info.monitorInfo.rcMonitor)))
     }
 }
 

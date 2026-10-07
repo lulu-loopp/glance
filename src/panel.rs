@@ -43,7 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::detector::{Detector, Motion};
 use crate::reading::{Sample, StaticInfo};
-use crate::settings::{Anchor, Edge, OverFullscreen, Settings};
+use crate::overlay::Overlay;
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, GAP};
@@ -99,6 +100,8 @@ const DISMISS: u32 = WM_APP + 2;
 const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
 const TOGGLE: u32 = WM_APP + 5;
+/// A new sample: the overlay is drawn again.
+const OVERLAY: u32 = WM_APP + 7;
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
@@ -110,6 +113,7 @@ struct Config {
     columns: Option<usize>,
     game_columns: Option<usize>,
     auto_game_mode: bool,
+    overlay: OverlaySettings,
     pressure: i32,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
@@ -127,6 +131,7 @@ fn config_from(settings: &Settings) -> Config {
         columns: settings.columns,
         game_columns: settings.game_columns,
         auto_game_mode: settings.auto_game_mode,
+        overlay: settings.overlay,
         pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
@@ -188,6 +193,15 @@ impl Controller {
         self.seen.lock().unwrap().note(&sample);
         // A game starting or ending sets the mode by itself again.
         let playing = sample.game.as_ref().is_some_and(|game| game.is_game);
+        let started = playing && !self.modes.lock().unwrap().playing;
+        if started {
+            // The first game ever, with the overlay off: it is offered.
+            let overlay = self.config.lock().unwrap().overlay;
+            if !overlay.on && !overlay.offered {
+                let name = sample.game.as_ref().map(|game| game.name.clone()).unwrap_or_default();
+                std::thread::spawn(move || crate::app().offer_overlay(&name));
+            }
+        }
         let changed = {
             let mut modes = self.modes.lock().unwrap();
             let before = self.mode_of(&modes);
@@ -200,6 +214,7 @@ impl Controller {
         if changed {
             self.post(RESTYLE);
         }
+        self.post(OVERLAY);
         let keep = self.config.lock().unwrap().history;
         let mut history = self.history.lock().unwrap();
         while history.len() >= keep {
@@ -286,6 +301,14 @@ impl Controller {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
         let mut panel = Panel::new(self).expect("panel window");
+        // Without one (no graphics device just now), no overlay.
+        let mut overlay = Overlay::new().ok();
+        let draw_overlay = |overlay: &mut Option<Overlay>, lang: Lang| {
+            let Some(overlay) = overlay else { return };
+            let settings = self.config.lock().unwrap().overlay;
+            let history = self.history.lock().unwrap();
+            overlay.show(history.back(), &settings, lang);
+        };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
         let mut detector = Detector::default();
@@ -393,9 +416,14 @@ impl Controller {
                 }
                 // Placed, zoomed and backed for screens that are no longer
                 // so: taken down, and opened afresh.
-                crate::ui::window::SCREENS_CHANGED => panel.screens_changed(msg.wParam.0 as u32, now),
+                // The panel's own (the overlay's follows its game's screen).
+                crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
                 OPEN_SETTINGS => settings_window::open(),
-                RESTYLE => panel.restyle(),
+                RESTYLE => {
+                    panel.restyle();
+                    draw_overlay(&mut overlay, panel.lang);
+                }
+                OVERLAY => draw_overlay(&mut overlay, panel.lang),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
                 WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
@@ -1105,6 +1133,10 @@ impl<'a> Panel<'a> {
             }
             Some(Hit::Pin) => self.pinned ^= true,
             Some(Hit::Mode(mode)) if mode != self.mode => self.controller.choose_mode(mode),
+            Some(Hit::Overlay) => {
+                let on = !self.controller.config.lock().unwrap().overlay.on;
+                std::thread::spawn(move || crate::app().set_overlay(on));
+            }
             Some(Hit::Mark(game)) => {
                 let program = self.controller.history.lock().unwrap().back().and_then(|s| s.game.as_ref()).map(|g| g.program.clone());
                 if let Some(program) = program.filter(|program| !program.is_empty()) {
@@ -1148,7 +1180,10 @@ fn scene<'s>(
     history: &'s [Sample],
     seen: &'s Seen,
 ) -> Scene<'s> {
-    let interval = controller.config.lock().unwrap().interval;
+    let (interval, overlay) = {
+        let config = controller.config.lock().unwrap();
+        (config.interval, config.overlay.on)
+    };
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
     Scene {
         info: &controller.info,
@@ -1162,6 +1197,7 @@ fn scene<'s>(
         hover,
         pinned,
         mode,
+        overlay,
     }
 }
 

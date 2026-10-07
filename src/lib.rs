@@ -19,6 +19,8 @@ mod journal;
 #[cfg(windows)]
 mod metrics;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
 mod panel;
 #[cfg(windows)]
 mod pawnio;
@@ -116,6 +118,37 @@ impl App {
         prefs.processes.sort = sort;
         settings.view = serde_json::to_value(prefs).unwrap();
         self.save(settings);
+    }
+
+    /// The overlay turned on or off from the panel.
+    pub fn set_overlay(&self, on: bool) {
+        let mut settings = self.settings.lock().unwrap().clone();
+        settings.overlay.on = on;
+        settings.overlay.offered = true;
+        self.save(settings);
+    }
+
+    /// A game, `name`, has started for the first time with the overlay off:
+    /// told once that there is one.
+    pub fn offer_overlay(&self, name: &str) {
+        let mut settings = self.settings.lock().unwrap().clone();
+        if settings.overlay.offered || settings.overlay.on {
+            return;
+        }
+        settings.overlay.offered = true;
+        self.save(settings);
+        let lang = ui::text::Lang::resolve(ui::prefs::Prefs::resolve(&self.settings.lock().unwrap().view, &[]).language);
+        let (title, text) = match lang {
+            ui::text::Lang::Zh => (
+                format!("检测到游戏：{name}"),
+                "可以在游戏画面的角落显示帧率等信息：点面板底部的手柄按钮，或在设置的“游戏模式”里打开悬浮窗。".to_string(),
+            ),
+            ui::text::Lang::En => (
+                format!("A game is running: {name}"),
+                "Glance can show the frame rate and more in a corner of the game: click the controller button on the panel's bar, or turn the overlay on under Game mode in the settings.".to_string(),
+            ),
+        };
+        tray::notify(&title, &text);
     }
 
     /// Program `program` was said from the panel to be a game, or not.

@@ -9,6 +9,7 @@ pub mod canvas;
 #[cfg(windows)]
 pub mod gfx;
 pub mod motion;
+pub mod overlay;
 pub mod prefs;
 pub mod seen;
 #[cfg(windows)]

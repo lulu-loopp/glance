@@ -253,6 +253,8 @@ impl Sampler {
             longest_ms: presenting.stats.longest_ms,
             fills_screen: presenting.fills_screen,
             refresh_hz: presenting.refresh_hz,
+            screen: presenting.screen,
+            gpu_index: self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().position(|a| a.luid == *luid)),
             cpu: usage.map(|(cpu, _)| cpu),
             // A process the counters list nothing for uses no GPU.
             gpu: self.gpu_by_pid.as_ref().and_then(|by_pid| by_pid.get(&pid).copied().unwrap_or(Some(0.0))),

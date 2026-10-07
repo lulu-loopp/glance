@@ -161,7 +161,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
-    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: if game_mode { Mode::Game } else { Mode::Daily } };
+    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: if game_mode { Mode::Game } else { Mode::Daily }, overlay: false };
     let (layout, zoom, rest, _) = place(&probe, &view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -199,6 +199,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             hover: None,
             pinned: false,
             mode: if game_mode { Mode::Game } else { Mode::Daily },
+            overlay: false,
         };
         let (layout, zoom, rest, held) = place(&scene, &view::lanes(&scene), &theme);
         // What the panel holds as it has been up: drawn in the boxes it opened with.
@@ -368,6 +369,8 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             longest_ms: if stutter { 18.0 + 14.0 * noise() } else { 7.6 + 1.6 * noise() },
             fills_screen: true,
             refresh_hz: Some(165),
+            screen: None,
+            gpu_index: Some(0),
             cpu: Some(14.0 + 6.0 * noise()),
             gpu: Some(93.0 + 5.0 * noise()),
             mem: Some((6.2 * gb as f32) as u64),

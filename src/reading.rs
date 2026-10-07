@@ -112,6 +112,10 @@ pub struct GameSample {
     pub fills_screen: bool,
     /// The refresh rate of its screen.
     pub refresh_hz: Option<u32>,
+    /// Its screen, in physical pixels: left, top, right, bottom.
+    pub screen: Option<[i32; 4]>,
+    /// The GPU it uses most, as `StaticInfo::gpus` and `Sample::gpus` list it.
+    pub gpu_index: Option<usize>,
     /// Its share of every processor, in percent, at the last look at the
     /// process list.
     pub cpu: Option<f32>,

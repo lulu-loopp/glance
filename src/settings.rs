@@ -111,6 +111,46 @@ impl GameMarks {
     }
 }
 
+/// The readings over a game, in a corner of its screen.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverlaySettings {
+    pub on: bool,
+    pub corner: Corner,
+    pub detail: Detail,
+    /// Offered once already: the first game told of it.
+    pub offered: bool,
+}
+
+impl Default for OverlaySettings {
+    fn default() -> Self {
+        OverlaySettings { on: false, corner: Corner::TopLeft, detail: Detail::Standard, offered: false }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Corner {
+    #[default]
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// How much the overlay shows.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Detail {
+    /// The frame rate.
+    Simple,
+    /// The frame rate and its 1% low; the CPU's and GPU's use and heat.
+    #[default]
+    Standard,
+    /// Besides, frame time, power and memory.
+    Detailed,
+}
+
 /// What opens the panel over a game in exclusive fullscreen.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -186,6 +226,7 @@ pub struct Settings {
     pub last_version: Option<String>,
     /// Programs the user has said are games, or are not, by name.
     pub games: GameMarks,
+    pub overlay: OverlaySettings,
     pub view: serde_json::Value,
 }
 
@@ -209,6 +250,7 @@ impl Default for Settings {
             heat_alert: false,
             last_version: None,
             games: GameMarks::default(),
+            overlay: OverlaySettings::default(),
             view: serde_json::Value::Null,
         }
     }

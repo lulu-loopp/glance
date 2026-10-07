@@ -47,6 +47,8 @@ pub enum Hit {
     Mode(Mode),
     /// The program in the game lane is a game (true), or is not.
     Mark(bool),
+    /// The overlay's switch.
+    Overlay,
 }
 
 impl Hit {
@@ -81,6 +83,8 @@ pub struct Scene<'a> {
     pub pinned: bool,
     /// The mode it is in.
     pub mode: Mode,
+    /// The overlay is on.
+    pub overlay: bool,
 }
 
 impl Scene<'_> {
@@ -1113,8 +1117,9 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let top = bar.y + (bar.h - BUTTON) / 2.0;
     let settings = bar.x + bar.w - theme.bar_pad.1 - BUTTON;
     let pin = settings - BUTTON;
+    let overlay = pin - BUTTON;
     // The modes before them, the one in force lit.
-    let modes = pin - 8.0 - 2.0 * MODE_BUTTON;
+    let modes = overlay - 8.0 - 2.0 * MODE_BUTTON;
     // The two on one track, as one control.
     frame.fill_rounded(theme.track, modes, top, 2.0 * MODE_BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
     for (i, (mode, name)) in [(Mode::Daily, scene.lang.pick("日常", "Daily")), (Mode::Game, scene.lang.pick("游戏", "Game"))].into_iter().enumerate() {
@@ -1134,7 +1139,9 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let start = bar.x + theme.bar_pad.0;
     frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, modes - 8.0 - start, Align::Start);
     let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
-    for (left, glyph, hit, lit) in [(pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)] {
+    // The overlay's: a game controller, lit while it is on.
+    let buttons = [(overlay, "\u{E7FC}", Hit::Overlay, scene.overlay), (pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)];
+    for (left, glyph, hit, lit) in buttons {
         let hovered = scene.hover == Some(hit);
         if hovered || lit {
             frame.fill_rounded(theme.hover, left, top, BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
@@ -1254,7 +1261,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -1278,7 +1285,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
