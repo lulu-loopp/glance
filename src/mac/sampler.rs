@@ -206,6 +206,7 @@ impl Sampler {
                 .into_iter()
                 .collect(),
             dimm_temps: Vec::new(),
+            game: None,
         };
         self.previous = Previous {
             at: now,

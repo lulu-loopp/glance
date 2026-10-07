@@ -22,6 +22,8 @@ mod metrics;
 mod panel;
 #[cfg(windows)]
 mod pawnio;
+#[cfg(windows)]
+mod presents;
 mod os;
 mod reading;
 #[cfg(windows)]
@@ -247,6 +249,8 @@ pub fn run() {
         move || controller.run()
     });
     thread::spawn(update::watch);
+    // The frames programs present (for the game in front), while Glance runs.
+    presents::start();
     thread::spawn(move || {
         let mut watch = watch::Watch::default();
         let mut next = Instant::now();
@@ -268,6 +272,7 @@ pub fn run() {
         }
     });
     tray::run();
+    presents::stop();
 }
 
 #[cfg(target_os = "macos")]

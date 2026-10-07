@@ -8,7 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::dimm::Dimms;
 use crate::gpu_power::{self, GpuPower};
-use crate::reading::{BatterySample, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
+use crate::reading::{BatterySample, GameSample, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
 use crate::sensors::CpuReader;
 use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
@@ -285,6 +285,16 @@ impl Sampler {
             board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
+            // Named from the process list (never by opening the game's
+            // process: anti-cheat watches for that).
+            game: crate::presents::front().map(|front| GameSample {
+                name: self.processes.name_of(front.pid as usize).unwrap_or_default(),
+                fps: front.stats.fps,
+                low: front.stats.low,
+                longest_ms: front.stats.longest_ms,
+                fills_screen: front.fills_screen,
+                refresh_hz: front.refresh_hz,
+            }),
         })
     }
 
@@ -557,11 +567,18 @@ extern "system" {
 struct ProcessTable {
     /// Keyed by (process id, creation time): ids are reused.
     totals: HashMap<(usize, i64), (i64, i64)>,
+    /// Each process's name, by id, as of the last look.
+    names: HashMap<usize, String>,
     at: Option<Instant>,
     buf: Vec<u64>,
 }
 
 impl ProcessTable {
+    /// The name of process `pid` at the last look, if it was there.
+    fn name_of(&self, pid: usize) -> Option<String> {
+        self.names.get(&pid).cloned()
+    }
+
     /// The busiest programs since the previous call: the top of the ranking
     /// by CPU, by memory, by I/O and by GPU, together. Processes sharing an
     /// executable name are added together.
@@ -588,6 +605,7 @@ impl ProcessTable {
         // CPU time is in 100 ns units.
         let interval = self.at.map(|at| now.duration_since(at).as_secs_f64() * 1e7);
         let mut totals = HashMap::with_capacity(self.totals.len());
+        let mut names = HashMap::with_capacity(self.names.len());
         let mut programs: HashMap<String, ProcessSample> = HashMap::new();
         let mut moved: HashMap<String, i64> = HashMap::new();
         let mut offset = 0usize;
@@ -609,6 +627,7 @@ impl ProcessTable {
                     String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(image.Buffer.0, image.Length as usize / 2) })
                 };
                 let name = name.trim_end_matches(".exe").to_string();
+                names.insert(record.process_id, name.clone());
                 *moved.entry(name.clone()).or_default() += bytes - bytes_before;
                 let program = programs.entry(name.clone()).or_insert_with(|| ProcessSample {
                     name,
@@ -629,6 +648,7 @@ impl ProcessTable {
             offset += record.next_entry_offset as usize;
         }
         self.totals = totals;
+        self.names = names;
         self.at = Some(now);
 
         // Without a previous sample there is no interval to take a share of.

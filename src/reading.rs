@@ -86,6 +86,25 @@ pub struct Sample {
     pub drive_temps: Vec<DriveTemperature>,
     /// Each memory module's temperature, in slot order, read through the driver.
     pub dimm_temps: Vec<f32>,
+    /// The program in front, while it presents frames (a game, or anything
+    /// drawing with Direct3D).
+    pub game: Option<GameSample>,
+}
+
+/// The program in front and its frames.
+#[derive(Clone, Serialize)]
+pub struct GameSample {
+    pub name: String,
+    pub fps: f32,
+    /// The 1% low, as frames a second; none until enough frames have come.
+    pub low: Option<f32>,
+    /// The longest frame of the last second, in milliseconds.
+    pub longest_ms: f32,
+    /// Whether its window covers its whole screen (borderless, or exclusive
+    /// fullscreen).
+    pub fills_screen: bool,
+    /// The refresh rate of its screen.
+    pub refresh_hz: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]

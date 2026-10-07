@@ -1051,6 +1051,7 @@ mod tests {
             board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
             drive_temps: Vec::new(),
             dimm_temps: Vec::new(),
+            game: None,
         }
     }
 
