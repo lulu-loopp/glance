@@ -3,6 +3,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod detector;
+mod frames;
 #[cfg(windows)]
 mod diagnostics;
 #[cfg(windows)]
