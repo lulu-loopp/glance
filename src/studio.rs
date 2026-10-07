@@ -26,8 +26,8 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::panel::{CLOSE, OPEN, OPEN_FADE, PEN_LAG_MS};
 use crate::reading::{
-    BatterySample, BoardSensors, CpuSensors, DriveTemperature, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo,
-    SystemSample, VolumeSample,
+    BatterySample, BoardSensors, CpuSensors, DriveTemperature, GameSample, GpuLimit, GpuSample, MemorySample, NetworkInfo, ProcessSample,
+    Sample, StaticInfo, SystemSample, VolumeSample,
 };
 use crate::settings::Edge;
 use crate::ui::gfx::Gfx;
@@ -77,6 +77,8 @@ struct Shot {
     load: (f32, f32),
     /// The lanes shown, in order; all of this machine's but "system" if absent.
     modules: Option<Vec<String>>,
+    /// A game being played, by its name, if one is.
+    game: Option<String>,
 }
 
 fn backdrop() -> String {
@@ -109,7 +111,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
     let px = script.scale;
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
-    let mut known = vec!["cpu".to_string()];
+    let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
@@ -127,7 +129,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let history: Vec<Sample> = (0..=(backlog + shot.seconds as f64) as usize)
         .map(|i| {
             let t = (i as f64 - backlog) as f32;
-            made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)))
+            made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)), shot.game.as_deref())
         })
         .collect();
 
@@ -285,9 +287,10 @@ fn motion(shot: &Shot, t: f32) -> (f32, f32) {
 }
 
 /// Readings for a machine with `info`'s hardware, at `load` (0 idle, 1 flat
-/// out), varying from second to second as real ones do: the same for the
-/// same `seed`, so that a shot films the same every time.
-fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
+/// out), playing `game` if one is named, varying from second to second as
+/// real ones do: the same for the same `seed`, so that a shot films the
+/// same every time.
+fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str>) -> Sample {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     let mut noise = move || {
         state ^= state << 13;
@@ -349,6 +352,26 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
     let (net_down, net_up) = (burst(180_000.0 + 2_500_000.0 * busy as f64), burst(40_000.0));
     let (disk_read, disk_write) = (burst(1_200_000.0 + 40_000_000.0 * busy as f64), burst(400_000.0));
     let (ghz, cpu_power) = (4.3 + 1.0 * busy + 0.1 * noise(), 22.0 + 150.0 * busy + 6.0 * noise());
+    // Held near a 165 Hz screen's rate, with a stutter now and then.
+    let game = game.map(|name| {
+        let stutter = noise() > 0.9;
+        GameSample {
+            name: name.to_string(),
+            program: name.to_string(),
+            is_game: true,
+            fps: 138.0 + 14.0 * wave(11.0, 0.4) + 4.0 * noise() - if stutter { 9.0 } else { 0.0 },
+            low: Some(96.0 + 6.0 * noise()),
+            longest_ms: if stutter { 18.0 + 14.0 * noise() } else { 7.6 + 1.6 * noise() },
+            fills_screen: true,
+            refresh_hz: Some(165),
+            cpu: Some(14.0 + 6.0 * noise()),
+            gpu: Some(93.0 + 5.0 * noise()),
+            mem: Some((6.2 * gb as f32) as u64),
+            vram: Some((7.9 * gb as f32) as u64),
+            gpu_limit: Some(GpuLimit::Power),
+            playing_s: Some(47 * 60 + seed),
+        }
+    });
     Sample {
         t: t_ms as u64,
         cpu: Some(cpu),
@@ -390,7 +413,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32) -> Sample {
         }),
         drive_temps: info.drives.first().map(|name| DriveTemperature { id: 0, name: name.clone(), celsius: 34.0 + 9.0 * busy }).into_iter().collect(),
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
-        game: None,
+        game,
     }
 }
 

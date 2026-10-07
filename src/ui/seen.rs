@@ -36,6 +36,8 @@ pub struct Seen {
     /// A game presenting frames (one marked so, or its window covering its
     /// screen), now.
     pub game: bool,
+    /// What holds back the clock of a game's GPU (which NVIDIA's driver says).
+    pub game_limit: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -98,6 +100,7 @@ impl Seen {
         }
         self.battery |= s.battery.is_some();
         self.game = s.game.as_ref().is_some_and(|game| game.is_game);
+        self.game_limit |= s.game.as_ref().is_some_and(|game| game.gpu_limit.is_some());
     }
 
     /// The readings `other` holds for the lane of module `id` that this
@@ -131,7 +134,10 @@ impl Seen {
                 news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
             }
             "battery" => flag(self.battery, other.battery, Item::Battery),
-            "game" => flag(self.game, other.game, Item::Game),
+            "game" => {
+                flag(self.game, other.game, Item::Game);
+                flag(self.game_limit, other.game_limit, Item::GameLimit);
+            }
             _ => {
                 let Some(index) = info.gpu_of(id) else { return news };
                 let (ours, theirs) = (self.gpus.get(index).cloned().unwrap_or_default(), other.gpus.get(index).cloned().unwrap_or_default());
@@ -201,6 +207,7 @@ impl Seen {
             }
             Item::Battery => seen.battery = true,
             Item::Game => seen.game = true,
+            Item::GameLimit => seen.game_limit = true,
             Item::Gpu(index, gpu) => {
                 if seen.gpus.len() <= *index {
                     seen.gpus.resize(index + 1, GpuSeen::default());
@@ -242,6 +249,7 @@ pub enum Item {
     BoardFan(String),
     Battery,
     Game,
+    GameLimit,
     /// Of the GPU at this place in `StaticInfo::gpus`.
     Gpu(usize, GpuItem),
 }

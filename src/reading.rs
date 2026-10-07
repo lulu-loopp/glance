@@ -110,6 +110,35 @@ pub struct GameSample {
     pub fills_screen: bool,
     /// The refresh rate of its screen.
     pub refresh_hz: Option<u32>,
+    /// Its share of every processor, in percent, at the last look at the
+    /// process list.
+    pub cpu: Option<f32>,
+    /// Its use of the GPU it uses most, in percent.
+    pub gpu: Option<f32>,
+    /// Its private memory, in bytes.
+    pub mem: Option<u64>,
+    /// The video memory it holds on its cards, in bytes.
+    pub vram: Option<u64>,
+    /// What holds back the clock of the GPU it uses most, where its driver
+    /// says (NVIDIA's).
+    pub gpu_limit: Option<GpuLimit>,
+    /// How long it has been played: since it first presented frames, through
+    /// short times away from it. None for a program that is no game.
+    pub playing_s: Option<u64>,
+}
+
+/// What holds a GPU's clock below what it could run at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize)]
+pub enum GpuLimit {
+    /// Nothing: it runs as fast as it is asked to.
+    Free,
+    /// Its power limit.
+    Power,
+    /// Its temperature.
+    Thermal,
+    /// The board slowing it, for its power supply or its heat, without
+    /// saying which.
+    Hardware,
 }
 
 #[derive(Clone, Serialize)]

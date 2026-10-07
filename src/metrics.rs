@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 
 use crate::dimm::Dimms;
@@ -44,6 +44,9 @@ const PDH_FMT_DOUBLE_NOCAP100: PDH_FMT = PDH_FMT(PDH_FMT_DOUBLE.0 | 0x8000);
 /// whichever ranking is chosen, and scrolls through the rest.
 const TOP_PROCESSES: usize = 40;
 const DRIVE_FIXED: u32 = 3;
+/// How long a game can be away (another window in front, a screen that
+/// draws nothing) and still be the same time playing it.
+const PLAY_BREAK: Duration = Duration::from_secs(5 * 60);
 
 struct Adapter {
     luid: (u32, i32),
@@ -91,6 +94,13 @@ pub struct Sampler {
     /// was), from the last reading of the engine counters; `None` while
     /// they cannot be read.
     gpu_by_pid: Option<HashMap<usize, Option<f32>>>,
+    /// The adapter each process uses most, from the same reading.
+    adapter_by_pid: HashMap<usize, (u32, i32)>,
+    /// Each process's video memory, its dedicated part.
+    gpu_process_memory: Option<PDH_HCOUNTER>,
+    /// The game being played: its program, when it was first seen, and when
+    /// last.
+    playing: Option<(String, Instant, Instant)>,
     buf: Vec<u64>,
     pub info: StaticInfo,
 }
@@ -112,6 +122,7 @@ impl Sampler {
         let gpu_engine = add(w!(r"\GPU Engine(*)\Utilization Percentage"));
         let gpu_dedicated = add(w!(r"\GPU Adapter Memory(*)\Dedicated Usage"));
         let gpu_shared = add(w!(r"\GPU Adapter Memory(*)\Shared Usage"));
+        let gpu_process_memory = add(w!(r"\GPU Process Memory(*)\Dedicated Usage"));
         let disk_read = add(w!(r"\PhysicalDisk(_Total)\Disk Read Bytes/sec"));
         let disk_write = add(w!(r"\PhysicalDisk(_Total)\Disk Write Bytes/sec"));
         let disk_idle = add(w!(r"\PhysicalDisk(_Total)\% Idle Time"));
@@ -167,6 +178,9 @@ impl Sampler {
             super_io,
             dimms,
             gpu_by_pid: None,
+            adapter_by_pid: HashMap::new(),
+            gpu_process_memory,
+            playing: None,
             buf: Vec::new(),
             info,
         }
@@ -175,9 +189,11 @@ impl Sampler {
     /// The game to show: of the programs presenting frames, a game on the
     /// pointer's screen, else a game on another, else the program in front.
     /// A game is one marked so, or else one whose window covers its screen.
-    /// Named by its window's title, its program from the process list
-    /// (never by opening its process: anti-cheat watches for that).
-    fn game(&self) -> Option<GameSample> {
+    /// Named by its window's title, its program from the process list, and
+    /// its use of the machine from the counters (never by opening its
+    /// process: anti-cheat watches for that). `collected` says whether the
+    /// counters were read this time.
+    fn game(&mut self, collected: bool) -> Option<GameSample> {
         let marks = crate::app().settings.lock().unwrap().games.clone();
         let found: Vec<(crate::presents::Presenting, String, bool)> = crate::presents::presenting()
             .into_iter()
@@ -187,12 +203,44 @@ impl Sampler {
                 (presenting, program, is_game)
             })
             .collect();
+        let now = Instant::now();
         let chosen = found
             .iter()
             .find(|(p, _, is_game)| *is_game && p.under_pointer)
             .or_else(|| found.iter().find(|(_, _, is_game)| *is_game))
-            .or_else(|| found.iter().find(|(p, _, _)| p.in_front))?;
-        let (presenting, program, is_game) = chosen;
+            .or_else(|| found.iter().find(|(p, _, _)| p.in_front));
+        let Some((presenting, program, is_game)) = chosen else {
+            self.forget_playing(now);
+            return None;
+        };
+        let pid = presenting.pid as usize;
+        let playing_s = if *is_game {
+            // The same game again soon after it was last seen is the same
+            // time playing it (a look at another window, a loading screen
+            // that drew nothing).
+            let start = match &self.playing {
+                Some((was, start, last)) if was == program && now.duration_since(*last) < PLAY_BREAK => *start,
+                _ => now,
+            };
+            self.playing = Some((program.clone(), start, now));
+            Some(now.duration_since(start).as_secs())
+        } else {
+            self.forget_playing(now);
+            None
+        };
+        let usage = self.processes.usage_of(pid);
+        let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
+        let gpu_limit = adapter.and_then(|a| a.power).and_then(|reader| self.gpu_power.limit(reader));
+        // Its memory on every card; unread where an instance of its is.
+        let vram = self.gpu_process_memory.filter(|_| collected).and_then(|counter| {
+            let mut total = Some(0u64);
+            for (name, value) in read_array(counter, &mut self.buf)? {
+                if parse_pid(&name) == Some(pid) {
+                    total = total.zip(value).map(|(total, value)| total + value as u64);
+                }
+            }
+            total
+        });
         Some(GameSample {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
@@ -202,7 +250,21 @@ impl Sampler {
             longest_ms: presenting.stats.longest_ms,
             fills_screen: presenting.fills_screen,
             refresh_hz: presenting.refresh_hz,
+            cpu: usage.map(|(cpu, _)| cpu),
+            // A process the counters list nothing for uses no GPU.
+            gpu: self.gpu_by_pid.as_ref().and_then(|by_pid| by_pid.get(&pid).copied().unwrap_or(Some(0.0))),
+            mem: usage.map(|(_, mem)| mem),
+            vram,
+            gpu_limit,
+            playing_s,
         })
+    }
+
+    /// Forgets the game played once it has been gone a while.
+    fn forget_playing(&mut self, now: Instant) {
+        if self.playing.as_ref().is_some_and(|(_, _, last)| now.duration_since(*last) >= PLAY_BREAK) {
+            self.playing = None;
+        }
     }
 
     /// Takes one sample. Reading the process list and the network adapters is
@@ -318,7 +380,7 @@ impl Sampler {
             board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
-            game: self.game(),
+            game: self.game(collected),
         })
     }
 
@@ -408,11 +470,19 @@ impl Sampler {
             }
         }
         let mut by_pid: HashMap<usize, Option<f32>> = HashMap::new();
-        for ((pid, _, _), value) in by_process {
+        // The adapter of each process's busiest engine, and that engine's use.
+        let mut adapters: HashMap<usize, ((u32, i32), f64)> = HashMap::new();
+        for ((pid, luid, _), value) in by_process {
             let use_ = by_pid.entry(pid).or_insert(Some(0.0));
             *use_ = use_.zip(value).map(|(most, value)| most.max(value.min(100.0) as f32));
+            let value = value.unwrap_or(0.0);
+            let busiest = adapters.entry(pid).or_insert((luid, value));
+            if value > busiest.1 {
+                *busiest = (luid, value);
+            }
         }
         self.gpu_by_pid = Some(by_pid);
+        self.adapter_by_pid = adapters.into_iter().map(|(pid, (luid, _))| (pid, luid)).collect();
         Some((engines, unread))
     }
 
@@ -593,6 +663,9 @@ struct ProcessTable {
     totals: HashMap<(usize, i64), (i64, i64)>,
     /// Each process's name, by id, as of the last look.
     names: HashMap<usize, String>,
+    /// Each process's share of every processor (percent) and private
+    /// memory, by id, as of the last look.
+    usage: HashMap<usize, (f32, u64)>,
     at: Option<Instant>,
     buf: Vec<u64>,
 }
@@ -601,6 +674,13 @@ impl ProcessTable {
     /// The name of process `pid` at the last look, if it was there.
     fn name_of(&self, pid: usize) -> Option<String> {
         self.names.get(&pid).cloned()
+    }
+
+    /// The share of every processor (percent) and the private memory of
+    /// process `pid` at the last look, if it was there and there was a look
+    /// before it to take the share since.
+    fn usage_of(&self, pid: usize) -> Option<(f32, u64)> {
+        self.usage.get(&pid).copied()
     }
 
     /// The busiest programs since the previous call: the top of the ranking
@@ -630,6 +710,9 @@ impl ProcessTable {
         let interval = self.at.map(|at| now.duration_since(at).as_secs_f64() * 1e7);
         let mut totals = HashMap::with_capacity(self.totals.len());
         let mut names = HashMap::with_capacity(self.names.len());
+        let mut usage = HashMap::with_capacity(self.usage.len());
+        // CPU time, as a share of every processor over the interval.
+        let share = |time: f64| interval.map(|interval| (time / (interval * processors as f64) * 100.0) as f32);
         let mut programs: HashMap<String, ProcessSample> = HashMap::new();
         let mut moved: HashMap<String, i64> = HashMap::new();
         let mut offset = 0usize;
@@ -652,6 +735,9 @@ impl ProcessTable {
                 };
                 let name = name.trim_end_matches(".exe").to_string();
                 names.insert(record.process_id, name.clone());
+                if let Some(cpu) = share((time - time_before) as f64) {
+                    usage.insert(record.process_id, (cpu, record.working_set_private as u64));
+                }
                 *moved.entry(name.clone()).or_default() += bytes - bytes_before;
                 let program = programs.entry(name.clone()).or_insert_with(|| ProcessSample {
                     name,
@@ -673,6 +759,7 @@ impl ProcessTable {
         }
         self.totals = totals;
         self.names = names;
+        self.usage = usage;
         self.at = Some(now);
 
         // Without a previous sample there is no interval to take a share of.
@@ -680,7 +767,7 @@ impl ProcessTable {
         let mut all: Vec<ProcessSample> = programs
             .into_values()
             .map(|mut program| {
-                program.cpu = (program.cpu as f64 / (interval * processors as f64) * 100.0) as f32;
+                program.cpu = share(program.cpu as f64).unwrap_or_default();
                 program.io = moved[&program.name] as f64 / (interval / 1e7);
                 program.gpu = program.gpu.map(|gpu| gpu.min(100.0));
                 program

@@ -9,6 +9,8 @@
 
 use std::ffi::c_void;
 
+use crate::reading::GpuLimit;
+
 use windows::core::{s, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32};
@@ -62,6 +64,15 @@ impl GpuPower {
             Reader::Amd(index) => self.adl.as_ref()?.power(index),
         }
     }
+
+    /// What holds the card's clock back now, where its driver says (only
+    /// NVIDIA's does).
+    pub fn limit(&self, reader: Reader) -> Option<GpuLimit> {
+        match reader {
+            Reader::Nvidia(index) => self.nvml.as_ref()?.limit(index),
+            Reader::Amd(_) => None,
+        }
+    }
 }
 
 /// A function the library exports, as `F`.
@@ -77,6 +88,30 @@ fn system_library(name: PCWSTR) -> Option<HMODULE> {
 // ---- NVIDIA: NVML (nvml.h) ----
 
 const NVML_SUCCESS: i32 = 0;
+
+// The reasons NVML gives for a clock below the most it may run at
+// (nvmlClocksEventReason*): the power limit, the GPU's own temperature and
+// the board's slowdown (for heat or for its power supply, said apart by
+// the two after it where the driver can).
+const SW_POWER_CAP: u64 = 0x4;
+const HW_SLOWDOWN: u64 = 0x8;
+const SW_THERMAL_SLOWDOWN: u64 = 0x20;
+const HW_THERMAL_SLOWDOWN: u64 = 0x40;
+const HW_POWER_BRAKE_SLOWDOWN: u64 = 0x80;
+
+/// What holds a clock back, from NVML's reasons; heat before power where
+/// both do (the hotter card is the one to look at).
+fn limit_of(reasons: u64) -> GpuLimit {
+    if reasons & (SW_THERMAL_SLOWDOWN | HW_THERMAL_SLOWDOWN) != 0 {
+        GpuLimit::Thermal
+    } else if reasons & (SW_POWER_CAP | HW_POWER_BRAKE_SLOWDOWN) != 0 {
+        GpuLimit::Power
+    } else if reasons & HW_SLOWDOWN != 0 {
+        GpuLimit::Hardware
+    } else {
+        GpuLimit::Free
+    }
+}
 
 /// nvmlPciInfo_t.
 #[repr(C)]
@@ -95,6 +130,9 @@ type NvmlDevice = *mut c_void;
 struct Nvml {
     library: HMODULE,
     power_usage: unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32,
+    /// The reasons the clock is held back; absent from drivers before NVML
+    /// had them.
+    clock_reasons: Option<unsafe extern "C" fn(NvmlDevice, *mut u64) -> i32>,
     shutdown: unsafe extern "C" fn() -> i32,
     /// Every card, by where it sits (a card's GPU is function 0).
     devices: Vec<(PciAddress, NvmlDevice)>,
@@ -117,6 +155,9 @@ impl Nvml {
         let handle: unsafe extern "C" fn(u32, *mut NvmlDevice) -> i32 = unsafe { export(library, s!("nvmlDeviceGetHandleByIndex_v2")) }?;
         let pci: unsafe extern "C" fn(NvmlDevice, *mut NvmlPciInfo) -> i32 = unsafe { export(library, s!("nvmlDeviceGetPciInfo_v3")) }?;
         let power_usage = unsafe { export(library, s!("nvmlDeviceGetPowerUsage")) }?;
+        // Named "throttle" reasons before driver 535 ("clocks event" since).
+        let clock_reasons = unsafe { export(library, s!("nvmlDeviceGetCurrentClocksEventReasons")) }
+            .or_else(|| unsafe { export(library, s!("nvmlDeviceGetCurrentClocksThrottleReasons")) });
         if unsafe { init() } != NVML_SUCCESS {
             return None;
         }
@@ -131,13 +172,19 @@ impl Nvml {
                 }
             }
         }
-        Some(Nvml { library, power_usage, shutdown, devices })
+        Some(Nvml { library, power_usage, clock_reasons, shutdown, devices })
     }
 
     fn power(&self, index: usize) -> Option<f32> {
         let mut milliwatts = 0u32;
         let read = unsafe { (self.power_usage)(self.devices.get(index)?.1, &mut milliwatts) };
         (read == NVML_SUCCESS).then(|| milliwatts as f32 / 1000.0)
+    }
+
+    fn limit(&self, index: usize) -> Option<GpuLimit> {
+        let mut reasons = 0u64;
+        let read = unsafe { (self.clock_reasons?)(self.devices.get(index)?.1, &mut reasons) };
+        (read == NVML_SUCCESS).then(|| limit_of(reasons))
     }
 }
 
@@ -289,13 +336,26 @@ mod tests {
         assert_eq!(size_of::<super::PmLogData>(), 4 + 256 * 8);
     }
 
+    #[test]
+    fn names_what_holds_a_clock_back() {
+        use super::*;
+        assert_eq!(limit_of(0), GpuLimit::Free);
+        // Idle, and clocks the user set: nothing holding it back.
+        assert_eq!(limit_of(0x1 | 0x2), GpuLimit::Free);
+        assert_eq!(limit_of(SW_POWER_CAP), GpuLimit::Power);
+        assert_eq!(limit_of(HW_SLOWDOWN | HW_POWER_BRAKE_SLOWDOWN), GpuLimit::Power);
+        assert_eq!(limit_of(HW_SLOWDOWN | HW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
+        assert_eq!(limit_of(SW_POWER_CAP | SW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
+        assert_eq!(limit_of(HW_SLOWDOWN), GpuLimit::Hardware);
+    }
+
     /// Prints what this machine's cards draw.
     #[test]
     fn reads_this_machines_cards() {
         let power = super::GpuPower::open();
         if let Some(nvml) = &power.nvml {
             for (index, (at, _)) in nvml.devices.iter().enumerate() {
-                println!("NVIDIA at {at:?}: {:?} W", nvml.power(index));
+                println!("NVIDIA at {at:?}: {:?} W, held back by {:?}", nvml.power(index), nvml.limit(index));
             }
         }
         if let Some(adl) = &power.adl {

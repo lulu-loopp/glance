@@ -8,7 +8,7 @@ use super::prefs::{Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
-use crate::reading::{ProcessSample, Sample, StaticInfo};
+use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
 
 /// A column's width (DIPs), whatever the skin.
 pub const COLUMN_WIDTH: f32 = 356.0;
@@ -28,6 +28,8 @@ pub const TABLE_ROW: f32 = 22.0;
 const BUTTON: f32 = 32.0;
 /// Rates below this full scale are drawn against it, so idle chatter stays low.
 const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
+/// The frame time chart's least full scale, in milliseconds.
+const MIN_FRAME_SCALE: f64 = 10.0;
 
 /// What a click or a wheel turn on the panel lands on.
 #[derive(Clone, Copy, PartialEq, Hash)]
@@ -107,7 +109,8 @@ enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
     /// A figure, and its chart unless the module's chart is switched off.
     Readout { figure: String, unit: &'static str, hot: bool, plot: Option<Plot> },
-    Rates { rows: Vec<(String, String)>, plot: Option<Plot> },
+    /// Rates beside their chart, `gap` below what comes before.
+    Rates { rows: Vec<(String, String)>, plot: Option<Plot>, gap: f32 },
     /// Each thread's load (0–1), unread where `None`, and whether it is hot.
     Threads(Vec<(Option<f32>, bool)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
@@ -120,7 +123,7 @@ impl Block {
         match self {
             Block::Head { .. } => HEAD + HEAD_GAP,
             Block::Readout { .. } => PLOT,
-            Block::Rates { .. } => RATE_PLOT,
+            Block::Rates { gap, .. } => gap + RATE_PLOT,
             Block::Threads(_) => 10.0 + 14.0,
             Block::Meter { gap, .. } => gap + LINE,
             Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
@@ -138,7 +141,7 @@ impl Hash for Block {
         match self {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
-            Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
+            Block::Rates { rows, plot, gap } => (rows, plot.as_ref().map(|plot| plot.max.to_bits()), gap.to_bits()).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
@@ -373,6 +376,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         (lang.pick("上传", "Up").into(), shown(s.net_up, |rate| text::rate(rate, bits))),
                     ],
                     plot: chart.then_some(plot),
+                    gap: 0.0,
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -412,6 +416,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         (lang.pick("写入", "Write").into(), shown(s.disk_write, |rate| text::rate(rate, false))),
                     ],
                     plot: chart.then_some(plot),
+                    gap: 0.0,
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -488,21 +493,51 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             let game = s.game.as_ref();
             // Its screen's refresh rate in the corner: the most frames it can show.
             let refresh = game.and_then(|g| g.refresh_hz);
+            // A stutter: a frame taking as long as three at the screen's rate.
+            let stutter = refresh.map(|hz| 3000.0 / hz as f64);
+            let longest = game.map(|g| g.longest_ms);
+            let frametimes = on("frametimes");
             let mut facts = Vec::new();
             if on("low") {
                 facts.push(("1% low".into(), shown(game.and_then(|g| g.low), |low| format!("{low:.0} FPS")), false));
             }
-            if on("longest") {
-                // Hot: a frame taking as long as three at the screen's rate.
-                let hot = |ms: f32| refresh.is_some_and(|hz| ms > 3000.0 / hz as f32);
-                let longest = game.map(|g| g.longest_ms);
-                facts.push((lang.pick("最长一帧", "Longest frame").into(), shown(longest, |ms| format!("{ms:.1} ms")), longest.is_some_and(hot)));
+            // Beside its chart, with that on.
+            if on("longest") && !frametimes {
+                let hot = longest.zip(stutter).is_some_and(|(ms, stutter)| ms as f64 > stutter);
+                facts.push((lang.pick("最长一帧", "Longest frame").into(), shown(longest, |ms| format!("{ms:.1} ms")), hot));
+            }
+            if on("usage") {
+                let cpu = shown(game.and_then(|g| g.cpu), text::percent);
+                let gpu = shown(game.and_then(|g| g.gpu), text::percent);
+                facts.push((lang.pick("占用", "Use").into(), format!("CPU {cpu} · GPU {gpu}"), false));
+            }
+            if on("memory") {
+                let memory = shown(game.and_then(|g| g.mem), text::size);
+                let vram = shown(game.and_then(|g| g.vram), text::size);
+                let value = if lang == Lang::Zh { format!("{memory} · 显存 {vram}") } else { format!("{memory} · VRAM {vram}") };
+                facts.push((lang.pick("内存", "Memory").into(), value, false));
+            }
+            if on("limit") && scene.seen.game_limit {
+                let limit = game.and_then(|g| g.gpu_limit);
+                let value = shown(limit, |limit| {
+                    match limit {
+                        GpuLimit::Free => lang.pick("未受限", "Not limited"),
+                        GpuLimit::Power => lang.pick("功耗墙", "Power limit"),
+                        GpuLimit::Thermal => lang.pick("温度墙", "Thermal limit"),
+                        GpuLimit::Hardware => lang.pick("硬件降频", "Slowed by board"),
+                    }
+                    .into()
+                });
+                facts.push((lang.pick("显卡", "GPU").into(), value, limit.is_some_and(|limit| matches!(limit, GpuLimit::Thermal | GpuLimit::Hardware))));
+            }
+            if on("time") {
+                facts.push((lang.pick("已玩", "Played").into(), shown(game.and_then(|g| g.playing_s), |s| lang.duration(s)), false));
             }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
             let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps as f64)).fold(0.0, f64::max);
             let scale = refresh.map(f64::from).map(|hz| hz.max(most));
-            vec![
+            let mut blocks = vec![
                 head(lang.pick("游戏", "Game"), game.map_or(String::new(), |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
                 Block::Readout {
                     figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
@@ -510,8 +545,21 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     hot: false,
                     plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.game.as_ref().map(|g| g.fps as f64))], scale, None)),
                 },
-                Block::Facts { rows: facts, gap: 10.0 },
-            ]
+            ];
+            if frametimes {
+                // Full scale: two frames at the screen's rate, or the longest
+                // frame on screen, if longer, rounded up.
+                let series: Series = Box::new(|s| s.game.as_ref().map(|g| g.longest_ms as f64));
+                let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
+                let peak = visible_peak(scene, &series).max(floor);
+                blocks.push(Block::Rates {
+                    rows: vec![(lang.pick("最长", "Max").into(), shown(longest, |ms| format!("{ms:.1} ms")))],
+                    plot: Some(Plot { series: vec![series], max: round_up(peak), hot: stutter }),
+                    gap: 10.0,
+                });
+            }
+            blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+            blocks
         }
         "battery" => {
             if !scene.seen.battery {
@@ -577,6 +625,20 @@ fn round_up_rate(value: f64) -> f64 {
     let leading = value / unit / magnitude;
     let step = if leading <= 1.0 { 1.0 } else if leading <= 2.0 { 2.0 } else if leading <= 5.0 { 5.0 } else { 10.0 };
     step * magnitude * unit
+}
+
+/// The most `series` reads in the samples on screen, or 0.
+fn visible_peak(scene: &Scene, series: &Series) -> f64 {
+    let oldest = scene.pen_ms - scene.prefs.chart_seconds * 1000.0;
+    scene.history.iter().filter(|s| s.t as f64 >= oldest).filter_map(series).fold(0.0, f64::max)
+}
+
+/// Rounds `value` (above 0) up to 1, 2 or 5 times a power of ten.
+fn round_up(value: f64) -> f64 {
+    let magnitude = 10f64.powf(value.log10().floor());
+    let leading = value / magnitude;
+    let step = if leading <= 1.0 { 1.0 } else if leading <= 2.0 { 2.0 } else if leading <= 5.0 { 5.0 } else { 10.0 };
+    step * magnitude
 }
 
 fn full_scale(scene: &Scene, series: &[Series]) -> f64 {
@@ -775,8 +837,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
         let height = block.height();
         match (block, pass) {
             (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
-            (Block::Rates { plot: Some(plot), .. }, Pass::Plots) => {
-                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height)
+            (Block::Rates { plot: Some(plot), gap, .. }, Pass::Plots) => {
+                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y + gap, plot_width - RATE_INDENT, height - gap)
             }
             (_, Pass::Plots) => {}
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
