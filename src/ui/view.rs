@@ -109,8 +109,10 @@ enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
     /// A figure, and its chart unless the module's chart is switched off.
     Readout { figure: String, unit: &'static str, hot: bool, plot: Option<Plot> },
-    /// Rates beside their chart, `gap` below what comes before.
-    Rates { rows: Vec<(String, String)>, plot: Option<Plot>, gap: f32 },
+    Rates { rows: Vec<(String, String)>, plot: Option<Plot> },
+    /// A second chart below a readout's, aligned with it, `gap` below it:
+    /// what it charts named over its value.
+    Trace { label: String, value: String, hot: bool, plot: Plot, gap: f32 },
     /// Each thread's load (0–1), unread where `None`, and whether it is hot.
     Threads(Vec<(Option<f32>, bool)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
@@ -123,7 +125,8 @@ impl Block {
         match self {
             Block::Head { .. } => HEAD + HEAD_GAP,
             Block::Readout { .. } => PLOT,
-            Block::Rates { gap, .. } => gap + RATE_PLOT,
+            Block::Rates { .. } => RATE_PLOT,
+            Block::Trace { gap, .. } => gap + RATE_PLOT,
             Block::Threads(_) => 10.0 + 14.0,
             Block::Meter { gap, .. } => gap + LINE,
             Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
@@ -141,7 +144,8 @@ impl Hash for Block {
         match self {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
-            Block::Rates { rows, plot, gap } => (rows, plot.as_ref().map(|plot| plot.max.to_bits()), gap.to_bits()).hash(state),
+            Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
+            Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
             Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
@@ -376,7 +380,6 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         (lang.pick("上传", "Up").into(), shown(s.net_up, |rate| text::rate(rate, bits))),
                     ],
                     plot: chart.then_some(plot),
-                    gap: 0.0,
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -416,7 +419,6 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         (lang.pick("写入", "Write").into(), shown(s.disk_write, |rate| text::rate(rate, false))),
                     ],
                     plot: chart.then_some(plot),
-                    gap: 0.0,
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
@@ -552,9 +554,11 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 let series: Series = Box::new(|s| s.game.as_ref().map(|g| g.longest_ms as f64));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
-                blocks.push(Block::Rates {
-                    rows: vec![(lang.pick("最长", "Max").into(), shown(longest, |ms| format!("{ms:.1} ms")))],
-                    plot: Some(Plot { series: vec![series], max: round_up(peak), hot: stutter }),
+                blocks.push(Block::Trace {
+                    label: lang.pick("帧时间", "Frame time").into(),
+                    value: shown(longest, |ms| format!("{ms:.1} ms")),
+                    hot: longest.zip(stutter).is_some_and(|(ms, stutter)| ms as f64 > stutter),
+                    plot: Plot { series: vec![series], max: round_up(peak), hot: stutter },
                     gap: 10.0,
                 });
             }
@@ -837,9 +841,10 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
         let height = block.height();
         match (block, pass) {
             (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
-            (Block::Rates { plot: Some(plot), gap, .. }, Pass::Plots) => {
-                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y + gap, plot_width - RATE_INDENT, height - gap)
+            (Block::Rates { plot: Some(plot), .. }, Pass::Plots) => {
+                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height)
             }
+            (Block::Trace { plot, gap, .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y + gap, plot_width, height - gap),
             (_, Pass::Plots) => {}
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
                 let title_width = frame.measure(title, theme.title);
@@ -869,6 +874,12 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                     frame.text(label, theme.small, theme.text2, left + 15.0, row_y + 1.0, 40.0, Align::Start);
                     frame.text(value, theme.value, theme.text, left, row_y, LABEL + RATE_INDENT, Align::End);
                 }
+            }
+            (Block::Trace { label, value, hot, .. }, Pass::Content) => {
+                // The value on the chart's baseline, its name above it.
+                let bottom = y + height;
+                frame.text(label, theme.small, theme.text2, left, bottom - 2.0 * LINE - 2.0, LABEL, Align::Start);
+                frame.text(value, theme.value, if *hot { theme.signal } else { theme.text }, left, bottom - LINE, LABEL, Align::Start);
             }
             (Block::Threads(cells), Pass::Content) => {
                 let gap = 2.0;

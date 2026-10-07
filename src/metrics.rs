@@ -231,11 +231,13 @@ impl Sampler {
         let usage = self.processes.usage_of(pid);
         let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
         let gpu_limit = adapter.and_then(|a| a.power).and_then(|reader| self.gpu_power.limit(reader));
-        // Its memory on every card; unread where an instance of its is.
+        // Its memory on the card it uses most (or on every card, while it
+        // uses none); unread where an instance of it is.
+        let card = self.adapter_by_pid.get(&pid).copied();
         let vram = self.gpu_process_memory.filter(|_| collected).and_then(|counter| {
             let mut total = Some(0u64);
             for (name, value) in read_array(counter, &mut self.buf)? {
-                if parse_pid(&name) == Some(pid) {
+                if parse_pid(&name) == Some(pid) && card.is_none_or(|card| parse_luid(&name) == Some(card)) {
                     total = total.zip(value).map(|(total, value)| total + value as u64);
                 }
             }
@@ -475,10 +477,10 @@ impl Sampler {
         for ((pid, luid, _), value) in by_process {
             let use_ = by_pid.entry(pid).or_insert(Some(0.0));
             *use_ = use_.zip(value).map(|(most, value)| most.max(value.min(100.0) as f32));
+            // A process using no engine now uses no card.
             let value = value.unwrap_or(0.0);
-            let busiest = adapters.entry(pid).or_insert((luid, value));
-            if value > busiest.1 {
-                *busiest = (luid, value);
+            if value > 0.0 && adapters.get(&pid).is_none_or(|(_, most)| value > *most) {
+                adapters.insert(pid, (luid, value));
             }
         }
         self.gpu_by_pid = Some(by_pid);
