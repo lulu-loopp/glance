@@ -197,6 +197,31 @@ pub fn watch() {
     }
 }
 
+/// Says so once if this is the first start since Glance was updated, and
+/// notes the version that runs. Settings from before versions were noted
+/// (0.1.8 and earlier) count as an update; none at all, as a first install.
+pub fn tell_if_updated() {
+    let app = crate::app();
+    let version = env!("CARGO_PKG_VERSION");
+    let mut settings = app.settings.lock().unwrap().clone();
+    let updated = match settings.last_version.as_deref() {
+        Some(last) => newer(version, last),
+        None => crate::settings::saved(&app.config),
+    };
+    if settings.last_version.as_deref() == Some(version) {
+        return;
+    }
+    settings.last_version = Some(version.to_string());
+    app.save(settings);
+    if updated {
+        let (title, text) = match language() {
+            Lang::Zh => (format!("Glance 已更新到 {version}"), "设置都已保留。".to_string()),
+            Lang::En => (format!("Glance is updated to {version}"), "Your settings are as they were.".to_string()),
+        };
+        crate::tray::notify(&title, &text);
+    }
+}
+
 /// Downloads the newer release's installer and runs it, on a thread of its
 /// own; the installer closes Glance as it replaces it.
 pub fn install() {

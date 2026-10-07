@@ -613,8 +613,10 @@ impl<'a> Panel<'a> {
         self.lang = Lang::resolve(self.prefs.language);
         // While the backdrop is live the window has to stay out of the
         // captures of what is behind it; the system offers that only as
-        // "out of every capture", screenshots too.
-        self.window.exclude_from_capture(self.live);
+        // "out of every capture", screenshots too. Only while it is up: a
+        // window kept out of captures is "protected content" to recorders
+        // (NVIDIA's Instant Replay stops for it), hidden or not.
+        self.window.exclude_from_capture(self.live && self.is_shown());
         self.dress();
     }
 
@@ -675,6 +677,7 @@ impl<'a> Panel<'a> {
         }
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
         self.controller.shown.store(true, Ordering::Relaxed);
+        self.window.exclude_from_capture(self.live);
         if reduced_motion() {
             self.shift.jump(0.0);
             self.opacity.retarget(1.0, PLAIN_FADE, LINEAR, now);
@@ -747,6 +750,7 @@ impl<'a> Panel<'a> {
         self.phase = Phase::Hidden;
         self.pinned = false;
         self.window.hide();
+        self.window.exclude_from_capture(false);
         // The drawing memory is given back while the panel is away.
         if let Some(surface) = &mut self.surface {
             surface.release(&self.gfx);

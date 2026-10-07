@@ -10,6 +10,12 @@ use windows::Win32::UI::Shell::{FOLDERID_RoamingAppData, SHGetKnownFolderPath, K
 
 #[cfg(windows)]
 const FILE: &str = "settings.json";
+
+/// Whether Glance has saved settings in `dir` before.
+#[cfg(windows)]
+pub fn saved(dir: &Path) -> bool {
+    dir.join(FILE).is_file()
+}
 /// Larger than this, a settings file is not one Glance wrote.
 #[cfg(windows)]
 const MOST: u64 = 1 << 20;
@@ -129,6 +135,8 @@ pub struct Settings {
     /// Tell from the tray when the CPU or a graphics card stays at or above
     /// the temperature alert.
     pub heat_alert: bool,
+    /// The version that last ran: a newer one starting says it was updated.
+    pub last_version: Option<String>,
     pub view: serde_json::Value,
 }
 
@@ -148,6 +156,7 @@ impl Default for Settings {
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
+            last_version: None,
             view: serde_json::Value::Null,
         }
     }

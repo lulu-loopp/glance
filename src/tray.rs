@@ -169,6 +169,8 @@ pub fn run() {
         let _ = ChangeWindowMessageFilterEx(hwnd, SHOW_SETTINGS, MSGFLT_ALLOW, None);
         add_icon(hwnd);
         register_hotkey(hwnd);
+        // A first start since an update says so, from the icon now there.
+        crate::update::tell_if_updated();
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             DispatchMessageW(&msg);

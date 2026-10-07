@@ -955,7 +955,11 @@ impl Ui {
         let lang = self.lang;
         let p = |zh, en| pick(lang, zh, en);
         let (name, hint, on) = match switch {
-            Switch::Live => (p("实时折射", "Live refraction"), Some(p("开启后截图里不会出现面板", "The panel then stays out of screenshots")), self.settings.live_backdrop),
+            Switch::Live => (
+                p("实时折射", "Live refraction"),
+                Some(p("面板打开时不进截图，录屏可能暂停", "While up, the panel stays out of captures; recorders may pause")),
+                self.settings.live_backdrop,
+            ),
             // Only a copy no ordinary program can replace (one the installer
             // put in Program Files) may start elevated unasked.
             Switch::Startup => (
