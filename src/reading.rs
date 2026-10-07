@@ -86,15 +86,20 @@ pub struct Sample {
     pub drive_temps: Vec<DriveTemperature>,
     /// Each memory module's temperature, in slot order, read through the driver.
     pub dimm_temps: Vec<f32>,
-    /// The program in front, while it presents frames (a game, or anything
-    /// drawing with Direct3D).
+    /// The game presenting frames, the one on the pointer's screen first;
+    /// with none, the program in front if it presents frames.
     pub game: Option<GameSample>,
 }
 
-/// The program in front and its frames.
+/// A game (or, with none, the program in front) and its frames.
 #[derive(Clone, Serialize)]
 pub struct GameSample {
+    /// What it calls itself (its window's title), or its program's name.
     pub name: String,
+    /// Its program's name, as the user marks it a game or not.
+    pub program: String,
+    /// A game: marked one, or its window covering its screen.
+    pub is_game: bool,
     pub fps: f32,
     /// The 1% low, as frames a second; none until enough frames have come.
     pub low: Option<f32>,

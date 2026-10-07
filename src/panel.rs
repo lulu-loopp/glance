@@ -26,7 +26,9 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON,
+};
 use windows::Win32::UI::Input::{
     GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER,
     RIDEV_INPUTSINK, RID_INPUT, RIM_TYPEMOUSE,
@@ -34,7 +36,7 @@ use windows::Win32::UI::Input::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, MSG, PM_REMOVE,
-    QS_ALLINPUT,
+    QS_ALLINPUT, WM_HOTKEY,
     SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
@@ -97,6 +99,8 @@ const DISMISS: u32 = WM_APP + 2;
 const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
 const TOGGLE: u32 = WM_APP + 5;
+/// The panel thread's own hotkey: Escape, while the panel is open.
+const ESCAPE_HOTKEY: i32 = 1;
 
 struct Config {
     edge: Edge,
@@ -244,6 +248,10 @@ impl Controller {
         // gesture, not a new one.
         let mut armed = true;
         let mut ticking = false;
+        // Escape closes the open panel: taken from every program while the
+        // panel is open and not pinned (it has no keyboard focus of its own),
+        // and given back as it closes or is pinned.
+        let mut escape = false;
         // Raw input stops reaching this process while a window of higher
         // privilege (Task Manager, an installer) has the focus. A slow watch
         // on the cursor notices that: it moved, and no raw input came. The
@@ -332,6 +340,11 @@ impl Controller {
                     }
                 }
                 DISMISS => panel.dismiss(),
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
+                    if panel.is_open() && !panel.pinned {
+                        panel.begin_close(now);
+                    }
+                }
                 // Placed, zoomed and backed for screens that are no longer
                 // so: taken down, and opened afresh.
                 crate::ui::window::SCREENS_CHANGED => panel.screens_changed(msg.wParam.0 as u32, now),
@@ -407,6 +420,17 @@ impl Controller {
                 _ => {}
             }
 
+            let wanted = panel.is_open() && !panel.pinned;
+            if wanted != escape {
+                escape = wanted;
+                unsafe {
+                    if wanted {
+                        let _ = RegisterHotKey(None, ESCAPE_HOTKEY, MOD_NOREPEAT, u32::from(VK_ESCAPE.0));
+                    } else {
+                        let _ = UnregisterHotKey(None, ESCAPE_HOTKEY);
+                    }
+                }
+            }
             let needed = !panel.is_open() && detector.dwelling();
             if needed != ticking {
                 ticking = needed;

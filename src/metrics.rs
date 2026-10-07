@@ -172,6 +172,39 @@ impl Sampler {
         }
     }
 
+    /// The game to show: of the programs presenting frames, a game on the
+    /// pointer's screen, else a game on another, else the program in front.
+    /// A game is one marked so, or else one whose window covers its screen.
+    /// Named by its window's title, its program from the process list
+    /// (never by opening its process: anti-cheat watches for that).
+    fn game(&self) -> Option<GameSample> {
+        let marks = crate::app().settings.lock().unwrap().games.clone();
+        let found: Vec<(crate::presents::Presenting, String, bool)> = crate::presents::presenting()
+            .into_iter()
+            .map(|presenting| {
+                let program = self.processes.name_of(presenting.pid as usize).unwrap_or_default();
+                let is_game = marks.is_game(&program, presenting.fills_screen);
+                (presenting, program, is_game)
+            })
+            .collect();
+        let chosen = found
+            .iter()
+            .find(|(p, _, is_game)| *is_game && p.under_pointer)
+            .or_else(|| found.iter().find(|(_, _, is_game)| *is_game))
+            .or_else(|| found.iter().find(|(p, _, _)| p.in_front))?;
+        let (presenting, program, is_game) = chosen;
+        Some(GameSample {
+            name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
+            program: program.clone(),
+            is_game: *is_game,
+            fps: presenting.stats.fps,
+            low: presenting.stats.low,
+            longest_ms: presenting.stats.longest_ms,
+            fills_screen: presenting.fills_screen,
+            refresh_hz: presenting.refresh_hz,
+        })
+    }
+
     /// Takes one sample. Reading the process list and the network adapters is
     /// the expensive part and nothing charts it, so the caller says when it is
     /// worth refreshing. Returns `None` when PDH has no valid data for this
@@ -285,16 +318,7 @@ impl Sampler {
             board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
-            // Named from the process list (never by opening the game's
-            // process: anti-cheat watches for that).
-            game: crate::presents::front().map(|front| GameSample {
-                name: self.processes.name_of(front.pid as usize).unwrap_or_default(),
-                fps: front.stats.fps,
-                low: front.stats.low,
-                longest_ms: front.stats.longest_ms,
-                fills_screen: front.fills_screen,
-                refresh_hz: front.refresh_hz,
-            }),
+            game: self.game(),
         })
     }
 

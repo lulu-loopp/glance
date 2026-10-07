@@ -33,7 +33,7 @@ pub struct Seen {
     pub volumes: Vec<String>,
     pub board: Option<BoardSeen>,
     pub battery: bool,
-    /// A game in front (a program presenting frames, its window covering its
+    /// A game presenting frames (one marked so, or its window covering its
     /// screen), now.
     pub game: bool,
 }
@@ -97,7 +97,7 @@ impl Seen {
             merge(&mut seen.fans, board.fans.iter().map(|(name, _)| name.clone()), |a, b| a == b);
         }
         self.battery |= s.battery.is_some();
-        self.game = s.game.as_ref().is_some_and(|game| game.fills_screen);
+        self.game = s.game.as_ref().is_some_and(|game| game.is_game);
     }
 
     /// The readings `other` holds for the lane of module `id` that this

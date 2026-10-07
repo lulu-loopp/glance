@@ -10,15 +10,21 @@ use std::thread;
 use std::time::Duration;
 
 use windows::core::{GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HWND, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromWindow, DEVMODEW, ENUM_CURRENT_SETTINGS, MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONULL};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplaySettingsW, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, DEVMODEW, ENUM_CURRENT_SETTINGS, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+};
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_RECORD,
     EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
     PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsZoomed};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+};
 
 use crate::frames::{FrameStats, Presents};
 
@@ -131,45 +137,85 @@ pub fn stop() {
     let _ = unsafe { ControlTraceW(CONTROLTRACE_HANDLE::default(), PCWSTR(name.as_ptr()), Properties::new(&name).get(), EVENT_TRACE_CONTROL_STOP) };
 }
 
-/// The program in front, if it is presenting frames: its id, its frames,
-/// whether its window covers its whole screen without being maximized (a
-/// game, borderless or in exclusive fullscreen: a maximized window on a
-/// screen with no taskbar covers it too, and is no game), and that
-/// screen's refresh rate.
-pub struct Front {
+/// A program presenting frames, as one of its windows shows it: the
+/// topmost of its windows that is visible and not minimized.
+pub struct Presenting {
     pub pid: u32,
     pub stats: FrameStats,
+    /// Its window's title (what the game calls itself).
+    pub title: String,
+    /// Whether its window covers its whole screen without being maximized
+    /// (a game, borderless or in exclusive fullscreen: a maximized window on
+    /// a screen with no taskbar covers it too, and is no game).
     pub fills_screen: bool,
+    /// Whether that screen is the one the pointer is on.
+    pub under_pointer: bool,
+    /// Whether it is the window in front.
+    pub in_front: bool,
     pub refresh_hz: Option<u32>,
 }
 
-/// What the program in front presents now; programs that have stopped
-/// presenting are forgotten.
-pub fn front() -> Option<Front> {
+/// Every program presenting frames now, by its topmost window, topmost
+/// first; programs that have stopped presenting are forgotten. Looked at
+/// through their windows alone: no program's process is opened.
+pub fn presenting() -> Vec<Presenting> {
     let mut now = 0i64;
-    unsafe { QueryPerformanceCounter(&mut now) }.ok()?;
+    if unsafe { QueryPerformanceCounter(&mut now) }.is_err() {
+        return Vec::new();
+    }
     let now = ticks(now);
-    let window = unsafe { GetForegroundWindow() };
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-    let stats = {
+    let stats: HashMap<u32, FrameStats> = {
         let mut presents = PRESENTS.lock().unwrap();
-        let presents = presents.as_mut()?;
+        let Some(presents) = presents.as_mut() else { return Vec::new() };
         presents.retain(|_, frames| frames.stats(now).is_some());
-        presents.get(&pid)?.stats(now)?
+        presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now)?))).collect()
     };
-    let (fills_screen, refresh_hz) = screen_of(window);
-    Some(Front { pid, stats, fills_screen, refresh_hz })
+    if stats.is_empty() {
+        return Vec::new();
+    }
+    let own = std::process::id();
+    let front = unsafe { GetForegroundWindow() };
+    let mut cursor = POINT::default();
+    let pointer_screen = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
+    // The top-level windows, topmost first.
+    let mut windows: Vec<HWND> = Vec::new();
+    unsafe extern "system" fn gather(window: HWND, windows: LPARAM) -> BOOL {
+        unsafe { (*(windows.0 as *mut Vec<HWND>)).push(window) };
+        BOOL(1)
+    }
+    let _ = unsafe { EnumWindows(Some(gather), LPARAM(&mut windows as *mut Vec<HWND> as isize)) };
+    let mut found: Vec<Presenting> = Vec::new();
+    for window in windows {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+        let Some(&frames) = stats.get(&pid) else { continue };
+        if pid == own || found.iter().any(|seen| seen.pid == pid) || !unsafe { IsWindowVisible(window) }.as_bool() || unsafe { IsIconic(window) }.as_bool() {
+            continue;
+        }
+        let (fills_screen, refresh_hz, monitor) = screen_of(window);
+        let mut title = [0u16; 256];
+        let length = unsafe { GetWindowTextW(window, &mut title) };
+        found.push(Presenting {
+            pid,
+            stats: frames,
+            title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
+            fills_screen,
+            under_pointer: monitor.is_some() && monitor == pointer_screen,
+            in_front: window == front,
+            refresh_hz,
+        });
+    }
+    found
 }
 
-/// Whether `window` covers its monitor, not maximized, and the monitor's
-/// refresh rate.
-fn screen_of(window: HWND) -> (bool, Option<u32>) {
+/// Whether `window` covers its monitor, not maximized, the monitor's
+/// refresh rate, and the monitor.
+fn screen_of(window: HWND) -> (bool, Option<u32>, Option<HMONITOR>) {
     unsafe {
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONULL);
         let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
         if monitor.is_invalid() || !GetMonitorInfoW(monitor, &mut info.monitorInfo).as_bool() {
-            return (false, None);
+            return (false, None, None);
         }
         let mut rect = RECT::default();
         let fills = !IsZoomed(window).as_bool() && GetWindowRect(window, &mut rect).is_ok() && {
@@ -182,7 +228,7 @@ fn screen_of(window: HWND) -> (bool, Option<u32>) {
             .then_some(mode.dmDisplayFrequency)
             // 0 and 1 stand for the hardware's default.
             .filter(|&hz| hz > 1);
-        (fills, refresh)
+        (fills, refresh, Some(monitor))
     }
 }
 
@@ -210,8 +256,11 @@ mod tests {
                 .map(|presents| presents.iter().filter_map(|(pid, frames)| Some((*pid, frames.stats(now)?.fps))).collect())
                 .unwrap_or_default();
             rates.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let front = front().map(|front| format!("pid {} fps {:.1} low {:?} longest {:.1} ms fills {} refresh {:?}", front.pid, front.stats.fps, front.stats.low, front.stats.longest_ms, front.fills_screen, front.refresh_hz));
-            writeln!(out, "{second:>2}s presenting {rates:?}\n    front: {front:?}").unwrap();
+            let windows: Vec<String> = presenting()
+                .iter()
+                .map(|p| format!("pid {} '{}' fps {:.1} fills {} pointer {} front {} refresh {:?}", p.pid, p.title, p.stats.fps, p.fills_screen, p.under_pointer, p.in_front, p.refresh_hz))
+                .collect();
+            writeln!(out, "{second:>2}s presenting {rates:?}\n    windows: {windows:?}").unwrap();
         }
         stop();
     }

@@ -68,6 +68,31 @@ impl Shortcut {
     }
 }
 
+/// What the user has said of programs that present frames, by program
+/// name ("DeltaForceClient-Win64-Shipping"): those always games (a game in
+/// a window, which looks to Windows like any other program drawing), and
+/// those never (a browser playing a video full screen).
+#[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameMarks {
+    pub always: Vec<String>,
+    pub never: Vec<String>,
+}
+
+impl GameMarks {
+    /// Whether program `name` is a game: as the user said, or else as its
+    /// window covering its screen says.
+    pub fn is_game(&self, name: &str, fills_screen: bool) -> bool {
+        if self.always.iter().any(|marked| marked == name) {
+            true
+        } else if self.never.iter().any(|marked| marked == name) {
+            false
+        } else {
+            fills_screen
+        }
+    }
+}
+
 /// What opens the panel over a game in exclusive fullscreen.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -137,6 +162,8 @@ pub struct Settings {
     pub heat_alert: bool,
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
+    /// Programs the user has said are games, or are not, by name.
+    pub games: GameMarks,
     pub view: serde_json::Value,
 }
 
@@ -157,6 +184,7 @@ impl Default for Settings {
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
             last_version: None,
+            games: GameMarks::default(),
             view: serde_json::Value::Null,
         }
     }
@@ -231,6 +259,15 @@ mod tests {
         // Modifiers alone are no shortcut.
         assert!(!key(true, true, false, false, 0x12));
         assert!(!key(true, false, false, false, 0x5B));
+    }
+
+    #[test]
+    fn games_are_as_marked_or_as_their_windows_say() {
+        let marks = GameMarks { always: vec!["windowed".into()], never: vec!["browser".into()] };
+        assert!(marks.is_game("windowed", false));
+        assert!(!marks.is_game("browser", true));
+        assert!(marks.is_game("other", true));
+        assert!(!marks.is_game("other", false));
     }
 
     #[test]
