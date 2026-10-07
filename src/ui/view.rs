@@ -498,14 +498,17 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 let longest = game.map(|g| g.longest_ms);
                 facts.push((lang.pick("最长一帧", "Longest frame").into(), shown(longest, |ms| format!("{ms:.1} ms")), longest.is_some_and(hot)));
             }
+            // Full scale: the screen's rate, or the most frames drawn, if more
+            // (a game not held to the screen's rate draws frames it never shows).
+            let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps as f64)).fold(0.0, f64::max);
+            let scale = refresh.map(f64::from).map(|hz| hz.max(most));
             vec![
-                head(lang.pick("游戏", "Game"), game.map_or(String::new(), |g| g.name.clone()), shown(refresh, |hz| format!("{hz} Hz")), false),
+                head(lang.pick("游戏", "Game"), game.map_or(String::new(), |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
                 Block::Readout {
                     figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    // Full scale at the screen's rate, the most it can show.
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.game.as_ref().map(|g| g.fps as f64))], refresh.map(f64::from), None)),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.game.as_ref().map(|g| g.fps as f64))], scale, None)),
                 },
                 Block::Facts { rows: facts, gap: 10.0 },
             ]
