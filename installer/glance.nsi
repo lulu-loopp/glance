@@ -93,11 +93,21 @@ LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n
 ; An update taken from Glance's settings runs silent with /RESTART: Glance
 ; is started again once it is in.
 Function .onInstSuccess
+  Call Restart
+FunctionEnd
+
+; One that failed starts again the Glance it closed, still there.
+Function .onInstFailed
+  Call Restart
+FunctionEnd
+
+Function Restart
   ${GetParameters} $0
   ClearErrors
   ${GetOptions} $0 "/RESTART" $1
   ${IfNot} ${Errors}
   ${AndIf} ${Silent}
+  ${AndIf} ${FileExists} "$INSTDIR\${EXE}"
     SetOutPath "$INSTDIR"
     Exec '"$INSTDIR\${EXE}"'
   ${EndIf}

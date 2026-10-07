@@ -1279,6 +1279,7 @@ impl Ui {
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
                 Row::Shortcut => vec![Target::Shortcut],
+                Row::Version if update::check() == update::Check::Checking => vec![],
                 Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
                 // A module's row, which opens its card if it has one, then its switch.
@@ -1287,6 +1288,7 @@ impl Ui {
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
+                Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => vec![Target::Update],
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
@@ -1394,6 +1396,7 @@ impl Ui {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,

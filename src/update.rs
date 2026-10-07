@@ -97,6 +97,8 @@ pub enum Check {
 struct Asking {
     check: Check,
     now: Option<Asker>,
+    /// The tray asked while an ask was under way: told its outcome.
+    tray_waits: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -105,7 +107,7 @@ pub enum Asker {
     Tray,
 }
 
-static ASKING: Mutex<Asking> = Mutex::new(Asking { check: Check::Idle, now: None });
+static ASKING: Mutex<Asking> = Mutex::new(Asking { check: Check::Idle, now: None, tray_waits: false });
 static WAKE: Condvar = Condvar::new();
 
 /// How the last ask for a newer release went.
@@ -118,6 +120,7 @@ pub fn check() -> Check {
 pub fn check_now(asker: Asker) {
     let mut asking = ASKING.lock().unwrap();
     if asking.check == Check::Checking {
+        asking.tray_waits |= asker == Asker::Tray;
         return;
     }
     asking.now = Some(asker);
@@ -150,7 +153,8 @@ pub fn watch() {
                     asking.check = Check::Checking;
                     break None;
                 }
-                let wait = due.saturating_duration_since(Instant::now()).min(Duration::from_secs(60)).max(Duration::from_secs(1));
+                let until_due = if wanted { due.saturating_duration_since(Instant::now()) } else { Duration::from_secs(60) };
+                let wait = until_due.min(Duration::from_secs(60)).max(Duration::from_secs(1));
                 asking = WAKE.wait_timeout(asking, wait).unwrap().0;
             }
         };
@@ -163,7 +167,11 @@ pub fn watch() {
             unanswered += 1;
         }
         let answered = answer.is_some();
-        ASKING.lock().unwrap().check = if answered { Check::Answered } else { Check::Unanswered };
+        let asker = {
+            let mut asking = ASKING.lock().unwrap();
+            asking.check = if answered { Check::Answered } else { Check::Unanswered };
+            if std::mem::take(&mut asking.tray_waits) { Some(Asker::Tray) } else { asker }
+        };
         let newer_release = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION")));
         let lang = language();
         if let Some(release) = newer_release {
@@ -305,8 +313,11 @@ fn fetch_and_run(release: &Release) -> State {
     let path = HSTRING::from(installer.as_os_str());
     // Silent, and Glance started again once it is in: the one press in the
     // settings is all an update asks. (Glance runs elevated, and so does the
-    // installer it starts, unasked.)
-    let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, w!("/S /RESTART"), PCWSTR::null(), SW_SHOWNORMAL) };
+    // installer it starts, unasked.) Not for a Glance installed somewhere
+    // unprotected all the same: a silent installer cannot ask whether to
+    // install there again, and refuses; it shows its pages instead.
+    let arguments = if crate::elevation::may_start_unasked() { w!("/S /RESTART") } else { PCWSTR::null() };
+    let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, arguments, PCWSTR::null(), SW_SHOWNORMAL) };
     // Above 32: the installer is running.
     if started.0 as usize > 32 {
         note("installer started");

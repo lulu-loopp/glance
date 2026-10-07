@@ -125,8 +125,17 @@ fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
         .collect();
     // A line each, its cells a space apart: Windows 11 draws the tray's
     // tooltips in a way no program can measure, and no spacing lines up
-    // columns there.
-    std::iter::once("Glance".to_string()).chain(cells.iter().map(|cells| cells.join(" "))).collect::<Vec<_>>().join("\n")
+    // columns there. As many whole lines as its 127 characters hold, "Glance"
+    // and the line breaks among them.
+    let mut tip = "Glance".to_string();
+    for line in cells.iter().map(|cells| cells.join(" ")) {
+        if tip.encode_utf16().count() + 1 + line.encode_utf16().count() > 127 {
+            break;
+        }
+        tip.push('\n');
+        tip.push_str(&line);
+    }
+    tip
 }
 
 #[cfg(test)]
