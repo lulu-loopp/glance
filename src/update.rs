@@ -16,7 +16,7 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetOption, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
+    WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
     WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER,
     WINHTTP_QUERY_STATUS_CODE,
 };
@@ -43,6 +43,15 @@ const SOURCES: [&str; 2] = [
 /// reach) is made again after each of these in turn, then every last one.
 const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRIES: [Duration; 3] = [Duration::from_secs(60), Duration::from_secs(5 * 60), Duration::from_secs(60 * 60)];
+/// How long the second site is waited for once the first has answered.
+const STRAGGLER: Duration = Duration::from_secs(3);
+/// How long a request waits to find, reach, and hear from a site: a site
+/// out of reach is given up in seconds, not the minute and more Windows
+/// waits by itself. Downloading the installer reads on as long as data
+/// comes.
+const RESOLVE_MS: i32 = 10_000;
+const CONNECT_MS: i32 = 10_000;
+const ANSWER_MS: i32 = 15_000;
 /// More than any installer of Glance's: an answer this large is not one.
 const MOST: usize = 64 << 20;
 
@@ -269,7 +278,10 @@ fn fetch_and_run(release: &Release) -> State {
     }
     let Some(installer) = chosen else { return outcome };
     let path = HSTRING::from(installer.as_os_str());
-    let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+    // Silent, and Glance started again once it is in: the one press in the
+    // settings is all an update asks. (Glance runs elevated, and so does the
+    // installer it starts, unasked.)
+    let started = unsafe { ShellExecuteW(None::<HWND>, w!("open"), &path, w!("/S /RESTART"), PCWSTR::null(), SW_SHOWNORMAL) };
     // Above 32: the installer is running.
     if started.0 as usize > 32 {
         note("installer started");
@@ -321,20 +333,31 @@ pub(crate) fn language() -> Lang {
 /// does not answer (out of reach from where the user is) is noted, and the
 /// other one serves.
 fn latest() -> Option<Release> {
-    let mut answers: Vec<(Duration, (String, String))> = SOURCES
-        .iter()
-        .filter_map(|url| {
-            let asked = Instant::now();
+    // Both sites at once, each on a thread of its own; their answers in the
+    // order they come, a site out of reach answering nothing. Once one has
+    // answered, the other is waited for a moment more, not for as long as
+    // an unreachable site takes to give up.
+    let (sender, answers) = std::sync::mpsc::channel();
+    for url in SOURCES {
+        let sender = sender.clone();
+        thread::spawn(move || {
             let answer = get(url).and_then(|body| release(&body));
             if answer.is_none() {
                 let host = url.trim_start_matches("https://").split('/').next().unwrap_or(url);
                 crate::journal::note(format!("update check: no answer from {host}"));
             }
-            Some((asked.elapsed(), answer?))
-        })
-        .collect();
-    answers.sort_by_key(|(took, _)| *took);
-    let mut installers: Vec<(String, String)> = answers.into_iter().map(|(_, answer)| answer).collect();
+            let _ = sender.send(answer);
+        });
+    }
+    drop(sender);
+    let mut installers: Vec<(String, String)> = Vec::new();
+    let mut heard = 0;
+    while heard < SOURCES.len() {
+        let next = if installers.is_empty() { answers.recv().ok() } else { answers.recv_timeout(STRAGGLER).ok() };
+        let Some(answer) = next else { break };
+        heard += 1;
+        installers.extend(answer);
+    }
     // The newest first; of the same version, still the sooner site first.
     installers.sort_by(|(a, _), (b, _)| if newer(a, b) { Ordering::Less } else if newer(b, a) { Ordering::Greater } else { Ordering::Equal });
     let version = installers.first()?.0.clone();
@@ -394,6 +417,7 @@ fn get(url: &str) -> Option<Vec<u8>> {
         if WinHttpSetOption(Some(session.0), WINHTTP_OPTION_SECURE_PROTOCOLS, Some(&protocols)).is_err() {
             let _ = WinHttpSetOption(Some(session.0), WINHTTP_OPTION_SECURE_PROTOCOLS, Some(&WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2.to_ne_bytes()));
         }
+        let _ = WinHttpSetTimeouts(session.0, RESOLVE_MS, CONNECT_MS, ANSWER_MS, ANSWER_MS);
         let connection = Handle(WinHttpConnect(session.0, &HSTRING::from(host), INTERNET_DEFAULT_HTTPS_PORT, 0));
         if connection.0.is_null() {
             return None;

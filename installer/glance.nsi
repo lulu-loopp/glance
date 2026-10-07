@@ -13,6 +13,7 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
 
 !define NAME "Glance"
 !define VERSION "0.1.9"
@@ -88,6 +89,19 @@ LangString RemovePawnIO ${LANG_ENGLISH} "Remove the PawnIO driver as well?$\r$\n
   nsExec::Exec '"$SYSDIR\taskkill.exe" /IM ${EXE} /F'
   Sleep 500
 !macroend
+
+; An update taken from Glance's settings runs silent with /RESTART: Glance
+; is started again once it is in.
+Function .onInstSuccess
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/RESTART" $1
+  ${IfNot} ${Errors}
+  ${AndIf} ${Silent}
+    SetOutPath "$INSTDIR"
+    Exec '"$INSTDIR\${EXE}"'
+  ${EndIf}
+FunctionEnd
 
 Function .onInit
   ${IfNot} ${RunningX64}

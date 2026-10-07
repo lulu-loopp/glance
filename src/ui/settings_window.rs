@@ -1765,7 +1765,7 @@ impl Ui {
                         (true, false, _) => pick(lang, "按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
                         (false, _, None) => pick(lang, "未设置，点右边的按钮设置", "None; click the button to set one"),
                         (false, _, Some(_)) if crate::tray::hotkey_taken() => pick(lang, "已被其他程序占用，请换一个", "Another program is using it; choose another"),
-                        (false, _, Some(_)) => pick(lang, "打开或收起面板，点右边的按钮更换", "Opens and closes the panel; click to change"),
+                        (false, _, Some(_)) => pick(lang, "打开或收起面板", "Opens and closes the panel"),
                     };
                     let (action, kind) = match (self.recording, self.settings.shortcut) {
                         (true, _) => (pick(lang, "请按键…", "Press keys…").to_string(), Button::Taking),

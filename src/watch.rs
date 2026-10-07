@@ -123,8 +123,10 @@ fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
             cells
         })
         .collect();
-    // The tooltip holds 127 characters, "Glance" and its line break among them.
-    std::iter::once("Glance".to_string()).chain(crate::tray::columns(&cells, 127 - 7)).collect::<Vec<_>>().join("\n")
+    // A line each, its cells a space apart: Windows 11 draws the tray's
+    // tooltips in a way no program can measure, and no spacing lines up
+    // columns there.
+    std::iter::once("Glance".to_string()).chain(cells.iter().map(|cells| cells.join(" "))).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
