@@ -363,7 +363,6 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             name: name.to_string(),
             program: name.to_string(),
             is_game: true,
-            marked: false,
             fps: 138.0 + 14.0 * wave(11.0, 0.4) + 4.0 * noise() - if stutter { 9.0 } else { 0.0 },
             low: Some(96.0 + 6.0 * noise()),
             longest_ms: if stutter { 18.0 + 14.0 * noise() } else { 7.6 + 1.6 * noise() },

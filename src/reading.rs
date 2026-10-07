@@ -96,12 +96,10 @@ pub struct Sample {
 pub struct GameSample {
     /// What it calls itself (its window's title), or its program's name.
     pub name: String,
-    /// Its program's name, as the user marks it a game or not.
+    /// Its program's name.
     pub program: String,
-    /// A game: marked one, or its window covering its screen.
+    /// A game: its window covers its screen.
     pub is_game: bool,
-    /// The user has said whether it is a game.
-    pub marked: bool,
     pub fps: f32,
     /// The 1% low, as frames a second; none until enough frames have come.
     pub low: Option<f32>,

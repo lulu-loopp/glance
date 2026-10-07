@@ -188,18 +188,17 @@ impl Sampler {
 
     /// The game to show: of the programs presenting frames, a game on the
     /// pointer's screen, else a game on another, else the program in front.
-    /// A game is one marked so, or else one whose window covers its screen.
+    /// A game is one whose window covers its screen.
     /// Named by its window's title, its program from the process list, and
     /// its use of the machine from the counters (never by opening its
     /// process: anti-cheat watches for that). `collected` says whether the
     /// counters were read this time.
     fn game(&mut self, collected: bool) -> Option<GameSample> {
-        let marks = crate::app().settings.lock().unwrap().games.clone();
         let found: Vec<(crate::presents::Presenting, String, bool)> = crate::presents::presenting()
             .into_iter()
             .map(|presenting| {
                 let program = self.processes.name_of(presenting.pid as usize).unwrap_or_default();
-                let is_game = marks.is_game(&program, presenting.fills_screen);
+                let is_game = presenting.fills_screen;
                 (presenting, program, is_game)
             })
             .collect();
@@ -247,7 +246,6 @@ impl Sampler {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
             is_game: *is_game,
-            marked: marks.is_marked(program),
             fps: presenting.stats.fps,
             low: presenting.stats.low,
             longest_ms: presenting.stats.longest_ms,

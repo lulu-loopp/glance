@@ -68,87 +68,48 @@ impl Shortcut {
     }
 }
 
-/// What the user has said of programs that present frames, by program
-/// name ("DeltaForceClient-Win64-Shipping"): those always games (a game in
-/// a window, which looks to Windows like any other program drawing), and
-/// those never (a browser playing a video full screen).
-#[derive(Clone, Default, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(default)]
-pub struct GameMarks {
-    pub always: Vec<String>,
-    pub never: Vec<String>,
-}
-
-impl GameMarks {
-    /// Whether program `name` is a game: as the user said, or else as its
-    /// window covering its screen says.
-    pub fn is_game(&self, name: &str, fills_screen: bool) -> bool {
-        if self.always.iter().any(|marked| marked == name) {
-            true
-        } else if self.never.iter().any(|marked| marked == name) {
-            false
-        } else {
-            fills_screen
-        }
-    }
-
-    /// Whether the user has said whether program `name` is a game.
-    pub fn is_marked(&self, name: &str) -> bool {
-        self.always.iter().chain(&self.never).any(|marked| marked == name)
-    }
-
-    /// Says program `name` is a game (`game`), or is not.
-    pub fn mark(&mut self, name: &str, game: bool) {
-        self.always.retain(|marked| marked != name);
-        self.never.retain(|marked| marked != name);
-        if game { &mut self.always } else { &mut self.never }.push(name.to_string());
-    }
-
-    /// Forgets what was said of program `name`.
-    pub fn forget(&mut self, name: &str) {
-        self.always.retain(|marked| marked != name);
-        self.never.retain(|marked| marked != name);
-    }
-}
-
-/// The readings over a game, in a corner of its screen.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+/// A few readings floating over the screen: over a game while one runs,
+/// or always.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlaySettings {
     pub on: bool,
-    pub corner: Corner,
-    pub detail: Detail,
+    pub when: OverlayWhen,
+    /// What it shows, by name (see `ui::overlay::ITEMS`).
+    pub items: Vec<String>,
+    /// Where it is on its screen: how far across and down the room there is
+    /// for it (0 at the left or top, 1 at the right or bottom).
+    pub at: (f32, f32),
+    /// A point on the screen it was put on (physical pixels), where it shows
+    /// when no game decides the screen.
+    pub screen: Option<(i32, i32)>,
     /// Offered once already: the first game told of it.
     pub offered: bool,
 }
 
 impl Default for OverlaySettings {
     fn default() -> Self {
-        OverlaySettings { on: false, corner: Corner::TopLeft, detail: Detail::Standard, offered: false }
+        OverlaySettings {
+            on: false,
+            when: OverlayWhen::GameMode,
+            items: ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"].map(String::from).to_vec(),
+            at: (0.0, 0.0),
+            screen: None,
+            offered: false,
+        }
     }
 }
 
+/// When the overlay is up.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Corner {
+pub enum OverlayWhen {
+    /// While the panel is in game mode, on the game's screen.
     #[default]
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
-}
-
-/// How much the overlay shows.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Detail {
-    /// The frame rate.
-    Simple,
-    /// The frame rate and its 1% low; the CPU's and GPU's use and heat.
-    #[default]
-    Standard,
-    /// Besides, frame time, power and memory.
-    Detailed,
+    #[serde(rename = "game")]
+    GameMode,
+    /// All the time, on the screen it was put on.
+    Always,
 }
 
 /// What opens the panel over a game in exclusive fullscreen.
@@ -224,8 +185,6 @@ pub struct Settings {
     pub heat_alert: bool,
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
-    /// Programs the user has said are games, or are not, by name.
-    pub games: GameMarks,
     pub overlay: OverlaySettings,
     pub view: serde_json::Value,
 }
@@ -249,7 +208,6 @@ impl Default for Settings {
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
             last_version: None,
-            games: GameMarks::default(),
             overlay: OverlaySettings::default(),
             view: serde_json::Value::Null,
         }
@@ -328,25 +286,10 @@ mod tests {
     }
 
     #[test]
-    fn games_are_as_marked_or_as_their_windows_say() {
-        let marks = GameMarks { always: vec!["windowed".into()], never: vec!["browser".into()] };
-        assert!(marks.is_game("windowed", false));
-        assert!(!marks.is_game("browser", true));
-        assert!(marks.is_game("other", true));
-        assert!(!marks.is_game("other", false));
-        // Marked the other way, it is only that.
-        let mut marks = marks;
-        marks.mark("browser", true);
-        assert!(marks.is_game("browser", false) && marks.never.is_empty());
-        marks.forget("browser");
-        assert!(!marks.is_game("browser", false) && marks.always == ["windowed"]);
+    fn settings_from_before_take_the_defaults() {
         // Settings from before modes switch by themselves.
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(settings.auto_game_mode);
-    }
-
-    #[test]
-    fn settings_from_before_take_the_defaults() {
         let mut settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
         settings.carry_over();
         assert_eq!(settings.shortcut, Some(Shortcut::default()));

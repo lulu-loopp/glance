@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_HOTKEY,
-    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
@@ -131,7 +131,7 @@ fn config_from(settings: &Settings) -> Config {
         columns: settings.columns,
         game_columns: settings.game_columns,
         auto_game_mode: settings.auto_game_mode,
-        overlay: settings.overlay,
+        overlay: settings.overlay.clone(),
         pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
@@ -196,8 +196,11 @@ impl Controller {
         let started = playing && !self.modes.lock().unwrap().playing;
         if started {
             // The first game ever, with the overlay off: it is offered.
-            let overlay = self.config.lock().unwrap().overlay;
-            if !overlay.on && !overlay.offered {
+            let (on, offered) = {
+                let config = self.config.lock().unwrap();
+                (config.overlay.on, config.overlay.offered)
+            };
+            if !on && !offered {
                 let name = sample.game.as_ref().map(|game| game.name.clone()).unwrap_or_default();
                 std::thread::spawn(move || crate::app().offer_overlay(&name));
             }
@@ -305,9 +308,10 @@ impl Controller {
         let mut overlay = Overlay::new().ok();
         let draw_overlay = |overlay: &mut Option<Overlay>, lang: Lang| {
             let Some(overlay) = overlay else { return };
-            let settings = self.config.lock().unwrap().overlay;
+            let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, lang);
+            // Placed while the settings are open.
+            overlay.show(history.back(), &settings, lang, self.mode() == Mode::Game, settings_window::is_open());
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -418,13 +422,24 @@ impl Controller {
                 // so: taken down, and opened afresh.
                 // The panel's own (the overlay's follows its game's screen).
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
-                OPEN_SETTINGS => settings_window::open(),
+                OPEN_SETTINGS => {
+                    settings_window::open();
+                    draw_overlay(&mut overlay, panel.lang);
+                }
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, panel.lang);
                 }
                 OVERLAY => draw_overlay(&mut overlay, panel.lang),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
+                // The overlay dragged into place.
+                WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
+                WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().moved(),
+                WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                    if let Some((at, point)) = overlay.as_mut().unwrap().release() {
+                        std::thread::spawn(move || crate::app().place_overlay(at, point));
+                    }
+                }
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
                 WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
@@ -1136,13 +1151,6 @@ impl<'a> Panel<'a> {
             Some(Hit::Overlay) => {
                 let on = !self.controller.config.lock().unwrap().overlay.on;
                 std::thread::spawn(move || crate::app().set_overlay(on));
-            }
-            Some(Hit::Mark(game)) => {
-                let program = self.controller.history.lock().unwrap().back().and_then(|s| s.game.as_ref()).map(|g| g.program.clone());
-                if let Some(program) = program.filter(|program| !program.is_empty()) {
-                    // Saving tells this thread to restyle; not from here.
-                    std::thread::spawn(move || crate::app().mark_game(&program, game));
-                }
             }
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;

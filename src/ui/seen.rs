@@ -33,8 +33,7 @@ pub struct Seen {
     pub volumes: Vec<String>,
     pub board: Option<BoardSeen>,
     pub battery: bool,
-    /// A game presenting frames (one marked so, or its window covering its
-    /// screen), now.
+    /// A game presenting frames (its window covering its screen), now.
     pub game: bool,
     /// What holds back the clock of a game's GPU (which NVIDIA's driver says).
     pub game_limit: bool,

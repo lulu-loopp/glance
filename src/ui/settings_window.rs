@@ -61,7 +61,8 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Corner, Detail, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlayWhen, Sensitivity, Settings, Shortcut};
+use super::overlay::ITEMS as OVERLAY_ITEMS;
 use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
@@ -84,6 +85,14 @@ const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
+/// The heading of the modules, with the modes' choice on its line.
+const MODE_HEADING: f32 = 40.0;
+/// The overlay's chips: their height, the room beside their text, and
+/// between them; and where the first line of them starts in their card.
+const CHIP: f32 = 30.0;
+const CHIP_PAD: f32 = 14.0;
+const CHIP_GAP: f32 = 8.0;
+const CHIP_TOP: f32 = 48.0;
 /// A row inside a module's open card, and how far in from the card's edge
 /// its label starts: under the module's name, past the grip.
 const ITEM_ROW: f32 = 48.0;
@@ -279,8 +288,7 @@ enum Field {
     Span,
     LoadAlert,
     TempAlert,
-    OverlayCorner,
-    OverlayDetail,
+    OverlayWhen,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -321,8 +329,8 @@ enum Target {
     Shortcut,
     /// Clears the shortcut.
     ClearShortcut,
-    /// Forgets what was said of a program: game or not.
-    Forget(String),
+    /// One of the overlay's readings, on or off.
+    OverlayItem(&'static str),
     /// Asks for a newer release now.
     CheckNow,
     Diagnostics,
@@ -341,10 +349,10 @@ enum Row {
     /// In a module's open card: one of its items, or a choice of its own.
     Item(String, &'static str),
     ModuleChoice(String, Field),
-    /// A program the user has said is a game (true), or is not.
-    Mark(String, bool),
-    /// No program marked yet: where to mark one.
-    NoMarks,
+    /// "Shown", with the choice of the mode whose modules follow.
+    ModeHeading,
+    /// What the overlay shows: a chip for each reading.
+    OverlayItems,
     Shortcut,
     /// This Glance's version, how the last asking went, and asking now.
     Version,
@@ -702,8 +710,7 @@ impl Ui {
             Row::Choice(Field::CloseDelay),
             Row::Shortcut,
             Row::Choice(Field::OverFullscreen),
-            Row::Heading("显示内容", "Shown"),
-            Row::Choice(Field::Mode),
+            Row::ModeHeading,
             Row::Choice(Field::Columns),
         ];
         for entry in &self.prefs.modules {
@@ -718,15 +725,9 @@ impl Ui {
             Row::Heading("游戏模式", "Game mode"),
             Row::Switch(Switch::AutoGame),
             Row::Switch(Switch::Overlay),
-            Row::Choice(Field::OverlayCorner),
-            Row::Choice(Field::OverlayDetail),
+            Row::Choice(Field::OverlayWhen),
+            Row::OverlayItems,
         ]);
-        let marks = &self.settings.games;
-        rows.extend(marks.always.iter().map(|name| Row::Mark(name.clone(), true)));
-        rows.extend(marks.never.iter().map(|name| Row::Mark(name.clone(), false)));
-        if marks.always.is_empty() && marks.never.is_empty() {
-            rows.push(Row::NoMarks);
-        }
         rows.extend([
             Row::Heading("数据", "Data"),
             Row::Choice(Field::Interval),
@@ -777,6 +778,8 @@ impl Ui {
             let (before, height) = match &row {
                 Row::Title => (0.0, 36.0),
                 Row::Heading(..) => (GROUP_GAP, 20.0),
+                Row::ModeHeading => (GROUP_GAP - 6.0, MODE_HEADING),
+                Row::OverlayItems => (ROW_GAP, self.chips().1),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
@@ -786,7 +789,7 @@ impl Ui {
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
             };
             y += before;
-            after_heading = matches!(row, Row::Heading(..));
+            after_heading = matches!(row, Row::Heading(..) | Row::ModeHeading);
             placed.push((row, y, height));
             y += height;
         }
@@ -890,15 +893,10 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlayCorner => (
-                pick(lang, "悬浮窗位置", "Overlay corner"),
-                vec![s("左上", "Top left"), s("右上", "Top right"), s("左下", "Bottom left"), s("右下", "Bottom right")],
-                [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight].iter().position(|&c| c == settings.overlay.corner),
-            ),
-            Field::OverlayDetail => (
-                pick(lang, "悬浮窗内容", "Overlay shows"),
-                vec![s("简洁", "Simple"), s("标准", "Standard"), s("详细", "Detailed")],
-                [Detail::Simple, Detail::Standard, Detail::Detailed].iter().position(|&d| d == settings.overlay.detail),
+            Field::OverlayWhen => (
+                pick(lang, "悬浮窗显示", "Overlay shows"),
+                vec![s("游戏模式时", "In game mode"), s("一直", "Always")],
+                [OverlayWhen::GameMode, OverlayWhen::Always].iter().position(|&w| w == settings.overlay.when),
             ),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
@@ -944,8 +942,7 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlayCorner => settings.overlay.corner = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight][index],
-            Field::OverlayDetail => settings.overlay.detail = [Detail::Simple, Detail::Standard, Detail::Detailed][index],
+            Field::OverlayWhen => settings.overlay.when = [OverlayWhen::GameMode, OverlayWhen::Always][index],
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -1007,6 +1004,26 @@ impl Ui {
         self.record(false);
     }
 
+    /// The overlay's chips, where each is in its card (from the card's
+    /// corner), with its reading's name and label; and the card's height.
+    fn chips(&self) -> (Vec<(Rect, &'static str, &'static str)>, f32) {
+        let font = Font::new(Family::Segoe, 13.0, 400.0);
+        let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
+        let (mut x, mut y) = (0.0, CHIP_TOP);
+        let mut chips = Vec::new();
+        for (name, zh, en) in OVERLAY_ITEMS {
+            let text = pick(self.lang, zh, en);
+            let w = self.gfx.measure(text, font) + 2.0 * CHIP_PAD;
+            if x > 0.0 && x + w > width {
+                x = 0.0;
+                y += CHIP + CHIP_GAP;
+            }
+            chips.push((Rect { x: ROW_SIDE + x, y, w, h: CHIP }, name, text));
+            x += w + CHIP_GAP;
+        }
+        (chips, y + CHIP + 16.0)
+    }
+
     /// The columns of the mode being set.
     fn columns(&self) -> Option<usize> {
         match self.editing {
@@ -1018,11 +1035,10 @@ impl Ui {
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
-            Field::Mode => Some(pick(self.lang, "两种模式各有自己的模块、顺序和栏数", "Each mode has its own modules, order and columns")),
-            Field::OverlayDetail => Some(pick(
+            Field::OverlayWhen => Some(pick(
                 self.lang,
-                "简洁：帧率；标准：加上 1% low、CPU 和 GPU 的占用与温度；详细：再加帧时间、功耗和内存",
-                "Simple: the frame rate. Standard: its 1% low, the CPU's and GPU's use and heat. Detailed: frame time, power and memory too",
+                "游戏模式时：显示在游戏所在的屏幕上；一直：不用呼出面板，常驻在放好的位置",
+                "In game mode: on the game's screen. Always: where it was put, without the panel",
             )),
             Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
@@ -1050,12 +1066,12 @@ impl Ui {
             ),
             Switch::AutoGame => (
                 p("自动切换到游戏模式", "Switch to game mode by itself"),
-                Some(p("游戏开始时切换，结束后切回日常；面板底部也能手动切换", "When a game starts, and back when it ends; the panel's bar switches too")),
+                Some(p("全屏游戏开始时切换，结束后切回日常；窗口化的游戏在面板底部手动切换", "When a fullscreen game starts, and back when it ends; for a windowed game, switch on the panel's bar")),
                 self.settings.auto_game_mode,
             ),
             Switch::Overlay => (
                 p("游戏悬浮窗", "Game overlay"),
-                Some(p("游戏运行时在画面角落显示帧率等，鼠标点击会穿过它；独占全屏的游戏上可能看不到", "Readings in a corner while a game runs; clicks pass through. May not show over exclusive fullscreen")),
+                Some(p("设置窗口打开时可以拖动它调整位置；平时鼠标点击会穿过它", "Drag it into place while the settings are open; otherwise clicks pass through")),
                 self.settings.overlay.on,
             ),
             Switch::HeatAlert => (
@@ -1323,9 +1339,14 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
-            Target::Forget(name) => {
-                self.settings.games.forget(&name);
-                self.focus = None;
+            Target::OverlayItem(name) => {
+                let items = &mut self.settings.overlay.items;
+                match items.iter().position(|item| item == name) {
+                    Some(at) => {
+                        items.remove(at);
+                    }
+                    None => items.push(name.to_string()),
+                }
                 self.save();
             }
             Target::CheckNow => update::check_now(update::Asker::Settings),
@@ -1404,8 +1425,9 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::Mark(name, _) => vec![Target::Forget(name)],
-                Row::Title | Row::Heading(..) | Row::NoMarks => vec![],
+                Row::ModeHeading => vec![Target::Choice(Field::Mode, self.editing as usize)],
+                Row::OverlayItems if self.settings.overlay.on => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
+                Row::Title | Row::Heading(..) | Row::OverlayItems => vec![],
             })
             .collect()
     }
@@ -1509,7 +1531,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::Mark(a, _), Target::Forget(b)) => a == b,
+            (Row::ModeHeading, Target::Choice(Field::Mode, _)) | (Row::OverlayItems, Target::OverlayItem(_)) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
@@ -1740,6 +1762,41 @@ impl Ui {
                 Row::Heading(zh, en) => {
                     text_centred(frame, pick(lang, zh, en), Font::new(Family::Segoe, 14.0, 600.0), palette.text, left, y + 10.0, width, Align::Start);
                 }
+                // The modes' choice on the heading's line: all below is the
+                // mode chosen's.
+                Row::ModeHeading => {
+                    let cy = y + row_height / 2.0;
+                    text_centred(frame, pick(lang, "显示内容", "Shown"), Font::new(Family::Segoe, 14.0, 600.0), palette.text, left, cy, width / 2.0, Align::Start);
+                    let (_, options, chosen) = self.choices(Field::Mode);
+                    self.segmented(frame, palette, Field::Mode, &options, chosen, true, left + width, cy, now, &hovered);
+                }
+                Row::OverlayItems => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let active = self.settings.overlay.on;
+                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+                    field_label_in(frame, colors, pick(lang, "显示项目", "Readings"), None, label, hint, left + ROW_SIDE, y + CHIP_TOP / 2.0 + 4.0, width - 2.0 * ROW_SIDE);
+                    let chip_font = Font::new(Family::Segoe, 13.0, 400.0);
+                    for (chip, name, text) in self.chips().0 {
+                        let r = Rect { x: left + chip.x, y: y + chip.y, w: chip.w, h: chip.h };
+                        let on = self.settings.overlay.items.iter().any(|item| item == name);
+                        let target = Target::OverlayItem(name);
+                        let hover = active && hovered.as_ref() == Some(&target);
+                        let ink = if on && active {
+                            fill(frame, if hover { palette.switch_on.alpha(0.9) } else { palette.switch_on }, r.x, r.y, r.w, r.h, r.h / 2.0);
+                            Color::hex(0xFFFFFF, 1.0)
+                        } else {
+                            if hover {
+                                fill(frame, palette.hover, r.x, r.y, r.w, r.h, r.h / 2.0);
+                            }
+                            stroke_inside(frame, r, r.h / 2.0, if on { palette.text3 } else { palette.rule });
+                            if !active { palette.text3 } else if on { palette.text } else { palette.text2 }
+                        };
+                        text_centred(frame, text, chip_font, ink, r.x + CHIP_PAD, r.y + r.h / 2.0, r.w, Align::Start);
+                        if active {
+                            self.targets.push((r, target));
+                        }
+                    }
+                }
                 Row::Skins => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let gap = 12.0;
@@ -1900,19 +1957,6 @@ impl Ui {
                     };
                     let button_left = self.button(frame, palette, &action, keys_right, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
                     field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::Mark(name, game) => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let detail = if game { pick(lang, "已设为游戏", "Marked a game") } else { pick(lang, "已设为不是游戏", "Marked not a game") };
-                    let target = Target::Forget(name.clone());
-                    let button_left = self.button(frame, palette, pick(lang, "移除", "Remove"), left + width - ROW_SIDE, y + row_height / 2.0, target, Button::Plain, &hovered);
-                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::NoMarks => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let name = pick(lang, "还没有标记过的程序", "No program marked yet");
-                    let detail = pick(lang, "窗口模式的游戏，可在游戏模式下从面板的游戏栏设为游戏", "A windowed game is marked from the panel's game lane, in game mode");
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE);
                 }
                 Row::Diagnostics => {
                     // "Copied" for a moment after the press.

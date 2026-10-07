@@ -141,20 +141,22 @@ impl App {
         let (title, text) = match lang {
             ui::text::Lang::Zh => (
                 format!("检测到游戏：{name}"),
-                "可以在游戏画面的角落显示帧率等信息：点面板底部的手柄按钮，或在设置的“游戏模式”里打开悬浮窗。".to_string(),
+                "可以在游戏画面上显示帧率等信息：点面板底部的悬浮窗按钮，或在设置的“游戏模式”里打开悬浮窗。".to_string(),
             ),
             ui::text::Lang::En => (
                 format!("A game is running: {name}"),
-                "Glance can show the frame rate and more in a corner of the game: click the controller button on the panel's bar, or turn the overlay on under Game mode in the settings.".to_string(),
+                "Glance can show the frame rate and more over the game: click the overlay button on the panel's bar, or turn the overlay on under Game mode in the settings.".to_string(),
             ),
         };
         tray::notify(&title, &text);
     }
 
-    /// Program `program` was said from the panel to be a game, or not.
-    pub fn mark_game(&self, program: &str, game: bool) {
+    /// The overlay was dragged to `at` (see `OverlaySettings::at`) on the
+    /// screen with `point` on it.
+    pub fn place_overlay(&self, at: (f32, f32), point: (i32, i32)) {
         let mut settings = self.settings.lock().unwrap().clone();
-        settings.games.mark(program, game);
+        settings.overlay.at = at;
+        settings.overlay.screen = Some(point);
         self.save(settings);
     }
 }
