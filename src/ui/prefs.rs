@@ -72,6 +72,7 @@ const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const BATTERY: [Item; 1] = [item("chart", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
+const GAME: [Item; 3] = [item("chart", true), item("low", true), item("longest", true)];
 
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the
 /// settings list them.
@@ -85,6 +86,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "board" => &BOARD,
         "battery" => &BATTERY,
         "system" => &SYSTEM,
+        "game" => &GAME,
         _ => &[],
     }
 }
@@ -214,9 +216,15 @@ impl Prefs {
         prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
         prefs.processes.count = prefs.processes.count.clamp(1, 30);
         prefs.modules.retain(|entry| known.contains(&entry.id));
-        for id in known {
+        // A module new to these settings goes where the default order puts
+        // it: before the first module listed after it there.
+        for (index, id) in known.iter().enumerate() {
             if !prefs.modules.iter().any(|entry| &entry.id == id) {
-                prefs.modules.push(ModuleEntry { id: id.clone(), on: !DEFAULT_OFF.contains(&id.as_str()), items: BTreeMap::new() });
+                let at = known[index + 1..]
+                    .iter()
+                    .find_map(|next| prefs.modules.iter().position(|entry| &entry.id == next))
+                    .unwrap_or(prefs.modules.len());
+                prefs.modules.insert(at, ModuleEntry { id: id.clone(), on: !DEFAULT_OFF.contains(&id.as_str()), items: BTreeMap::new() });
             }
         }
         prefs.carry_over();
@@ -280,6 +288,19 @@ mod tests {
 
     fn known() -> Vec<String> {
         ["cpu", "gpu:0", "gpu:1", "memory", "network", "disk", "processes"].map(String::from).to_vec()
+    }
+
+    #[test]
+    fn puts_a_new_module_where_the_default_order_has_it() {
+        // Settings from before the game module, the user's own order.
+        let stored = serde_json::json!({"modules": [{"id": "memory", "on": true}, {"id": "cpu", "on": true}, {"id": "disk", "on": false}]});
+        let known: Vec<String> = ["game", "cpu", "memory", "disk", "storage"].map(String::from).to_vec();
+        let prefs = Prefs::resolve(&stored, &known);
+        let order: Vec<&str> = prefs.modules.iter().map(|entry| entry.id.as_str()).collect();
+        // The game before the CPU, which follows it by default; the user's
+        // order kept; storage, last by default, after the rest.
+        assert_eq!(order, ["memory", "game", "cpu", "disk", "storage"]);
+        assert!(!prefs.modules[3].on);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! would gain and lose rows with them, and change its shape. Instead a
 //! reading once read keeps its place for as long as Glance runs, showing
 //! "—" while it is missing. The volumes are the exception: they are the
-//! ones mounted now, as a drive plugged in or out really changes them.
+//! ones mounted now, as a drive plugged in or out really changes them; and
+//! so is a game: one in front now, or none.
 
 use crate::reading::{Sample, StaticInfo};
 
@@ -32,6 +33,9 @@ pub struct Seen {
     pub volumes: Vec<String>,
     pub board: Option<BoardSeen>,
     pub battery: bool,
+    /// A game in front (a program presenting frames, its window covering its
+    /// screen), now.
+    pub game: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -93,6 +97,7 @@ impl Seen {
             merge(&mut seen.fans, board.fans.iter().map(|(name, _)| name.clone()), |a, b| a == b);
         }
         self.battery |= s.battery.is_some();
+        self.game = s.game.as_ref().is_some_and(|game| game.fills_screen);
     }
 
     /// The readings `other` holds for the lane of module `id` that this
@@ -126,6 +131,7 @@ impl Seen {
                 news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
             }
             "battery" => flag(self.battery, other.battery, Item::Battery),
+            "game" => flag(self.game, other.game, Item::Game),
             _ => {
                 let Some(index) = info.gpu_of(id) else { return news };
                 let (ours, theirs) = (self.gpus.get(index).cloned().unwrap_or_default(), other.gpus.get(index).cloned().unwrap_or_default());
@@ -153,7 +159,7 @@ impl Seen {
     /// This and `other` together: everything either holds.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
-        let mut lanes: Vec<String> = ["cpu", "memory", "network", "disk", "storage", "board", "battery"].map(String::from).to_vec();
+        let mut lanes: Vec<String> = ["game", "cpu", "memory", "network", "disk", "storage", "board", "battery"].map(String::from).to_vec();
         lanes.extend(info.gpu_modules());
         for id in &lanes {
             for item in joined.news(other, id, info) {
@@ -194,6 +200,7 @@ impl Seen {
                 }
             }
             Item::Battery => seen.battery = true,
+            Item::Game => seen.game = true,
             Item::Gpu(index, gpu) => {
                 if seen.gpus.len() <= *index {
                     seen.gpus.resize(index + 1, GpuSeen::default());
@@ -234,6 +241,7 @@ pub enum Item {
     BoardTemp(String),
     BoardFan(String),
     Battery,
+    Game,
     /// Of the GPU at this place in `StaticInfo::gpus`.
     Gpu(usize, GpuItem),
 }

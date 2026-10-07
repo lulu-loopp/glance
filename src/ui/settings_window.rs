@@ -1036,6 +1036,7 @@ impl Ui {
             "storage" => (p("存储", "Storage"), Some(p("各分区的空间", "Space on each drive"))),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
+            "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、1% low 和刷新率", "A fullscreen game's frame rate, 1% low and refresh rate"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -1105,6 +1106,9 @@ impl Ui {
         match (id.split(':').next().unwrap_or(id), name) {
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
             ("battery", "chart") => (p("电量图表", "Charge chart"), None),
+            ("game", "chart") => (p("帧率图表", "Frame rate chart"), None),
+            ("game", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
+            ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近一秒里最慢的一帧，卡顿时会变大", "The slowest frame of the last second: a stutter shows here"))),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
             ("board", "temps") => (p("温度传感器", "Temperature sensors"), None),
             ("board", "fans") => (p("风扇", "Fans"), None),

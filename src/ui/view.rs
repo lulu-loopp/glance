@@ -481,6 +481,35 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 },
             ]
         }
+        "game" => {
+            if !scene.seen.game {
+                return None;
+            }
+            let game = s.game.as_ref();
+            // Its screen's refresh rate in the corner: the most frames it can show.
+            let refresh = game.and_then(|g| g.refresh_hz);
+            let mut facts = Vec::new();
+            if on("low") {
+                facts.push(("1% low".into(), shown(game.and_then(|g| g.low), |low| format!("{low:.0} FPS")), false));
+            }
+            if on("longest") {
+                // Hot: a frame taking as long as three at the screen's rate.
+                let hot = |ms: f32| refresh.is_some_and(|hz| ms > 3000.0 / hz as f32);
+                let longest = game.map(|g| g.longest_ms);
+                facts.push((lang.pick("最长一帧", "Longest frame").into(), shown(longest, |ms| format!("{ms:.1} ms")), longest.is_some_and(hot)));
+            }
+            vec![
+                head(lang.pick("游戏", "Game"), game.map_or(String::new(), |g| g.name.clone()), shown(refresh, |hz| format!("{hz} Hz")), false),
+                Block::Readout {
+                    figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
+                    unit: "FPS",
+                    hot: false,
+                    // Full scale at the screen's rate, the most it can show.
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.game.as_ref().map(|g| g.fps as f64))], refresh.map(f64::from), None)),
+                },
+                Block::Facts { rows: facts, gap: 10.0 },
+            ]
+        }
         "battery" => {
             if !scene.seen.battery {
                 return None;
