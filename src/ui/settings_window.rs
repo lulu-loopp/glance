@@ -30,9 +30,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, HIMC};
+use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_MENU,
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
@@ -313,6 +313,8 @@ enum Target {
     Grip(String),
     /// The shortcut's keys: pressed, the next combination becomes them.
     Shortcut,
+    /// Clears the shortcut.
+    ClearShortcut,
     /// Asks for a newer release now.
     CheckNow,
     Diagnostics,
@@ -577,7 +579,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
             // Bit 30: the key was already down (an auto-repeat).
             let repeat = lparam.0 & (1 << 30) != 0;
-            match with_ui(|ui| ui.key(VIRTUAL_KEY(wparam.0 as u16), shift, alt, repeat)) {
+            // A key an input method has taken comes as VK_PROCESSKEY: the key
+            // pressed is asked of it.
+            let key = match VIRTUAL_KEY(wparam.0 as u16) {
+                VK_PROCESSKEY => VIRTUAL_KEY(unsafe { ImmGetVirtualKey(hwnd) } as u16),
+                key => key,
+            };
+            match with_ui(|ui| ui.key(key, shift, alt, repeat)) {
                 Some(true) => LRESULT(0),
                 _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
             }
@@ -897,9 +905,16 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
+    /// No shortcut: nothing opens the panel by keys.
+    fn clear_shortcut(&mut self) {
+        self.settings.shortcut = None;
+        self.save();
+        self.record(false);
+    }
+
     /// A key pressed while taking a new shortcut: Escape gives up, Backspace
-    /// clears the shortcut, a modifier alone waits for the key it goes with,
-    /// and a key with Ctrl, Alt or Win held becomes the shortcut.
+    /// or Delete clears the shortcut, a modifier alone waits for the key it
+    /// goes with, and a key with Ctrl, Alt or Win held becomes the shortcut.
     fn take_shortcut(&mut self, key: VIRTUAL_KEY) {
         self.next_frame = Instant::now();
         let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(key.0 as i32) } < 0;
@@ -908,10 +923,8 @@ impl Ui {
             self.record(false);
             return;
         }
-        if key == VK_BACK {
-            self.settings.shortcut = None;
-            self.save();
-            self.record(false);
+        if key == VK_BACK || key == VK_DELETE {
+            self.clear_shortcut();
             return;
         }
         if modifiers.contains(&key) {
@@ -919,6 +932,8 @@ impl Ui {
         }
         let shortcut = Shortcut { ctrl: down(VK_CONTROL), alt: down(VK_MENU), shift: down(VK_SHIFT), win: down(VK_LWIN) || down(VK_RWIN), key: key.0 };
         if !shortcut.usable() {
+            // Noted, for a report of a shortcut that would not take.
+            crate::journal::note(format!("shortcut: key 0x{:02X} without Ctrl, Alt or Win", key.0));
             self.needs_modifier = true;
             return;
         }
@@ -1135,7 +1150,7 @@ impl Ui {
         self.pointer = Some((x, y));
         self.pressed = self.hovered();
         // A press anywhere else gives up taking a new shortcut.
-        if self.recording && self.pressed != Some(Target::Shortcut) {
+        if self.recording && !matches!(self.pressed, Some(Target::Shortcut | Target::ClearShortcut)) {
             self.record(false);
         }
         // A press moves the focus there too, without showing it.
@@ -1197,6 +1212,7 @@ impl Ui {
             Target::Choice(field, index) => self.choose(field, index),
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
+            Target::ClearShortcut => self.clear_shortcut(),
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 if let Some(entry) = self.prefs.modules.iter_mut().find(|entry| entry.id == id) {
@@ -1257,6 +1273,7 @@ impl Ui {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
+                Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
                 Row::Shortcut => vec![Target::Shortcut],
                 Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
@@ -1745,7 +1762,7 @@ impl Ui {
                     let name = pick(lang, "快捷键", "Shortcut");
                     let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
                         (true, true, _) => pick(lang, "要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
-                        (true, false, _) => pick(lang, "按下新的组合键；Backspace 清除，Esc 取消", "Press the new keys; Backspace clears, Esc cancels"),
+                        (true, false, _) => pick(lang, "按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
                         (false, _, None) => pick(lang, "未设置，点右边的按钮设置", "None; click the button to set one"),
                         (false, _, Some(_)) if crate::tray::hotkey_taken() => pick(lang, "已被其他程序占用，请换一个", "Another program is using it; choose another"),
                         (false, _, Some(_)) => pick(lang, "打开或收起面板，点右边的按钮更换", "Opens and closes the panel; click to change"),
@@ -1755,7 +1772,13 @@ impl Ui {
                         (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Button::Plain),
                         (false, None) => (pick(lang, "未设置", "None").to_string(), Button::Plain),
                     };
-                    let button_left = self.button(frame, palette, &action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
+                    // With a shortcut set, a button to clear it, right of its keys.
+                    let right = left + width - ROW_SIDE;
+                    let keys_right = match self.settings.shortcut {
+                        Some(_) => self.button(frame, palette, pick(lang, "清除", "Clear"), right, y + row_height / 2.0, Target::ClearShortcut, Button::Plain, &hovered) - 8.0,
+                        None => right,
+                    };
+                    let button_left = self.button(frame, palette, &action, keys_right, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
                     field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
                 Row::Diagnostics => {

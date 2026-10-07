@@ -111,8 +111,10 @@ fn summary(sample: &Sample, info: &StaticInfo, lang: Lang) -> String {
     rows.push((lang.pick("内存", "Memory").to_string(), Some(memory), None));
     // The name, then the use and the temperature, each lined up at its end.
     // The name ends in a colon: a card's number would read as part of its use
-    // ("GPU 1  1%").
-    let colon = lang.pick("：", ":");
+    // ("GPU 1  1%"). A Latin one in either language: the spaces after a
+    // full-width one are drawn in the font that lends it, wider than they
+    // measure, and the columns fall out of line.
+    let colon = ":";
     let cells: Vec<Vec<String>> = rows
         .into_iter()
         .map(|(label, usage, temp)| {
