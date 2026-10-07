@@ -5,10 +5,24 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+/// What the panel is for at the moment: the everyday, or a game being
+/// played. Each has its own modules, in its own order, with their items.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Daily,
+    Game,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Prefs {
+    /// The daily mode's modules.
     pub modules: Vec<ModuleEntry>,
+    /// The game mode's.
+    #[serde(rename = "gameModules")]
+    pub game_modules: Vec<ModuleEntry>,
     /// The switches each module's items had before they were the modules'
     /// own (up to 0.1.7): read once, to carry the choices over, and not
     /// written again.
@@ -177,6 +191,7 @@ impl Default for Prefs {
     fn default() -> Self {
         Prefs {
             modules: Vec::new(),
+            game_modules: Vec::new(),
             cpu: None,
             gpu: None,
             memory: None,
@@ -212,6 +227,23 @@ impl Default for ProcessPrefs {
 
 /// Modules off until chosen.
 const DEFAULT_OFF: [&str; 1] = ["system"];
+/// The game mode's modules on until chosen otherwise (and every GPU): what
+/// bears on a game.
+const GAME_DEFAULT_ON: [&str; 3] = ["game", "cpu", "memory"];
+
+/// `entries` matched to this machine's modules (`known`, in default order):
+/// modules it no longer has are dropped, new ones put where the default
+/// order puts them (before the first module listed after them there), on
+/// as `on` says.
+fn fit(entries: &mut Vec<ModuleEntry>, known: &[String], on: impl Fn(&str) -> bool) {
+    entries.retain(|entry| known.contains(&entry.id));
+    for (index, id) in known.iter().enumerate() {
+        if !entries.iter().any(|entry| &entry.id == id) {
+            let at = known[index + 1..].iter().find_map(|next| entries.iter().position(|entry| &entry.id == next)).unwrap_or(entries.len());
+            entries.insert(at, ModuleEntry { id: id.clone(), on: on(id), items: BTreeMap::new() });
+        }
+    }
+}
 
 impl Prefs {
     /// The stored preferences, completed with defaults, with the module list
@@ -224,19 +256,18 @@ impl Prefs {
         prefs.hot_load = prefs.hot_load.clamp(1.0, 100.0);
         prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
         prefs.processes.count = prefs.processes.count.clamp(1, 30);
-        prefs.modules.retain(|entry| known.contains(&entry.id));
-        // A module new to these settings goes where the default order puts
-        // it: before the first module listed after it there.
-        for (index, id) in known.iter().enumerate() {
-            if !prefs.modules.iter().any(|entry| &entry.id == id) {
-                let at = known[index + 1..]
-                    .iter()
-                    .find_map(|next| prefs.modules.iter().position(|entry| &entry.id == next))
-                    .unwrap_or(prefs.modules.len());
-                prefs.modules.insert(at, ModuleEntry { id: id.clone(), on: !DEFAULT_OFF.contains(&id.as_str()), items: BTreeMap::new() });
-            }
-        }
+        fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));
+        fit(&mut prefs.game_modules, known, |id| GAME_DEFAULT_ON.contains(&id) || id.starts_with("gpu:"));
         prefs.carry_over();
+        prefs
+    }
+
+    /// These preferences as mode `mode` shows them: its modules.
+    pub fn for_mode(&self, mode: Mode) -> Prefs {
+        let mut prefs = self.clone();
+        if mode == Mode::Game {
+            std::mem::swap(&mut prefs.modules, &mut prefs.game_modules);
+        }
         prefs
     }
 
@@ -282,11 +313,15 @@ impl Prefs {
         if let Some(details) = network {
             carried.extend(["adapter", "address", "link", "totals"].map(|name| ("network", name, details)));
         }
-        let ids: Vec<String> = self.modules.iter().map(|entry| entry.id.clone()).collect();
-        for (kind, name, on) in carried {
-            for id in ids.iter().filter(|id| id.split(':').next() == Some(kind)) {
-                self.set_item(id, name, on);
+        // In both modes' lists.
+        for _ in [Mode::Daily, Mode::Game] {
+            let ids: Vec<String> = self.modules.iter().map(|entry| entry.id.clone()).collect();
+            for (kind, name, on) in &carried {
+                for id in ids.iter().filter(|id| id.split(':').next() == Some(*kind)) {
+                    self.set_item(id, name, *on);
+                }
             }
+            std::mem::swap(&mut self.modules, &mut self.game_modules);
         }
     }
 }
@@ -310,6 +345,23 @@ mod tests {
         // order kept; storage, last by default, after the rest.
         assert_eq!(order, ["memory", "game", "cpu", "disk", "storage"]);
         assert!(!prefs.modules[3].on);
+    }
+
+    #[test]
+    fn keeps_each_modes_own_modules() {
+        let known: Vec<String> = ["game", "cpu", "gpu:0", "memory", "network", "processes"].map(String::from).to_vec();
+        let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
+        let on = |prefs: &Prefs| prefs.modules.iter().filter(|entry| entry.on).map(|entry| entry.id.clone()).collect::<Vec<_>>();
+        assert_eq!(on(&prefs), known);
+        // A game's: the game and what it runs on.
+        let game = prefs.for_mode(Mode::Game);
+        assert_eq!(on(&game), ["game", "cpu", "gpu:0", "memory"]);
+        // Changed in one mode, the other is as it was.
+        let mut stored = serde_json::to_value(&prefs).unwrap();
+        stored["gameModules"][1]["on"] = false.into();
+        let again = Prefs::resolve(&stored, &known);
+        assert_eq!(on(&again.for_mode(Mode::Game)), ["game", "gpu:0", "memory"]);
+        assert_eq!(on(&again.for_mode(Mode::Daily)), known);
     }
 
     #[test]

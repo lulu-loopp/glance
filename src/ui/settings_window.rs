@@ -51,7 +51,7 @@ use super::backdrop::Capture;
 use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
-use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
+use super::prefs::{self, LanguagePref, Mode, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
 use super::render::{self, PanelLayers};
 use super::skins;
@@ -262,6 +262,8 @@ fn module_fields(id: &str) -> &'static [Field] {
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
+    /// Which mode's modules and columns the list below sets.
+    Mode,
     Theme,
     Language,
     Edge,
@@ -296,6 +298,7 @@ enum Switch {
     Startup,
     Updates,
     HeatAlert,
+    AutoGame,
 }
 
 /// What a press lands on.
@@ -315,6 +318,8 @@ enum Target {
     Shortcut,
     /// Clears the shortcut.
     ClearShortcut,
+    /// Forgets what was said of a program: game or not.
+    Forget(String),
     /// Asks for a newer release now.
     CheckNow,
     Diagnostics,
@@ -333,6 +338,10 @@ enum Row {
     /// In a module's open card: one of its items, or a choice of its own.
     Item(String, &'static str),
     ModuleChoice(String, Field),
+    /// A program the user has said is a game (true), or is not.
+    Mark(String, bool),
+    /// No program marked yet: where to mark one.
+    NoMarks,
     Shortcut,
     /// This Glance's version, how the last asking went, and asking now.
     Version,
@@ -367,7 +376,11 @@ struct Ui {
     /// Physical pixels per DIP.
     scale: f32,
     settings: Settings,
+    /// The preferences, with the modules of the mode being set in place of
+    /// the daily mode's (see `Prefs::for_mode`).
     prefs: Prefs,
+    /// The mode whose modules and columns are being set.
+    editing: Mode,
     lang: Lang,
     dark: bool,
     palette: Palette,
@@ -458,7 +471,9 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let surface = Some(Surface::new(&gfx, hwnd).ok()?);
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
-        let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
+        // The mode the panel is in, to begin with.
+        let editing = app.controller.mode();
+        let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules()).for_mode(editing);
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let stage = Stage { size, desktop: wallpaper::desktop(size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
@@ -473,6 +488,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             palette: Palette::new(false),
             settings,
             prefs,
+            editing,
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
@@ -662,7 +678,8 @@ impl Ui {
 
     /// Keeps the settings and hands them to the panel.
     fn save(&mut self) {
-        self.settings.view = serde_json::to_value(&self.prefs).unwrap();
+        // The daily mode's modules back in their place.
+        self.settings.view = serde_json::to_value(self.prefs.for_mode(self.editing)).unwrap();
         crate::app().save(self.settings.clone());
         self.next_frame = Instant::now();
     }
@@ -678,12 +695,13 @@ impl Ui {
             Row::Heading("呼出", "Opening"),
             Row::Choice(Field::Edge),
             Row::Choice(Field::Anchor),
-            Row::Choice(Field::Columns),
             Row::Choice(Field::Push),
             Row::Choice(Field::CloseDelay),
             Row::Shortcut,
             Row::Choice(Field::OverFullscreen),
             Row::Heading("显示内容", "Shown"),
+            Row::Choice(Field::Mode),
+            Row::Choice(Field::Columns),
         ];
         for entry in &self.prefs.modules {
             rows.push(Row::Module(entry.id.clone()));
@@ -692,6 +710,13 @@ impl Ui {
                 rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
                 rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
             }
+        }
+        rows.extend([Row::Heading("游戏模式", "Game mode"), Row::Switch(Switch::AutoGame)]);
+        let marks = &self.settings.games;
+        rows.extend(marks.always.iter().map(|name| Row::Mark(name.clone(), true)));
+        rows.extend(marks.never.iter().map(|name| Row::Mark(name.clone(), false)));
+        if marks.always.is_empty() && marks.never.is_empty() {
+            rows.push(Row::NoMarks);
         }
         rows.extend([
             Row::Heading("数据", "Data"),
@@ -794,6 +819,7 @@ impl Ui {
         let (settings, prefs) = (&self.settings, &self.prefs);
         let at = |values: &[u64], value: u64| values.iter().position(|&v| v == value);
         match field {
+            Field::Mode => (pick(lang, "设置哪种模式", "Setting up"), vec![s("日常", "Daily"), s("游戏", "Game")], Some(self.editing as usize)),
             Field::Theme => (
                 pick(lang, "明暗", "Theme"),
                 vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Backdrop")],
@@ -822,7 +848,7 @@ impl Ui {
             Field::Columns => (
                 pick(lang, "面板栏数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
-                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns),
+                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == self.columns()),
             ),
             Field::Push => (
                 pick(lang, "推入力度", "Push"),
@@ -865,13 +891,31 @@ impl Ui {
     }
 
     fn choose(&mut self, field: Field, index: usize) {
+        if field == Field::Mode {
+            // Nothing to keep: the list below now sets the other mode.
+            let mode = [Mode::Daily, Mode::Game][index];
+            if mode != self.editing {
+                std::mem::swap(&mut self.prefs.modules, &mut self.prefs.game_modules);
+                self.editing = mode;
+            }
+            self.next_frame = Instant::now();
+            return;
+        }
+        let editing = self.editing;
         let (settings, prefs) = (&mut self.settings, &mut self.prefs);
         match field {
+            Field::Mode => {}
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
-            Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
+            Field::Columns => {
+                let columns = [None, Some(1), Some(2), Some(3), Some(4)][index];
+                match editing {
+                    Mode::Daily => settings.columns = columns,
+                    Mode::Game => settings.game_columns = columns,
+                }
+            }
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
@@ -942,9 +986,18 @@ impl Ui {
         self.record(false);
     }
 
+    /// The columns of the mode being set.
+    fn columns(&self) -> Option<usize> {
+        match self.editing {
+            Mode::Daily => self.settings.columns,
+            Mode::Game => self.settings.game_columns,
+        }
+    }
+
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
+            Field::Mode => Some(pick(self.lang, "两种模式各有自己的模块、顺序和栏数", "Each mode has its own modules, order and columns")),
             Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
         }
@@ -968,6 +1021,11 @@ impl Ui {
                     p("当前安装位置不受保护，无法启用；点击查看原因", "Unavailable in this location; click for details")
                 }),
                 self.autostart,
+            ),
+            Switch::AutoGame => (
+                p("自动切换到游戏模式", "Switch to game mode by itself"),
+                Some(p("游戏开始时切换，结束后切回日常；面板底部也能手动切换", "When a game starts, and back when it ends; the panel's bar switches too")),
+                self.settings.auto_game_mode,
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
@@ -1008,6 +1066,7 @@ impl Ui {
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
+            Switch::AutoGame => settings.auto_game_mode ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -1229,6 +1288,11 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
+            Target::Forget(name) => {
+                self.settings.games.forget(&name);
+                self.focus = None;
+                self.save();
+            }
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 if let Some(entry) = self.prefs.modules.iter_mut().find(|entry| entry.id == id) {
@@ -1305,7 +1369,8 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::Title | Row::Heading(..) => vec![],
+                Row::Mark(name, _) => vec![Target::Forget(name)],
+                Row::Title | Row::Heading(..) | Row::NoMarks => vec![],
             })
             .collect()
     }
@@ -1409,6 +1474,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
+            (Row::Mark(a, _), Target::Forget(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
@@ -1800,6 +1866,19 @@ impl Ui {
                     let button_left = self.button(frame, palette, &action, keys_right, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
                     field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
                 }
+                Row::Mark(name, game) => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let detail = if game { pick(lang, "已设为游戏", "Marked a game") } else { pick(lang, "已设为不是游戏", "Marked not a game") };
+                    let target = Target::Forget(name.clone());
+                    let button_left = self.button(frame, palette, pick(lang, "移除", "Remove"), left + width - ROW_SIDE, y + row_height / 2.0, target, Button::Plain, &hovered);
+                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
+                }
+                Row::NoMarks => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let name = pick(lang, "还没有标记过的程序", "No program marked yet");
+                    let detail = pick(lang, "窗口模式的游戏，可在游戏模式下从面板的游戏栏设为游戏", "A windowed game is marked from the panel's game lane, in game mode");
+                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, width - 2.0 * ROW_SIDE);
+                }
                 Row::Diagnostics => {
                     // "Copied" for a moment after the press.
                     let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
@@ -2055,7 +2134,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
@@ -2074,7 +2153,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

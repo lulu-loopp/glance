@@ -50,7 +50,7 @@ use crate::ui::arrange::{self, GAP};
 use crate::ui::seen::Seen;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
-use crate::ui::prefs::Prefs;
+use crate::ui::prefs::{Mode, Prefs};
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
@@ -108,6 +108,8 @@ struct Config {
     live: bool,
     anchor: Anchor,
     columns: Option<usize>,
+    game_columns: Option<usize>,
+    auto_game_mode: bool,
     pressure: i32,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
@@ -123,6 +125,8 @@ fn config_from(settings: &Settings) -> Config {
         live: settings.live_backdrop,
         anchor: settings.anchor,
         columns: settings.columns,
+        game_columns: settings.game_columns,
+        auto_game_mode: settings.auto_game_mode,
         pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
@@ -132,9 +136,20 @@ fn config_from(settings: &Settings) -> Config {
     }
 }
 
+/// Which mode the panel is in: as chosen on it, or else as a game running
+/// says.
+#[derive(Default)]
+struct Modes {
+    /// Chosen on the panel; held until a game starts or ends.
+    chosen: Option<Mode>,
+    /// A game is running (presenting frames).
+    playing: bool,
+}
+
 pub struct Controller {
     info: StaticInfo,
     config: Mutex<Config>,
+    modes: Mutex<Modes>,
     /// The samples of the longest chart span, oldest first.
     pub history: Mutex<VecDeque<Sample>>,
     /// What the machine has shown it can read since Glance started.
@@ -149,6 +164,7 @@ impl Controller {
         Controller {
             info,
             config: Mutex::new(config_from(settings)),
+            modes: Mutex::new(Modes::default()),
             history: Mutex::new(VecDeque::new()),
             seen: Mutex::new(Seen::default()),
             sink: AtomicIsize::new(0),
@@ -170,6 +186,20 @@ impl Controller {
 
     pub fn record(&self, sample: Sample) {
         self.seen.lock().unwrap().note(&sample);
+        // A game starting or ending sets the mode by itself again.
+        let playing = sample.game.as_ref().is_some_and(|game| game.is_game);
+        let changed = {
+            let mut modes = self.modes.lock().unwrap();
+            let before = self.mode_of(&modes);
+            if modes.playing != playing {
+                modes.playing = playing;
+                modes.chosen = None;
+            }
+            self.mode_of(&modes) != before
+        };
+        if changed {
+            self.post(RESTYLE);
+        }
         let keep = self.config.lock().unwrap().history;
         let mut history = self.history.lock().unwrap();
         while history.len() >= keep {
@@ -180,6 +210,22 @@ impl Controller {
 
     pub fn is_shown(&self) -> bool {
         self.shown.load(Ordering::Relaxed)
+    }
+
+    /// The mode the panel is in now.
+    pub fn mode(&self) -> Mode {
+        self.mode_of(&self.modes.lock().unwrap())
+    }
+
+    fn mode_of(&self, modes: &Modes) -> Mode {
+        let auto = self.config.lock().unwrap().auto_game_mode;
+        modes.chosen.unwrap_or(if auto && modes.playing { Mode::Game } else { Mode::Daily })
+    }
+
+    /// Puts the panel in mode `mode`, until a game starts or ends.
+    pub fn choose_mode(&self, mode: Mode) {
+        self.modes.lock().unwrap().chosen = Some(mode);
+        self.post(RESTYLE);
     }
 
     /// Opens the panel from the tray icon, on the monitor the pointer is on.
@@ -522,6 +568,7 @@ struct Panel<'a> {
     opacity: Transition,
     placement: Option<Placement>,
     prefs: Prefs,
+    mode: Mode,
     skin: Skin,
     theme: Theme,
     lang: Lang,
@@ -577,6 +624,7 @@ impl<'a> Panel<'a> {
             opacity: Transition::settled(0.0),
             placement: None,
             prefs: Prefs::default(),
+            mode: Mode::Daily,
             skin: Skin::Paper,
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
@@ -614,10 +662,11 @@ impl<'a> Panel<'a> {
     /// The settings changed: what is shown, how, and from which edge.
     fn restyle(&mut self) {
         self.next_frame = Instant::now();
+        self.mode = self.controller.mode();
         let config = self.controller.config.lock().unwrap();
-        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
+        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).for_mode(self.mode);
         self.edge = config.edge;
-        self.columns = config.columns;
+        self.columns = if self.mode == Mode::Game { config.game_columns } else { config.columns };
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
@@ -626,7 +675,7 @@ impl<'a> Panel<'a> {
         // lane's size, and leaves it be.
         let mut sized = self.prefs.clone();
         sized.processes.sort = Default::default();
-        let style = format!("{} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, serde_json::to_string(&sized).unwrap_or_default());
+        let style = format!("{} {:?} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, self.mode, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
             // A second change before a frame laid it out keeps what the
@@ -875,7 +924,7 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode));
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
@@ -969,7 +1018,7 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode), history.make_contiguous(), seen);
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
@@ -1055,6 +1104,14 @@ impl<'a> Panel<'a> {
                 crate::show_settings();
             }
             Some(Hit::Pin) => self.pinned ^= true,
+            Some(Hit::Mode(mode)) if mode != self.mode => self.controller.choose_mode(mode),
+            Some(Hit::Mark(game)) => {
+                let program = self.controller.history.lock().unwrap().back().and_then(|s| s.game.as_ref()).map(|g| g.program.clone());
+                if let Some(program) = program.filter(|program| !program.is_empty()) {
+                    // Saving tells this thread to restyle; not from here.
+                    std::thread::spawn(move || crate::app().mark_game(&program, game));
+                }
+            }
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;
                 self.scroll = 0.0;
@@ -1087,7 +1144,7 @@ fn scene<'s>(
     lang: Lang,
     scroll: f32,
     hover: Option<Hit>,
-    pinned: bool,
+    (pinned, mode): (bool, Mode),
     history: &'s [Sample],
     seen: &'s Seen,
 ) -> Scene<'s> {
@@ -1104,6 +1161,7 @@ fn scene<'s>(
         process_scroll: scroll,
         hover,
         pinned,
+        mode,
     }
 }
 

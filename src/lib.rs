@@ -117,6 +117,13 @@ impl App {
         settings.view = serde_json::to_value(prefs).unwrap();
         self.save(settings);
     }
+
+    /// Program `program` was said from the panel to be a game, or not.
+    pub fn mark_game(&self, program: &str, game: bool) {
+        let mut settings = self.settings.lock().unwrap().clone();
+        settings.games.mark(program, game);
+        self.save(settings);
+    }
 }
 
 /// Brings the settings window up; the panel gives way to it.

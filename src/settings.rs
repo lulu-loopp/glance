@@ -91,6 +91,24 @@ impl GameMarks {
             fills_screen
         }
     }
+
+    /// Whether the user has said whether program `name` is a game.
+    pub fn is_marked(&self, name: &str) -> bool {
+        self.always.iter().chain(&self.never).any(|marked| marked == name)
+    }
+
+    /// Says program `name` is a game (`game`), or is not.
+    pub fn mark(&mut self, name: &str, game: bool) {
+        self.always.retain(|marked| marked != name);
+        self.never.retain(|marked| marked != name);
+        if game { &mut self.always } else { &mut self.never }.push(name.to_string());
+    }
+
+    /// Forgets what was said of program `name`.
+    pub fn forget(&mut self, name: &str) {
+        self.always.retain(|marked| marked != name);
+        self.never.retain(|marked| marked != name);
+    }
 }
 
 /// What opens the panel over a game in exclusive fullscreen.
@@ -139,6 +157,10 @@ pub struct Settings {
     /// How many columns the panel's lanes are dealt into; none chosen, as
     /// few as fit the screen's height.
     pub columns: Option<usize>,
+    /// The same, in game mode.
+    pub game_columns: Option<usize>,
+    /// Game mode while a game runs, daily mode otherwise.
+    pub auto_game_mode: bool,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -174,6 +196,8 @@ impl Default for Settings {
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
+            game_columns: None,
+            auto_game_mode: true,
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,
@@ -268,6 +292,15 @@ mod tests {
         assert!(!marks.is_game("browser", true));
         assert!(marks.is_game("other", true));
         assert!(!marks.is_game("other", false));
+        // Marked the other way, it is only that.
+        let mut marks = marks;
+        marks.mark("browser", true);
+        assert!(marks.is_game("browser", false) && marks.never.is_empty());
+        marks.forget("browser");
+        assert!(!marks.is_game("browser", false) && marks.always == ["windowed"]);
+        // Settings from before modes switch by themselves.
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.auto_game_mode);
     }
 
     #[test]

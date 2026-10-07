@@ -4,7 +4,7 @@
 use std::hash::{Hash, Hasher};
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
-use super::prefs::{Prefs, ProcessSort};
+use super::prefs::{Mode, Prefs, ProcessSort};
 use super::seen::Seen;
 use super::text::{self, Lang};
 use super::theme::{Ink, Skin, Theme};
@@ -23,6 +23,10 @@ const RATE_PLOT: f32 = 36.0;
 const RATE_INDENT: f32 = 26.0;
 const LINE: f32 = 16.0;
 const FACT_GAP: f32 = 3.0;
+/// The mark row: a fact with a button beside it.
+const MARK_ROW: f32 = 24.0;
+/// One choice of the bar's mode switch.
+const MODE_BUTTON: f32 = 44.0;
 pub const TABLE_ROW: f32 = 22.0;
 /// The settings button in the bar.
 const BUTTON: f32 = 32.0;
@@ -39,6 +43,10 @@ pub enum Hit {
     Sort(ProcessSort),
     /// The process list, and how far it scrolls.
     Processes(u32),
+    /// The bar's switch between the modes: to this one.
+    Mode(Mode),
+    /// The program in the game lane is a game (true), or is not.
+    Mark(bool),
 }
 
 impl Hit {
@@ -71,6 +79,8 @@ pub struct Scene<'a> {
     pub hover: Option<Hit>,
     /// The panel is pinned open.
     pub pinned: bool,
+    /// The mode it is in.
+    pub mode: Mode,
 }
 
 impl Scene<'_> {
@@ -118,6 +128,9 @@ enum Block {
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
     Table { headings: Vec<(String, ProcessSort)>, sort: ProcessSort, rows: Vec<[String; 5]>, visible: usize },
+    /// What the program shown is taken for, and the button that says
+    /// otherwise (`game`: that it is a game).
+    Mark { label: String, value: String, button: String, game: bool },
 }
 
 impl Block {
@@ -132,6 +145,7 @@ impl Block {
             Block::Facts { rows, gap } if !rows.is_empty() => gap + rows.len() as f32 * LINE + (rows.len() - 1) as f32 * FACT_GAP,
             Block::Facts { .. } => 0.0,
             Block::Table { visible, .. } => *visible as f32 * TABLE_ROW,
+            Block::Mark { .. } => FACT_GAP + MARK_ROW,
         }
     }
 }
@@ -153,6 +167,7 @@ impl Hash for Block {
                 headings.iter().for_each(|(label, key)| (label, *key as u8).hash(state));
                 (*sort as u8, rows, visible).hash(state);
             }
+            Block::Mark { label, value, button, game } => (label, value, button, game).hash(state),
         }
     }
 }
@@ -489,7 +504,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ]
         }
         "game" => {
-            if !scene.seen.game {
+            // A game; in game mode, any program presenting frames, to be
+            // marked a game.
+            if !(scene.seen.game || scene.mode == Mode::Game && scene.seen.presenting) {
                 return None;
             }
             let game = s.game.as_ref();
@@ -563,6 +580,21 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 });
             }
             blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+            if let Some(game) = game.filter(|g| !g.program.is_empty()) {
+                let marked = game.marked;
+                let value = match (game.is_game, marked) {
+                    (true, true) => lang.pick("已设为游戏", "Marked a game"),
+                    (true, false) => lang.pick("全屏，视为游戏", "Fullscreen: a game"),
+                    (false, true) => lang.pick("已设为不是游戏", "Marked not a game"),
+                    (false, false) => lang.pick("窗口程序", "A windowed program"),
+                };
+                blocks.push(Block::Mark {
+                    label: lang.pick("识别", "Taken for").into(),
+                    value: value.into(),
+                    button: if game.is_game { lang.pick("不是游戏", "Not a game") } else { lang.pick("设为游戏", "A game") }.into(),
+                    game: !game.is_game,
+                });
+            }
             blocks
         }
         "battery" => {
@@ -881,6 +913,21 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                 frame.text(label, theme.small, theme.text2, left, bottom - 2.0 * LINE - 2.0, LABEL, Align::Start);
                 frame.text(value, theme.value, if *hot { theme.signal } else { theme.text }, left, bottom - LINE, LABEL, Align::Start);
             }
+            (Block::Mark { label, value, button, game }, Pass::Content) => {
+                let row_y = y + FACT_GAP;
+                let line_y = row_y + (MARK_ROW - LINE) / 2.0;
+                frame.text(label, theme.small, theme.text2, left, line_y, LABEL, Align::Start);
+                frame.text(value, theme.small, theme.text, plot_left, line_y, width - LABEL - LABEL_GAP, Align::Start);
+                let hit = Hit::Mark(*game);
+                let hovered = scene.hover == Some(hit);
+                let button_width = frame.measure(button, theme.small) + 16.0;
+                let button_left = left + width - button_width;
+                // A button even at rest: on a track, lit under the pointer.
+                let fill = if hovered { theme.hover } else { theme.track };
+                frame.fill_rounded(fill, button_left, row_y, button_width, MARK_ROW, theme.control_radius.min(MARK_ROW / 2.0));
+                frame.text(button, theme.small, if hovered { theme.text } else { theme.text2 }, button_left + 8.0, line_y, button_width, Align::Start);
+                hits.push((button_left, row_y, button_width, MARK_ROW, hit));
+            }
             (Block::Threads(cells), Pass::Content) => {
                 let gap = 2.0;
                 let count = cells.len().max(1) as f32;
@@ -1061,14 +1108,31 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
         frame.fill(theme.footer, bar.x, bar.y, bar.w, bar.h);
         frame.fill(theme.rule, bar.x, bar.y, bar.w, 1.0);
     }
-    let uptime = scene.lang.duration(scene.latest().system.uptime_s);
-    let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
-    frame.text(&label, theme.small, theme.text2, bar.x + theme.bar_pad.0, bar.y + (bar.h - LINE) / 2.0, bar.w / 2.0, Align::Start);
     // Settings at the end, and the pin before it: glyphs of the system's
     // icon font, each centred in its button. A pinned pin stays lit.
     let top = bar.y + (bar.h - BUTTON) / 2.0;
     let settings = bar.x + bar.w - theme.bar_pad.1 - BUTTON;
     let pin = settings - BUTTON;
+    // The modes before them, the one in force lit.
+    let modes = pin - 8.0 - 2.0 * MODE_BUTTON;
+    // The two on one track, as one control.
+    frame.fill_rounded(theme.track, modes, top, 2.0 * MODE_BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+    for (i, (mode, name)) in [(Mode::Daily, scene.lang.pick("日常", "Daily")), (Mode::Game, scene.lang.pick("游戏", "Game"))].into_iter().enumerate() {
+        let left = modes + i as f32 * MODE_BUTTON;
+        let hit = Hit::Mode(mode);
+        let (lit, hovered) = (scene.mode == mode, scene.hover == Some(hit));
+        if lit || hovered {
+            frame.fill_rounded(theme.hover, left, top, MODE_BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+        }
+        let color = if lit || hovered { theme.text } else { theme.text2 };
+        let text_left = left + (MODE_BUTTON - frame.measure(name, theme.small)) / 2.0;
+        frame.text(name, theme.small, color, text_left, top + (BUTTON - LINE) / 2.0, MODE_BUTTON, Align::Start);
+        hits.push((left, top, MODE_BUTTON, BUTTON, hit));
+    }
+    let uptime = scene.lang.duration(scene.latest().system.uptime_s);
+    let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
+    let start = bar.x + theme.bar_pad.0;
+    frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, modes - 8.0 - start, Align::Start);
     let pin_glyph = if scene.pinned { "\u{E840}" } else { "\u{E718}" };
     for (left, glyph, hit, lit) in [(pin, pin_glyph, Hit::Pin, scene.pinned), (settings, "\u{E713}", Hit::Settings, false)] {
         let hovered = scene.hover == Some(hit);
@@ -1190,7 +1254,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -1214,7 +1278,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);

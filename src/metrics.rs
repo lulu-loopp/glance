@@ -247,6 +247,7 @@ impl Sampler {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
             is_game: *is_game,
+            marked: marks.is_marked(program),
             fps: presenting.stats.fps,
             low: presenting.stats.low,
             longest_ms: presenting.stats.longest_ms,
