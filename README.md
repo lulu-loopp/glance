@@ -26,7 +26,7 @@ out with everything your PC is doing; move away and it slides back.
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
-- **Battery**, on laptops
+- **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
 ## The overlay
@@ -132,7 +132,7 @@ on the clipboard, with the latest lines of its log, ready to paste into an
 issue (no paths or names in it). The log itself is `glance.log`, beside the
 settings in `%APPDATA%\dev.weiyi.glance`. On laptops, fans and
 board temperatures belong to the laptop's embedded controller and are not
-shown; integrated graphics draw from the CPU package, whose power the CPU
+shown, except an ASUS laptop's fans, which its firmware reports; integrated graphics draw from the CPU package, whose power the CPU
 lane shows.
 
 ## Build
