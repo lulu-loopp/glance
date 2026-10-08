@@ -1,4 +1,4 @@
-﻿; Glance's installer: for every user of the machine, under Program Files
+; Glance's installer: for every user of the machine, under Program Files
 ; unless another folder is chosen.
 ; Build with: makensis installer\glance.nsi (after cargo build --release).
 ;
@@ -16,7 +16,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.1.9"
+!define VERSION "0.2.0"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${NAME}"

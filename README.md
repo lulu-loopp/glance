@@ -35,7 +35,8 @@ A few readings floating over the screen, all the time or only while a game
 runs, on the game's screen. Drag it into place, drag its edges to size it,
 right-click it to lock it or close it. Choose its readings one by one (frame
 rate, 1% low, frame time, the CPU's and GPU's use, heat and power, memory,
-video memory, network, microphone) and how opaque its background is.
+video memory, network, microphone), and whether they sit on a plate (grey
+or blue) or bare, each in a thin dark halo.
 
 Frames are counted from Windows' own event tracing: nothing is injected into
 a game and its process is never opened, so anti-cheat has nothing to object
@@ -98,7 +99,10 @@ for administrator rights at every start and cannot start with Windows.
   off; drag modules to change their order.
 - **Close it**: move the pointer away, or press Esc.
 - **Keep it open**: the pin in its bottom bar holds it on screen while you
-  work elsewhere; unpin it, or press the shortcut, to let it go.
+  work elsewhere; unpin it, or press the shortcut, to let it go. Pinned, it
+  can be dragged by its bottom bar anywhere, onto another screen too, and
+  sized by its edges; moved off the edge, it stays there, Glance restarting
+  too, until it is unpinned.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the
   tray when the CPU or a graphics card stays at the temperature alert for
