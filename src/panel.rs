@@ -16,7 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic, SetForegroundWindow, SC_RESTORE, WM_SYSCOMMAND};
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, RegisterClassW, WNDCLASSW};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
 use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
@@ -153,9 +155,16 @@ fn config_from(settings: &Settings) -> Config {
 struct Modes {
     /// Chosen on the panel; held until a game starts or ends.
     chosen: Option<Mode>,
-    /// A game is running (presenting frames).
+    /// A game is running: it presented frames, and has not been without
+    /// them for `GAME_GAP` since.
     playing: bool,
+    /// When a game last presented frames.
+    last_played: Option<Instant>,
 }
+
+/// How long a game can go without frames (a loading screen, a stall, a
+/// look at another window) and still be running, as the modes see it.
+const GAME_GAP: Duration = Duration::from_secs(5);
 
 pub struct Controller {
     info: StaticInfo,
@@ -197,9 +206,24 @@ impl Controller {
 
     pub fn record(&self, sample: Sample) {
         self.seen.lock().unwrap().note(&sample);
-        // A game starting or ending sets the mode by itself again.
-        let playing = sample.game.as_ref().is_some_and(|game| game.is_game);
-        let started = playing && !self.modes.lock().unwrap().playing;
+        // A game starting or ending sets the mode by itself again: one that
+        // has gone a short while without frames has not ended.
+        let now = Instant::now();
+        let presenting = sample.game.as_ref().is_some_and(|game| game.is_game);
+        let (changed, started) = {
+            let mut modes = self.modes.lock().unwrap();
+            if presenting {
+                modes.last_played = Some(now);
+            }
+            let playing = modes.last_played.is_some_and(|last| now.duration_since(last) < GAME_GAP);
+            let before = self.mode_of(&modes);
+            let started = playing && !modes.playing;
+            if modes.playing != playing {
+                modes.playing = playing;
+                modes.chosen = None;
+            }
+            (self.mode_of(&modes) != before, started)
+        };
         if started {
             // The first game ever, with the overlay off: it is offered.
             let (on, offered) = {
@@ -211,15 +235,6 @@ impl Controller {
                 std::thread::spawn(move || crate::app().offer_overlay(&name));
             }
         }
-        let changed = {
-            let mut modes = self.modes.lock().unwrap();
-            let before = self.mode_of(&modes);
-            if modes.playing != playing {
-                modes.playing = playing;
-                modes.chosen = None;
-            }
-            self.mode_of(&modes) != before
-        };
         if changed {
             self.post(RESTYLE);
         }
@@ -287,9 +302,16 @@ impl Controller {
     /// never silently disconnects it.
     pub fn run(&self) {
         let sink = unsafe {
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(sink_procedure),
+                hInstance: GetModuleHandleW(None).expect("own module").into(),
+                lpszClassName: w!("GlanceSink"),
+                ..Default::default()
+            };
+            RegisterClassW(&class);
             CreateWindowExW(
                 WINDOW_EX_STYLE(0),
-                w!("STATIC"),
+                w!("GlanceSink"),
                 PCWSTR::null(),
                 WINDOW_STYLE(0),
                 0,
@@ -310,11 +332,15 @@ impl Controller {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
         let mut panel = Panel::new(self).expect("panel window");
-        // Without one (no graphics device just now), no overlay.
-        let mut overlay = Overlay::new().ok();
+        // Made when first wanted; with no graphics device just then, tried
+        // again at the next sample.
+        let mut overlay: Option<Overlay> = None;
         let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
-            let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
+            if overlay.is_none() && settings.on {
+                *overlay = Overlay::new().ok();
+            }
+            let Some(overlay) = overlay else { return };
             let history = self.history.lock().unwrap();
             overlay.show(history.back(), &settings, panel.lang, self.mode() == Mode::Game);
         };
@@ -442,13 +468,18 @@ impl Controller {
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().moved(),
-                WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                // Let go, or the capture taken away mid-drag (the lock
+                // screen, another program): it stays where it was put.
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
                     if let Some((at, point)) = overlay.as_mut().unwrap().release() {
                         std::thread::spawn(move || crate::app().place_overlay(at, point));
                     }
                 }
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                    // What comes for this thread while the menu is up waits.
+                    hold_messages(true);
                     let (choice, before) = overlay.as_ref().unwrap().menu();
+                    hold_messages(false);
                     match choice {
                         Some(OverlayChoice::Settings) => {
                             panel.dismiss();
@@ -745,7 +776,13 @@ impl<'a> Panel<'a> {
     /// for the mode and fade in (see `frame`); otherwise at once.
     fn follow(&mut self, now: Instant) {
         let mode = self.controller.mode();
-        if self.is_shown() && mode != self.mode && !reduced_motion() {
+        if !self.is_shown() {
+            // Hidden (taken down mid-switch, too): at once.
+            self.switching = false;
+            self.fade.jump(1.0);
+            self.restyle();
+            self.mode_thumb.jump(thumb_at(self.mode));
+        } else if mode != self.mode && !reduced_motion() {
             self.mode_thumb.retarget(thumb_at(mode), THUMB.0, THUMB.1, now);
             self.fade.retarget(0.0, FADE_OUT, LINEAR, now);
             self.switching = true;
@@ -1095,6 +1132,8 @@ impl<'a> Panel<'a> {
             self.switching = false;
             self.restyle();
             self.fade.retarget(1.0, FADE_IN, LINEAR, now);
+            // To the mode as it is now: it may have changed back mid-switch.
+            self.mode_thumb.retarget(thumb_at(self.mode), THUMB.0, THUMB.1, now);
         }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
@@ -1217,7 +1256,8 @@ impl<'a> Panel<'a> {
                 crate::show_settings();
             }
             Some(Hit::Pin) => self.pinned ^= true,
-            Some(Hit::Mode(mode)) if mode != self.mode => self.controller.choose_mode(mode),
+            // Against the mode in force, which a switch under way is going to.
+            Some(Hit::Mode(mode)) if mode != self.controller.mode() => self.controller.choose_mode(mode),
             Some(Hit::Overlay) => {
                 let on = !self.controller.config.lock().unwrap().overlay.on;
                 std::thread::spawn(move || crate::app().set_overlay(on));
@@ -1279,6 +1319,34 @@ fn scene<'s>(
         mode_thumb,
         fade,
     }
+}
+
+thread_local! {
+    /// While a menu runs its own loop on this thread: what was posted to
+    /// the sink meanwhile, which that loop hands to the sink's procedure.
+    static HELD: std::cell::RefCell<Option<Vec<(u32, WPARAM, LPARAM)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Starts holding the sink's messages (`true`), or posts back what was held.
+fn hold_messages(hold: bool) {
+    let held = HELD.with(|held| std::mem::replace(&mut *held.borrow_mut(), hold.then(Vec::new)));
+    let sink = crate::app().controller.sink.load(Ordering::Acquire);
+    for (message, wparam, lparam) in held.unwrap_or_default() {
+        let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), message, wparam, lparam) };
+    }
+}
+
+/// The sink's procedure. The input loop takes its messages before they are
+/// dispatched; only a loop of another's (a menu's) dispatches them here, and
+/// Glance's own are then held for the input loop.
+unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if (WM_APP..0xC000).contains(&message) {
+        let held = HELD.with(|held| held.borrow_mut().as_mut().map(|held| held.push((message, wparam, lparam))).is_some());
+        if held {
+            return LRESULT(0);
+        }
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
 /// Where the modes' thumb rests for `mode`.

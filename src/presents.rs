@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_RECORD,
-    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
+    EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES, EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, EVENT_TRACE_REAL_TIME_MODE, PROCESS_TRACE_MODE_EVENT_RECORD,
     PROCESS_TRACE_MODE_REAL_TIME, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -78,7 +78,11 @@ impl Properties {
             (*properties).Wnode.Flags = WNODE_FLAG_TRACED_GUID;
             // Timestamps from the performance counter.
             (*properties).Wnode.ClientContext = 1;
-            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+            // One buffer for the session: events come in the order they
+            // happened, not each processor's in turn; and delivered within
+            // a second, the span the frame rate is taken over.
+            (*properties).LogFileMode = EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING;
+            (*properties).FlushTimer = 1;
             (*properties).LoggerNameOffset = size_of::<EVENT_TRACE_PROPERTIES>() as u32;
         }
         Properties(buffer)

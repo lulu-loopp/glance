@@ -103,11 +103,24 @@ impl App {
     /// Takes new settings: the panel follows them at once, and they are kept
     /// for next time.
     pub fn save(&self, settings: Settings) {
+        self.change(|held| *held = settings);
+    }
+
+    /// Changes the settings where they are held, under their lock, so that
+    /// changes made at once in several places (the panel, the overlay, the
+    /// settings window) all stand; keeps them; and only then has the panel,
+    /// the settings window and the tray follow, so that they read them as
+    /// changed.
+    fn change(&self, change: impl FnOnce(&mut Settings)) {
+        let settings = {
+            let mut held = self.settings.lock().unwrap();
+            change(&mut held);
+            if let Err(error) = held.save(&self.config) {
+                journal::note(format!("could not save settings: {error}"));
+            }
+            held.clone()
+        };
         self.controller.apply(&settings);
-        if let Err(error) = settings.save(&self.config) {
-            journal::note(format!("could not save settings: {error}"));
-        }
-        *self.settings.lock().unwrap() = settings;
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
     }
@@ -115,30 +128,33 @@ impl App {
     /// The process list was sorted from the panel: kept, as if chosen in the
     /// settings.
     pub fn set_process_sort(&self, sort: ui::prefs::ProcessSort) {
-        let mut settings = self.settings.lock().unwrap().clone();
-        let mut prefs = ui::prefs::Prefs::resolve(&settings.view, &self.controller.known_modules());
-        prefs.processes.sort = sort;
-        settings.view = serde_json::to_value(prefs).unwrap();
-        self.save(settings);
+        let known = self.controller.known_modules();
+        self.change(|settings| {
+            let mut prefs = ui::prefs::Prefs::resolve(&settings.view, &known);
+            prefs.processes.sort = sort;
+            settings.view = serde_json::to_value(prefs).unwrap();
+        });
     }
 
     /// The overlay turned on or off from the panel.
     pub fn set_overlay(&self, on: bool) {
-        let mut settings = self.settings.lock().unwrap().clone();
-        settings.overlay.on = on;
-        settings.overlay.offered = true;
-        self.save(settings);
+        self.change(|settings| {
+            settings.overlay.on = on;
+            settings.overlay.offered = true;
+        });
     }
 
     /// A game, `name`, has started for the first time with the overlay off:
     /// told once that there is one.
     pub fn offer_overlay(&self, name: &str) {
-        let mut settings = self.settings.lock().unwrap().clone();
-        if settings.overlay.offered || settings.overlay.on {
+        let mut offer = false;
+        self.change(|settings| {
+            offer = !settings.overlay.offered && !settings.overlay.on;
+            settings.overlay.offered = true;
+        });
+        if !offer {
             return;
         }
-        settings.overlay.offered = true;
-        self.save(settings);
         let lang = ui::text::Lang::resolve(ui::prefs::Prefs::resolve(&self.settings.lock().unwrap().view, &[]).language);
         let (title, text) = match lang {
             ui::text::Lang::Zh => (
@@ -155,18 +171,16 @@ impl App {
 
     /// The overlay locked where it is, or let loose.
     pub fn lock_overlay(&self, locked: bool) {
-        let mut settings = self.settings.lock().unwrap().clone();
-        settings.overlay.locked = locked;
-        self.save(settings);
+        self.change(|settings| settings.overlay.locked = locked);
     }
 
     /// The overlay was dragged to `at` (see `OverlaySettings::at`) on the
     /// screen with `point` on it.
     pub fn place_overlay(&self, at: (f32, f32), point: (i32, i32)) {
-        let mut settings = self.settings.lock().unwrap().clone();
-        settings.overlay.at = at;
-        settings.overlay.screen = Some(point);
-        self.save(settings);
+        self.change(|settings| {
+            settings.overlay.at = at;
+            settings.overlay.screen = Some(point);
+        });
     }
 }
 

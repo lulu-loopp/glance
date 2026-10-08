@@ -33,10 +33,13 @@ pub struct Presents {
 }
 
 impl Presents {
-    /// A frame presented at `at`, no earlier than the last.
+    /// A frame presented at `at`. Frames can be told out of order (each
+    /// processor buffers its own events): it goes in its place among them.
     pub fn push(&mut self, at: Duration) {
-        self.times.push_back(at);
-        while self.times.front().is_some_and(|&first| at.saturating_sub(first) > KEPT) {
+        let place = self.times.iter().rposition(|&t| t <= at).map_or(0, |before| before + 1);
+        self.times.insert(place, at);
+        let newest = *self.times.back().unwrap();
+        while self.times.front().is_some_and(|&first| newest - first > KEPT) {
             self.times.pop_front();
         }
     }
@@ -68,6 +71,17 @@ mod tests {
 
     fn ms(n: f64) -> Duration {
         Duration::from_secs_f64(n / 1000.0)
+    }
+
+    #[test]
+    fn takes_frames_told_out_of_order() {
+        let mut presents = Presents::default();
+        for t in [0.0, 20.0, 10.0, 30.0, 50.0, 40.0] {
+            presents.push(ms(t));
+        }
+        let stats = presents.stats(ms(50.0)).unwrap();
+        assert!((stats.fps - 100.0).abs() < 0.01);
+        assert!((stats.longest_ms - 10.0).abs() < 0.01);
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl SuperIo {
     /// stood in the way, for a report (what each port showed).
     /// `vendor` is the board's maker, which decides what the inputs are named.
     pub fn open(vendor: &str) -> Result<Self, String> {
-        let module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
+        let mut module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
         // Entering configuration mode writes to the chip: only with the bus to ourselves.
         let _lock = NamedLock::acquire(ISA_LOCK, 1000).ok_or("ISA bus held by another program")?;
         let mut seen = Vec::new();
@@ -174,18 +174,23 @@ impl SuperIo {
                 continue;
             }
             let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, ec_temps: Vec::new(), ec_fans: Vec::new(), last: BoardSensors::default() };
-            if let Kind::NuvotonEc = kind {
-                found.set_up_ec().map_err(|why| format!("{port:#X}: Nuvoton chip {chip:04X}, {why}"))?;
-                return Ok(found);
-            }
-            // A Nuvoton monitor that answers is one from Nuvoton.
-            if let Kind::Nuvoton { .. } = kind {
-                let vendor = found.register(NUVOTON_VENDOR.0).zip(found.register(NUVOTON_VENDOR.1));
-                if vendor.map(|(high, low)| (high as u16) << 8 | low as u16) != Some(NUVOTON_VENDOR_ID) {
-                    return Err(format!("{port:#X}: Nuvoton chip {chip:04X}, its monitor not answering as Nuvoton's"));
+            let failed = match kind {
+                Kind::NuvotonEc => found.set_up_ec().err(),
+                // A Nuvoton monitor that answers is one from Nuvoton.
+                Kind::Nuvoton { .. } => {
+                    let vendor = found.register(NUVOTON_VENDOR.0).zip(found.register(NUVOTON_VENDOR.1));
+                    (vendor.map(|(high, low)| (high as u16) << 8 | low as u16) != Some(NUVOTON_VENDOR_ID)).then(|| "its monitor not answering as Nuvoton's".to_string())
+                }
+                Kind::Ite { .. } => None,
+            };
+            match failed {
+                None => return Ok(found),
+                // The other port may hold the chip to read.
+                Some(why) => {
+                    seen.push(format!("{port:#X}: chip {chip:04X}, {why}"));
+                    module = found.module;
                 }
             }
-            return Ok(found);
         }
         Err(seen.join("; "))
     }

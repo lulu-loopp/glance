@@ -9,7 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
-    PostMessageW, WM_APP, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -17,6 +17,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// monitor gone; WPARAM 0) or the window's scale did (WPARAM its new DPI,
 /// which the panel's own move to another monitor causes too).
 pub const SCREENS_CHANGED: u32 = WM_APP + 6;
+/// Posted to the window's thread when the mouse capture it held was taken
+/// from it (or let go).
+pub const CAPTURE_LOST: u32 = WM_APP + 8;
 
 pub struct Window {
     pub hwnd: HWND,
@@ -28,6 +31,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Clicking the panel must leave the focus where it was.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_CAPTURECHANGED => {
+            let _ = unsafe { PostMessageW(Some(hwnd), CAPTURE_LOST, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
         WM_DISPLAYCHANGE => {
             let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
