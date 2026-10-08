@@ -117,7 +117,6 @@ pub trait Canvas {
     /// The shape `points` outline, closed.
     fn fill_shape(&self, points: &[Point], fill: Fill);
     /// What `paint` draws inside `size` DIPs from the origin, ringed by a
-    /// halo of `glow`: what is drawn, thickened a pixel and blurred by
-    /// `spread` DIPs.
+    /// halo of `glow` about `spread` DIPs wide, as wide every way.
     fn glowing(&self, glow: Color, spread: f32, size: (f32, f32), paint: &dyn Fn(&dyn Canvas));
 }

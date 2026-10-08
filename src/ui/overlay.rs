@@ -74,8 +74,8 @@ impl Plate {
     }
 }
 
-/// While it is dragged, the plate is this much nearer white, and this opaque.
-const DRAGGED: (f32, f32) = (0.18, 0.9);
+/// The plate while it is dragged, whatever its colour.
+const DRAGGED: Color = Color::hex(0x1D4F91, 0.9);
 const NAME: Color = Color::hex(0xFFFFFF, 0.74);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
@@ -85,7 +85,7 @@ const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
 const LEGIBLE: f32 = 4.5;
 /// Bare, each reading's halo: its colour, and how far it spreads (DIPs).
 const HALO: Color = Color::hex(0x000000, 0.85);
-const HALO_SPREAD: f32 = 0.5;
+const HALO_SPREAD: f32 = 0.75;
 /// A reading to heed (a muted microphone).
 const HOT: Color = Color::hex(0xFF9A8E, 1.0);
 
@@ -270,13 +270,11 @@ pub fn plate_opacity(plate: Plate) -> f32 {
 /// (each line put on a whole pixel, not smeared across two), as `style`
 /// has them: on a plate of `plate`'s colour, or bare, each reading in a
 /// dark halo of its own. `dragged`, on the plate that says it is being
-/// moved: lighter than the plate, and there in either style.
+/// moved, in either style.
 pub fn paint(frame: &dyn Canvas, lines: &[Line], plate: Plate, style: Style, dragged: bool, px: f32) {
     let (width, height) = size(lines, px, |text, font| frame.measure(text, font));
     if dragged {
-        let c = Color::hex(plate.rgb(), DRAGGED.1);
-        let lift = |v: f32| v + (1.0 - v) * DRAGGED.0;
-        frame.fill_rounded(Color { r: lift(c.r), g: lift(c.g), b: lift(c.b), a: c.a }, 0.0, 0.0, width, height, RADIUS);
+        frame.fill_rounded(DRAGGED, 0.0, 0.0, width, height, RADIUS);
     }
     match style {
         Style::Plate => {

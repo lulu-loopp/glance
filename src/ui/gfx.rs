@@ -82,6 +82,10 @@ pub struct Gfx {
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
 }
 
+/// How much a glow's blurred alpha is raised (see `Canvas::glowing`): its
+/// faint rim made as dark as its core, out to about a deviation.
+const HALO_GAIN: f32 = 3.0;
+
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
 /// system's default is 1).
 const CRISP_CONTRAST: f32 = 2.0;
@@ -427,7 +431,7 @@ impl Canvas for Frame<'_> {
         // Drawn alone first, as sharp as it shows: in a bitmap of the
         // pixels it covers at the frame's DPI and current scale, with room
         // around it for the halo.
-        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1Morphology, D2D1_MORPHOLOGY_MODE_DILATE, D2D1_MORPHOLOGY_PROP_HEIGHT, D2D1_MORPHOLOGY_PROP_MODE, D2D1_MORPHOLOGY_PROP_WIDTH, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_UINT32};
+        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1ColorMatrix, D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_PROPERTY_TYPE_BOOL, D2D1_PROPERTY_TYPE_MATRIX_5X4};
         let dc = &self.dc;
         let (mut parent, mut dpi) = (Matrix3x2::default(), (0.0f32, 0.0f32));
         unsafe {
@@ -461,19 +465,31 @@ impl Canvas for Frame<'_> {
                 dc.SetDpi(dpi.0, dpi.1);
                 dc.SetTransform(&parent);
                 let image = effect_input(dc, &bitmap)?;
-                // The halo: the drawing thickened by half a DIP each way,
-                // blurred as much, in the halo's colour.
-                let kernel = 2 * (scale / 2.0).round() as u32 + 1;
-                let thicker = dc.CreateEffect(&CLSID_D2D1Morphology)?;
-                thicker.SetInput(0, &image, true);
-                thicker.SetValue(D2D1_MORPHOLOGY_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_MORPHOLOGY_MODE_DILATE.0 as u32).to_ne_bytes())?;
-                thicker.SetValue(D2D1_MORPHOLOGY_PROP_WIDTH.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &kernel.to_ne_bytes())?;
-                thicker.SetValue(D2D1_MORPHOLOGY_PROP_HEIGHT.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &kernel.to_ne_bytes())?;
-                let halo = dc.CreateEffect(&CLSID_D2D1Shadow)?;
-                halo.SetInput(0, &thicker.GetOutput()?, true);
-                halo.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &spread.to_ne_bytes())?;
-                let rgba = [glow.r, glow.g, glow.b, glow.a];
-                halo.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                // The halo, as far out every way: the drawing blurred (a
+                // Gaussian is the same in every direction, as thickening by
+                // a square is not), its faint rim made dark by a gain on its
+                // alpha, then as opaque as the halo's colour.
+                let blurred = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                blurred.SetInput(0, &image, true);
+                blurred.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &spread.to_ne_bytes())?;
+                let rgba = [glow.r, glow.g, glow.b, 1.0f32];
+                blurred.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                let mut halo = blurred;
+                for gain in [HALO_GAIN, glow.a] {
+                    let alpha = dc.CreateEffect(&CLSID_D2D1ColorMatrix)?;
+                    alpha.SetInput(0, &halo.GetOutput()?, true);
+                    #[rustfmt::skip]
+                    let matrix: [f32; 20] = [
+                        1.0, 0.0, 0.0, 0.0,
+                        0.0, 1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0, 0.0,
+                        0.0, 0.0, 0.0, gain,
+                        0.0, 0.0, 0.0, 0.0,
+                    ];
+                    alpha.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, std::slice::from_raw_parts(matrix.as_ptr().cast(), 80))?;
+                    alpha.SetValue(D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT.0 as u32, D2D1_PROPERTY_TYPE_BOOL, &1u32.to_ne_bytes())?;
+                    halo = alpha;
+                }
                 let at = Vector2 { X: -room, Y: -room };
                 dc.DrawImage(&halo.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                 dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
