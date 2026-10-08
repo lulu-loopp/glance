@@ -97,9 +97,6 @@ pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing
 pub(crate) const SIZES: (f32, f32) = (0.75, 2.0);
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
-/// How long after a drag the desktop behind the glass is taken again: the
-/// window is kept out of captures by then.
-const RECAPTURE_WAIT: Duration = Duration::from_millis(100);
 /// While the pinned panel is dragged, the pointer is followed this often (ms).
 const FOLLOW_MS: u32 = 8;
 
@@ -498,12 +495,21 @@ impl Controller {
                     draw_overlay(&mut overlay, &panel)
                 }
                 // The pinned panel dragged by its bar.
-                WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
+                WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => {
+                    panel.release_owed = false;
+                    panel.press(lparam_point(msg.lParam))
+                }
+                WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && std::mem::take(&mut panel.release_owed) => {}
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => panel.dragged(now),
                 WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.drag.is_some() => {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
-                    if let Some((at, size)) = panel.let_go(now).filter(|(at, size)| at.is_some() || size.is_some()) {
+                    panel.release_owed = msg.message == WM_TIMER;
+                    let kept = panel.let_go(now);
+                    if std::mem::take(&mut panel.screens_missed) {
+                        panel.screens_changed(0, now);
+                    }
+                    if let Some((at, size)) = kept.filter(|(at, size)| at.is_some() || size.is_some()) {
                         crate::app().change(|settings| {
                             if at.is_some() {
                                 settings.panel_at = at;
@@ -537,7 +543,9 @@ impl Controller {
                     hold_messages(false);
                     match choice {
                         Some(OverlayChoice::Settings) => {
-                            panel.dismiss();
+                            if !(panel.pinned && panel.floating()) {
+                                panel.dismiss();
+                            }
                             settings_window::open_at_overlay();
                         }
                         choice => {
@@ -732,6 +740,13 @@ impl Edges {
 /// pressing what is there (DIPs).
 const EDGE: f32 = 6.0;
 
+/// The pointer's own shape (the window's class sets none: it is set as the
+/// pointer moves over it).
+pub(crate) fn arrow() {
+    use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW};
+    unsafe { SetCursor(LoadCursorW(None, IDC_ARROW).ok()) };
+}
+
 /// The pointer's shape over edges `edges` (none: the bar, to move it).
 fn point_at(edges: Edges) {
     use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE};
@@ -820,8 +835,15 @@ struct Panel<'a> {
     bar: view::Rect,
     /// A drag of the pinned panel under way.
     drag: Option<PanelDrag>,
-    /// When the desktop behind the glass is taken again, after a drag.
-    recapture: Option<Instant>,
+    /// The desktop behind the glass is to be taken again (the panel moved
+    /// or grew past what was taken).
+    recapture: bool,
+    /// The screens changed while the panel was dragged: seen to as it is
+    /// let go.
+    screens_missed: bool,
+    /// A drag ended with the button already up (seen by the timer): the
+    /// button's release, still to come, is the drag's, not a click.
+    release_owed: bool,
     last_frame: Instant,
     /// When the panel is next drawn: at once while anything on it is in
     /// motion beyond the charts' creep.
@@ -866,7 +888,9 @@ impl<'a> Panel<'a> {
             corner: (0.0, 0.0),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             drag: None,
-            recapture: None,
+            recapture: false,
+            screens_missed: false,
+            release_owed: false,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
         };
@@ -889,7 +913,10 @@ impl<'a> Panel<'a> {
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.edge = config.edge;
         self.columns = config.columns;
-        self.size = config.size;
+        // Mid-drag, the size is the drag's.
+        if self.drag.is_none() {
+            self.size = config.size;
+        }
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
@@ -915,7 +942,7 @@ impl<'a> Panel<'a> {
         // (NVIDIA's Instant Replay stops for it), hidden or not.
         // (And while the desktop behind is about to be taken again, after a
         // drag.)
-        self.window.exclude_from_capture((self.live || self.recapture.is_some()) && self.is_shown());
+        self.window.exclude_from_capture(self.live && self.is_shown());
         self.dress();
     }
 
@@ -935,8 +962,13 @@ impl<'a> Panel<'a> {
         if let Some(PanelAt { at, screen: (x, y) }) = panel_at {
             let point = POINT { x, y };
             if let Some(contact) = monitor_at(point) {
+                let was_shown = self.is_shown();
                 self.open(point, contact, Some(at), now);
-                self.pinned = self.is_open();
+                // Opened there, it is pinned there; one picked up on its way
+                // out (opened from the edge) stays as it was.
+                if !was_shown && self.is_open() {
+                    self.pinned = true;
+                }
             }
         } else if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
             self.open(cursor, contact, None, now);
@@ -1029,8 +1061,10 @@ impl<'a> Panel<'a> {
     /// down, to be opened afresh. Its own move to a monitor of another scale
     /// as it opens tells a scale it was already placed for, and is no change.
     fn screens_changed(&mut self, dpi: u32, now: Instant) {
-        // Dragged onto another screen, it is laid out for it as it is let go.
+        // Dragged onto another screen, it is laid out for it as it is let
+        // go; the screens themselves changing, seen to then.
         if self.drag.is_some() {
+            self.screens_missed |= dpi == 0;
             return;
         }
         let Some(placement) = &self.placement else { return };
@@ -1073,7 +1107,7 @@ impl<'a> Panel<'a> {
             return;
         }
         self.end_drag();
-        self.recapture = None;
+        self.recapture = false;
         self.game = None;
         self.phase = Phase::Hidden;
         self.pinned = false;
@@ -1135,7 +1169,18 @@ impl<'a> Panel<'a> {
         if self.live && self.is_open() {
             self.refresh_behind(now);
         }
-        if self.recapture.is_some_and(|due| now >= due) {
+        // A panel the desktop was taken behind, grown or moved past it
+        // (dragged, sized, laid out afresh), takes it again; with live
+        // refraction it is taken again anyway.
+        if !self.live && self.drag.is_none() && self.skin.sees_backdrop() {
+            let window = self.placement.as_ref().map(|placement| placement.window);
+            let taken = self.behind.as_ref().map(|behind| behind.capture.rect);
+            let covered = |outer: RECT, inner: RECT| inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom;
+            if let (Some(window), Some(taken)) = (window, taken) {
+                self.recapture |= !covered(taken, window);
+            }
+        }
+        if self.recapture {
             self.recapture_behind(now);
         }
         if now >= self.next_frame {
@@ -1169,10 +1214,13 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
-    /// Takes the desktop behind the glass again where the panel now is
-    /// (dragged there), kept out of the capture itself for the while.
+    /// Takes the desktop behind the glass again where the panel now is,
+    /// kept out of the capture itself for the while: once the desktop has
+    /// been composed again without it.
     fn recapture_behind(&mut self, now: Instant) {
-        self.recapture = None;
+        self.recapture = false;
+        self.window.exclude_from_capture(true);
+        let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
         if let Some(placement) = &self.placement {
             if let Some(capture) = Capture::take(placement.window) {
                 let behind = Behind::new(capture, placement, now);
@@ -1307,10 +1355,7 @@ impl<'a> Panel<'a> {
         let size = drag.sized.then_some(self.size);
         // Moved or sized, the desktop behind is taken again for what it now covers.
         let moved = self.placement.as_ref().is_some_and(|placement| placement.held.is_some());
-        if (drag.sized || moved) && self.skin.sees_backdrop() {
-            self.window.exclude_from_capture(true);
-            self.recapture = Some(now + RECAPTURE_WAIT);
-        }
+        self.recapture |= (drag.sized || moved) && self.skin.sees_backdrop();
         self.next_frame = now;
         let placement = self.placement.as_mut()?;
         if placement.held.is_none() {
@@ -1332,8 +1377,22 @@ impl<'a> Panel<'a> {
         }
         // Where it now is, as far into the room on the screen's work area
         // as that (wholly on it, as it is placed from now on).
+        let PanelAt { at, .. } = self.kept_at()?;
         let placement = self.placement.as_mut()?;
+        placement.floating = Some(at);
+        placement.held = None;
+        self.arrange();
+        let kept = self.kept_at()?;
+        self.placement.as_mut()?.anchor = POINT { x: kept.screen.0, y: kept.screen.1 };
+        Some((Some(kept), size))
+    }
+
+    /// Where the panel is, as it is kept away from the edge: how far into
+    /// the room on its screen's work area, and its middle.
+    fn kept_at(&self) -> Option<PanelAt> {
+        let placement = self.placement.as_ref()?;
         let panel = placement.panel;
+        let contact = placement.contact;
         let (width, height) = (panel.right - panel.left, panel.bottom - panel.top);
         let gap = (GAP * contact.scale).round() as i32;
         let work = contact.work;
@@ -1342,14 +1401,7 @@ impl<'a> Panel<'a> {
             share(panel.left, work.left, work.right - work.left - 2 * gap - width),
             share(panel.top, work.top, work.bottom - work.top - 2 * gap - height),
         );
-        placement.floating = Some(at);
-        placement.held = None;
-        self.arrange();
-        let placement = self.placement.as_mut()?;
-        let panel = placement.panel;
-        let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
-        placement.anchor = centre;
-        Some((Some(PanelAt { at, screen: (centre.x, centre.y) }), size))
+        Some(PanelAt { at, screen: (panel.left + width / 2, panel.top + height / 2) })
     }
 
     /// The panel's lanes, laid out (once each opening, and held), and the
@@ -1533,8 +1585,9 @@ impl<'a> Panel<'a> {
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         // Pinned, its edges and its bar show what a drag there does.
-        if let Some(edges) = self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client)) {
-            point_at(edges);
+        match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client)) {
+            Some(edges) => point_at(edges),
+            None => arrow(),
         }
         let hover = self.hit_at(client).filter(|hit| hit.max_scroll().is_none());
         if hover != self.hover {
@@ -1552,9 +1605,11 @@ impl<'a> Panel<'a> {
             Some(Hit::Pin) => {
                 self.pinned ^= true;
                 // Unpinned away from the edge: it closes as the pointer
-                // leaves, and opens from the edge from then on.
-                if !self.pinned && self.floating() {
-                    crate::app().place_panel(None);
+                // leaves, and opens from the edge from then on; pinned
+                // again before it has, kept where it is again.
+                if self.floating() {
+                    let at = if self.pinned { self.kept_at() } else { None };
+                    crate::app().place_panel(at);
                 }
             }
             Some(Hit::Overlay) => {

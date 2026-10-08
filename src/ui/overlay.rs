@@ -87,7 +87,7 @@ const LEGIBLE: f32 = 4.5;
 const HALO: Color = Color::hex(0x000000, 0.85);
 const HALO_SPREAD: f32 = 0.75;
 /// A reading to heed (a muted microphone).
-const HOT: Color = Color::hex(0xFF9A8E, 1.0);
+const HOT: Color = Color::hex(0xFFB0A6, 1.0);
 
 /// One line of the overlay: a name, its value, whether the value is to be
 /// heeded, and for each of the value's parts, the widest it can be written
@@ -319,7 +319,7 @@ mod tests {
             // Every colour holds its contrast over white at that opacity
             // (or the plate is wholly opaque); a step clearer, one does not.
             let holds = |opacity: f32| [NAME, FIGURE, FRAMES, HOT].iter().all(|&c| contrast_over_white(c, plate, opacity) >= LEGIBLE);
-            assert!(holds(opacity) || opacity == 1.0, "{plate:?} {opacity}");
+            assert!(holds(opacity), "{plate:?} {opacity}");
             assert!(!holds(opacity - 0.01), "{plate:?} {opacity}");
         }
         // The grey plate lets a little through.

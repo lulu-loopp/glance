@@ -169,12 +169,12 @@ impl App {
         self.change(|settings| settings.overlay.locked = locked);
     }
 
-    /// The overlay was dragged where, and to the size, `placed` says.
     /// The pinned panel moved away from the edge to `at`, or (none) unpinned.
     pub fn place_panel(&self, at: Option<settings::PanelAt>) {
         self.change(|settings| settings.panel_at = at);
     }
 
+    /// The overlay was dragged where, and to the size, `placed` says.
     pub fn place_overlay(&self, placed: overlay::Placed) {
         self.change(|settings| {
             settings.overlay.at = placed.at;

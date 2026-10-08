@@ -284,7 +284,9 @@ impl Overlay {
     pub fn moved(&mut self) {
         let Some(at) = cursor() else { return };
         let Some(grab) = self.grab else {
-            if !self.locked {
+            if self.locked {
+                crate::panel::arrow();
+            } else {
                 Self::point_at(self.edges_at(at));
             }
             return;
