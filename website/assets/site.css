@@ -197,7 +197,6 @@ html[lang="en"] h2 { letter-spacing: -0.02em; line-height: 1.15; }
 .feature .ic svg { width: 21px; height: 21px; }
 .feature h3 { margin: 0 0 8px; font-size: 18px; font-weight: 600; line-height: 1.4; }
 .feature p { margin: 0; color: var(--ink-2); font-size: 15px; }
-.feature .shot { display: block; width: 100%; max-width: 260px; height: auto; margin-top: 16px; border-radius: 12px; }
 
 
 /* quiet numbers */
@@ -331,6 +330,50 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
     radial-gradient(60% 60% at 0% 100%, #1f9bb0 0%, transparent 70%),
     #4a3f86;
   box-shadow: var(--shadow); }
+
+/* ---------- the overlay ---------- */
+/* A made-up game scene: a sky, a sun, hills and a few towers, detailed
+   enough for the glass over it to be seen frosting it. */
+.scene { position: relative; display: block; height: 360px; padding: 0;
+  background: linear-gradient(#5aa0e6 0%, #a9d2f2 55%, #f4d6a0 70%, #6f9a4c 70.5%, #47703a 100%); }
+.scene .art { position: absolute; inset: 0; pointer-events: none; }
+.scene .sun { position: absolute; width: 120px; height: 120px; right: 16%; top: 14%; border-radius: 50%;
+  background: radial-gradient(circle, #fff7d6 0 38%, #ffd36b 40% 58%, rgba(255, 211, 107, 0) 72%); }
+.scene .hill { position: absolute; left: 0; right: 0; bottom: 0; }
+.scene .h1 { height: 48%; background: #6a8fbf; clip-path: polygon(0 60%, 12% 30%, 26% 52%, 40% 18%, 55% 46%, 70% 22%, 86% 50%, 100% 28%, 100% 100%, 0 100%); }
+.scene .h2 { height: 36%; background: #4f7a46; clip-path: polygon(0 40%, 18% 62%, 34% 30%, 50% 58%, 66% 36%, 82% 64%, 100% 40%, 100% 100%, 0 100%); }
+.scene .h3 { height: 18%; background: #2f5530; }
+.scene .tower { position: absolute; bottom: 14%; width: 26px; background: repeating-linear-gradient(#e9e2d0 0 10px, #c9bfa8 10px 13px);
+  box-shadow: inset -6px 0 0 rgba(0, 0, 0, 0.12); }
+.scene .tower::before { content: ""; position: absolute; left: -6px; right: -6px; top: -14px; height: 14px; background: #b5523b;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.ov-glass { position: absolute; top: 24px; left: 24px; max-width: calc(100% - 48px); color: #fff; text-align: left;
+  font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums; line-height: 1.25;
+  background: rgba(30, 34, 41, 0.52); -webkit-backdrop-filter: blur(30px) saturate(0.85); backdrop-filter: blur(30px) saturate(0.85);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    0 6px 16px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.22); }
+.ov-card { width: 270px; padding: 14px; border-radius: 18px; display: grid; gap: 12px; }
+.ov-hero { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; align-items: stretch; }
+.ov-hero svg { width: 100%; height: 100%; min-height: 64px; }
+.ov-big { font: 600 42px/1 var(--display); letter-spacing: -0.02em; margin: 6px 0 6px; }
+.ov-name { display: flex; align-items: center; gap: 6px; font-size: 12px; color: rgba(255, 255, 255, 0.68); }
+.ov-mark { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: none; }
+.ov-fps { background: #8be08f; } .ov-cpu { background: #6fb6ff; } .ov-gpu { background: #ffb35c; } .ov-mem { background: #c99bff; }
+.ov-rest { font-size: 12px; color: rgba(255, 255, 255, 0.68); white-space: nowrap; }
+.ov-line { fill: none; stroke: #8be08f; stroke-width: 1.6; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.ov-area { fill: url(#ov-fade); }
+.ov-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.ov-tile { display: grid; gap: 3px; padding: 9px 11px 10px; border-radius: 10px; background: rgba(255, 255, 255, 0.07); }
+.ov-fig b, .ov-item b { font: 600 22px/1.1 var(--display); }
+.ov-unit { margin-left: 3px; font-size: 12px; color: rgba(255, 255, 255, 0.68); }
+.ov-strip { display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 18px; border-radius: 22px; white-space: nowrap; overflow: hidden; }
+.ov-item { display: flex; align-items: baseline; gap: 6px; }
+.ov-item b { font-size: 18px; }
+.ov-item .ov-name { align-self: center; }
+.ov-item .ov-unit { margin-left: -3px; }
+.ov-rule { flex: none; width: 1px; height: 18px; background: rgba(255, 255, 255, 0.18); }
+@media (max-width: 440px) { .scene { height: 400px; } }
 
 /* ---------- the panel itself ---------- */
 .gp { --line-c: rgba(255, 255, 255, 0.12); width: min(704px, 100%); display: grid;

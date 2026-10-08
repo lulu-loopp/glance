@@ -13,9 +13,10 @@
 <link rel="icon" href="../favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preload" href="../assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="../assets/site.css?v=7">
+<link rel="stylesheet" href="../assets/site.css?v=8">
 <script src="../assets/site.js?v=5" defer></script>
 <script src="../assets/demo.js?v=5" defer></script>
+<script src="../assets/overlay.js?v=1" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -98,7 +99,6 @@
           <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2.5"/><rect x="6" y="7" width="7" height="5" rx="1"/></svg></div>
           <h3>An overlay, in its corner</h3>
           <p>A few readings floating over the screen, all the time or only while you play. A card or a strip on frosted glass that turns darker or lighter with what is behind it, so the figures always read. Drag it where you want it, drag its edges to size it, choose what it shows and in what order.</p>
-          <img class="shot" src="../assets/img/overlay-card-en.webp" alt="The overlay as a card: 154 frames a second charted beside it, the CPU and GPU in tiles below" width="560" height="380" loading="lazy">
         </li>
       </ul>
 
@@ -115,6 +115,22 @@
           </div>
         </div>
         <div class="stage" data-demo></div>
+      </div>
+
+      <div class="looks">
+        <div class="looks-text">
+          <div>
+            <h3>The overlay: a card or a strip</h3>
+            <p>It floats in a corner while you play, on frosted glass: the picture behind is blurred, and the glass turns darker or lighter with what is around it, so the figures always read.</p>
+          </div>
+          <div class="seg" role="group" data-overlay-layout>
+          <button type="button" data-layout="card" aria-pressed="true">Card</button>
+          <button type="button" data-layout="strip" aria-pressed="false">Strip</button>
+          </div>
+        </div>
+        <div class="stage scene" data-overlay-stage>
+          <div class="art" aria-hidden="true"><i class="sun"></i><i class="hill h1"></i><i class="hill h2"></i><i class="tower" style="left:58%;height:34%"></i><i class="tower" style="left:64%;height:26%"></i><i class="tower" style="left:30%;height:22%"></i><i class="hill h3"></i></div>
+        </div>
       </div>
     </div>
   </section>
