@@ -2320,7 +2320,9 @@ impl Ui {
                     // edge, so its ring keeps some room; the rest hug theirs.
                     let room = if matches!(target, Target::Skin(_)) { 8.0 } else { -1.0 };
                     let ring = Rect { x: r.x - room, y: r.y - room, w: r.w + 2.0 * room, h: r.h + 2.0 * room };
-                    stroke_outside(frame, ring, 5.0 + room.max(0.0), palette.text, 2.0);
+                    // Round as what it rings: a reading's chip is a pill.
+                    let radius = if matches!(target, Target::OverlayItem(_)) { ring.h / 2.0 } else { 5.0 + room.max(0.0) };
+                    stroke_outside(frame, ring, radius, palette.text, 2.0);
                 }
             }
         }

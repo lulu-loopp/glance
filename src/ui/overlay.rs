@@ -98,6 +98,20 @@ pub struct Line {
     pub value: String,
     pub hot: bool,
     widest: Vec<&'static [&'static str]>,
+    /// The value is a word ("On"), not figures: set as the names are (a
+    /// Chinese face has no semibold, and the figures' weight is its bold).
+    word: bool,
+}
+
+impl Line {
+    /// The face its value is set in.
+    fn value_font(&self) -> Font {
+        if self.word {
+            LABEL
+        } else {
+            VALUE
+        }
+    }
 }
 
 // The widest each reading can be written: the system font's digits are all
@@ -125,6 +139,7 @@ fn line(name: &str, parts: Vec<(Option<String>, &'static [&'static str])>, hot: 
         value: read.iter().map(|(value, _)| value.as_str()).collect::<Vec<_>>().join(SEPARATOR),
         hot,
         widest: read.iter().map(|(_, widest)| *widest).collect(),
+        word: false,
     })
 }
 
@@ -187,7 +202,7 @@ pub fn lines(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[Stri
     if let Some(muted) = s.mic_muted.filter(|_| on("mic")) {
         let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
         let widest = if lang == Lang::Zh { MIC_ZH } else { MIC_EN };
-        lines.push(line(lang.pick("麦克风", "Mic"), vec![(Some(value.to_string()), widest)], muted));
+        lines.push(line(lang.pick("麦克风", "Mic"), vec![(Some(value.to_string()), widest)], muted).map(|line| Line { word: true, ..line }));
     }
     lines.into_iter().flatten().collect()
 }
@@ -231,10 +246,11 @@ fn pitch(px: f32) -> (f32, f32) {
 pub fn size(lines: &[Line], px: f32, measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
     let label = lines.iter().map(|line| measure(&line.name, LABEL)).fold(0.0, f32::max);
     let widest = |line: &Line| {
-        let parts: f32 = line.widest.iter().map(|forms| forms.iter().map(|form| measure(form, VALUE)).fold(0.0, f32::max)).sum();
-        parts + line.widest.len().saturating_sub(1) as f32 * measure(SEPARATOR, VALUE)
+        let font = line.value_font();
+        let parts: f32 = line.widest.iter().map(|forms| forms.iter().map(|form| measure(form, font)).fold(0.0, f32::max)).sum();
+        parts + line.widest.len().saturating_sub(1) as f32 * measure(SEPARATOR, font)
     };
-    let value = lines.iter().map(|line| widest(line).max(measure(&line.value, VALUE))).fold(0.0, f32::max);
+    let value = lines.iter().map(|line| widest(line).max(measure(&line.value, line.value_font()))).fold(0.0, f32::max);
     let (pad, line) = pitch(px);
     (((2.0 * PAD.0 + label + LABEL_GAP + value) * px).ceil() / px, 2.0 * pad + lines.len() as f32 * line)
 }
@@ -295,15 +311,17 @@ fn readings(frame: &dyn Canvas, lines: &[Line], width: f32, px: f32) {
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, descent_value) = frame.baseline(VALUE);
-    for (i, Line { name, value, hot, .. }) in lines.iter().enumerate() {
+    for (i, reading) in lines.iter().enumerate() {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
         let y = pad + i as f32 * line + (line - ascent_value - descent_value) / 2.0;
-        // Each face's baseline on a whole pixel.
-        let (label_top, value_top) = (snap(y + ascent_value) - ascent_label, snap(y + ascent_value) - ascent_value);
-        let color = if name == "FPS" { FRAMES } else { NAME };
-        frame.text(name, LABEL, color, snap(PAD.0), label_top, label, Align::Start);
-        frame.text(value, VALUE, if *hot { HOT } else { FIGURE }, snap(PAD.0 + label + LABEL_GAP), value_top, width, Align::Start);
+        // Each face's baseline the same whole pixel.
+        let baseline = snap(y + ascent_value);
+        let font = reading.value_font();
+        let (label_top, value_top) = (baseline - ascent_label, baseline - frame.baseline(font).0);
+        let color = if reading.name == "FPS" { FRAMES } else { NAME };
+        frame.text(&reading.name, LABEL, color, snap(PAD.0), label_top, label, Align::Start);
+        frame.text(&reading.value, font, if reading.hot { HOT } else { FIGURE }, snap(PAD.0 + label + LABEL_GAP), value_top, width, Align::Start);
     }
 }
 
