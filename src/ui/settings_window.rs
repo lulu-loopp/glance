@@ -915,7 +915,7 @@ impl Ui {
             ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
-                vec![s("跟随指针", "At pointer"), s("居中", "Centred")],
+                vec![s("鼠标处", "By the mouse"), s("边缘正中", "Centred")],
                 [Anchor::Pointer, Anchor::Center].iter().position(|&a| a == settings.anchor),
             ),
             Field::OverFullscreen => (
@@ -1107,6 +1107,12 @@ impl Ui {
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
+            Field::Anchor => Some(pick(self.lang, "面板沿屏幕边缘弹出，出现在鼠标所在的位置，或边缘正中", "Along the edge: where the mouse is, or in the middle")),
+            Field::Push => Some(pick(
+                self.lang,
+                "鼠标移到屏幕边缘后再往外推一下就会打开；力度越重越不容易误触",
+                "Move the mouse to the edge and push on: the panel opens. Firmer is harder to set off by accident",
+            )),
             Field::OverlayWhen => Some(pick(
                 self.lang,
                 "帧率、1% low、帧时间只在游戏模式下显示，那时悬浮窗在游戏所在的屏幕上",
