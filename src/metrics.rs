@@ -89,6 +89,8 @@ pub struct Sampler {
     /// Readers that need the driver; absent without it or without rights.
     cpu_sensors: Option<CpuReader>,
     super_io: Option<SuperIo>,
+    /// An ASUS laptop's fans, as its firmware reports them.
+    asus_fans: Option<crate::asus::AsusFans>,
     dimms: Option<Dimms>,
     mic: Option<Microphone>,
     /// Each process's GPU use at the last sample, by process id.
@@ -139,11 +141,13 @@ impl Sampler {
         let cpu_sensors = CpuReader::open();
         let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")));
         let dimms = Dimms::open();
+        let asus_fans = crate::asus::AsusFans::open();
         let missing = || "not found".to_string();
         let mut found = vec![
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
             format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
+            format!("Laptop fans: {}", asus_fans.as_ref().map_or_else(missing, crate::asus::AsusFans::describe)),
         ];
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
@@ -178,6 +182,7 @@ impl Sampler {
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
             super_io: super_io.ok(),
+            asus_fans,
             dimms,
             mic: Microphone::open(),
             gpu_by_pid: None,
@@ -370,7 +375,7 @@ impl Sampler {
             },
             battery: battery(),
             cpu_sensors: self.cpu_sensors.as_mut().map(CpuReader::read),
-            board: self.super_io.as_mut().map(SuperIo::read),
+            board: self.board(),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
@@ -1002,6 +1007,17 @@ fn performance_info() -> PERFORMANCE_INFORMATION {
     unsafe { GetPerformanceInfo(&mut info, size_of::<PERFORMANCE_INFORMATION>() as u32) }
         .expect("GetPerformanceInfo");
     info
+}
+
+impl Sampler {
+    /// The motherboard's sensors, and a laptop's fans its firmware reports.
+    fn board(&mut self) -> Option<crate::reading::BoardSensors> {
+        let mut board = self.super_io.as_mut().map(SuperIo::read);
+        if let Some(fans) = &self.asus_fans {
+            board.get_or_insert_with(Default::default).fans.extend(fans.read());
+        }
+        board
+    }
 }
 
 /// `None` on machines without a battery.

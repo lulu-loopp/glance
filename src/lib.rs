@@ -3,6 +3,8 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 #[cfg(windows)]
+mod asus;
+#[cfg(windows)]
 mod battery;
 mod detector;
 mod frames;

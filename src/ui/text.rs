@@ -39,6 +39,8 @@ impl Lang {
             "vrm" => ("VRM 供电", "VRM"),
             "vsoc" => ("SoC 供电", "SoC VRM"),
             "cpu_fan" => ("CPU 风扇", "CPU fan"),
+            "gpu_fan" => ("显卡风扇", "GPU fan"),
+            "mid_fan" => ("中间风扇", "Middle fan"),
             "system_fan_1" => ("系统风扇 1", "System fan 1"),
             "system_fan_2" => ("系统风扇 2", "System fan 2"),
             "system_fan_3" => ("系统风扇 3", "System fan 3"),
