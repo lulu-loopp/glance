@@ -17,7 +17,11 @@ const CONFIG_CONTROL: u64 = 0x02;
 /// ITE's environment controller (temperatures, fans, voltages).
 const ITE_ENVIRONMENT: u64 = 0x04;
 /// Nuvoton's hardware monitor, and its register whose bit 4 locks the
-/// monitor's I/O space (set by some firmware; Glance leaves it be).
+/// monitor's I/O space on the NCT6791D and later (set by some firmware,
+/// ASUS's among them; cleared as Linux's nct6775 driver clears it).
+/// The lock decides only whether the monitor's readings can be reached:
+/// fans, voltages and how the board runs are left as they were, and the
+/// firmware sets it again at the next start.
 const NUVOTON_MONITOR: u64 = 0x0B;
 const NUVOTON_IO_LOCK: u64 = 0x28;
 
@@ -231,8 +235,8 @@ fn find_ite(module: &Module, slot: u64, port: u64) -> Result<(Kind, u16, u64), P
     found
 }
 
-/// A Nuvoton chip at `port`, as `find_ite`. One whose monitor the firmware
-/// has locked is left alone: unlocking it would change how the board is set up.
+/// A Nuvoton chip at `port`, as `find_ite`. A monitor the firmware has
+/// locked is unlocked (see `NUVOTON_IO_LOCK`).
 fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> {
     let found = (|| {
         // Nuvoton's key into configuration mode.
@@ -245,11 +249,18 @@ fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> 
         };
         module.call("ioctl_find_bars", &[], &mut []).map_err(|_| None)?;
         module.call("ioctl_superio_outb", &[DEVICE_SELECT, NUVOTON_MONITOR], &mut []).map_err(|_| None)?;
-        let locked = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).map_err(|_| None)? & 0x10 != 0;
-        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)?;
-        if locked {
-            return Err(Some(format!("Nuvoton chip {chip:04X}, its monitor locked by the firmware")));
+        // The NCT6779D has no such lock.
+        if chip & 0xFFF8 != 0xC560 {
+            let lock = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).map_err(|_| None)?;
+            if lock & 0x10 != 0 {
+                module.call("ioctl_superio_outb", &[NUVOTON_IO_LOCK, lock & !0x10], &mut []).map_err(|_| None)?;
+                let still = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).map_err(|_| None)? & 0x10 != 0;
+                if still {
+                    return Err(Some(format!("Nuvoton chip {chip:04X}, its monitor locked by the firmware and staying so")));
+                }
+            }
         }
+        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)?;
         Ok((Kind::Nuvoton { temps, fans }, chip, base))
     })();
     // Nuvoton's key out of configuration mode.
