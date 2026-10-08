@@ -82,6 +82,10 @@ pub struct Gfx {
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
 }
 
+/// How much contrast grayscale text's edges are given by `crisp_text` (the
+/// system's default is 1).
+const CRISP_CONTRAST: f32 = 2.0;
+
 /// Text, font, width, at the end, and broken into lines.
 type LayoutKey = (String, FontKey, u32, bool, bool);
 
@@ -439,6 +443,19 @@ impl<'a> Frame<'a> {
             sink.EndFigure(D2D1_FIGURE_END_OPEN);
             sink.Close().ok()?;
             Some(path)
+        }
+    }
+
+    /// Draws text from here on as sharply as grayscale antialiasing allows
+    /// (a surface with nothing opaque beneath its text has no ClearType):
+    /// stems fitted to the pixel grid, edges given more contrast.
+    pub fn crisp_text(&self) {
+        let params = unsafe {
+            use windows::Win32::Graphics::DirectWrite::{DWRITE_GRID_FIT_MODE_ENABLED, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC};
+            self.gfx.write.CreateCustomRenderingParams(1.8, 0.5, CRISP_CONTRAST, 0.0, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC, DWRITE_GRID_FIT_MODE_ENABLED)
+        };
+        if let Ok(params) = params {
+            unsafe { self.dc.SetTextRenderingParams(&params) };
         }
     }
 

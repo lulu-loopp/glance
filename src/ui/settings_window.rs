@@ -2443,7 +2443,8 @@ impl Ui {
             }
         }
         frame.place(Matrix3x2::scale(size, size) * Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
-        super::overlay::paint(frame, &lines, overlay.opacity, false);
+        frame.crisp_text();
+        super::overlay::paint(frame, &lines, overlay.opacity, false, self.scale * k * size);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
     }

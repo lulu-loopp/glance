@@ -30,17 +30,19 @@ pub const ITEMS: [(&str, &str, &str); 13] = [
 pub const INSET: f32 = 16.0;
 
 /// Room around the readings, and the height of a line of them (DIPs).
-const PAD: (f32, f32) = (10.0, 7.0);
+const PAD: (f32, f32) = (12.0, 8.0);
 const LINE: f32 = 19.0;
 /// Between a reading's name and its value.
 const LABEL_GAP: f32 = 10.0;
-const RADIUS: f32 = 6.0;
-const LABEL: Font = Font::new(Family::Segoe, 12.0, 600.0);
+const RADIUS: f32 = 8.0;
+const LABEL: Font = Font::new(Family::Segoe, 12.0, 500.0);
 const VALUE: Font = Font::new(Family::Segoe, 13.0, 600.0);
-const PLATE: u32 = 0x101214;
+/// A cool, soft grey: lighter than black, so the plate reads as glass over
+/// a game rather than a hole in it.
+const PLATE: u32 = 0x1E2229;
 /// The plate while it is dragged.
 const DRAGGED: Color = Color::hex(0x1D4F91, 0.9);
-const NAME: Color = Color::hex(0xFFFFFF, 0.62);
+const NAME: Color = Color::hex(0xFFFFFF, 0.74);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
 const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
@@ -188,8 +190,11 @@ pub fn size(lines: &[Line], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
 }
 
 /// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
-/// corner; `dragged`, on the plate that says it is being moved.
-pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
+/// corner, at `px` physical pixels a DIP (each line put on a whole pixel,
+/// not smeared across two); `dragged`, on the plate that says it is being
+/// moved.
+pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px: f32) {
+    let snap = |at: f32| (at * px).round() / px;
     let (width, height) = size(lines, |text, font| frame.measure(text, font));
     let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
     frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
@@ -212,9 +217,11 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
         let y = PAD.1 + i as f32 * LINE + (LINE - ascent_value - descent_value) / 2.0;
+        // Each face's baseline on a whole pixel.
+        let (label_top, value_top) = (snap(y + ascent_value) - ascent_label, snap(y + ascent_value) - ascent_value);
         let color = if name == "FPS" { FRAMES } else { NAME };
-        outlined(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label);
-        outlined(value, VALUE, if *hot { HOT } else { FIGURE }, PAD.0 + label + LABEL_GAP, y, width);
+        outlined(name, LABEL, color, snap(PAD.0), label_top, label);
+        outlined(value, VALUE, if *hot { HOT } else { FIGURE }, snap(PAD.0 + label + LABEL_GAP), value_top, width);
     }
 }
 

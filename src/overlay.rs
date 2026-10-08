@@ -197,7 +197,11 @@ impl Overlay {
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let dragged = self.grab.is_some();
         let surface = self.surface.as_mut().unwrap();
-        if surface.draw(&self.gfx, size, scale, |frame| overlay::paint(frame, lines, opacity, dragged)).is_err() {
+        let painted = surface.draw(&self.gfx, size, scale, |frame| {
+            frame.crisp_text();
+            overlay::paint(frame, lines, opacity, dragged, scale);
+        });
+        if painted.is_err() {
             // Made again on a new device at the next sample.
             gfx::lost();
             return;
