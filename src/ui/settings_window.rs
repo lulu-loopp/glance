@@ -38,7 +38,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
-    MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
+    IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
@@ -616,7 +616,13 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         ui.restyle();
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
+        // Glance started hidden (by the scheduler, an installer, a script)
+        // has the system apply that to the first window of its own it
+        // shows, in place of what is asked: shown again, it shows.
         let _ = ShowWindow(hwnd, SW_SHOW);
+        if !IsWindowVisible(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
         let _ = SetForegroundWindow(hwnd);
         Some(hwnd)
     }
