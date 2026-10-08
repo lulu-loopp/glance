@@ -1013,10 +1013,13 @@ fn battery() -> Option<BatterySample> {
     if status.BatteryFlag & NO_BATTERY != 0 || status.BatteryLifePercent == UNKNOWN {
         return None;
     }
+    let figures = crate::battery::read();
     Some(BatterySample {
         percent: status.BatteryLifePercent,
         charging: status.ACLineStatus == 1,
         seconds_left: (status.BatteryLifeTime != u32::MAX).then_some(status.BatteryLifeTime),
+        watts: figures.watts,
+        health: figures.health,
     })
 }
 

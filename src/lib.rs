@@ -2,6 +2,8 @@
 // content) have no program to use them yet: the ports are under way.
 #![cfg_attr(not(windows), allow(dead_code))]
 
+#[cfg(windows)]
+mod battery;
 mod detector;
 mod frames;
 #[cfg(windows)]

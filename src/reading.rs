@@ -213,6 +213,12 @@ pub struct BatterySample {
     pub percent: u8,
     pub charging: bool,
     pub seconds_left: Option<u32>,
+    /// Watts going in (charging, above 0) or out (below 0): on battery
+    /// power, what the whole machine draws.
+    pub watts: Option<f32>,
+    /// What it holds when full, as a share of what it was made to hold
+    /// (percent).
+    pub health: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

@@ -1493,6 +1493,8 @@ impl Ui {
                     _ => !seen.engines.is_empty(),
                 }),
                 ("memory", "dimms") => seen.dimms > 0,
+                ("battery", "power") => seen.battery_power,
+                ("battery", "health") => seen.battery_health,
                 ("network", "address") => seen.address,
                 ("network", "link") => seen.link,
                 ("disk", "drives") => !seen.drives.is_empty(),
@@ -1534,6 +1536,8 @@ impl Ui {
         match (id.split(':').next().unwrap_or(id), name) {
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
             ("battery", "chart") => (p("电量图表", "Charge chart"), None),
+            ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率；拔掉电源时就是整台电脑的耗电", "Watts going in or out: on battery, what the whole machine draws"))),
+            ("battery", "health") => (p("健康度", "Health"), Some(p("充满时的容量占出厂设计容量的比例", "What it holds when full, against what it was made to hold"))),
             ("game", "chart") => (p("帧率图表", "Frame rate chart"), None),
             ("game", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
             ("game", "longest") => (p("最长一帧", "Longest frame"), Some(p("最近一秒里最慢的一帧，卡顿时会变大", "The slowest frame of the last second: a stutter shows here"))),

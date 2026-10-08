@@ -601,6 +601,19 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 },
                 None => UNREAD.into(),
             };
+            // In, charging; out, what the whole machine draws.
+            let power = |watts: f32| match watts {
+                w if w > 0.05 => format!("{} {w:.1} W", lang.pick("充电", "In")),
+                w if w < -0.05 => format!("{} {:.1} W", lang.pick("耗电", "Out"), -w),
+                _ => "0 W".to_string(),
+            };
+            let mut facts = Vec::new();
+            if scene.seen.battery_power && on("power") {
+                facts.push((lang.pick("功率", "Power").to_string(), shown(battery.and_then(|b| b.watts), power), false));
+            }
+            if scene.seen.battery_health && on("health") {
+                facts.push((lang.pick("健康度", "Health").to_string(), shown(battery.and_then(|b| b.health), |h| format!("{h:.0}%")), false));
+            }
             vec![
                 head(lang.pick("电池", "Battery"), "", state, false),
                 Block::Readout {
@@ -609,6 +622,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     hot: battery.is_some_and(|b| !b.charging && b.percent <= 20),
                     plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
+                Block::Facts { rows: facts, gap: 8.0 },
             ]
         }
         "system" => {
@@ -1184,7 +1198,7 @@ mod tests {
             volumes: Vec::new(),
             processes: Vec::new(),
             system: SystemSample { uptime_s: 60, processes: 1, threads: 1, handles: 1 },
-            battery: battery.map(|percent| BatterySample { percent, charging: false, seconds_left: None }),
+            battery: battery.map(|percent| BatterySample { percent, charging: false, seconds_left: None, watts: None, health: None }),
             cpu_sensors: None,
             board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
             drive_temps: Vec::new(),

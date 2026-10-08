@@ -36,6 +36,7 @@ windows-numerics = "0.3"
 version = "0.62"
 features = [
     "Wdk_Graphics_Direct3D",
+    "Win32_Devices_DeviceAndDriverInstallation",
     "UI_ViewManagement",
     "Win32_Foundation",
     "Win32_Globalization",

@@ -31,6 +31,11 @@ impl Entry {
         self.property(key)?.downcast::<CFString>().ok().map(|s| s.to_string())
     }
 
+    /// A property that is a number, as an integer.
+    pub fn number(&self, key: &str) -> Option<i64> {
+        self.property(key)?.downcast::<CFNumber>().ok()?.as_i64()
+    }
+
     /// A property that is raw bytes.
     pub fn data(&self, key: &str) -> Option<Vec<u8>> {
         self.property(key)?.downcast::<CFData>().ok().map(|data| data.to_vec())

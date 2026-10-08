@@ -70,7 +70,7 @@ const MEMORY: [Item; 4] = [item("chart", true), item("dimms", true), item("commi
 const NETWORK: [Item; 5] = [item("chart", true), item("adapter", false), item("address", false), item("link", false), item("totals", false)];
 const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
-const BATTERY: [Item; 1] = [item("chart", true)];
+const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),

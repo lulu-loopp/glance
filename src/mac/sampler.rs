@@ -459,10 +459,20 @@ fn battery() -> Option<BatterySample> {
         let on_battery = text("Power Source State").as_deref() == Some("Battery Power");
         // Minutes, or -1 while the system is still working it out.
         let left = iokit::number(&description, "Time to Empty").filter(|minutes| on_battery && *minutes > 0);
+        // The battery's own gauge: its current (mA, below 0 discharging)
+        // at its voltage (mV), and what it holds against its design (mAh).
+        let gauge = iokit::services("AppleSmartBattery").into_iter().next();
+        let watts = gauge.as_ref().and_then(|g| Some(g.number("InstantAmperage")? as f32 * g.number("Voltage")? as f32 / 1e6));
+        let health = gauge
+            .as_ref()
+            .and_then(|g| Some((g.number("AppleRawMaxCapacity")?, g.number("DesignCapacity").filter(|&design| design > 0)?)))
+            .map(|(full, design)| full as f32 / design as f32 * 100.0);
         Some(BatterySample {
             percent: (current * 100 / most).clamp(0, 100) as u8,
             charging: flag("Is Charging"),
             seconds_left: left.map(|minutes| minutes as u32 * 60),
+            watts,
+            health,
         })
     })
 }

@@ -33,6 +33,9 @@ pub struct Seen {
     pub volumes: Vec<String>,
     pub board: Option<BoardSeen>,
     pub battery: bool,
+    /// The battery's power in and out, and its health.
+    pub battery_power: bool,
+    pub battery_health: bool,
     /// A game presenting frames (its window covering its screen), now.
     pub game: bool,
     /// What holds back the clock of a game's GPU (which NVIDIA's driver says).
@@ -100,6 +103,8 @@ impl Seen {
             merge(&mut seen.fans, board.fans.iter().map(|(name, _)| name.clone()), |a, b| a == b);
         }
         self.battery |= s.battery.is_some();
+        self.battery_power |= s.battery.as_ref().is_some_and(|b| b.watts.is_some());
+        self.battery_health |= s.battery.as_ref().is_some_and(|b| b.health.is_some());
         self.game = s.game.is_some();
         self.game_limit |= s.game.as_ref().is_some_and(|game| game.gpu_limit.is_some());
         self.mic |= s.mic_muted.is_some();
@@ -135,7 +140,11 @@ impl Seen {
                 news.extend(theirs.temps.into_iter().filter(|name| !ours.temps.contains(name)).map(Item::BoardTemp));
                 news.extend(theirs.fans.into_iter().filter(|name| !ours.fans.contains(name)).map(Item::BoardFan));
             }
-            "battery" => flag(self.battery, other.battery, Item::Battery),
+            "battery" => {
+                flag(self.battery, other.battery, Item::Battery);
+                flag(self.battery_power, other.battery_power, Item::BatteryPower);
+                flag(self.battery_health, other.battery_health, Item::BatteryHealth);
+            }
             "game" => {
                 flag(self.game, other.game, Item::Game);
                 flag(self.game_limit, other.game_limit, Item::GameLimit);
@@ -209,6 +218,8 @@ impl Seen {
                 }
             }
             Item::Battery => seen.battery = true,
+            Item::BatteryPower => seen.battery_power = true,
+            Item::BatteryHealth => seen.battery_health = true,
             Item::Game => seen.game = true,
             Item::GameLimit => seen.game_limit = true,
             Item::Mic => seen.mic = true,
@@ -252,6 +263,8 @@ pub enum Item {
     BoardTemp(String),
     BoardFan(String),
     Battery,
+    BatteryPower,
+    BatteryHealth,
     Game,
     GameLimit,
     Mic,
