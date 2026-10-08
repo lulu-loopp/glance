@@ -1,5 +1,5 @@
-// The overlay drawn in the page, over a made-up game scene, running on
-// made-up readings: a card or a strip on frosted glass, as Glance draws it.
+// The overlay drawn in the page, over the same slice of desktop as the
+// panel above it, running on made-up readings: a card or a strip on frosted glass, as Glance draws it.
 (function () {
   "use strict";
 
@@ -72,72 +72,6 @@
     var rest = el("span", "ov-rest", t);
     return { v: v, u: u, rest: rest };
   }
-
-  // ---- the scene: ridges by midpoint displacement, nearer ones darker ----
-  (function scene() {
-    var svg = stage.querySelector("[data-scene]");
-    if (!svg) return;
-    var W = 1200, H = 360;
-    var seed = 7;
-    function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647; }
-    function node(tag, attrs, parent) {
-      var e = document.createElementNS(SVG, tag);
-      for (var k in attrs) e.setAttribute(k, attrs[k]);
-      (parent || svg).appendChild(e);
-      return e;
-    }
-    function hex(c) { return [1, 3, 5].map(function (i) { return parseInt(c.slice(i, i + 2), 16); }); }
-    function mix(a, b, t) {
-      var A = hex(a), B = hex(b);
-      return "rgb(" + A.map(function (v, i) { return Math.round(v + (B[i] - v) * t); }).join(",") + ")";
-    }
-    var defs = node("defs", {});
-    var sky = node("linearGradient", { id: "sc-sky", x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
-    [["0", "#241a45"], ["0.45", "#7a3f74"], ["0.72", "#e2786a"], ["1", "#f7b27a"]].forEach(function (s) {
-      node("stop", { offset: s[0], "stop-color": s[1] }, sky);
-    });
-    var glow = node("radialGradient", { id: "sc-glow" }, defs);
-    [["0", "#fff1d0", "0.95"], ["0.25", "#ffd9a0", "0.6"], ["1", "#f7b27a", "0"]].forEach(function (s) {
-      node("stop", { offset: s[0], "stop-color": s[1], "stop-opacity": s[2] }, glow);
-    });
-    node("rect", { width: W, height: H, fill: "url(#sc-sky)" });
-    // Stars in the dark top of the sky.
-    for (var i = 0; i < 90; i++) {
-      var y = rnd() * 150;
-      node("circle", { cx: (rnd() * W).toFixed(1), cy: y.toFixed(1), r: (0.6 + rnd() * 1.1).toFixed(2), fill: "#fff", opacity: (0.25 + 0.6 * (1 - y / 150) * rnd()).toFixed(2) });
-    }
-    // The sun, low, half behind the overlay's edge: frosted there, sharp past it.
-    node("circle", { cx: 300, cy: 140, r: 150, fill: "url(#sc-glow)" });
-    node("circle", { cx: 300, cy: 140, r: 34, fill: "#fff3dc" });
-    // The ridges, far to near.
-    var LAYERS = 7;
-    for (var l = 0; l < LAYERS; l++) {
-      var t = l / (LAYERS - 1);
-      var base = 190 + l * 26, rough = 70 - l * 6;
-      var n = 128, pts = new Array(n + 1);
-      pts[0] = base - rnd() * rough; pts[n] = base - rnd() * rough;
-      (function split(a, b, amp) {
-        if (b - a < 2) return;
-        var m = (a + b) >> 1;
-        pts[m] = (pts[a] + pts[b]) / 2 + (rnd() - 0.5) * amp;
-        split(a, m, amp * 0.55);
-        split(m, b, amp * 0.55);
-      })(0, n, rough * 1.6);
-      var d = "M0 " + H;
-      for (var j = 0; j <= n; j++) d += "L" + (j / n * W).toFixed(1) + " " + pts[j].toFixed(1);
-      // Trees on the nearest ridges: thin spikes along the line.
-      if (l >= LAYERS - 3) {
-        d = "M0 " + H;
-        for (var x = 0; x <= W; x += 4 + rnd() * 6) {
-          var k = Math.min(n, Math.round(x / W * n)), ground = pts[k];
-          var h = (l === LAYERS - 1 ? 10 : 6) + rnd() * (l === LAYERS - 1 ? 18 : 10);
-          d += "L" + x.toFixed(1) + " " + ground.toFixed(1) + "L" + (x + 2).toFixed(1) + " " + (ground - h).toFixed(1) + "L" + (x + 4).toFixed(1) + " " + ground.toFixed(1);
-        }
-      }
-      d += "L" + W + " " + H + "Z";
-      node("path", { d: d, fill: mix("#e48a79", "#170d22", Math.pow(t, 0.8)) });
-    }
-  })();
 
   var glass = el("div", "ov-glass", stage);
   var parts = {};

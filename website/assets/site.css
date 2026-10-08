@@ -332,11 +332,8 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
   box-shadow: var(--shadow); }
 
 /* ---------- the overlay ---------- */
-/* A made-up game scene at dusk (drawn by overlay.js): ridges fading into
-   the haze, a low sun and a few stars, behind the overlay so its glass is
-   seen frosting them. */
-.scene { position: relative; display: block; height: 360px; padding: 0; background: #2a1d43; }
-.scene .art { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* The overlay on the same slice of desktop as the panel above. */
+.scene { position: relative; display: block; height: 360px; padding: 0; }
 .ov-glass { position: absolute; top: 24px; left: 24px; max-width: calc(100% - 48px); color: #fff; text-align: left;
   font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
   font-variant-numeric: tabular-nums; line-height: 1.25;
