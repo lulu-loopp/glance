@@ -119,7 +119,8 @@ struct Config {
     game_columns: Option<usize>,
     auto_game_mode: bool,
     overlay: OverlaySettings,
-    pressure: i32,
+    /// None: pushing into the edge opens nothing.
+    pressure: Option<i32>,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
@@ -400,6 +401,9 @@ impl Controller {
             // Over a game in exclusive fullscreen the panel sends the game to
             // the background: it opens there only as the settings allow.
             let may_open = |allowed: bool| allowed || !exclusive_fullscreen();
+            // Where on the edge the pointer is, and how hard it has to push
+            // there; never, with pushing turned off.
+            let at_edge = |cursor: POINT| edge_contact(cursor, edge).zip(pressure);
             if panel.is_shown() {
                 armed = false;
             }
@@ -474,8 +478,8 @@ impl Controller {
                     raw_since_watch = true;
                     let motion = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge);
                     if let (Some(motion), Some(cursor)) = (motion, cursor_position()) {
-                        match edge_contact(cursor, edge) {
-                            Some(contact) if armed && detector.motion(motion, now, pressure) => {
+                        match at_edge(cursor) {
+                            Some((contact, pressure)) if armed && detector.motion(motion, now, pressure) => {
                                 detector.reset();
                                 // Not over this game: not again until the
                                 // pointer has left the edge.
@@ -499,8 +503,8 @@ impl Controller {
                     let Some(cursor) = cursor_position() else { continue };
                     let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
                     if moved && !raw_since_watch && !panel.is_open() {
-                        match edge_contact(cursor, edge) {
-                            Some(_) if armed => {
+                        match at_edge(cursor) {
+                            Some((_, pressure)) if armed => {
                                 detector.motion(Motion::Absolute, now, pressure);
                             }
                             Some(_) => {}
@@ -515,8 +519,8 @@ impl Controller {
                 }
                 WM_TIMER if msg.wParam.0 == TRACK_TIMER && !panel.is_open() => {
                     let Some(cursor) = cursor_position() else { continue };
-                    match edge_contact(cursor, edge) {
-                        Some(contact) if armed && detector.dwell_elapsed(now) => {
+                    match at_edge(cursor) {
+                        Some((contact, _)) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
                             if may_open(fullscreen_edge) {
                                 panel.open(cursor, contact, now);

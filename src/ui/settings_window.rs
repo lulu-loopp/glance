@@ -929,9 +929,9 @@ impl Ui {
                 [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == self.columns()),
             ),
             Field::Push => (
-                pick(lang, "推入力度", "Push"),
-                vec![s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
-                [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm].iter().position(|&p| p == settings.sensitivity),
+                pick(lang, "推边缘呼出", "Push into the edge"),
+                vec![s("关闭", "Off"), s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
+                [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm].iter().position(|&p| p == settings.sensitivity),
             ),
             Field::CloseDelay => (
                 pick(lang, "离开后收起", "Close after"),
@@ -1005,7 +1005,7 @@ impl Ui {
                 }
             }
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
-            Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
+            Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],

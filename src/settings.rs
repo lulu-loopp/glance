@@ -136,6 +136,8 @@ pub enum OverFullscreen {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sensitivity {
+    /// Pushing into the edge opens nothing: the shortcut and the tray do.
+    Off,
     Light,
     #[default]
     Medium,
@@ -143,12 +145,14 @@ pub enum Sensitivity {
 }
 
 impl Sensitivity {
-    /// Raw mouse counts of outward travel against the edge.
-    pub fn pressure(self) -> i32 {
+    /// Raw mouse counts of outward travel against the edge; none when the
+    /// edge opens nothing.
+    pub fn pressure(self) -> Option<i32> {
         match self {
-            Sensitivity::Light => 50,
-            Sensitivity::Medium => 120,
-            Sensitivity::Firm => 260,
+            Sensitivity::Off => None,
+            Sensitivity::Light => Some(50),
+            Sensitivity::Medium => Some(120),
+            Sensitivity::Firm => Some(260),
         }
     }
 }
