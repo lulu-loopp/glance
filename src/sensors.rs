@@ -22,10 +22,32 @@ const AMD_FAMILY_17: &[u8] = include_bytes!("../pawnio-modules/AMDFamily17.bin")
 /// Tctl, the control temperature: CUR_TEMP in bits 31–21, in eighths of a
 /// degree; bit 19 selects the range that starts at −49 °C.
 const THM_TCON_CUR_TMP: u64 = 0x0005_9800;
-/// Each CCD's temperature, one word per CCD, from Zen 4 on; and before that.
-const CCD_TEMP_ZEN4: u64 = 0x0005_9B08;
-const CCD_TEMP_ZEN2: u64 = 0x0005_9954;
-const MAX_CCDS: u64 = 8;
+/// The block the CCDs' temperatures are reported in, one word per CCD from
+/// an offset that depends on the processor (`ccd_layout`): bits 10–0 in
+/// eighths of a degree from −49 °C, bit 11 set while the reading is valid
+/// (a CCD absent, or one the processor reports nothing for, has it clear).
+const REPORTED_TEMP_BASE: u64 = 0x0005_9800;
+const CCD_TEMP_VALID: u64 = 1 << 11;
+const CCD_TEMP_MASK: u64 = 0x7FF;
+
+/// Where the CCDs' temperatures are (their offset in the reported block)
+/// and how many CCDs there can be, by family and model, as Linux's k10temp
+/// has them; none for a processor that reports none (mobile Zen 5 among
+/// them).
+fn ccd_layout(family: u32, model: u32) -> Option<(u64, u64)> {
+    Some(match (family, model) {
+        (0x17 | 0x18, 0x01 | 0x08 | 0x11 | 0x18) => (0x154, 4),
+        (0x17 | 0x18, 0x31 | 0x47 | 0x60 | 0x68 | 0x71) => (0x154, 8),
+        (0x17 | 0x18, 0xA0..=0xAF) => (0x300, 8),
+        (0x19, 0x00..=0x01 | 0x08 | 0x21 | 0x50..=0x5F) => (0x154, 8),
+        (0x19, 0x40..=0x4F) => (0x300, 8),
+        (0x19, 0x60..=0x7F) => (0x308, 8),
+        (0x19, 0x10..=0x1F | 0xA0..=0xAF) => (0x300, 12),
+        (0x1A, 0x00..=0x1F) => (0x1F0, 16),
+        (0x1A, 0x40..=0x4F) => (0x308, 8),
+        _ => return None,
+    })
+}
 const MSR_PWR_UNIT: u64 = 0xC001_0299;
 const MSR_PKG_ENERGY_STAT: u64 = 0xC001_029B;
 
@@ -169,7 +191,8 @@ fn total_power(module: &Module, packages: &mut [(Processors, EnergyCounter)], ms
 
 pub struct AmdCpu {
     module: Module,
-    ccd_base: u64,
+    /// Where its CCDs' temperatures are, and how many there can be.
+    ccds: Option<(u64, u64)>,
     /// Each package's processors and energy counter.
     packages: Vec<(Processors, EnergyCounter)>,
     /// The latest temperatures, kept while another program has the PCI bus.
@@ -181,12 +204,11 @@ impl AmdCpu {
     pub fn open() -> Option<Self> {
         let module = Module::load(AMD_FAMILY_17).ok()?;
         let (family, model) = cpu_family_model();
-        // Raphael (Zen 4, 19h model 61h) and later use the newer CCD block.
-        let ccd_base = if family >= 0x1A || (family == 0x19 && model >= 0x60) { CCD_TEMP_ZEN4 } else { CCD_TEMP_ZEN2 };
+        let ccds = ccd_layout(family, model);
         let units = module.read("ioctl_read_msr", MSR_PWR_UNIT).ok()?;
         let unit = 1.0 / (1u64 << ((units >> 8) & 0x1F)) as f64;
         let packages = topology(RelationProcessorPackage).into_iter().map(|p| (p, EnergyCounter::new(unit))).collect();
-        Some(AmdCpu { module, ccd_base, packages, last: (None, Vec::new()) })
+        Some(AmdCpu { module, ccds, packages, last: (None, Vec::new()) })
     }
 
     /// One SMN register. Reached through an index and a data register on
@@ -207,13 +229,13 @@ impl AmdCpu {
                 let offset = if raw & (1 << 19) != 0 { 49.0 } else { 0.0 };
                 ((raw >> 21) & 0x7FF) as f32 * 0.125 - offset
             });
-            for ccd in 0..MAX_CCDS {
-                let Some(raw) = self.smn(self.ccd_base + ccd * 4) else { continue };
-                let raw = raw & 0xFFF;
-                let celsius = raw as f32 * 0.125 - 305.0;
-                // An absent CCD reads zero.
-                if raw > 0 && celsius < 125.0 {
-                    ccds.push((ccd as usize, celsius));
+            let (offset, count) = self.ccds.unwrap_or_default();
+            for ccd in 0..count {
+                let Some(raw) = self.smn(REPORTED_TEMP_BASE + offset + ccd * 4) else { continue };
+                // A register out of reach reads all ones, which would pass
+                // for valid.
+                if raw & 0xFFFF_FFFF != 0xFFFF_FFFF && raw & CCD_TEMP_VALID != 0 {
+                    ccds.push((ccd as usize, (raw & CCD_TEMP_MASK) as f32 * 0.125 - 49.0));
                 }
             }
             self.last = (temp, ccds);
