@@ -1,15 +1,15 @@
 //! The panel's own window: a borderless, topmost tool window that never takes
 //! the focus, drawn entirely by DirectComposition.
 
-use windows::core::{w, Result, BOOL};
+use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, LWA_ALPHA,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
-    PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -31,6 +31,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Clicking the panel must leave the focus where it was.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        // The pointer's shape, as the window's owner last set it (see
+        // `Window::point`): asked for at every move, before the move itself.
+        WM_SETCURSOR => {
+            let shape = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+            let shape = if shape == 0 { IDC_ARROW } else { PCWSTR(shape as *const u16) };
+            unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
+            LRESULT(1)
+        }
         WM_CAPTURECHANGED => {
             let _ = unsafe { PostMessageW(Some(hwnd), CAPTURE_LOST, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
@@ -54,9 +62,8 @@ impl Window {
             lpfnWndProc: Some(procedure),
             hInstance: instance.into(),
             lpszClassName: w!("GlancePanel"),
-            // None: each window sets the pointer's shape as it moves over
-            // it (an arrow, or what a drag there would do), and the system
-            // does not set it back between.
+            // None: each window says what the pointer looks like over it
+            // (`Window::point`).
             ..Default::default()
         };
         unsafe { RegisterClassW(&class) };
@@ -112,6 +119,15 @@ impl Window {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             // Above whatever took the top since it was last shown.
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        }
+    }
+
+    /// The pointer's shape over the window from here on: `shape`, one of
+    /// the system's (IDC_*).
+    pub fn point(&self, shape: PCWSTR) {
+        unsafe {
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, shape.0 as isize);
+            SetCursor(LoadCursorW(None, shape).ok());
         }
     }
 

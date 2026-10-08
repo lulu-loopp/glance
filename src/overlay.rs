@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR,
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, GetSystemMetrics, KillTimer, LoadCursorW, PostMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, TrackPopupMenuEx, SM_SWAPBUTTON, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, GetSystemMetrics, KillTimer, PostMessageW, SetForegroundWindow,
+    SetTimer, TrackPopupMenuEx, SM_SWAPBUTTON, IDC_ARROW, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
 use crate::reading::Sample;
@@ -249,15 +249,8 @@ impl Overlay {
     }
 
     /// The pointer's shape over edges `edges` (none: the whole overlay).
-    fn point_at(edges: Edges) {
-        let shape = match (edges.left || edges.right, edges.top || edges.bottom) {
-            (true, true) if edges.left == edges.top => IDC_SIZENWSE,
-            (true, true) => IDC_SIZENESW,
-            (true, false) => IDC_SIZEWE,
-            (false, true) => IDC_SIZENS,
-            (false, false) => IDC_SIZEALL,
-        };
-        unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
+    fn point_at(&self, edges: Edges) {
+        self.window.point(crate::panel::sizing(edges.left, edges.right, edges.top, edges.bottom));
     }
 
     /// The left button went down on it: unless it is locked, it is moved, or
@@ -285,13 +278,13 @@ impl Overlay {
         let Some(at) = cursor() else { return };
         let Some(grab) = self.grab else {
             if self.locked {
-                crate::panel::arrow();
+                self.window.point(IDC_ARROW);
             } else {
-                Self::point_at(self.edges_at(at));
+                self.point_at(self.edges_at(at));
             }
             return;
         };
-        Self::point_at(grab.edges);
+        self.point_at(grab.edges);
         let (dx, dy) = (at.x - grab.from.x, at.y - grab.from.y);
         let r = grab.rect;
         if !grab.edges.any() {

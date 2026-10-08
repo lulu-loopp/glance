@@ -740,24 +740,21 @@ impl Edges {
 /// pressing what is there (DIPs).
 const EDGE: f32 = 6.0;
 
-/// The pointer's own shape (the window's class sets none: it is set as the
-/// pointer moves over it).
-pub(crate) fn arrow() {
-    use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW};
-    unsafe { SetCursor(LoadCursorW(None, IDC_ARROW).ok()) };
-}
-
-/// The pointer's shape over edges `edges` (none: the bar, to move it).
-fn point_at(edges: Edges) {
-    use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE};
-    let shape = match (edges.left || edges.right, edges.top || edges.bottom) {
-        (true, true) if edges.left == edges.top => IDC_SIZENWSE,
+/// The pointer's shape over edges `edges` of what is dragged by them (none:
+/// the whole of it, moved).
+pub(crate) fn sizing(left: bool, right: bool, top: bool, bottom: bool) -> windows::core::PCWSTR {
+    use windows::Win32::UI::WindowsAndMessaging::{IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE};
+    match (left || right, top || bottom) {
+        (true, true) if left == top => IDC_SIZENWSE,
         (true, true) => IDC_SIZENESW,
         (true, false) => IDC_SIZEWE,
         (false, true) => IDC_SIZENS,
         (false, false) => IDC_SIZEALL,
-    };
-    unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
+    }
+}
+
+fn point_at(window: &Window, edges: Edges) {
+    window.point(sizing(edges.left, edges.right, edges.top, edges.bottom));
 }
 
 /// The desktop behind the window, captured as the panel opened (or again
@@ -1294,7 +1291,7 @@ impl<'a> Panel<'a> {
     /// a whole from the corner opposite them (its shape is its lanes').
     fn dragged(&mut self, now: Instant) {
         let (Some(drag), Some(cursor)) = (self.drag, cursor_position()) else { return };
-        point_at(drag.edges);
+        point_at(&self.window, drag.edges);
         let (dx, dy) = (cursor.x - drag.from.x, cursor.y - drag.from.y);
         let r = drag.rect;
         let e = drag.edges;
@@ -1595,8 +1592,8 @@ impl<'a> Panel<'a> {
         // Pinned, its edges and its bar show what a drag there does (the
         // rest moves it too, under the reader's arrow).
         match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
-            Some(edges) => point_at(edges),
-            None => arrow(),
+            Some(edges) => point_at(&self.window, edges),
+            None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
         let hover = self.hit_at(client).filter(|hit| hit.max_scroll().is_none());
         if hover != self.hover {
