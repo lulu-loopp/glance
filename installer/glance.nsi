@@ -1,4 +1,4 @@
-; Glance's installer: for every user of the machine, under Program Files
+﻿; Glance's installer: for every user of the machine, under Program Files
 ; unless another folder is chosen.
 ; Build with: makensis installer\glance.nsi (after cargo build --release).
 ;
