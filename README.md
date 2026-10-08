@@ -32,11 +32,15 @@ out with everything your PC is doing; move away and it slides back.
 ## The overlay
 
 A few readings floating over the screen, all the time or only while a game
-runs, on the game's screen. Drag it into place, drag its edges to size it,
-right-click it to lock it or close it. Choose its readings one by one (frame
-rate, 1% low, frame time, the CPU's and GPU's use, heat and power, memory,
-video memory, network, microphone), and whether they sit on a plate (grey
-or blue) or bare, each in a thin dark halo.
+runs, on the game's screen. Laid out as a card (the frame rate large, its
+last minute charted beside it, the rest in tiles) or as a strip of one to
+three rows, on frosted glass: the screen behind is blurred, and the glass is
+tinted dark or light by what is around it, just enough for every figure to
+read (on Windows 10 it is tinted, not blurred). Drag it into place, drag its
+edges to size it, right-click it to lock it or close it. Choose what it shows
+group by group, as for the panel (frame rate, CPU, GPU, memory, video memory,
+download and upload, microphone), each group's figures one by one, and drag
+the groups into the order you want.
 
 Frames are counted from Windows' own event tracing: nothing is injected into
 a game and its process is never opened, so anti-cheat has nothing to object
