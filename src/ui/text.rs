@@ -32,6 +32,7 @@ impl Lang {
     pub fn name(self, key: &str) -> String {
         let (zh, en) = match key {
             "system" => ("系统", "System"),
+            "cpu" => ("CPU", "CPU"),
             "chipset" => ("芯片组", "Chipset"),
             "cpu_socket" => ("CPU 插座", "CPU socket"),
             "pcie_x16" => ("PCIe x16 插槽", "PCIe x16 slot"),

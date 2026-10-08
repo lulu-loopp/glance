@@ -1,7 +1,8 @@
 //! The motherboard's Super I/O chip, which measures the board's temperatures
 //! and every fan header's speed. Read through PawnIO's LpcIO module. ITE
-//! chips (Gigabyte, ASRock and others) and Nuvoton's NCT6779D and NCT679x
-//! (ASUS, ASRock, some MSI and Gigabyte boards) are supported.
+//! chips (Gigabyte, ASRock and others), Nuvoton's NCT6779D and NCT679x
+//! (ASUS, ASRock, some MSI and Gigabyte boards), and Nuvoton's NCT6683D,
+//! NCT6686D and NCT6687D (MSI's boards above all) are supported.
 
 use crate::reading::BoardSensors;
 use crate::pawnio::Module;
@@ -43,6 +44,49 @@ const NUVOTON_FANS: [u16; 7] = [0x4C0, 0x4C2, 0x4C4, 0x4C6, 0x4C8, 0x4CA, 0x4CE]
 const NUVOTON_VENDOR: (u16, u16) = (0x804F, 0x004F);
 const NUVOTON_VENDOR_ID: u16 = 0x5CA3;
 
+/// Nuvoton's NCT6683D, NCT6686D and NCT6687D, read as Linux's nct6683
+/// driver reads them: through an embedded controller's space, a page and an
+/// index written and a byte read at these offsets from the monitor's base
+/// (itself 4 past the logical device's address); 32 monitoring channels,
+/// each set to a source (a temperature below 0x60, a voltage from there),
+/// in 1/256 °C; 16 fan inputs, each in use if its configuration's top bit
+/// is, in RPM.
+const NUVOTON_EC_IDS: [u16; 3] = [0xC730, 0xD440, 0xD590];
+const EC_OFFSET: u64 = 4;
+const EC_PAGE: u64 = 0;
+const EC_INDEX: u64 = 1;
+const EC_DATA: u64 = 2;
+const EC_LOGICAL_DEVICE_ENABLE: u64 = 0x30;
+const EC_CHANNELS: u16 = 32;
+const EC_MONITOR: u16 = 0x100;
+const EC_MONITOR_SOURCE: u16 = 0x1A0;
+const EC_FAN_RPM: u16 = 0x140;
+const EC_FAN_INPUT: u16 = 0x1C0;
+const EC_FANS: u16 = 16;
+/// Bit 7: monitoring running.
+const EC_CONFIG: u16 = 0x180;
+const EC_CUSTOMER: u16 = 0x602;
+/// The boards' makers whose firmware Linux trusts this way of reading
+/// with: Intel, MiTAC, MSI's four, AMD, ASRock's seven.
+const EC_CUSTOMERS: [u16; 14] = [0x805, 0xA0E, 0x201, 0x200, 0x207, 0x20D, 0x162B, 0xE2C, 0xE1B, 0x1631, 0x163E, 0x1621, 0x1633, 0x163D];
+
+/// What a monitoring channel's source is, as Glance names inputs: the CPU
+/// as the board sees it (AMD's TSI, Intel's PECI, the PCH's view of it),
+/// the chipset; none for one to be numbered, or a voltage.
+fn ec_source_name(source: u8) -> Option<&'static str> {
+    match source {
+        0x20..=0x27 | 0x30 | 0x42..=0x49 => Some("cpu"),
+        0x31 | 0x33 => Some("chipset"),
+        _ => None,
+    }
+}
+
+/// Whether a channel's source is a temperature (and not disabled, reserved
+/// or a voltage).
+fn ec_source_is_temperature(source: u8) -> bool {
+    matches!(source, 0x01..=0x18 | 0x20..=0x2B | 0x30..=0x41 | 0x42..=0x49 | 0x50..=0x57)
+}
+
 
 /// What each of the chip's inputs is wired to on a given board, as the
 /// board's maker labels them. Names are keys the page translates.
@@ -65,9 +109,10 @@ fn layout(vendor: &str, chip: u16) -> Option<&'static Layout> {
 enum Kind {
     /// With its number of temperature inputs and fan headers.
     Ite { temps: u8, fans: usize },
-    /// With its number of fan headers.
     /// How many of the temperature inputs and fan headers below it has.
     Nuvoton { temps: usize, fans: usize },
+    /// Read through its embedded controller's space.
+    NuvotonEc,
 }
 
 pub struct SuperIo {
@@ -77,6 +122,10 @@ pub struct SuperIo {
     chip: u16,
     layout: Option<&'static Layout>,
     base: u64,
+    /// On an embedded controller's chip: the channels that are temperatures
+    /// (register, and name), and the fans in use (register, and name).
+    ec_temps: Vec<(u16, String)>,
+    ec_fans: Vec<(u16, String)>,
     /// The latest readings, kept while another program has the ISA bus.
     last: BoardSensors,
 }
@@ -87,7 +136,7 @@ impl SuperIo {
     pub fn describe(&self) -> String {
         let maker = match self.kind {
             Kind::Ite { .. } => "ITE",
-            Kind::Nuvoton { .. } => "Nuvoton",
+            Kind::Nuvoton { .. } | Kind::NuvotonEc => "Nuvoton",
         };
         let wiring = if self.layout.is_some() { "board layout known" } else { "generic input names" };
         format!("{maker} chip {:04X} at {:#X}, {wiring}", self.chip, self.base)
@@ -115,11 +164,20 @@ impl SuperIo {
                     continue;
                 }
             };
-            if base < 0x100 || base & 0xF007 != 0 {
+            // The embedded controller's space sits 4 into an 8-port block.
+            let usable = match kind {
+                Kind::NuvotonEc => base >= 0x100 && base & 0xF007 == EC_OFFSET,
+                _ => base >= 0x100 && base & 0xF007 == 0,
+            };
+            if !usable {
                 seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
                 continue;
             }
-            let found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, last: BoardSensors::default() };
+            let mut found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, ec_temps: Vec::new(), ec_fans: Vec::new(), last: BoardSensors::default() };
+            if let Kind::NuvotonEc = kind {
+                found.set_up_ec().map_err(|why| format!("{port:#X}: Nuvoton chip {chip:04X}, {why}"))?;
+                return Ok(found);
+            }
             // A Nuvoton monitor that answers is one from Nuvoton.
             if let Kind::Nuvoton { .. } = kind {
                 let vendor = found.register(NUVOTON_VENDOR.0).zip(found.register(NUVOTON_VENDOR.1));
@@ -132,10 +190,65 @@ impl SuperIo {
         Err(seen.join("; "))
     }
 
+    /// On an embedded controller's chip: checks that the board's maker is
+    /// one whose firmware reads this way, starts monitoring if it is not
+    /// running, and finds the temperature channels and the fans in use.
+    fn set_up_ec(&mut self) -> Result<(), String> {
+        let customer = self.register16(EC_CUSTOMER).ok_or("not answering")?;
+        if !EC_CUSTOMERS.contains(&customer) {
+            return Err(format!("its maker's firmware ({customer:04X}) not known to read this way"));
+        }
+        let config = self.register(EC_CONFIG).ok_or("not answering")?;
+        if config & 0x80 == 0 {
+            self.write_ec(EC_CONFIG, config | 0x80).ok_or("monitoring would not start")?;
+        }
+        let mut numbered = 0;
+        for channel in 0..EC_CHANNELS {
+            let Some(source) = self.register(EC_MONITOR_SOURCE + channel).map(|s| s & 0x7F) else { continue };
+            if !ec_source_is_temperature(source) {
+                continue;
+            }
+            // A second channel of a named source goes by a number, as the rest.
+            let name = ec_source_name(source).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name));
+            let name = name.map(str::to_string).unwrap_or_else(|| {
+                numbered += 1;
+                numbered.to_string()
+            });
+            self.ec_temps.push((EC_MONITOR + channel * 2, name));
+        }
+        for fan in 0..EC_FANS {
+            if self.register(EC_FAN_INPUT + fan).is_some_and(|input| input & 0x80 != 0) {
+                self.ec_fans.push((EC_FAN_RPM + fan * 2, (self.ec_fans.len() + 1).to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Two registers on an embedded controller's chip, high byte first.
+    fn register16(&self, register: u16) -> Option<u16> {
+        Some((self.register(register)? as u16) << 8 | self.register(register + 1)? as u16)
+    }
+
+    /// Writes a register in an embedded controller's space.
+    fn write_ec(&self, register: u16, value: u8) -> Option<()> {
+        let out = |port, value: u64| self.module.call("ioctl_pio_outb", &[port, value], &mut []).ok();
+        out(self.base + EC_PAGE, 0xFF)?;
+        out(self.base + EC_PAGE, (register >> 8) as u64)?;
+        out(self.base + EC_INDEX, (register & 0xFF) as u64)?;
+        out(self.base + EC_DATA, value as u64).map(|_| ())
+    }
+
     /// A monitor register: the low byte, in the bank of the high byte on a
-    /// Nuvoton chip.
+    /// Nuvoton chip; on an embedded controller's, the page of the high byte
+    /// (opened by writing all ones to the page port first).
     fn register(&self, register: u16) -> Option<u8> {
         let out = |port, value: u64| self.module.call("ioctl_pio_outb", &[port, value], &mut []).ok();
+        if let Kind::NuvotonEc = self.kind {
+            out(self.base + EC_PAGE, 0xFF)?;
+            out(self.base + EC_PAGE, (register >> 8) as u64)?;
+            out(self.base + EC_INDEX, (register & 0xFF) as u64)?;
+            return self.module.read("ioctl_pio_inb", self.base + EC_DATA).ok().map(|v| v as u8);
+        }
         if let Kind::Nuvoton { .. } = self.kind {
             out(self.base + ADDRESS_OFFSET, NUVOTON_BANK as u64)?;
             out(self.base + DATA_OFFSET, (register >> 8) as u64)?;
@@ -169,6 +282,21 @@ impl SuperIo {
                     // A stopped or absent fan reads all ones.
                     if count > 0 && count < 0xFFFF {
                         sensors.fans.push((self.name(fan, |l| l.fans), 1.35e6 / (count as f32 * 2.0)));
+                    }
+                }
+            }
+            Kind::NuvotonEc => {
+                for (register, name) in &self.ec_temps {
+                    // In 1/256 °C, kept to the half degree the chip measures.
+                    let celsius = self.register16(*register).map(|raw| (raw as i16 / 128) as f32 / 2.0).filter(|&c| c > 0.0 && c < 127.0);
+                    if let Some(value) = celsius {
+                        sensors.temps.push((name.clone(), value));
+                    }
+                }
+                for (register, name) in &self.ec_fans {
+                    // A stopped fan reads zero.
+                    if let Some(rpm) = self.register16(*register).filter(|&rpm| rpm > 0 && rpm < 0xFFFF) {
+                        sensors.fans.push((name.clone(), rpm as f32));
                     }
                 }
             }
@@ -244,6 +372,17 @@ fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> 
             module.call("ioctl_pio_outb", &[port, 0x87], &mut []).map_err(|_| None)?;
         }
         let chip = module.read("ioctl_superio_inw", CHIP_ID).map_err(|_| None)? as u16;
+        if NUVOTON_EC_IDS.contains(&(chip & 0xFFF0)) {
+            module.call("ioctl_find_bars", &[], &mut []).map_err(|_| None)?;
+            module.call("ioctl_superio_outb", &[DEVICE_SELECT, NUVOTON_MONITOR], &mut []).map_err(|_| None)?;
+            // Left as the firmware set it: a disabled controller is not ours to start.
+            let enabled = module.read("ioctl_superio_inb", EC_LOGICAL_DEVICE_ENABLE).map_err(|_| None)? & 0x01 != 0;
+            if !enabled {
+                return Err(Some(format!("Nuvoton chip {chip:04X}, its embedded controller disabled")));
+            }
+            let address = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)? & !7;
+            return Ok((Kind::NuvotonEc, chip, address + EC_OFFSET));
+        }
         let Some((temps, fans)) = nuvoton_layout(chip) else {
             return Err(answered(chip).then(|| format!("chip {chip:04X}, not supported")));
         };
@@ -309,6 +448,22 @@ mod tests {
         assert_eq!(super::nuvoton_layout(0xD423), Some((7, 6)));
         assert_eq!(super::nuvoton_layout(0xC562), Some((6, 5)));
         assert_eq!(super::nuvoton_layout(0x8689), None);
+        // The NCT6687D is read through its embedded controller instead.
+        assert!(super::NUVOTON_EC_IDS.contains(&(0xD592 & 0xFFF0)));
+        assert_eq!(super::nuvoton_layout(0xD592), None);
+    }
+
+    #[test]
+    fn names_the_embedded_controllers_sources() {
+        // AMD's TSI and Intel's PECI are the CPU; thermistors are numbered.
+        assert_eq!(super::ec_source_name(0x46), Some("cpu"));
+        assert_eq!(super::ec_source_name(0x20), Some("cpu"));
+        assert_eq!(super::ec_source_name(0x0B), None);
+        assert!(super::ec_source_is_temperature(0x0B));
+        // Disabled, reserved and voltages are not temperatures.
+        assert!(!super::ec_source_is_temperature(0x00));
+        assert!(!super::ec_source_is_temperature(0x19));
+        assert!(!super::ec_source_is_temperature(0x60));
     }
 
     /// Needs administrator rights and the PawnIO driver.
