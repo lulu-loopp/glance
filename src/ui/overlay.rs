@@ -151,9 +151,11 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
     let label = lines.iter().map(|(name, ..)| frame.measure(name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
-    let (ascent_value, _) = frame.baseline(VALUE);
+    let (ascent_value, descent_value) = frame.baseline(VALUE);
     for (i, (name, value, hot)) in lines.iter().enumerate() {
-        let y = PAD.1 + i as f32 * LINE + (LINE - VALUE.size) / 2.0;
+        // The value's line box centred in its line, as tall as the face
+        // makes it (more than its size).
+        let y = PAD.1 + i as f32 * LINE + (LINE - ascent_value - descent_value) / 2.0;
         let color = if name == "FPS" { FRAMES } else { NAME };
         frame.text(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label, Align::Start);
         frame.text(value, VALUE, if *hot { HOT } else { FIGURE }, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
