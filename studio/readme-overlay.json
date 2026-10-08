@@ -1,0 +1,10 @@
+{
+  "width": 1920, "height": 1080, "scale": 1.5, "fps": 30,
+  "wallpaper": "target/studio/wall-wide-dark.png",
+  "shots": [
+    { "name": "overlay-card-zh", "skin": "glass", "seconds": 0.034, "load": [0.6, 0.6], "game": "Game", "overlay": "card", "modules": ["cpu"] },
+    { "name": "overlay-strip-zh", "skin": "glass", "seconds": 0.034, "load": [0.6, 0.6], "game": "Game", "overlay": "strip", "modules": ["cpu"] },
+    { "name": "overlay-card-en", "skin": "glass", "lang": "en", "seconds": 0.034, "load": [0.6, 0.6], "game": "Game", "overlay": "card", "modules": ["cpu"] },
+    { "name": "overlay-strip-en", "skin": "glass", "lang": "en", "seconds": 0.034, "load": [0.6, 0.6], "game": "Game", "overlay": "strip", "modules": ["cpu"] }
+  ]
+}

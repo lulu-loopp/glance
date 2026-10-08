@@ -42,6 +42,10 @@ group by group, as for the panel (frame rate, CPU, GPU, memory, video memory,
 download and upload, microphone), each group's figures one by one, and drag
 the groups into the order you want.
 
+![The overlay as a card: the frame rate large, charted beside it, the CPU and GPU in tiles](docs/images/overlay-card-en.webp)
+
+![The overlay as a strip, in one row](docs/images/overlay-strip-en.webp)
+
 Frames are counted from Windows' own event tracing: nothing is injected into
 a game and its process is never opened, so anti-cheat has nothing to object
 to. Games using DirectX are covered; Vulkan and OpenGL games show no frame

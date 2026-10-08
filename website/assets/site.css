@@ -197,6 +197,7 @@ html[lang="en"] h2 { letter-spacing: -0.02em; line-height: 1.15; }
 .feature .ic svg { width: 21px; height: 21px; }
 .feature h3 { margin: 0 0 8px; font-size: 18px; font-weight: 600; line-height: 1.4; }
 .feature p { margin: 0; color: var(--ink-2); font-size: 15px; }
+.feature .shot { display: block; width: 100%; max-width: 260px; height: auto; margin-top: 16px; border-radius: 12px; }
 
 
 /* quiet numbers */
