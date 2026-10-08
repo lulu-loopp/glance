@@ -105,9 +105,6 @@ pub struct GameSample {
     pub low: Option<f32>,
     /// The longest frame of the last second, in milliseconds.
     pub longest_ms: f32,
-    /// Whether its window covers its whole screen (borderless, or exclusive
-    /// fullscreen).
-    pub fills_screen: bool,
     /// The refresh rate of its screen.
     pub refresh_hz: Option<u32>,
     /// Its screen, in physical pixels: left, top, right, bottom.
@@ -126,9 +123,9 @@ pub struct GameSample {
     /// What holds back the clock of the GPU it uses most, where its driver
     /// says (NVIDIA's).
     pub gpu_limit: Option<GpuLimit>,
-    /// How long it has been played: since it first presented frames, through
-    /// short times away from it. None for a program that is no game.
-    pub playing_s: Option<u64>,
+    /// How long it has been played (seconds): since it first presented
+    /// frames, through short times away from it.
+    pub playing_s: u64,
 }
 
 /// What holds a GPU's clock below what it could run at.

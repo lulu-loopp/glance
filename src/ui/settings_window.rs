@@ -41,7 +41,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
-    SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_DESTROY,
+    SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
@@ -90,7 +90,7 @@ const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
 /// A slider's track, the room for its value, and its thumb's radius.
-const SLIDER_WIDTH: f32 = 200.0;
+const SLIDER_WIDTH: f32 = 160.0;
 const SLIDER_VALUE: f32 = 44.0;
 const SLIDER_THUMB: f32 = 10.0;
 /// The narrowest a row's word may be beside its choices.
@@ -424,7 +424,7 @@ enum Target {
 }
 
 enum Row {
-    /// The page's name; on the modules' page, with the modes' choice.
+    /// The page's name.
     Title,
     Skins,
     Choice(Field),
@@ -684,6 +684,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.release(x as f32 / ui.scale, y as f32 / ui.scale));
             LRESULT(0)
         }
+        // The pointer taken away mid-drag (Alt+Tab, another program): let go
+        // where it is. (Let go by the window itself, it is already.)
+        WM_CAPTURECHANGED => {
+            with_ui(|ui| ui.let_go());
+            LRESULT(0)
+        }
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
             let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
@@ -726,6 +732,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             crate::tray::hold_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back
             // what they held.
+            // Closed mid-drag: what was dragged is kept.
+            with_ui(|ui| ui.let_go());
             let ui = UI.with(|cell| cell.borrow_mut().take());
             if let Some(ui) = ui {
                 let gfx = ui.gfx.clone();
@@ -736,6 +744,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// Sets `field`, a slider's, to `value` in `settings`.
+fn put_slider(settings: &mut Settings, field: Field, value: f32) {
+    match field {
+        Field::PanelSize => settings.panel_size = value,
+        Field::OverlaySize => settings.overlay.size = value,
+        _ => settings.overlay.opacity = value,
     }
 }
 
@@ -1218,16 +1235,24 @@ impl Ui {
     }
 
     /// Sets a slider's value, to its nearest step; the panel and the overlay
-    /// show it at once (it is kept by `save`).
+    /// show it at once, with the settings as they are held (it is kept by
+    /// `keep_slider`).
     fn set_slider(&mut self, field: Field, value: f32) {
         let (_, min, max, step, _) = self.slider(field);
         let value = (min + ((value - min) / step).round() * step).clamp(min, max);
-        match field {
-            Field::PanelSize => self.settings.panel_size = value,
-            Field::OverlaySize => self.settings.overlay.size = value,
-            _ => self.settings.overlay.opacity = value,
-        }
-        crate::app().controller.apply(&self.settings);
+        put_slider(&mut self.settings, field, value);
+        let app = crate::app();
+        let mut live = app.settings.lock().unwrap().clone();
+        put_slider(&mut live, field, value);
+        app.controller.apply(&live);
+        self.next_frame = Instant::now();
+    }
+
+    /// Keeps a slider's value, and only it: the settings changed elsewhere
+    /// while it slid (the overlay placed, a game's offer made) stand.
+    fn keep_slider(&mut self, field: Field) {
+        let value = self.slider(field).4;
+        crate::app().change(|held| put_slider(held, field, value));
         self.next_frame = Instant::now();
     }
 
@@ -1549,21 +1574,15 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
-    fn release(&mut self, x: f32, y: f32) {
-        self.pointer = Some((x, y));
-        // Kept once let go; shown live as it slid.
-        if self.sliding.take().is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+    /// A slider or a module let go (or the pointer taken away mid-drag, by
+    /// another window or the window closing): kept where it was left.
+    fn let_go(&mut self) {
+        // Shown live as it slid.
+        if let Some((field, _)) = self.sliding.take() {
             self.pressed = None;
-            self.save();
-            return;
+            self.keep_slider(field);
         }
         if let Some(drag) = self.drag.take() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
             // The held row settles into its place.
             let slot = self.row_top(&drag.id);
             let now = Instant::now();
@@ -1572,6 +1591,16 @@ impl Ui {
             self.motion.insert(format!("row:{}", drag.id), settle);
             self.pressed = None;
             self.save();
+        }
+    }
+
+    fn release(&mut self, x: f32, y: f32) {
+        self.pointer = Some((x, y));
+        if self.sliding.is_some() || self.drag.is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            self.let_go();
             return;
         }
         let pressed = self.pressed.take();
@@ -1744,7 +1773,7 @@ impl Ui {
                         let next = (value + if forward { step } else { -step }).clamp(min, max);
                         if next != value {
                             self.set_slider(field, next);
-                            self.save();
+                            self.keep_slider(field);
                         }
                     }
                     Some(Target::Choice(field, index)) => {
@@ -2065,12 +2094,13 @@ impl Ui {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let (name, min, max, _, value) = self.slider(field);
                     let cy = y + row_height / 2.0;
-                    text_centred(frame, name, label, palette.text, left + ROW_SIDE, cy, width / 2.0, Align::Start);
-                    // The value on the right; the track before it.
+                    // The value on the right; the track before it; the name
+                    // in the room left.
                     let right = left + width - ROW_SIDE;
+                    let track = Rect { x: right - SLIDER_VALUE - 12.0 - SLIDER_WIDTH, y, w: SLIDER_WIDTH, h: row_height };
+                    text_centred(frame, name, label, palette.text, left + ROW_SIDE, cy, track.x - 12.0 - (left + ROW_SIDE), Align::Start);
                     let shown = format!("{:.0}%", value * 100.0);
                     text_centred(frame, &shown, label, palette.text2, right - SLIDER_VALUE, cy, SLIDER_VALUE, Align::End);
-                    let track = Rect { x: right - SLIDER_VALUE - 12.0 - SLIDER_WIDTH, y, w: SLIDER_WIDTH, h: row_height };
                     let (start, end) = (track.x + SLIDER_THUMB, track.x + track.w - SLIDER_THUMB);
                     let at = start + (value - min) / (max - min) * (end - start);
                     fill(frame, palette.switch_stroke.alpha(0.45), start, cy - 2.0, end - start, 4.0, 2.0);

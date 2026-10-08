@@ -218,7 +218,7 @@ impl Sampler {
             _ => now,
         };
         self.playing = Some((program.clone(), start, now));
-        let playing_s = Some(now.duration_since(start).as_secs());
+        let playing_s = now.duration_since(start).as_secs();
         let usage = self.processes.usage_of(pid);
         let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
         let gpu_limit = adapter.and_then(|a| a.power).and_then(|reader| self.gpu_power.limit(reader));
@@ -240,7 +240,6 @@ impl Sampler {
             fps: presenting.stats.fps,
             low: presenting.stats.low,
             longest_ms: presenting.stats.longest_ms,
-            fills_screen: presenting.fills_screen,
             refresh_hz: presenting.refresh_hz,
             screen: presenting.screen,
             gpu_index: self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().position(|a| a.luid == *luid)),

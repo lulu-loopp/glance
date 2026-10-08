@@ -111,7 +111,7 @@ impl App {
     /// settings window) all stand; keeps them; and only then has the panel,
     /// the settings window and the tray follow, so that they read them as
     /// changed.
-    fn change(&self, change: impl FnOnce(&mut Settings)) {
+    pub fn change(&self, change: impl FnOnce(&mut Settings)) {
         let settings = {
             let mut held = self.settings.lock().unwrap();
             change(&mut held);

@@ -242,8 +242,8 @@ mod tests {
     /// For a look at a game in front: run elevated, with the game in front
     /// (`PRESENTS_OUT` names the file the readings go to).
     #[test]
-    #[ignore = "needs administrator rights and a game in front"]
-    fn reads_the_program_in_front() {
+    #[ignore = "needs administrator rights and a game running"]
+    fn reads_the_presenting_windows() {
         use std::io::Write;
         let mut out = std::fs::File::create(std::env::var("PRESENTS_OUT").unwrap()).unwrap();
         start();

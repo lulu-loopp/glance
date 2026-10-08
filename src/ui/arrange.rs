@@ -23,19 +23,20 @@ const TOP_SHARE: f32 = 0.6;
 /// as the screen's width allows it: chosen, it may be more than a panel
 /// along a side takes by itself.
 pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32) -> (Layout, f32) {
-    // Laid out for the screen as the panel's own DIPs at that size measure it.
-    let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns);
+    // Laid out for the screen as the panel's own DIPs at that size measure
+    // it: the gaps from the screen's ends stay as they are on the screen.
+    let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns, GAP / size);
     (layout, zoom * size)
 }
 
-fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>) -> (Layout, f32) {
+fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32) -> (Layout, f32) {
     // The room the panel has: across from its edge it keeps a gap from the
     // far side; along its edge, from both ends.
     let (room_width, room) = match edge {
-        Edge::Left | Edge::Right => (work.0 - GAP - theme.inset, work.1 - 2.0 * GAP),
+        Edge::Left | Edge::Right => (work.0 - gap - theme.inset, work.1 - 2.0 * gap),
         // Along the top the panel grows sideways instead, and no lower than a
         // share of the screen.
-        Edge::Top => (work.0 - 2.0 * GAP, work.1 * TOP_SHARE - GAP - theme.inset),
+        Edge::Top => (work.0 - 2.0 * gap, work.1 * TOP_SHARE - gap - theme.inset),
     };
     // As many columns as fit across, and along a side no more than a few.
     let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
@@ -136,7 +137,7 @@ mod tests {
         assert_eq!((layout.columns, zoom), (1, 1.5));
         // Twice as large on a screen with room for less: as large as fits.
         let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], (400.0, 1000.0), Some(1), 2.0);
-        assert!(zoom < 2.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP * 2.0 + 0.01);
+        assert!(zoom < 2.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
     }
 
     #[test]

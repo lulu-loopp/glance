@@ -210,19 +210,20 @@ impl Controller {
             }
             let was = playing.now;
             playing.now = playing.last.is_some_and(|last| now.duration_since(last) < GAME_GAP);
+            // An overlay closed by hand stays closed for the rest of the
+            // game (cleared under the lock `set_overlay` closes it under).
+            if was && !playing.now {
+                self.overlay_closed.store(false, Ordering::Relaxed);
+            }
             (playing.now && !was, was && !playing.now)
         };
-        // An overlay closed by hand stays closed for the rest of the game.
-        if ended {
-            self.overlay_closed.store(false, Ordering::Relaxed);
-        }
         if started {
             // The first game ever, with the overlay off: it is offered.
-            let (on, offered) = {
+            let (on, in_game, offered) = {
                 let config = self.config.lock().unwrap();
-                (config.overlay.on, config.overlay.offered)
+                (config.overlay.on, config.overlay.in_game, config.overlay.offered)
             };
-            if !on && !offered {
+            if !on && !in_game && !offered {
                 let name = sample.game.as_ref().map(|game| game.name.clone()).unwrap_or_default();
                 std::thread::spawn(move || crate::app().offer_overlay(&name));
             }
@@ -261,11 +262,19 @@ impl Controller {
 
     /// The overlay opened or closed by hand (its button, its menu): closed,
     /// it is off, and if a game opened it, closed for the rest of that game;
-    /// opened, it is on.
+    /// opened, it is on, or during a game that opens it, only open again
+    /// for the rest of it.
     pub fn set_overlay(&self, open: bool) {
-        self.overlay_closed.store(!open && self.playing(), Ordering::Relaxed);
-        let on = self.config.lock().unwrap().overlay.on;
-        if on != open {
+        let (on, in_game) = {
+            let config = self.config.lock().unwrap();
+            (config.overlay.on, config.overlay.in_game)
+        };
+        let by_game = {
+            let playing = self.playing.lock().unwrap();
+            self.overlay_closed.store(!open && playing.now, Ordering::Relaxed);
+            in_game && playing.now
+        };
+        if on != open && !(open && by_game) {
             std::thread::spawn(move || crate::app().set_overlay(open));
         } else {
             self.post(RESTYLE);
@@ -349,7 +358,8 @@ impl Controller {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, panel.lang, playing, wanted);
+            let beneath = panel.is_shown().then_some(panel.window.hwnd);
+            overlay.show(history.back(), &settings, panel.lang, playing, wanted, beneath);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 

@@ -167,7 +167,6 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
         fps: 144.0,
         low: Some(118.0),
         longest_ms: 8.4,
-        fills_screen: true,
         refresh_hz: Some(144),
         screen: None,
         gpu_index: None,
@@ -176,7 +175,7 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
         mem: None,
         vram: None,
         gpu_limit: None,
-        playing_s: None,
+        playing_s: 0,
     };
     lines(s, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
 }
@@ -280,7 +279,6 @@ mod tests {
                         fps: 143.6,
                 low: None,
                 longest_ms: 9.26,
-                fills_screen: true,
                 refresh_hz: Some(144),
                 screen: None,
                 gpu_index: None,
@@ -289,7 +287,7 @@ mod tests {
                 mem: None,
                 vram: None,
                 gpu_limit: None,
-                playing_s: None,
+                playing_s: 0,
             }),
         }
     }

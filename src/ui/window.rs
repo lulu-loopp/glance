@@ -86,10 +86,16 @@ impl Window {
     }
 
     pub fn place(&self, rect: RECT) {
+        self.place_under(rect, None);
+    }
+
+    /// Placed at `rect`, above all, or just below `above` (another window
+    /// above all) while there is one.
+    pub fn place_under(&self, rect: RECT, above: Option<HWND>) {
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
-                Some(HWND_TOPMOST),
+                Some(above.unwrap_or(HWND_TOPMOST)),
                 rect.left,
                 rect.top,
                 rect.right - rect.left,

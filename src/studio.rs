@@ -372,7 +372,6 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             fps: 138.0 + 14.0 * wave(11.0, 0.4) + 4.0 * noise() - if stutter { 9.0 } else { 0.0 },
             low: Some(96.0 + 6.0 * noise()),
             longest_ms: if stutter { 18.0 + 14.0 * noise() } else { 7.6 + 1.6 * noise() },
-            fills_screen: true,
             refresh_hz: Some(165),
             screen: None,
             gpu_index: Some(0),
@@ -381,7 +380,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             mem: Some((6.2 * gb as f32) as u64),
             vram: Some((7.9 * gb as f32) as u64),
             gpu_limit: Some(GpuLimit::Power),
-            playing_s: Some(47 * 60 + seed),
+            playing_s: 47 * 60 + seed,
         }
     });
     Sample {

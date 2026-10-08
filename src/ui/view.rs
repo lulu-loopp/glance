@@ -537,7 +537,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 facts.push((lang.pick("显卡", "GPU").into(), value, limit.is_some_and(|limit| matches!(limit, GpuLimit::Thermal | GpuLimit::Hardware))));
             }
             if on("time") {
-                facts.push((lang.pick("已玩", "Played").into(), shown(game.and_then(|g| g.playing_s), |s| lang.duration(s)), false));
+                facts.push((lang.pick("已玩", "Played").into(), shown(game.map(|g| g.playing_s), |s| lang.duration(s)), false));
             }
             if on("mic") && scene.seen.mic {
                 let muted = s.mic_muted;

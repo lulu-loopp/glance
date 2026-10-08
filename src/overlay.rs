@@ -51,6 +51,8 @@ pub struct Overlay {
     /// The screen of the game played, kept while it presents no frames
     /// for a moment.
     game_screen: Option<[i32; 4]>,
+    /// The panel's window while the panel is up: kept above the overlay.
+    beneath: Option<HWND>,
 }
 
 /// A drag under way: where the pointer, the overlay and its size were as it
@@ -130,15 +132,18 @@ impl Overlay {
             drawn: (Vec::new(), 1.0),
             grab: None,
             game_screen: None,
+            beneath: None,
         })
     }
 
     /// Shows the readings of `sample` as `settings` ask, while `wanted`:
     /// while a game is played (`playing`), with its frames, on its screen;
     /// otherwise on the screen it was put on. Hidden while not wanted, and
-    /// while there is nothing to show.
-    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool) {
+    /// while there is nothing to show. Above all but `beneath` (the open
+    /// panel's window).
+    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
+        self.beneath = beneath;
         self.lang = lang;
         let game = sample.and_then(|s| s.game.as_ref()).filter(|_| playing);
         let lines = sample.filter(|_| wanted).map(|s| overlay::lines(s, game, playing, &settings.items, lang)).unwrap_or_default();
@@ -182,8 +187,9 @@ impl Overlay {
     /// Its width and height on screen, at its size (physical pixels).
     fn dims(&self) -> (i32, i32) {
         let scale = self.dpi * self.size;
+        // Whole pixels already: rounded, not lifted a pixel by a float's error.
         let (width, height) = overlay::size(&self.drawn.0, scale, |text, font| self.gfx.measure(text, font));
-        ((width * scale).ceil() as i32, (height * scale).ceil() as i32)
+        ((width * scale).round() as i32, (height * scale).round() as i32)
     }
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
@@ -191,8 +197,9 @@ impl Overlay {
         if !self.follow_device() {
             return;
         }
-        // Placed above all again each time: a game may have taken the top.
-        self.window.place(self.rect);
+        // Placed above all again each time (a game may have taken the top),
+        // but for the open panel.
+        self.window.place_under(self.rect, self.beneath);
         let (lines, opacity, scale) = (&self.drawn.0, self.drawn.1, self.dpi * self.size);
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let dragged = self.grab.is_some();
@@ -209,6 +216,7 @@ impl Overlay {
         self.gfx.sweep();
         if !self.shown {
             self.window.show();
+            self.window.place_under(self.rect, self.beneath);
             self.shown = true;
         }
     }
@@ -258,7 +266,7 @@ impl Overlay {
         let r = grab.rect;
         if !grab.edges.any() {
             self.rect = RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy };
-            self.window.place(self.rect);
+            self.window.place_under(self.rect, self.beneath);
             return;
         }
         let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);

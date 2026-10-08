@@ -531,6 +531,9 @@ impl Surface {
             dc.SetTransform(&base);
             // A transparent surface takes no ClearType.
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            // The system's text rendering, unless the frame asks for crisp
+            // text: the context may be one another surface had it set on.
+            dc.SetTextRenderingParams(None);
             dc.Clear(Some(&D2D1_COLOR_F::default()));
         }
         let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
