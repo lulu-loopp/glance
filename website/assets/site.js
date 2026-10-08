@@ -27,6 +27,14 @@
   var root = document.documentElement;
   var lang = root.lang.indexOf("zh") === 0 ? "zh" : "en";
 
+  // A language chosen with the switch is kept: the Chinese page then no
+  // longer sends a browser that reads no Chinese to the English one (lang.js).
+  document.querySelectorAll("a[hreflang]").forEach(function (a) {
+    a.addEventListener("click", function () {
+      try { localStorage.setItem("glance-lang", a.hreflang.indexOf("zh") === 0 ? "zh" : "en"); } catch (e) { /* not kept: the browser's languages decide */ }
+    });
+  });
+
   var TEXT = {
     zh: {
       meta: function (v, size) { return v + " 版 · 免费" + (size ? " · " + size : ""); },
