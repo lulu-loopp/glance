@@ -501,16 +501,16 @@ impl Controller {
                 WM_LBUTTONDOWN if msg.hwnd == panel.window.hwnd => panel.press(lparam_point(msg.lParam)),
                 WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => panel.dragged(now),
                 WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.drag.is_some() => {
+                    // Kept here, in the order things happened (an unpin just
+                    // after stands).
                     if let Some((at, size)) = panel.let_go(now).filter(|(at, size)| at.is_some() || size.is_some()) {
-                        std::thread::spawn(move || {
-                            crate::app().change(|settings| {
-                                if at.is_some() {
-                                    settings.panel_at = at;
-                                }
-                                if let Some(size) = size {
-                                    settings.panel_size = size;
-                                }
-                            })
+                        crate::app().change(|settings| {
+                            if at.is_some() {
+                                settings.panel_at = at;
+                            }
+                            if let Some(size) = size {
+                                settings.panel_size = size;
+                            }
                         });
                     }
                 }
@@ -913,7 +913,9 @@ impl<'a> Panel<'a> {
         // "out of every capture", screenshots too. Only while it is up: a
         // window kept out of captures is "protected content" to recorders
         // (NVIDIA's Instant Replay stops for it), hidden or not.
-        self.window.exclude_from_capture(self.live && self.is_shown());
+        // (And while the desktop behind is about to be taken again, after a
+        // drag.)
+        self.window.exclude_from_capture((self.live || self.recapture.is_some()) && self.is_shown());
         self.dress();
     }
 
@@ -1303,16 +1305,36 @@ impl<'a> Panel<'a> {
     fn let_go(&mut self, now: Instant) -> Option<(Option<PanelAt>, Option<f32>)> {
         let drag = self.end_drag()?;
         let size = drag.sized.then_some(self.size);
+        // Moved or sized, the desktop behind is taken again for what it now covers.
+        let moved = self.placement.as_ref().is_some_and(|placement| placement.held.is_some());
+        if (drag.sized || moved) && self.skin.sees_backdrop() {
+            self.window.exclude_from_capture(true);
+            self.recapture = Some(now + RECAPTURE_WAIT);
+        }
+        self.next_frame = now;
         let placement = self.placement.as_mut()?;
-        let moved = placement.held.take().is_some() && !drag.edges.any();
-        if !(moved || drag.sized && placement.floating.is_some()) {
-            self.next_frame = now;
+        if placement.held.is_none() {
+            // Pressed and let go where it was, or sized against the edge.
             return Some((None, size));
         }
         let panel = placement.panel;
-        let (width, height) = (panel.right - panel.left, panel.bottom - panel.top);
-        let centre = POINT { x: panel.left + width / 2, y: panel.top + height / 2 };
+        let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
         let contact = monitor_at(centre)?;
+        if contact != placement.contact {
+            // Another screen: laid out afresh for it, its held corner where
+            // it was let go.
+            placement.contact = contact;
+            placement.px = contact.scale;
+            if let Some(opening) = self.opening.take() {
+                self.held = Some(opening.seen);
+            }
+            self.arrange();
+        }
+        // Where it now is, as far into the room on the screen's work area
+        // as that (wholly on it, as it is placed from now on).
+        let placement = self.placement.as_mut()?;
+        let panel = placement.panel;
+        let (width, height) = (panel.right - panel.left, panel.bottom - panel.top);
         let gap = (GAP * contact.scale).round() as i32;
         let work = contact.work;
         let share = |at: i32, low: i32, room: i32| if room > 0 { ((at - low - gap) as f32 / room as f32).clamp(0.0, 1.0) } else { 0.0 };
@@ -1321,20 +1343,12 @@ impl<'a> Panel<'a> {
             share(panel.top, work.top, work.bottom - work.top - 2 * gap - height),
         );
         placement.floating = Some(at);
+        placement.held = None;
+        self.arrange();
+        let placement = self.placement.as_mut()?;
+        let panel = placement.panel;
+        let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
         placement.anchor = centre;
-        if contact != placement.contact {
-            // Another screen: laid out afresh for it.
-            placement.contact = contact;
-            placement.px = contact.scale;
-            if let Some(opening) = self.opening.take() {
-                self.held = Some(opening.seen);
-            }
-        }
-        if self.skin.sees_backdrop() {
-            self.window.exclude_from_capture(true);
-            self.recapture = Some(now + RECAPTURE_WAIT);
-        }
-        self.next_frame = now;
         Some((Some(PanelAt { at, screen: (centre.x, centre.y) }), size))
     }
 
@@ -1540,7 +1554,7 @@ impl<'a> Panel<'a> {
                 // Unpinned away from the edge: it closes as the pointer
                 // leaves, and opens from the edge from then on.
                 if !self.pinned && self.floating() {
-                    std::thread::spawn(|| crate::app().place_panel(None));
+                    crate::app().place_panel(None);
                 }
             }
             Some(Hit::Overlay) => {

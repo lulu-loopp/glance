@@ -101,8 +101,25 @@ const GIGABYTE_IT8689E: Layout = Layout {
     fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "system_fan_4_pump", "cpu_opt_fan"],
 };
 
+/// Gigabyte's 800-series AM5 boards with an IT8696E wire its first five
+/// temperature inputs and fan headers as the IT8689E boards do, the fifth
+/// header aside; what the rest are wired to differs from board to board,
+/// and they keep their numbers (as LibreHardwareMonitor's tables of those
+/// boards have them).
+const GIGABYTE_IT8696E: Layout = Layout {
+    temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm"],
+    fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "cpu_opt_fan"],
+};
+
 fn layout(vendor: &str, chip: u16) -> Option<&'static Layout> {
-    (vendor.starts_with("Gigabyte") && chip == 0x8689).then_some(&GIGABYTE_IT8689E)
+    if !vendor.starts_with("Gigabyte") {
+        return None;
+    }
+    match chip {
+        0x8689 => Some(&GIGABYTE_IT8689E),
+        0x8696 => Some(&GIGABYTE_IT8696E),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy)]
