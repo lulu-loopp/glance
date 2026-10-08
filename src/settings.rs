@@ -85,6 +85,8 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
+    /// How opaque its plate is, 0–1.
+    pub opacity: f32,
     /// Offered once already: the first game told of it.
     pub offered: bool,
 }
@@ -98,6 +100,7 @@ impl Default for OverlaySettings {
             at: (0.0, 0.0),
             screen: None,
             locked: false,
+            opacity: 0.85,
             offered: false,
         }
     }

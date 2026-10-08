@@ -66,14 +66,17 @@ use super::overlay::ITEMS as OVERLAY_ITEMS;
 use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
-const SIZE: (f32, f32) = (1120.0, 760.0);
-const MIN_SIZE: (f32, f32) = (900.0, 560.0);
+const SIZE: (f32, f32) = (1300.0, 760.0);
+const MIN_SIZE: (f32, f32) = (1080.0, 560.0);
 /// The first Windows 11 build that lets a window ask for Mica.
 const FIRST_MICA_BUILD: u32 = 22621;
 
 /// The list of choices: its width, its padding (top, sides, bottom), and
 /// the thin scroll bar's gutter.
 const PANE: f32 = 480.0;
+/// The pages' list, left of the page.
+const NAV: f32 = 200.0;
+const NAV_ITEM: f32 = 40.0;
 const PAD_TOP: f32 = 28.0;
 const PAD_SIDE: f32 = 36.0;
 const PAD_BOTTOM: f32 = 48.0;
@@ -85,8 +88,8 @@ const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
-/// The heading of the modules, with the modes' choice on its line.
-const MODE_HEADING: f32 = 40.0;
+/// The page's name, at the top of the page.
+const TITLE: f32 = 52.0;
 /// The overlay's chips: their height, the room beside their text, and
 /// between them; and where the first line of them starts in their card.
 const CHIP: f32 = 30.0;
@@ -99,7 +102,6 @@ const ITEM_ROW: f32 = 48.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
-const GROUP_GAP: f32 = 32.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
@@ -157,6 +159,13 @@ pub fn open() {
     if let Some(hwnd) = make(gfx) {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
     }
+}
+
+/// Opens the window (on the calling thread, the panel's, as `open`) at
+/// the game mode's page: from the overlay's menu.
+pub fn open_at_game_mode() {
+    open();
+    with_ui(|ui| ui.turn_to(Page::Game));
 }
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
@@ -268,6 +277,44 @@ fn module_fields(id: &str) -> &'static [Field] {
     }
 }
 
+/// The settings, a group to a page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Page {
+    Appearance,
+    Opening,
+    Shown,
+    Game,
+    Data,
+    System,
+}
+
+const PAGES: [Page; 6] = [Page::Appearance, Page::Opening, Page::Shown, Page::Game, Page::Data, Page::System];
+
+impl Page {
+    fn name(self, lang: Lang) -> &'static str {
+        match self {
+            Page::Appearance => pick(lang, "外观", "Appearance"),
+            Page::Opening => pick(lang, "呼出", "Opening"),
+            Page::Shown => pick(lang, "显示内容", "Shown"),
+            Page::Game => pick(lang, "游戏模式", "Game mode"),
+            Page::Data => pick(lang, "数据", "Data"),
+            Page::System => pick(lang, "系统", "System"),
+        }
+    }
+
+    /// Its glyph in the system's icon font.
+    fn glyph(self) -> &'static str {
+        match self {
+            Page::Appearance => "\u{E790}",
+            Page::Opening => "\u{E8B0}",
+            Page::Shown => "\u{E8A9}",
+            Page::Game => "\u{E7FC}",
+            Page::Data => "\u{E9D2}",
+            Page::System => "\u{E770}",
+        }
+    }
+}
+
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
@@ -289,6 +336,7 @@ enum Field {
     LoadAlert,
     TempAlert,
     OverlayWhen,
+    OverlayOpacity,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -331,6 +379,8 @@ enum Target {
     ClearShortcut,
     /// One of the overlay's readings, on or off.
     OverlayItem(&'static str),
+    /// A page, in the pages' list.
+    Page(Page),
     /// Asks for a newer release now.
     CheckNow,
     Diagnostics,
@@ -340,8 +390,8 @@ enum Target {
 }
 
 enum Row {
+    /// The page's name; on the modules' page, with the modes' choice.
     Title,
-    Heading(&'static str, &'static str),
     Skins,
     Choice(Field),
     Switch(Switch),
@@ -349,8 +399,6 @@ enum Row {
     /// In a module's open card: one of its items, or a choice of its own.
     Item(String, &'static str),
     ModuleChoice(String, Field),
-    /// "Shown", with the choice of the mode whose modules follow.
-    ModeHeading,
     /// What the overlay shows: a chip for each reading.
     OverlayItems,
     Shortcut,
@@ -392,6 +440,8 @@ struct Ui {
     prefs: Prefs,
     /// The mode whose modules and columns are being set.
     editing: Mode,
+    /// The page shown.
+    page: Page,
     lang: Lang,
     dark: bool,
     palette: Palette,
@@ -500,6 +550,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             settings,
             prefs,
             editing,
+            page: Page::Appearance,
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
@@ -696,60 +747,67 @@ impl Ui {
     }
 
     fn rows(&self) -> Vec<Row> {
-        let mut rows = vec![
-            Row::Title,
-            Row::Heading("外观", "Appearance"),
-            Row::Skins,
-            Row::Choice(Field::Theme),
-            Row::Switch(Switch::Live),
-            Row::Choice(Field::Language),
-            Row::Heading("呼出", "Opening"),
-            Row::Choice(Field::Edge),
-            Row::Choice(Field::Anchor),
-            Row::Choice(Field::Push),
-            Row::Choice(Field::CloseDelay),
-            Row::Shortcut,
-            Row::Choice(Field::OverFullscreen),
-            Row::ModeHeading,
-            Row::Choice(Field::Columns),
-        ];
-        for entry in &self.prefs.modules {
-            rows.push(Row::Module(entry.id.clone()));
-            // A card's rows, while it is open or still closing.
-            if self.opened(&entry.id) > 0.0 {
-                rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
-                rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
+        let mut rows = vec![Row::Title];
+        match self.page {
+            Page::Appearance => rows.extend([Row::Skins, Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
+            Page::Opening => rows.extend([
+                Row::Choice(Field::Edge),
+                Row::Choice(Field::Anchor),
+                Row::Choice(Field::Push),
+                Row::Choice(Field::CloseDelay),
+                Row::Shortcut,
+                Row::Choice(Field::OverFullscreen),
+            ]),
+            Page::Shown => {
+                rows.push(Row::Choice(Field::Columns));
+                for entry in &self.prefs.modules {
+                    rows.push(Row::Module(entry.id.clone()));
+                    // A card's rows, while it is open or still closing.
+                    if self.opened(&entry.id) > 0.0 {
+                        rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
+                        rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
+                    }
+                }
+            }
+            Page::Game => rows.extend([
+                Row::Switch(Switch::AutoGame),
+                Row::Switch(Switch::Overlay),
+                Row::Choice(Field::OverlayWhen),
+                Row::Choice(Field::OverlayOpacity),
+                Row::OverlayItems,
+            ]),
+            Page::Data => rows.extend([
+                Row::Choice(Field::Interval),
+                Row::Choice(Field::Span),
+                Row::Choice(Field::LoadAlert),
+                Row::Choice(Field::TempAlert),
+                Row::Switch(Switch::HeatAlert),
+            ]),
+            Page::System => {
+                // The switches together, then the buttons.
+                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
+                if update::available().is_some() {
+                    rows.push(Row::Update);
+                }
+                rows.push(Row::Diagnostics);
+                if self.uninstaller.is_some() {
+                    rows.push(Row::Uninstall);
+                }
+                rows.push(Row::Quit);
             }
         }
-        rows.extend([
-            Row::Heading("游戏模式", "Game mode"),
-            Row::Switch(Switch::AutoGame),
-            Row::Switch(Switch::Overlay),
-            Row::Choice(Field::OverlayWhen),
-            Row::OverlayItems,
-        ]);
-        rows.extend([
-            Row::Heading("数据", "Data"),
-            Row::Choice(Field::Interval),
-            Row::Choice(Field::Span),
-            Row::Choice(Field::LoadAlert),
-            Row::Choice(Field::TempAlert),
-            Row::Switch(Switch::HeatAlert),
-            Row::Heading("系统", "System"),
-            // The switches together, then the buttons.
-            Row::Switch(Switch::Startup),
-            Row::Switch(Switch::Updates),
-            Row::Version,
-        ]);
-        if update::available().is_some() {
-            rows.push(Row::Update);
-        }
-        rows.push(Row::Diagnostics);
-        if self.uninstaller.is_some() {
-            rows.push(Row::Uninstall);
-        }
-        rows.push(Row::Quit);
         rows
+    }
+
+    /// Shows page `page`, from its top.
+    fn turn_to(&mut self, page: Page) {
+        if page != self.page {
+            self.page = page;
+            self.scroll = 0.0;
+            self.scroll_target = 0.0;
+            self.drag = None;
+        }
+        self.next_frame = Instant::now();
     }
 
     /// Each row with its top and height, from the top of the list (DIPs).
@@ -776,9 +834,7 @@ impl Ui {
             // A heading's space above it takes in the title's below; the
             // first row of a group sits 8 under its heading, the rest 4 apart.
             let (before, height) = match &row {
-                Row::Title => (0.0, 36.0),
-                Row::Heading(..) => (GROUP_GAP, 20.0),
-                Row::ModeHeading => (GROUP_GAP - 6.0, MODE_HEADING),
+                Row::Title => (0.0, TITLE),
                 Row::OverlayItems => (ROW_GAP, self.chips().1),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 // A choice with a word on it: the word above, the choices on
@@ -789,7 +845,7 @@ impl Ui {
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
             };
             y += before;
-            after_heading = matches!(row, Row::Heading(..) | Row::ModeHeading);
+            after_heading = matches!(row, Row::Title);
             placed.push((row, y, height));
             y += height;
         }
@@ -893,6 +949,11 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
+            Field::OverlayOpacity => (
+                pick(lang, "背景不透明度", "Background opacity"),
+                vec!["100%".into(), "85%".into(), "70%".into(), "50%".into()],
+                [100, 85, 70, 50].iter().position(|&o| o == (settings.overlay.opacity * 100.0).round() as u32),
+            ),
             Field::OverlayWhen => (
                 pick(lang, "悬浮窗显示", "Overlay shows"),
                 vec![s("游戏模式时", "In game mode"), s("一直", "Always")],
@@ -943,6 +1004,7 @@ impl Ui {
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
             Field::OverlayWhen => settings.overlay.when = [OverlayWhen::GameMode, OverlayWhen::Always][index],
+            Field::OverlayOpacity => settings.overlay.opacity = [1.0, 0.85, 0.7, 0.5][index],
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -1339,6 +1401,7 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
+            Target::Page(page) => self.turn_to(page),
             Target::OverlayItem(name) => {
                 let items = &mut self.settings.overlay.items;
                 match items.iter().position(|item| item == name) {
@@ -1403,8 +1466,8 @@ impl Ui {
     /// Every focus stop, in the order the list shows them (scrolled out of
     /// view or not).
     fn stops(&self) -> Vec<Target> {
-        self.layout()
-            .into_iter()
+        let pages = PAGES.iter().map(|page| Target::Page(*page));
+        pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
@@ -1425,10 +1488,11 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::ModeHeading => vec![Target::Choice(Field::Mode, self.editing as usize)],
                 Row::OverlayItems if self.settings.overlay.on => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
-                Row::Title | Row::Heading(..) | Row::OverlayItems => vec![],
-            })
+                // The modes' choice, on the modules' page.
+                Row::Title if self.page == Page::Shown => vec![Target::Choice(Field::Mode, self.editing as usize)],
+                Row::Title | Row::OverlayItems => vec![],
+            }))
             .collect()
     }
 
@@ -1531,7 +1595,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::ModeHeading, Target::Choice(Field::Mode, _)) | (Row::OverlayItems, Target::OverlayItem(_)) => true,
+            (Row::Title, Target::Choice(Field::Mode, _)) | (Row::OverlayItems, Target::OverlayItem(_)) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
@@ -1552,7 +1616,7 @@ impl Ui {
 
     fn wheel(&mut self, delta: i16) {
         let Some((x, _)) = self.pointer else { return };
-        if x >= PANE {
+        if !(NAV..NAV + PANE).contains(&x) {
             return;
         }
         let height = self.client().1;
@@ -1699,15 +1763,44 @@ impl Ui {
             fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
         }
         self.targets.clear();
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(0.0, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        self.paint_nav(frame, &palette);
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         self.paint_list(frame, &palette, now, height);
         unsafe { frame.dc.PopAxisAlignedClip() };
         self.paint_preview(frame, &palette, width, height)
     }
 
+    /// The pages' list: the window's name, then each page, the one shown lit
+    /// and marked in the accent.
+    fn paint_nav(&mut self, frame: &Frame, palette: &Palette) {
+        let lang = self.lang;
+        let hovered = self.hovered();
+        let left = 16.0;
+        let width = NAV - 2.0 * left + 8.0;
+        let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
+        text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left + 8.0, PAD_TOP + 18.0, width, Align::Start);
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
+        let icon = Font::new(Family::Icons, 16.0, 400.0);
+        for (i, page) in PAGES.into_iter().enumerate() {
+            let r = Rect { x: left, y: PAD_TOP + 52.0 + i as f32 * (NAV_ITEM + 4.0), w: width, h: NAV_ITEM };
+            let target = Target::Page(page);
+            let (shown, hover) = (page == self.page, hovered.as_ref() == Some(&target));
+            if shown || hover {
+                fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
+            }
+            if shown {
+                fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
+            }
+            let cy = r.y + r.h / 2.0;
+            text_centred(frame, page.glyph(), icon, palette.text, r.x + 14.0, cy, 24.0, Align::Start);
+            text_centred(frame, page.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
+            self.targets.push((r, target));
+        }
+    }
+
     fn paint_list(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {
         let lang = self.lang;
-        let left = PAD_SIDE;
+        let left = NAV + PAD_SIDE;
         let width = PANE - 2.0 * PAD_SIDE - GUTTER;
         let scroll = self.scroll;
         let hovered = self.hovered();
@@ -1757,18 +1850,12 @@ impl Ui {
             match row {
                 Row::Title => {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
-                    text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left, y + 18.0, width, Align::Start);
-                }
-                Row::Heading(zh, en) => {
-                    text_centred(frame, pick(lang, zh, en), Font::new(Family::Segoe, 14.0, 600.0), palette.text, left, y + 10.0, width, Align::Start);
-                }
-                // The modes' choice on the heading's line: all below is the
-                // mode chosen's.
-                Row::ModeHeading => {
-                    let cy = y + row_height / 2.0;
-                    text_centred(frame, pick(lang, "显示内容", "Shown"), Font::new(Family::Segoe, 14.0, 600.0), palette.text, left, cy, width / 2.0, Align::Start);
-                    let (_, options, chosen) = self.choices(Field::Mode);
-                    self.segmented(frame, palette, Field::Mode, &options, chosen, true, left + width, cy, now, &hovered);
+                    text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
+                    // All below is the mode chosen's.
+                    if self.page == Page::Shown {
+                        let (_, options, chosen) = self.choices(Field::Mode);
+                        self.segmented(frame, palette, Field::Mode, &options, chosen, true, left + width, y + 22.0, now, &hovered);
+                    }
                 }
                 Row::OverlayItems => {
                     card(frame, palette, left, y, width, row_height, palette.card);
@@ -2016,7 +2103,7 @@ impl Ui {
         if content > height {
             let thumb = (height * height / content).max(24.0);
             let at = (height - thumb) * self.scroll / (content - height);
-            fill(frame, palette.text3.alpha(0.6), PANE - GUTTER + 2.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
+            fill(frame, palette.text3.alpha(0.6), NAV + PANE - GUTTER + 2.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
         }
     }
 
@@ -2182,14 +2269,14 @@ impl Ui {
     /// The preview: the panel as it will look over the desktop, running live.
     fn paint_preview(&mut self, frame: &Frame, palette: &Palette, width: f32, height: f32) -> Option<f32> {
         let lang = self.lang;
-        let x0 = PANE + PAD_SIDE;
+        let x0 = NAV + PANE + PAD_SIDE;
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
         let title = pick(lang, "预览", "Preview");
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = pick(lang, "实时数据，桌面为当前壁纸", "Live readings over your wallpaper");
         let title_w = frame.gfx.measure(title, head);
         text_centred(frame, detail, Font::new(Family::Segoe, 12.0, 400.0), palette.text2, x0 + title_w + 12.0, PAD_TOP + 20.0, 400.0, Align::Start);
-        let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - PANE - 2.0 * PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
+        let area = Rect { x: x0, y: PAD_TOP + 40.0, w: width - NAV - PANE - 2.0 * PAD_SIDE, h: height - PAD_TOP - 40.0 - PAD_TOP };
         if area.w <= 0.0 || area.h <= 0.0 {
             return None;
         }
@@ -2216,7 +2303,7 @@ impl Ui {
         let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.columns());
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
@@ -2276,6 +2363,20 @@ impl Ui {
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest));
         let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
+        // On the game mode's page, the overlay too, where it was put, in the
+        // panel's look.
+        if self.page == Page::Game && self.settings.overlay.on {
+            let overlay = &self.settings.overlay;
+            let lines = super::overlay::preview(samples.last().unwrap(), &overlay.items, lang);
+            let style = super::overlay::Style::new(&Theme::new(skin, theme::is_dark(self.prefs.theme, None)), overlay.opacity);
+            let (w, h) = super::overlay::size(&lines, &style, |text, font| frame.gfx.measure(text, font));
+            let inset = super::overlay::INSET;
+            let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
+            let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
+            frame.place(Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
+            super::overlay::paint(frame, &lines, &style, false);
+            frame.origin(0.0, 0.0);
+        }
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
         match drawn {

@@ -306,11 +306,14 @@ impl Controller {
         let mut panel = Panel::new(self).expect("panel window");
         // Without one (no graphics device just now), no overlay.
         let mut overlay = Overlay::new().ok();
-        let draw_overlay = |overlay: &mut Option<Overlay>, lang: Lang| {
+        // In the panel's look; light or dark as chosen (the backdrop, which
+        // the overlay cannot see, as the system's apps are).
+        let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
+            let theme = Theme::new(panel.skin, theme::is_dark(panel.prefs.theme, None));
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, lang, self.mode() == Mode::Game);
+            overlay.show(history.back(), &settings, &theme, panel.lang, self.mode() == Mode::Game);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -424,9 +427,9 @@ impl Controller {
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => {
                     panel.restyle();
-                    draw_overlay(&mut overlay, panel.lang);
+                    draw_overlay(&mut overlay, &panel);
                 }
-                OVERLAY => draw_overlay(&mut overlay, panel.lang),
+                OVERLAY => draw_overlay(&mut overlay, &panel),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
@@ -439,7 +442,10 @@ impl Controller {
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
                     let (choice, before) = overlay.as_ref().unwrap().menu();
                     match choice {
-                        Some(OverlayChoice::Settings) => crate::show_settings(),
+                        Some(OverlayChoice::Settings) => {
+                            panel.dismiss();
+                            settings_window::open_at_game_mode();
+                        }
                         choice => {
                             // The game in front before the menu, in front again.
                             bring_back(Some(before).filter(|window| !window.is_invalid()));
