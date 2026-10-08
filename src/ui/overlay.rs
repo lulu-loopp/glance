@@ -47,15 +47,49 @@ const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
 /// A reading to heed (a muted microphone).
 const HOT: Color = Color::hex(0xFF7B6B, 1.0);
 
-/// One line of the overlay: a name, its value, and whether the value is to
-/// be heeded.
-pub type Line = (String, String, bool);
+/// One line of the overlay: a name, its value, whether the value is to be
+/// heeded, and for each of the value's parts, the widest it can be written
+/// (the plate is as wide as those, so that it holds still as values change).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub name: String,
+    pub value: String,
+    pub hot: bool,
+    widest: Vec<&'static [&'static str]>,
+}
+
+// The widest each reading can be written: the system font's digits are all
+// as wide, so it is the most digits each unit is shown with.
+const PERCENT: &[&str] = &["100%"];
+const CELSIUS: &[&str] = &["100 °C"];
+const WATTS: &[&str] = &["999 W"];
+const FRAMES_A_SECOND: &[&str] = &["999"];
+const LOW: &[&str] = &["1% 999"];
+const FRAME_TIME: &[&str] = &["999.9 ms"];
+const SIZE: &[&str] = &["999.9 GB", "999 MB"];
+const DOWN: &[&str] = &["↓ 999 B/s", "↓ 99.9 KB/s", "↓ 999 KB/s", "↓ 99.9 MB/s", "↓ 999 MB/s", "↓ 99.9 GB/s"];
+const UP: &[&str] = &["↑ 999 B/s", "↑ 99.9 KB/s", "↑ 999 KB/s", "↑ 99.9 MB/s", "↑ 999 MB/s", "↑ 99.9 GB/s"];
+const MIC_ZH: &[&str] = &["已静音", "开启"];
+const MIC_EN: &[&str] = &["Muted", "On"];
+/// Between the parts of a value.
+const SEPARATOR: &str = " · ";
+
+/// A line of the parts that are read (each with the widest it can be); none
+/// if none is.
+fn line(name: &str, parts: Vec<(Option<String>, &'static [&'static str])>, hot: bool) -> Option<Line> {
+    let read: Vec<(String, &'static [&'static str])> = parts.into_iter().filter_map(|(value, widest)| Some((value?, widest))).collect();
+    (!read.is_empty()).then(|| Line {
+        name: name.to_string(),
+        value: read.iter().map(|(value, _)| value.as_str()).collect::<Vec<_>>().join(SEPARATOR),
+        hot,
+        widest: read.iter().map(|(_, widest)| *widest).collect(),
+    })
+}
 
 /// What the overlay shows of sample `s`, line by line: the `items` chosen
 /// that are read. A game's readings are `game`'s, if there is one.
 pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang) -> Vec<Line> {
     let on = |name: &str| items.iter().any(|item| item == name);
-    let joined = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
     let celsius = |t: f32| format!("{t:.0} °C");
     let watts = |w: f32| format!("{w:.0} W");
     // The GPU the game uses, or the busiest.
@@ -64,49 +98,53 @@ pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang
         .and_then(|i| s.gpus.get(i))
         .or_else(|| s.gpus.iter().max_by(|a, b| a.usage.unwrap_or(0.0).total_cmp(&b.usage.unwrap_or(0.0))));
     let cpu_sensors = s.cpu_sensors.as_ref();
+    let rate = |rate: Option<f64>| rate.map(|rate| text::rate(rate, false));
     let mut lines = Vec::new();
     if let Some(game) = game {
-        let fps = on("fps").then(|| format!("{:.0}", game.fps));
-        let low = on("low").then(|| game.low.map(|low| format!("1% {low:.0}"))).flatten();
-        lines.push(("FPS".to_string(), joined(vec![fps, low])));
-        if on("frametime") {
-            lines.push((lang.pick("帧时间", "Frame").to_string(), format!("{:.1} ms", game.longest_ms)));
-        }
+        lines.push(line(
+            "FPS",
+            vec![
+                (on("fps").then(|| format!("{:.0}", game.fps)), FRAMES_A_SECOND),
+                (on("low").then(|| game.low.map(|low| format!("1% {low:.0}"))).flatten(), LOW),
+            ],
+            false,
+        ));
+        lines.push(line(lang.pick("帧时间", "Frame"), vec![(on("frametime").then(|| format!("{:.1} ms", game.longest_ms)), FRAME_TIME)], false));
     }
-    lines.push((
-        "CPU".into(),
-        joined(vec![
-            on("cpu").then(|| s.cpu.map(text::percent)).flatten(),
-            on("cpu_temp").then(|| cpu_sensors.and_then(|c| c.temp).map(celsius)).flatten(),
-            on("cpu_power").then(|| cpu_sensors.and_then(|c| c.power).map(watts)).flatten(),
-        ]),
+    lines.push(line(
+        "CPU",
+        vec![
+            (on("cpu").then(|| s.cpu.map(text::percent)).flatten(), PERCENT),
+            (on("cpu_temp").then(|| cpu_sensors.and_then(|c| c.temp).map(celsius)).flatten(), CELSIUS),
+            (on("cpu_power").then(|| cpu_sensors.and_then(|c| c.power).map(watts)).flatten(), WATTS),
+        ],
+        false,
     ));
-    lines.push((
-        "GPU".into(),
-        joined(vec![
-            on("gpu").then(|| gpu.and_then(|g| g.usage).map(text::percent)).flatten(),
-            on("gpu_temp").then(|| gpu.and_then(|g| g.temp).map(celsius)).flatten(),
-            on("gpu_power").then(|| gpu.and_then(|g| g.power).map(watts)).flatten(),
-        ]),
+    lines.push(line(
+        "GPU",
+        vec![
+            (on("gpu").then(|| gpu.and_then(|g| g.usage).map(text::percent)).flatten(), PERCENT),
+            (on("gpu_temp").then(|| gpu.and_then(|g| g.temp).map(celsius)).flatten(), CELSIUS),
+            (on("gpu_power").then(|| gpu.and_then(|g| g.power).map(watts)).flatten(), WATTS),
+        ],
+        false,
     ));
-    if on("memory") {
-        lines.push((lang.pick("内存", "RAM").into(), text::size(s.memory.used)));
-    }
-    if on("vram") {
-        lines.push((lang.pick("显存", "VRAM").into(), gpu.and_then(|g| g.mem_used).map(text::size).unwrap_or_default()));
-    }
-    if on("network") {
-        let rate = |rate: Option<f64>| rate.map(|rate| text::rate(rate, false));
-        let value = joined(vec![rate(s.net_down).map(|r| format!("↓ {r}")), rate(s.net_up).map(|r| format!("↑ {r}"))]);
-        lines.push((lang.pick("网速", "Net").into(), value));
-    }
-    let mut lines: Vec<Line> = lines.into_iter().map(|(name, value)| (name, value, false)).collect();
+    lines.push(line(lang.pick("内存", "RAM"), vec![(on("memory").then(|| text::size(s.memory.used)), SIZE)], false));
+    lines.push(line(lang.pick("显存", "VRAM"), vec![(on("vram").then(|| gpu.and_then(|g| g.mem_used).map(text::size)).flatten(), SIZE)], false));
+    lines.push(line(
+        lang.pick("网速", "Net"),
+        vec![
+            (on("network").then(|| rate(s.net_down).map(|r| format!("↓ {r}"))).flatten(), DOWN),
+            (on("network").then(|| rate(s.net_up).map(|r| format!("↑ {r}"))).flatten(), UP),
+        ],
+        false,
+    ));
     if let Some(muted) = s.mic_muted.filter(|_| on("mic")) {
         let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
-        lines.push((lang.pick("麦克风", "Mic").into(), value.into(), muted));
+        let widest = if lang == Lang::Zh { MIC_ZH } else { MIC_EN };
+        lines.push(line(lang.pick("麦克风", "Mic"), vec![(Some(value.to_string()), widest)], muted));
     }
-    // A line with nothing read on it is left out.
-    lines.into_iter().filter(|(_, value, _)| !value.is_empty()).collect()
+    lines.into_iter().flatten().collect()
 }
 
 /// What the overlay would show of sample `s` over a game: its game's
@@ -135,10 +173,15 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
 }
 
 /// How large `lines` are drawn, plate and all (DIPs), with `measure` giving
-/// a text's width in a font.
+/// a text's width in a font: as wide as their values can be, not as they
+/// are now.
 pub fn size(lines: &[Line], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
-    let label = lines.iter().map(|(name, ..)| measure(name, LABEL)).fold(0.0, f32::max);
-    let value = lines.iter().map(|(_, value, _)| measure(value, VALUE)).fold(0.0, f32::max);
+    let label = lines.iter().map(|line| measure(&line.name, LABEL)).fold(0.0, f32::max);
+    let widest = |line: &Line| {
+        let parts: f32 = line.widest.iter().map(|forms| forms.iter().map(|form| measure(form, VALUE)).fold(0.0, f32::max)).sum();
+        parts + line.widest.len().saturating_sub(1) as f32 * measure(SEPARATOR, VALUE)
+    };
+    let value = lines.iter().map(|line| widest(line).max(measure(&line.value, VALUE))).fold(0.0, f32::max);
     ((2.0 * PAD.0 + label + LABEL_GAP + value).ceil(), (2.0 * PAD.1 + lines.len() as f32 * LINE).ceil())
 }
 
@@ -148,11 +191,11 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
     let (width, height) = size(lines, |text, font| frame.measure(text, font));
     let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
     frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
-    let label = lines.iter().map(|(name, ..)| frame.measure(name, LABEL)).fold(0.0, f32::max);
+    let label = lines.iter().map(|line| frame.measure(&line.name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, descent_value) = frame.baseline(VALUE);
-    for (i, (name, value, hot)) in lines.iter().enumerate() {
+    for (i, Line { name, value, hot, .. }) in lines.iter().enumerate() {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
         let y = PAD.1 + i as f32 * LINE + (LINE - ascent_value - descent_value) / 2.0;
@@ -222,7 +265,7 @@ mod tests {
         let chosen = items(&["fps", "low", "frametime", "cpu", "gpu", "memory"]);
         let s = sample(true);
         // Unread readings left out, not shown as gaps: no 1% low yet, no GPU.
-        let plain = |lines: Vec<Line>| lines.into_iter().map(|(name, value, _)| (name, value)).collect::<Vec<_>>();
+        let plain = |lines: Vec<Line>| lines.into_iter().map(|line| (line.name, line.value)).collect::<Vec<(String, String)>>();
         assert_eq!(
             plain(lines(&s, s.game.as_ref(), &chosen, Lang::Zh)),
             [("FPS".into(), "144".into()), ("帧时间".into(), "9.3 ms".into()), ("CPU".into(), text::percent(40.0)), ("内存".into(), "8.0 GB".to_string())]
@@ -232,6 +275,12 @@ mod tests {
         assert_eq!(plain(lines(&s, None, &items(&["fps", "cpu"]), Lang::En)), [("CPU".into(), text::percent(40.0))]);
         assert!(lines(&s, None, &items(&["fps"]), Lang::En).is_empty());
         // A muted microphone, to be heeded.
-        assert_eq!(lines(&s, None, &items(&["mic"]), Lang::En), [("Mic".into(), "Muted".into(), true)]);
+        let mic = lines(&s, None, &items(&["mic"]), Lang::En);
+        assert_eq!((mic[0].value.as_str(), mic[0].hot), ("Muted", true));
+        // As wide as its widest value, whatever it reads now: a character
+        // a unit wide here.
+        let measure = |text: &str, _| text.chars().count() as f32;
+        let now = size(&lines(&s, None, &items(&["cpu"]), Lang::En), measure);
+        assert_eq!(now.0, (2.0 * PAD.0 + 3.0 + LABEL_GAP + 4.0).ceil());
     }
 }
