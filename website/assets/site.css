@@ -190,7 +190,7 @@ html[lang="en"] h2 { letter-spacing: -0.02em; line-height: 1.15; }
 /* features */
 .features { display: grid; gap: 16px; grid-template-columns: 1fr; margin: 0; padding: 0; list-style: none; }
 @media (min-width: 720px) { .features { grid-template-columns: 1fr 1fr; } }
-@media (min-width: 1080px) { .features { grid-template-columns: repeat(4, 1fr); } }
+@media (min-width: 1080px) { .features { grid-template-columns: repeat(3, 1fr); } }
 .feature { border-radius: var(--radius); padding: 24px 22px 22px; }
 .feature .ic { width: 40px; height: 40px; border-radius: 10px; background: var(--glass-strong);
   border: 1px solid var(--glass-edge); color: var(--ink); display: grid; place-items: center; margin-bottom: 16px; }

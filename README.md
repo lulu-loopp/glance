@@ -27,6 +27,20 @@ out with everything your PC is doing; move away and it slides back.
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
 - **Battery**, on laptops
+- **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
+
+## The overlay
+
+A few readings floating over the screen, all the time or only while a game
+runs, on the game's screen. Drag it into place, drag its edges to size it,
+right-click it to lock it or close it. Choose its readings one by one (frame
+rate, 1% low, frame time, the CPU's and GPU's use, heat and power, memory,
+video memory, network, microphone) and how opaque its background is.
+
+Frames are counted from Windows' own event tracing: nothing is injected into
+a game and its process is never opened, so anti-cheat has nothing to object
+to. Games using DirectX are covered; Vulkan and OpenGL games show no frame
+rate yet.
 
 ## Three looks
 
@@ -41,8 +55,8 @@ or following the brightness of your wallpaper. Chinese or English.
 One executable of about 1 MB, drawn natively with Direct2D and
 DirectComposition. About 55 MB of memory and well under 1% of a CPU core
 while the panel is hidden. No account, no ads, and no network access but
-one daily question to GitHub about a newer version, which the settings can
-turn off.
+one daily question to GitHub and Gitee about a newer version, which the
+settings can turn off.
 
 ## Install
 
@@ -67,19 +81,22 @@ for administrator rights at every start and cannot start with Windows.
 ## Use
 
 - **Open the panel**: push the pointer against the screen's right edge (the
-  edge, the push needed, where the panel appears and how many columns it
-  takes are in the settings). A deliberate push is needed, so scroll bars at
+  edge, the push needed, where the panel appears, how many columns it takes
+  and how large it is are in the settings, and pushing can be turned off).
+  A deliberate push is needed, so scroll bars at
   the edge stay usable. Or press **Ctrl+Alt+G** (or a shortcut of your own),
   which opens it at the pointer and closes it again.
-- **Games**: the panel shows over borderless and windowed games as over
-  anything else. A game set to exclusive "Fullscreen" steps out while
+- **Games**: while a fullscreen game runs, a Game lane comes at the top of
+  the panel; for its frame rate over the game itself, turn on "Show while
+  playing" on the settings' Overlay page. The panel shows over borderless
+  and windowed games as over anything else. A game set to exclusive "Fullscreen" steps out while
   anything shows over it, as Windows works; the settings choose what may open
   the panel over one (the shortcut only, by default), and the game comes back
   when the panel closes.
 - **Choose what it shows**: in the settings, each module (CPU, each graphics
   card, memory, network, disk…) opens to its own items, each switched on or
   off; drag modules to change their order.
-- **Close it**: move the pointer away.
+- **Close it**: move the pointer away, or press Esc.
 - **Keep it open**: the pin in its bottom bar holds it on screen while you
   work elsewhere; unpin it, or press the shortcut, to let it go.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
@@ -101,13 +118,13 @@ for administrator rights at every start and cannot start with Windows.
 | | Supported | Tried on real hardware |
 |---|---|---|
 | CPU | AMD Ryzen (Zen and later), Intel Core | AMD Ryzen 9 9950X |
-| Motherboard sensors | ITE and Nuvoton Super I/O chips | ITE IT8689E |
+| Motherboard sensors | ITE and Nuvoton (NCT67xx, and the NCT6683/6686/6687 on most MSI boards) Super I/O chips | ITE IT8689E |
 | Memory temperature | DDR4 and DDR5 modules with a sensor | DDR5 |
 | Graphics power | NVIDIA (NVML), AMD (ADL) discrete cards | NVIDIA RTX 5070 Ti |
 | Everything else | through Windows (the sources Task Manager uses) | |
 
-Reports from Intel and Nuvoton machines are welcome: **Settings → Diagnostics
-→ Copy** puts what Glance found on your machine, and which readings it gets,
+Reports from Intel and Nuvoton machines are welcome: **Settings → System →
+Diagnostics → Copy** puts what Glance found on your machine, and which readings it gets,
 on the clipboard, with the latest lines of its log, ready to paste into an
 issue (no paths or names in it). The log itself is `glance.log`, beside the
 settings in `%APPDATA%\dev.weiyi.glance`. On laptops, fans and
