@@ -1367,8 +1367,8 @@ impl Ui {
                 self.settings.overlay.in_game,
             ),
             Switch::Seam => (
-                p("屏幕之间也能呼出", "Open from between screens"),
-                Some(p("鼠标停在两块屏幕相接处约半秒，面板在呼出边那一侧的屏幕上打开", "Rest the pointer on the seam between two screens for half a second: the panel opens on the screen whose edge it is")),
+                p("在屏幕相接处呼出", "Open where screens meet"),
+                Some(p("鼠标在两块屏幕的相接处停留约半秒，即可在呼出边所在一侧的屏幕上呼出面板", "Rest the pointer where two screens meet for half a second to open the panel on the screen whose edge it is")),
                 self.settings.seam,
             ),
             Switch::HeatAlert => (

@@ -286,9 +286,18 @@ struct Held(std::fs::File);
 impl Held {
     /// Opens `path` itself (a link as the link), able to delete it.
     fn open(path: &Path) -> Option<Self> {
+        Self::open_with(path, DELETE.0)
+    }
+
+    /// Opens `path` itself (a link as the link), to look at and hold only.
+    fn open_to_hold(path: &Path) -> Option<Self> {
+        Self::open_with(path, 0)
+    }
+
+    fn open_with(path: &Path, rights: u32) -> Option<Self> {
         use std::os::windows::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
-            .access_mode((FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE).0)
+            .access_mode((FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0 | rights)
             .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
             .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
             .open(path)
@@ -311,6 +320,26 @@ impl Held {
     }
 
     /// Whether it lies directly in the folder `parent` holds.
+    /// Takes the name `path` (a full path), replacing what is there.
+    fn rename_to(&self, path: &Path) -> std::io::Result<()> {
+        use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+        use windows::Win32::Storage::FileSystem::{FileRenameInfo, FILE_RENAME_INFO, FILE_RENAME_INFO_0};
+        let name: Vec<u16> = path.as_os_str().encode_wide().collect();
+        // The structure, its name running on past its end.
+        let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+        let size = header + (name.len() + 1) * 2;
+        let mut buffer = vec![0u64; size.div_ceil(8)];
+        let info = buffer.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        unsafe {
+            (*info).Anonymous = FILE_RENAME_INFO_0 { ReplaceIfExists: true };
+            (*info).RootDirectory = HANDLE::default();
+            (*info).FileNameLength = (name.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(name.as_ptr(), std::ptr::addr_of_mut!((*info).FileName) as *mut u16, name.len());
+            SetFileInformationByHandle(HANDLE(self.0.as_raw_handle()), FileRenameInfo, info as *const _, size as u32)?;
+        }
+        Ok(())
+    }
+
     fn lies_in(&self, parent: &Held) -> bool {
         let (Some(me), Some(parent)) = (self.place(), parent.place()) else { return false };
         me.parent().is_some_and(|mine| same_path(mine, &parent))
@@ -637,7 +666,12 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
 /// `folder` held, if it is really where its path says: Windows, asked by
 /// handle, puts it there (no link at it or anywhere above it).
 fn held_where_it_says(folder: &Path) -> Option<Held> {
-    let held = pin(folder)?;
+    // Held without the right to delete it: a file renamed into it has the
+    // folder opened to add the name, and on Windows 10 that open, sharing
+    // no deletion, is refused by a holder that may delete
+    // (ERROR_SHARING_VIOLATION). Holding it still keeps it, and every
+    // folder above it, from being moved or deleted by anyone else.
+    let held = Held::open_to_hold(folder).filter(Held::is_folder)?;
     let place = held.place()?;
     same_path(&place, &std::path::absolute(folder).ok()?).then_some(held)
 }
@@ -688,9 +722,10 @@ pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Re
         file.delete();
         return Err(error);
     }
-    // Renamed while still open (it shares delete), so that if the name's
-    // place cannot be taken, what was written goes again by its handle.
-    match std::fs::rename(&temporary, folder.join(name)) {
+    // Renamed by its own handle while still open (not opened again by its
+    // path), so that if the name's place cannot be taken, what was written
+    // goes again by its handle.
+    match file.rename_to(&folder.join(name)) {
         Ok(()) => Ok(()),
         Err(error) => {
             file.delete();
@@ -728,7 +763,12 @@ pub fn remove_settings() -> bool {
         // Not opened: gone already, or held by another program.
         None => folder.join(name).symlink_metadata().is_err(),
     });
-    held.delete();
+    // Then the folder, by a handle able to delete it, if it is still the
+    // one held (which is let go first: it shares no deletion).
+    drop(held);
+    if let Some(folder_held) = pin(&folder).filter(|held| held.place().is_some_and(|place| std::path::absolute(&folder).is_ok_and(|path| same_path(&place, &path)))) {
+        folder_held.delete();
+    }
     gone.iter().all(|gone| *gone)
 }
 
@@ -1037,6 +1077,21 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "writes into this user's folders"]
+    fn writes_in_place_here() {
+        let scratch = std::env::temp_dir().join("glance-write-test");
+        let _ = std::fs::create_dir_all(&scratch);
+        println!("temp: {:?}", write_in_place(&scratch, "settings.json", b"{}"));
+        println!("temp holds: {:?}", std::fs::read_dir(&scratch).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
+        let config = crate::settings::config_dir();
+        println!("config {config:?} ensure: {:?}", ensure_folder(&config));
+        println!("config held: {}", held_where_it_says(&config).is_some());
+        println!("config: {:?}", write_in_place(&config, "probe.json", b"{}"));
+        println!("config holds: {:?}", std::fs::read_dir(&config).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
+        let _ = std::fs::remove_file(config.join("probe.json"));
+    }
+
+    #[test]
     fn knows_its_own_tasks() {
         assert!(is_glance_task("Glance"));
         assert!(is_glance_task("Glance at sign-in S-1-5-21-1-2-3-1001"));
@@ -1119,6 +1174,16 @@ mod tests {
         assert!(std::fs::rename(&folder, above.join("moved")).is_err());
         assert!(std::fs::remove_dir(&folder).is_err());
         drop(pinned);
+        // Held only to keep it (as the settings' folder is while they are
+        // written), the same: and a file is renamed into it all the same.
+        let held = held_where_it_says(&folder).expect("a folder can be held");
+        assert!(std::fs::rename(&above, base.join("moved")).is_err());
+        assert!(std::fs::rename(&folder, above.join("moved")).is_err());
+        assert!(std::fs::remove_dir(&folder).is_err());
+        write_in_place(&folder, "settings.json", b"{}").unwrap();
+        assert_eq!(std::fs::read(folder.join("settings.json")).unwrap(), b"{}");
+        drop(held);
+        std::fs::remove_file(folder.join("settings.json")).unwrap();
         std::fs::rename(&above, base.join("moved")).unwrap();
         // A junction is not pinned.
         let link = base.join("link");

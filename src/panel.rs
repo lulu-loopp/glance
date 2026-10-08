@@ -70,9 +70,13 @@ const LEAVE_TOLERANCE: f32 = 10.0;
 const CORNER_EXCLUSION: f64 = 48.0;
 /// The seam between two screens (see `seam_contact`): how far either side
 /// of the line the pointer may be (DIPs; there is no wall to stop it on the
-/// line), how still it has to rest there (DIPs), and how long. Longer than
-/// on an edge: a scroll bar may be beside the seam.
-const SEAM_ZONE: f32 = 4.0;
+/// line); how far past it, on the other screen, a pointer that has just
+/// come across from the edge's screen (it overshot) may be, and for how
+/// long after; how still it has to rest there (DIPs), and how long. Longer
+/// than on an edge: a scroll bar may be beside the seam.
+const SEAM_ZONE: f32 = 8.0;
+const SEAM_OVERSHOOT: f32 = 64.0;
+const SEAM_CROSSED: Duration = Duration::from_millis(1500);
 const SEAM_STILL: f32 = 8.0;
 const SEAM_DWELL: Duration = Duration::from_millis(500);
 /// History is kept for the longest chart span the settings offer.
@@ -400,6 +404,10 @@ impl Controller {
         // and, as on the edge, armed once the pointer has left it.
         let mut seam_rest: Option<(Instant, POINT)> = None;
         let mut seam_armed = true;
+        // The screen the pointer was last on, and the one it last came
+        // across from, and when.
+        let mut on_screen: Option<RECT> = None;
+        let mut crossed: Option<(RECT, Instant)> = None;
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         // What a frame in motion waits on: the screen's next refresh, or a
         // message, whichever comes first.
@@ -474,7 +482,13 @@ impl Controller {
             }
             // The pointer resting on the seam, where the panel opens.
             let mut on_seam = |cursor: POINT, panel: &mut Panel| {
-                let Some(contact) = seam_contact(cursor, edge).filter(|_| seam) else {
+                let here = monitor_at(cursor).map(|contact| contact.monitor);
+                if here != on_screen {
+                    crossed = on_screen.map(|from| (from, now));
+                    on_screen = here;
+                }
+                let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
+                let Some(contact) = seam_contact(cursor, edge, came_from).filter(|_| seam) else {
                     seam_rest = None;
                     seam_armed = !panel.is_shown();
                     return;
@@ -1912,19 +1926,30 @@ fn monitor_at(point: POINT) -> Option<Contact> {
 
 /// The screen to open on when the pointer is on the seam where a screen's
 /// `edge` meets another screen: within a few pixels of that line, on
-/// either side of it, clear of the line's ends, visible, no button held.
-/// The screen whose edge it is.
-fn seam_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
+/// either side of it (further past it, on the other screen, when it has
+/// just come across from `came_from`, the edge's screen: it overshot),
+/// clear of the line's ends, visible, no button held. The screen whose
+/// edge it is.
+fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Contact> {
     let here = monitor_at(cursor)?;
     let m = here.monitor;
-    let zone = (SEAM_ZONE * here.scale).round() as i32;
+    let near = (SEAM_ZONE * here.scale).round() as i32;
+    // How far from its own side the pointer may be on this screen, when the
+    // seam is on that side and the screen behind it is the edge's.
+    let behind_point = match edge {
+        Edge::Right => POINT { x: m.left - 1, y: cursor.y },
+        Edge::Left => POINT { x: m.right, y: cursor.y },
+        Edge::Top => POINT { x: cursor.x, y: m.bottom },
+    };
+    let overshot = came_from.is_some_and(|from| monitor_at(behind_point).is_some_and(|behind| behind.monitor == from));
+    let far = if overshot { (SEAM_OVERSHOOT * here.scale).round() as i32 } else { near };
     let exists = |point: POINT| !unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_invalid();
     // Near this screen's own edge with a screen beyond it, or near the
     // opposite side of it with a screen behind it whose edge that is.
     let (own, beyond, other, behind) = match edge {
-        Edge::Right => (cursor.x >= m.right - zone, POINT { x: m.right, y: cursor.y }, cursor.x < m.left + zone, POINT { x: m.left - 1, y: cursor.y }),
-        Edge::Left => (cursor.x < m.left + zone, POINT { x: m.left - 1, y: cursor.y }, cursor.x >= m.right - zone, POINT { x: m.right, y: cursor.y }),
-        Edge::Top => (cursor.y < m.top + zone, POINT { x: cursor.x, y: m.top - 1 }, cursor.y >= m.bottom - zone, POINT { x: cursor.x, y: m.bottom }),
+        Edge::Right => (cursor.x >= m.right - near, POINT { x: m.right, y: cursor.y }, cursor.x < m.left + far, behind_point),
+        Edge::Left => (cursor.x < m.left + near, POINT { x: m.left - 1, y: cursor.y }, cursor.x >= m.right - far, behind_point),
+        Edge::Top => (cursor.y < m.top + near, POINT { x: cursor.x, y: m.top - 1 }, cursor.y >= m.bottom - far, behind_point),
     };
     let target = if own && exists(beyond) {
         here
