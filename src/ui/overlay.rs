@@ -46,6 +46,9 @@ const NAME: Color = Color::hex(0xFFFFFF, 0.74);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
 const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
+/// Readings are outlined on a plate less opaque than this, in this.
+const OUTLINED_BELOW: f32 = 0.35;
+const OUTLINE: Color = Color::hex(0x000000, 0.85);
 /// A reading to heed (a muted microphone).
 const HOT: Color = Color::hex(0xFF7B6B, 1.0);
 
@@ -202,12 +205,14 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, descent_value) = frame.baseline(VALUE);
-    // The clearer the plate, the darker the outline the readings take, so
-    // that they read over any picture.
-    let outline = Color::hex(0x000000, (1.0 - opacity.clamp(0.0, 1.0)) * 0.7);
+    // On a plate too clear to set them off, the readings take an outline to
+    // read over any picture: a steady one, a physical pixel wide. A faint
+    // one, coming and going with what is behind, would only look unsteady.
+    let outline = (!dragged && opacity < OUTLINED_BELOW).then_some(OUTLINE);
+    let pixel = 1.0 / px;
     let outlined = |text: &str, font: Font, color: Color, x: f32, y: f32, room: f32| {
-        if !dragged && outline.a > 0.0 {
-            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+        if let Some(outline) = outline {
+            for (dx, dy) in [(-pixel, 0.0), (pixel, 0.0), (0.0, -pixel), (0.0, pixel)] {
                 frame.text(text, font, outline, x + dx, y + dy, room, Align::Start);
             }
         }
