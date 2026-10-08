@@ -100,8 +100,7 @@ for administrator rights at every start and cannot start with Windows.
 - **Close it**: move the pointer away, or press Esc.
 - **Keep it open**: the pin in its bottom bar holds it on screen while you
   work elsewhere; unpin it, or press the shortcut, to let it go. Pinned, it
-  can be dragged by its bottom bar anywhere, onto another screen too, and
-  sized by its edges; moved off the edge, it stays there, Glance restarting
+  can be dragged anywhere, onto another screen too, and sized by its edges; moved off the edge, it stays there, Glance restarting
   too, until it is unpinned.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the

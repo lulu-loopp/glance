@@ -109,6 +109,9 @@ try {
     $quoted = ($arguments | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
     # Bounded: a signtool waiting on something it will never get is killed.
     $process = Start-Process -FilePath $tool -ArgumentList $quoted -NoNewWindow -PassThru
+    # Its handle taken while it runs: without it, the exit code reads empty
+    # once the process has gone.
+    $null = $process.Handle
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $process.Kill()
         throw "signtool did not finish within $TimeoutSeconds s"

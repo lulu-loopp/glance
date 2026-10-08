@@ -1223,10 +1223,11 @@ impl<'a> Panel<'a> {
         let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
         if let Some(placement) = &self.placement {
             if let Some(capture) = Capture::take(placement.window) {
-                let behind = Behind::new(capture, placement, now);
-                // The theme holds for the opening; only the frost follows.
-                self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
-                self.behind = Some(behind);
+                // Moved or grown over another desktop: the theme follows it
+                // (live refraction, refreshing over the same place, leaves
+                // the theme be).
+                self.behind = Some(Behind::new(capture, placement, now));
+                self.dress();
             }
         }
         self.window.exclude_from_capture(self.live);
@@ -1247,8 +1248,9 @@ impl<'a> Panel<'a> {
     }
 
     /// What a press at `client` (physical px in the window) would do to the
-    /// pinned panel: size it by the edges it is on, or move it by its bar
-    /// (none of the bar's buttons); nothing, unpinned.
+    /// pinned panel: size it by the edges it is on, or move it, from
+    /// anywhere on it that takes no click or wheel of its own; nothing,
+    /// unpinned.
     fn grip_at(&self, client: POINT) -> Option<Edges> {
         let px = match &self.placement {
             Some(placement) if self.pinned && self.is_open() => placement.px,
@@ -1259,13 +1261,19 @@ impl<'a> Panel<'a> {
         if edges.any() {
             return Some(edges);
         }
+        self.hit_at(client).is_none().then_some(edges)
+    }
+
+    /// Whether `client` (physical px in the window) is on the panel's bar.
+    fn on_bar(&self, client: POINT) -> bool {
+        let Some(placement) = &self.placement else { return false };
+        let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
         let bar = self.bar;
-        let on_bar = x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h;
-        (on_bar && self.hit_at(client).is_none()).then_some(edges)
+        x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h
     }
 
     /// A press on the panel at `client` (physical px in the window): pinned,
-    /// on its edges it begins to size it, on its bar to move it.
+    /// on its edges it begins to size it, elsewhere (see `grip_at`) to move it.
     fn press(&mut self, client: POINT) {
         let Some(edges) = self.grip_at(client) else { return };
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
@@ -1584,8 +1592,9 @@ impl<'a> Panel<'a> {
 
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
-        // Pinned, its edges and its bar show what a drag there does.
-        match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client)) {
+        // Pinned, its edges and its bar show what a drag there does (the
+        // rest moves it too, under the reader's arrow).
+        match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
             Some(edges) => point_at(edges),
             None => arrow(),
         }

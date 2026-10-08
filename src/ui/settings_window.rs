@@ -1357,7 +1357,7 @@ impl Ui {
                 self.settings.overlay.on,
             ),
             Switch::OverlayInGame => (
-                p("玩游戏时自动显示", "Show while playing"),
+                p("游戏时自动显示", "Show while playing"),
                 Some(p(
                     "全屏游戏运行期间显示于游戏所在屏幕，游戏结束后隐藏。帧率、1% low 与帧时间仅在游戏期间显示",
                     "Shown on the game's screen while a fullscreen game runs, hidden when it ends. Frame rate, 1% low and frame time show only during a game",

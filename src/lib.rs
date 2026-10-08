@@ -154,7 +154,7 @@ impl App {
         let (title, text) = match lang {
             ui::text::Lang::Zh => (
                 format!("检测到游戏：{name}"),
-                "可以在游戏画面上显示帧率等信息：在设置的“悬浮窗”页打开“玩游戏时自动显示”。".to_string(),
+                "可以在游戏画面上显示帧率等信息：在设置的“悬浮窗”页打开“游戏时自动显示”。".to_string(),
             ),
             ui::text::Lang::En => (
                 format!("A game is running: {name}"),
