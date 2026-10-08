@@ -13,7 +13,7 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, LoadCursorW, PostMessageW, SetCursor, SetForegroundWindow,
-    TrackPopupMenuEx, IDC_SIZEALL, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    TrackPopupMenuEx, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
 use crate::reading::Sample;
@@ -41,14 +41,52 @@ pub struct Overlay {
     lang: Lang,
     /// Where it is on screen (physical pixels).
     rect: RECT,
-    /// What it shows, how opaque, and at what scale: drawn again as a drag
-    /// starts and ends.
-    drawn: (Vec<overlay::Line>, f32, f32),
-    /// Being dragged: the pointer's offset from its corner.
-    grab: Option<POINT>,
+    /// Its screen's scale, and the size it is drawn at (1 as designed).
+    dpi: f32,
+    size: f32,
+    /// What it shows, and how opaque: drawn again as it is dragged.
+    drawn: (Vec<overlay::Line>, f32),
+    /// Being dragged by the pointer: to move it, or by its edges, to size it.
+    grab: Option<Grab>,
     /// The screen of the game played, kept while it presents no frames
     /// for a moment.
     game_screen: Option<[i32; 4]>,
+}
+
+/// A drag under way: where the pointer, the overlay and its size were as it
+/// began, and which edges it holds (none: the whole overlay, to move it).
+#[derive(Clone, Copy)]
+struct Grab {
+    from: POINT,
+    rect: RECT,
+    size: f32,
+    edges: Edges,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Edges {
+    left: bool,
+    right: bool,
+    top: bool,
+    bottom: bool,
+}
+
+impl Edges {
+    fn any(self) -> bool {
+        self.left || self.right || self.top || self.bottom
+    }
+}
+
+/// How near its edge the pointer sizes it rather than moves it (DIPs).
+const EDGE: f32 = 6.0;
+
+/// Where it is moved to, and how large it is, as a drag left it.
+pub struct Placed {
+    /// See `OverlaySettings::at`.
+    pub at: (f32, f32),
+    /// A point on the screen it is over.
+    pub point: (i32, i32),
+    pub size: f32,
 }
 
 /// A monitor's whole area, and its scale.
@@ -69,6 +107,11 @@ fn room(screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
     (screen.left + inset, screen.top + inset, across, down)
 }
 
+fn cursor() -> Option<POINT> {
+    let mut cursor = POINT::default();
+    unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| cursor)
+}
+
 impl Overlay {
     pub fn new() -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
@@ -82,7 +125,9 @@ impl Overlay {
             locked: false,
             lang: Lang::En,
             rect: RECT::default(),
-            drawn: (Vec::new(), 1.0, 1.0),
+            dpi: 1.0,
+            size: 1.0,
+            drawn: (Vec::new(), 1.0),
             grab: None,
             game_screen: None,
         })
@@ -100,6 +145,14 @@ impl Overlay {
         if lines.is_empty() {
             return self.hide();
         }
+        self.drawn = (lines, settings.opacity);
+        // Held as the pointer has it while it is dragged.
+        if self.grab.is_some() {
+            let (width, height) = self.dims();
+            self.rect.right = self.rect.left + width;
+            self.rect.bottom = self.rect.top + height;
+            return self.draw();
+        }
         // Over a game, the game's screen; otherwise the one it was put on.
         if let Some(screen) = game.and_then(|game| game.screen) {
             self.game_screen = Some(screen);
@@ -115,23 +168,22 @@ impl Overlay {
             Some((x, y)) => unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) },
             None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
         };
-        let (screen, scale) = monitor_info(monitor);
-        // Its screen's scale, at the size chosen.
-        let scale = scale * settings.size.clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
-        let (width, height) = overlay::size(&lines, |text, font| self.gfx.measure(text, font));
-        let size = ((width * scale).ceil() as i32, (height * scale).ceil() as i32);
-        // Held where it is while it is dragged.
-        if self.grab.is_none() {
-            let (left, top, across, down) = room(screen, size, scale);
-            let x = left + (settings.at.0.clamp(0.0, 1.0) * across as f32).round() as i32;
-            let y = top + (settings.at.1.clamp(0.0, 1.0) * down as f32).round() as i32;
-            self.rect = RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
-        } else {
-            self.rect.right = self.rect.left + size.0;
-            self.rect.bottom = self.rect.top + size.1;
-        }
-        self.drawn = (lines, settings.opacity, scale);
+        let screen;
+        (screen, self.dpi) = monitor_info(monitor);
+        self.size = settings.size.clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
+        let size = self.dims();
+        let (left, top, across, down) = room(screen, size, self.dpi);
+        let x = left + (settings.at.0.clamp(0.0, 1.0) * across as f32).round() as i32;
+        let y = top + (settings.at.1.clamp(0.0, 1.0) * down as f32).round() as i32;
+        self.rect = RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
         self.draw();
+    }
+
+    /// Its width and height on screen, at its size (physical pixels).
+    fn dims(&self) -> (i32, i32) {
+        let scale = self.dpi * self.size;
+        let (width, height) = overlay::size(&self.drawn.0, |text, font| self.gfx.measure(text, font));
+        ((width * scale).ceil() as i32, (height * scale).ceil() as i32)
     }
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
@@ -141,7 +193,7 @@ impl Overlay {
         }
         // Placed above all again each time: a game may have taken the top.
         self.window.place(self.rect);
-        let (lines, opacity, scale) = (&self.drawn.0, self.drawn.1, self.drawn.2);
+        let (lines, opacity, scale) = (&self.drawn.0, self.drawn.1, self.dpi * self.size);
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let dragged = self.grab.is_some();
         let surface = self.surface.as_mut().unwrap();
@@ -157,37 +209,75 @@ impl Overlay {
         }
     }
 
-    /// The left button went down on it: unless it is locked, it follows the
-    /// pointer until it is let go.
+    /// The edges of it the pointer at `at` is on, if it is near them.
+    fn edges_at(&self, at: POINT) -> Edges {
+        let near = (EDGE * self.dpi).round() as i32;
+        let r = self.rect;
+        Edges { left: at.x < r.left + near, right: at.x >= r.right - near, top: at.y < r.top + near, bottom: at.y >= r.bottom - near }
+    }
+
+    /// The pointer's shape over edges `edges` (none: the whole overlay).
+    fn point_at(edges: Edges) {
+        let shape = match (edges.left || edges.right, edges.top || edges.bottom) {
+            (true, true) if edges.left == edges.top => IDC_SIZENWSE,
+            (true, true) => IDC_SIZENESW,
+            (true, false) => IDC_SIZEWE,
+            (false, true) => IDC_SIZENS,
+            (false, false) => IDC_SIZEALL,
+        };
+        unsafe { SetCursor(LoadCursorW(None, shape).ok()) };
+    }
+
+    /// The left button went down on it: unless it is locked, it is moved, or
+    /// if the pointer is on its edges, sized, until it is let go.
     pub fn press(&mut self) {
-        let mut cursor = POINT::default();
-        if self.locked || unsafe { GetCursorPos(&mut cursor) }.is_err() {
-            return;
-        }
-        self.grab = Some(POINT { x: cursor.x - self.rect.left, y: cursor.y - self.rect.top });
+        let Some(from) = cursor().filter(|_| !self.locked) else { return };
+        let edges = self.edges_at(from);
+        self.grab = Some(Grab { from, rect: self.rect, size: self.size, edges });
         unsafe { SetCapture(self.window.hwnd) };
         self.draw();
     }
 
-    /// The pointer moved over it, or while it is dragged.
+    /// The pointer moved over it, or while it is dragged: it moves, or grows
+    /// and shrinks as a whole from the corner opposite the edges held (its
+    /// shape is its readings').
     pub fn moved(&mut self) {
-        if !self.locked {
-            unsafe { SetCursor(LoadCursorW(None, IDC_SIZEALL).ok()) };
-        }
-        let (Some(grab), mut cursor) = (self.grab, POINT::default()) else { return };
-        if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+        let Some(at) = cursor() else { return };
+        let Some(grab) = self.grab else {
+            if !self.locked {
+                Self::point_at(self.edges_at(at));
+            }
+            return;
+        };
+        Self::point_at(grab.edges);
+        let (dx, dy) = (at.x - grab.from.x, at.y - grab.from.y);
+        let r = grab.rect;
+        if !grab.edges.any() {
+            self.rect = RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy };
+            self.window.place(self.rect);
             return;
         }
-        let (width, height) = (self.rect.right - self.rect.left, self.rect.bottom - self.rect.top);
-        let (x, y) = (cursor.x - grab.x, cursor.y - grab.y);
+        let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
+        let e = grab.edges;
+        let across = (e.left || e.right).then(|| (width + if e.right { dx } else { -dx } as f32) / width);
+        let down = (e.top || e.bottom).then(|| (height + if e.bottom { dy } else { -dy } as f32) / height);
+        let ratio = match (across, down) {
+            (Some(a), Some(d)) => a.max(d),
+            (Some(a), None) => a,
+            (None, Some(d)) => d,
+            (None, None) => 1.0,
+        };
+        self.size = (grab.size * ratio).clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
+        let (width, height) = self.dims();
+        let x = if e.left { r.right - width } else { r.left };
+        let y = if e.top { r.bottom - height } else { r.top };
         self.rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
-        self.window.place(self.rect);
+        self.draw();
     }
 
-    /// Let go: where it now is on the screen it is over, as kept (see
-    /// `OverlaySettings::at`), and a point on that screen; none unless it
-    /// was being dragged.
-    pub fn release(&mut self) -> Option<((f32, f32), (i32, i32))> {
+    /// Let go: where it now is and how large, as kept; none unless it was
+    /// being dragged.
+    pub fn release(&mut self) -> Option<Placed> {
         self.grab.take()?;
         unsafe {
             let _ = ReleaseCapture();
@@ -198,7 +288,7 @@ impl Overlay {
         let (screen, scale) = monitor_info(unsafe { MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST) });
         let (left, top, across, down) = room(screen, (rect.right - rect.left, rect.bottom - rect.top), scale);
         let share = |at: i32, room: i32| if room > 0 { (at as f32 / room as f32).clamp(0.0, 1.0) } else { 0.0 };
-        Some(((share(rect.left - left, across), share(rect.top - top, down)), (centre.x, centre.y)))
+        Some(Placed { at: (share(rect.left - left, across), share(rect.top - top, down)), point: (centre.x, centre.y), size: self.size })
     }
 
     /// A right click on it: its menu, at the pointer, and what was chosen.

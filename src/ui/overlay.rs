@@ -197,13 +197,24 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, descent_value) = frame.baseline(VALUE);
+    // The clearer the plate, the darker the outline the readings take, so
+    // that they read over any picture.
+    let outline = Color::hex(0x000000, (1.0 - opacity.clamp(0.0, 1.0)) * 0.7);
+    let outlined = |text: &str, font: Font, color: Color, x: f32, y: f32, room: f32| {
+        if !dragged && outline.a > 0.0 {
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                frame.text(text, font, outline, x + dx, y + dy, room, Align::Start);
+            }
+        }
+        frame.text(text, font, color, x, y, room, Align::Start);
+    };
     for (i, Line { name, value, hot, .. }) in lines.iter().enumerate() {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
         let y = PAD.1 + i as f32 * LINE + (LINE - ascent_value - descent_value) / 2.0;
         let color = if name == "FPS" { FRAMES } else { NAME };
-        frame.text(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label, Align::Start);
-        frame.text(value, VALUE, if *hot { HOT } else { FIGURE }, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
+        outlined(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label);
+        outlined(value, VALUE, if *hot { HOT } else { FIGURE }, PAD.0 + label + LABEL_GAP, y, width);
     }
 }
 

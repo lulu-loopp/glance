@@ -1213,7 +1213,7 @@ impl Ui {
         match field {
             Field::PanelSize => (pick(lang, "面板大小", "Panel size"), sizes.0, sizes.1, 0.05, self.settings.panel_size.clamp(sizes.0, sizes.1)),
             Field::OverlaySize => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
-            _ => (pick(lang, "背景不透明度", "Background opacity"), 0.2, 1.0, 0.05, overlay.opacity.clamp(0.2, 1.0)),
+            _ => (pick(lang, "背景不透明度", "Background opacity"), 0.0, 1.0, 0.05, overlay.opacity.clamp(0.0, 1.0)),
         }
     }
 

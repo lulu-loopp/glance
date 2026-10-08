@@ -478,8 +478,8 @@ impl Controller {
                 // Let go, or the capture taken away mid-drag (the lock
                 // screen, another program): it stays where it was put.
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
-                    if let Some((at, point)) = overlay.as_mut().unwrap().release() {
-                        std::thread::spawn(move || crate::app().place_overlay(at, point));
+                    if let Some(placed) = overlay.as_mut().unwrap().release() {
+                        std::thread::spawn(move || crate::app().place_overlay(placed));
                     }
                 }
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {

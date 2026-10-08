@@ -174,12 +174,12 @@ impl App {
         self.change(|settings| settings.overlay.locked = locked);
     }
 
-    /// The overlay was dragged to `at` (see `OverlaySettings::at`) on the
-    /// screen with `point` on it.
-    pub fn place_overlay(&self, at: (f32, f32), point: (i32, i32)) {
+    /// The overlay was dragged where, and to the size, `placed` says.
+    pub fn place_overlay(&self, placed: overlay::Placed) {
         self.change(|settings| {
-            settings.overlay.at = at;
-            settings.overlay.screen = Some(point);
+            settings.overlay.at = placed.at;
+            settings.overlay.screen = Some(placed.point);
+            settings.overlay.size = placed.size;
         });
     }
 }
