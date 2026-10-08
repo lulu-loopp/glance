@@ -23,7 +23,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    EnumWindows, GetCursorPos, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
 };
 
 use crate::frames::{FrameStats, Presents};
@@ -154,8 +154,6 @@ pub struct Presenting {
     pub fills_screen: bool,
     /// Whether that screen is the one the pointer is on.
     pub under_pointer: bool,
-    /// Whether it is the window in front.
-    pub in_front: bool,
     pub refresh_hz: Option<u32>,
     /// Its screen, in physical pixels: left, top, right, bottom.
     pub screen: Option<[i32; 4]>,
@@ -180,7 +178,6 @@ pub fn presenting() -> Vec<Presenting> {
         return Vec::new();
     }
     let own = std::process::id();
-    let front = unsafe { GetForegroundWindow() };
     let mut cursor = POINT::default();
     let pointer_screen = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
     // The top-level windows, topmost first.
@@ -207,7 +204,6 @@ pub fn presenting() -> Vec<Presenting> {
             title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
             fills_screen,
             under_pointer: monitor.is_some() && monitor.map(|(monitor, _)| monitor) == pointer_screen,
-            in_front: window == front,
             refresh_hz,
             screen: monitor.map(|(_, r)| [r.left, r.top, r.right, r.bottom]),
         });
@@ -265,7 +261,7 @@ mod tests {
             rates.sort_by(|a, b| b.1.total_cmp(&a.1));
             let windows: Vec<String> = presenting()
                 .iter()
-                .map(|p| format!("pid {} '{}' fps {:.1} fills {} pointer {} front {} refresh {:?}", p.pid, p.title, p.stats.fps, p.fills_screen, p.under_pointer, p.in_front, p.refresh_hz))
+                .map(|p| format!("pid {} '{}' fps {:.1} fills {} pointer {} refresh {:?}", p.pid, p.title, p.stats.fps, p.fills_screen, p.under_pointer, p.refresh_hz))
                 .collect();
             writeln!(out, "{second:>2}s presenting {rates:?}\n    windows: {windows:?}").unwrap();
         }

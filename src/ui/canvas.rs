@@ -109,9 +109,6 @@ pub trait Canvas {
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
     fn unclip(&self);
-    /// Draws at `opacity` until `unfade`; fades nest.
-    fn fade(&self, opacity: f32);
-    fn unfade(&self);
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32);
     fn fill_rounded(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32);
     fn fill_circle(&self, color: Color, centre: Point, radius: f32);

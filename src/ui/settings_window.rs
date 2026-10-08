@@ -51,7 +51,7 @@ use super::backdrop::Capture;
 use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
-use super::prefs::{self, LanguagePref, Mode, Prefs, ProcessSort, ThemePref};
+use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
 use super::render::{self, PanelLayers};
 use super::skins;
@@ -169,7 +169,7 @@ pub fn follow_settings() {
     with_ui(|ui| {
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
-        ui.prefs = Prefs::resolve(&settings.view, &app.controller.known_modules()).for_mode(ui.editing);
+        ui.prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
         ui.settings = settings;
         ui.next_frame = Instant::now();
     });
@@ -298,12 +298,11 @@ enum Page {
     Opening,
     Shown,
     Overlay,
-    Game,
     Data,
     System,
 }
 
-const PAGES: [Page; 7] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Game, Page::Data, Page::System];
+const PAGES: [Page; 6] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Data, Page::System];
 
 impl Page {
     fn name(self, lang: Lang) -> &'static str {
@@ -312,7 +311,6 @@ impl Page {
             Page::Opening => pick(lang, "呼出", "Opening"),
             Page::Shown => pick(lang, "显示内容", "Shown"),
             Page::Overlay => pick(lang, "悬浮窗", "Overlay"),
-            Page::Game => pick(lang, "游戏模式", "Game mode"),
             Page::Data => pick(lang, "数据", "Data"),
             Page::System => pick(lang, "系统", "System"),
         }
@@ -325,7 +323,6 @@ impl Page {
             Page::Opening => "\u{E8B0}",
             Page::Shown => "\u{E8A9}",
             Page::Overlay => "\u{E9D9}",
-            Page::Game => "\u{E7FC}",
             Page::Data => "\u{E9D2}",
             Page::System => "\u{E770}",
         }
@@ -335,8 +332,6 @@ impl Page {
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
-    /// Which mode's modules and columns the list below sets.
-    Mode,
     Theme,
     Language,
     Edge,
@@ -376,7 +371,6 @@ enum Switch {
     Startup,
     Updates,
     HeatAlert,
-    AutoGame,
     Overlay,
     OverlayInGame,
 }
@@ -456,11 +450,7 @@ struct Ui {
     /// Physical pixels per DIP.
     scale: f32,
     settings: Settings,
-    /// The preferences, with the modules of the mode being set in place of
-    /// the daily mode's (see `Prefs::for_mode`).
     prefs: Prefs,
-    /// The mode whose modules and columns are being set.
-    editing: Mode,
     /// The page shown.
     page: Page,
     lang: Lang,
@@ -553,9 +543,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let surface = Some(Surface::new(&gfx, hwnd).ok()?);
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
-        // The mode the panel is in, to begin with.
-        let editing = app.controller.mode();
-        let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules()).for_mode(editing);
+        let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let stage = Stage { size, desktop: wallpaper::desktop(size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
@@ -570,7 +558,6 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             palette: Palette::new(false),
             settings,
             prefs,
-            editing,
             page: Page::Appearance,
             autostart: elevation::autostart_enabled(),
             may_autostart: elevation::may_start_unasked(),
@@ -761,8 +748,7 @@ impl Ui {
 
     /// Keeps the settings and hands them to the panel.
     fn save(&mut self) {
-        // The daily mode's modules back in their place.
-        self.settings.view = serde_json::to_value(self.prefs.for_mode(self.editing)).unwrap();
+        self.settings.view = serde_json::to_value(&self.prefs).unwrap();
         crate::app().save(self.settings.clone());
         self.next_frame = Instant::now();
     }
@@ -791,7 +777,6 @@ impl Ui {
                 }
             }
             Page::Overlay => rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Choice(Field::OverlayOpacity), Row::OverlayItems]),
-            Page::Game => rows.push(Row::Switch(Switch::AutoGame)),
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
                 Row::Choice(Field::Span),
@@ -1040,7 +1025,6 @@ impl Ui {
         let (settings, prefs) = (&self.settings, &self.prefs);
         let at = |values: &[u64], value: u64| values.iter().position(|&v| v == value);
         match field {
-            Field::Mode => (pick(lang, "设置哪种模式", "Setting up"), vec![s("日常", "Daily"), s("游戏", "Game")], Some(self.editing as usize)),
             Field::Theme => (
                 pick(lang, "明暗", "Theme"),
                 vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Backdrop")],
@@ -1069,7 +1053,7 @@ impl Ui {
             Field::Columns => (
                 pick(lang, "面板栏数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
-                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == self.columns()),
+                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns),
             ),
             Field::Push => (
                 pick(lang, "推边缘呼出", "Push into the edge"),
@@ -1117,31 +1101,13 @@ impl Ui {
     }
 
     fn choose(&mut self, field: Field, index: usize) {
-        if field == Field::Mode {
-            // Nothing to keep: the list below now sets the other mode.
-            let mode = [Mode::Daily, Mode::Game][index];
-            if mode != self.editing {
-                std::mem::swap(&mut self.prefs.modules, &mut self.prefs.game_modules);
-                self.editing = mode;
-            }
-            self.next_frame = Instant::now();
-            return;
-        }
-        let editing = self.editing;
         let (settings, prefs) = (&mut self.settings, &mut self.prefs);
         match field {
-            Field::Mode => {}
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
-            Field::Columns => {
-                let columns = [None, Some(1), Some(2), Some(3), Some(4)][index];
-                match editing {
-                    Mode::Daily => settings.columns = columns,
-                    Mode::Game => settings.game_columns = columns,
-                }
-            }
+            Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
@@ -1233,14 +1199,6 @@ impl Ui {
         (chips, y + CHIP + 16.0)
     }
 
-    /// The columns of the mode being set.
-    fn columns(&self) -> Option<usize> {
-        match self.editing {
-            Mode::Daily => self.settings.columns,
-            Mode::Game => self.settings.game_columns,
-        }
-    }
-
     /// A word under a row of choices' name, for the few that need one.
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
@@ -1274,21 +1232,16 @@ impl Ui {
                 }),
                 self.autostart,
             ),
-            Switch::AutoGame => (
-                p("自动切换到游戏模式", "Switch to game mode by itself"),
-                Some(p("全屏游戏开始时切换，结束后切回日常；窗口化的游戏在面板底部手动切换", "When a fullscreen game starts, and back when it ends; for a windowed game, switch on the panel's bar")),
-                self.settings.auto_game_mode,
-            ),
             Switch::Overlay => (
                 p("悬浮窗", "Overlay"),
                 Some(p("一直显示。拖动它调整位置；右键它可以锁定位置、关闭或打开设置", "Shown all the time. Drag it into place; right-click it to lock it, close it or open the settings")),
                 self.settings.overlay.on,
             ),
             Switch::OverlayInGame => (
-                p("游戏模式时自动打开", "Open in game mode"),
+                p("玩游戏时自动显示", "Show while playing"),
                 Some(p(
-                    "平时关着也会在游戏模式下出现，显示在游戏所在的屏幕上，离开游戏模式后收起。帧率、1% low、帧时间只在游戏模式下显示",
-                    "Shown in game mode even when off otherwise, on the game's screen, and put away after. Frame rate, 1% low and frame time show in game mode",
+                    "平时关着也会在全屏游戏运行时出现在游戏所在的屏幕上，游戏结束后收起。帧率、1% low、帧时间只在玩游戏时显示",
+                    "Shown over a fullscreen game, on its screen, even when off otherwise, and put away after. Frame rate, 1% low and frame time show while playing",
                 )),
                 self.settings.overlay.in_game,
             ),
@@ -1331,7 +1284,6 @@ impl Ui {
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
-            Switch::AutoGame => settings.auto_game_mode ^= true,
             Switch::Overlay => {
                 settings.overlay.on ^= true;
                 settings.overlay.offered = true;
@@ -1656,8 +1608,6 @@ impl Ui {
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
                 Row::OverlayItems if self.settings.overlay.on || self.settings.overlay.in_game => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
-                // The modes' choice, on the modules' page.
-                Row::Title if self.page == Page::Shown => vec![Target::Choice(Field::Mode, self.editing as usize)],
                 Row::Title | Row::OverlayItems => vec![],
             }))
             .collect()
@@ -1762,7 +1712,7 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::Title, Target::Choice(Field::Mode, _)) | (Row::OverlayItems, Target::OverlayItem(_)) => true,
+            (Row::OverlayItems, Target::OverlayItem(_)) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
@@ -2018,11 +1968,6 @@ impl Ui {
                 Row::Title => {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
                     text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
-                    // All below is the mode chosen's.
-                    if self.page == Page::Shown {
-                        let (_, options, chosen) = self.choices(Field::Mode);
-                        self.segmented(frame, palette, Field::Mode, &options, chosen, true, left + width, y + 22.0, now, &hovered);
-                    }
                 }
                 Row::OverlayItems => {
                     card(frame, palette, left, y, width, row_height, palette.card);
@@ -2424,10 +2369,10 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: crate::app().controller.overlay_wanted(), mode_thumb: self.editing as usize as f32, fade: 1.0 };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted() };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.columns());
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
@@ -2443,7 +2388,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: crate::app().controller.overlay_wanted(), mode_thumb: self.editing as usize as f32, fade: 1.0 };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted() };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

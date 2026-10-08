@@ -68,14 +68,14 @@ impl Shortcut {
     }
 }
 
-/// A few readings floating over the screen: all the time, or in game mode
-/// (over the game) only.
+/// A few readings floating over the screen: all the time, or while a game
+/// is played (over the game) only.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlaySettings {
     /// Shown all the time.
     pub on: bool,
-    /// Shown in game mode, off or not otherwise.
+    /// Shown while a game is played, off or not otherwise.
     pub in_game: bool,
     /// What it shows, by name (see `ui::overlay::ITEMS`).
     pub items: Vec<String>,
@@ -158,10 +158,6 @@ pub struct Settings {
     /// How many columns the panel's lanes are dealt into; none chosen, as
     /// few as fit the screen's height.
     pub columns: Option<usize>,
-    /// The same, in game mode.
-    pub game_columns: Option<usize>,
-    /// Game mode while a game runs, daily mode otherwise.
-    pub auto_game_mode: bool,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -196,8 +192,6 @@ impl Default for Settings {
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
-            game_columns: None,
-            auto_game_mode: true,
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,
@@ -287,9 +281,6 @@ mod tests {
 
     #[test]
     fn settings_from_before_take_the_defaults() {
-        // Settings from before modes switch by themselves.
-        let settings: Settings = serde_json::from_str("{}").unwrap();
-        assert!(settings.auto_game_mode);
         let mut settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
         settings.carry_over();
         assert_eq!(settings.shortcut, Some(Shortcut::default()));

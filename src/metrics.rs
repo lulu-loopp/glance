@@ -190,46 +190,35 @@ impl Sampler {
     }
 
     /// The game to show: of the programs presenting frames, a game on the
-    /// pointer's screen, else a game on another, else the program in front.
+    /// pointer's screen, else a game on another.
     /// A game is one whose window covers its screen.
     /// Named by its window's title, its program from the process list, and
     /// its use of the machine from the counters (never by opening its
     /// process: anti-cheat watches for that). `collected` says whether the
     /// counters were read this time.
     fn game(&mut self, collected: bool) -> Option<GameSample> {
-        let found: Vec<(crate::presents::Presenting, String, bool)> = crate::presents::presenting()
-            .into_iter()
-            .map(|presenting| {
-                let program = self.processes.name_of(presenting.pid as usize).unwrap_or_default();
-                let is_game = presenting.fills_screen;
-                (presenting, program, is_game)
-            })
-            .collect();
+        // A game: a program presenting frames whose window covers its screen.
+        let found: Vec<crate::presents::Presenting> = crate::presents::presenting().into_iter().filter(|p| p.fills_screen).collect();
         let now = Instant::now();
         let chosen = found
             .iter()
-            .find(|(p, _, is_game)| *is_game && p.under_pointer)
-            .or_else(|| found.iter().find(|(_, _, is_game)| *is_game))
-            .or_else(|| found.iter().find(|(p, _, _)| p.in_front));
-        let Some((presenting, program, is_game)) = chosen else {
+            .find(|p| p.under_pointer)
+            .or_else(|| found.first());
+        let Some(presenting) = chosen else {
             self.forget_playing(now);
             return None;
         };
         let pid = presenting.pid as usize;
-        let playing_s = if *is_game {
-            // The same game again soon after it was last seen is the same
-            // time playing it (a look at another window, a loading screen
-            // that drew nothing).
-            let start = match &self.playing {
-                Some((was, start, last)) if was == program && now.duration_since(*last) < PLAY_BREAK => *start,
-                _ => now,
-            };
-            self.playing = Some((program.clone(), start, now));
-            Some(now.duration_since(start).as_secs())
-        } else {
-            self.forget_playing(now);
-            None
+        let program = self.processes.name_of(pid).unwrap_or_default();
+        // The same game again soon after it was last seen is the same time
+        // playing it (a look at another window, a loading screen that drew
+        // nothing).
+        let start = match &self.playing {
+            Some((was, start, last)) if *was == program && now.duration_since(*last) < PLAY_BREAK => *start,
+            _ => now,
         };
+        self.playing = Some((program.clone(), start, now));
+        let playing_s = Some(now.duration_since(start).as_secs());
         let usage = self.processes.usage_of(pid);
         let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
         let gpu_limit = adapter.and_then(|a| a.power).and_then(|reader| self.gpu_power.limit(reader));
@@ -248,7 +237,6 @@ impl Sampler {
         Some(GameSample {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
-            is_game: *is_game,
             fps: presenting.stats.fps,
             low: presenting.stats.low,
             longest_ms: presenting.stats.longest_ms,

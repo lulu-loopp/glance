@@ -87,8 +87,10 @@ fn line(name: &str, parts: Vec<(Option<String>, &'static [&'static str])>, hot: 
 }
 
 /// What the overlay shows of sample `s`, line by line: the `items` chosen
-/// that are read. A game's readings are `game`'s, if there is one.
-pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang) -> Vec<Line> {
+/// that are read. A game's readings are `game`'s while one is `playing`;
+/// "—" while it presents no frames for a moment (it lost the front to a
+/// menu, it loads), so that its lines hold their place.
+pub fn lines(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[String], lang: Lang) -> Vec<Line> {
     let on = |name: &str| items.iter().any(|item| item == name);
     let celsius = |t: f32| format!("{t:.0} °C");
     let watts = |w: f32| format!("{w:.0} W");
@@ -100,16 +102,17 @@ pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang
     let cpu_sensors = s.cpu_sensors.as_ref();
     let rate = |rate: Option<f64>| rate.map(|rate| text::rate(rate, false));
     let mut lines = Vec::new();
-    if let Some(game) = game {
-        lines.push(line(
-            "FPS",
-            vec![
-                (on("fps").then(|| format!("{:.0}", game.fps)), FRAMES_A_SECOND),
-                (on("low").then(|| game.low.map(|low| format!("1% {low:.0}"))).flatten(), LOW),
-            ],
-            false,
-        ));
-        lines.push(line(lang.pick("帧时间", "Frame"), vec![(on("frametime").then(|| format!("{:.1} ms", game.longest_ms)), FRAME_TIME)], false));
+    if playing {
+        let unread = || "—".to_string();
+        let fps = game.map_or_else(unread, |game| format!("{:.0}", game.fps));
+        // No 1% low yet is no line part, as for any reading not yet read.
+        let low = match game {
+            Some(game) => game.low.map(|low| format!("1% {low:.0}")),
+            None => Some(unread()),
+        };
+        let frame = game.map_or_else(unread, |game| format!("{:.1} ms", game.longest_ms));
+        lines.push(line("FPS", vec![(on("fps").then_some(fps), FRAMES_A_SECOND), (low.filter(|_| on("low")), LOW)], false));
+        lines.push(line(lang.pick("帧时间", "Frame"), vec![(on("frametime").then_some(frame), FRAME_TIME)], false));
     }
     lines.push(line(
         "CPU",
@@ -154,7 +157,6 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
     let example = GameSample {
         name: String::new(),
         program: String::new(),
-        is_game: true,
         fps: 144.0,
         low: Some(118.0),
         longest_ms: 8.4,
@@ -169,7 +171,7 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
         gpu_limit: None,
         playing_s: None,
     };
-    lines(s, Some(s.game.as_ref().unwrap_or(&example)), items, lang)
+    lines(s, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
 }
 
 /// How large `lines` are drawn, plate and all (DIPs), with `measure` giving
@@ -238,8 +240,7 @@ mod tests {
             game: game.then(|| GameSample {
                 name: "Game".into(),
                 program: "game".into(),
-                is_game: true,
-                fps: 143.6,
+                        fps: 143.6,
                 low: None,
                 longest_ms: 9.26,
                 fills_screen: true,
@@ -267,20 +268,22 @@ mod tests {
         // Unread readings left out, not shown as gaps: no 1% low yet, no GPU.
         let plain = |lines: Vec<Line>| lines.into_iter().map(|line| (line.name, line.value)).collect::<Vec<(String, String)>>();
         assert_eq!(
-            plain(lines(&s, s.game.as_ref(), &chosen, Lang::Zh)),
+            plain(lines(&s, s.game.as_ref(), true, &chosen, Lang::Zh)),
             [("FPS".into(), "144".into()), ("帧时间".into(), "9.3 ms".into()), ("CPU".into(), text::percent(40.0)), ("内存".into(), "8.0 GB".to_string())]
         );
         // Without a game, only the machine's.
         let s = sample(false);
-        assert_eq!(plain(lines(&s, None, &items(&["fps", "cpu"]), Lang::En)), [("CPU".into(), text::percent(40.0))]);
-        assert!(lines(&s, None, &items(&["fps"]), Lang::En).is_empty());
+        assert_eq!(plain(lines(&s, None, false, &items(&["fps", "cpu"]), Lang::En)), [("CPU".into(), text::percent(40.0))]);
+        assert!(lines(&s, None, false, &items(&["fps"]), Lang::En).is_empty());
+        // A game played that presents no frame for a moment keeps its line.
+        assert_eq!(plain(lines(&s, None, true, &items(&["fps"]), Lang::En)), [("FPS".into(), "—".into())]);
         // A muted microphone, to be heeded.
-        let mic = lines(&s, None, &items(&["mic"]), Lang::En);
+        let mic = lines(&s, None, false, &items(&["mic"]), Lang::En);
         assert_eq!((mic[0].value.as_str(), mic[0].hot), ("Muted", true));
         // As wide as its widest value, whatever it reads now: a character
         // a unit wide here.
         let measure = |text: &str, _| text.chars().count() as f32;
-        let now = size(&lines(&s, None, &items(&["cpu"]), Lang::En), measure);
+        let now = size(&lines(&s, None, false, &items(&["cpu"]), Lang::En), measure);
         assert_eq!(now.0, (2.0 * PAD.0 + 3.0 + LABEL_GAP + 4.0).ceil());
     }
 }

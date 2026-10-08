@@ -31,7 +31,7 @@ use crate::reading::{
 };
 use crate::settings::Edge;
 use crate::ui::gfx::Gfx;
-use crate::ui::prefs::{Mode, Prefs};
+use crate::ui::prefs::Prefs;
 use crate::ui::arrange::{self, GAP};
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::seen::Seen;
@@ -114,9 +114,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system"].map(String::from));
-    // Filmed in game mode while a game is played.
-    let game_mode = shot.game.is_some();
-    let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known).for_mode(if game_mode { Mode::Game } else { Mode::Daily });
+    let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
         prefs.modules.iter_mut().for_each(|entry| entry.on = shown.contains(&entry.id));
@@ -161,7 +159,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
-    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: if game_mode { Mode::Game } else { Mode::Daily }, overlay: false, mode_thumb: if game_mode { 1.0 } else { 0.0 }, fade: 1.0 };
+    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false };
     let (layout, zoom, rest, _) = place(&probe, &view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -198,10 +196,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             process_scroll: 0.0,
             hover: None,
             pinned: false,
-            mode: if game_mode { Mode::Game } else { Mode::Daily },
             overlay: false,
-            mode_thumb: if game_mode { 1.0 } else { 0.0 },
-            fade: 1.0,
         };
         let (layout, zoom, rest, held) = place(&scene, &view::lanes(&scene), &theme);
         // What the panel holds as it has been up: drawn in the boxes it opened with.
@@ -364,7 +359,6 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         GameSample {
             name: name.to_string(),
             program: name.to_string(),
-            is_game: true,
             fps: 138.0 + 14.0 * wave(11.0, 0.4) + 4.0 * noise() - if stutter { 9.0 } else { 0.0 },
             low: Some(96.0 + 6.0 * noise()),
             longest_ms: if stutter { 18.0 + 14.0 * noise() } else { 7.6 + 1.6 * noise() },

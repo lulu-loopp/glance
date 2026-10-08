@@ -89,19 +89,17 @@ pub struct Sample {
     /// Whether the default microphone is muted; none without one.
     pub mic_muted: Option<bool>,
     /// The game presenting frames, the one on the pointer's screen first;
-    /// with none, the program in front if it presents frames.
+    /// none while no game presents frames.
     pub game: Option<GameSample>,
 }
 
-/// A game (or, with none, the program in front) and its frames.
+/// A game and its frames.
 #[derive(Clone, Serialize)]
 pub struct GameSample {
     /// What it calls itself (its window's title), or its program's name.
     pub name: String,
     /// Its program's name.
     pub program: String,
-    /// A game: its window covers its screen.
-    pub is_game: bool,
     pub fps: f32,
     /// The 1% low, as frames a second; none until enough frames have come.
     pub low: Option<f32>,

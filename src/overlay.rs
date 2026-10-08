@@ -46,6 +46,9 @@ pub struct Overlay {
     drawn: (Vec<overlay::Line>, f32, f32),
     /// Being dragged: the pointer's offset from its corner.
     grab: Option<POINT>,
+    /// The screen of the game played, kept while it presents no frames
+    /// for a moment.
+    game_screen: Option<[i32; 4]>,
 }
 
 /// A monitor's whole area, and its scale.
@@ -81,23 +84,30 @@ impl Overlay {
             rect: RECT::default(),
             drawn: (Vec::new(), 1.0, 1.0),
             grab: None,
+            game_screen: None,
         })
     }
 
-    /// Shows the readings of `sample` as `settings` ask, while `wanted`: in
-    /// game mode (`game_mode`), with the frames of the program presenting
-    /// them, on its screen; otherwise on the screen it was put on. Hidden
-    /// while not wanted, and while there is nothing to show.
-    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, game_mode: bool, wanted: bool) {
+    /// Shows the readings of `sample` as `settings` ask, while `wanted`:
+    /// while a game is played (`playing`), with its frames, on its screen;
+    /// otherwise on the screen it was put on. Hidden while not wanted, and
+    /// while there is nothing to show.
+    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool) {
         self.locked = settings.locked;
         self.lang = lang;
-        let game = sample.and_then(|s| s.game.as_ref()).filter(|_| game_mode);
-        let lines = sample.filter(|_| wanted).map(|s| overlay::lines(s, game, &settings.items, lang)).unwrap_or_default();
+        let game = sample.and_then(|s| s.game.as_ref()).filter(|_| playing);
+        let lines = sample.filter(|_| wanted).map(|s| overlay::lines(s, game, playing, &settings.items, lang)).unwrap_or_default();
         if lines.is_empty() {
             return self.hide();
         }
-        // In game mode, the game's screen; otherwise the one it was put on.
-        let point = match game.and_then(|game| game.screen) {
+        // Over a game, the game's screen; otherwise the one it was put on.
+        if let Some(screen) = game.and_then(|game| game.screen) {
+            self.game_screen = Some(screen);
+        }
+        if !playing {
+            self.game_screen = None;
+        }
+        let point = match self.game_screen {
             Some([left, top, right, bottom]) => Some(((left + right) / 2, (top + bottom) / 2)),
             None => settings.screen,
         };

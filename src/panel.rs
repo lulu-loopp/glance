@@ -53,7 +53,7 @@ use crate::ui::arrange::{self, GAP};
 use crate::ui::seen::Seen;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
-use crate::ui::prefs::{Mode, Prefs};
+use crate::ui::prefs::Prefs;
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
@@ -95,11 +95,6 @@ pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
 pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
-/// The modes' thumb sliding over; one mode's lanes fading out, and the
-/// other's in.
-const THUMB: (Duration, Easing) = (Duration::from_millis(240), Easing(0.16, 1.0, 0.3, 1.0));
-const FADE_OUT: Duration = Duration::from_millis(90);
-const FADE_IN: Duration = Duration::from_millis(160);
 
 /// Requests to the input thread from elsewhere.
 const OPEN_FROM_TRAY: u32 = WM_APP + 1;
@@ -118,8 +113,6 @@ struct Config {
     live: bool,
     anchor: Anchor,
     columns: Option<usize>,
-    game_columns: Option<usize>,
-    auto_game_mode: bool,
     overlay: OverlaySettings,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
@@ -137,8 +130,6 @@ fn config_from(settings: &Settings) -> Config {
         live: settings.live_backdrop,
         anchor: settings.anchor,
         columns: settings.columns,
-        game_columns: settings.game_columns,
-        auto_game_mode: settings.auto_game_mode,
         overlay: settings.overlay.clone(),
         pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
@@ -149,32 +140,28 @@ fn config_from(settings: &Settings) -> Config {
     }
 }
 
-/// Which mode the panel is in: as chosen on it, or else as a game running
-/// says.
+/// Whether a game is being played: one presented frames, and has not been
+/// without them for `GAME_GAP` since.
 #[derive(Default)]
-struct Modes {
-    /// Chosen on the panel; held until a game starts or ends.
-    chosen: Option<Mode>,
-    /// A game is running: it presented frames, and has not been without
-    /// them for `GAME_GAP` since.
-    playing: bool,
+struct Playing {
+    now: bool,
     /// When a game last presented frames.
-    last_played: Option<Instant>,
+    last: Option<Instant>,
 }
 
 /// How long a game can go without frames (a loading screen, a stall, a
-/// look at another window) and still be running, as the modes see it.
+/// look at another window) and still be played.
 const GAME_GAP: Duration = Duration::from_secs(5);
 
 pub struct Controller {
     info: StaticInfo,
     config: Mutex<Config>,
-    modes: Mutex<Modes>,
+    playing: Mutex<Playing>,
     /// The samples of the longest chart span, oldest first.
     pub history: Mutex<VecDeque<Sample>>,
     /// What the machine has shown it can read since Glance started.
     pub seen: Mutex<Seen>,
-    /// The overlay, opened by game mode, closed by hand for the rest of it.
+    /// The overlay, opened by a game, closed by hand for the rest of it.
     overlay_closed: AtomicBool,
     /// The input thread's message window, once it has one.
     sink: AtomicIsize,
@@ -186,7 +173,7 @@ impl Controller {
         Controller {
             info,
             config: Mutex::new(config_from(settings)),
-            modes: Mutex::new(Modes::default()),
+            playing: Mutex::new(Playing::default()),
             history: Mutex::new(VecDeque::new()),
             seen: Mutex::new(Seen::default()),
             overlay_closed: AtomicBool::new(false),
@@ -209,24 +196,21 @@ impl Controller {
 
     pub fn record(&self, sample: Sample) {
         self.seen.lock().unwrap().note(&sample);
-        // A game starting or ending sets the mode by itself again: one that
-        // has gone a short while without frames has not ended.
+        // A game that has gone a short while without frames has not ended.
         let now = Instant::now();
-        let presenting = sample.game.as_ref().is_some_and(|game| game.is_game);
-        let (changed, started) = {
-            let mut modes = self.modes.lock().unwrap();
-            if presenting {
-                modes.last_played = Some(now);
+        let (started, ended) = {
+            let mut playing = self.playing.lock().unwrap();
+            if sample.game.is_some() {
+                playing.last = Some(now);
             }
-            let playing = modes.last_played.is_some_and(|last| now.duration_since(last) < GAME_GAP);
-            let before = self.mode_of(&modes);
-            let started = playing && !modes.playing;
-            if modes.playing != playing {
-                modes.playing = playing;
-                modes.chosen = None;
-            }
-            (self.mode_of(&modes) != before, started)
+            let was = playing.now;
+            playing.now = playing.last.is_some_and(|last| now.duration_since(last) < GAME_GAP);
+            (playing.now && !was, was && !playing.now)
         };
+        // An overlay closed by hand stays closed for the rest of the game.
+        if ended {
+            self.overlay_closed.store(false, Ordering::Relaxed);
+        }
         if started {
             // The first game ever, with the overlay off: it is offered.
             let (on, offered) = {
@@ -238,7 +222,8 @@ impl Controller {
                 std::thread::spawn(move || crate::app().offer_overlay(&name));
             }
         }
-        if changed {
+        if started || ended {
+            // The bar's overlay button is lit while the overlay is up.
             self.post(RESTYLE);
         }
         self.post(OVERLAY);
@@ -254,43 +239,32 @@ impl Controller {
         self.shown.load(Ordering::Relaxed)
     }
 
-    /// The mode the panel is in now.
-    pub fn mode(&self) -> Mode {
-        self.mode_of(&self.modes.lock().unwrap())
-    }
-
-    fn mode_of(&self, modes: &Modes) -> Mode {
-        let auto = self.config.lock().unwrap().auto_game_mode;
-        modes.chosen.unwrap_or(if auto && modes.playing { Mode::Game } else { Mode::Daily })
+    /// Whether a game is being played.
+    pub fn playing(&self) -> bool {
+        self.playing.lock().unwrap().now
     }
 
     /// Whether the overlay is wanted on screen: on all the time, or opened by
-    /// game mode (and not closed for the rest of it).
+    /// a game (and not closed for the rest of it).
     pub fn overlay_wanted(&self) -> bool {
         let (on, in_game) = {
             let config = self.config.lock().unwrap();
             (config.overlay.on, config.overlay.in_game)
         };
-        on || in_game && self.mode() == Mode::Game && !self.overlay_closed.load(Ordering::Relaxed)
+        on || in_game && self.playing() && !self.overlay_closed.load(Ordering::Relaxed)
     }
 
     /// The overlay opened or closed by hand (its button, its menu): closed,
-    /// it is off, and if game mode opened it, closed for the rest of that;
+    /// it is off, and if a game opened it, closed for the rest of that game;
     /// opened, it is on.
     pub fn set_overlay(&self, open: bool) {
-        self.overlay_closed.store(!open && self.mode() == Mode::Game, Ordering::Relaxed);
+        self.overlay_closed.store(!open && self.playing(), Ordering::Relaxed);
         let on = self.config.lock().unwrap().overlay.on;
         if on != open {
             std::thread::spawn(move || crate::app().set_overlay(open));
         } else {
             self.post(RESTYLE);
         }
-    }
-
-    /// Puts the panel in mode `mode`, until a game starts or ends.
-    pub fn choose_mode(&self, mode: Mode) {
-        self.modes.lock().unwrap().chosen = Some(mode);
-        self.post(RESTYLE);
     }
 
     /// Opens the panel from the tray icon, on the monitor the pointer is on.
@@ -362,11 +336,7 @@ impl Controller {
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
         let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
-            let game_mode = self.mode() == Mode::Game;
-            // Closed by hand in game mode: until game mode ends.
-            if !game_mode {
-                self.overlay_closed.store(false, Ordering::Relaxed);
-            }
+            let playing = self.playing();
             let wanted = self.overlay_wanted();
             if overlay.is_none() && wanted {
                 *overlay = Overlay::new().ok();
@@ -374,7 +344,7 @@ impl Controller {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, panel.lang, game_mode, wanted);
+            overlay.show(history.back(), &settings, panel.lang, playing, wanted);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -490,7 +460,7 @@ impl Controller {
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => {
-                    panel.follow(now);
+                    panel.restyle();
                     draw_overlay(&mut overlay, &panel);
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
@@ -701,14 +671,6 @@ struct Panel<'a> {
     opacity: Transition,
     placement: Option<Placement>,
     prefs: Prefs,
-    mode: Mode,
-    /// The modes' thumb (0 Daily, 1 Game), and the lanes' opacity.
-    mode_thumb: Transition,
-    fade: Transition,
-    /// Going over to the other mode: its lanes laid out once the old have
-    /// faded out; the whole panel with them (`whole`) when its size changes.
-    switching: bool,
-    whole: bool,
     skin: Skin,
     theme: Theme,
     lang: Lang,
@@ -764,11 +726,6 @@ impl<'a> Panel<'a> {
             opacity: Transition::settled(0.0),
             placement: None,
             prefs: Prefs::default(),
-            mode: Mode::Daily,
-            mode_thumb: Transition::settled(0.0),
-            fade: Transition::settled(1.0),
-            switching: false,
-            whole: false,
             skin: Skin::Paper,
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
@@ -803,44 +760,13 @@ impl<'a> Panel<'a> {
         matches!(self.phase, Phase::Open { .. })
     }
 
-    /// The settings or the mode changed. Over to the other mode while the
-    /// panel is up, its thumb slides and its lanes fade out, to be laid out
-    /// for the mode and fade in (see `frame`); otherwise at once.
-    fn follow(&mut self, now: Instant) {
-        let mode = self.controller.mode();
-        if !self.is_shown() {
-            // Hidden (taken down mid-switch, too): at once.
-            self.switching = false;
-            self.whole = false;
-            self.fade.jump(1.0);
-            self.restyle();
-            self.mode_thumb.jump(thumb_at(self.mode));
-        } else if mode != self.mode && !reduced_motion() {
-            self.mode_thumb.retarget(thumb_at(mode), THUMB.0, THUMB.1, now);
-            self.fade.retarget(0.0, FADE_OUT, LINEAR, now);
-            // A panel of another size (other columns, other lanes) fades out
-            // whole, sheet and all, rather than jump to its new size.
-            let size = |layout: &Layout| (layout.width(), layout.height());
-            if self.size_in(mode) != self.opening.as_ref().map(|opening| size(&opening.layout)) {
-                self.opacity.retarget(0.0, FADE_OUT, LINEAR, now);
-                self.whole = true;
-            }
-            self.switching = true;
-            self.next_frame = now;
-        } else if !self.switching {
-            self.restyle();
-            self.mode_thumb.jump(thumb_at(self.mode));
-        }
-    }
-
     /// The settings changed: what is shown, how, and from which edge.
     fn restyle(&mut self) {
         self.next_frame = Instant::now();
-        self.mode = self.controller.mode();
         let config = self.controller.config.lock().unwrap();
-        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).for_mode(self.mode);
+        self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.edge = config.edge;
-        self.columns = if self.mode == Mode::Game { config.game_columns } else { config.columns };
+        self.columns = config.columns;
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
@@ -849,7 +775,7 @@ impl<'a> Panel<'a> {
         // lane's size, and leaves it be.
         let mut sized = self.prefs.clone();
         sized.processes.sort = Default::default();
-        let style = format!("{} {:?} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, self.mode, serde_json::to_string(&sized).unwrap_or_default());
+        let style = format!("{} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
             // A second change before a frame laid it out keeps what the
@@ -884,10 +810,6 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
-            self.mode_thumb.jump(thumb_at(self.mode));
-            self.fade.jump(1.0);
-            self.switching = false;
-            self.whole = false;
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
             self.held = None;
@@ -1090,28 +1012,6 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
-    /// The size the panel would be laid out at in mode `mode`, holding what
-    /// it holds now, on its screen; none while it is not placed.
-    fn size_in(&self, mode: Mode) -> Option<(f32, f32)> {
-        let contact = self.placement.as_ref()?.contact;
-        let held = &self.opening.as_ref()?.seen;
-        let work = (
-            (contact.work.right - contact.work.left) as f32 / contact.scale,
-            (contact.work.bottom - contact.work.top) as f32 / contact.scale,
-        );
-        let (prefs, columns) = {
-            let config = self.controller.config.lock().unwrap();
-            let prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).for_mode(mode);
-            (prefs, if mode == Mode::Game { config.game_columns } else { config.columns })
-        };
-        let mut history = self.controller.history.lock().unwrap();
-        let scene = scene(self.controller, &prefs, &self.theme, self.lang, 0.0, None, (false, mode, (thumb_at(mode), 1.0)), history.make_contiguous(), held);
-        let lanes = view::lanes(&scene);
-        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(&self.theme))).collect();
-        let layout = arrange::Opening::new(&self.theme, self.edge, &heights, work, columns, held.clone()).layout;
-        Some((layout.width(), layout.height()))
-    }
-
     /// The panel's lanes, laid out (once each opening, and held), and the
     /// window placed for them.
     fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
@@ -1124,8 +1024,7 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let motion = (self.mode_thumb.value(Instant::now()), self.fade.value(Instant::now()));
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode, motion));
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
@@ -1190,17 +1089,6 @@ impl<'a> Panel<'a> {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
-        // The old mode's lanes gone: the new mode's, laid out, fade in.
-        if self.switching && self.fade.done(now) {
-            self.switching = false;
-            self.restyle();
-            self.fade.retarget(1.0, FADE_IN, LINEAR, now);
-            // To the mode as it is now: it may have changed back mid-switch.
-            self.mode_thumb.retarget(thumb_at(self.mode), THUMB.0, THUMB.1, now);
-            if std::mem::take(&mut self.whole) {
-                self.opacity.retarget(1.0, FADE_IN, LINEAR, now);
-            }
-        }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
@@ -1230,8 +1118,7 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let motion = (self.mode_thumb.value(now), self.fade.value(now));
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode, motion), history.make_contiguous(), seen);
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
@@ -1285,12 +1172,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = !self.shift.done(now)
-            || !self.opacity.done(now)
-            || !self.mode_thumb.done(now)
-            || !self.fade.done(now)
-            || self.switching
-            || (self.scroll_target - self.scroll).abs() > 0.05;
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05;
         self.next_frame = if moving {
             now
         } else {
@@ -1322,8 +1204,6 @@ impl<'a> Panel<'a> {
                 crate::show_settings();
             }
             Some(Hit::Pin) => self.pinned ^= true,
-            // Against the mode in force, which a switch under way is going to.
-            Some(Hit::Mode(mode)) if mode != self.controller.mode() => self.controller.choose_mode(mode),
             Some(Hit::Overlay) => {
                 // As it is on screen now: shown, it closes; not, it opens.
                 self.controller.set_overlay(!self.controller.overlay_wanted());
@@ -1360,7 +1240,7 @@ fn scene<'s>(
     lang: Lang,
     scroll: f32,
     hover: Option<Hit>,
-    (pinned, mode, (mode_thumb, fade)): (bool, Mode, (f32, f32)),
+    pinned: bool,
     history: &'s [Sample],
     seen: &'s Seen,
 ) -> Scene<'s> {
@@ -1378,10 +1258,7 @@ fn scene<'s>(
         process_scroll: scroll,
         hover,
         pinned,
-        mode,
         overlay,
-        mode_thumb,
-        fade,
     }
 }
 
@@ -1413,13 +1290,6 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Where the modes' thumb rests for `mode`.
-fn thumb_at(mode: Mode) -> f32 {
-    match mode {
-        Mode::Daily => 0.0,
-        Mode::Game => 1.0,
-    }
-}
 
 /// Positions the panel for a layout `size` DIPs large, and moves the window
 /// if that changed it.
