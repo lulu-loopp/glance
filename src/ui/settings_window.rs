@@ -1071,7 +1071,7 @@ impl Ui {
             ),
             Switch::Overlay => (
                 p("游戏悬浮窗", "Game overlay"),
-                Some(p("设置窗口打开时可以拖动它调整位置；平时鼠标点击会穿过它", "Drag it into place while the settings are open; otherwise clicks pass through")),
+                Some(p("拖动它调整位置；右键它可以锁定位置、隐藏或打开设置", "Drag it into place; right-click it to lock it, hide it or open the settings")),
                 self.settings.overlay.on,
             ),
             Switch::HeatAlert => (

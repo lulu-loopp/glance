@@ -83,6 +83,8 @@ pub struct OverlaySettings {
     /// A point on the screen it was put on (physical pixels), where it shows
     /// when no game decides the screen.
     pub screen: Option<(i32, i32)>,
+    /// Locked where it is: not dragged.
+    pub locked: bool,
     /// Offered once already: the first game told of it.
     pub offered: bool,
 }
@@ -95,6 +97,7 @@ impl Default for OverlaySettings {
             items: ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"].map(String::from).to_vec(),
             at: (0.0, 0.0),
             screen: None,
+            locked: false,
             offered: false,
         }
     }

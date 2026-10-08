@@ -33,8 +33,8 @@ const RADIUS: f32 = 6.0;
 const LABEL: Font = Font::new(Family::Segoe, 12.0, 600.0);
 const VALUE: Font = Font::new(Family::Segoe, 13.0, 600.0);
 const PLATE: Color = Color::hex(0x101214, 0.62);
-/// The plate while it is being placed: it can be dragged.
-const PLATE_PLACING: Color = Color::hex(0x1D4F91, 0.86);
+/// The plate while it is dragged.
+const PLATE_DRAGGED: Color = Color::hex(0x1D4F91, 0.86);
 const NAME: Color = Color::hex(0xFFFFFF, 0.62);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
@@ -42,9 +42,8 @@ const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
 
 /// What the overlay shows of sample `s`, line by line (a name and its
 /// value): the `items` chosen that are read. A game's readings are
-/// `game`'s, if there is one; `placing`, they show as "—" without one, to
-/// place them by.
-pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang, placing: bool) -> Vec<(String, String)> {
+/// `game`'s, if there is one.
+pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang) -> Vec<(String, String)> {
     let on = |name: &str| items.iter().any(|item| item == name);
     let joined = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
     let celsius = |t: f32| format!("{t:.0} °C");
@@ -55,24 +54,14 @@ pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang
         .and_then(|i| s.gpus.get(i))
         .or_else(|| s.gpus.iter().max_by(|a, b| a.usage.unwrap_or(0.0).total_cmp(&b.usage.unwrap_or(0.0))));
     let cpu_sensors = s.cpu_sensors.as_ref();
-    let unread = || Some("—".to_string());
     let mut lines = Vec::new();
-    match game {
-        Some(game) => {
-            let fps = on("fps").then(|| format!("{:.0}", game.fps));
-            let low = on("low").then(|| game.low.map(|low| format!("1% {low:.0}"))).flatten();
-            lines.push(("FPS".to_string(), joined(vec![fps, low])));
-            if on("frametime") {
-                lines.push((lang.pick("帧时间", "Frame").to_string(), format!("{:.1} ms", game.longest_ms)));
-            }
+    if let Some(game) = game {
+        let fps = on("fps").then(|| format!("{:.0}", game.fps));
+        let low = on("low").then(|| game.low.map(|low| format!("1% {low:.0}"))).flatten();
+        lines.push(("FPS".to_string(), joined(vec![fps, low])));
+        if on("frametime") {
+            lines.push((lang.pick("帧时间", "Frame").to_string(), format!("{:.1} ms", game.longest_ms)));
         }
-        None if placing => {
-            lines.push(("FPS".to_string(), joined(vec![on("fps").then(unread).flatten(), on("low").then(unread).flatten()])));
-            if on("frametime") {
-                lines.push((lang.pick("帧时间", "Frame").to_string(), "—".into()));
-            }
-        }
-        None => {}
     }
     lines.push((
         "CPU".into(),
@@ -113,11 +102,11 @@ pub fn size(lines: &[(String, String)], measure: impl Fn(&str, Font) -> f32) -> 
     ((2.0 * PAD.0 + label + LABEL_GAP + value).ceil(), (2.0 * PAD.1 + lines.len() as f32 * LINE).ceil())
 }
 
-/// Draws `lines` on their plate, from the canvas's corner; `placing`, on
-/// the plate that says it can be dragged.
-pub fn paint(frame: &dyn Canvas, lines: &[(String, String)], placing: bool) {
+/// Draws `lines` on their plate, from the canvas's corner; `dragged`, on
+/// the plate that says it is being moved.
+pub fn paint(frame: &dyn Canvas, lines: &[(String, String)], dragged: bool) {
     let (width, height) = size(lines, |text, font| frame.measure(text, font));
-    frame.fill_rounded(if placing { PLATE_PLACING } else { PLATE }, 0.0, 0.0, width, height, RADIUS);
+    frame.fill_rounded(if dragged { PLATE_DRAGGED } else { PLATE }, 0.0, 0.0, width, height, RADIUS);
     let label = lines.iter().map(|(name, _)| frame.measure(name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
@@ -190,13 +179,12 @@ mod tests {
         let s = sample(true);
         // Unread readings left out, not shown as gaps: no 1% low yet, no GPU.
         assert_eq!(
-            lines(&s, s.game.as_ref(), &chosen, Lang::Zh, false),
+            lines(&s, s.game.as_ref(), &chosen, Lang::Zh),
             [("FPS".into(), "144".into()), ("帧时间".into(), "9.3 ms".into()), ("CPU".into(), text::percent(40.0)), ("内存".into(), "8.0 GB".to_string())]
         );
-        // Without a game, only the machine's; placing, the game's as "—".
+        // Without a game, only the machine's.
         let s = sample(false);
-        assert_eq!(lines(&s, None, &items(&["fps", "cpu"]), Lang::En, false), [("CPU".into(), text::percent(40.0))]);
-        assert_eq!(lines(&s, None, &items(&["fps", "cpu"]), Lang::En, true)[0], ("FPS".into(), "—".into()));
-        assert!(lines(&s, None, &items(&["fps"]), Lang::En, false).is_empty());
+        assert_eq!(lines(&s, None, &items(&["fps", "cpu"]), Lang::En), [("CPU".into(), text::percent(40.0))]);
+        assert!(lines(&s, None, &items(&["fps"]), Lang::En).is_empty());
     }
 }

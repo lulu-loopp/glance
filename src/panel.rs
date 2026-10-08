@@ -37,13 +37,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, GetCursorInfo, GetCursorPos, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, CURSORINFO, CURSOR_SHOWING, HWND_MESSAGE, MSG, PM_REMOVE,
     QS_ALLINPUT, WM_HOTKEY,
-    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+    SPI_GETCLIENTAREAANIMATION, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
     WM_TIMER,
 };
 
 use crate::detector::{Detector, Motion};
 use crate::reading::{Sample, StaticInfo};
-use crate::overlay::Overlay;
+use crate::overlay::{Choice as OverlayChoice, Overlay};
 use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
@@ -310,8 +310,7 @@ impl Controller {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.lock().unwrap();
-            // Placed while the settings are open.
-            overlay.show(history.back(), &settings, lang, self.mode() == Mode::Game, settings_window::is_open());
+            overlay.show(history.back(), &settings, lang, self.mode() == Mode::Game);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -422,10 +421,7 @@ impl Controller {
                 // so: taken down, and opened afresh.
                 // The panel's own (the overlay's follows its game's screen).
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
-                OPEN_SETTINGS => {
-                    settings_window::open();
-                    draw_overlay(&mut overlay, panel.lang);
-                }
+                OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, panel.lang);
@@ -438,6 +434,25 @@ impl Controller {
                 WM_LBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
                     if let Some((at, point)) = overlay.as_mut().unwrap().release() {
                         std::thread::spawn(move || crate::app().place_overlay(at, point));
+                    }
+                }
+                WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                    let (choice, before) = overlay.as_ref().unwrap().menu();
+                    match choice {
+                        Some(OverlayChoice::Settings) => crate::show_settings(),
+                        choice => {
+                            // The game in front before the menu, in front again.
+                            bring_back(Some(before).filter(|window| !window.is_invalid()));
+                            match choice {
+                                Some(OverlayChoice::Lock(locked)) => {
+                                    std::thread::spawn(move || crate::app().lock_overlay(locked));
+                                }
+                                Some(OverlayChoice::Hide) => {
+                                    std::thread::spawn(|| crate::app().set_overlay(false));
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),

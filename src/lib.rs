@@ -151,6 +151,13 @@ impl App {
         tray::notify(&title, &text);
     }
 
+    /// The overlay locked where it is, or let loose.
+    pub fn lock_overlay(&self, locked: bool) {
+        let mut settings = self.settings.lock().unwrap().clone();
+        settings.overlay.locked = locked;
+        self.save(settings);
+    }
+
     /// The overlay was dragged to `at` (see `OverlaySettings::at`) on the
     /// screen with `point` on it.
     pub fn place_overlay(&self, at: (f32, f32), point: (i32, i32)) {
