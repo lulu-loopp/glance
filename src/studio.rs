@@ -147,7 +147,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             }
             None => {
                 let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
-                held.insert(arrange::Opening::new(theme, edge, &heights, (sw, sh), None, scene.seen.clone()))
+                held.insert(arrange::Opening::new(theme, edge, &heights, (sw, sh), None, 1.0, scene.seen.clone()))
             }
         };
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);

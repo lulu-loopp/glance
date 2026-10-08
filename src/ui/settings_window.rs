@@ -63,6 +63,7 @@ use crate::elevation;
 use crate::metrics;
 use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
 use super::overlay::ITEMS as OVERLAY_ITEMS;
+use crate::panel::SIZES;
 use crate::update;
 
 /// The window's size, and the least it can be resized to (DIPs).
@@ -88,6 +89,10 @@ const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
+/// A slider's track, the room for its value, and its thumb's radius.
+const SLIDER_WIDTH: f32 = 200.0;
+const SLIDER_VALUE: f32 = 44.0;
+const SLIDER_THUMB: f32 = 10.0;
 /// The narrowest a row's word may be beside its choices.
 const MIN_WORDS: f32 = 140.0;
 /// The page's name, at the top of the page.
@@ -167,6 +172,11 @@ pub fn open() {
 /// menu, a drag): an open window shows them, and saves on top of them.
 pub fn follow_settings() {
     with_ui(|ui| {
+        // Sliding shows its value live through the panel's settings; the
+        // window's own are kept as it is let go.
+        if ui.sliding.is_some() {
+            return;
+        }
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
         ui.prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
@@ -227,6 +237,8 @@ struct Palette {
     /// take in either (the pale dark-mode shade cannot carry a white knob).
     selection: Color,
     switch_on: Color,
+    /// The ring of a slider's thumb.
+    switch_knob_ring: Color,
 }
 
 impl Palette {
@@ -255,6 +267,7 @@ impl Palette {
                 disabled_knob: white(0.53),
                 selection: off,
                 switch_on: on,
+                switch_knob_ring: Color::hex(0x454545, 1.0),
             }
         } else {
             Palette {
@@ -277,6 +290,7 @@ impl Palette {
                 disabled_knob: white(1.0),
                 selection: on,
                 switch_on: on,
+                switch_knob_ring: white(1.0),
             }
         }
     }
@@ -347,7 +361,10 @@ enum Field {
     Span,
     LoadAlert,
     TempAlert,
+    /// Set on a slider (see `slider`).
     OverlayOpacity,
+    OverlaySize,
+    PanelSize,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -394,6 +411,8 @@ enum Target {
     ClearShortcut,
     /// One of the overlay's readings, on or off.
     OverlayItem(&'static str),
+    /// A slider's track.
+    Slider(Field),
     /// A page, in the pages' list.
     Page(Page),
     /// Asks for a newer release now.
@@ -416,6 +435,8 @@ enum Row {
     ModuleChoice(String, Field),
     /// What the overlay shows: a chip for each reading.
     OverlayItems,
+    /// A value set by sliding.
+    Slider(Field),
     Shortcut,
     /// This Glance's version, how the last asking went, and asking now.
     Version,
@@ -480,6 +501,8 @@ struct Ui {
     focus: Option<Target>,
     keyboard: bool,
     drag: Option<Drag>,
+    /// A slider being slid, and where its track is.
+    sliding: Option<(Field, Rect)>,
     /// The modules whose cards are open (all closed as the window opens).
     expanded: HashSet<String>,
     targets: Vec<(Rect, Target)>,
@@ -575,6 +598,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             focus: None,
             keyboard: false,
             drag: None,
+            sliding: None,
             expanded: HashSet::new(),
             targets: Vec::new(),
             relabel_at: None,
@@ -756,7 +780,7 @@ impl Ui {
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Title];
         match self.page {
-            Page::Appearance => rows.extend([Row::Skins, Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
+            Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
             Page::Opening => rows.extend([
                 Row::Choice(Field::Edge),
                 Row::Choice(Field::Anchor),
@@ -776,7 +800,13 @@ impl Ui {
                     }
                 }
             }
-            Page::Overlay => rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Choice(Field::OverlayOpacity), Row::OverlayItems]),
+            Page::Overlay => rows.extend([
+                Row::Switch(Switch::Overlay),
+                Row::Switch(Switch::OverlayInGame),
+                Row::Slider(Field::OverlaySize),
+                Row::Slider(Field::OverlayOpacity),
+                Row::OverlayItems,
+            ]),
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
                 Row::Choice(Field::Span),
@@ -836,6 +866,7 @@ impl Ui {
             // first row of a group sits 8 under its heading, the rest 4 apart.
             let (before, height) = match &row {
                 Row::Title => (0.0, TITLE),
+                Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::OverlayItems => (ROW_GAP, self.chips().1),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 // A choice with a word on it: the word above, the choices on
@@ -1086,11 +1117,7 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlayOpacity => (
-                pick(lang, "背景不透明度", "Background opacity"),
-                vec!["100%".into(), "85%".into(), "70%".into(), "50%".into()],
-                [100, 85, 70, 50].iter().position(|&o| o == (settings.overlay.opacity * 100.0).round() as u32),
-            ),
+            Field::OverlayOpacity | Field::OverlaySize | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -1117,7 +1144,7 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlayOpacity => settings.overlay.opacity = [1.0, 0.85, 0.7, 0.5][index],
+            Field::OverlayOpacity | Field::OverlaySize | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -1179,6 +1206,38 @@ impl Ui {
         self.record(false);
     }
 
+    /// A slider's name, its least and most values, its step, and its value.
+    fn slider(&self, field: Field) -> (&'static str, f32, f32, f32, f32) {
+        let lang = self.lang;
+        let (sizes, overlay) = (SIZES, &self.settings.overlay);
+        match field {
+            Field::PanelSize => (pick(lang, "面板大小", "Panel size"), sizes.0, sizes.1, 0.05, self.settings.panel_size.clamp(sizes.0, sizes.1)),
+            Field::OverlaySize => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
+            _ => (pick(lang, "背景不透明度", "Background opacity"), 0.2, 1.0, 0.05, overlay.opacity.clamp(0.2, 1.0)),
+        }
+    }
+
+    /// Sets a slider's value, to its nearest step; the panel and the overlay
+    /// show it at once (it is kept by `save`).
+    fn set_slider(&mut self, field: Field, value: f32) {
+        let (_, min, max, step, _) = self.slider(field);
+        let value = (min + ((value - min) / step).round() * step).clamp(min, max);
+        match field {
+            Field::PanelSize => self.settings.panel_size = value,
+            Field::OverlaySize => self.settings.overlay.size = value,
+            _ => self.settings.overlay.opacity = value,
+        }
+        crate::app().controller.apply(&self.settings);
+        self.next_frame = Instant::now();
+    }
+
+    /// A slider slid to `x` along its `track`.
+    fn slide(&mut self, field: Field, track: Rect, x: f32) {
+        let (_, min, max, ..) = self.slider(field);
+        let share = ((x - track.x - SLIDER_THUMB) / (track.w - 2.0 * SLIDER_THUMB)).clamp(0.0, 1.0);
+        self.set_slider(field, min + share * (max - min));
+    }
+
     /// The overlay's chips, where each is in its card (from the card's
     /// corner), with its reading's name and label; and the card's height.
     fn chips(&self) -> (Vec<(Rect, &'static str, &'static str)>, f32) {
@@ -1234,14 +1293,14 @@ impl Ui {
             ),
             Switch::Overlay => (
                 p("悬浮窗", "Overlay"),
-                Some(p("一直显示。拖动它调整位置；右键它可以锁定位置、关闭或打开设置", "Shown all the time. Drag it into place; right-click it to lock it, close it or open the settings")),
+                Some(p("始终显示在屏幕上。可拖动调整位置，右键可锁定、关闭或打开设置", "Always on screen. Drag to move; right-click to lock, close or open settings")),
                 self.settings.overlay.on,
             ),
             Switch::OverlayInGame => (
                 p("玩游戏时自动显示", "Show while playing"),
                 Some(p(
-                    "平时关着也会在全屏游戏运行时出现在游戏所在的屏幕上，游戏结束后收起。帧率、1% low、帧时间只在玩游戏时显示",
-                    "Shown over a fullscreen game, on its screen, even when off otherwise, and put away after. Frame rate, 1% low and frame time show while playing",
+                    "全屏游戏运行期间显示于游戏所在屏幕，游戏结束后隐藏。帧率、1% low 与帧时间仅在游戏期间显示",
+                    "Shown on the game's screen while a fullscreen game runs, hidden when it ends. Frame rate, 1% low and frame time show only during a game",
                 )),
                 self.settings.overlay.in_game,
             ),
@@ -1446,6 +1505,9 @@ impl Ui {
 
     fn moved(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        if let Some((field, track)) = self.sliding {
+            self.slide(field, track, x);
+        }
         if let Some(drag) = &mut self.drag {
             drag.pointer = y + self.scroll;
             self.reorder();
@@ -1465,6 +1527,16 @@ impl Ui {
             self.keyboard = false;
             self.focus = Some(self.stop_for(target));
         }
+        // A slider takes the value where it is pressed, and follows the
+        // pointer until it is let go.
+        if let Some(Target::Slider(field)) = self.pressed {
+            if let Some((track, _)) = self.targets.iter().find(|(_, target)| *target == Target::Slider(field)) {
+                let track = *track;
+                self.sliding = Some((field, track));
+                self.slide(field, track, x);
+                unsafe { SetCapture(self.hwnd) };
+            }
+        }
         if let Some(Target::Grip(id)) = &self.pressed {
             // A card travels closed.
             let id = id.clone();
@@ -1479,6 +1551,15 @@ impl Ui {
 
     fn release(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
+        // Kept once let go; shown live as it slid.
+        if self.sliding.take().is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            self.pressed = None;
+            self.save();
+            return;
+        }
         if let Some(drag) = self.drag.take() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -1564,7 +1645,8 @@ impl Ui {
                 }
             }
             Target::Quit => crate::quit(),
-            Target::Grip(_) => {}
+            // Slid by the pointer, stepped by the arrows; pressing alone does nothing more.
+            Target::Grip(_) | Target::Slider(_) => {}
         }
         self.next_frame = Instant::now();
     }
@@ -1596,6 +1678,7 @@ impl Ui {
                 Row::Version if update::check() == update::Check::Checking => vec![],
                 Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
+                Row::Slider(field) => vec![Target::Slider(field)],
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
@@ -1656,6 +1739,14 @@ impl Ui {
                 let forward = key == VK_RIGHT || key == VK_DOWN;
                 match self.focus.clone() {
                     Some(Target::Module(id) | Target::Expand(id)) if moves_module => self.shift_module(&id, forward),
+                    Some(Target::Slider(field)) => {
+                        let (_, min, max, step, value) = self.slider(field);
+                        let next = (value + if forward { step } else { -step }).clamp(min, max);
+                        if next != value {
+                            self.set_slider(field, next);
+                            self.save();
+                        }
+                    }
                     Some(Target::Choice(field, index)) => {
                         let count = self.choices(field).1.len();
                         let next = if forward { (index + 1).min(count - 1) } else { index.saturating_sub(1) };
@@ -1715,6 +1806,7 @@ impl Ui {
             (Row::OverlayItems, Target::OverlayItem(_)) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
+            (Row::Slider(f), Target::Slider(g)) => f == g,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
             (Row::Item(m, a), Target::Item(n, b)) => m == n && a == b,
             (Row::ModuleChoice(_, f), Target::Choice(g, _)) => f == g,
@@ -1968,6 +2060,30 @@ impl Ui {
                 Row::Title => {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
                     text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
+                }
+                Row::Slider(field) => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let (name, min, max, _, value) = self.slider(field);
+                    let cy = y + row_height / 2.0;
+                    text_centred(frame, name, label, palette.text, left + ROW_SIDE, cy, width / 2.0, Align::Start);
+                    // The value on the right; the track before it.
+                    let right = left + width - ROW_SIDE;
+                    let shown = format!("{:.0}%", value * 100.0);
+                    text_centred(frame, &shown, label, palette.text2, right - SLIDER_VALUE, cy, SLIDER_VALUE, Align::End);
+                    let track = Rect { x: right - SLIDER_VALUE - 12.0 - SLIDER_WIDTH, y, w: SLIDER_WIDTH, h: row_height };
+                    let (start, end) = (track.x + SLIDER_THUMB, track.x + track.w - SLIDER_THUMB);
+                    let at = start + (value - min) / (max - min) * (end - start);
+                    fill(frame, palette.switch_stroke.alpha(0.45), start, cy - 2.0, end - start, 4.0, 2.0);
+                    fill(frame, palette.switch_on, start, cy - 2.0, at - start, 4.0, 2.0);
+                    // As Windows' own: a ring around a dot in the accent, the
+                    // dot larger under the pointer.
+                    let lit = hovered == Some(Target::Slider(field)) || self.sliding.is_some_and(|(f, _)| f == field);
+                    let ring = SLIDER_THUMB;
+                    fill(frame, palette.card_stroke, at - ring - 1.0, cy - ring - 1.0, 2.0 * ring + 2.0, 2.0 * ring + 2.0, ring + 1.0);
+                    fill(frame, palette.switch_knob_ring, at - ring, cy - ring, 2.0 * ring, 2.0 * ring, ring);
+                    let dot = if lit { 7.0 } else { 5.0 };
+                    fill(frame, palette.switch_on, at - dot, cy - dot, 2.0 * dot, 2.0 * dot, dot);
+                    self.targets.push((track, Target::Slider(field)));
                 }
                 Row::OverlayItems => {
                     card(frame, palette, left, y, width, row_height, palette.card);
@@ -2305,7 +2421,9 @@ impl Ui {
             super::overlay::preview(sample, &overlay.items, self.lang)
         };
         let (sw, sh) = self.stage.size;
+        let size = overlay.size.clamp(SIZES.0, SIZES.1);
         let (w, h) = super::overlay::size(&lines, |text, font| frame.gfx.measure(text, font));
+        let (w, h) = (w * size, h * size);
         let inset = super::overlay::INSET;
         let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
         let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
@@ -2324,7 +2442,7 @@ impl Ui {
                 frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
             }
         }
-        frame.place(Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
+        frame.place(Matrix3x2::scale(size, size) * Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
         super::overlay::paint(frame, &lines, overlay.opacity, false);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
@@ -2372,7 +2490,8 @@ impl Ui {
         let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted() };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns);
+        let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);

@@ -89,6 +89,8 @@ pub struct OverlaySettings {
     pub locked: bool,
     /// How opaque its plate is, 0–1.
     pub opacity: f32,
+    /// How large it is drawn, 1 as designed (0.75 to 2).
+    pub size: f32,
     /// Offered once already: the first game told of it.
     pub offered: bool,
 }
@@ -103,6 +105,7 @@ impl Default for OverlaySettings {
             screen: None,
             locked: false,
             opacity: 0.85,
+            size: 1.0,
             offered: false,
         }
     }
@@ -158,6 +161,8 @@ pub struct Settings {
     /// How many columns the panel's lanes are dealt into; none chosen, as
     /// few as fit the screen's height.
     pub columns: Option<usize>,
+    /// How large the panel is drawn, 1 as designed (0.75 to 2).
+    pub panel_size: f32,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -192,6 +197,7 @@ impl Default for Settings {
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
+            panel_size: 1.0,
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,

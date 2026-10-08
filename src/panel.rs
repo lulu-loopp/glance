@@ -93,6 +93,8 @@ const SCROLL_EASE: f32 = 0.06;
 pub(crate) const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
 pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
 pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
+/// The sizes the panel and the overlay may be drawn at, as designed's share.
+pub(crate) const SIZES: (f32, f32) = (0.75, 2.0);
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
 
@@ -113,6 +115,7 @@ struct Config {
     live: bool,
     anchor: Anchor,
     columns: Option<usize>,
+    size: f32,
     overlay: OverlaySettings,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
@@ -130,6 +133,8 @@ fn config_from(settings: &Settings) -> Config {
         live: settings.live_backdrop,
         anchor: settings.anchor,
         columns: settings.columns,
+        // As far as the settings offer: the file may say anything.
+        size: settings.panel_size.clamp(SIZES.0, SIZES.1),
         overlay: settings.overlay.clone(),
         pressure: settings.sensitivity.pressure(),
         over_fullscreen: settings.over_fullscreen,
@@ -151,7 +156,7 @@ struct Playing {
 
 /// How long a game can go without frames (a loading screen, a stall, a
 /// look at another window) and still be played.
-const GAME_GAP: Duration = Duration::from_secs(5);
+const GAME_GAP: Duration = Duration::from_secs(3);
 
 pub struct Controller {
     info: StaticInfo,
@@ -677,6 +682,8 @@ struct Panel<'a> {
     edge: Edge,
     /// The columns chosen in the settings; none, as few as fit.
     columns: Option<usize>,
+    /// The size chosen in the settings, 1 as designed.
+    size: f32,
     /// Refresh the desktop behind the glass while the panel is open.
     live: bool,
     behind: Option<Behind>,
@@ -731,6 +738,7 @@ impl<'a> Panel<'a> {
             lang: Lang::En,
             edge: Edge::Right,
             columns: None,
+            size: 1.0,
             live: false,
             behind: None,
             tried_behind: Instant::now(),
@@ -767,6 +775,7 @@ impl<'a> Panel<'a> {
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.edge = config.edge;
         self.columns = config.columns;
+        self.size = config.size;
         self.skin = Skin::named(&config.skin);
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
@@ -775,7 +784,7 @@ impl<'a> Panel<'a> {
         // lane's size, and leaves it be.
         let mut sized = self.prefs.clone();
         sized.processes.sort = Default::default();
-        let style = format!("{} {:?} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.skin, serde_json::to_string(&sized).unwrap_or_default());
+        let style = format!("{} {:?} {} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.size, self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
             // A second change before a frame laid it out keeps what the
@@ -1041,7 +1050,7 @@ impl<'a> Panel<'a> {
                 let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
                 let lanes = view::lanes(&scene);
                 let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
-                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, self.columns, now.clone()))
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, self.columns, self.size, now.clone()))
             }
         };
         let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));

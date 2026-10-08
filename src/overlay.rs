@@ -116,6 +116,8 @@ impl Overlay {
             None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
         };
         let (screen, scale) = monitor_info(monitor);
+        // Its screen's scale, at the size chosen.
+        let scale = scale * settings.size.clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
         let (width, height) = overlay::size(&lines, |text, font| self.gfx.measure(text, font));
         let size = ((width * scale).ceil() as i32, (height * scale).ceil() as i32);
         // Held where it is while it is dragged.
