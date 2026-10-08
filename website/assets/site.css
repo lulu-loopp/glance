@@ -332,21 +332,11 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
   box-shadow: var(--shadow); }
 
 /* ---------- the overlay ---------- */
-/* A made-up game scene: a sky, a sun, hills and a few towers, detailed
-   enough for the glass over it to be seen frosting it. */
-.scene { position: relative; display: block; height: 360px; padding: 0;
-  background: linear-gradient(#5aa0e6 0%, #a9d2f2 55%, #f4d6a0 70%, #6f9a4c 70.5%, #47703a 100%); }
-.scene .art { position: absolute; inset: 0; pointer-events: none; }
-.scene .sun { position: absolute; width: 120px; height: 120px; right: 16%; top: 14%; border-radius: 50%;
-  background: radial-gradient(circle, #fff7d6 0 38%, #ffd36b 40% 58%, rgba(255, 211, 107, 0) 72%); }
-.scene .hill { position: absolute; left: 0; right: 0; bottom: 0; }
-.scene .h1 { height: 48%; background: #6a8fbf; clip-path: polygon(0 60%, 12% 30%, 26% 52%, 40% 18%, 55% 46%, 70% 22%, 86% 50%, 100% 28%, 100% 100%, 0 100%); }
-.scene .h2 { height: 36%; background: #4f7a46; clip-path: polygon(0 40%, 18% 62%, 34% 30%, 50% 58%, 66% 36%, 82% 64%, 100% 40%, 100% 100%, 0 100%); }
-.scene .h3 { height: 18%; background: #2f5530; }
-.scene .tower { position: absolute; bottom: 14%; width: 26px; background: repeating-linear-gradient(#e9e2d0 0 10px, #c9bfa8 10px 13px);
-  box-shadow: inset -6px 0 0 rgba(0, 0, 0, 0.12); }
-.scene .tower::before { content: ""; position: absolute; left: -6px; right: -6px; top: -14px; height: 14px; background: #b5523b;
-  clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+/* A made-up game scene at dusk (drawn by overlay.js): ridges fading into
+   the haze, a low sun and a few stars, behind the overlay so its glass is
+   seen frosting them. */
+.scene { position: relative; display: block; height: 360px; padding: 0; background: #2a1d43; }
+.scene .art { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .ov-glass { position: absolute; top: 24px; left: 24px; max-width: calc(100% - 48px); color: #fff; text-align: left;
   font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
   font-variant-numeric: tabular-nums; line-height: 1.25;
