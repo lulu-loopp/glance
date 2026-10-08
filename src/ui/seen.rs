@@ -39,6 +39,8 @@ pub struct Seen {
     pub game_limit: bool,
     /// A program presenting frames, a game or not (game mode shows it), now.
     pub presenting: bool,
+    /// A microphone's mute.
+    pub mic: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -103,6 +105,7 @@ impl Seen {
         self.game = s.game.as_ref().is_some_and(|game| game.is_game);
         self.game_limit |= s.game.as_ref().is_some_and(|game| game.gpu_limit.is_some());
         self.presenting = s.game.is_some();
+        self.mic |= s.mic_muted.is_some();
     }
 
     /// The readings `other` holds for the lane of module `id` that this
@@ -140,6 +143,7 @@ impl Seen {
                 flag(self.game, other.game, Item::Game);
                 flag(self.game_limit, other.game_limit, Item::GameLimit);
                 flag(self.presenting, other.presenting, Item::Presenting);
+                flag(self.mic, other.mic, Item::Mic);
             }
             _ => {
                 let Some(index) = info.gpu_of(id) else { return news };
@@ -212,6 +216,7 @@ impl Seen {
             Item::Game => seen.game = true,
             Item::GameLimit => seen.game_limit = true,
             Item::Presenting => seen.presenting = true,
+            Item::Mic => seen.mic = true,
             Item::Gpu(index, gpu) => {
                 if seen.gpus.len() <= *index {
                     seen.gpus.resize(index + 1, GpuSeen::default());
@@ -255,6 +260,7 @@ pub enum Item {
     Game,
     GameLimit,
     Presenting,
+    Mic,
     /// Of the GPU at this place in `StaticInfo::gpus`.
     Gpu(usize, GpuItem),
 }

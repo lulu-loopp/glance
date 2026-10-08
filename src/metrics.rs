@@ -10,6 +10,7 @@ use crate::dimm::Dimms;
 use crate::gpu_power::{self, GpuPower};
 use crate::reading::{BatterySample, GameSample, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
 use crate::sensors::CpuReader;
+use crate::mic::Microphone;
 use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
@@ -89,6 +90,7 @@ pub struct Sampler {
     cpu_sensors: Option<CpuReader>,
     super_io: Option<SuperIo>,
     dimms: Option<Dimms>,
+    mic: Option<Microphone>,
     /// Each process's GPU use at the last sample, by process id.
     /// Each process's use of the GPUs (unread where an instance of its
     /// was), from the last reading of the engine counters; `None` while
@@ -177,6 +179,7 @@ impl Sampler {
             cpu_sensors,
             super_io: super_io.ok(),
             dimms,
+            mic: Microphone::open(),
             gpu_by_pid: None,
             adapter_by_pid: HashMap::new(),
             gpu_process_memory,
@@ -383,6 +386,7 @@ impl Sampler {
             board: self.super_io.as_mut().map(SuperIo::read),
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
+            mic_muted: self.mic.as_ref().and_then(Microphone::muted),
             game: self.game(collected),
         })
     }

@@ -43,7 +43,7 @@ pub struct Overlay {
     rect: RECT,
     /// What it shows, how opaque, and at what scale: drawn again as a drag
     /// starts and ends.
-    drawn: (Vec<(String, String)>, f32, f32),
+    drawn: (Vec<overlay::Line>, f32, f32),
     /// Being dragged: the pointer's offset from its corner.
     grab: Option<POINT>,
 }

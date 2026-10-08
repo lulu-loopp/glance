@@ -10,7 +10,7 @@ use crate::reading::{GameSample, Sample};
 /// What the overlay can show, in the order it shows them: name, and what
 /// the settings call it in Chinese and English. Readings of one thing go
 /// on one line (the CPU's use, heat and power).
-pub const ITEMS: [(&str, &str, &str); 12] = [
+pub const ITEMS: [(&str, &str, &str); 13] = [
     ("fps", "帧率", "FPS"),
     ("low", "1% low", "1% low"),
     ("frametime", "帧时间", "Frame time"),
@@ -23,6 +23,7 @@ pub const ITEMS: [(&str, &str, &str); 12] = [
     ("memory", "内存", "Memory"),
     ("vram", "显存", "VRAM"),
     ("network", "网速", "Network"),
+    ("mic", "麦克风", "Microphone"),
 ];
 
 /// How far the plate keeps from its screen's edges (DIPs).
@@ -43,11 +44,16 @@ const NAME: Color = Color::hex(0xFFFFFF, 0.62);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
 const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
+/// A reading to heed (a muted microphone).
+const HOT: Color = Color::hex(0xFF7B6B, 1.0);
 
-/// What the overlay shows of sample `s`, line by line (a name and its
-/// value): the `items` chosen that are read. A game's readings are
-/// `game`'s, if there is one.
-pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang) -> Vec<(String, String)> {
+/// One line of the overlay: a name, its value, and whether the value is to
+/// be heeded.
+pub type Line = (String, String, bool);
+
+/// What the overlay shows of sample `s`, line by line: the `items` chosen
+/// that are read. A game's readings are `game`'s, if there is one.
+pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang) -> Vec<Line> {
     let on = |name: &str| items.iter().any(|item| item == name);
     let joined = |parts: Vec<Option<String>>| parts.into_iter().flatten().collect::<Vec<_>>().join(" · ");
     let celsius = |t: f32| format!("{t:.0} °C");
@@ -94,14 +100,19 @@ pub fn lines(s: &Sample, game: Option<&GameSample>, items: &[String], lang: Lang
         let value = joined(vec![rate(s.net_down).map(|r| format!("↓ {r}")), rate(s.net_up).map(|r| format!("↑ {r}"))]);
         lines.push((lang.pick("网速", "Net").into(), value));
     }
+    let mut lines: Vec<Line> = lines.into_iter().map(|(name, value)| (name, value, false)).collect();
+    if let Some(muted) = s.mic_muted.filter(|_| on("mic")) {
+        let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
+        lines.push((lang.pick("麦克风", "Mic").into(), value.into(), muted));
+    }
     // A line with nothing read on it is left out.
-    lines.into_iter().filter(|(_, value)| !value.is_empty()).collect()
+    lines.into_iter().filter(|(_, value, _)| !value.is_empty()).collect()
 }
 
 /// What the overlay would show of sample `s` over a game: its game's
 /// readings, or with none running, an example game's, for the settings'
 /// preview.
-pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<(String, String)> {
+pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
     let example = GameSample {
         name: String::new(),
         program: String::new(),
@@ -125,27 +136,27 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<(String, String)
 
 /// How large `lines` are drawn, plate and all (DIPs), with `measure` giving
 /// a text's width in a font.
-pub fn size(lines: &[(String, String)], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
-    let label = lines.iter().map(|(name, _)| measure(name, LABEL)).fold(0.0, f32::max);
-    let value = lines.iter().map(|(_, value)| measure(value, VALUE)).fold(0.0, f32::max);
+pub fn size(lines: &[Line], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
+    let label = lines.iter().map(|(name, ..)| measure(name, LABEL)).fold(0.0, f32::max);
+    let value = lines.iter().map(|(_, value, _)| measure(value, VALUE)).fold(0.0, f32::max);
     ((2.0 * PAD.0 + label + LABEL_GAP + value).ceil(), (2.0 * PAD.1 + lines.len() as f32 * LINE).ceil())
 }
 
 /// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
 /// corner; `dragged`, on the plate that says it is being moved.
-pub fn paint(frame: &dyn Canvas, lines: &[(String, String)], opacity: f32, dragged: bool) {
+pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool) {
     let (width, height) = size(lines, |text, font| frame.measure(text, font));
     let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
     frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
-    let label = lines.iter().map(|(name, _)| frame.measure(name, LABEL)).fold(0.0, f32::max);
+    let label = lines.iter().map(|(name, ..)| frame.measure(name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, _) = frame.baseline(VALUE);
-    for (i, (name, value)) in lines.iter().enumerate() {
+    for (i, (name, value, hot)) in lines.iter().enumerate() {
         let y = PAD.1 + i as f32 * LINE + (LINE - VALUE.size) / 2.0;
         let color = if name == "FPS" { FRAMES } else { NAME };
         frame.text(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label, Align::Start);
-        frame.text(value, VALUE, FIGURE, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
+        frame.text(value, VALUE, if *hot { HOT } else { FIGURE }, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
     }
 }
 
@@ -178,6 +189,7 @@ mod tests {
             board: None,
             drive_temps: Vec::new(),
             dimm_temps: Vec::new(),
+            mic_muted: Some(true),
             game: game.then(|| GameSample {
                 name: "Game".into(),
                 program: "game".into(),
@@ -208,13 +220,16 @@ mod tests {
         let chosen = items(&["fps", "low", "frametime", "cpu", "gpu", "memory"]);
         let s = sample(true);
         // Unread readings left out, not shown as gaps: no 1% low yet, no GPU.
+        let plain = |lines: Vec<Line>| lines.into_iter().map(|(name, value, _)| (name, value)).collect::<Vec<_>>();
         assert_eq!(
-            lines(&s, s.game.as_ref(), &chosen, Lang::Zh),
+            plain(lines(&s, s.game.as_ref(), &chosen, Lang::Zh)),
             [("FPS".into(), "144".into()), ("帧时间".into(), "9.3 ms".into()), ("CPU".into(), text::percent(40.0)), ("内存".into(), "8.0 GB".to_string())]
         );
         // Without a game, only the machine's.
         let s = sample(false);
-        assert_eq!(lines(&s, None, &items(&["fps", "cpu"]), Lang::En), [("CPU".into(), text::percent(40.0))]);
+        assert_eq!(plain(lines(&s, None, &items(&["fps", "cpu"]), Lang::En)), [("CPU".into(), text::percent(40.0))]);
         assert!(lines(&s, None, &items(&["fps"]), Lang::En).is_empty());
+        // A muted microphone, to be heeded.
+        assert_eq!(lines(&s, None, &items(&["mic"]), Lang::En), [("Mic".into(), "Muted".into(), true)]);
     }
 }

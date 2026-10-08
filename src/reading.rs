@@ -86,6 +86,8 @@ pub struct Sample {
     pub drive_temps: Vec<DriveTemperature>,
     /// Each memory module's temperature, in slot order, read through the driver.
     pub dimm_temps: Vec<f32>,
+    /// Whether the default microphone is muted; none without one.
+    pub mic_muted: Option<bool>,
     /// The game presenting frames, the one on the pointer's screen first;
     /// with none, the program in front if it presents frames.
     pub game: Option<GameSample>,

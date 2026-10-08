@@ -206,6 +206,7 @@ impl Sampler {
                 .into_iter()
                 .collect(),
             dimm_temps: Vec::new(),
+            mic_muted: None,
             game: None,
         };
         self.previous = Previous {

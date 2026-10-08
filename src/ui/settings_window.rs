@@ -1445,6 +1445,7 @@ impl Ui {
             ("game", "usage") => (p("游戏占用", "Game's use"), Some(p("这个游戏自己用了多少 CPU 和 GPU", "How much of the CPU and the GPU the game itself uses"))),
             ("game", "memory") => (p("游戏内存", "Game's memory"), Some(p("这个游戏自己占的内存和显存", "The memory and video memory the game itself holds"))),
             ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("显卡是否被功耗墙或温度墙压住了频率（N 卡）", "Whether the GPU's clock is held back by its power or temperature limit (NVIDIA)"))),
+            ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
             ("board", "temps") => (p("温度传感器", "Temperature sensors"), None),

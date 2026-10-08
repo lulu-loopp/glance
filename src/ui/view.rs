@@ -553,6 +553,11 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if on("time") {
                 facts.push((lang.pick("已玩", "Played").into(), shown(game.and_then(|g| g.playing_s), |s| lang.duration(s)), false));
             }
+            if on("mic") && scene.seen.mic {
+                let muted = s.mic_muted;
+                let value = shown(muted, |muted| if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") }.into());
+                facts.push((lang.pick("麦克风", "Microphone").into(), value, muted == Some(true)));
+            }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
             let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps as f64)).fold(0.0, f64::max);
@@ -1220,6 +1225,7 @@ mod tests {
             board: fan.map(|rpm| BoardSensors { temps: Vec::new(), fans: vec![("1".into(), rpm)] }),
             drive_temps: Vec::new(),
             dimm_temps: Vec::new(),
+            mic_muted: None,
             game: None,
         }
     }

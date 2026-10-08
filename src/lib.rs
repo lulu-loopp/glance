@@ -19,6 +19,8 @@ mod journal;
 #[cfg(windows)]
 mod metrics;
 #[cfg(windows)]
+mod mic;
+#[cfg(windows)]
 mod overlay;
 #[cfg(windows)]
 mod panel;

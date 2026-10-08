@@ -86,7 +86,7 @@ const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const BATTERY: [Item; 1] = [item("chart", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
-const GAME: [Item; 8] = [
+const GAME: [Item; 9] = [
     item("chart", true),
     item("frametimes", true),
     item("low", true),
@@ -95,6 +95,7 @@ const GAME: [Item; 8] = [
     item("memory", true),
     item("limit", true),
     item("time", true),
+    item("mic", true),
 ];
 
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the

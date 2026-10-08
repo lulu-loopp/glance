@@ -421,6 +421,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         }),
         drive_temps: info.drives.first().map(|name| DriveTemperature { id: 0, name: name.clone(), celsius: 34.0 + 9.0 * busy }).into_iter().collect(),
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
+        mic_muted: Some(false),
         game,
     }
 }
