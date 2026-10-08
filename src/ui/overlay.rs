@@ -181,17 +181,28 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<Line> {
     lines(s, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
 }
 
-/// How large `lines` are drawn, plate and all (DIPs), with `measure` giving
-/// a text's width in a font: as wide as their values can be, not as they
-/// are now.
-pub fn size(lines: &[Line], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
+/// The room above the first line and below the last, and the distance
+/// from one line to the next, at `px` physical pixels a DIP: each a whole
+/// number of pixels (DIPs), so every line is as far from the next however
+/// the screen and the size scale them (a line 28.5 pixels tall would set
+/// lines 28 and 29 apart by turns).
+fn pitch(px: f32) -> (f32, f32) {
+    let whole = |dips: f32| (dips * px).round().max(1.0) / px;
+    (whole(PAD.1), whole(LINE))
+}
+
+/// How large `lines` are drawn, plate and all (DIPs), at `px` physical
+/// pixels a DIP, with `measure` giving a text's width in a font: as wide as
+/// their values can be, not as they are now.
+pub fn size(lines: &[Line], px: f32, measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
     let label = lines.iter().map(|line| measure(&line.name, LABEL)).fold(0.0, f32::max);
     let widest = |line: &Line| {
         let parts: f32 = line.widest.iter().map(|forms| forms.iter().map(|form| measure(form, VALUE)).fold(0.0, f32::max)).sum();
         parts + line.widest.len().saturating_sub(1) as f32 * measure(SEPARATOR, VALUE)
     };
     let value = lines.iter().map(|line| widest(line).max(measure(&line.value, VALUE))).fold(0.0, f32::max);
-    ((2.0 * PAD.0 + label + LABEL_GAP + value).ceil(), (2.0 * PAD.1 + lines.len() as f32 * LINE).ceil())
+    let (pad, line) = pitch(px);
+    (((2.0 * PAD.0 + label + LABEL_GAP + value) * px).ceil() / px, 2.0 * pad + lines.len() as f32 * line)
 }
 
 /// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
@@ -200,7 +211,8 @@ pub fn size(lines: &[Line], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
 /// moved.
 pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px: f32) {
     let snap = |at: f32| (at * px).round() / px;
-    let (width, height) = size(lines, |text, font| frame.measure(text, font));
+    let (width, height) = size(lines, px, |text, font| frame.measure(text, font));
+    let (pad, line) = pitch(px);
     let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
     frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
     let label = lines.iter().map(|line| frame.measure(&line.name, LABEL)).fold(0.0, f32::max);
@@ -223,7 +235,7 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px
     for (i, Line { name, value, hot, .. }) in lines.iter().enumerate() {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
-        let y = PAD.1 + i as f32 * LINE + (LINE - ascent_value - descent_value) / 2.0;
+        let y = pad + i as f32 * line + (line - ascent_value - descent_value) / 2.0;
         // Each face's baseline on a whole pixel.
         let (label_top, value_top) = (snap(y + ascent_value) - ascent_label, snap(y + ascent_value) - ascent_value);
         let color = if name == "FPS" { FRAMES } else { NAME };
@@ -308,7 +320,14 @@ mod tests {
         // As wide as its widest value, whatever it reads now: a character
         // a unit wide here.
         let measure = |text: &str, _| text.chars().count() as f32;
-        let now = size(&lines(&s, None, false, &items(&["cpu"]), Lang::En), measure);
+        let now = size(&lines(&s, None, false, &items(&["cpu"]), Lang::En), 1.0, measure);
         assert_eq!(now.0, (2.0 * PAD.0 + 3.0 + LABEL_GAP + 4.0).ceil());
+        // Lines a whole number of pixels apart: at 150%, LINE's 28.5
+        // pixels taken as 29 (as DIPs, 29 / 1.5) for every line.
+        let three = lines(&s, None, true, &items(&["fps", "cpu", "memory"]), Lang::En);
+        let (_, height) = size(&three, 1.5, measure);
+        let (pad, line) = pitch(1.5);
+        assert_eq!(((line * 1.5).round(), (pad * 1.5).round()), ((LINE * 1.5).round(), (PAD.1 * 1.5).round()));
+        assert!(((height - 2.0 * pad - 3.0 * line) * 1.5).abs() < 1e-3);
     }
 }

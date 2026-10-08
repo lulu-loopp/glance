@@ -182,7 +182,7 @@ impl Overlay {
     /// Its width and height on screen, at its size (physical pixels).
     fn dims(&self) -> (i32, i32) {
         let scale = self.dpi * self.size;
-        let (width, height) = overlay::size(&self.drawn.0, |text, font| self.gfx.measure(text, font));
+        let (width, height) = overlay::size(&self.drawn.0, scale, |text, font| self.gfx.measure(text, font));
         ((width * scale).ceil() as i32, (height * scale).ceil() as i32)
     }
 

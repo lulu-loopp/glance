@@ -2422,14 +2422,14 @@ impl Ui {
         };
         let (sw, sh) = self.stage.size;
         let size = overlay.size.clamp(SIZES.0, SIZES.1);
-        let (w, h) = super::overlay::size(&lines, |text, font| frame.gfx.measure(text, font));
+        // At its own size, as on screen: the part of the screen around it
+        // that the preview holds (all of a screen smaller than that).
+        let k = (area.w / sw).min(area.h / sh).max(1.0);
+        let (w, h) = super::overlay::size(&lines, self.scale * k * size, |text, font| frame.gfx.measure(text, font));
         let (w, h) = (w * size, h * size);
         let inset = super::overlay::INSET;
         let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
         let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
-        // At its own size, as on screen: the part of the screen around it
-        // that the preview holds (all of a screen smaller than that).
-        let k = (area.w / sw).min(area.h / sh).max(1.0);
         let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
         let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
