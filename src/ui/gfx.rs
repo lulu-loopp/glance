@@ -526,8 +526,10 @@ impl<'a> Frame<'a> {
     /// stems fitted to the pixel grid, edges given more contrast.
     pub fn crisp_text(&self) {
         let params = unsafe {
-            use windows::Win32::Graphics::DirectWrite::{DWRITE_GRID_FIT_MODE_ENABLED, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC};
-            self.gfx.write.CreateCustomRenderingParams(1.8, 0.5, CRISP_CONTRAST, 0.0, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC, DWRITE_GRID_FIT_MODE_ENABLED)
+            use windows::Win32::Graphics::DirectWrite::{DWRITE_GRID_FIT_MODE_ENABLED, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_GDI_CLASSIC};
+            // GDI's own rendering: stems on whole pixels, smoothed across only,
+            // as the system draws small text; sharpest at 100% scale.
+            self.gfx.write.CreateCustomRenderingParams(1.8, 0.5, CRISP_CONTRAST, 0.0, DWRITE_PIXEL_GEOMETRY_FLAT, DWRITE_RENDERING_MODE1_GDI_CLASSIC, DWRITE_GRID_FIT_MODE_ENABLED)
         };
         if let Ok(params) = params {
             unsafe { self.dc.SetTextRenderingParams(&params) };
