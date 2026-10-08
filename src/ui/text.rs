@@ -34,7 +34,7 @@ impl Lang {
             "system" => ("系统", "System"),
             "cpu" => ("CPU", "CPU"),
             "chipset" => ("芯片组", "Chipset"),
-            "cpu_socket" => ("CPU 插座", "CPU socket"),
+            "cpu_socket" => ("CPU", "CPU"),
             "pcie_x16" => ("PCIe x16 插槽", "PCIe x16 slot"),
             "vrm" => ("VRM 供电", "VRM"),
             "vsoc" => ("SoC 供电", "SoC VRM"),
