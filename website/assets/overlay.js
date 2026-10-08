@@ -1,5 +1,5 @@
-// The overlay drawn in the page, over the same slice of desktop as the
-// panel above it, running on made-up readings: a card or a strip on frosted glass, as Glance draws it.
+// The overlay drawn in the page, over a soft dusk in the colours of the
+// desktop above it, running on made-up readings: a card or a strip on frosted glass, as Glance draws it.
 (function () {
   "use strict";
 
@@ -72,6 +72,49 @@
     var rest = el("span", "ov-rest", t);
     return { v: v, u: u, rest: rest };
   }
+
+  // ---- the scene: a soft dusk in the colours of the desktop above it ----
+  (function scene() {
+    var W = 1200, H = 360;
+    var svg = document.createElementNS(SVG, "svg");
+    svg.setAttribute("class", "art");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    svg.setAttribute("preserveAspectRatio", "xMidYMax slice");
+    stage.appendChild(svg);
+    function node(tag, attrs, parent) {
+      var e = document.createElementNS(SVG, tag);
+      for (var k in attrs) e.setAttribute(k, attrs[k]);
+      (parent || svg).appendChild(e);
+      return e;
+    }
+    function gradient(id, stops) {
+      var g = node("linearGradient", { id: id, x1: 0, y1: 0, x2: 0, y2: 1 }, defs);
+      stops.forEach(function (s) { node("stop", { offset: s[0], "stop-color": s[1] }, g); });
+    }
+    var defs = node("defs", {});
+    gradient("sc-sky", [["0", "#2a6ee0"], ["0.42", "#7f56d8"], ["0.7", "#c2559a"], ["0.9", "#ec8a4a"]]);
+    gradient("sc-far", [["0", "#9a64d6"], ["1", "#6d48b8"]]);
+    gradient("sc-mid", [["0", "#5a3aa6"], ["1", "#3f2a82"]]);
+    gradient("sc-near", [["0", "#2f2468"], ["1", "#1d1745"]]);
+    var sun = node("radialGradient", { id: "sc-sun" }, defs);
+    [["0", "#fff0d2", "1"], ["0.18", "#ffd08a", "0.9"], ["0.5", "#ff9a52", "0.35"], ["1", "#ff9a52", "0"]].forEach(function (s) {
+      node("stop", { offset: s[0], "stop-color": s[1], "stop-opacity": s[2] }, sun);
+    });
+    node("rect", { width: W, height: H, fill: "url(#sc-sky)" });
+    // The sun on the horizon, half under the overlay's edge: frosted
+    // there, clear past it.
+    node("circle", { cx: 310, cy: 220, r: 210, fill: "url(#sc-sun)" });
+    // Hills: smooth swells, far to near, each lower and darker.
+    [["sc-far", 205, 26, 0.004, 0.0], ["sc-mid", 245, 30, 0.0055, 1.7], ["sc-near", 295, 24, 0.007, 3.1]].forEach(function (h) {
+      var d = "M0 " + H;
+      for (var x = 0; x <= W; x += 10) {
+        var y = h[1] - h[2] * Math.sin(x * h[3] + h[4]) - h[2] * 0.5 * Math.sin(x * h[3] * 2.3 + h[4] * 1.9);
+        d += "L" + x + " " + y.toFixed(1);
+      }
+      node("path", { d: d + "L" + W + " " + H + "Z", fill: "url(#" + h[0] + ")" });
+    });
+  })();
 
   var glass = el("div", "ov-glass", stage);
   var parts = {};
