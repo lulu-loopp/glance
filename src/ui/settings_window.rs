@@ -161,6 +161,18 @@ pub fn open() {
     }
 }
 
+/// Takes up settings changed elsewhere (the panel's bar, the overlay's
+/// menu, a drag): an open window shows them, and saves on top of them.
+pub fn follow_settings() {
+    with_ui(|ui| {
+        let app = crate::app();
+        let settings = app.settings.lock().unwrap().clone();
+        ui.prefs = Prefs::resolve(&settings.view, &app.controller.known_modules()).for_mode(ui.editing);
+        ui.settings = settings;
+        ui.next_frame = Instant::now();
+    });
+}
+
 /// Opens the window (on the calling thread, the panel's, as `open`) at
 /// the overlay's page: from the overlay's menu.
 pub fn open_at_overlay() {
@@ -1131,7 +1143,7 @@ impl Ui {
             ),
             Switch::Overlay => (
                 p("悬浮窗", "Overlay"),
-                Some(p("拖动它调整位置；右键它可以锁定位置、隐藏或打开设置", "Drag it into place; right-click it to lock it, hide it or open the settings")),
+                Some(p("拖动它调整位置；右键它可以锁定位置、关闭或打开设置", "Drag it into place; right-click it to lock it, close it or open the settings")),
                 self.settings.overlay.on,
             ),
             Switch::HeatAlert => (
@@ -2275,8 +2287,17 @@ impl Ui {
             super::overlay::preview(sample, &overlay.items, self.lang)
         };
         let (sw, sh) = self.stage.size;
-        let k = (area.w / sw).min(area.h / sh);
-        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
+        let (w, h) = super::overlay::size(&lines, |text, font| frame.gfx.measure(text, font));
+        let inset = super::overlay::INSET;
+        let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
+        let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
+        // At its own size, as on screen: the part of the screen around it
+        // that the preview holds (all of a screen smaller than that).
+        let k = (area.w / sw).min(area.h / sh).max(1.0);
+        let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
+        let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
+        let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
             self.stage.bitmap = self.stage.desktop.bitmap(&frame.dc, 1.0).ok().map(|b| (1.0f32.to_bits(), b));
         }
@@ -2285,13 +2306,10 @@ impl Ui {
                 frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
             }
         }
-        let (w, h) = super::overlay::size(&lines, |text, font| frame.gfx.measure(text, font));
-        let inset = super::overlay::INSET;
-        let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
-        let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
         frame.place(Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
         super::overlay::paint(frame, &lines, overlay.opacity, false);
         frame.origin(0.0, 0.0);
+        unsafe { frame.dc.PopAxisAlignedClip() };
     }
 
     /// The preview: the panel as it will look over the desktop, running live.
@@ -2333,7 +2351,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on, mode_thumb: self.editing as usize as f32, fade: 1.0 };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.columns());
@@ -2352,7 +2370,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on, mode_thumb: self.editing as usize as f32, fade: 1.0 };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

@@ -58,6 +58,7 @@ impl PanelLayers {
         picture.backdrop.map(|(_, at, digest)| (digest, at.X.to_bits(), at.Y.to_bits())).hash(&mut key);
         let ground_key = key.finish();
         (picture.lanes, &layout.cuts, layout.columns, scene.lang, scene.process_scroll.to_bits(), scene.hover, scene.pinned).hash(&mut key);
+        (scene.mode, scene.overlay, scene.mode_thumb.to_bits(), scene.fade.to_bits()).hash(&mut key);
         let content_key = key.finish();
 
         let mut grounded = false;

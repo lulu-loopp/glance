@@ -93,6 +93,11 @@ pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
 pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
+/// The modes' thumb sliding over; one mode's lanes fading out, and the
+/// other's in.
+const THUMB: (Duration, Easing) = (Duration::from_millis(240), Easing(0.16, 1.0, 0.3, 1.0));
+const FADE_OUT: Duration = Duration::from_millis(90);
+const FADE_IN: Duration = Duration::from_millis(160);
 
 /// Requests to the input thread from elsewhere.
 const OPEN_FROM_TRAY: u32 = WM_APP + 1;
@@ -423,8 +428,10 @@ impl Controller {
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
                 OPEN_SETTINGS => settings_window::open(),
                 RESTYLE => {
-                    panel.restyle();
+                    panel.follow(now);
                     draw_overlay(&mut overlay, &panel);
+                    // An open settings window takes what was changed elsewhere.
+                    settings_window::follow_settings();
                 }
                 OVERLAY => draw_overlay(&mut overlay, &panel),
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd => panel.click(lparam_point(msg.lParam)),
@@ -450,7 +457,7 @@ impl Controller {
                                 Some(OverlayChoice::Lock(locked)) => {
                                     std::thread::spawn(move || crate::app().lock_overlay(locked));
                                 }
-                                Some(OverlayChoice::Hide) => {
+                                Some(OverlayChoice::Close) => {
                                     std::thread::spawn(|| crate::app().set_overlay(false));
                                 }
                                 _ => {}
@@ -630,6 +637,12 @@ struct Panel<'a> {
     placement: Option<Placement>,
     prefs: Prefs,
     mode: Mode,
+    /// The modes' thumb (0 Daily, 1 Game), and the lanes' opacity.
+    mode_thumb: Transition,
+    fade: Transition,
+    /// Going over to the other mode: its lanes laid out once the old have
+    /// faded out.
+    switching: bool,
     skin: Skin,
     theme: Theme,
     lang: Lang,
@@ -686,6 +699,9 @@ impl<'a> Panel<'a> {
             placement: None,
             prefs: Prefs::default(),
             mode: Mode::Daily,
+            mode_thumb: Transition::settled(0.0),
+            fade: Transition::settled(1.0),
+            switching: false,
             skin: Skin::Paper,
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
@@ -718,6 +734,22 @@ impl<'a> Panel<'a> {
 
     fn is_open(&self) -> bool {
         matches!(self.phase, Phase::Open { .. })
+    }
+
+    /// The settings or the mode changed. Over to the other mode while the
+    /// panel is up, its thumb slides and its lanes fade out, to be laid out
+    /// for the mode and fade in (see `frame`); otherwise at once.
+    fn follow(&mut self, now: Instant) {
+        let mode = self.controller.mode();
+        if self.is_shown() && mode != self.mode && !reduced_motion() {
+            self.mode_thumb.retarget(thumb_at(mode), THUMB.0, THUMB.1, now);
+            self.fade.retarget(0.0, FADE_OUT, LINEAR, now);
+            self.switching = true;
+            self.next_frame = now;
+        } else if !self.switching {
+            self.restyle();
+            self.mode_thumb.jump(thumb_at(self.mode));
+        }
     }
 
     /// The settings changed: what is shown, how, and from which edge.
@@ -771,6 +803,9 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
+            self.mode_thumb.jump(thumb_at(self.mode));
+            self.fade.jump(1.0);
+            self.switching = false;
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
             self.held = None;
@@ -985,7 +1020,8 @@ impl<'a> Panel<'a> {
             (contact.work.right - contact.work.left) as f32 / contact.scale,
             (contact.work.bottom - contact.work.top) as f32 / contact.scale,
         );
-        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode));
+        let motion = (self.mode_thumb.value(Instant::now()), self.fade.value(Instant::now()));
+        let (prefs, theme, lang, scroll, hover, pinned) = (&self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode, motion));
         let opening = match &mut self.opening {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
@@ -1050,6 +1086,12 @@ impl<'a> Panel<'a> {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
+        // The old mode's lanes gone: the new mode's, laid out, fade in.
+        if self.switching && self.fade.done(now) {
+            self.switching = false;
+            self.restyle();
+            self.fade.retarget(1.0, FADE_IN, LINEAR, now);
+        }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
@@ -1079,7 +1121,8 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let mut history = controller.history.lock().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
-        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode), history.make_contiguous(), seen);
+        let motion = (self.mode_thumb.value(now), self.fade.value(now));
+        let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, (self.pinned, self.mode, motion), history.make_contiguous(), seen);
         let (layers, behind, edge, frost) = (&mut self.layers, &mut self.behind, self.edge, self.frost);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
@@ -1133,7 +1176,12 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel.
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || (self.scroll_target - self.scroll).abs() > 0.05;
+        let moving = !self.shift.done(now)
+            || !self.opacity.done(now)
+            || !self.mode_thumb.done(now)
+            || !self.fade.done(now)
+            || self.switching
+            || (self.scroll_target - self.scroll).abs() > 0.05;
         self.next_frame = if moving {
             now
         } else {
@@ -1202,7 +1250,7 @@ fn scene<'s>(
     lang: Lang,
     scroll: f32,
     hover: Option<Hit>,
-    (pinned, mode): (bool, Mode),
+    (pinned, mode, (mode_thumb, fade)): (bool, Mode, (f32, f32)),
     history: &'s [Sample],
     seen: &'s Seen,
 ) -> Scene<'s> {
@@ -1224,6 +1272,16 @@ fn scene<'s>(
         pinned,
         mode,
         overlay,
+        mode_thumb,
+        fade,
+    }
+}
+
+/// Where the modes' thumb rests for `mode`.
+fn thumb_at(mode: Mode) -> f32 {
+    match mode {
+        Mode::Daily => 0.0,
+        Mode::Game => 1.0,
     }
 }
 

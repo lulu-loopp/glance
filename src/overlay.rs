@@ -1,6 +1,6 @@
 //! The overlay's window: never taking the focus. Unlocked, it is dragged
 //! where it is to stay; locked, it stays. Either way a right click on it
-//! offers the lock, hiding it and the settings (so it takes the clicks that
+//! offers the lock, turning it off and the settings (so it takes the clicks that
 //! land on it: a game holding the pointer is not one of them). Drawn by the
 //! panel's thread at every sample.
 
@@ -27,7 +27,7 @@ use crate::ui::window::Window;
 /// What its right-click menu offers.
 pub enum Choice {
     Lock(bool),
-    Hide,
+    Close,
     Settings,
 }
 
@@ -202,7 +202,7 @@ impl Overlay {
     fn choose(&self) -> Option<Choice> {
         let zh = self.lang == Lang::Zh;
         const LOCK: usize = 1;
-        const HIDE: usize = 2;
+        const CLOSE: usize = 2;
         const SETTINGS: usize = 3;
         let mut cursor = POINT::default();
         unsafe { GetCursorPos(&mut cursor) }.ok()?;
@@ -210,7 +210,7 @@ impl Overlay {
             let menu = CreatePopupMenu().ok()?;
             let lock = HSTRING::from(if zh { "锁定位置" } else { "Lock position" });
             let _ = AppendMenuW(menu, if self.locked { MF_STRING | MF_CHECKED } else { MF_STRING }, LOCK, &lock);
-            let _ = AppendMenuW(menu, MF_STRING, HIDE, &HSTRING::from(if zh { "隐藏悬浮窗" } else { "Hide the overlay" }));
+            let _ = AppendMenuW(menu, MF_STRING, CLOSE, &HSTRING::from(if zh { "关闭悬浮窗" } else { "Close the overlay" }));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, SETTINGS, &HSTRING::from(if zh { "设置…" } else { "Settings…" }));
             let hwnd = self.window.hwnd;
@@ -222,7 +222,7 @@ impl Overlay {
         };
         match chosen {
             LOCK => Some(Choice::Lock(!self.locked)),
-            HIDE => Some(Choice::Hide),
+            CLOSE => Some(Choice::Close),
             SETTINGS => Some(Choice::Settings),
             _ => None,
         }

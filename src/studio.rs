@@ -161,7 +161,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
-    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: if game_mode { Mode::Game } else { Mode::Daily }, overlay: false };
+    let probe = Scene { info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: if game_mode { Mode::Game } else { Mode::Daily }, overlay: false, mode_thumb: if game_mode { 1.0 } else { 0.0 }, fade: 1.0 };
     let (layout, zoom, rest, _) = place(&probe, &view::lanes(&probe), &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -200,6 +200,8 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             pinned: false,
             mode: if game_mode { Mode::Game } else { Mode::Daily },
             overlay: false,
+            mode_thumb: if game_mode { 1.0 } else { 0.0 },
+            fade: 1.0,
         };
         let (layout, zoom, rest, held) = place(&scene, &view::lanes(&scene), &theme);
         // What the panel holds as it has been up: drawn in the boxes it opened with.

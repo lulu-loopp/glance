@@ -42,7 +42,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     ID2D1PathGeometry1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
-    D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
+    D2D1_GAMMA_2_2, D2D1_LAYER_PARAMETERS1, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -340,6 +340,16 @@ impl Canvas for Frame<'_> {
 
     fn unclip(&self) {
         unsafe { self.dc.PopAxisAlignedClip() };
+    }
+
+    fn fade(&self, opacity: f32) {
+        let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+        let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
+        unsafe { self.dc.PushLayer(&layer, None) };
+    }
+
+    fn unfade(&self) {
+        unsafe { self.dc.PopLayer() };
     }
 
     fn fill(&self, color: Color, x: f32, y: f32, width: f32, height: f32) {

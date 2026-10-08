@@ -81,6 +81,12 @@ pub struct Scene<'a> {
     pub mode: Mode,
     /// The overlay is on.
     pub overlay: bool,
+    /// Where the modes' switch's thumb is: 0 on Daily, 1 on Game, between
+    /// as it slides.
+    pub mode_thumb: f32,
+    /// How opaque the lanes are: below 1 while one mode's give way to the
+    /// other's.
+    pub fade: f32,
 }
 
 impl Scene<'_> {
@@ -811,6 +817,10 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
     let theme = scene.theme;
     let mut hits = Vec::new();
     let boxes = layout.lanes();
+    let faded = scene.fade < 1.0;
+    if faded {
+        frame.fade(scene.fade);
+    }
     for (lane, area) in lanes.iter().zip(&boxes) {
         paint_lane(frame, scene, lane, *area, pass, &mut hits);
         // Chart paper rules each lane off below; the last rule in a column
@@ -818,6 +828,9 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
         if pass == Pass::Content && theme.ruled {
             frame.fill(theme.rule, area.x, area.y + area.h - 1.0, area.w, 1.0);
         }
+    }
+    if faded {
+        frame.unfade();
     }
     if pass == Pass::Content {
         if theme.ruled {
@@ -1081,16 +1094,35 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let overlay = pin - BUTTON;
     // The modes before them, the one in force lit.
     let modes = overlay - 8.0 - 2.0 * MODE_BUTTON;
-    // The two on one track, as one control.
-    frame.fill_rounded(theme.track, modes, top, 2.0 * MODE_BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
+    // The two on one track, as one control, with a thumb that slides to the
+    // one in force: in each skin's material (glass a lit, clear drop on it).
+    let radius = theme.control_radius.min(BUTTON / 2.0);
+    frame.fill_rounded(theme.track, modes, top, 2.0 * MODE_BUTTON, BUTTON, radius);
+    let white = |a| Color::hex(0xFFFFFF, a);
+    let (body, rim, drop) = match (theme.skin, theme.dark) {
+        (Skin::Glass, false) => (white(0.5), white(0.95), Some(Color::hex(0, 0.08))),
+        (Skin::Glass, true) => (white(0.16), white(0.32), Some(Color::hex(0, 0.25))),
+        (Skin::Paper, _) => (theme.paper, theme.rule, None),
+        (Skin::Fluent, false) => (white(1.0), Color::hex(0, 0.06), Some(Color::hex(0, 0.06))),
+        (Skin::Fluent, true) => (white(0.1), white(0.07), None),
+    };
+    let thumb = (modes + scene.mode_thumb.clamp(0.0, 1.0) * MODE_BUTTON + 2.0, top + 2.0, MODE_BUTTON - 4.0, BUTTON - 4.0);
+    let inner = (radius - 2.0).max(0.0);
+    if let Some(drop) = drop {
+        frame.fill_rounded(drop, thumb.0, thumb.1 + 1.0, thumb.2, thumb.3, inner);
+    }
+    frame.fill_rounded(rim, thumb.0, thumb.1, thumb.2, thumb.3, inner);
+    frame.fill_rounded(body, thumb.0 + 1.0, thumb.1 + 1.0, thumb.2 - 2.0, thumb.3 - 2.0, (inner - 1.0).max(0.0));
+    if theme.skin == Skin::Glass {
+        // The light caught along its upper half.
+        frame.fill_rounded(white(if theme.dark { 0.08 } else { 0.3 }), thumb.0 + 2.0, thumb.1 + 2.0, thumb.2 - 4.0, thumb.3 / 2.0 - 2.0, (inner - 2.0).max(0.0));
+    }
     for (i, (mode, name)) in [(Mode::Daily, scene.lang.pick("日常", "Daily")), (Mode::Game, scene.lang.pick("游戏", "Game"))].into_iter().enumerate() {
         let left = modes + i as f32 * MODE_BUTTON;
         let hit = Hit::Mode(mode);
-        let (lit, hovered) = (scene.mode == mode, scene.hover == Some(hit));
-        if lit || hovered {
-            frame.fill_rounded(theme.hover, left, top, MODE_BUTTON, BUTTON, theme.control_radius.min(BUTTON / 2.0));
-        }
-        let color = if lit || hovered { theme.text } else { theme.text2 };
+        // Lit where the thumb mostly is.
+        let lit = (scene.mode_thumb - i as f32).abs() < 0.5;
+        let color = if lit || scene.hover == Some(hit) { theme.text } else { theme.text2 };
         let text_left = left + (MODE_BUTTON - frame.measure(name, theme.small)) / 2.0;
         frame.text(name, theme.small, color, text_left, top + (BUTTON - LINE) / 2.0, MODE_BUTTON, Align::Start);
         hits.push((left, top, MODE_BUTTON, BUTTON, hit));
@@ -1222,7 +1254,7 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false, mode_thumb: 0.0, fade: 1.0 };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -1246,7 +1278,7 @@ mod tests {
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, mode: Mode::Daily, overlay: false, mode_thumb: 0.0, fade: 1.0 };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
