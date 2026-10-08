@@ -1363,6 +1363,12 @@ impl Ui {
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
             "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，点表头排序", "The busiest programs; click a heading to sort"))),
             "storage" => (p("存储", "Storage"), Some(p("各分区的空间", "Space on each drive"))),
+            // A board whose sensors are not read says so, rather than
+            // looking like a switch that does nothing.
+            "board" if crate::app().controller.seen.lock().unwrap().board.is_none() => (
+                p("主板", "Motherboard"),
+                Some(p("没有读到这块主板的传感器，原因见“系统”页的诊断信息", "This board's sensors were not read; the diagnostics on the System page say why")),
+            ),
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
