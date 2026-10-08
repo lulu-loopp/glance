@@ -68,6 +68,13 @@ const LEAVE_TOLERANCE: f32 = 10.0;
 /// Strip at each end of the edge that does not trigger (logical px): the
 /// height of a title bar's buttons and of the taskbar, which own the corners.
 const CORNER_EXCLUSION: f64 = 48.0;
+/// The seam between two screens (see `seam_contact`): how far either side
+/// of the line the pointer may be (DIPs; there is no wall to stop it on the
+/// line), how still it has to rest there (DIPs), and how long. Longer than
+/// on an edge: a scroll bar may be beside the seam.
+const SEAM_ZONE: f32 = 4.0;
+const SEAM_STILL: f32 = 8.0;
+const SEAM_DWELL: Duration = Duration::from_millis(500);
 /// History is kept for the longest chart span the settings offer.
 const LONGEST_SPAN: Duration = Duration::from_secs(300);
 /// The chart's pen runs this far behind the newest sample beyond one
@@ -122,6 +129,7 @@ struct Config {
     panel_at: Option<PanelAt>,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
+    seam: bool,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
@@ -141,6 +149,7 @@ fn config_from(settings: &Settings) -> Config {
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
         pressure: settings.sensitivity.pressure(),
+        seam: settings.seam,
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
@@ -387,6 +396,10 @@ impl Controller {
         // panel by resting on the edge.
         let mut last_cursor = cursor_position().unwrap_or_default();
         let mut raw_since_watch = false;
+        // A rest on the seam between two screens: since when, and where;
+        // and, as on the edge, armed once the pointer has left it.
+        let mut seam_rest: Option<(Instant, POINT)> = None;
+        let mut seam_armed = true;
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         // What a frame in motion waits on: the screen's next refresh, or a
         // message, whichever comes first.
@@ -440,9 +453,9 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (edge, pressure, over_fullscreen) = {
+            let (edge, pressure, over_fullscreen, seam) = {
                 let config = self.config.lock().unwrap();
-                (config.edge, config.pressure, config.over_fullscreen)
+                (config.edge, config.pressure, config.over_fullscreen, config.seam)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -457,7 +470,32 @@ impl Controller {
             let at_edge = |cursor: POINT| edge_contact(cursor, edge).zip(pressure);
             if panel.is_shown() {
                 armed = false;
+                seam_armed = false;
             }
+            // The pointer resting on the seam, where the panel opens.
+            let mut on_seam = |cursor: POINT, panel: &mut Panel| {
+                let Some(contact) = seam_contact(cursor, edge).filter(|_| seam) else {
+                    seam_rest = None;
+                    seam_armed = !panel.is_shown();
+                    return;
+                };
+                if !seam_armed || panel.is_open() {
+                    return;
+                }
+                let still = (SEAM_STILL * contact.scale).round() as i32;
+                let since = match seam_rest {
+                    Some((since, at)) if (at.x - cursor.x).abs() <= still && (at.y - cursor.y).abs() <= still => since,
+                    _ => seam_rest.insert((now, cursor)).0,
+                };
+                if now.duration_since(since) >= SEAM_DWELL {
+                    seam_rest = None;
+                    if may_open(fullscreen_edge) {
+                        panel.open(cursor, contact, None, now);
+                    } else {
+                        seam_armed = false;
+                    }
+                }
+            };
             match msg.message {
                 OPEN_FROM_TRAY => panel.open_by_hand(now),
                 TOGGLE if panel.is_open() => panel.begin_close(now),
@@ -568,6 +606,9 @@ impl Controller {
                 }
                 WM_INPUT if !panel.is_open() => {
                     raw_since_watch = true;
+                    if let Some(cursor) = cursor_position() {
+                        on_seam(cursor, &mut panel);
+                    }
                     let motion = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge);
                     if let (Some(motion), Some(cursor)) = (motion, cursor_position()) {
                         match at_edge(cursor) {
@@ -593,6 +634,9 @@ impl Controller {
                 // screen) the pointer cannot be read, and is left alone.
                 WM_TIMER if msg.wParam.0 == WATCH_TIMER => {
                     let Some(cursor) = cursor_position() else { continue };
+                    if !panel.is_open() {
+                        on_seam(cursor, &mut panel);
+                    }
                     let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
                     if moved && !raw_since_watch && !panel.is_open() {
                         match at_edge(cursor) {
@@ -611,6 +655,7 @@ impl Controller {
                 }
                 WM_TIMER if msg.wParam.0 == TRACK_TIMER && !panel.is_open() => {
                     let Some(cursor) = cursor_position() else { continue };
+                    on_seam(cursor, &mut panel);
                     match at_edge(cursor) {
                         Some((contact, _)) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
@@ -641,7 +686,7 @@ impl Controller {
                     }
                 }
             }
-            let needed = !panel.is_open() && detector.dwelling();
+            let needed = !panel.is_open() && (detector.dwelling() || seam_rest.is_some());
             if needed != ticking {
                 ticking = needed;
                 unsafe {
@@ -1863,6 +1908,38 @@ fn monitor_at(point: POINT) -> Option<Contact> {
     let (mut dpi, mut dpi_y) = (0, 0);
     unsafe { GetDpiForMonitor(handle, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y) }.ok()?;
     Some(Contact { monitor: info.rcMonitor, work: info.rcWork, scale: dpi as f32 / 96.0 })
+}
+
+/// The screen to open on when the pointer is on the seam where a screen's
+/// `edge` meets another screen: within a few pixels of that line, on
+/// either side of it, clear of the line's ends, visible, no button held.
+/// The screen whose edge it is.
+fn seam_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
+    let here = monitor_at(cursor)?;
+    let m = here.monitor;
+    let zone = (SEAM_ZONE * here.scale).round() as i32;
+    let exists = |point: POINT| !unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_invalid();
+    // Near this screen's own edge with a screen beyond it, or near the
+    // opposite side of it with a screen behind it whose edge that is.
+    let (own, beyond, other, behind) = match edge {
+        Edge::Right => (cursor.x >= m.right - zone, POINT { x: m.right, y: cursor.y }, cursor.x < m.left + zone, POINT { x: m.left - 1, y: cursor.y }),
+        Edge::Left => (cursor.x < m.left + zone, POINT { x: m.left - 1, y: cursor.y }, cursor.x >= m.right - zone, POINT { x: m.right, y: cursor.y }),
+        Edge::Top => (cursor.y < m.top + zone, POINT { x: cursor.x, y: m.top - 1 }, cursor.y >= m.bottom - zone, POINT { x: cursor.x, y: m.bottom }),
+    };
+    let target = if own && exists(beyond) {
+        here
+    } else if other && exists(behind) {
+        monitor_at(behind)?
+    } else {
+        return None;
+    };
+    let t = target.monitor;
+    let corner = (CORNER_EXCLUSION * target.scale as f64).round() as i32;
+    let clear = match edge {
+        Edge::Left | Edge::Right => (t.top + corner..t.bottom - corner).contains(&cursor.y),
+        Edge::Top => (t.left + corner..t.right - corner).contains(&cursor.x),
+    };
+    (clear && !buttons_down() && cursor_showing()).then_some(target)
 }
 
 /// Describes the monitor under the cursor if the cursor is pressed against its

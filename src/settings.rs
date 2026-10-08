@@ -178,6 +178,9 @@ pub struct Settings {
     /// How large the panel is drawn, 1 as designed (0.75 to 2).
     pub panel_size: f32,
     pub sensitivity: Sensitivity,
+    /// The seam between two screens opens the panel too, on the screen
+    /// whose edge it is, to a pointer resting on it.
+    pub seam: bool,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
     /// Refresh the desktop behind the glass while the panel is open. The
@@ -215,6 +218,7 @@ impl Default for Settings {
             columns: None,
             panel_size: 1.0,
             sensitivity: Sensitivity::default(),
+            seam: false,
             close_delay_ms: 200,
             interval_ms: 1000,
             live_backdrop: false,

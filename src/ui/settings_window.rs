@@ -385,6 +385,7 @@ type ButtonRow = (String, String, Vec<(String, Target, Button)>);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
     Live,
+    Seam,
     Startup,
     Updates,
     HeatAlert,
@@ -820,6 +821,7 @@ impl Ui {
                 Row::Choice(Field::Edge),
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
+                Row::Switch(Switch::Seam),
                 Row::Choice(Field::CloseDelay),
                 Row::Shortcut,
                 Row::Choice(Field::OverFullscreen),
@@ -1364,6 +1366,11 @@ impl Ui {
                 )),
                 self.settings.overlay.in_game,
             ),
+            Switch::Seam => (
+                p("屏幕之间也能呼出", "Open from between screens"),
+                Some(p("鼠标停在两块屏幕相接处约半秒，面板在呼出边那一侧的屏幕上打开", "Rest the pointer on the seam between two screens for half a second: the panel opens on the screen whose edge it is")),
+                self.settings.seam,
+            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
@@ -1401,6 +1408,7 @@ impl Ui {
         let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
+            Switch::Seam => settings.seam ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Overlay => {
