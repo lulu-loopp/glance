@@ -89,31 +89,43 @@ impl SuperIo {
         format!("{maker} chip {:04X} at {:#X}, {wiring}", self.chip, self.base)
     }
 
-    /// Finds a supported chip at either configuration port.
+    /// Finds a supported chip at either configuration port; or says what
+    /// stood in the way, for a report (what each port showed).
     /// `vendor` is the board's maker, which decides what the inputs are named.
-    pub fn open(vendor: &str) -> Option<Self> {
-        let module = Module::load(LPC_IO).ok()?;
+    pub fn open(vendor: &str) -> Result<Self, String> {
+        let module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
         // Entering configuration mode writes to the chip: only with the bus to ourselves.
-        let _lock = NamedLock::acquire(ISA_LOCK, 1000)?;
+        let _lock = NamedLock::acquire(ISA_LOCK, 1000).ok_or("ISA bus held by another program")?;
+        let mut seen = Vec::new();
         for slot in 0..2u64 {
-            module.call("ioctl_select_slot", &[slot], &mut []).ok()?;
             let port = if slot == 0 { 0x2E } else { 0x4E };
-            let found = find_ite(&module, slot, port).or_else(|| find_nuvoton(&module, port));
-            let Some((kind, chip, base)) = found else { continue };
-            if base < 0x100 || base & 0xF007 != 0 {
+            if module.call("ioctl_select_slot", &[slot], &mut []).is_err() {
+                seen.push(format!("{port:#X}: not selectable"));
                 continue;
             }
-            let chip = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, last: BoardSensors::default() };
+            let found = find_ite(&module, slot, port).or_else(|ite| find_nuvoton(&module, port).map_err(|nuvoton| ite.or(nuvoton)));
+            let (kind, chip, base) = match found {
+                Ok(found) => found,
+                Err(passed) => {
+                    seen.push(format!("{port:#X}: {}", passed.unwrap_or_else(|| "nothing".into())));
+                    continue;
+                }
+            };
+            if base < 0x100 || base & 0xF007 != 0 {
+                seen.push(format!("{port:#X}: chip {chip:04X} with its monitor at {base:#X}, not usable"));
+                continue;
+            }
+            let found = SuperIo { module, kind, chip, layout: layout(vendor, chip), base, last: BoardSensors::default() };
             // A Nuvoton monitor that answers is one from Nuvoton.
             if let Kind::Nuvoton { .. } = kind {
-                let vendor = chip.register(NUVOTON_VENDOR.0).zip(chip.register(NUVOTON_VENDOR.1));
+                let vendor = found.register(NUVOTON_VENDOR.0).zip(found.register(NUVOTON_VENDOR.1));
                 if vendor.map(|(high, low)| (high as u16) << 8 | low as u16) != Some(NUVOTON_VENDOR_ID) {
-                    return None;
+                    return Err(format!("{port:#X}: Nuvoton chip {chip:04X}, its monitor not answering as Nuvoton's"));
                 }
             }
-            return Some(chip);
+            return Ok(found);
         }
-        None
+        Err(seen.join("; "))
     }
 
     /// A monitor register: the low byte, in the bank of the high byte on a
@@ -188,20 +200,32 @@ impl SuperIo {
 
 const ISA_LOCK: windows::core::PCWSTR = windows::core::w!("Global\\Access_ISABUS.HTP.Method");
 
+/// What the search at a port found short of a chip to read: what it was,
+/// if there was something to say.
+type Passed = Option<String>;
+
+/// Whether a chip identifier is one: an empty port reads all ones or zeros.
+fn answered(chip: u16) -> bool {
+    chip != 0xFFFF && chip != 0
+}
+
 /// An ITE chip at `port`: its kind, its identifier and its monitor's base.
 /// Leaves configuration mode however far the search got.
-fn find_ite(module: &Module, slot: u64, port: u64) -> Option<(Kind, u16, u64)> {
+fn find_ite(module: &Module, slot: u64, port: u64) -> Result<(Kind, u16, u64), Passed> {
     let found = (|| {
         // ITE's key into configuration mode; the last byte differs by port.
         for byte in [0x87, 0x01, 0x55, if slot == 0 { 0x55 } else { 0xAA }] {
-            module.call("ioctl_pio_outb", &[port, byte], &mut []).ok()?;
+            module.call("ioctl_pio_outb", &[port, byte], &mut []).map_err(|_| None)?;
         }
-        let chip = module.read("ioctl_superio_inw", CHIP_ID).ok()? as u16;
-        let (temps, fans) = ite_layout(chip)?;
-        module.call("ioctl_find_bars", &[], &mut []).ok()?;
-        module.call("ioctl_superio_outb", &[DEVICE_SELECT, ITE_ENVIRONMENT], &mut []).ok()?;
-        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).ok()?;
-        Some((Kind::Ite { temps, fans }, chip, base))
+        let chip = module.read("ioctl_superio_inw", CHIP_ID).map_err(|_| None)? as u16;
+        let Some((temps, fans)) = ite_layout(chip) else {
+            // Another maker's chip answers ITE's key with nothing.
+            return Err((answered(chip) && chip >> 12 == 0x8).then(|| format!("ITE chip {chip:04X}, not supported")));
+        };
+        module.call("ioctl_find_bars", &[], &mut []).map_err(|_| None)?;
+        module.call("ioctl_superio_outb", &[DEVICE_SELECT, ITE_ENVIRONMENT], &mut []).map_err(|_| None)?;
+        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)?;
+        Ok((Kind::Ite { temps, fans }, chip, base))
     })();
     let _ = module.call("ioctl_superio_outb", &[CONFIG_CONTROL, 0x02], &mut []);
     found
@@ -209,19 +233,24 @@ fn find_ite(module: &Module, slot: u64, port: u64) -> Option<(Kind, u16, u64)> {
 
 /// A Nuvoton chip at `port`, as `find_ite`. One whose monitor the firmware
 /// has locked is left alone: unlocking it would change how the board is set up.
-fn find_nuvoton(module: &Module, port: u64) -> Option<(Kind, u16, u64)> {
+fn find_nuvoton(module: &Module, port: u64) -> Result<(Kind, u16, u64), Passed> {
     let found = (|| {
         // Nuvoton's key into configuration mode.
         for _ in 0..2 {
-            module.call("ioctl_pio_outb", &[port, 0x87], &mut []).ok()?;
+            module.call("ioctl_pio_outb", &[port, 0x87], &mut []).map_err(|_| None)?;
         }
-        let chip = module.read("ioctl_superio_inw", CHIP_ID).ok()? as u16;
-        let (temps, fans) = nuvoton_layout(chip)?;
-        module.call("ioctl_find_bars", &[], &mut []).ok()?;
-        module.call("ioctl_superio_outb", &[DEVICE_SELECT, NUVOTON_MONITOR], &mut []).ok()?;
-        let locked = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).ok()? & 0x10 != 0;
-        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).ok()?;
-        (!locked).then_some((Kind::Nuvoton { temps, fans }, chip, base))
+        let chip = module.read("ioctl_superio_inw", CHIP_ID).map_err(|_| None)? as u16;
+        let Some((temps, fans)) = nuvoton_layout(chip) else {
+            return Err(answered(chip).then(|| format!("chip {chip:04X}, not supported")));
+        };
+        module.call("ioctl_find_bars", &[], &mut []).map_err(|_| None)?;
+        module.call("ioctl_superio_outb", &[DEVICE_SELECT, NUVOTON_MONITOR], &mut []).map_err(|_| None)?;
+        let locked = module.read("ioctl_superio_inb", NUVOTON_IO_LOCK).map_err(|_| None)? & 0x10 != 0;
+        let base = module.read("ioctl_superio_inw", BASE_ADDRESS).map_err(|_| None)?;
+        if locked {
+            return Err(Some(format!("Nuvoton chip {chip:04X}, its monitor locked by the firmware")));
+        }
+        Ok((Kind::Nuvoton { temps, fans }, chip, base))
     })();
     // Nuvoton's key out of configuration mode.
     let _ = module.call("ioctl_pio_outb", &[port, 0xAA], &mut []);

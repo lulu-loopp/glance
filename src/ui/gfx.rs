@@ -33,7 +33,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_AXIS_TAG_WEIGHT, DWRITE_FONT_AXIS_TAG_WIDTH, DWRITE_FONT_AXIS_VALUE,
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
@@ -82,7 +82,8 @@ pub struct Gfx {
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
 }
 
-type LayoutKey = (String, FontKey, u32, bool);
+/// Text, font, width, at the end, and broken into lines.
+type LayoutKey = (String, FontKey, u32, bool, bool);
 
 impl Drop for Gfx {
     fn drop(&mut self) {
@@ -188,7 +189,24 @@ impl Gfx {
 
     /// Lays `text` out on one line, `width` DIPs wide at most.
     pub fn layout(&self, text: &str, font: Font, width: f32, align: Align) -> IDWriteTextLayout {
-        let key = (text.to_string(), font.key(), width.max(0.0).to_bits(), align == Align::End);
+        self.laid_out(text, font, width, align, false)
+    }
+
+    /// Lays `text` out in as many lines `width` DIPs wide as it takes,
+    /// broken between words (or, in Chinese, characters).
+    pub fn wrapped(&self, text: &str, font: Font, width: f32) -> IDWriteTextLayout {
+        self.laid_out(text, font, width, Align::Start, true)
+    }
+
+    /// How tall `text` is laid out in lines `width` wide.
+    pub fn wrapped_height(&self, text: &str, font: Font, width: f32) -> f32 {
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        unsafe { self.wrapped(text, font, width).GetMetrics(&mut metrics).unwrap() };
+        metrics.height
+    }
+
+    fn laid_out(&self, text: &str, font: Font, width: f32, align: Align, wrap: bool) -> IDWriteTextLayout {
+        let key = (text.to_string(), font.key(), width.max(0.0).to_bits(), align == Align::End, wrap);
         if let Some((layout, used)) = self.layouts.borrow_mut().get_mut(&key) {
             *used = Instant::now();
             return layout.clone();
@@ -198,6 +216,12 @@ impl Gfx {
             .expect("text layout");
         let alignment = if align == Align::End { DWRITE_TEXT_ALIGNMENT_TRAILING } else { DWRITE_TEXT_ALIGNMENT_LEADING };
         unsafe { layout.SetTextAlignment(alignment).unwrap() };
+        if wrap {
+            unsafe {
+                layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP).unwrap();
+                layout.SetTrimming(&DWRITE_TRIMMING::default(), None).unwrap();
+            }
+        }
         if font.tracking != 0.0 {
             // As CSS letter-spacing: added after every character.
             let range = DWRITE_TEXT_RANGE { startPosition: 0, length: wide.len() as u32 };
@@ -429,6 +453,12 @@ impl<'a> Frame<'a> {
     pub fn brush(&self, color: Color) -> &ID2D1SolidColorBrush {
         unsafe { self.brush.SetColor(&color.d2d()) };
         &self.brush
+    }
+
+    /// Draws `text` in lines `width` wide, the first line's box at `(x, y)`.
+    pub fn text_wrapped(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32) {
+        let layout = self.gfx.wrapped(text, font, width);
+        unsafe { self.dc.DrawTextLayout(windows_numerics::Vector2 { X: x, Y: y }, &layout, self.brush(color), D2D1_DRAW_TEXT_OPTIONS_NONE) };
     }
 
     /// Draws `text` with its first baseline-box at `(x, y)`, in a box `width` wide.

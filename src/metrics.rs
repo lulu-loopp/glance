@@ -140,7 +140,7 @@ impl Sampler {
         let missing = || "not found".to_string();
         let mut found = vec![
             format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
-            format!("Motherboard chip: {}", super_io.as_ref().map_or_else(missing, SuperIo::describe)),
+            format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
             format!("Memory sensors: {}", dimms.as_ref().map_or_else(missing, Dimms::describe)),
         ];
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
@@ -175,7 +175,7 @@ impl Sampler {
             gpu_power,
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
-            super_io,
+            super_io: super_io.ok(),
             dimms,
             gpu_by_pid: None,
             adapter_by_pid: HashMap::new(),

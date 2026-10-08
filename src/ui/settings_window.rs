@@ -364,6 +364,10 @@ enum Button {
     Quiet,
 }
 
+/// A row of buttons: its name, its word, and its buttons, right to left
+/// (text, what each does, how it looks).
+type ButtonRow = (String, String, Vec<(String, Target, Button)>);
+
 /// A row that is on or off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
@@ -849,10 +853,15 @@ impl Ui {
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
-                Row::Choice(field) if self.choice_hint(*field).is_some() => (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE),
+                Row::Choice(field) if self.choice_hint(*field).is_some() => {
+                    let options = self.choices(*field).1;
+                    let words = self.words_height(&row).max(ROW);
+                    (if after_heading { 8.0 } else { ROW_GAP }, if self.stacked(&options) { words + CHOICE_LINE } else { words })
+                }
                 // Inside its module's card, right under the row above.
-                Row::Item(..) | Row::ModuleChoice(..) => (0.0, ITEM_ROW),
-                _ => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
+                Row::Item(..) => (0.0, (self.words_height(&row) - ROW + ITEM_ROW).max(ITEM_ROW)),
+                Row::ModuleChoice(..) => (0.0, ITEM_ROW),
+                _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
             after_heading = matches!(row, Row::Title);
@@ -864,6 +873,138 @@ impl Ui {
         }
         let _ = y;
         placed
+    }
+
+    /// How tall a row has to be for its name and its word, the word broken
+    /// into lines in the room it has beside the row's controls; none taller
+    /// than a row for a row without a word.
+    fn words_height(&self, row: &Row) -> f32 {
+        let width = PANE - 2.0 * PAD_SIDE - GUTTER;
+        let font = Font::new(Family::Segoe, 14.0, 400.0);
+        let button = |text: &str| self.gfx.measure(text, font) + 32.0;
+        let (word, room): (Cow<'static, str>, f32) = match row {
+            Row::Switch(switch) => match self.switch(*switch).1 {
+                Some(word) => (word, width - 2.0 * ROW_SIDE - 40.0 - 16.0),
+                None => return 0.0,
+            },
+            Row::Choice(field) => {
+                let Some(word) = self.choice_hint(*field) else { return 0.0 };
+                let options = self.choices(*field).1;
+                let room = if self.stacked(&options) { width - 2.0 * ROW_SIDE } else { width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0 };
+                (Cow::Borrowed(word), room)
+            }
+            Row::Item(id, name) => match self.item_label(id, name).1 {
+                Some(word) => (Cow::Borrowed(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
+                None => return 0.0,
+            },
+            _ => match self.button_row(row, Instant::now()) {
+                Some((_, word, buttons)) => {
+                    let taken: f32 = buttons.iter().map(|(text, ..)| button(text) + 8.0).sum();
+                    (Cow::Owned(word), width - 2.0 * ROW_SIDE - taken - 8.0)
+                }
+                None => return 0.0,
+            },
+        };
+        // A 20 DIP line for the name, 2 apart, the word's lines, and room
+        // above and below.
+        22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, 12.0, 400.0), room.max(40.0)) + 18.0
+    }
+
+    /// How wide a row of choices is.
+    fn segmented_width(&self, options: &[String]) -> f32 {
+        let font = Font::new(Family::Segoe, 13.0, 400.0);
+        options.iter().map(|o| (self.gfx.measure(o, font) + 24.0).max(44.0)).sum::<f32>() + 4.0
+    }
+
+    /// Whether a row of choices with a word goes on a line of its own under
+    /// its name: when beside it, it would leave the name less than half the
+    /// row.
+    fn stacked(&self, options: &[String]) -> bool {
+        let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
+        self.segmented_width(options) + 16.0 > width / 2.0
+    }
+
+    /// What a row of buttons says, its word, and its buttons, right to left:
+    /// each one's text, what it does, and how it looks. None for a row of
+    /// another kind, or an update row with no update.
+    fn button_row(&self, row: &Row, now: Instant) -> Option<ButtonRow> {
+        let lang = self.lang;
+        let p = |zh, en| pick(lang, zh, en).to_string();
+        Some(match row {
+            Row::Update => {
+                let (version, state) = update::available()?;
+                let name = match lang {
+                    Lang::Zh => format!("Glance {version} 可用"),
+                    Lang::En => format!("Glance {version} is available"),
+                };
+                let (detail, action) = match state {
+                    update::State::Ready => (p("下载并运行已签名的安装程序", "Downloads and runs the signed installer"), p("更新", "Update")),
+                    update::State::Downloading => (p("正在下载安装程序", "Downloading the installer"), p("下载中", "Downloading")),
+                    update::State::Failed => (p("下载失败，请稍后重试", "Download failed; try again later"), p("重试", "Retry")),
+                    update::State::Rejected => (p("签名或版本不符，未运行；请手动下载", "Signature or version did not match; not run. Download it yourself"), p("重试", "Retry")),
+                };
+                let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
+                (name, detail, vec![(action, Target::Update, kind)])
+            }
+            Row::Version => {
+                let version = env!("CARGO_PKG_VERSION");
+                let name = match lang {
+                    Lang::Zh => format!("当前版本 {version}"),
+                    Lang::En => format!("Version {version}"),
+                };
+                let detail = match update::check() {
+                    update::Check::Checking => p("正在检查…", "Checking…"),
+                    update::Check::Answered if update::available().is_some() => p("有新版本，见下方", "A newer one is out; see below"),
+                    update::Check::Answered => p("已是最新", "The latest"),
+                    update::Check::Unanswered => p("没能连上 GitHub 和 Gitee，稍后再试", "GitHub and Gitee did not answer; try later"),
+                    update::Check::Idle => p("还没有检查过", "Not checked yet"),
+                };
+                let button = if update::check() == update::Check::Checking {
+                    (p("检查中", "Checking"), Target::CheckNow, Button::Quiet)
+                } else {
+                    (p("检查更新", "Check for updates"), Target::CheckNow, Button::Plain)
+                };
+                (name, detail, vec![button])
+            }
+            Row::Shortcut => {
+                let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
+                    (true, true, _) => p("要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
+                    (true, false, _) => p("按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
+                    (false, _, None) => p("未设置，点右边的按钮设置", "None; click the button to set one"),
+                    (false, _, Some(_)) if crate::tray::hotkey_taken() => p("已被其他程序占用，请换一个", "Another program is using it; choose another"),
+                    (false, _, Some(_)) => p("打开或收起面板", "Opens and closes the panel"),
+                };
+                let keys = match (self.recording, self.settings.shortcut) {
+                    (true, _) => (p("请按键…", "Press keys…"), Target::Shortcut, Button::Taking),
+                    (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Target::Shortcut, Button::Plain),
+                    (false, None) => (p("未设置", "None"), Target::Shortcut, Button::Plain),
+                };
+                // With a shortcut set, a button to clear it, right of its keys.
+                let mut buttons = Vec::new();
+                if self.settings.shortcut.is_some() {
+                    buttons.push((p("清除", "Clear"), Target::ClearShortcut, Button::Plain));
+                }
+                buttons.push(keys);
+                (p("快捷键", "Shortcut"), detail, buttons)
+            }
+            Row::Diagnostics => {
+                // "Copied" for a moment after the press.
+                let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
+                let action = if copied { p("已复制", "Copied") } else { p("复制", "Copy") };
+                (p("诊断信息", "Diagnostics"), p("反馈问题时复制附上", "To paste into a problem report"), vec![(action, Target::Diagnostics, Button::Plain)])
+            }
+            Row::Uninstall => (
+                p("卸载 Glance", "Uninstall Glance"),
+                p("连同设置一起删除，会先确认", "Removes it and its settings; asks first"),
+                vec![(p("卸载", "Uninstall"), Target::Uninstall, Button::Plain)],
+            ),
+            Row::Quit => (
+                p("退出 Glance", "Quit Glance"),
+                p("面板和托盘图标都会关闭", "Closes the panel and the tray icon"),
+                vec![(p("退出", "Quit"), Target::Quit, Button::Plain)],
+            ),
+            _ => return None,
+        })
     }
 
     /// How open module `id`'s card is: 0 closed, 1 open, between while it
@@ -1931,9 +2072,15 @@ impl Ui {
                     let (name, options, chosen) = self.choices(field);
                     let right = left + width - ROW_SIDE;
                     match self.choice_hint(field) {
-                        Some(word) => {
-                            field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + ROW / 2.0, width - 2.0 * ROW_SIDE);
+                        Some(word) if self.stacked(&options) => {
+                            let words = row_height - CHOICE_LINE;
+                            field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + words / 2.0, width - 2.0 * ROW_SIDE);
                             self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height - CHOICE_LINE / 2.0 - 8.0, now, &hovered);
+                        }
+                        Some(word) => {
+                            let room = width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0;
+                            field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + row_height / 2.0, room);
+                            self.segmented(frame, palette, field, &options, chosen, true, right, y + row_height / 2.0, now, &hovered);
                         }
                         None => {
                             text_centred(frame, name, label, palette.text, left + ROW_SIDE, y + row_height / 2.0, width / 2.0, Align::Start);
@@ -1992,104 +2139,14 @@ impl Ui {
                         self.targets.truncate(targets);
                     }
                 }
-                Row::Update => {
-                    let Some((version, state)) = update::available() else { continue };
-                    let name = match lang {
-                        Lang::Zh => format!("Glance {version} 可用"),
-                        Lang::En => format!("Glance {version} is available"),
-                    };
-                    let (detail, action) = match state {
-                        update::State::Ready => (
-                            pick(lang, "下载并运行已签名的安装程序", "Downloads and runs the signed installer"),
-                            pick(lang, "更新", "Update"),
-                        ),
-                        update::State::Downloading => (pick(lang, "正在下载安装程序", "Downloading the installer"), pick(lang, "下载中", "Downloading")),
-                        update::State::Failed => (pick(lang, "下载失败，请稍后重试", "Download failed; try again later"), pick(lang, "重试", "Retry")),
-                        update::State::Rejected => (
-                            pick(lang, "签名或版本不符，未运行；请手动下载", "Signature or version did not match; not run. Download it yourself"),
-                            pick(lang, "重试", "Retry"),
-                        ),
-                    };
+                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::Uninstall | Row::Quit => {
+                    let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
-                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Update, kind, &hovered);
-                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::Version => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let version = env!("CARGO_PKG_VERSION");
-                    let name = match lang {
-                        Lang::Zh => format!("当前版本 {version}"),
-                        Lang::En => format!("Version {version}"),
-                    };
-                    let detail = match update::check() {
-                        update::Check::Checking => pick(lang, "正在检查…", "Checking…"),
-                        update::Check::Answered if update::available().is_some() => pick(lang, "有新版本，见下方", "A newer one is out; see below"),
-                        update::Check::Answered => pick(lang, "已是最新", "The latest"),
-                        update::Check::Unanswered => pick(lang, "没能连上 GitHub 和 Gitee，稍后再试", "GitHub and Gitee did not answer; try later"),
-                        update::Check::Idle => pick(lang, "还没有检查过", "Not checked yet"),
-                    };
-                    let (action, kind) = if update::check() == update::Check::Checking {
-                        (pick(lang, "检查中", "Checking"), Button::Quiet)
-                    } else {
-                        (pick(lang, "检查更新", "Check for updates"), Button::Plain)
-                    };
-                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::CheckNow, kind, &hovered);
-                    field_label(frame, palette, &name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::Shortcut => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let name = pick(lang, "快捷键", "Shortcut");
-                    let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
-                        (true, true, _) => pick(lang, "要配合 Ctrl、Alt 或 Win 一起按", "Hold Ctrl, Alt or Win with it"),
-                        (true, false, _) => pick(lang, "按下新的组合键，Esc 取消", "Press the new keys; Esc to cancel"),
-                        (false, _, None) => pick(lang, "未设置，点右边的按钮设置", "None; click the button to set one"),
-                        (false, _, Some(_)) if crate::tray::hotkey_taken() => pick(lang, "已被其他程序占用，请换一个", "Another program is using it; choose another"),
-                        (false, _, Some(_)) => pick(lang, "打开或收起面板", "Opens and closes the panel"),
-                    };
-                    let (action, kind) = match (self.recording, self.settings.shortcut) {
-                        (true, _) => (pick(lang, "请按键…", "Press keys…").to_string(), Button::Taking),
-                        (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Button::Plain),
-                        (false, None) => (pick(lang, "未设置", "None").to_string(), Button::Plain),
-                    };
-                    // With a shortcut set, a button to clear it, right of its keys.
-                    let right = left + width - ROW_SIDE;
-                    let keys_right = match self.settings.shortcut {
-                        Some(_) => self.button(frame, palette, pick(lang, "清除", "Clear"), right, y + row_height / 2.0, Target::ClearShortcut, Button::Plain, &hovered) - 8.0,
-                        None => right,
-                    };
-                    let button_left = self.button(frame, palette, &action, keys_right, y + row_height / 2.0, Target::Shortcut, kind, &hovered);
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::Diagnostics => {
-                    // "Copied" for a moment after the press.
-                    let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
-                    let action = if copied { pick(lang, "已复制", "Copied") } else { pick(lang, "复制", "Copy") };
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let name = pick(lang, "诊断信息", "Diagnostics");
-                    let detail = pick(lang, "反馈问题时复制附上", "To paste into a problem report");
-                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, Target::Diagnostics, Button::Plain, &hovered);
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
-                }
-                Row::Uninstall | Row::Quit => {
-                    let (target, name, detail, action) = if matches!(row, Row::Uninstall) {
-                        (
-                            Target::Uninstall,
-                            pick(lang, "卸载 Glance", "Uninstall Glance"),
-                            pick(lang, "连同设置一起删除，会先确认", "Removes it and its settings; asks first"),
-                            pick(lang, "卸载", "Uninstall"),
-                        )
-                    } else {
-                        (
-                            Target::Quit,
-                            pick(lang, "退出 Glance", "Quit Glance"),
-                            pick(lang, "面板和托盘图标都会关闭", "Closes the panel and the tray icon"),
-                            pick(lang, "退出", "Quit"),
-                        )
-                    };
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let button_left = self.button(frame, palette, action, left + width - ROW_SIDE, y + row_height / 2.0, target, Button::Plain, &hovered);
-                    field_label(frame, palette, name, Some(detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, button_left - 16.0 - left - ROW_SIDE);
+                    let mut right = left + width - ROW_SIDE;
+                    for (text, target, kind) in buttons {
+                        right = self.button(frame, palette, &text, right, y + row_height / 2.0, target, kind, &hovered) - 8.0;
+                    }
+                    field_label(frame, palette, &name, Some(&detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, right - 8.0 - left - ROW_SIDE);
                 }
             }
             if inside.is_some() {
@@ -2169,7 +2226,7 @@ impl Ui {
             text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
             frame.origin(0.0, 0.0);
         }
-        field_label(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
+        field_label_line(frame, palette, &title, detail.as_deref(), label, hint, text_left, cy, switch_left - 12.0 - text_left);
         let pressed = self.pressed == Some(Target::Module(id.to_string()));
         self.toggle(frame, palette, format!("module:{id}"), on, true, switch_left, cy, now, pressed);
         if !held {
@@ -2475,16 +2532,32 @@ fn field_label(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>
     field_label_in(frame, (palette.text, palette.text2), label, hint, label_font, hint_font, x, cy, width);
 }
 
-/// A row's label and hint in the colours given (label, hint).
+/// A row's label and hint in the colours given (label, hint), the hint
+/// broken into as many lines as `width` makes it.
 #[allow(clippy::too_many_arguments)]
 fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
     match hint {
         None => text_centred(frame, label, label_font, colors.0, x, cy, width, Align::Start),
         Some(hint) => {
+            // A 20 DIP line, 2 apart, then the hint's lines.
+            let width = width.max(40.0);
+            let top = cy - (22.0 + frame.gfx.wrapped_height(hint, hint_font, width)) / 2.0;
+            text_centred(frame, label, label_font, colors.0, x, top + 10.0, width, Align::Start);
+            frame.text_wrapped(hint, hint_font, colors.1, x, top + 22.0, width);
+        }
+    }
+}
+
+/// A row's label and hint, each on one line, cut short if they do not fit.
+#[allow(clippy::too_many_arguments)]
+fn field_label_line(frame: &Frame, palette: &Palette, label: &str, hint: Option<&str>, label_font: Font, hint_font: Font, x: f32, cy: f32, width: f32) {
+    match hint {
+        None => text_centred(frame, label, label_font, palette.text, x, cy, width, Align::Start),
+        Some(hint) => {
             // A 20 DIP line, 2 apart, then a 16 DIP one.
             let top = cy - 19.0;
-            text_centred(frame, label, label_font, colors.0, x, top + 10.0, width, Align::Start);
-            text_centred(frame, hint, hint_font, colors.1, x, top + 22.0 + 8.0, width, Align::Start);
+            text_centred(frame, label, label_font, palette.text, x, top + 10.0, width, Align::Start);
+            text_centred(frame, hint, hint_font, palette.text2, x, top + 22.0 + 8.0, width, Align::Start);
         }
     }
 }
