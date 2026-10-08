@@ -88,6 +88,8 @@ const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
+/// The narrowest a row's word may be beside its choices.
+const MIN_WORDS: f32 = 140.0;
 /// The page's name, at the top of the page.
 const TITLE: f32 = 52.0;
 /// The overlay's chips: their height, the room beside their text, and
@@ -917,11 +919,11 @@ impl Ui {
     }
 
     /// Whether a row of choices with a word goes on a line of its own under
-    /// its name: when beside it, it would leave the name less than half the
-    /// row.
+    /// its name: when beside it, it would leave the word too narrow a column
+    /// to read (a few characters to a line).
     fn stacked(&self, options: &[String]) -> bool {
         let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        self.segmented_width(options) + 16.0 > width / 2.0
+        width - self.segmented_width(options) - 16.0 < MIN_WORDS
     }
 
     /// What a row of buttons says, its word, and its buttons, right to left:

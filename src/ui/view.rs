@@ -1108,7 +1108,8 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
         (Skin::Glass, false) => (white(0.5), white(0.95), Some(Color::hex(0, 0.08))),
         (Skin::Glass, true) => (white(0.16), white(0.32), Some(Color::hex(0, 0.25))),
         (Skin::Paper, _) => (theme.paper, theme.rule, None),
-        (Skin::Fluent, false) => (white(1.0), Color::hex(0, 0.06), Some(Color::hex(0, 0.06))),
+        // As Windows 11's own: a translucent white fill, a hairline, no glare.
+        (Skin::Fluent, false) => (white(0.7), Color::hex(0, 0.08), Some(Color::hex(0, 0.04))),
         (Skin::Fluent, true) => (white(0.1), white(0.07), None),
     };
     let thumb = (modes + scene.mode_thumb.clamp(0.0, 1.0) * MODE_BUTTON + 2.0, top + 2.0, MODE_BUTTON - 4.0, BUTTON - 4.0);

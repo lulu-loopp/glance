@@ -676,8 +676,9 @@ struct Panel<'a> {
     mode_thumb: Transition,
     fade: Transition,
     /// Going over to the other mode: its lanes laid out once the old have
-    /// faded out.
+    /// faded out; the whole panel with them (`whole`) when its size changes.
     switching: bool,
+    whole: bool,
     skin: Skin,
     theme: Theme,
     lang: Lang,
@@ -737,6 +738,7 @@ impl<'a> Panel<'a> {
             mode_thumb: Transition::settled(0.0),
             fade: Transition::settled(1.0),
             switching: false,
+            whole: false,
             skin: Skin::Paper,
             theme: Theme::new(Skin::Paper, false),
             lang: Lang::En,
@@ -779,12 +781,20 @@ impl<'a> Panel<'a> {
         if !self.is_shown() {
             // Hidden (taken down mid-switch, too): at once.
             self.switching = false;
+            self.whole = false;
             self.fade.jump(1.0);
             self.restyle();
             self.mode_thumb.jump(thumb_at(self.mode));
         } else if mode != self.mode && !reduced_motion() {
             self.mode_thumb.retarget(thumb_at(mode), THUMB.0, THUMB.1, now);
             self.fade.retarget(0.0, FADE_OUT, LINEAR, now);
+            // A panel of another size (other columns, other lanes) fades out
+            // whole, sheet and all, rather than jump to its new size.
+            let size = |layout: &Layout| (layout.width(), layout.height());
+            if self.size_in(mode) != self.opening.as_ref().map(|opening| size(&opening.layout)) {
+                self.opacity.retarget(0.0, FADE_OUT, LINEAR, now);
+                self.whole = true;
+            }
             self.switching = true;
             self.next_frame = now;
         } else if !self.switching {
@@ -847,6 +857,7 @@ impl<'a> Panel<'a> {
             self.mode_thumb.jump(thumb_at(self.mode));
             self.fade.jump(1.0);
             self.switching = false;
+            self.whole = false;
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
             self.held = None;
@@ -1049,6 +1060,28 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
+    /// The size the panel would be laid out at in mode `mode`, holding what
+    /// it holds now, on its screen; none while it is not placed.
+    fn size_in(&self, mode: Mode) -> Option<(f32, f32)> {
+        let contact = self.placement.as_ref()?.contact;
+        let held = &self.opening.as_ref()?.seen;
+        let work = (
+            (contact.work.right - contact.work.left) as f32 / contact.scale,
+            (contact.work.bottom - contact.work.top) as f32 / contact.scale,
+        );
+        let (prefs, columns) = {
+            let config = self.controller.config.lock().unwrap();
+            let prefs = Prefs::resolve(&config.view, &self.controller.known_modules()).for_mode(mode);
+            (prefs, if mode == Mode::Game { config.game_columns } else { config.columns })
+        };
+        let mut history = self.controller.history.lock().unwrap();
+        let scene = scene(self.controller, &prefs, &self.theme, self.lang, 0.0, None, (false, mode, (thumb_at(mode), 1.0)), history.make_contiguous(), held);
+        let lanes = view::lanes(&scene);
+        let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(&self.theme))).collect();
+        let layout = arrange::Opening::new(&self.theme, self.edge, &heights, work, columns, held.clone()).layout;
+        Some((layout.width(), layout.height()))
+    }
+
     /// The panel's lanes, laid out (once each opening, and held), and the
     /// window placed for them.
     fn arrange(&mut self) -> (Vec<view::Lane>, Layout) {
@@ -1134,6 +1167,9 @@ impl<'a> Panel<'a> {
             self.fade.retarget(1.0, FADE_IN, LINEAR, now);
             // To the mode as it is now: it may have changed back mid-switch.
             self.mode_thumb.retarget(thumb_at(self.mode), THUMB.0, THUMB.1, now);
+            if std::mem::take(&mut self.whole) {
+                self.opacity.retarget(1.0, FADE_IN, LINEAR, now);
+            }
         }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
