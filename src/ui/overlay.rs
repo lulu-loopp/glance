@@ -35,7 +35,9 @@ const LINE: f32 = 19.0;
 /// Between a reading's name and its value.
 const LABEL_GAP: f32 = 10.0;
 const RADIUS: f32 = 8.0;
-const LABEL: Font = Font::new(Family::Segoe, 12.0, 500.0);
+/// Names and values alike in size (Chinese shows a size apart at once),
+/// told apart by colour and weight.
+const LABEL: Font = Font::new(Family::Segoe, 13.0, 500.0);
 const VALUE: Font = Font::new(Family::Segoe, 13.0, 600.0);
 /// A cool, soft grey: lighter than black, so the plate reads as glass over
 /// a game rather than a hole in it.
