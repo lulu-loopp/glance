@@ -32,7 +32,7 @@ pub struct Prefs {
     pub language: LanguagePref,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
 pub struct ModuleEntry {
     pub id: String,
     pub on: bool,

@@ -116,7 +116,13 @@ pub trait Canvas {
     fn stroke(&self, points: &[Point], color: Color, width: f32);
     /// The shape `points` outline, closed.
     fn fill_shape(&self, points: &[Point], fill: Fill);
-    /// What `paint` draws inside `size` DIPs from the origin, ringed by a
-    /// halo of `glow` about `spread` DIPs wide, as wide every way.
-    fn glowing(&self, glow: Color, spread: f32, size: (f32, f32), paint: &dyn Fn(&dyn Canvas));
+    /// The outline of the rounded rectangle, a line `line` DIPs wide
+    /// centred on it.
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32);
+    /// The shadow the rounded rectangle casts, `drop` DIPs below it and
+    /// blurred by a deviation of `blur` DIPs: outside the rectangle only, so
+    /// that what is drawn in it shows through clear.
+    #[allow(clippy::too_many_arguments)]
+    fn shadow(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, drop: f32);
 }

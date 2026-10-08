@@ -56,7 +56,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 }
 
 impl Window {
+    /// A window that can let clicks through (see `set_click_through`).
     pub fn new() -> Result<Self> {
+        Self::make(true)
+    }
+
+    /// A window that always takes its clicks, and that the system's
+    /// compositor may draw the screen behind into, blurred (a layered
+    /// window gets no host backdrop).
+    pub fn see_through() -> Result<Self> {
+        Self::make(false)
+    }
+
+    fn make(layered: bool) -> Result<Self> {
         let instance = unsafe { GetModuleHandleW(None)? };
         let class = WNDCLASSW {
             lpfnWndProc: Some(procedure),
@@ -69,9 +81,10 @@ impl Window {
         unsafe { RegisterClassW(&class) };
         // Layered so that it can let clicks through (see `set_click_through`);
         // fully opaque as a layer, its content's own alpha is what shows.
+        let style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP | WS_EX_LAYERED,
+                if layered { style | WS_EX_LAYERED } else { style },
                 w!("GlancePanel"),
                 w!("Glance"),
                 WS_POPUP,
@@ -85,7 +98,9 @@ impl Window {
                 None,
             )?
         };
-        unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)? };
+        if layered {
+            unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)? };
+        }
         // The panel animates itself; no system fade on top.
         let disabled = BOOL::from(true);
         unsafe {

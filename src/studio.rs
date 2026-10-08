@@ -79,8 +79,9 @@ struct Shot {
     modules: Option<Vec<String>>,
     /// A game being played, by its name, if one is.
     game: Option<String>,
-    /// The overlay, in the screen's top left corner, in this style.
-    overlay: Option<crate::ui::overlay::Style>,
+    /// The overlay, in the screen's top left corner, laid out so (a strip
+    /// in one row).
+    overlay: Option<crate::ui::overlay::Layout>,
 }
 
 fn backdrop() -> String {
@@ -242,12 +243,31 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge: Some(edge), backdrop, frost };
                 let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + shift * travel * zoom, rest.1);
                 let _ = layers.draw(frame, &picture, local, px * zoom);
-                if let (Some(style), Some(sample)) = (shot.overlay, scene.history.last()) {
-                    let items = crate::settings::OverlaySettings::default().items;
-                    let lines = crate::ui::overlay::lines(sample, sample.game.as_ref(), sample.game.is_some(), &items, lang);
-                    frame.place(Matrix3x2::translation(crate::ui::overlay::INSET, crate::ui::overlay::INSET));
+                if let (Some(layout), Some(sample)) = (shot.overlay, scene.history.last()) {
+                    use crate::ui::overlay::{self, Metrics, INSET, MARGIN};
+                    let items = crate::settings::OverlaySettings::default().chosen();
+                    let playing = sample.game.is_some();
+                    let readings = overlay::readings(sample, sample.game.as_ref(), playing, &items, lang);
+                    let frames = overlay::frames(scene.history.iter(), playing);
+                    let width = |text: &str, font| frame.gfx.measure(text, font);
+                    let line = |font| frame.gfx.baseline(font);
+                    let metrics = Metrics { width: &width, line: &line };
+                    let shape = overlay::Shape { layout, rows: 1, width: sw - 2.0 * INSET };
+                    let (w, h) = overlay::size(&readings, shape, px, &metrics);
+                    let radius = overlay::radius(&readings, shape, px, &metrics);
+                    // Tinted for the desktop around it, over the desktop behind it.
+                    let whole = |dips: f32| (dips * px).round() as i32;
+                    let hole = RECT { left: whole(INSET), top: whole(INSET), right: whole(INSET + w), bottom: whole(INSET + h) };
+                    let ring = RECT { left: 0, top: 0, right: whole(INSET + w + MARGIN + 16.0), bottom: whole(INSET + h + MARGIN + 16.0) };
+                    let glass = overlay::glass(&mut desktop.luminances(ring, hole, 1), None);
+                    let at = Matrix3x2::translation(INSET, INSET);
+                    if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at);
+                    }
+                    frame.place(at);
                     frame.crisp_text();
-                    crate::ui::overlay::paint(frame, &lines, crate::ui::overlay::Plate::Grey, style, false, px);
+                    overlay::shadow(frame, &readings, shape, glass, false, px);
+                    overlay::paint(frame, &readings, &frames, shape, glass, false, px);
                     frame.origin(0.0, 0.0);
                 }
                 unsafe { frame.dc.PopLayer() };

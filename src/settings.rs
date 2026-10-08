@@ -88,8 +88,12 @@ pub struct OverlaySettings {
     pub on: bool,
     /// Shown while a game is played, off or not otherwise.
     pub in_game: bool,
-    /// What it shows, by name (see `ui::overlay::ITEMS`).
-    pub items: Vec<String>,
+    /// What it shows, group by group, in order (see `ui::overlay::GROUPS`).
+    pub groups: Vec<crate::ui::prefs::ModuleEntry>,
+    /// What it showed up to 0.2.1, by name: read once, to carry the choices
+    /// over, and not written again.
+    #[serde(skip_serializing)]
+    items: Option<Vec<String>>,
     /// Where it is on its screen: how far across and down the room there is
     /// for it (0 at the left or top, 1 at the right or bottom).
     pub at: (f32, f32),
@@ -98,14 +102,27 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
-    /// On a plate, or bare.
-    pub style: crate::ui::overlay::Style,
-    /// Its plate's colour.
-    pub plate: crate::ui::overlay::Plate,
+    /// A card or a strip.
+    pub layout: crate::ui::overlay::Layout,
+    /// A strip's rows (see `ui::overlay::ROWS`).
+    pub rows: usize,
     /// How large it is drawn, 1 as designed (0.75 to 2).
     pub size: f32,
     /// Offered once already: the first game told of it.
     pub offered: bool,
+}
+
+impl OverlaySettings {
+    /// What it shows, by item, group by group.
+    pub fn chosen(&self) -> Vec<&'static str> {
+        crate::ui::overlay::chosen(&self.groups)
+    }
+
+    /// How its readings are laid out, on a screen `width` DIPs wide (at
+    /// its size).
+    pub fn shape(&self, width: f32) -> crate::ui::overlay::Shape {
+        crate::ui::overlay::Shape { layout: self.layout, rows: self.rows, width }
+    }
 }
 
 impl Default for OverlaySettings {
@@ -113,12 +130,13 @@ impl Default for OverlaySettings {
         OverlaySettings {
             on: false,
             in_game: false,
-            items: ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"].map(String::from).to_vec(),
+            groups: crate::ui::overlay::default_groups(),
+            items: None,
             at: (0.0, 0.0),
             screen: None,
             locked: false,
-            style: Default::default(),
-            plate: Default::default(),
+            layout: Default::default(),
+            rows: 1,
             size: 1.0,
             offered: false,
         }
@@ -274,6 +292,10 @@ impl Settings {
     /// Settings from before, in today's terms; a shortcut that cannot be one
     /// (a file not written by Glance) is the default.
     fn carry_over(&mut self) {
+        if let Some(items) = self.overlay.items.take() {
+            self.overlay.groups = crate::ui::overlay::carried_over(&items);
+        }
+        crate::ui::overlay::complete(&mut self.overlay.groups);
         if self.hotkey.take() == Some(false) {
             self.shortcut = None;
         }
@@ -375,5 +397,11 @@ mod tests {
         settings.carry_over();
         assert_eq!(settings.shortcut, None);
         assert!(!serde_json::to_string(&settings).unwrap().contains("hotkey"));
+        // The overlay's readings chosen by name, in groups now; the names
+        // not written again.
+        let mut settings: Settings = serde_json::from_str(r#"{"overlay":{"items":["gpu","network"],"style":"plate"}}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.overlay.chosen(), ["gpu", "down", "up"]);
+        assert!(!serde_json::to_string(&settings).unwrap().contains("\"items\":[\""));
     }
 }

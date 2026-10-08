@@ -8,6 +8,8 @@ pub mod backdrop;
 pub mod canvas;
 #[cfg(windows)]
 pub mod gfx;
+#[cfg(windows)]
+pub mod glass;
 pub mod motion;
 pub mod overlay;
 pub mod prefs;

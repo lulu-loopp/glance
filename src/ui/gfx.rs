@@ -64,7 +64,7 @@ impl Color {
 /// Devices and factories shared by every surface.
 pub struct Gfx {
     pub factory: ID2D1Factory1,
-    device: ID2D1Device,
+    pub(super) device: ID2D1Device,
     dxgi: IDXGIDevice3,
     pub dcomp: IDCompositionDesktopDevice,
     write: IDWriteFactory6,
@@ -81,10 +81,6 @@ pub struct Gfx {
     /// each was last drawn.
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
 }
-
-/// How much a glow's blurred alpha is raised (see `Canvas::glowing`): its
-/// faint rim made as dark as its core, out to about a deviation.
-const HALO_GAIN: f32 = 3.0;
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
 /// system's default is 1).
@@ -412,87 +408,56 @@ impl Canvas for Frame<'_> {
 
     fn fill_shape(&self, points: &[Point], fill: Fill) {
         let Some(path) = self.path(points, true) else { return };
-        match fill {
-            Fill::Solid(color) => unsafe { self.dc.FillGeometry(&path, self.brush(color), None) },
-            Fill::Down { top, from, bottom, to } => {
-                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
-                unsafe {
-                    let Ok(collection) = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
-                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
-                    if let Ok(brush) = self.dc.CreateLinearGradientBrush(&line, None, &collection) {
-                        self.dc.FillGeometry(&path, &brush, None);
-                    }
-                }
-            }
+        if let Some(brush) = self.paint_with(fill) {
+            unsafe { self.dc.FillGeometry(&path, &brush, None) };
         }
     }
 
-    fn glowing(&self, glow: Color, spread: f32, size: (f32, f32), paint: &dyn Fn(&dyn Canvas)) {
-        // Drawn alone first, as sharp as it shows: in a bitmap of the
-        // pixels it covers at the frame's DPI and current scale, with room
-        // around it for the halo.
-        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1ColorMatrix, D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_PROPERTY_TYPE_BOOL, D2D1_PROPERTY_TYPE_MATRIX_5X4};
-        let dc = &self.dc;
-        let (mut parent, mut dpi) = (Matrix3x2::default(), (0.0f32, 0.0f32));
-        unsafe {
-            dc.GetTransform(&mut parent);
-            dc.GetDpi(&mut dpi.0, &mut dpi.1);
+    fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
+        let radius = radius.max(0.0).min(width / 2.0).min(height / 2.0);
+        let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
+        if let Some(brush) = self.paint_with(fill) {
+            unsafe { self.dc.DrawRoundedRectangle(&shape, &brush, line, None) };
         }
-        let scale = dpi.0 / 96.0 * (parent.M11 * parent.M11 + parent.M12 * parent.M12).sqrt();
-        // A whole number of pixels, so that the drawing lands back on the
-        // pixels it was drawn for, as sharp as drawn.
-        let room = ((3.0 * spread + 2.0 / scale) * scale).ceil() / scale;
-        let pixels = D2D_SIZE_U { width: ((size.0 + 2.0 * room) * scale).ceil() as u32, height: ((size.1 + 2.0 * room) * scale).ceil() as u32 };
-        let properties = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
-            dpiX: 96.0 * scale,
-            dpiY: 96.0 * scale,
-            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-            ..Default::default()
-        };
-        // Without a bitmap (the device going, which the frame's end tells),
-        // nothing is drawn this time.
-        let _ = (|| -> Result<()> {
-            let bitmap = unsafe { dc.CreateBitmap(pixels, None, 0, &properties)? };
+    }
+
+    fn shadow(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, drop: f32) {
+        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1Composite, D2D1_COMPOSITE_PROP_MODE, D2D1_PROPERTY_TYPE_ENUM};
+        use windows::Win32::Graphics::Direct2D::Common::D2D1_COMPOSITE_MODE_SOURCE_OUT;
+        let dc = &self.dc;
+        // The rectangle as a picture of its own, recorded in the frame's
+        // DIPs (drawn back through the frame's transform), where `down`
+        // below its place.
+        let shape = |down: f32| -> Result<ID2D1Image> {
             unsafe {
-                let target = dc.GetTarget()?;
-                dc.SetTarget(&bitmap);
-                dc.SetDpi(96.0 * scale, 96.0 * scale);
-                dc.SetTransform(&Matrix3x2::translation(room, room));
-                dc.Clear(Some(&D2D1_COLOR_F::default()));
-                paint(self);
+                let list = dc.CreateCommandList()?;
+                let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
+                dc.GetTransform(&mut transform);
+                dc.SetTarget(&list);
+                dc.SetTransform(&Matrix3x2::identity());
+                Canvas::fill_rounded(self, Color::hex(0, 1.0), x, y + down, width, height, radius);
                 dc.SetTarget(&target);
-                dc.SetDpi(dpi.0, dpi.1);
-                dc.SetTransform(&parent);
-                let image = effect_input(dc, &bitmap)?;
-                // The halo, as far out every way: the drawing blurred (a
-                // Gaussian is the same in every direction, as thickening by
-                // a square is not), its faint rim made dark by a gain on its
-                // alpha, then as opaque as the halo's colour.
-                let blurred = dc.CreateEffect(&CLSID_D2D1Shadow)?;
-                blurred.SetInput(0, &image, true);
-                blurred.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &spread.to_ne_bytes())?;
-                let rgba = [glow.r, glow.g, glow.b, 1.0f32];
-                blurred.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
-                let mut halo = blurred;
-                for gain in [HALO_GAIN, glow.a] {
-                    let alpha = dc.CreateEffect(&CLSID_D2D1ColorMatrix)?;
-                    alpha.SetInput(0, &halo.GetOutput()?, true);
-                    #[rustfmt::skip]
-                    let matrix: [f32; 20] = [
-                        1.0, 0.0, 0.0, 0.0,
-                        0.0, 1.0, 0.0, 0.0,
-                        0.0, 0.0, 1.0, 0.0,
-                        0.0, 0.0, 0.0, gain,
-                        0.0, 0.0, 0.0, 0.0,
-                    ];
-                    alpha.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, std::slice::from_raw_parts(matrix.as_ptr().cast(), 80))?;
-                    alpha.SetValue(D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT.0 as u32, D2D1_PROPERTY_TYPE_BOOL, &1u32.to_ne_bytes())?;
-                    halo = alpha;
-                }
-                let at = Vector2 { X: -room, Y: -room };
-                dc.DrawImage(&halo.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.SetTransform(&transform);
+                list.Close()?;
+                list.cast()
+            }
+        };
+        // Without its pictures (the device going, which the frame's end
+        // tells), no shadow this time.
+        let _ = (|| -> Result<()> {
+            unsafe {
+                let cast = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                cast.SetInput(0, &shape(drop)?, true);
+                cast.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
+                let rgba = [color.r, color.g, color.b, color.a];
+                cast.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                // The shadow where the rectangle is not: the rectangle as the
+                // destination, the shadow kept outside it.
+                let outside = dc.CreateEffect(&CLSID_D2D1Composite)?;
+                outside.SetInput(0, &shape(0.0)?, true);
+                outside.SetInput(1, &cast.GetOutput()?, true);
+                outside.SetValue(D2D1_COMPOSITE_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_COMPOSITE_MODE_SOURCE_OUT.0 as u32).to_ne_bytes())?;
+                dc.DrawImage(&outside.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
             }
             Ok(())
         })();
@@ -500,6 +465,41 @@ impl Canvas for Frame<'_> {
 }
 
 impl<'a> Frame<'a> {
+    /// A frame on a composition surface's context just handed out for
+    /// drawing, at `offset` (physical pixels) in it: cleared, at `scale`
+    /// physical pixels per DIP.
+    pub(super) fn begun(gfx: &'a Gfx, dc: ID2D1DeviceContext, offset: POINT, scale: f32) -> Result<Self> {
+        // The surface may hand out a region of a larger atlas.
+        let base = Matrix3x2::translation(offset.x as f32 / scale, offset.y as f32 / scale);
+        unsafe {
+            dc.SetDpi(96.0 * scale, 96.0 * scale);
+            dc.SetTransform(&base);
+            // A transparent surface takes no ClearType.
+            dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            // The system's text rendering, unless the frame asks for crisp
+            // text: the context may be one another surface had it set on.
+            dc.SetTextRenderingParams(None);
+            dc.Clear(Some(&D2D1_COLOR_F::default()));
+        }
+        let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
+        Ok(Frame { gfx, dc, brush, base })
+    }
+
+    /// A brush for `fill`; none if Direct2D cannot make it.
+    fn paint_with(&self, fill: Fill) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
+        match fill {
+            Fill::Solid(color) => self.brush(color).cast().ok(),
+            Fill::Down { top, from, bottom, to } => {
+                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
+                unsafe {
+                    let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
+                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
+                    self.dc.CreateLinearGradientBrush(&line, None, &collection).ok()?.cast().ok()
+                }
+            }
+        }
+    }
+
     /// The path through `points`, closed as a shape or open as a line;
     /// `None` without points, or if Direct2D cannot make it.
     fn path(&self, points: &[Point], closed: bool) -> Option<ID2D1PathGeometry1> {
@@ -534,6 +534,48 @@ impl<'a> Frame<'a> {
         if let Ok(params) = params {
             unsafe { self.dc.SetTextRenderingParams(&params) };
         }
+    }
+
+    /// The picture `bitmap`, placed by `placed` from the surface's corner,
+    /// frosted as the glass frosts what is behind it (see `glass`), inside
+    /// the rounded rectangle `pane` (left, top, width, height, radius)
+    /// placed by `at`. For the glass where no compositor draws it.
+    pub fn frosted(&self, bitmap: &ID2D1Bitmap1, placed: Matrix3x2, pane: (f32, f32, f32, f32, f32), at: Matrix3x2) {
+        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_LAYER_PARAMETERS1, D2D1_PROPERTY_TYPE_ENUM, D2D1_SATURATION_PROP_SATURATION};
+        let (x, y, width, height, radius) = pane;
+        let dc = &self.dc;
+        let _ = (|| -> Result<()> {
+            unsafe {
+                use windows::Win32::Graphics::Direct2D::Common::D2D1_BORDER_MODE_HARD;
+                let shape = D2D1_ROUNDED_RECT { rect: rect(x, y, width, height), radiusX: radius, radiusY: radius };
+                let mask = self.gfx.factory.CreateRoundedRectangleGeometry(&shape)?;
+                let softened = dc.CreateEffect(&CLSID_D2D1Saturation)?;
+                softened.SetInput(0, &effect_input(dc, bitmap)?, true);
+                softened.SetValue(D2D1_SATURATION_PROP_SATURATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &super::glass::SATURATION.to_ne_bytes())?;
+                let blurred = dc.CreateEffect(&CLSID_D2D1GaussianBlur)?;
+                blurred.SetInput(0, &softened.GetOutput()?, true);
+                blurred.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &super::glass::blur().to_ne_bytes())?;
+                blurred.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes())?;
+                let mut before = Matrix3x2::default();
+                dc.GetTransform(&mut before);
+                let layer = D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: rect(-1e6, -1e6, 2e6, 2e6),
+                    geometricMask: std::mem::ManuallyDrop::new(Some(mask.cast()?)),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: at * self.base,
+                    opacity: 1.0,
+                    ..Default::default()
+                };
+                dc.SetTransform(&Matrix3x2::identity());
+                dc.PushLayer(&layer, None);
+                std::mem::ManuallyDrop::into_inner(layer.geometricMask);
+                dc.SetTransform(&(placed * self.base));
+                dc.DrawImage(&blurred.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.PopLayer();
+                dc.SetTransform(&before);
+            }
+            Ok(())
+        })();
     }
 
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
@@ -601,20 +643,7 @@ impl Surface {
         let surface = self.surface.as_ref().unwrap();
         let mut offset = POINT::default();
         let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
-        // The surface may hand out a region of a larger atlas.
-        let base = Matrix3x2::translation(offset.x as f32 / scale, offset.y as f32 / scale);
-        unsafe {
-            dc.SetDpi(96.0 * scale, 96.0 * scale);
-            dc.SetTransform(&base);
-            // A transparent surface takes no ClearType.
-            dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            // The system's text rendering, unless the frame asks for crisp
-            // text: the context may be one another surface had it set on.
-            dc.SetTextRenderingParams(None);
-            dc.Clear(Some(&D2D1_COLOR_F::default()));
-        }
-        let brush = unsafe { dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)? };
-        paint(&Frame { gfx, dc, brush, base });
+        paint(&Frame::begun(gfx, dc, offset, scale)?);
         unsafe {
             surface.EndDraw()?;
             gfx.dcomp.Commit()?;

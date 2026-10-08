@@ -25,9 +25,12 @@ pub struct Capture {
 
 impl Capture {
     /// Copies the screen inside `rect`; `None` while it cannot be read (the
-    /// lock screen or a UAC prompt has the display).
+    /// lock screen or a UAC prompt has the display), or for an empty `rect`.
     pub fn take(rect: RECT) -> Option<Self> {
         let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        if width <= 0 || height <= 0 {
+            return None;
+        }
         let header = BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
@@ -94,6 +97,27 @@ impl Capture {
             ..Default::default()
         };
         unsafe { dc.CreateBitmap(size, Some(self.pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
+    }
+
+    /// The relative luminance (0–1, as WCAG measures it) of every `step`th
+    /// pixel each way inside `area` but outside `hole` (both in the
+    /// capture's coordinates: physical screen ones for the screen's).
+    pub fn luminances(&self, area: RECT, hole: RECT, step: i32) -> Vec<f32> {
+        let r = self.rect;
+        let (left, right) = (area.left.max(r.left), area.right.min(r.right));
+        let (top, bottom) = (area.top.max(r.top), area.bottom.min(r.bottom));
+        let channel = |v: u8| v as f32 / 255.0;
+        let mut luminances = Vec::new();
+        for y in (top..bottom).step_by(step.max(1) as usize) {
+            for x in (left..right).step_by(step.max(1) as usize) {
+                if x >= hole.left && x < hole.right && y >= hole.top && y < hole.bottom {
+                    continue;
+                }
+                let i = (((y - r.top) * self.width() + x - r.left) * 4) as usize;
+                luminances.push(crate::ui::overlay::luminance(channel(self.pixels[i + 2]), channel(self.pixels[i + 1]), channel(self.pixels[i])));
+            }
+        }
+        luminances
     }
 
     /// The mean and standard deviation (0–1) of the luminance behind `area`

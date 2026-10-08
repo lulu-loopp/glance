@@ -16,10 +16,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetTimer, TrackPopupMenuEx, SM_SWAPBUTTON, IDC_ARROW, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
+use std::collections::VecDeque;
+
 use crate::reading::Sample;
 use crate::settings::OverlaySettings;
+use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
-use crate::ui::overlay::{self, INSET};
+use crate::ui::glass::Frosted;
+use crate::ui::overlay::{self, Glass, Layout, Metrics, Shape, INSET, MARGIN};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
 
@@ -34,18 +38,28 @@ pub enum Choice {
 pub struct Overlay {
     gfx: Rc<Gfx>,
     pub window: Window,
-    /// None after the device was lost, until it is made again on the new one.
-    surface: Option<Surface>,
+    /// Its content: the glass and what is on it.
+    surface: Frosted,
+    /// Its shadow, in a window of its own just beneath it that every click
+    /// passes through, and that window's content (none after the device
+    /// was lost, until it is made again on the new one).
+    shade: Window,
+    shade_surface: Option<(Rc<Gfx>, Surface)>,
     shown: bool,
     locked: bool,
     lang: Lang,
-    /// Where it is on screen (physical pixels).
+    /// Where its glass is on screen (physical pixels).
     rect: RECT,
+    /// The screen it is on.
+    screen: RECT,
     /// Its screen's scale, and the size it is drawn at (1 as designed).
     dpi: f32,
     size: f32,
-    /// What it shows, on what colour, in what style: drawn again as it is dragged.
-    drawn: (Vec<overlay::Line>, overlay::Plate, overlay::Style),
+    /// What it shows, the frame rate's recent course, and how: drawn again
+    /// as it is dragged.
+    drawn: (Vec<overlay::Reading>, Vec<Option<f32>>, Shape),
+    /// How its glass is tinted, as the screen around it last asked.
+    glass: Option<Glass>,
     /// Being dragged by the pointer: to move it, or by its edges, to size it.
     grab: Option<Grab>,
     /// The screen of the game played, kept while it presents no frames
@@ -60,7 +74,8 @@ pub struct Overlay {
 #[derive(Clone, Copy)]
 struct Grab {
     from: POINT,
-    rect: RECT,
+    /// The glass's place on screen as the drag began.
+    glass: RECT,
     size: f32,
     edges: Edges,
 }
@@ -81,6 +96,11 @@ impl Edges {
 
 /// How near its edge the pointer sizes it rather than moves it (DIPs).
 const EDGE: f32 = 6.0;
+
+/// How far around the overlay's shadow the screen is looked at, for how to
+/// tint the glass (DIPs): what is behind it, blurred, is much like what is
+/// around it.
+const AROUND: f32 = 16.0;
 
 /// While it is dragged, the pointer is followed this often (ms) by a timer
 /// of this id: never in front, the overlay is told of the pointer only
@@ -106,7 +126,7 @@ fn monitor_info(monitor: HMONITOR) -> (RECT, f32) {
     (info.rcMonitor, dpi as f32 / 96.0)
 }
 
-/// The room a plate `size` large has on `screen`, inside the inset: its
+/// The room glass `size` large has on `screen`, inside the inset: its
 /// left, top, and how far it can move across and down.
 fn room(screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
     let inset = (INSET * scale).round() as i32;
@@ -130,12 +150,21 @@ fn cursor() -> Option<POINT> {
 impl Overlay {
     pub fn new() -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
-        let window = Window::new()?;
-        let surface = match Surface::new(&gfx, window.hwnd) {
-            Ok(surface) => Some(surface),
+        let window = Window::see_through()?;
+        let mut shade = match Window::new() {
+            Ok(shade) => shade,
             Err(error) => {
-                // Tried again at the next sample, with a window of its own.
                 window.destroy();
+                return Err(error);
+            }
+        };
+        shade.set_click_through(true);
+        let surface = match Frosted::new(&gfx, window.hwnd) {
+            Ok(surface) => surface,
+            Err(error) => {
+                // Tried again at the next sample, with windows of its own.
+                window.destroy();
+                shade.destroy();
                 return Err(error);
             }
         };
@@ -143,39 +172,45 @@ impl Overlay {
             gfx,
             window,
             surface,
+            shade,
+            shade_surface: None,
             shown: false,
             locked: false,
             lang: Lang::En,
             rect: RECT::default(),
+            screen: RECT::default(),
             dpi: 1.0,
             size: 1.0,
-            drawn: (Vec::new(), overlay::Plate::Grey, overlay::Style::Plate),
+            drawn: (Vec::new(), Vec::new(), Shape { layout: Layout::Card, rows: 1, width: f32::INFINITY }),
+            glass: None,
             grab: None,
             game_screen: None,
             beneath: None,
         })
     }
 
-    /// Shows the readings of `sample` as `settings` ask, while `wanted`:
-    /// while a game is played (`playing`), with its frames, on its screen;
-    /// otherwise on the screen it was put on. Hidden while not wanted, and
-    /// while there is nothing to show. Above all but `beneath` (the open
-    /// panel's window).
-    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
+    /// Shows the readings of the latest sample in `history` as `settings`
+    /// ask, while `wanted`: while a game is played (`playing`), with its
+    /// frames, on its screen; otherwise on the screen it was put on. Hidden
+    /// while not wanted, and while there is nothing to show. Above all but
+    /// `beneath` (the open panel's window).
+    pub fn show(&mut self, history: &VecDeque<Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
         self.beneath = beneath;
         self.lang = lang;
+        let sample = history.back();
         let game = sample.and_then(|s| s.game.as_ref()).filter(|_| playing);
-        let lines = sample.filter(|_| wanted).map(|s| overlay::lines(s, game, playing, &settings.items, lang)).unwrap_or_default();
-        if lines.is_empty() {
+        let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, game, playing, &settings.chosen(), lang)).unwrap_or_default();
+        if readings.is_empty() {
             return self.hide();
         }
-        self.drawn = (lines, settings.plate, settings.style);
+        let frames = overlay::frames(history.iter(), playing);
         // Held as the pointer has it while it is dragged.
         if self.grab.is_some() {
+            self.drawn = (readings, frames, self.drawn.2);
             let (width, height) = self.dims();
-            self.rect.right = self.rect.left + width;
-            self.rect.bottom = self.rect.top + height;
+            let r = self.rect;
+            self.rect = RECT { left: r.left, top: r.top, right: r.left + width, bottom: r.top + height };
             return self.draw();
         }
         // Over a game, the game's screen; otherwise the one it was put on.
@@ -193,42 +228,109 @@ impl Overlay {
             Some((x, y)) => unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) },
             None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
         };
-        let screen;
-        (screen, self.dpi) = monitor_info(monitor);
+        (self.screen, self.dpi) = monitor_info(monitor);
         self.size = settings.size.clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
+        // As wide as its screen at most, inside the inset (DIPs at its size).
+        let widest = (self.screen.right - self.screen.left) as f32 / self.scale() - 2.0 * INSET / self.size;
+        self.drawn = (readings, frames, settings.shape(widest));
         let size = self.dims();
-        let (left, top, across, down) = room(screen, size, self.dpi);
+        let (left, top, across, down) = room(self.screen, size, self.dpi);
         let x = left + (settings.at.0.clamp(0.0, 1.0) * across as f32).round() as i32;
         let y = top + (settings.at.1.clamp(0.0, 1.0) * down as f32).round() as i32;
         self.rect = RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
+        self.look();
         self.draw();
     }
 
-    /// Its width and height on screen, at its size (physical pixels).
-    fn dims(&self) -> (i32, i32) {
-        let scale = self.dpi * self.size;
+    /// The scale it is drawn at: its screen's, by its size.
+    fn scale(&self) -> f32 {
+        self.dpi * self.size
+    }
+
+    /// Its shadow's margin (physical pixels).
+    fn margin(&self) -> i32 {
+        (MARGIN * self.scale()).round() as i32
+    }
+
+    /// Where its shadow's window is: around the glass by the margin.
+    fn shadow_rect(&self) -> RECT {
+        let (m, r) = (self.margin(), self.rect);
+        RECT { left: r.left - m, top: r.top - m, right: r.right + m, bottom: r.bottom + m }
+    }
+
+    /// The glass's width and height on screen, at its size (physical
+    /// pixels), and its corners' radius.
+    fn measures(&self) -> (i32, i32, f32) {
+        let scale = self.scale();
+        let (readings, _, shape) = &self.drawn;
+        let width = |text: &str, font| self.gfx.measure(text, font);
+        let line = |font| self.gfx.baseline(font);
+        let metrics = Metrics { width: &width, line: &line };
         // Whole pixels already: rounded, not lifted a pixel by a float's error.
-        let (width, height) = overlay::size(&self.drawn.0, scale, |text, font| self.gfx.measure(text, font));
-        ((width * scale).round() as i32, (height * scale).round() as i32)
+        let (width, height) = overlay::size(readings, *shape, scale, &metrics);
+        ((width * scale).round() as i32, (height * scale).round() as i32, overlay::radius(readings, *shape, scale, &metrics) * scale)
+    }
+
+    fn dims(&self) -> (i32, i32) {
+        let (width, height, _) = self.measures();
+        (width, height)
+    }
+
+    /// Looks at the screen around it, and tints the glass for it (see
+    /// `overlay::glass`); unseen (the lock screen has the display, or none
+    /// of its screen is around it), for anything.
+    fn look(&mut self) {
+        let around = (AROUND * self.dpi).round() as i32;
+        let (r, s) = (self.shadow_rect(), self.screen);
+        // On its screen only: past the screen's edge is nothing.
+        let area = RECT { left: (r.left - around).max(s.left), top: (r.top - around).max(s.top), right: (r.right + around).min(s.right), bottom: (r.bottom + around).min(s.bottom) };
+        let seen = (area.right > area.left && area.bottom > area.top).then(|| Capture::take(area)).flatten();
+        let mut behind = seen.map(|capture| capture.luminances(area, r, self.dpi.round().max(1.0) as i32)).unwrap_or_default();
+        self.glass = Some(overlay::glass(&mut behind, self.glass));
+    }
+
+    /// Places its windows: the glass's where it is, above all but the open
+    /// panel; its shadow's just beneath it.
+    fn place(&self) {
+        self.window.place_under(self.rect, self.beneath);
+        self.shade.place_under(self.shadow_rect(), Some(self.window.hwnd));
     }
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
     fn draw(&mut self) {
-        if !self.follow_device() {
-            return;
-        }
+        // This thread's device: a new one after the last was lost.
+        let Ok(gfx) = gfx::current() else { return };
+        self.gfx = gfx;
         // Placed above all again each time (a game may have taken the top),
         // but for the open panel.
-        self.window.place_under(self.rect, self.beneath);
-        let (lines, plate, style, scale) = (&self.drawn.0, self.drawn.1, self.drawn.2, self.dpi * self.size);
-        let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
+        self.place();
+        let scale = self.scale();
+        let glass = self.glass.unwrap_or_else(|| overlay::glass(&mut [], None));
+        let (width, height, radius) = self.measures();
+        let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
-        let surface = self.surface.as_mut().unwrap();
-        let painted = surface.draw(&self.gfx, size, scale, |frame| {
+        let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
-            overlay::paint(frame, lines, plate, style, dragged, scale);
+            overlay::paint(frame, readings, frames, shape, glass, dragged, scale);
         });
-        if painted.is_err() {
+        // Its shadow, on a surface made on this device.
+        let shade_surface = match self.shade_surface.take() {
+            Some((made_on, surface)) if Rc::ptr_eq(&made_on, &self.gfx) => Ok(surface),
+            _ => Surface::new(&self.gfx, self.shade.hwnd),
+        };
+        let (r, m) = (self.shadow_rect(), self.margin() as f32 / scale);
+        let shaded = match shade_surface {
+            Ok(mut surface) => {
+                let drawn = surface.draw(&self.gfx, ((r.right - r.left) as u32, (r.bottom - r.top) as u32), scale, |frame| {
+                    frame.origin(m, m);
+                    overlay::shadow(frame, readings, shape, glass, dragged, scale);
+                });
+                self.shade_surface = Some((self.gfx.clone(), surface));
+                drawn
+            }
+            Err(error) => Err(error),
+        };
+        if painted.is_err() || shaded.is_err() {
             // Made again on a new device at the next sample.
             gfx::lost();
             return;
@@ -236,7 +338,8 @@ impl Overlay {
         self.gfx.sweep();
         if !self.shown {
             self.window.show();
-            self.window.place_under(self.rect, self.beneath);
+            self.shade.show();
+            self.place();
             self.shown = true;
         }
     }
@@ -258,7 +361,7 @@ impl Overlay {
     pub fn press(&mut self) {
         let Some(from) = cursor().filter(|_| !self.locked) else { return };
         let edges = self.edges_at(from);
-        self.grab = Some(Grab { from, rect: self.rect, size: self.size, edges });
+        self.grab = Some(Grab { from, glass: self.rect, size: self.size, edges });
         unsafe {
             SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), FOLLOW_TIMER, FOLLOW_MS, None);
@@ -286,17 +389,17 @@ impl Overlay {
         };
         self.point_at(grab.edges);
         let (dx, dy) = (at.x - grab.from.x, at.y - grab.from.y);
-        let r = grab.rect;
+        let g = grab.glass;
         if !grab.edges.any() {
-            let rect = RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy };
+            let rect = RECT { left: g.left + dx, top: g.top + dy, right: g.right + dx, bottom: g.bottom + dy };
             // Followed at every tick: moved only when the pointer has.
             if rect != self.rect {
                 self.rect = rect;
-                self.window.place_under(self.rect, self.beneath);
+                self.place();
             }
             return;
         }
-        let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
+        let (width, height) = ((g.right - g.left) as f32, (g.bottom - g.top) as f32);
         let e = grab.edges;
         let across = (e.left || e.right).then(|| (width + if e.right { dx } else { -dx } as f32) / width);
         let down = (e.top || e.bottom).then(|| (height + if e.bottom { dy } else { -dy } as f32) / height);
@@ -312,8 +415,8 @@ impl Overlay {
         }
         self.size = size;
         let (width, height) = self.dims();
-        let x = if e.left { r.right - width } else { r.left };
-        let y = if e.top { r.bottom - height } else { r.top };
+        let x = if e.left { g.right - width } else { g.left };
+        let y = if e.top { g.bottom - height } else { g.top };
         self.rect = RECT { left: x, top: y, right: x + width, bottom: y + height };
         self.draw();
     }
@@ -326,13 +429,15 @@ impl Overlay {
             let _ = KillTimer(Some(self.window.hwnd), FOLLOW_TIMER);
             let _ = ReleaseCapture();
         }
+        let glass = self.rect;
+        let centre = POINT { x: (glass.left + glass.right) / 2, y: (glass.top + glass.bottom) / 2 };
+        (self.screen, self.dpi) = monitor_info(unsafe { MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST) });
+        // Tinted for where it was put.
+        self.look();
         self.draw();
-        let rect = self.rect;
-        let centre = POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 };
-        let (screen, scale) = monitor_info(unsafe { MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST) });
-        let (left, top, across, down) = room(screen, (rect.right - rect.left, rect.bottom - rect.top), scale);
+        let (left, top, across, down) = room(self.screen, (glass.right - glass.left, glass.bottom - glass.top), self.dpi);
         let share = |at: i32, room: i32| if room > 0 { (at as f32 / room as f32).clamp(0.0, 1.0) } else { 0.0 };
-        Some(Placed { at: (share(rect.left - left, across), share(rect.top - top, down)), point: (centre.x, centre.y), size: self.size })
+        Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size })
     }
 
     /// A right click on it: its menu, at the pointer, and what was chosen.
@@ -384,26 +489,11 @@ impl Overlay {
         }
         self.shown = false;
         self.window.hide();
+        self.shade.hide();
         // The drawing memory is given back while it is away.
-        if let Some(surface) = &mut self.surface {
-            surface.release(&self.gfx);
+        self.surface.release();
+        if let Some((gfx, surface)) = &mut self.shade_surface {
+            surface.release(gfx);
         }
-    }
-
-    /// Takes up this thread's current graphics device if it is a new one,
-    /// making the surface again on it. False while there is none.
-    fn follow_device(&mut self) -> bool {
-        let Ok(current) = gfx::current() else { return false };
-        if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
-            return true;
-        }
-        self.surface = None;
-        let Ok(surface) = Surface::new(&current, self.window.hwnd) else {
-            gfx::lost();
-            return false;
-        };
-        self.surface = Some(surface);
-        self.gfx = current;
-        true
     }
 }

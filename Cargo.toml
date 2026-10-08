@@ -31,11 +31,20 @@ objc2-io-kit = "0.3"
 # Windows' own APIs: everything Glance does there, and only there.
 [target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
+# For `#[implement]`: the effects handed to Windows' compositor.
+windows-core = "0.62"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
     "Wdk_Graphics_Direct3D",
+    "Foundation",
+    "Graphics",
+    "Graphics_DirectX",
+    "Graphics_Effects",
+    "System",
+    "UI_Composition",
+    "UI_Composition_Desktop",
     "Win32_Devices_DeviceAndDriverInstallation",
     "UI_ViewManagement",
     "Win32_Foundation",
@@ -85,6 +94,9 @@ features = [
     "Win32_System_Time",
     "Win32_System_Variant",
     "Win32_System_Wmi",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_System_WinRT_Graphics_Direct2D",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input",

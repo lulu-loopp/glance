@@ -51,7 +51,7 @@ use super::backdrop::Capture;
 use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
-use super::overlay::{Plate, Style};
+use super::overlay::{Layout, ROWS};
 use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
 use super::render::{self, PanelLayers};
@@ -63,7 +63,6 @@ use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
 use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
-use super::overlay::ITEMS as OVERLAY_ITEMS;
 use crate::panel::SIZES;
 use crate::update;
 
@@ -98,12 +97,10 @@ const SLIDER_THUMB: f32 = 10.0;
 const MIN_WORDS: f32 = 140.0;
 /// The page's name, at the top of the page.
 const TITLE: f32 = 52.0;
-/// The overlay's chips: their height, the room beside their text, and
-/// between them; and where the first line of them starts in their card.
-const CHIP: f32 = 30.0;
-const CHIP_PAD: f32 = 14.0;
-const CHIP_GAP: f32 = 8.0;
-const CHIP_TOP: f32 = 48.0;
+/// What the overlay's groups' rows are told from the panel's modules by:
+/// the start of their ids.
+const OVERLAY: &str = "overlay:";
+
 /// A row inside a module's open card, and how far in from the card's edge
 /// its label starts: under the module's name, past the grip.
 const ITEM_ROW: f32 = 48.0;
@@ -363,8 +360,8 @@ enum Field {
     /// Set on a slider (see `slider`).
     OverlaySize,
     PanelSize,
-    OverlayStyle,
-    OverlayPlate,
+    OverlayLayout,
+    OverlayRows,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -410,8 +407,6 @@ enum Target {
     Shortcut,
     /// Clears the shortcut.
     ClearShortcut,
-    /// One of the overlay's readings, on or off.
-    OverlayItem(&'static str),
     /// A slider's track.
     Slider(Field),
     /// A page, in the pages' list.
@@ -434,8 +429,6 @@ enum Row {
     /// In a module's open card: one of its items, or a choice of its own.
     Item(String, String),
     ModuleChoice(String, Field),
-    /// What the overlay shows: a chip for each reading.
-    OverlayItems,
     /// A value set by sliding.
     Slider(Field),
     Shortcut,
@@ -844,12 +837,19 @@ impl Ui {
                 }
             }
             Page::Overlay => {
-                rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Slider(Field::OverlaySize), Row::Choice(Field::OverlayStyle)]);
-                // A colour only for a plate.
-                if self.settings.overlay.style == Style::Plate {
-                    rows.push(Row::Choice(Field::OverlayPlate));
+                rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Slider(Field::OverlaySize), Row::Choice(Field::OverlayLayout)]);
+                // Rows only for a strip.
+                if self.settings.overlay.layout == Layout::Strip {
+                    rows.push(Row::Choice(Field::OverlayRows));
                 }
-                rows.push(Row::OverlayItems);
+                // What it shows, group by group, as the panel's modules are.
+                for entry in &self.settings.overlay.groups {
+                    let id = format!("{OVERLAY}{}", entry.id);
+                    rows.push(Row::Module(id.clone()));
+                    if self.opened(&id) > 0.0 {
+                        rows.extend(self.items_here(&id).into_iter().map(|name| Row::Item(id.clone(), name)));
+                    }
+                }
             }
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
@@ -911,7 +911,6 @@ impl Ui {
             let (before, height) = match &row {
                 Row::Title => (0.0, TITLE),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
-                Row::OverlayItems => (ROW_GAP, self.chips().1),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
@@ -1115,15 +1114,15 @@ impl Ui {
                 vec![s("左侧", "Left"), s("顶部", "Top"), s("右侧", "Right")],
                 [Edge::Left, Edge::Top, Edge::Right].iter().position(|&e| e == settings.edge),
             ),
-            Field::OverlayStyle => (
-                pick(lang, "样式", "Style"),
-                vec![s("实底", "On a plate"), s("无底板", "Bare")],
-                [Style::Plate, Style::Bare].iter().position(|&p| p == settings.overlay.style),
+            Field::OverlayLayout => (
+                pick(lang, "布局", "Layout"),
+                vec![s("卡片", "Card"), s("横条", "Strip")],
+                [Layout::Card, Layout::Strip].iter().position(|&l| l == settings.overlay.layout),
             ),
-            Field::OverlayPlate => (
-                pick(lang, "背景颜色", "Background colour"),
-                vec![s("灰色", "Grey"), s("蓝色", "Blue")],
-                [Plate::Grey, Plate::Blue].iter().position(|&p| p == settings.overlay.plate),
+            Field::OverlayRows => (
+                pick(lang, "行数", "Rows"),
+                ROWS.iter().map(|rows| rows.to_string()).collect(),
+                ROWS.iter().position(|&rows| rows == settings.overlay.rows),
             ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
@@ -1188,8 +1187,8 @@ impl Ui {
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
-            Field::OverlayStyle => settings.overlay.style = [Style::Plate, Style::Bare][index],
-            Field::OverlayPlate => settings.overlay.plate = [Plate::Grey, Plate::Blue][index],
+            Field::OverlayLayout => settings.overlay.layout = [Layout::Card, Layout::Strip][index],
+            Field::OverlayRows => settings.overlay.rows = ROWS[index],
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
@@ -1304,26 +1303,6 @@ impl Ui {
         let (_, min, max, ..) = self.slider(field);
         let share = ((x - track.x - SLIDER_THUMB) / (track.w - 2.0 * SLIDER_THUMB)).clamp(0.0, 1.0);
         self.set_slider(field, min + share * (max - min));
-    }
-
-    /// The overlay's chips, where each is in its card (from the card's
-    /// corner), with its reading's name and label; and the card's height.
-    fn chips(&self) -> (Vec<(Rect, &'static str, &'static str)>, f32) {
-        let font = Font::new(Family::Segoe, 13.0, 400.0);
-        let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
-        let (mut x, mut y) = (0.0, CHIP_TOP);
-        let mut chips = Vec::new();
-        for (name, zh, en) in OVERLAY_ITEMS {
-            let text = pick(self.lang, zh, en);
-            let w = self.gfx.measure(text, font) + 2.0 * CHIP_PAD;
-            if x > 0.0 && x + w > width {
-                x = 0.0;
-                y += CHIP + CHIP_GAP;
-            }
-            chips.push((Rect { x: ROW_SIDE + x, y, w, h: CHIP }, name, text));
-            x += w + CHIP_GAP;
-        }
-        (chips, y + CHIP + 16.0)
     }
 
     /// A word under a row of choices' name, for the few that need one.
@@ -1443,6 +1422,17 @@ impl Ui {
     fn module(&self, id: &str) -> (String, Option<String>) {
         let (lang, info) = (self.lang, &crate::app().info);
         let p = |zh, en| pick(lang, zh, en).to_string();
+        if let Some(group) = id.strip_prefix(OVERLAY) {
+            return match group {
+                "frames" => (p("帧率", "Frame rate"), Some(p("游戏时显示，其余时候显示“—”", "While a game plays; “—” otherwise"))),
+                "cpu" => ("CPU".into(), None),
+                "gpu" => ("GPU".into(), None),
+                "memory" => (p("内存", "Memory"), None),
+                "vram" => (p("显存", "Video memory"), None),
+                "network" => (p("网速", "Network"), None),
+                _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
+            };
+        }
         match id {
             "cpu" => ("CPU".into(), Some(info.cpu_name.clone())),
             _ if id.starts_with("gpu:") => ("GPU".into(), info.gpu_of(id).map(|i| info.gpus[i].name.clone())),
@@ -1466,12 +1456,37 @@ impl Ui {
 
     /// Whether module `id` is on.
     fn module_on(&self, id: &str) -> bool {
-        self.prefs.modules.iter().any(|entry| entry.id == id && entry.on)
+        match id.strip_prefix(OVERLAY) {
+            Some(group) => self.settings.overlay.groups.iter().any(|entry| entry.id == group && entry.on),
+            None => self.prefs.modules.iter().any(|entry| entry.id == id && entry.on),
+        }
+    }
+
+    /// The list a row's module (`id`) is in, the panel's or the overlay's,
+    /// and its id there.
+    fn list<'a>(&mut self, id: &'a str) -> (&mut Vec<super::prefs::ModuleEntry>, &'a str) {
+        match id.strip_prefix(OVERLAY) {
+            Some(group) => (&mut self.settings.overlay.groups, group),
+            None => (&mut self.prefs.modules, id),
+        }
+    }
+
+    /// Whether item `name` of a row's module `id` is chosen.
+    fn item_on(&self, id: &str, name: &str) -> bool {
+        match id.strip_prefix(OVERLAY) {
+            Some(group) => super::overlay::shows(&self.settings.overlay.groups, group, name),
+            None => self.prefs.shows(id, name),
+        }
     }
 
     /// The items of module `id` this machine has shown it can read: only
     /// those are listed.
     fn items_here(&self, id: &str) -> Vec<String> {
+        // An overlay's group of one item has no card: its switch is the item's.
+        if let Some(group) = id.strip_prefix(OVERLAY) {
+            let items = super::overlay::GROUPS.iter().find(|(g, _)| *g == group).map_or(&[][..], |(_, items)| *items);
+            return if items.len() > 1 { items.iter().map(|(name, _)| name.to_string()).collect() } else { Vec::new() };
+        }
         let app = crate::app();
         let seen = app.controller.seen.lock().unwrap();
         let info = &app.info;
@@ -1548,6 +1563,14 @@ impl Ui {
     fn module_item_label(&self, id: &str, name: &str) -> (&'static str, Option<&'static str>) {
         let p = |zh, en| pick(self.lang, zh, en);
         match (id.split(':').next().unwrap_or(id), name) {
+            ("overlay", "fps") => (p("帧率", "Frame rate"), None),
+            ("overlay", "low") => (p("1% low", "1% low"), Some(p("最慢 1% 的帧换算成的帧率", "The slowest 1% of frames, as frames a second"))),
+            ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近一秒里最慢的一帧", "The slowest frame of the last second"))),
+            ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),
+            ("overlay", "down") => (p("下载", "Download"), None),
+            ("overlay", "up") => (p("上传", "Upload"), None),
+            ("overlay", _) if name.ends_with("_temp") => (p("温度", "Temperature"), None),
+            ("overlay", _) if name.ends_with("_power") => (p("功耗", "Power"), None),
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
             ("battery", "chart") => (p("电量图表", "Charge chart"), None),
             ("battery", "power") => (p("功率", "Power"), Some(p("充电或放电的功率；拔掉电源时就是整台电脑的耗电", "Watts going in or out: on battery, what the whole machine draws"))),
@@ -1701,19 +1724,10 @@ impl Ui {
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
             Target::Page(page) => self.turn_to(page),
-            Target::OverlayItem(name) => {
-                let items = &mut self.settings.overlay.items;
-                match items.iter().position(|item| item == name) {
-                    Some(at) => {
-                        items.remove(at);
-                    }
-                    None => items.push(name.to_string()),
-                }
-                self.save();
-            }
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
-                if let Some(entry) = self.prefs.modules.iter_mut().find(|entry| entry.id == id) {
+                let (list, bare) = self.list(&id);
+                if let Some(entry) = list.iter_mut().find(|entry| entry.id == bare) {
                     entry.on ^= true;
                 }
                 self.save();
@@ -1724,8 +1738,11 @@ impl Ui {
             }
             // An item is changed only while its module is on.
             Target::Item(id, name) if self.module_on(&id) => {
-                let on = self.prefs.shows(&id, &name);
-                self.prefs.set_item(&id, &name, !on);
+                let on = self.item_on(&id, &name);
+                match id.strip_prefix(OVERLAY) {
+                    Some(group) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),
+                    None => self.prefs.set_item(&id, &name, !on),
+                }
                 self.save();
             }
             Target::Item(..) => {}
@@ -1789,8 +1806,7 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::OverlayItems if self.settings.overlay.on || self.settings.overlay.in_game => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
-                Row::Title | Row::OverlayItems => vec![],
+                Row::Title => vec![],
             }))
             .collect()
     }
@@ -1879,13 +1895,14 @@ impl Ui {
 
     /// Moves module `id` one place up or down the list.
     fn shift_module(&mut self, id: &str, down: bool) {
-        let Some(at) = self.prefs.modules.iter().position(|entry| entry.id == id) else { return };
+        let before = self.row_tops();
+        let (list, bare) = self.list(id);
+        let Some(at) = list.iter().position(|entry| entry.id == bare) else { return };
         let to = if down { at + 1 } else { at.wrapping_sub(1) };
-        if to >= self.prefs.modules.len() {
+        if to >= list.len() {
             return;
         }
-        let before = self.row_tops();
-        self.prefs.modules.swap(at, to);
+        list.swap(at, to);
         self.glide_rows(before, "");
         self.save();
         self.reveal_focus();
@@ -1902,7 +1919,6 @@ impl Ui {
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
             (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
-            (Row::OverlayItems, Target::OverlayItem(_)) => true,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Slider(f), Target::Slider(g)) => f == g,
@@ -1944,11 +1960,13 @@ impl Ui {
         let Some(drag) = &self.drag else { return };
         let middle = drag.pointer - drag.grab + ROW / 2.0;
         let before = self.row_tops();
-        let held = self.prefs.modules.iter().position(|entry| entry.id == drag.id).unwrap();
-        let entry = self.prefs.modules.remove(held);
-        let next = self.prefs.modules.iter().position(|other| middle < before[&other.id] + ROW / 2.0).unwrap_or(self.prefs.modules.len());
-        let id = entry.id.clone();
-        self.prefs.modules.insert(next, entry);
+        let id = drag.id.clone();
+        let prefix = if id.starts_with(OVERLAY) { OVERLAY } else { "" };
+        let (list, bare) = self.list(&id);
+        let held = list.iter().position(|entry| entry.id == bare).unwrap();
+        let entry = list.remove(held);
+        let next = list.iter().position(|other| middle < before[&format!("{prefix}{}", other.id)] + ROW / 2.0).unwrap_or(list.len());
+        list.insert(next, entry);
         if next == held {
             return;
         }
@@ -2185,33 +2203,6 @@ impl Ui {
                     fill(frame, palette.switch_on, at - dot, cy - dot, 2.0 * dot, 2.0 * dot, dot);
                     self.targets.push((track, Target::Slider(field)));
                 }
-                Row::OverlayItems => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    let active = self.settings.overlay.on || self.settings.overlay.in_game;
-                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
-                    field_label_in(frame, colors, pick(lang, "显示项目", "Readings"), None, label, hint, left + ROW_SIDE, y + CHIP_TOP / 2.0 + 4.0, width - 2.0 * ROW_SIDE);
-                    let chip_font = Font::new(Family::Segoe, 13.0, 400.0);
-                    for (chip, name, text) in self.chips().0 {
-                        let r = Rect { x: left + chip.x, y: y + chip.y, w: chip.w, h: chip.h };
-                        let on = self.settings.overlay.items.iter().any(|item| item == name);
-                        let target = Target::OverlayItem(name);
-                        let hover = active && hovered.as_ref() == Some(&target);
-                        let ink = if on && active {
-                            fill(frame, if hover { palette.switch_on.alpha(0.9) } else { palette.switch_on }, r.x, r.y, r.w, r.h, r.h / 2.0);
-                            Color::hex(0xFFFFFF, 1.0)
-                        } else {
-                            if hover {
-                                fill(frame, palette.hover, r.x, r.y, r.w, r.h, r.h / 2.0);
-                            }
-                            stroke_inside(frame, r, r.h / 2.0, if on { palette.text3 } else { palette.rule });
-                            if !active { palette.text3 } else if on { palette.text } else { palette.text2 }
-                        };
-                        text_centred(frame, text, chip_font, ink, r.x + CHIP_PAD, r.y + r.h / 2.0, r.w, Align::Start);
-                        if active {
-                            self.targets.push((r, target));
-                        }
-                    }
-                }
                 Row::Skins => {
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let gap = 12.0;
@@ -2290,7 +2281,7 @@ impl Ui {
                     let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
                     field_label_in(frame, colors, &name_text, detail, label, hint, left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
                     let pressed = self.pressed == Some(target.clone());
-                    let on = self.prefs.shows(&id, &name);
+                    let on = self.item_on(&id, &name);
                     self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
                     if active && usable {
                         self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
@@ -2338,8 +2329,7 @@ impl Ui {
                     // edge, so its ring keeps some room; the rest hug theirs.
                     let room = if matches!(target, Target::Skin(_)) { 8.0 } else { -1.0 };
                     let ring = Rect { x: r.x - room, y: r.y - room, w: r.w + 2.0 * room, h: r.h + 2.0 * room };
-                    // Round as what it rings: a reading's chip is a pill.
-                    let radius = if matches!(target, Target::OverlayItem(_)) { ring.h / 2.0 } else { 5.0 + room.max(0.0) };
+                    let radius = 5.0 + room.max(0.0);
                     stroke_outside(frame, ring, radius, palette.text, 2.0);
                 }
             }
@@ -2371,7 +2361,7 @@ impl Ui {
             // Windows' own settings draw an open one.
             card(frame, palette, left, y, width, reach, palette.card);
         }
-        let on = self.prefs.modules.iter().find(|entry| entry.id == id).is_some_and(|entry| entry.on);
+        let on = self.module_on(id);
         let (title, detail) = self.module(id);
         // The grip: six dots, to drag the row by.
         let grip = Rect { x: left + 12.0, y: y + height / 2.0 - 16.0, w: 20.0, h: 32.0 };
@@ -2517,18 +2507,32 @@ impl Ui {
     /// running).
     fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
         let overlay = &self.settings.overlay;
-        let lines = {
+        let readings = {
             let history = crate::app().controller.history.lock().unwrap();
             let Some(sample) = history.back() else { return };
-            super::overlay::preview(sample, &overlay.items, self.lang)
+            super::overlay::preview(sample, &overlay.chosen(), self.lang)
         };
+        let frames = super::overlay::preview_frames();
         let (sw, sh) = self.stage.size;
         let size = overlay.size.clamp(SIZES.0, SIZES.1);
+        let width = |text: &str, font| frame.gfx.measure(text, font);
+        let line = |font| frame.gfx.baseline(font);
+        let metrics = super::overlay::Metrics { width: &width, line: &line };
+        let shape = overlay.shape((sw - 2.0 * super::overlay::INSET) / size);
+        let glass = |k: f32| {
+            let px = self.scale * k * size;
+            (px, super::overlay::size(&readings, shape, px, &metrics), super::overlay::radius(&readings, shape, px, &metrics))
+        };
         // At its own size, as on screen: the part of the screen around it
-        // that the preview holds (all of a screen smaller than that).
+        // that the preview holds (all of a screen smaller than that); smaller
+        // only where the overlay, shadow and all, is wider or taller than
+        // the preview.
         let k = (area.w / sw).min(area.h / sh).max(1.0);
-        let (w, h) = super::overlay::size(&lines, self.scale * k * size, |text, font| frame.gfx.measure(text, font));
-        let (w, h) = (w * size, h * size);
+        let (_, (gw, gh), _) = glass(k);
+        let room = 2.0 * super::overlay::MARGIN;
+        let k = k.min(area.w / (gw * size + room)).min(area.h / (gh * size + room));
+        let (px, (gw, gh), radius) = glass(k);
+        let (w, h) = (gw * size, gh * size);
         let inset = super::overlay::INSET;
         let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
         let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
@@ -2544,9 +2548,22 @@ impl Ui {
                 frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
             }
         }
-        frame.place(Matrix3x2::scale(size, size) * Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
+        // The glass, tinted for the screen around it, over the screen behind
+        // it blurred as the compositor blurs it.
+        let screen = Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
+        let placed = Matrix3x2::scale(size, size) * Matrix3x2::translation(x, y) * screen;
+        let around = super::overlay::MARGIN + 16.0;
+        let whole = |v: f32| v.round() as i32;
+        let hole = RECT { left: whole(x), top: whole(y), right: whole(x + w), bottom: whole(y + h) };
+        let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
+        let glass = super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None);
+        if let Some((_, bitmap)) = &self.stage.bitmap {
+            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed);
+        }
+        frame.place(placed);
         frame.crisp_text();
-        super::overlay::paint(frame, &lines, overlay.plate, overlay.style, false, self.scale * k * size);
+        super::overlay::shadow(frame, &readings, shape, glass, false, px);
+        super::overlay::paint(frame, &readings, &frames, shape, glass, false, px);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
     }
