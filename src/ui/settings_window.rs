@@ -61,7 +61,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlayWhen, Sensitivity, Settings, Shortcut};
+use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
 use super::overlay::ITEMS as OVERLAY_ITEMS;
 use crate::update;
 
@@ -352,7 +352,6 @@ enum Field {
     Span,
     LoadAlert,
     TempAlert,
-    OverlayWhen,
     OverlayOpacity,
 }
 
@@ -379,6 +378,7 @@ enum Switch {
     HeatAlert,
     AutoGame,
     Overlay,
+    OverlayInGame,
 }
 
 /// What a press lands on.
@@ -790,7 +790,7 @@ impl Ui {
                     }
                 }
             }
-            Page::Overlay => rows.extend([Row::Switch(Switch::Overlay), Row::Choice(Field::OverlayWhen), Row::Choice(Field::OverlayOpacity), Row::OverlayItems]),
+            Page::Overlay => rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Choice(Field::OverlayOpacity), Row::OverlayItems]),
             Page::Game => rows.push(Row::Switch(Switch::AutoGame)),
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
@@ -1107,11 +1107,6 @@ impl Ui {
                 vec!["100%".into(), "85%".into(), "70%".into(), "50%".into()],
                 [100, 85, 70, 50].iter().position(|&o| o == (settings.overlay.opacity * 100.0).round() as u32),
             ),
-            Field::OverlayWhen => (
-                pick(lang, "显示时机", "Shown"),
-                vec![s("一直", "Always"), s("仅游戏模式", "Game mode only")],
-                [OverlayWhen::Always, OverlayWhen::GameMode].iter().position(|&w| w == settings.overlay.when),
-            ),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -1156,7 +1151,6 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlayWhen => settings.overlay.when = [OverlayWhen::Always, OverlayWhen::GameMode][index],
             Field::OverlayOpacity => settings.overlay.opacity = [1.0, 0.85, 0.7, 0.5][index],
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
@@ -1256,11 +1250,6 @@ impl Ui {
                 "鼠标移到屏幕边缘后再往外推一下就会打开；力度越重越不容易误触",
                 "Move the mouse to the edge and push on: the panel opens. Firmer is harder to set off by accident",
             )),
-            Field::OverlayWhen => Some(pick(
-                self.lang,
-                "帧率、1% low、帧时间只在游戏模式下显示，那时悬浮窗在游戏所在的屏幕上",
-                "Frame rate, 1% low and frame time show in game mode, on the game's screen",
-            )),
             Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
         }
@@ -1292,8 +1281,16 @@ impl Ui {
             ),
             Switch::Overlay => (
                 p("悬浮窗", "Overlay"),
-                Some(p("拖动它调整位置；右键它可以锁定位置、关闭或打开设置", "Drag it into place; right-click it to lock it, close it or open the settings")),
+                Some(p("一直显示。拖动它调整位置；右键它可以锁定位置、关闭或打开设置", "Shown all the time. Drag it into place; right-click it to lock it, close it or open the settings")),
                 self.settings.overlay.on,
+            ),
+            Switch::OverlayInGame => (
+                p("游戏模式时自动打开", "Open in game mode"),
+                Some(p(
+                    "平时关着也会在游戏模式下出现，显示在游戏所在的屏幕上，离开游戏模式后收起。帧率、1% low、帧时间只在游戏模式下显示",
+                    "Shown in game mode even when off otherwise, on the game's screen, and put away after. Frame rate, 1% low and frame time show in game mode",
+                )),
+                self.settings.overlay.in_game,
             ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
@@ -1337,6 +1334,10 @@ impl Ui {
             Switch::AutoGame => settings.auto_game_mode ^= true,
             Switch::Overlay => {
                 settings.overlay.on ^= true;
+                settings.overlay.offered = true;
+            }
+            Switch::OverlayInGame => {
+                settings.overlay.in_game ^= true;
                 settings.overlay.offered = true;
             }
             Switch::Startup if !self.may_autostart && !self.autostart => {
@@ -1654,7 +1655,7 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
-                Row::OverlayItems if self.settings.overlay.on => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
+                Row::OverlayItems if self.settings.overlay.on || self.settings.overlay.in_game => OVERLAY_ITEMS.iter().map(|(name, ..)| Target::OverlayItem(name)).collect(),
                 // The modes' choice, on the modules' page.
                 Row::Title if self.page == Page::Shown => vec![Target::Choice(Field::Mode, self.editing as usize)],
                 Row::Title | Row::OverlayItems => vec![],
@@ -2025,7 +2026,7 @@ impl Ui {
                 }
                 Row::OverlayItems => {
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let active = self.settings.overlay.on;
+                    let active = self.settings.overlay.on || self.settings.overlay.in_game;
                     let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
                     field_label_in(frame, colors, pick(lang, "显示项目", "Readings"), None, label, hint, left + ROW_SIDE, y + CHIP_TOP / 2.0 + 4.0, width - 2.0 * ROW_SIDE);
                     let chip_font = Font::new(Family::Segoe, 13.0, 400.0);
@@ -2423,7 +2424,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on, mode_thumb: self.editing as usize as f32, fade: 1.0 };
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: crate::app().controller.overlay_wanted(), mode_thumb: self.editing as usize as f32, fade: 1.0 };
         let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.columns());
@@ -2442,7 +2443,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: self.settings.overlay.on, mode_thumb: self.editing as usize as f32, fade: 1.0 };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, mode: self.editing, overlay: crate::app().controller.overlay_wanted(), mode_thumb: self.editing as usize as f32, fade: 1.0 };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of

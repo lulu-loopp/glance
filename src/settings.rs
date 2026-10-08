@@ -68,13 +68,15 @@ impl Shortcut {
     }
 }
 
-/// A few readings floating over the screen: over a game while one runs,
-/// or always.
+/// A few readings floating over the screen: all the time, or in game mode
+/// (over the game) only.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlaySettings {
+    /// Shown all the time.
     pub on: bool,
-    pub when: OverlayWhen,
+    /// Shown in game mode, off or not otherwise.
+    pub in_game: bool,
     /// What it shows, by name (see `ui::overlay::ITEMS`).
     pub items: Vec<String>,
     /// Where it is on its screen: how far across and down the room there is
@@ -95,7 +97,7 @@ impl Default for OverlaySettings {
     fn default() -> Self {
         OverlaySettings {
             on: false,
-            when: OverlayWhen::Always,
+            in_game: false,
             items: ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"].map(String::from).to_vec(),
             at: (0.0, 0.0),
             screen: None,
@@ -104,18 +106,6 @@ impl Default for OverlaySettings {
             offered: false,
         }
     }
-}
-
-/// When the overlay is up.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OverlayWhen {
-    /// All the time, on the screen it was put on (in game mode, the game's).
-    #[default]
-    Always,
-    /// Only in game mode, on the game's screen.
-    #[serde(rename = "game")]
-    GameMode,
 }
 
 /// What opens the panel over a game in exclusive fullscreen.

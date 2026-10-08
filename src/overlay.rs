@@ -17,7 +17,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::reading::Sample;
-use crate::settings::{OverlaySettings, OverlayWhen};
+use crate::settings::OverlaySettings;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::overlay::{self, INSET};
 use crate::ui::text::Lang;
@@ -84,15 +84,14 @@ impl Overlay {
         })
     }
 
-    /// Shows the readings of `sample` as `settings` ask: in game mode
-    /// (`game_mode`), with the frames of the program presenting them, on its
-    /// screen; or always, on the screen it was put on. Hidden while off, and
-    /// while there is nothing to show.
-    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, game_mode: bool) {
+    /// Shows the readings of `sample` as `settings` ask, while `wanted`: in
+    /// game mode (`game_mode`), with the frames of the program presenting
+    /// them, on its screen; otherwise on the screen it was put on. Hidden
+    /// while not wanted, and while there is nothing to show.
+    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, game_mode: bool, wanted: bool) {
         self.locked = settings.locked;
         self.lang = lang;
         let game = sample.and_then(|s| s.game.as_ref()).filter(|_| game_mode);
-        let wanted = settings.on && (game_mode || settings.when == OverlayWhen::Always);
         let lines = sample.filter(|_| wanted).map(|s| overlay::lines(s, game, &settings.items, lang)).unwrap_or_default();
         if lines.is_empty() {
             return self.hide();

@@ -174,6 +174,8 @@ pub struct Controller {
     pub history: Mutex<VecDeque<Sample>>,
     /// What the machine has shown it can read since Glance started.
     pub seen: Mutex<Seen>,
+    /// The overlay, opened by game mode, closed by hand for the rest of it.
+    overlay_closed: AtomicBool,
     /// The input thread's message window, once it has one.
     sink: AtomicIsize,
     shown: AtomicBool,
@@ -187,6 +189,7 @@ impl Controller {
             modes: Mutex::new(Modes::default()),
             history: Mutex::new(VecDeque::new()),
             seen: Mutex::new(Seen::default()),
+            overlay_closed: AtomicBool::new(false),
             sink: AtomicIsize::new(0),
             shown: AtomicBool::new(false),
         }
@@ -259,6 +262,29 @@ impl Controller {
     fn mode_of(&self, modes: &Modes) -> Mode {
         let auto = self.config.lock().unwrap().auto_game_mode;
         modes.chosen.unwrap_or(if auto && modes.playing { Mode::Game } else { Mode::Daily })
+    }
+
+    /// Whether the overlay is wanted on screen: on all the time, or opened by
+    /// game mode (and not closed for the rest of it).
+    pub fn overlay_wanted(&self) -> bool {
+        let (on, in_game) = {
+            let config = self.config.lock().unwrap();
+            (config.overlay.on, config.overlay.in_game)
+        };
+        on || in_game && self.mode() == Mode::Game && !self.overlay_closed.load(Ordering::Relaxed)
+    }
+
+    /// The overlay opened or closed by hand (its button, its menu): closed,
+    /// it is off, and if game mode opened it, closed for the rest of that;
+    /// opened, it is on.
+    pub fn set_overlay(&self, open: bool) {
+        self.overlay_closed.store(!open && self.mode() == Mode::Game, Ordering::Relaxed);
+        let on = self.config.lock().unwrap().overlay.on;
+        if on != open {
+            std::thread::spawn(move || crate::app().set_overlay(open));
+        } else {
+            self.post(RESTYLE);
+        }
     }
 
     /// Puts the panel in mode `mode`, until a game starts or ends.
@@ -336,13 +362,19 @@ impl Controller {
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
         let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
-            let settings = self.config.lock().unwrap().overlay.clone();
-            if overlay.is_none() && settings.on {
+            let game_mode = self.mode() == Mode::Game;
+            // Closed by hand in game mode: until game mode ends.
+            if !game_mode {
+                self.overlay_closed.store(false, Ordering::Relaxed);
+            }
+            let wanted = self.overlay_wanted();
+            if overlay.is_none() && wanted {
                 *overlay = Overlay::new().ok();
             }
             let Some(overlay) = overlay else { return };
+            let settings = self.config.lock().unwrap().overlay.clone();
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, panel.lang, self.mode() == Mode::Game);
+            overlay.show(history.back(), &settings, panel.lang, game_mode, wanted);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -492,9 +524,7 @@ impl Controller {
                                 Some(OverlayChoice::Lock(locked)) => {
                                     std::thread::spawn(move || crate::app().lock_overlay(locked));
                                 }
-                                Some(OverlayChoice::Close) => {
-                                    std::thread::spawn(|| crate::app().set_overlay(false));
-                                }
+                                Some(OverlayChoice::Close) => self.set_overlay(false),
                                 _ => {}
                             }
                         }
@@ -1295,8 +1325,8 @@ impl<'a> Panel<'a> {
             // Against the mode in force, which a switch under way is going to.
             Some(Hit::Mode(mode)) if mode != self.controller.mode() => self.controller.choose_mode(mode),
             Some(Hit::Overlay) => {
-                let on = !self.controller.config.lock().unwrap().overlay.on;
-                std::thread::spawn(move || crate::app().set_overlay(on));
+                // As it is on screen now: shown, it closes; not, it opens.
+                self.controller.set_overlay(!self.controller.overlay_wanted());
             }
             Some(Hit::Sort(sort)) if sort != self.prefs.processes.sort => {
                 self.prefs.processes.sort = sort;
@@ -1334,10 +1364,8 @@ fn scene<'s>(
     history: &'s [Sample],
     seen: &'s Seen,
 ) -> Scene<'s> {
-    let (interval, overlay) = {
-        let config = controller.config.lock().unwrap();
-        (config.interval, config.overlay.on)
-    };
+    let interval = controller.config.lock().unwrap().interval;
+    let overlay = controller.overlay_wanted();
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
     Scene {
         info: &controller.info,
