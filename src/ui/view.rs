@@ -959,11 +959,20 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                 // The headings share the lane's head row, after the title.
                 let head_y = y - HEAD - HEAD_GAP;
                 let columns = table_columns(left, width);
+                // Every heading's ink centred on the title's: Chinese, from
+                // another face than the Latin, and a heavier weight each sit
+                // differently in their line boxes.
+                let title_top = head_y + (HEAD - theme.title.size) / 2.0 - 1.0;
+                let middle = |text: &str, font: Font| {
+                    let (top, bottom) = frame.ink(text, font);
+                    (top + bottom) / 2.0
+                };
+                let centre = title_top + middle(scene.lang.pick("进程", "Processes"), theme.title);
                 for ((label, key), (cx, cw)) in headings.iter().zip(&columns[1..]) {
                     let chosen = key == sort;
                     let font = if chosen { Font { weight: 650.0, ..theme.small } } else { theme.small };
                     let lit = chosen || scene.hover == Some(Hit::Sort(*key));
-                    frame.text(label, font, if lit { theme.text } else { theme.text2 }, *cx, head_y + 1.0, *cw, Align::End);
+                    frame.text(label, font, if lit { theme.text } else { theme.text2 }, *cx, centre - middle(label, font), *cw, Align::End);
                     hits.push((*cx, head_y, *cw, HEAD, Hit::Sort(*key)));
                 }
                 let list_height = *visible as f32 * TABLE_ROW;

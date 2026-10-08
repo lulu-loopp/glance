@@ -103,6 +103,9 @@ pub trait Canvas {
     fn measure(&self, text: &str, font: Font) -> f32;
     /// The ascent and descent of `font`'s line box.
     fn baseline(&self, font: Font) -> (f32, f32);
+    /// How far below the top of its line box `text`'s ink starts and ends:
+    /// where its glyphs, from whichever face draws them, actually are.
+    fn ink(&self, text: &str, font: Font) -> (f32, f32);
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
     fn unclip(&self);

@@ -262,6 +262,14 @@ impl Gfx {
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
     }
 
+    /// How far below the top of its line box `text`'s ink starts and ends.
+    pub fn ink(&self, text: &str, font: Font) -> (f32, f32) {
+        // Laid out in a box twice the font's size tall (see `laid_out`); the
+        // overhangs say how far the ink reaches beyond it.
+        let overhang = unsafe { self.layout(text, font, 10_000.0, Align::Start).GetOverhangMetrics().unwrap() };
+        (-overhang.top, font.size * 2.0 + overhang.bottom)
+    }
+
     /// How wide `text` is in `font`, in DIPs.
     pub fn measure(&self, text: &str, font: Font) -> f32 {
         let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -356,6 +364,10 @@ impl Canvas for Frame<'_> {
 
     fn baseline(&self, font: Font) -> (f32, f32) {
         self.gfx.baseline(font)
+    }
+
+    fn ink(&self, text: &str, font: Font) -> (f32, f32) {
+        self.gfx.ink(text, font)
     }
 
     fn clip(&self, x: f32, y: f32, width: f32, height: f32) {
