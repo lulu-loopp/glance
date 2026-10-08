@@ -19,8 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::reading::Sample;
 use crate::settings::{OverlaySettings, OverlayWhen};
 use crate::ui::gfx::{self, Gfx, Surface};
-use crate::ui::overlay::{self, Style, INSET};
-use crate::ui::theme::Theme;
+use crate::ui::overlay::{self, INSET};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
 
@@ -42,9 +41,9 @@ pub struct Overlay {
     lang: Lang,
     /// Where it is on screen (physical pixels).
     rect: RECT,
-    /// What it shows, how, and at what scale: drawn again as a drag starts
-    /// and ends.
-    drawn: (Vec<(String, String)>, Option<Style>, f32),
+    /// What it shows, how opaque, and at what scale: drawn again as a drag
+    /// starts and ends.
+    drawn: (Vec<(String, String)>, f32, f32),
     /// Being dragged: the pointer's offset from its corner.
     grab: Option<POINT>,
 }
@@ -80,7 +79,7 @@ impl Overlay {
             locked: false,
             lang: Lang::En,
             rect: RECT::default(),
-            drawn: (Vec::new(), None, 1.0),
+            drawn: (Vec::new(), 1.0, 1.0),
             grab: None,
         })
     }
@@ -89,7 +88,7 @@ impl Overlay {
     /// (`game_mode`), with the frames of the program presenting them, on its
     /// screen; or always, on the screen it was put on. Hidden while off, and
     /// while there is nothing to show.
-    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, theme: &Theme, lang: Lang, game_mode: bool) {
+    pub fn show(&mut self, sample: Option<&Sample>, settings: &OverlaySettings, lang: Lang, game_mode: bool) {
         self.locked = settings.locked;
         self.lang = lang;
         let game = sample.and_then(|s| s.game.as_ref()).filter(|_| game_mode);
@@ -108,8 +107,7 @@ impl Overlay {
             None => unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) },
         };
         let (screen, scale) = monitor_info(monitor);
-        let style = Style::new(theme, settings.opacity);
-        let (width, height) = overlay::size(&lines, &style, |text, font| self.gfx.measure(text, font));
+        let (width, height) = overlay::size(&lines, |text, font| self.gfx.measure(text, font));
         let size = ((width * scale).ceil() as i32, (height * scale).ceil() as i32);
         // Held where it is while it is dragged.
         if self.grab.is_none() {
@@ -121,7 +119,7 @@ impl Overlay {
             self.rect.right = self.rect.left + size.0;
             self.rect.bottom = self.rect.top + size.1;
         }
-        self.drawn = (lines, Some(style), scale);
+        self.drawn = (lines, settings.opacity, scale);
         self.draw();
     }
 
@@ -132,12 +130,11 @@ impl Overlay {
         }
         // Placed above all again each time: a game may have taken the top.
         self.window.place(self.rect);
-        let (lines, scale) = (&self.drawn.0, self.drawn.2);
-        let Some(style) = &self.drawn.1 else { return };
+        let (lines, opacity, scale) = (&self.drawn.0, self.drawn.1, self.drawn.2);
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let dragged = self.grab.is_some();
         let surface = self.surface.as_mut().unwrap();
-        if surface.draw(&self.gfx, size, scale, |frame| overlay::paint(frame, lines, style, dragged)).is_err() {
+        if surface.draw(&self.gfx, size, scale, |frame| overlay::paint(frame, lines, opacity, dragged)).is_err() {
             // Made again on a new device at the next sample.
             gfx::lost();
             return;

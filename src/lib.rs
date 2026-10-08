@@ -141,11 +141,11 @@ impl App {
         let (title, text) = match lang {
             ui::text::Lang::Zh => (
                 format!("检测到游戏：{name}"),
-                "可以在游戏画面上显示帧率等信息：点面板底部的悬浮窗按钮，或在设置的“游戏模式”里打开悬浮窗。".to_string(),
+                "可以在游戏画面上显示帧率等信息：点面板底部的悬浮窗按钮，或在设置的“悬浮窗”页打开。".to_string(),
             ),
             ui::text::Lang::En => (
                 format!("A game is running: {name}"),
-                "Glance can show the frame rate and more over the game: click the overlay button on the panel's bar, or turn the overlay on under Game mode in the settings.".to_string(),
+                "Glance can show the frame rate and more over the game: click the overlay button on the panel's bar, or turn it on in the settings' Overlay page.".to_string(),
             ),
         };
         tray::notify(&title, &text);

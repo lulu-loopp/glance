@@ -1,11 +1,10 @@
-//! The overlay: a few readings floating over the screen, on a plate in the
-//! panel's look (its skin, light or dark) as opaque as chosen. What it
-//! shows and how it is drawn; its window is the panel thread's (see
-//! `crate::overlay`).
+//! The overlay: a few readings floating over the screen, on a dark plate
+//! (as opaque as chosen) that reads over any picture, whatever the panel's
+//! look. What it shows and how it is drawn; its window is the panel
+//! thread's (see `crate::overlay`).
 
-use super::canvas::{Align, Canvas, Color, Font};
+use super::canvas::{Align, Canvas, Color, Family, Font};
 use super::text::{self, Lang};
-use super::theme::{self, Skin, Theme};
 use crate::reading::{GameSample, Sample};
 
 /// What the overlay can show, in the order it shows them: name, and what
@@ -34,41 +33,16 @@ const PAD: (f32, f32) = (10.0, 7.0);
 const LINE: f32 = 19.0;
 /// Between a reading's name and its value.
 const LABEL_GAP: f32 = 10.0;
-
-/// How the plate is drawn: in the panel's look, as opaque as chosen.
-pub struct Style {
-    plate: Color,
-    /// The plate while it is dragged: the accent's.
-    dragged: Color,
-    name: Color,
-    figure: Color,
-    /// The frame rate's name, set off from the rest in the game's ink.
-    frames: Color,
-    label: Font,
-    value: Font,
-    radius: f32,
-}
-
-impl Style {
-    /// The plate of `theme`'s skin, light or dark, `opacity` opaque (0–1).
-    pub fn new(theme: &Theme, opacity: f32) -> Self {
-        let sheet = match theme.skin {
-            Skin::Paper => theme.paper,
-            Skin::Fluent => theme.luminosity,
-            Skin::Glass => theme.glass,
-        };
-        Style {
-            plate: Color { a: opacity.clamp(0.0, 1.0), ..sheet },
-            dragged: theme::accent(theme.dark).alpha(0.9),
-            name: theme.text2,
-            figure: theme.text,
-            frames: theme.ink("game").trace,
-            label: theme.small,
-            value: theme.value,
-            radius: (theme.radius / 2.0).clamp(4.0, 12.0),
-        }
-    }
-}
+const RADIUS: f32 = 6.0;
+const LABEL: Font = Font::new(Family::Segoe, 12.0, 600.0);
+const VALUE: Font = Font::new(Family::Segoe, 13.0, 600.0);
+const PLATE: u32 = 0x101214;
+/// The plate while it is dragged.
+const DRAGGED: Color = Color::hex(0x1D4F91, 0.9);
+const NAME: Color = Color::hex(0xFFFFFF, 0.62);
+const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
+/// The frame rate's name, set off from the rest.
+const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
 
 /// What the overlay shows of sample `s`, line by line (a name and its
 /// value): the `items` chosen that are read. A game's readings are
@@ -149,28 +123,29 @@ pub fn preview(s: &Sample, items: &[String], lang: Lang) -> Vec<(String, String)
     lines(s, Some(s.game.as_ref().unwrap_or(&example)), items, lang)
 }
 
-/// How large `lines` are drawn in `style`, plate and all (DIPs), with
-/// `measure` giving a text's width in a font.
-pub fn size(lines: &[(String, String)], style: &Style, measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
-    let label = lines.iter().map(|(name, _)| measure(name, style.label)).fold(0.0, f32::max);
-    let value = lines.iter().map(|(_, value)| measure(value, style.value)).fold(0.0, f32::max);
+/// How large `lines` are drawn, plate and all (DIPs), with `measure` giving
+/// a text's width in a font.
+pub fn size(lines: &[(String, String)], measure: impl Fn(&str, Font) -> f32) -> (f32, f32) {
+    let label = lines.iter().map(|(name, _)| measure(name, LABEL)).fold(0.0, f32::max);
+    let value = lines.iter().map(|(_, value)| measure(value, VALUE)).fold(0.0, f32::max);
     ((2.0 * PAD.0 + label + LABEL_GAP + value).ceil(), (2.0 * PAD.1 + lines.len() as f32 * LINE).ceil())
 }
 
-/// Draws `lines` on their plate in `style`, from the canvas's corner;
-/// `dragged`, on the plate that says it is being moved.
-pub fn paint(frame: &dyn Canvas, lines: &[(String, String)], style: &Style, dragged: bool) {
-    let (width, height) = size(lines, style, |text, font| frame.measure(text, font));
-    frame.fill_rounded(if dragged { style.dragged } else { style.plate }, 0.0, 0.0, width, height, style.radius);
-    let label = lines.iter().map(|(name, _)| frame.measure(name, style.label)).fold(0.0, f32::max);
+/// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
+/// corner; `dragged`, on the plate that says it is being moved.
+pub fn paint(frame: &dyn Canvas, lines: &[(String, String)], opacity: f32, dragged: bool) {
+    let (width, height) = size(lines, |text, font| frame.measure(text, font));
+    let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
+    frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
+    let label = lines.iter().map(|(name, _)| frame.measure(name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
-    let (ascent_label, _) = frame.baseline(style.label);
-    let (ascent_value, _) = frame.baseline(style.value);
+    let (ascent_label, _) = frame.baseline(LABEL);
+    let (ascent_value, _) = frame.baseline(VALUE);
     for (i, (name, value)) in lines.iter().enumerate() {
-        let y = PAD.1 + i as f32 * LINE + (LINE - style.value.size) / 2.0;
-        let color = if name == "FPS" { style.frames } else { style.name };
-        frame.text(name, style.label, color, PAD.0, y + ascent_value - ascent_label, label, Align::Start);
-        frame.text(value, style.value, style.figure, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
+        let y = PAD.1 + i as f32 * LINE + (LINE - VALUE.size) / 2.0;
+        let color = if name == "FPS" { FRAMES } else { NAME };
+        frame.text(name, LABEL, color, PAD.0, y + ascent_value - ascent_label, label, Align::Start);
+        frame.text(value, VALUE, FIGURE, PAD.0 + label + LABEL_GAP, y, width, Align::Start);
     }
 }
 

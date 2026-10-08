@@ -95,7 +95,7 @@ impl Default for OverlaySettings {
     fn default() -> Self {
         OverlaySettings {
             on: false,
-            when: OverlayWhen::GameMode,
+            when: OverlayWhen::Always,
             items: ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"].map(String::from).to_vec(),
             at: (0.0, 0.0),
             screen: None,
@@ -110,12 +110,12 @@ impl Default for OverlaySettings {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OverlayWhen {
-    /// While the panel is in game mode, on the game's screen.
+    /// All the time, on the screen it was put on (in game mode, the game's).
     #[default]
+    Always,
+    /// Only in game mode, on the game's screen.
     #[serde(rename = "game")]
     GameMode,
-    /// All the time, on the screen it was put on.
-    Always,
 }
 
 /// What opens the panel over a game in exclusive fullscreen.

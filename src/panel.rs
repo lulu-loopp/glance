@@ -306,14 +306,11 @@ impl Controller {
         let mut panel = Panel::new(self).expect("panel window");
         // Without one (no graphics device just now), no overlay.
         let mut overlay = Overlay::new().ok();
-        // In the panel's look; light or dark as chosen (the backdrop, which
-        // the overlay cannot see, as the system's apps are).
         let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
-            let theme = Theme::new(panel.skin, theme::is_dark(panel.prefs.theme, None));
             let history = self.history.lock().unwrap();
-            overlay.show(history.back(), &settings, &theme, panel.lang, self.mode() == Mode::Game);
+            overlay.show(history.back(), &settings, panel.lang, self.mode() == Mode::Game);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
 
@@ -444,7 +441,7 @@ impl Controller {
                     match choice {
                         Some(OverlayChoice::Settings) => {
                             panel.dismiss();
-                            settings_window::open_at_game_mode();
+                            settings_window::open_at_overlay();
                         }
                         choice => {
                             // The game in front before the menu, in front again.

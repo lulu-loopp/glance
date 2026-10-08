@@ -162,10 +162,10 @@ pub fn open() {
 }
 
 /// Opens the window (on the calling thread, the panel's, as `open`) at
-/// the game mode's page: from the overlay's menu.
-pub fn open_at_game_mode() {
+/// the overlay's page: from the overlay's menu.
+pub fn open_at_overlay() {
     open();
-    with_ui(|ui| ui.turn_to(Page::Game));
+    with_ui(|ui| ui.turn_to(Page::Overlay));
 }
 
 /// Draws the window if a frame is due, and says when the next one is; `None`
@@ -283,12 +283,13 @@ enum Page {
     Appearance,
     Opening,
     Shown,
+    Overlay,
     Game,
     Data,
     System,
 }
 
-const PAGES: [Page; 6] = [Page::Appearance, Page::Opening, Page::Shown, Page::Game, Page::Data, Page::System];
+const PAGES: [Page; 7] = [Page::Appearance, Page::Opening, Page::Shown, Page::Overlay, Page::Game, Page::Data, Page::System];
 
 impl Page {
     fn name(self, lang: Lang) -> &'static str {
@@ -296,6 +297,7 @@ impl Page {
             Page::Appearance => pick(lang, "外观", "Appearance"),
             Page::Opening => pick(lang, "呼出", "Opening"),
             Page::Shown => pick(lang, "显示内容", "Shown"),
+            Page::Overlay => pick(lang, "悬浮窗", "Overlay"),
             Page::Game => pick(lang, "游戏模式", "Game mode"),
             Page::Data => pick(lang, "数据", "Data"),
             Page::System => pick(lang, "系统", "System"),
@@ -308,6 +310,7 @@ impl Page {
             Page::Appearance => "\u{E790}",
             Page::Opening => "\u{E8B0}",
             Page::Shown => "\u{E8A9}",
+            Page::Overlay => "\u{E9D9}",
             Page::Game => "\u{E7FC}",
             Page::Data => "\u{E9D2}",
             Page::System => "\u{E770}",
@@ -769,13 +772,8 @@ impl Ui {
                     }
                 }
             }
-            Page::Game => rows.extend([
-                Row::Switch(Switch::AutoGame),
-                Row::Switch(Switch::Overlay),
-                Row::Choice(Field::OverlayWhen),
-                Row::Choice(Field::OverlayOpacity),
-                Row::OverlayItems,
-            ]),
+            Page::Overlay => rows.extend([Row::Switch(Switch::Overlay), Row::Choice(Field::OverlayWhen), Row::Choice(Field::OverlayOpacity), Row::OverlayItems]),
+            Page::Game => rows.push(Row::Switch(Switch::AutoGame)),
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
                 Row::Choice(Field::Span),
@@ -955,9 +953,9 @@ impl Ui {
                 [100, 85, 70, 50].iter().position(|&o| o == (settings.overlay.opacity * 100.0).round() as u32),
             ),
             Field::OverlayWhen => (
-                pick(lang, "悬浮窗显示", "Overlay shows"),
-                vec![s("游戏模式时", "In game mode"), s("一直", "Always")],
-                [OverlayWhen::GameMode, OverlayWhen::Always].iter().position(|&w| w == settings.overlay.when),
+                pick(lang, "显示时机", "Shown"),
+                vec![s("一直", "Always"), s("仅游戏模式", "Game mode only")],
+                [OverlayWhen::Always, OverlayWhen::GameMode].iter().position(|&w| w == settings.overlay.when),
             ),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
@@ -1003,7 +1001,7 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlayWhen => settings.overlay.when = [OverlayWhen::GameMode, OverlayWhen::Always][index],
+            Field::OverlayWhen => settings.overlay.when = [OverlayWhen::Always, OverlayWhen::GameMode][index],
             Field::OverlayOpacity => settings.overlay.opacity = [1.0, 0.85, 0.7, 0.5][index],
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
@@ -1099,8 +1097,8 @@ impl Ui {
         match field {
             Field::OverlayWhen => Some(pick(
                 self.lang,
-                "游戏模式时：显示在游戏所在的屏幕上；一直：不用呼出面板，常驻在放好的位置",
-                "In game mode: on the game's screen. Always: where it was put, without the panel",
+                "帧率、1% low、帧时间只在游戏模式下显示，那时悬浮窗在游戏所在的屏幕上",
+                "Frame rate, 1% low and frame time show in game mode, on the game's screen",
             )),
             Field::OverFullscreen => Some(pick(self.lang, "游戏会暂时切出，收起面板后自动回来；无边框模式不受影响", "The game steps out until the panel closes; borderless games stay")),
             _ => None,
@@ -1132,7 +1130,7 @@ impl Ui {
                 self.settings.auto_game_mode,
             ),
             Switch::Overlay => (
-                p("游戏悬浮窗", "Game overlay"),
+                p("悬浮窗", "Overlay"),
                 Some(p("拖动它调整位置；右键它可以锁定位置、隐藏或打开设置", "Drag it into place; right-click it to lock it, hide it or open the settings")),
                 self.settings.overlay.on,
             ),
@@ -2266,6 +2264,36 @@ impl Ui {
         fill(frame, mix(knob_off, knob_on, t), left, cy - size / 2.0, size + stretch, size, size / 2.0);
     }
 
+    /// The overlay's preview: the whole screen, and the overlay where it was
+    /// put, showing the readings chosen (an example game's frames, with none
+    /// running).
+    fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
+        let overlay = &self.settings.overlay;
+        let lines = {
+            let history = crate::app().controller.history.lock().unwrap();
+            let Some(sample) = history.back() else { return };
+            super::overlay::preview(sample, &overlay.items, self.lang)
+        };
+        let (sw, sh) = self.stage.size;
+        let k = (area.w / sw).min(area.h / sh);
+        let (ox, oy) = (area.x + (area.w - sw * k) / 2.0, area.y + (area.h - sh * k) / 2.0);
+        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != 1.0f32.to_bits()) {
+            self.stage.bitmap = self.stage.desktop.bitmap(&frame.dc, 1.0).ok().map(|b| (1.0f32.to_bits(), b));
+        }
+        if let Some((_, bitmap)) = &self.stage.bitmap {
+            unsafe {
+                frame.dc.DrawBitmap(bitmap, Some(&rect(ox, oy, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
+            }
+        }
+        let (w, h) = super::overlay::size(&lines, |text, font| frame.gfx.measure(text, font));
+        let inset = super::overlay::INSET;
+        let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
+        let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
+        frame.place(Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
+        super::overlay::paint(frame, &lines, overlay.opacity, false);
+        frame.origin(0.0, 0.0);
+    }
+
     /// The preview: the panel as it will look over the desktop, running live.
     fn paint_preview(&mut self, frame: &Frame, palette: &Palette, width: f32, height: f32) -> Option<f32> {
         let lang = self.lang;
@@ -2282,6 +2310,11 @@ impl Ui {
         }
         fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
         stroke_inside(frame, area, 8.0, palette.card_stroke);
+
+        if self.page == Page::Overlay {
+            self.paint_overlay_preview(frame, area);
+            return None;
+        }
 
         // The panel laid out for the screen the window opened on, centred
         // along its edge.
@@ -2363,20 +2396,6 @@ impl Ui {
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest));
         let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
-        // On the game mode's page, the overlay too, where it was put, in the
-        // panel's look.
-        if self.page == Page::Game && self.settings.overlay.on {
-            let overlay = &self.settings.overlay;
-            let lines = super::overlay::preview(samples.last().unwrap(), &overlay.items, lang);
-            let style = super::overlay::Style::new(&Theme::new(skin, theme::is_dark(self.prefs.theme, None)), overlay.opacity);
-            let (w, h) = super::overlay::size(&lines, &style, |text, font| frame.gfx.measure(text, font));
-            let inset = super::overlay::INSET;
-            let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
-            let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
-            frame.place(Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
-            super::overlay::paint(frame, &lines, &style, false);
-            frame.origin(0.0, 0.0);
-        }
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
         match drawn {
