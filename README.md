@@ -106,10 +106,13 @@ for administrator rights at every start and cannot start with Windows.
   card, memory, network, disk…) opens to its own items, each switched on or
   off; drag modules to change their order.
 - **Close it**: move the pointer away, or press Esc.
-- **Keep it open**: the pin in its bottom bar holds it on screen while you
-  work elsewhere; unpin it, or press the shortcut, to let it go. Pinned, it
-  can be dragged anywhere, onto another screen too, and sized by its edges; moved off the edge, it stays there, Glance restarting
-  too, until it is unpinned.
+- **Move it, keep it**: drag the panel anywhere, onto another screen too,
+  and drag its edges to size it, as soon as it opens. Moved off the edge, it
+  stays on the desktop where you left it, Glance restarting too; drag it back
+  to the edge (a soft light there shows where) and it tucks away again. The
+  shortcut closes it.
+- **Pin it**: the pin in its bottom bar locks it where it is: it no longer
+  moves or sizes, and stays open while you work elsewhere.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the
   tray when the CPU or a graphics card stays at the temperature alert for
