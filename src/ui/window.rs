@@ -1,13 +1,15 @@
 //! The panel's own window: a borderless, topmost tool window that never takes
 //! the focus, drawn entirely by DirectComposition.
 
+use std::cell::Cell;
+
 use windows::core::{w, Result, BOOL, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
-    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
     PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -24,6 +26,8 @@ pub const CAPTURE_LOST: u32 = WM_APP + 8;
 pub struct Window {
     pub hwnd: HWND,
     click_through: bool,
+    /// The window it gives way to while there is one (see `yield_to`).
+    under: Cell<Option<HWND>>,
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -106,7 +110,7 @@ impl Window {
         unsafe {
             DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<BOOL>() as u32)?
         };
-        Ok(Window { hwnd, click_through: false })
+        Ok(Window { hwnd, click_through: false, under: Cell::new(None) })
     }
 
     pub fn place(&self, rect: RECT) {
@@ -114,12 +118,12 @@ impl Window {
     }
 
     /// Placed at `rect`, above all, or just below `above` (another window
-    /// above all) while there is one.
+    /// above all) while there is one, or the window it gives way to.
     pub fn place_under(&self, rect: RECT, above: Option<HWND>) {
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
-                Some(above.unwrap_or(HWND_TOPMOST)),
+                Some(above.or(self.under.get()).unwrap_or(HWND_TOPMOST)),
                 rect.left,
                 rect.top,
                 rect.right - rect.left,
@@ -132,8 +136,32 @@ impl Window {
     pub fn show(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-            // Above whatever took the top since it was last shown.
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+            // Above whatever took the top since it was last shown (but the
+            // window it gives way to).
+            let _ = SetWindowPos(self.hwnd, Some(self.under.get().unwrap_or(HWND_TOPMOST)), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        }
+    }
+
+    /// Whether it is giving way to another window (see `yield_to`).
+    pub fn yielding(&self) -> bool {
+        self.under.get().is_some()
+    }
+
+    /// Gives way to `window` (an ordinary window in front, as the settings
+    /// are), just below it, until it is given way to no more (`None`):
+    /// above all again.
+    pub fn yield_to(&self, window: Option<HWND>) {
+        self.under.set(window);
+        let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
+        unsafe {
+            if let Some(window) = window {
+                // Out of the topmost windows first: placed after an ordinary
+                // window, it is one.
+                let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+                let _ = SetWindowPos(self.hwnd, Some(window), 0, 0, 0, 0, flags);
+            } else {
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            }
         }
     }
 

@@ -84,11 +84,12 @@ pub struct Point {
 }
 
 /// How a shape is filled: one colour, or a colour at `top` fading to another
-/// at `bottom` (both heights in DIPs).
+/// at `bottom` (both heights in DIPs), or at `left` to another at `right`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Fill {
     Solid(Color),
     Down { top: f32, from: Color, bottom: f32, to: Color },
+    Across { left: f32, from: Color, right: f32, to: Color },
 }
 
 /// What the panel's readings are painted with: each platform paints these

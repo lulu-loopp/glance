@@ -489,14 +489,18 @@ impl<'a> Frame<'a> {
     fn paint_with(&self, fill: Fill) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
         match fill {
             Fill::Solid(color) => self.brush(color).cast().ok(),
-            Fill::Down { top, from, bottom, to } => {
-                let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
-                unsafe {
-                    let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
-                    let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: top }, endPoint: Vector2 { X: 0.0, Y: bottom } };
-                    self.dc.CreateLinearGradientBrush(&line, None, &collection).ok()?.cast().ok()
-                }
-            }
+            Fill::Down { top, from, bottom, to } => self.gradient(Vector2 { X: 0.0, Y: top }, from, Vector2 { X: 0.0, Y: bottom }, to),
+            Fill::Across { left, from, right, to } => self.gradient(Vector2 { X: left, Y: 0.0 }, from, Vector2 { X: right, Y: 0.0 }, to),
+        }
+    }
+
+    /// A brush fading from `from` at `start` to `to` at `end`.
+    fn gradient(&self, start: Vector2, from: Color, end: Vector2, to: Color) -> Option<windows::Win32::Graphics::Direct2D::ID2D1Brush> {
+        let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: from.d2d() }, D2D1_GRADIENT_STOP { position: 1.0, color: to.d2d() }];
+        unsafe {
+            let collection = ID2D1RenderTarget::CreateGradientStopCollection(&self.dc, &stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()?;
+            let line = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: start, endPoint: end };
+            self.dc.CreateLinearGradientBrush(&line, None, &collection).ok()?.cast().ok()
         }
     }
 
@@ -519,6 +523,38 @@ impl<'a> Frame<'a> {
             sink.Close().ok()?;
             Some(path)
         }
+    }
+
+    /// What `paint` draws, in a glow of `glow` spreading about `blur` DIPs
+    /// around it: drawn once into a picture of its own (in the frame's
+    /// DIPs), and that drawn blurred in the glow's colour, then sharp on
+    /// top, all through the frame's current transform.
+    pub fn glow(&self, glow: Color, blur: f32, paint: impl FnOnce(&Frame)) {
+        let dc = &self.dc;
+        // Without its picture (the device going, which the frame's end
+        // tells), nothing is drawn this time.
+        let _ = (|| -> Result<()> {
+            unsafe {
+                let list = dc.CreateCommandList()?;
+                let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
+                dc.GetTransform(&mut transform);
+                dc.SetTarget(&list);
+                dc.SetTransform(&Matrix3x2::identity());
+                paint(self);
+                dc.SetTarget(&target);
+                dc.SetTransform(&transform);
+                list.Close()?;
+                let picture: ID2D1Image = list.cast()?;
+                let halo = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                halo.SetInput(0, &picture, true);
+                halo.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
+                let rgba = [glow.r, glow.g, glow.b, glow.a];
+                halo.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                dc.DrawImage(&halo.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.DrawImage(&picture, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+            Ok(())
+        })();
     }
 
     /// Draws text from here on as sharply as grayscale antialiasing allows

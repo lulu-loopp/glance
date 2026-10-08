@@ -68,8 +68,8 @@ impl Shortcut {
     }
 }
 
-/// Where a pinned panel was moved to, away from the screen's edge: it
-/// stays there, pinned, until it is unpinned, Glance restarting too.
+/// Where the panel was moved to, away from the screen's edge: it stays
+/// there, Glance restarting too, until it is moved back to the edge.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PanelAt {
     /// How far across and down the room there is for it on its screen's
@@ -77,6 +77,9 @@ pub struct PanelAt {
     pub at: (f32, f32),
     /// A point on its screen (physical pixels).
     pub screen: (i32, i32),
+    /// Pinned there: not moved or sized by the pointer.
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// A few readings floating over the screen: all the time, or while a game

@@ -284,7 +284,7 @@ impl Overlay {
         let (r, s) = (self.shadow_rect(), self.screen);
         // On its screen only: past the screen's edge is nothing.
         let area = RECT { left: (r.left - around).max(s.left), top: (r.top - around).max(s.top), right: (r.right + around).min(s.right), bottom: (r.bottom + around).min(s.bottom) };
-        let seen = (area.right > area.left && area.bottom > area.top).then(|| Capture::take(area)).flatten();
+        let seen = Capture::take(area);
         let mut behind = seen.map(|capture| capture.luminances(area, r, self.dpi.round().max(1.0) as i32)).unwrap_or_default();
         self.glass = Some(overlay::glass(&mut behind, self.glass));
     }

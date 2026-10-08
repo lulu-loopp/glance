@@ -565,7 +565,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let settings = app.settings.lock().unwrap().clone();
         let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
-        let stage = Stage { size, desktop: wallpaper::desktop(size.0 as u32, size.1 as u32), bitmap: None };
+        let stage = Stage { size, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
             hwnd,
@@ -729,9 +729,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Gone to another window: a new shortcut is no longer being taken.
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| ui.record(false));
+            crate::app().controller.settings_front(None);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // In front: the panel, staying up, gives way to it.
+        WM_ACTIVATE => {
+            crate::app().controller.settings_front(Some(hwnd));
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_DESTROY => {
+            crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back

@@ -119,6 +119,9 @@ const OPEN_SETTINGS: u32 = WM_APP + 4;
 const TOGGLE: u32 = WM_APP + 5;
 /// A new sample: the overlay is drawn again.
 const OVERLAY: u32 = WM_APP + 7;
+/// The settings window came to the front (WPARAM 1, LPARAM its window), or
+/// left it (WPARAM 0).
+const SETTINGS_FRONT: u32 = WM_APP + 9;
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
@@ -315,6 +318,16 @@ impl Controller {
     /// Takes the panel off the screen at once, without its animation.
     pub fn dismiss(&self) {
         self.post(DISMISS);
+    }
+
+    /// The settings window came to the front (`Some`) or left it: a panel
+    /// that stays up gives way to it meanwhile, so that it never covers it.
+    pub fn settings_front(&self, window: Option<HWND>) {
+        let sink = self.sink.load(Ordering::Acquire);
+        if sink != 0 {
+            let (front, window) = (window.is_some() as usize, window.map_or(0, |window| window.0 as isize));
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), SETTINGS_FRONT, WPARAM(front), LPARAM(window)) };
+        }
     }
 
     /// Opens the settings window, which this thread carries too.
@@ -515,12 +528,12 @@ impl Controller {
                 TOGGLE if panel.is_open() => panel.begin_close(now),
                 TOGGLE if !may_open(fullscreen_hotkey) => {}
                 TOGGLE => panel.open_by_hand(now),
-                // A panel pinned away from the edge stays, the settings
-                // window coming up or not.
-                DISMISS if panel.pinned && panel.floating() => {}
+                // A panel that stays (pinned, or moved away from the edge)
+                // stays, the settings window coming up or not.
+                DISMISS if panel.stays() => {}
                 DISMISS => panel.dismiss(),
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
-                    if panel.is_open() && !panel.pinned {
+                    if panel.is_open() && !panel.stays() {
                         panel.begin_close(now);
                     }
                 }
@@ -529,6 +542,7 @@ impl Controller {
                 // The panel's own (the overlay's follows its game's screen).
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
                 OPEN_SETTINGS => settings_window::open(),
+                SETTINGS_FRONT => panel.settings_front((msg.wParam.0 != 0).then_some(HWND(msg.lParam.0 as *mut _))),
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, &panel);
@@ -561,10 +575,12 @@ impl Controller {
                     if std::mem::take(&mut panel.screens_missed) {
                         panel.screens_changed(0, now);
                     }
-                    if let Some((at, size)) = kept.filter(|(at, size)| at.is_some() || size.is_some()) {
+                    if let Some((at, size)) = kept.filter(|(at, size)| !matches!(at, Kept::Unchanged) || size.is_some()) {
                         crate::app().change(|settings| {
-                            if at.is_some() {
-                                settings.panel_at = at;
+                            match at {
+                                Kept::At(at) => settings.panel_at = Some(at),
+                                Kept::Docked => settings.panel_at = None,
+                                Kept::Unchanged => {}
                             }
                             if let Some(size) = size {
                                 settings.panel_size = size;
@@ -595,7 +611,7 @@ impl Controller {
                     hold_messages(false);
                     match choice {
                         Some(OverlayChoice::Settings) => {
-                            if !(panel.pinned && panel.floating()) {
+                            if !panel.stays() {
                                 panel.dismiss();
                             }
                             settings_window::open_at_overlay();
@@ -689,7 +705,7 @@ impl Controller {
                 _ => {}
             }
 
-            let wanted = panel.is_open() && !panel.pinned;
+            let wanted = panel.is_open() && !panel.stays();
             if wanted != escape {
                 escape = wanted;
                 unsafe {
@@ -781,6 +797,17 @@ struct PanelDrag {
     sized: bool,
 }
 
+/// A limit a panel sized by its edges stops at.
+#[derive(Clone, Copy, PartialEq)]
+enum Limit {
+    /// The smallest size there is.
+    Smallest,
+    /// The largest size there is.
+    Largest,
+    /// As large as its screen holds.
+    Screen,
+}
+
 #[derive(Clone, Copy, Default, PartialEq)]
 struct Edges {
     left: bool,
@@ -798,6 +825,24 @@ impl Edges {
 /// How near its edge the pointer sizes the pinned panel rather than
 /// pressing what is there (DIPs).
 const EDGE: f32 = 6.0;
+
+/// How far the pointer moves a pressed panel before the panel moves with it
+/// (DIPs): a press that wanders less is a press.
+const MOVE_FROM: f32 = 8.0;
+
+/// How near its screen's edge a panel let go is taken back to the edge, to
+/// open from it again (DIPs).
+const DOCK: f32 = 24.0;
+
+/// What a drag let go leaves to keep of where the panel is.
+enum Kept {
+    /// Where it was: pressed and let go, or sized against the edge.
+    Unchanged,
+    /// Moved away from the edge, to stay there.
+    At(PanelAt),
+    /// Moved back against the edge: it opens from there again.
+    Docked,
+}
 
 /// The pointer's shape over edges `edges` of what is dragged by them (none:
 /// the whole of it, moved).
@@ -891,6 +936,15 @@ struct Panel<'a> {
     bar: view::Rect,
     /// A drag of the pinned panel under way.
     drag: Option<PanelDrag>,
+    /// The hint at the screen's edge while it is moved (made when first
+    /// needed).
+    dock_hint: Option<DockHint>,
+    /// The largest size the panel still grows to on its screen (see
+    /// `arrange::largest`), as it was last laid out.
+    largest: f32,
+    /// While it is sized by its edges: the size it is at, and the limit
+    /// the pointer is past, if it is (shown on it as it is dragged).
+    sizing: Option<(f32, Option<Limit>)>,
     /// The desktop behind the glass is to be taken again (the panel moved
     /// or grew past what was taken).
     recapture: bool,
@@ -944,6 +998,9 @@ impl<'a> Panel<'a> {
             corner: (0.0, 0.0),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             drag: None,
+            dock_hint: None,
+            largest: SIZES.1,
+            sizing: None,
             recapture: false,
             screens_missed: false,
             release_owed: false,
@@ -973,7 +1030,14 @@ impl<'a> Panel<'a> {
         if self.drag.is_none() {
             self.size = config.size;
         }
-        self.skin = Skin::named(&config.skin);
+        let skin = Skin::named(&config.skin);
+        // Up, and now a skin that sees the desktop: it is taken behind the
+        // panel as it is now (one taken for another skin, or none, would not
+        // fit it).
+        if skin != self.skin && skin.sees_backdrop() && self.is_shown() {
+            self.recapture = true;
+        }
+        self.skin = skin;
         self.live = config.live && self.skin.sees_backdrop();
         drop(config);
         // What is shown, and how, changed: it is laid out anew. The
@@ -1011,19 +1075,20 @@ impl<'a> Panel<'a> {
         self.frost = behind.map_or(0.0, |(mean, spread)| skins::frost(mean, spread, dark));
     }
 
-    /// Opens the panel as the shortcut and the tray do: where it was pinned
-    /// away from the edge, if it was (pinned again), or at the pointer.
+    /// Opens the panel as the shortcut and the tray do: where it was moved
+    /// away from the edge, if it was (pinned again if it was), or at the
+    /// pointer.
     fn open_by_hand(&mut self, now: Instant) {
         let panel_at = self.controller.config.lock().unwrap().panel_at;
-        if let Some(PanelAt { at, screen: (x, y) }) = panel_at {
+        if let Some(PanelAt { at, screen: (x, y), locked }) = panel_at {
             let point = POINT { x, y };
             if let Some(contact) = monitor_at(point) {
                 let was_shown = self.is_shown();
                 self.open(point, contact, Some(at), now);
-                // Opened there, it is pinned there; one picked up on its way
-                // out (opened from the edge) stays as it was.
+                // Opened there, pinned there if it was; one picked up on its
+                // way out (opened from the edge) stays as it was.
                 if !was_shown && self.is_open() {
-                    self.pinned = true;
+                    self.pinned = locked;
                 }
             }
         } else if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
@@ -1145,8 +1210,9 @@ impl<'a> Panel<'a> {
         if closing {
             bring_back(game);
         }
-        if open && floating && pinned {
+        if open && floating {
             self.open_by_hand(now);
+            self.pinned = pinned;
         } else if open {
             if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
                 self.open(cursor, contact, None, now);
@@ -1194,8 +1260,9 @@ impl<'a> Panel<'a> {
         // Around the panel the window is only shadow; clicks there belong
         // to whatever is underneath.
         self.window.set_click_through(!on_panel);
+        let stays = self.stays();
         let Phase::Open { entered, outside_since, dragging } = &mut self.phase else { return };
-        if self.pinned {
+        if stays {
             *outside_since = None;
             return;
         }
@@ -1231,12 +1298,13 @@ impl<'a> Panel<'a> {
         if !self.live && self.drag.is_none() && self.skin.sees_backdrop() {
             let window = self.placement.as_ref().map(|placement| placement.window);
             let taken = self.behind.as_ref().map(|behind| behind.capture.rect);
-            let covered = |outer: RECT, inner: RECT| inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom;
             if let (Some(window), Some(taken)) = (window, taken) {
-                self.recapture |= !covered(taken, window);
+                self.recapture |= !covers(taken, window);
             }
         }
-        if self.recapture {
+        // Not while it gives way to the settings: they are in front of it,
+        // and would be taken as what is behind it.
+        if self.recapture && !self.window.yielding() {
             self.recapture_behind(now);
         }
         if now >= self.next_frame {
@@ -1290,9 +1358,28 @@ impl<'a> Panel<'a> {
         self.next_frame = now;
     }
 
+    /// The settings window came to the front (`Some`), or left it: the
+    /// panel gives way to it meanwhile. Up over a desktop it sees, the
+    /// desktop is taken again once the settings have gone, without them.
+    fn settings_front(&mut self, settings: Option<HWND>) {
+        let was = self.window.yielding();
+        self.window.yield_to(settings);
+        if was && settings.is_none() && self.is_shown() && self.skin.sees_backdrop() && !self.live {
+            self.recapture = true;
+            self.next_frame = Instant::now();
+        }
+    }
+
     /// Whether it is moved away from the edge.
     fn floating(&self) -> bool {
         self.placement.as_ref().is_some_and(|placement| placement.floating.is_some() || placement.held.is_some())
+    }
+
+    /// Whether it stays up wherever the pointer goes: pinned, or moved away
+    /// from the edge (it lives there until it is closed by hand, or moved
+    /// back to the edge).
+    fn stays(&self) -> bool {
+        self.pinned || self.floating()
     }
 
     /// The edges of the panel a point `(x, y)` from its corner (DIPs) is
@@ -1304,12 +1391,12 @@ impl<'a> Panel<'a> {
     }
 
     /// What a press at `client` (physical px in the window) would do to the
-    /// pinned panel: size it by the edges it is on, or move it, from
-    /// anywhere on it that takes no click or wheel of its own; nothing,
-    /// unpinned.
+    /// open panel: size it by the edges it is on, or move it, from anywhere
+    /// on it that takes no click or wheel of its own; nothing, pinned (it
+    /// stays as it is).
     fn grip_at(&self, client: POINT) -> Option<Edges> {
         let px = match &self.placement {
-            Some(placement) if self.pinned && self.is_open() => placement.px,
+            Some(placement) if !self.pinned && self.is_open() => placement.px,
             _ => return None,
         };
         let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
@@ -1328,8 +1415,9 @@ impl<'a> Panel<'a> {
         x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h
     }
 
-    /// A press on the panel at `client` (physical px in the window): pinned,
-    /// on its edges it begins to size it, elsewhere (see `grip_at`) to move it.
+    /// A press on the panel at `client` (physical px in the window): unless
+    /// it is pinned, on its edges it begins to size it, elsewhere (see
+    /// `grip_at`) to move it.
     fn press(&mut self, client: POINT) {
         let Some(edges) = self.grip_at(client) else { return };
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
@@ -1360,9 +1448,44 @@ impl<'a> Panel<'a> {
             if placement.held == Some(held) {
                 return;
             }
+            // Not moved yet: only once the pointer has gone far enough.
+            let from = MOVE_FROM * placement.contact.scale;
+            if placement.held.is_none() && ((dx * dx + dy * dy) as f32) < from * from {
+                return;
+            }
             placement.held = Some(held);
             if let Some(opening) = &self.opening {
                 place(placement, &self.window, self.edge, &self.theme, (opening.layout.width(), opening.layout.height()), opening.zoom);
+            }
+            // Where letting it go takes it back to the edge, shown, and lit
+            // once it is near enough.
+            let panel = placement.panel;
+            let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
+            if let Some(contact) = monitor_at(centre) {
+                if self.dock_hint.is_none() {
+                    self.dock_hint = DockHint::new();
+                }
+                let near = docks(self.edge, contact, panel);
+                if let Some(hint) = &mut self.dock_hint {
+                    hint.show(&self.gfx, self.lang, self.edge, contact, near, self.window.hwnd);
+                }
+                // Moved past the desktop taken behind it (taken along the
+                // edge it opened from), the glass would show nothing behind
+                // it there: the whole of the screen it is now over is taken,
+                // without the panel, once. Let go, it is taken again just
+                // behind it.
+                let taken = self.behind.as_ref().map(|behind| behind.capture.rect);
+                let on_screen = intersection(panel, contact.monitor);
+                if self.skin.sees_backdrop() && !self.live && !taken.is_some_and(|taken| covers(taken, on_screen)) {
+                    self.window.exclude_from_capture(true);
+                    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
+                    if let (Some(capture), Some(placement)) = (Capture::take(contact.monitor), &self.placement) {
+                        let behind = Behind::new(capture, placement, now);
+                        self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
+                        self.behind = Some(behind);
+                    }
+                    self.window.exclude_from_capture(false);
+                }
             }
             return;
         }
@@ -1375,8 +1498,22 @@ impl<'a> Panel<'a> {
             (None, Some(d)) => d,
             (None, None) => 1.0,
         };
-        // In hundredths: laid out afresh only as often as that changes.
-        let size = ((drag.size * ratio).clamp(SIZES.0, SIZES.1) * 100.0).round() / 100.0;
+        // In hundredths: laid out afresh only as often as that changes. From
+        // as large as it shows (a size past what its screen holds shows no
+        // larger), and no larger than that: past either end, it says so.
+        let wanted = (drag.size.min(self.largest) * ratio * 100.0).round() / 100.0;
+        let limit = if wanted < SIZES.0 {
+            Some(Limit::Smallest)
+        } else if wanted > self.largest {
+            Some(if self.largest < SIZES.1 { Limit::Screen } else { Limit::Largest })
+        } else {
+            None
+        };
+        let size = wanted.clamp(SIZES.0, self.largest.max(SIZES.0));
+        if self.sizing != Some((size, limit)) {
+            self.sizing = Some((size, limit));
+            self.next_frame = now;
+        }
         if size == self.size {
             return;
         }
@@ -1403,6 +1540,10 @@ impl<'a> Panel<'a> {
 
     /// Ends a drag under way.
     fn end_drag(&mut self) -> Option<PanelDrag> {
+        self.sizing = None;
+        if let Some(hint) = &mut self.dock_hint {
+            hint.hide();
+        }
         let drag = self.drag.take()?;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
@@ -1414,7 +1555,7 @@ impl<'a> Panel<'a> {
     /// Let go: it stays where it was put and as large as it was made, laid
     /// out for that screen; what to keep, if it moved (where it is) or was
     /// sized (its size).
-    fn let_go(&mut self, now: Instant) -> Option<(Option<PanelAt>, Option<f32>)> {
+    fn let_go(&mut self, now: Instant) -> Option<(Kept, Option<f32>)> {
         let drag = self.end_drag()?;
         let size = drag.sized.then_some(self.size);
         // Moved or sized, the desktop behind is taken again for what it now covers.
@@ -1424,11 +1565,26 @@ impl<'a> Panel<'a> {
         let placement = self.placement.as_mut()?;
         if placement.held.is_none() {
             // Pressed and let go where it was, or sized against the edge.
-            return Some((None, size));
+            return Some((Kept::Unchanged, size));
         }
         let panel = placement.panel;
         let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
         let contact = monitor_at(centre)?;
+        // Let go against its screen's edge (the side it opens from): back to
+        // the edge, centred where it was let go, to close as the pointer
+        // leaves and open from the edge again.
+        if docks(self.edge, contact, panel) {
+            placement.contact = contact;
+            placement.px = contact.scale;
+            placement.floating = None;
+            placement.held = None;
+            placement.anchor = centre;
+            if let Some(opening) = self.opening.take() {
+                self.held = Some(opening.seen);
+            }
+            self.arrange();
+            return Some((Kept::Docked, size));
+        }
         if contact != placement.contact {
             // Another screen: laid out afresh for it, its held corner where
             // it was let go.
@@ -1448,7 +1604,7 @@ impl<'a> Panel<'a> {
         self.arrange();
         let kept = self.kept_at()?;
         self.placement.as_mut()?.anchor = POINT { x: kept.screen.0, y: kept.screen.1 };
-        Some((Some(kept), size))
+        Some((Kept::At(kept), size))
     }
 
     /// Where the panel is, as it is kept away from the edge: how far into
@@ -1465,7 +1621,7 @@ impl<'a> Panel<'a> {
             share(panel.left, work.left, work.right - work.left - 2 * gap - width),
             share(panel.top, work.top, work.bottom - work.top - 2 * gap - height),
         );
-        Some(PanelAt { at, screen: (panel.left + width / 2, panel.top + height / 2) })
+        Some(PanelAt { at, screen: (panel.left + width / 2, panel.top + height / 2), locked: self.pinned })
     }
 
     /// The panel's lanes, laid out (once each opening, and held), and the
@@ -1497,6 +1653,8 @@ impl<'a> Panel<'a> {
                 let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
                 let lanes = view::lanes(&scene);
                 let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
+                let tall: Vec<f32> = heights.iter().map(|(_, height)| *height).collect();
+                self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1);
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, self.columns, self.size, now.clone()))
             }
         };
@@ -1577,6 +1735,7 @@ impl<'a> Panel<'a> {
         let scene = scene(controller, &self.prefs, &self.theme, self.lang, self.scroll, self.hover, self.pinned, history.make_contiguous(), seen);
         let edge = (!self.floating()).then_some(self.edge);
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
+        let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
         let surface = self.surface.as_mut().unwrap();
         let painted = surface.draw(&self.gfx, size, px, |frame| {
@@ -1601,6 +1760,11 @@ impl<'a> Panel<'a> {
             });
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
             drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px));
+            if let Some((size, limit)) = sizing {
+                frame.place(Matrix3x2::translation(x, y));
+                size_badge(frame, theme, size, limit, lang, (width, height));
+                frame.origin(0.0, 0.0);
+            }
             if opacity < 1.0 {
                 unsafe { frame.dc.PopLayer() };
             }
@@ -1648,7 +1812,7 @@ impl<'a> Panel<'a> {
 
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
-        // Pinned, its edges and its bar show what a drag there does (the
+        // Unpinned, its edges and its bar show what a drag there does (the
         // rest moves it too, under the reader's arrow).
         match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
             Some(edges) => point_at(&self.window, edges),
@@ -1668,13 +1832,12 @@ impl<'a> Panel<'a> {
                 crate::show_settings();
             }
             Some(Hit::Pin) => {
+                // Pinned, it stays as it is: not moved, not sized, and not
+                // closed as the pointer leaves. Away from the edge, kept so
+                // across restarts.
                 self.pinned ^= true;
-                // Unpinned away from the edge: it closes as the pointer
-                // leaves, and opens from the edge from then on; pinned
-                // again before it has, kept where it is again.
                 if self.floating() {
-                    let at = if self.pinned { self.kept_at() } else { None };
-                    crate::app().place_panel(at);
+                    crate::app().place_panel(self.kept_at());
                 }
             }
             Some(Hit::Overlay) => {
@@ -1817,6 +1980,258 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
     if placement.window != window {
         placement.window = window;
         panel_window.place(window);
+    }
+}
+
+/// Over the middle of a panel `area` DIPs large while it is sized by its
+/// edges: the size it is at, or the limit it has reached (see `tag`).
+fn size_badge(frame: &gfx::Frame, theme: &Theme, size: f32, limit: Option<Limit>, lang: Lang, area: (f32, f32)) {
+    let percent = format!("{:.0}%", size * 100.0);
+    let text = match limit {
+        None => percent,
+        Some(Limit::Smallest) => format!("{} {percent}", lang.pick("最小", "Smallest:")),
+        Some(Limit::Largest) => format!("{} {percent}", lang.pick("最大", "Largest:")),
+        Some(Limit::Screen) => lang.pick("已占满屏幕", "As large as the screen holds").to_string(),
+    };
+    tag(frame, theme, &text, (area.0 / 2.0, area.1 / 2.0), limit.is_some());
+}
+
+/// Whether `outer` holds all of `inner`.
+fn covers(outer: RECT, inner: RECT) -> bool {
+    inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
+}
+
+/// What `a` and `b` share: empty where they do not meet.
+fn intersection(a: RECT, b: RECT) -> RECT {
+    RECT { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right).max(a.left.max(b.left)), bottom: a.bottom.min(b.bottom).max(a.top.max(b.top)) }
+}
+
+/// Whether a panel at `panel` (physical px) on `contact`'s screen is near
+/// enough to the edge it opens from to be taken back to it (see `DOCK`).
+fn docks(edge: Edge, contact: Contact, panel: RECT) -> bool {
+    let (monitor, near) = (contact.monitor, (DOCK * contact.scale).round() as i32);
+    match edge {
+        Edge::Left => panel.left - monitor.left <= near,
+        Edge::Right => monitor.right - panel.right <= near,
+        Edge::Top => panel.top - monitor.top <= near,
+    }
+}
+
+/// A word on what a drag does, centred at `centre` (DIPs), in the look of
+/// the panel's skin (its sheet, ink and type); `heed`, its edge and words in
+/// the skin's signal colour.
+fn tag(frame: &gfx::Frame, theme: &Theme, text: &str, centre: (f32, f32), heed: bool) {
+    use crate::ui::canvas::{Align, Canvas, Color, Fill};
+    let font = theme.title;
+    let (ascent, descent) = frame.baseline(font);
+    let (pad_x, pad_y) = (14.0, 7.0);
+    let (width, height) = (frame.measure(text, font) + 2.0 * pad_x, ascent + descent + 2.0 * pad_y);
+    let (x, y) = (centre.0 - width / 2.0, centre.1 - height / 2.0);
+    // Each skin's own sheet: paper, Windows 11's tint under its stroke, or
+    // glass under its rim.
+    let (ground, edge, radius) = match theme.skin {
+        Skin::Paper => (theme.paper, theme.text, theme.control_radius),
+        Skin::Fluent => (Color { a: 0.96, ..theme.tint }, theme.stroke, theme.control_radius.max(6.0)),
+        Skin::Glass => (Color { a: 0.9, ..theme.glass }, theme.legibility, theme.radius.min(height / 2.0)),
+    };
+    let (edge, ink) = if heed { (theme.signal, theme.signal) } else { (edge, theme.text) };
+    frame.fill_rounded(ground, x, y, width, height, radius);
+    let line = 1.0;
+    frame.stroke_rounded(Fill::Solid(edge), x + line / 2.0, y + line / 2.0, width - line, height - line, radius, line);
+    Canvas::text(frame, text, font, ink, x + pad_x, y + pad_y, width, Align::Start);
+}
+
+/// While the panel is moved: a light along the edge of the screen it opens
+/// from, with words in its middle, where letting it go takes it back to the
+/// edge; brighter, the words saying so, once it is near enough for that
+/// (see `DOCK`). In a window of its own,
+/// under the panel, that every click passes through.
+struct DockHint {
+    window: Window,
+    /// Its content, on the device it was made on.
+    surface: Option<(Rc<Gfx>, Surface)>,
+    /// What it shows: where (physical px), and whether the panel is near.
+    shown: Option<(RECT, bool)>,
+    /// Whether what is behind its words is bright, as it was when it was
+    /// first shown there: bright enough that the accent's deep shade stands
+    /// out from it more than white does, its light and words then take
+    /// that shade, in a white glow.
+    bright: Option<(RECT, bool)>,
+}
+
+/// How far along the edge its words reach either way from its middle (DIPs).
+const HINT_WORDS: f32 = 120.0;
+
+/// How well text of luminance `text` reads on a ground of luminance `ground`
+/// (relative luminances, 0–1), as APCA measures it (its lightness contrast,
+/// sign dropped): unlike WCAG's ratio it does not favour dark text on
+/// middling grounds, where white reads better.
+fn contrast(text: f32, ground: f32) -> f32 {
+    // Near black, luminance is lifted as the eye sees it (soft clamp).
+    let clamp = |y: f32| if y < 0.022 { y + (0.022 - y).powf(1.414) } else { y };
+    let (text, ground) = (clamp(text), clamp(ground));
+    let lc = if ground > text {
+        (ground.powf(0.56) - text.powf(0.57)) * 1.14 - 0.027
+    } else {
+        (text.powf(0.62) - ground.powf(0.65)) * 1.14 - 0.027
+    };
+    lc.max(0.0)
+}
+
+/// How far into the screen the hint reaches (DIPs): its light, and room for
+/// its word.
+const HINT_DEPTH: f32 = 320.0;
+/// How far into the screen its light fades (DIPs).
+const HINT_GLOW: f32 = 110.0;
+/// Its words: the same on every skin, white in the light, small, light
+/// and widely spaced (Chinese in the system's face, at that weight); down
+/// a side, a third of a line between characters.
+const HINT_FONT: crate::ui::canvas::Font = crate::ui::canvas::Font::new(crate::ui::canvas::Family::SegoeDisplay, 13.0, 300.0).tracking(0.25);
+const HINT_LEADING: f32 = 1.35;
+
+impl DockHint {
+    fn new() -> Option<Self> {
+        let mut window = Window::new().ok()?;
+        window.set_click_through(true);
+        // Never in the desktop taken behind the glass while it shows.
+        window.exclude_from_capture(true);
+        Some(DockHint { window, surface: None, shown: None, bright: None })
+    }
+
+    /// Shows the hint along `edge` of `contact`'s screen, lit if the
+    /// panel is `near`; beneath `panel_window`.
+    #[allow(clippy::too_many_arguments)]
+    fn show(&mut self, gfx: &Rc<Gfx>, lang: Lang, edge: Edge, contact: Contact, near: bool, panel_window: HWND) {
+        let (monitor, work, scale) = (contact.monitor, contact.work, contact.scale);
+        let depth = (HINT_DEPTH * scale).round() as i32;
+        let rect = match edge {
+            Edge::Left => RECT { left: monitor.left, top: work.top, right: monitor.left + depth, bottom: work.bottom },
+            Edge::Right => RECT { left: monitor.right - depth, top: work.top, right: monitor.right, bottom: work.bottom },
+            Edge::Top => RECT { left: work.left, top: monitor.top, right: work.right, bottom: monitor.top + depth },
+        };
+        if self.shown == Some((rect, near)) {
+            return;
+        }
+        // Looked at once on each screen, before it shows (it is never in a
+        // capture itself): what is behind its words, in the middle of the
+        // edge.
+        let bright = match self.bright {
+            Some((at, bright)) if at == rect => bright,
+            _ => {
+                let px = |dips: f32| (dips * scale).round() as i32;
+                let (mx, my) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+                let words = match edge {
+                    Edge::Left => RECT { left: rect.left + px(12.0), top: my - px(HINT_WORDS), right: rect.left + px(60.0), bottom: my + px(HINT_WORDS) },
+                    Edge::Right => RECT { left: rect.right - px(60.0), top: my - px(HINT_WORDS), right: rect.right - px(12.0), bottom: my + px(HINT_WORDS) },
+                    Edge::Top => RECT { left: mx - px(HINT_WORDS), top: rect.top + px(12.0), right: mx + px(HINT_WORDS), bottom: rect.top + px(48.0) },
+                };
+                let nothing = RECT::default();
+                let behind = Capture::take(words).map(|capture| capture.luminances(words, nothing, px(2.0).max(1)));
+                let bright = behind.filter(|behind| !behind.is_empty()).is_some_and(|behind| {
+                    let mean = behind.iter().sum::<f32>() / behind.len() as f32;
+                    let deep = theme::accent(false);
+                    contrast(crate::ui::overlay::luminance(deep.r, deep.g, deep.b), mean) > contrast(1.0, mean)
+                });
+                self.bright = Some((rect, bright));
+                bright
+            }
+        };
+        let surface = match self.surface.take() {
+            Some((made_on, surface)) if Rc::ptr_eq(&made_on, gfx) => Ok(surface),
+            _ => Surface::new(gfx, self.window.hwnd),
+        };
+        let Ok(mut surface) = surface else { return };
+        let size = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
+        let (width, height) = (size.0 as f32 / scale, size.1 as f32 / scale);
+        let drawn = surface.draw(gfx, size, scale, |frame| {
+            use crate::ui::canvas::{Align, Canvas, Color, Fill, Point};
+            // A soft light rising from the edge, in the system's accent;
+            // brighter once letting go would take the panel back.
+            let light = theme::accent(!bright);
+            let haze = if near { 0.32 } else { 0.14 };
+            let glow = HINT_GLOW;
+            let (band, fade) = match edge {
+                Edge::Left => ((0.0, 0.0, glow, height), Fill::Across { left: 0.0, from: light.alpha(haze), right: glow, to: light.alpha(0.0) }),
+                Edge::Right => ((width - glow, 0.0, glow, height), Fill::Across { left: width - glow, from: light.alpha(0.0), right: width, to: light.alpha(haze) }),
+                Edge::Top => ((0.0, 0.0, width, glow), Fill::Down { top: 0.0, from: light.alpha(haze), bottom: glow, to: light.alpha(0.0) }),
+            };
+            let (x, y, w, h) = band;
+            frame.fill_shape(&[Point { x, y }, Point { x: x + w, y }, Point { x: x + w, y: y + h }, Point { x, y: y + h }], fade);
+            // What the light is for, in its middle, running along the edge:
+            // white words in a glow of the light's own colour.
+            let word = match (near, lang) {
+                (false, Lang::Zh) => "拖至此处收回",
+                (true, Lang::Zh) => "松开收回",
+                (false, Lang::En) => "Drag here to tuck it away",
+                (true, Lang::En) => "Let go to tuck it away",
+            };
+            let font = HINT_FONT;
+            let (ascent, descent) = frame.baseline(font);
+            let step = ascent + descent;
+            let away = 20.0;
+            // White words in the light's glow; over a bright screen, the
+            // light's deep shade in a white glow.
+            let (ink, halo) = if bright {
+                (light.alpha(if near { 1.0 } else { 0.85 }), Color::hex(0xFFFFFF, if near { 0.95 } else { 0.8 }))
+            } else {
+                (Color::hex(0xFFFFFF, if near { 0.95 } else { 0.8 }), light.alpha(if near { 0.6 } else { 0.4 }))
+            };
+            let middle = match edge {
+                Edge::Left | Edge::Right => height / 2.0,
+                Edge::Top => width / 2.0,
+            };
+            // English along a side is turned to run with the edge, read from
+            // the screen's inside: up the left edge, down the right.
+            let turned = if edge == Edge::Left { (away + step / 2.0, -90.0) } else { (width - away - step / 2.0, 90.0) };
+            match (edge, lang) {
+                (Edge::Left | Edge::Right, Lang::En) => frame.place(Matrix3x2::rotation_around(turned.1, Vector2 { X: turned.0, Y: middle })),
+                _ => frame.origin(0.0, 0.0),
+            }
+            frame.glow(halo, 8.0, |frame| match (edge, lang) {
+                (Edge::Top, _) => {
+                    let w = frame.measure(word, font);
+                    Canvas::text(frame, word, font, ink, middle - w / 2.0, away, w + 1.0, Align::Start);
+                }
+                // Chinese down the side, a character under another.
+                (_, Lang::Zh) => {
+                    let characters: Vec<String> = word.chars().map(String::from).collect();
+                    let widest = characters.iter().map(|c| frame.measure(c, font)).fold(0.0, f32::max);
+                    let x = if edge == Edge::Left { away + widest / 2.0 } else { width - away - widest / 2.0 };
+                    let pitch = step * HINT_LEADING;
+                    let mut y = middle - (characters.len() as f32 * pitch - (pitch - step)) / 2.0;
+                    for c in &characters {
+                        let w = frame.measure(c, font);
+                        Canvas::text(frame, c, font, ink, x - w / 2.0, y, w + 1.0, Align::Start);
+                        y += pitch;
+                    }
+                }
+                // English turned (below) to run along the edge.
+                (_, Lang::En) => {
+                    let w = frame.measure(word, font);
+                    Canvas::text(frame, word, font, ink, turned.0 - w / 2.0, middle - step / 2.0, w + 1.0, Align::Start);
+                }
+            });
+            frame.origin(0.0, 0.0);
+        });
+        self.surface = Some((gfx.clone(), surface));
+        if drawn.is_err() {
+            return;
+        }
+        self.window.place_under(rect, Some(panel_window));
+        if self.shown.is_none() {
+            self.window.show();
+            self.window.place_under(rect, Some(panel_window));
+        }
+        self.shown = Some((rect, near));
+    }
+
+    fn hide(&mut self) {
+        if self.shown.take().is_some() {
+            self.window.hide();
+            if let Some((gfx, surface)) = &mut self.surface {
+                surface.release(gfx);
+            }
+        }
     }
 }
 
@@ -1989,4 +2404,17 @@ fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     }
     let neighbour = unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) };
     neighbour.is_invalid().then_some(contact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contrast;
+
+    #[test]
+    fn white_reads_on_a_middling_sky_and_deep_ink_on_white() {
+        // A clear blue sky (#4FA9F5) and a white page; ink a deep blue.
+        let (sky, page, deep) = (0.36, 0.9, 0.096);
+        assert!(contrast(1.0, sky) > contrast(deep, sky));
+        assert!(contrast(deep, page) > contrast(1.0, page));
+    }
 }

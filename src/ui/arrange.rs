@@ -19,14 +19,38 @@ const TOP_SHARE: f32 = 0.6;
 /// many columns as the lanes need to show at that size, up to what the
 /// screen allows, and zoomed out from it only if even that is too little.
 ///
+/// The size scales the panel as it shows at 1: one zoomed out to fit the
+/// screen at 1 is that much smaller again at less (laid out for more room,
+/// it would otherwise be zoomed back to fit the screen, and look the same).
+///
 /// `columns`, when given (chosen in the settings), is kept instead, as far
 /// as the screen's width allows it: chosen, it may be more than a panel
 /// along a side takes by itself.
 pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32) -> (Layout, f32) {
-    // Laid out for the screen as the panel's own DIPs at that size measure
-    // it: the gaps from the screen's ends stay as they are on the screen.
+    let (layout, zoom) = fitted(theme, edge, heights.clone(), work, columns, size);
+    let (_, at_one) = fitted(theme, edge, heights, work, columns, 1.0);
+    (layout, zoom.min(size * at_one))
+}
+
+/// The panel laid out at `size` and the zoom that fits it on the screen:
+/// laid out for the screen as the panel's own DIPs at that size measure
+/// it, the gaps from the screen's ends staying as they are on the screen.
+fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32) -> (Layout, f32) {
     let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns, GAP / size);
     (layout, zoom * size)
+}
+
+/// The largest size, up to `most`, at which the panel still grows: past it
+/// the screen holds no more of it (see `arrange`). In hundredths, as sizes
+/// are chosen.
+pub fn largest(theme: &Theme, edge: Edge, heights: &[f32], work: (f32, f32), columns: Option<usize>, most: f32) -> f32 {
+    let (_, at_one) = fitted(theme, edge, heights.to_vec(), work, columns, 1.0);
+    let grows = |size: f32| size * at_one <= fitted(theme, edge, heights.to_vec(), work, columns, size).1 + 1e-4;
+    let mut size = (most * 100.0).round() as i32;
+    while size > 100 && !grows(size as f32 / 100.0) {
+        size -= 1;
+    }
+    size as f32 / 100.0
 }
 
 fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32) -> (Layout, f32) {
@@ -138,6 +162,28 @@ mod tests {
         // Twice as large on a screen with room for less: as large as fits.
         let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], (400.0, 1000.0), Some(1), 2.0);
         assert!(zoom < 2.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
+    }
+
+    #[test]
+    fn a_panel_filling_the_screen_shrinks_with_its_size() {
+        let theme = Theme::new(Skin::Paper, false);
+        // One column too tall for the screen: zoomed to fit at 1, and three
+        // quarters of that at three quarters, not zoomed back to fit.
+        let lanes = || vec![400.0; 6];
+        let (_, one) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 1.0);
+        let (_, less) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 0.75);
+        assert!(one < 1.0);
+        assert!((less - 0.75 * one).abs() < 1e-4);
+        // It fills the screen already: it grows no further.
+        assert_eq!(largest(&theme, Edge::Right, &lanes(), (3000.0, 1000.0), Some(1), 2.0), 1.0);
+        // A panel with room grows until the screen is full, then stops.
+        let short = [600.0];
+        let most = largest(&theme, Edge::Right, &short, (3000.0, 1000.0), None, 2.0);
+        assert!(most > 1.0 && most < 2.0, "{most}");
+        let (layout, zoom) = arrange(&theme, Edge::Right, short.to_vec(), (3000.0, 1000.0), None, most);
+        assert!(layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
+        // Room for twice as large: twice.
+        assert_eq!(largest(&theme, Edge::Right, &[100.0], (3000.0, 2000.0), None, 2.0), 2.0);
     }
 
     #[test]
