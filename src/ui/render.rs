@@ -18,7 +18,8 @@ pub struct Picture<'a> {
     pub scene: &'a Scene<'a>,
     pub lanes: &'a [Lane],
     pub layout: &'a Layout,
-    pub edge: Edge,
+    /// The screen edge it is against; none for a panel moved away from it.
+    pub edge: Option<Edge>,
     /// The desktop behind, with the panel's corner at the given point in it,
     /// and what tells one desktop from another.
     pub backdrop: Option<(&'a ID2D1Bitmap1, Vector2, u64)>,

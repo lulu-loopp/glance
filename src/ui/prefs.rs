@@ -248,12 +248,22 @@ impl Prefs {
     /// itself is on).
     pub fn shows(&self, id: &str, name: &str) -> bool {
         let chosen = self.modules.iter().find(|entry| entry.id == id).and_then(|entry| entry.items.get(name).copied());
-        chosen.unwrap_or_else(|| items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on))
+        chosen.unwrap_or_else(|| self.shows_by_default(id, name))
+    }
+
+    /// Whether module `id` shows item `name` unless it is switched: as the
+    /// module's items are by default; one of a group the machine names
+    /// ("temps:CPU", a board's sensor), as the group is.
+    fn shows_by_default(&self, id: &str, name: &str) -> bool {
+        match name.split_once(':') {
+            Some((group, _)) => self.shows(id, group),
+            None => items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on),
+        }
     }
 
     /// Turns module `id`'s item `name` on or off.
     pub fn set_item(&mut self, id: &str, name: &str, on: bool) {
-        let default = items(id).iter().find(|item| item.name == name).is_some_and(|item| item.on);
+        let default = self.shows_by_default(id, name);
         if let Some(entry) = self.modules.iter_mut().find(|entry| entry.id == id) {
             // Only what differs from the default is kept.
             if on == default {

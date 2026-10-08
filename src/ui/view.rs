@@ -26,6 +26,8 @@ const FACT_GAP: f32 = 3.0;
 pub const TABLE_ROW: f32 = 22.0;
 /// The settings button in the bar.
 const BUTTON: f32 = 32.0;
+/// Between two of the bar's buttons, so that two lit side by side stay two.
+const BUTTON_GAP: f32 = 4.0;
 /// Rates below this full scale are drawn against it, so idle chatter stays low.
 const MIN_RATE_SCALE: f64 = 10.0 * 1024.0;
 /// The frame time chart's least full scale, in milliseconds.
@@ -213,6 +215,17 @@ pub fn lane_height(scene: &Scene, id: &str, seen: &Seen) -> Option<f32> {
     let scene = Scene { seen, ..*scene };
     let blocks = lane(&scene, id)?;
     Some(scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>())
+}
+
+/// What a board's sensor `name` of `group` ("temps" or "fans") is called:
+/// by what it is wired to, where the board is known; else by its number.
+pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
+    if name.parse::<u32>().is_ok() {
+        let numbered = if group == "fans" { ("风扇", "Fan") } else { ("传感器", "Sensor") };
+        format!("{} {name}", lang.pick(numbered.0, numbered.1))
+    } else {
+        lang.name(name)
+    }
 }
 
 fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
@@ -464,12 +477,10 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
         "board" => {
             let had = scene.seen.board.as_ref()?;
             let board = s.board.as_ref();
-            let named = |name: &str, numbered: (&str, &str)| {
-                if name.parse::<u32>().is_ok() { format!("{} {name}", lang.pick(numbered.0, numbered.1)) } else { lang.name(name) }
-            };
-            let none = Vec::new();
-            let temps = if on("temps") { &had.temps } else { &none };
-            let fans = if on("fans") { &had.fans } else { &none };
+            let named = |name: &str, group: &str| board_sensor(name, group, lang);
+            // Each sensor shown as it is switched (see `Prefs::shows`).
+            let temps: Vec<&String> = had.temps.iter().filter(|n| on(&format!("temps:{n}"))).collect();
+            let fans: Vec<&String> = had.fans.iter().filter(|n| on(&format!("fans:{n}"))).collect();
             let value = |list: Option<&Vec<(String, f32)>>, name: &str| list.and_then(|list| list.iter().find(|(n, _)| n == name)).map(|(_, v)| *v);
             vec![
                 head(lang.pick("主板", "Motherboard"), &info.board, "", false),
@@ -478,7 +489,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                         .iter()
                         .map(|n| {
                             let t = value(board.map(|b| &b.temps), n);
-                            (named(n, ("传感器", "Sensor")), shown(t, celsius), t.is_some_and(|t| t > hot_temp))
+                            (named(n, "temps"), shown(t, celsius), t.is_some_and(|t| t > hot_temp))
                         })
                         .collect(),
                     gap: 0.0,
@@ -486,7 +497,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 Block::Facts {
                     rows: fans
                         .iter()
-                        .map(|n| (named(n, ("风扇", "Fan")), shown(value(board.map(|b| &b.fans), n), |rpm| format!("{rpm:.0} RPM")), false))
+                        .map(|n| (named(n, "fans"), shown(value(board.map(|b| &b.fans), n), |rpm| format!("{rpm:.0} RPM")), false))
                         .collect(),
                     gap: 10.0,
                 },
@@ -1083,8 +1094,8 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     // icon font, each centred in its button. A pinned pin stays lit.
     let top = bar.y + (bar.h - BUTTON) / 2.0;
     let settings = bar.x + bar.w - theme.bar_pad.1 - BUTTON;
-    let pin = settings - BUTTON;
-    let overlay = pin - BUTTON;
+    let pin = settings - BUTTON_GAP - BUTTON;
+    let overlay = pin - BUTTON_GAP - BUTTON;
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     let start = bar.x + theme.bar_pad.0;

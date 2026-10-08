@@ -422,6 +422,65 @@ impl Canvas for Frame<'_> {
             }
         }
     }
+
+    fn glowing(&self, glow: Color, spread: f32, size: (f32, f32), paint: &dyn Fn(&dyn Canvas)) {
+        // Drawn alone first, as sharp as it shows: in a bitmap of the
+        // pixels it covers at the frame's DPI and current scale, with room
+        // around it for the halo.
+        use windows::Win32::Graphics::Direct2D::{CLSID_D2D1Morphology, D2D1_MORPHOLOGY_MODE_DILATE, D2D1_MORPHOLOGY_PROP_HEIGHT, D2D1_MORPHOLOGY_PROP_MODE, D2D1_MORPHOLOGY_PROP_WIDTH, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_UINT32};
+        let dc = &self.dc;
+        let (mut parent, mut dpi) = (Matrix3x2::default(), (0.0f32, 0.0f32));
+        unsafe {
+            dc.GetTransform(&mut parent);
+            dc.GetDpi(&mut dpi.0, &mut dpi.1);
+        }
+        let scale = dpi.0 / 96.0 * (parent.M11 * parent.M11 + parent.M12 * parent.M12).sqrt();
+        // A whole number of pixels, so that the drawing lands back on the
+        // pixels it was drawn for, as sharp as drawn.
+        let room = ((3.0 * spread + 2.0 / scale) * scale).ceil() / scale;
+        let pixels = D2D_SIZE_U { width: ((size.0 + 2.0 * room) * scale).ceil() as u32, height: ((size.1 + 2.0 * room) * scale).ceil() as u32 };
+        let properties = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0 * scale,
+            dpiY: 96.0 * scale,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        // Without a bitmap (the device going, which the frame's end tells),
+        // nothing is drawn this time.
+        let _ = (|| -> Result<()> {
+            let bitmap = unsafe { dc.CreateBitmap(pixels, None, 0, &properties)? };
+            unsafe {
+                let target = dc.GetTarget()?;
+                dc.SetTarget(&bitmap);
+                dc.SetDpi(96.0 * scale, 96.0 * scale);
+                dc.SetTransform(&Matrix3x2::translation(room, room));
+                dc.Clear(Some(&D2D1_COLOR_F::default()));
+                paint(self);
+                dc.SetTarget(&target);
+                dc.SetDpi(dpi.0, dpi.1);
+                dc.SetTransform(&parent);
+                let image = effect_input(dc, &bitmap)?;
+                // The halo: the drawing thickened by half a DIP each way,
+                // blurred as much, in the halo's colour.
+                let kernel = 2 * (scale / 2.0).round() as u32 + 1;
+                let thicker = dc.CreateEffect(&CLSID_D2D1Morphology)?;
+                thicker.SetInput(0, &image, true);
+                thicker.SetValue(D2D1_MORPHOLOGY_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_MORPHOLOGY_MODE_DILATE.0 as u32).to_ne_bytes())?;
+                thicker.SetValue(D2D1_MORPHOLOGY_PROP_WIDTH.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &kernel.to_ne_bytes())?;
+                thicker.SetValue(D2D1_MORPHOLOGY_PROP_HEIGHT.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &kernel.to_ne_bytes())?;
+                let halo = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+                halo.SetInput(0, &thicker.GetOutput()?, true);
+                halo.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &spread.to_ne_bytes())?;
+                let rgba = [glow.r, glow.g, glow.b, glow.a];
+                halo.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+                let at = Vector2 { X: -room, Y: -room };
+                dc.DrawImage(&halo.GetOutput()?, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                dc.DrawImage(&image, Some(&at), None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+            }
+            Ok(())
+        })();
+    }
 }
 
 impl<'a> Frame<'a> {

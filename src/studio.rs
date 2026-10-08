@@ -79,8 +79,8 @@ struct Shot {
     modules: Option<Vec<String>>,
     /// A game being played, by its name, if one is.
     game: Option<String>,
-    /// The overlay, in the screen's top left corner, as opaque as this.
-    overlay: Option<f32>,
+    /// The overlay, in the screen's top left corner, in this style.
+    overlay: Option<crate::ui::overlay::Style>,
 }
 
 fn backdrop() -> String {
@@ -239,15 +239,15 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 // include the zoom).
                 let behind = desktop.bitmap(&frame.dc, px * zoom).ok();
                 let backdrop = behind.as_ref().map(|bitmap| (bitmap, Vector2 { X: rest.0 / zoom, Y: rest.1 / zoom }, desktop.digest));
-                let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
+                let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge: Some(edge), backdrop, frost };
                 let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + shift * travel * zoom, rest.1);
                 let _ = layers.draw(frame, &picture, local, px * zoom);
-                if let (Some(opacity), Some(sample)) = (shot.overlay, scene.history.last()) {
+                if let (Some(style), Some(sample)) = (shot.overlay, scene.history.last()) {
                     let items = crate::settings::OverlaySettings::default().items;
                     let lines = crate::ui::overlay::lines(sample, sample.game.as_ref(), sample.game.is_some(), &items, lang);
                     frame.place(Matrix3x2::translation(crate::ui::overlay::INSET, crate::ui::overlay::INSET));
                     frame.crisp_text();
-                    crate::ui::overlay::paint(frame, &lines, opacity, false, px);
+                    crate::ui::overlay::paint(frame, &lines, crate::ui::overlay::Plate::Grey, style, false, px);
                     frame.origin(0.0, 0.0);
                 }
                 unsafe { frame.dc.PopLayer() };

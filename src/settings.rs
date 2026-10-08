@@ -68,6 +68,17 @@ impl Shortcut {
     }
 }
 
+/// Where a pinned panel was moved to, away from the screen's edge: it
+/// stays there, pinned, until it is unpinned, Glance restarting too.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PanelAt {
+    /// How far across and down the room there is for it on its screen's
+    /// work area (0 at the left or top, 1 at the right or bottom).
+    pub at: (f32, f32),
+    /// A point on its screen (physical pixels).
+    pub screen: (i32, i32),
+}
+
 /// A few readings floating over the screen: all the time, or while a game
 /// is played (over the game) only.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -87,8 +98,10 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
-    /// How opaque its plate is, 0–1.
-    pub opacity: f32,
+    /// On a plate, or bare.
+    pub style: crate::ui::overlay::Style,
+    /// Its plate's colour.
+    pub plate: crate::ui::overlay::Plate,
     /// How large it is drawn, 1 as designed (0.75 to 2).
     pub size: f32,
     /// Offered once already: the first game told of it.
@@ -104,7 +117,8 @@ impl Default for OverlaySettings {
             at: (0.0, 0.0),
             screen: None,
             locked: false,
-            opacity: 0.85,
+            style: Default::default(),
+            plate: Default::default(),
             size: 1.0,
             offered: false,
         }
@@ -187,6 +201,8 @@ pub struct Settings {
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
     pub overlay: OverlaySettings,
+    /// See `PanelAt`; none while the panel opens from the edge.
+    pub panel_at: Option<PanelAt>,
     pub view: serde_json::Value,
 }
 
@@ -209,6 +225,7 @@ impl Default for Settings {
             heat_alert: false,
             last_version: None,
             overlay: OverlaySettings::default(),
+            panel_at: None,
             view: serde_json::Value::Null,
         }
     }

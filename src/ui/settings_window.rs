@@ -51,6 +51,7 @@ use super::backdrop::Capture;
 use super::canvas::{Align, Color, Family, Font};
 use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::motion::{Easing, Transition};
+use super::overlay::{Plate, Style};
 use super::prefs::{self, LanguagePref, Prefs, ProcessSort, ThemePref};
 use super::arrange::{self, GAP};
 use super::render::{self, PanelLayers};
@@ -360,9 +361,10 @@ enum Field {
     LoadAlert,
     TempAlert,
     /// Set on a slider (see `slider`).
-    OverlayOpacity,
     OverlaySize,
     PanelSize,
+    OverlayStyle,
+    OverlayPlate,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -401,7 +403,7 @@ enum Target {
     Module(String),
     Expand(String),
     /// One of a module's items.
-    Item(String, &'static str),
+    Item(String, String),
     Grip(String),
     /// The shortcut's keys: pressed, the next combination becomes them.
     Shortcut,
@@ -429,7 +431,7 @@ enum Row {
     Switch(Switch),
     Module(String),
     /// In a module's open card: one of its items, or a choice of its own.
-    Item(String, &'static str),
+    Item(String, String),
     ModuleChoice(String, Field),
     /// What the overlay shows: a chip for each reading.
     OverlayItems,
@@ -753,8 +755,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 fn put_slider(settings: &mut Settings, field: Field, value: f32) {
     match field {
         Field::PanelSize => settings.panel_size = value,
-        Field::OverlaySize => settings.overlay.size = value,
-        _ => settings.overlay.opacity = value,
+        _ => settings.overlay.size = value,
     }
 }
 
@@ -834,13 +835,14 @@ impl Ui {
                     }
                 }
             }
-            Page::Overlay => rows.extend([
-                Row::Switch(Switch::Overlay),
-                Row::Switch(Switch::OverlayInGame),
-                Row::Slider(Field::OverlaySize),
-                Row::Slider(Field::OverlayOpacity),
-                Row::OverlayItems,
-            ]),
+            Page::Overlay => {
+                rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Slider(Field::OverlaySize), Row::Choice(Field::OverlayStyle)]);
+                // A colour only for a plate.
+                if self.settings.overlay.style == Style::Plate {
+                    rows.push(Row::Choice(Field::OverlayPlate));
+                }
+                rows.push(Row::OverlayItems);
+            }
             Page::Data => rows.extend([
                 Row::Choice(Field::Interval),
                 Row::Choice(Field::Span),
@@ -1105,6 +1107,16 @@ impl Ui {
                 vec![s("左侧", "Left"), s("顶部", "Top"), s("右侧", "Right")],
                 [Edge::Left, Edge::Top, Edge::Right].iter().position(|&e| e == settings.edge),
             ),
+            Field::OverlayStyle => (
+                pick(lang, "样式", "Style"),
+                vec![s("实底", "On a plate"), s("无底板", "Bare")],
+                [Style::Plate, Style::Bare].iter().position(|&p| p == settings.overlay.style),
+            ),
+            Field::OverlayPlate => (
+                pick(lang, "背景颜色", "Background colour"),
+                vec![s("灰色", "Grey"), s("蓝色", "Blue")],
+                [Plate::Grey, Plate::Blue].iter().position(|&p| p == settings.overlay.plate),
+            ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
                 vec![s("鼠标处", "By the mouse"), s("边缘正中", "Centred")],
@@ -1151,7 +1163,7 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlayOpacity | Field::OverlaySize | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
+            Field::OverlaySize | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -1168,6 +1180,8 @@ impl Ui {
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
+            Field::OverlayStyle => settings.overlay.style = [Style::Plate, Style::Bare][index],
+            Field::OverlayPlate => settings.overlay.plate = [Plate::Grey, Plate::Blue][index],
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
@@ -1178,7 +1192,7 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlayOpacity | Field::OverlaySize | Field::PanelSize => {}
+            Field::OverlaySize | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -1246,8 +1260,7 @@ impl Ui {
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
             Field::PanelSize => (pick(lang, "面板大小", "Panel size"), sizes.0, sizes.1, 0.05, self.settings.panel_size.clamp(sizes.0, sizes.1)),
-            Field::OverlaySize => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
-            _ => (pick(lang, "背景不透明度", "Background opacity"), 0.0, 1.0, 0.05, overlay.opacity.clamp(0.0, 1.0)),
+            _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
     }
 
@@ -1444,7 +1457,7 @@ impl Ui {
 
     /// The items of module `id` this machine has shown it can read: only
     /// those are listed.
-    fn items_here(&self, id: &str) -> Vec<&'static str> {
+    fn items_here(&self, id: &str) -> Vec<String> {
         let app = crate::app();
         let seen = app.controller.seen.lock().unwrap();
         let info = &app.info;
@@ -1484,9 +1497,16 @@ impl Ui {
                 ("network", "link") => seen.link,
                 ("disk", "drives") => !seen.drives.is_empty(),
                 ("disk", "active") => seen.disk_active,
-                ("board", "temps") => seen.board.as_ref().is_some_and(|board| !board.temps.is_empty()),
-                ("board", "fans") => seen.board.as_ref().is_some_and(|board| !board.fans.is_empty()),
                 _ => true,
+            })
+            .flat_map(|name| match (id, name) {
+                // A switch for each sensor the board has shown.
+                ("board", "temps" | "fans") => {
+                    let board = seen.board.clone().unwrap_or_default();
+                    let sensors = if name == "temps" { board.temps } else { board.fans };
+                    sensors.into_iter().map(|sensor| format!("{name}:{sensor}")).collect()
+                }
+                _ => vec![name.to_string()],
             })
             .collect()
     }
@@ -1497,7 +1517,19 @@ impl Ui {
     }
 
     /// What an item of module `id` is called, and a word on it.
-    fn item_label(&self, id: &str, name: &str) -> (&'static str, Option<&'static str>) {
+    fn item_label(&self, id: &str, name: &str) -> (Cow<'static, str>, Option<&'static str>) {
+        match name.split_once(':') {
+            // One of the board's sensors, by its name on the panel.
+            Some((group, sensor)) => (Cow::Owned(super::view::board_sensor(sensor, group, self.lang)), None),
+            None => {
+                let (label, word) = self.module_item_label(id, name);
+                (Cow::Borrowed(label), word)
+            }
+        }
+    }
+
+    /// What one of the items every module of kind `id` has is called, and a word on it.
+    fn module_item_label(&self, id: &str, name: &str) -> (&'static str, Option<&'static str>) {
         let p = |zh, en| pick(self.lang, zh, en);
         match (id.split(':').next().unwrap_or(id), name) {
             ("network" | "disk", "chart") => (p("速率图表", "Rate chart"), None),
@@ -1515,8 +1547,6 @@ impl Ui {
             ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
-            ("board", "temps") => (p("温度传感器", "Temperature sensors"), None),
-            ("board", "fans") => (p("风扇", "Fans"), None),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),
             ("system", "threads") => (p("线程数", "Threads"), None),
@@ -1676,8 +1706,8 @@ impl Ui {
             }
             // An item is changed only while its module is on.
             Target::Item(id, name) if self.module_on(&id) => {
-                let on = self.prefs.shows(&id, name);
-                self.prefs.set_item(&id, name, !on);
+                let on = self.prefs.shows(&id, &name);
+                self.prefs.set_item(&id, &name, !on);
                 self.save();
             }
             Target::Item(..) => {}
@@ -2236,13 +2266,13 @@ impl Ui {
                     let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
                     fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
                     let active = self.module_on(&id);
-                    let (name_text, detail) = self.item_label(&id, name);
-                    let target = Target::Item(id.clone(), name);
+                    let (name_text, detail) = self.item_label(&id, &name);
+                    let target = Target::Item(id.clone(), name.clone());
                     let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
                     let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
-                    field_label_in(frame, colors, name_text, detail, label, hint, left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
+                    field_label_in(frame, colors, &name_text, detail, label, hint, left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
                     let pressed = self.pressed == Some(target.clone());
-                    let on = self.prefs.shows(&id, name);
+                    let on = self.prefs.shows(&id, &name);
                     self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
                     if active && usable {
                         self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
@@ -2496,7 +2526,7 @@ impl Ui {
         }
         frame.place(Matrix3x2::scale(size, size) * Matrix3x2::translation(x, y) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy));
         frame.crisp_text();
-        super::overlay::paint(frame, &lines, overlay.opacity, false, self.scale * k * size);
+        super::overlay::paint(frame, &lines, overlay.plate, overlay.style, false, self.scale * k * size);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
     }
@@ -2602,7 +2632,7 @@ impl Ui {
         }
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest));
-        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge: Some(edge), backdrop, frost };
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));

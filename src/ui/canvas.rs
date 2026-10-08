@@ -116,4 +116,8 @@ pub trait Canvas {
     fn stroke(&self, points: &[Point], color: Color, width: f32);
     /// The shape `points` outline, closed.
     fn fill_shape(&self, points: &[Point], fill: Fill);
+    /// What `paint` draws inside `size` DIPs from the origin, ringed by a
+    /// halo of `glow`: what is drawn, thickened a pixel and blurred by
+    /// `spread` DIPs.
+    fn glowing(&self, glow: Color, spread: f32, size: (f32, f32), paint: &dyn Fn(&dyn Canvas));
 }

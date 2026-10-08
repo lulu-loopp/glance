@@ -3,6 +3,8 @@
 //! look. What it shows and how it is drawn; its window is the panel
 //! thread's (see `crate::overlay`).
 
+use serde::{Deserialize, Serialize};
+
 use super::canvas::{Align, Canvas, Color, Family, Font};
 use super::text::{self, Lang};
 use crate::reading::{GameSample, Sample};
@@ -39,19 +41,51 @@ const RADIUS: f32 = 8.0;
 /// told apart by colour and weight.
 const LABEL: Font = Font::new(Family::Segoe, 13.0, 500.0);
 const VALUE: Font = Font::new(Family::Segoe, 13.0, 600.0);
-/// A cool, soft grey: lighter than black, so the plate reads as glass over
-/// a game rather than a hole in it.
-const PLATE: u32 = 0x1E2229;
-/// The plate while it is dragged.
-const DRAGGED: Color = Color::hex(0x1D4F91, 0.9);
+/// How the readings are set off from what is behind them.
+#[derive(Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Style {
+    /// On a plate, as opaque as it needs to be for them to read over any
+    /// picture (see `plate_opacity`).
+    #[default]
+    Plate,
+    /// On nothing: each in a dark halo of its own, as games' own readouts are.
+    Bare,
+}
+
+/// The plate's colour, as chosen.
+#[derive(Clone, Copy, Default, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Plate {
+    /// A cool, soft grey: lighter than black, so the plate reads as glass
+    /// over a game rather than a hole in it.
+    #[default]
+    Grey,
+    /// A deep blue.
+    Blue,
+}
+
+impl Plate {
+    fn rgb(self) -> u32 {
+        match self {
+            Plate::Grey => 0x1E2229,
+            Plate::Blue => 0x1D4F91,
+        }
+    }
+}
+
+/// While it is dragged, the plate is this much nearer white, and this opaque.
+const DRAGGED: (f32, f32) = (0.18, 0.9);
 const NAME: Color = Color::hex(0xFFFFFF, 0.74);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
 const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
 /// The contrast the readings keep over any picture (WCAG's for ordinary
-/// text); on a plate too clear to give it, they are outlined, in this.
+/// text).
 const LEGIBLE: f32 = 4.5;
-const OUTLINE: Color = Color::hex(0x000000, 0.85);
+/// Bare, each reading's halo: its colour, and how far it spreads (DIPs).
+const HALO: Color = Color::hex(0x000000, 0.85);
+const HALO_SPREAD: f32 = 0.5;
 /// A reading to heed (a muted microphone).
 const HOT: Color = Color::hex(0xFF9A8E, 1.0);
 
@@ -210,8 +244,8 @@ pub fn size(lines: &[Line], px: f32, measure: impl Fn(&str, Font) -> f32) -> (f3
 /// text can have (white and light text; the plate is dark). Blended as the
 /// desktop blends them, in sRGB values; compared as WCAG compares, by
 /// relative luminance.
-fn contrast_over_white(color: Color, opacity: f32) -> f32 {
-    let plate = Color::hex(PLATE, 1.0);
+fn contrast_over_white(color: Color, plate: Plate, opacity: f32) -> f32 {
+    let plate = Color::hex(plate.rgb(), 1.0);
     let over = |top: f32, alpha: f32, under: f32| alpha * top + (1.0 - alpha) * under;
     let linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
     let luminance = |r: f32, g: f32, b: f32| 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
@@ -222,34 +256,47 @@ fn contrast_over_white(color: Color, opacity: f32) -> f32 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
-/// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
-/// corner, at `px` physical pixels a DIP (each line put on a whole pixel,
-/// not smeared across two); `dragged`, on the plate that says it is being
-/// moved.
-pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px: f32) {
-    let snap = |at: f32| (at * px).round() / px;
+/// How opaque `plate` is: as clear as it can be with every colour the
+/// readings take still holding WCAG's contrast over any picture (a white
+/// screen being the worst); wholly opaque if even that is not enough.
+pub fn plate_opacity(plate: Plate) -> f32 {
+    (0..=100)
+        .map(|i| i as f32 / 100.0)
+        .find(|&opacity| [NAME, FIGURE, FRAMES, HOT].iter().all(|&color| contrast_over_white(color, plate, opacity) >= LEGIBLE))
+        .unwrap_or(1.0)
+}
+
+/// Draws `lines` from the canvas's corner, at `px` physical pixels a DIP
+/// (each line put on a whole pixel, not smeared across two), as `style`
+/// has them: on a plate of `plate`'s colour, or bare, each reading in a
+/// dark halo of its own. `dragged`, on the plate that says it is being
+/// moved: lighter than the plate, and there in either style.
+pub fn paint(frame: &dyn Canvas, lines: &[Line], plate: Plate, style: Style, dragged: bool, px: f32) {
     let (width, height) = size(lines, px, |text, font| frame.measure(text, font));
+    if dragged {
+        let c = Color::hex(plate.rgb(), DRAGGED.1);
+        let lift = |v: f32| v + (1.0 - v) * DRAGGED.0;
+        frame.fill_rounded(Color { r: lift(c.r), g: lift(c.g), b: lift(c.b), a: c.a }, 0.0, 0.0, width, height, RADIUS);
+    }
+    match style {
+        Style::Plate => {
+            if !dragged {
+                frame.fill_rounded(Color::hex(plate.rgb(), plate_opacity(plate)), 0.0, 0.0, width, height, RADIUS);
+            }
+            readings(frame, lines, width, px);
+        }
+        Style::Bare => frame.glowing(HALO, HALO_SPREAD, (width, height), &|frame| readings(frame, lines, width, px)),
+    }
+}
+
+/// The readings themselves, `width` DIPs wide.
+fn readings(frame: &dyn Canvas, lines: &[Line], width: f32, px: f32) {
+    let snap = |at: f32| (at * px).round() / px;
     let (pad, line) = pitch(px);
-    let plate = if dragged { DRAGGED } else { Color::hex(PLATE, opacity.clamp(0.0, 1.0)) };
-    frame.fill_rounded(plate, 0.0, 0.0, width, height, RADIUS);
     let label = lines.iter().map(|line| frame.measure(&line.name, LABEL)).fold(0.0, f32::max);
     // The two faces' baselines level.
     let (ascent_label, _) = frame.baseline(LABEL);
     let (ascent_value, descent_value) = frame.baseline(VALUE);
-    // On a plate too clear to set them off, the readings take an outline to
-    // read over any picture: a steady one, a physical pixel wide. A faint
-    // one, coming and going with what is behind, would only look unsteady.
-    let colors = lines.iter().flat_map(|line| [if line.name == "FPS" { FRAMES } else { NAME }, if line.hot { HOT } else { FIGURE }]);
-    let outline = (!dragged && { colors }.any(|color| contrast_over_white(color, opacity) < LEGIBLE)).then_some(OUTLINE);
-    let pixel = 1.0 / px;
-    let outlined = |text: &str, font: Font, color: Color, x: f32, y: f32, room: f32| {
-        if let Some(outline) = outline {
-            for (dx, dy) in [(-pixel, 0.0), (pixel, 0.0), (0.0, -pixel), (0.0, pixel)] {
-                frame.text(text, font, outline, x + dx, y + dy, room, Align::Start);
-            }
-        }
-        frame.text(text, font, color, x, y, room, Align::Start);
-    };
     for (i, Line { name, value, hot, .. }) in lines.iter().enumerate() {
         // The value's line box centred in its line, as tall as the face
         // makes it (more than its size).
@@ -257,8 +304,8 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px
         // Each face's baseline on a whole pixel.
         let (label_top, value_top) = (snap(y + ascent_value) - ascent_label, snap(y + ascent_value) - ascent_value);
         let color = if name == "FPS" { FRAMES } else { NAME };
-        outlined(name, LABEL, color, snap(PAD.0), label_top, label);
-        outlined(value, VALUE, if *hot { HOT } else { FIGURE }, snap(PAD.0 + label + LABEL_GAP), value_top, width);
+        frame.text(name, LABEL, color, snap(PAD.0), label_top, label, Align::Start);
+        frame.text(value, VALUE, if *hot { HOT } else { FIGURE }, snap(PAD.0 + label + LABEL_GAP), value_top, width, Align::Start);
     }
 }
 
@@ -268,13 +315,17 @@ mod tests {
     use crate::reading::{MemorySample, SystemSample};
 
     #[test]
-    fn outlined_on_a_plate_too_clear_for_the_text() {
-        // The least opacity at which each colour keeps its contrast over white.
-        let least = |color: Color| (0..=100).map(|i| i as f32 / 100.0).find(|&a| contrast_over_white(color, a) >= LEGIBLE).unwrap_or(f32::INFINITY);
-        let all = [least(NAME), least(FIGURE), least(FRAMES), least(HOT)];
-        // As opaque as by default, the readings need no outline; half
-        // clear, they do.
-        assert!(all.iter().all(|&a| a > 0.5 && a <= 0.85), "{all:?}");
+    fn a_plate_as_opaque_as_the_readings_need() {
+        for plate in [Plate::Grey, Plate::Blue] {
+            let opacity = plate_opacity(plate);
+            // Every colour holds its contrast over white at that opacity
+            // (or the plate is wholly opaque); a step clearer, one does not.
+            let holds = |opacity: f32| [NAME, FIGURE, FRAMES, HOT].iter().all(|&c| contrast_over_white(c, plate, opacity) >= LEGIBLE);
+            assert!(holds(opacity) || opacity == 1.0, "{plate:?} {opacity}");
+            assert!(!holds(opacity - 0.01), "{plate:?} {opacity}");
+        }
+        // The grey plate lets a little through.
+        assert!(plate_opacity(Plate::Grey) < 0.9);
     }
 
     fn sample(game: bool) -> Sample {

@@ -65,7 +65,8 @@ pub fn frost(mean: f32, spread: f32, dark: bool) -> f32 {
 /// What the surface is drawn over and around.
 pub struct Ground<'a> {
     pub theme: &'a Theme,
-    pub edge: Edge,
+    /// The screen edge it is against; none for a panel moved away from it.
+    pub edge: Option<Edge>,
     /// The panel's size (DIPs).
     pub size: (f32, f32),
     /// Each lane's box and the bar's, from the panel's corner.
@@ -253,15 +254,17 @@ fn saturated(frame: &Frame, input: &ID2D1Effect, amount: f32) -> Result<ID2D1Eff
 }
 
 /// 记录纸: one slab flush with the screen edge, rounded only where it is
-/// free: its corners on the attached side lie beyond the edge.
+/// free: its corners on the attached side lie beyond the edge. Moved away
+/// from the edge, it is free all round.
 fn paper(frame: &Frame, ground: &Ground) -> Result<()> {
     let theme = ground.theme;
     let (w, h) = ground.size;
     let radius = theme.radius;
     let slab = match ground.edge {
-        Edge::Left => Rect { x: -radius, y: 0.0, w: w + radius, h },
-        Edge::Right => Rect { x: 0.0, y: 0.0, w: w + radius, h },
-        Edge::Top => Rect { x: 0.0, y: -radius, w, h: h + radius },
+        Some(Edge::Left) => Rect { x: -radius, y: 0.0, w: w + radius, h },
+        Some(Edge::Right) => Rect { x: 0.0, y: 0.0, w: w + radius, h },
+        Some(Edge::Top) => Rect { x: 0.0, y: -radius, w, h: h + radius },
+        None => Rect { x: 0.0, y: 0.0, w, h },
     };
     shadows(frame, &[(slab, radius)], &theme.shadows)?;
     unsafe {

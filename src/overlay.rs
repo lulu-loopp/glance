@@ -44,8 +44,8 @@ pub struct Overlay {
     /// Its screen's scale, and the size it is drawn at (1 as designed).
     dpi: f32,
     size: f32,
-    /// What it shows, and how opaque: drawn again as it is dragged.
-    drawn: (Vec<overlay::Line>, f32),
+    /// What it shows, on what colour, in what style: drawn again as it is dragged.
+    drawn: (Vec<overlay::Line>, overlay::Plate, overlay::Style),
     /// Being dragged by the pointer: to move it, or by its edges, to size it.
     grab: Option<Grab>,
     /// The screen of the game played, kept while it presents no frames
@@ -115,6 +115,13 @@ fn room(screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
     (screen.left + inset, screen.top + inset, across, down)
 }
 
+/// Whether the primary button is down (the left one, or the right where
+/// they are swapped): the one a drag is made with.
+pub fn primary_down() -> bool {
+    let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+    (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
+}
+
 fn cursor() -> Option<POINT> {
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| cursor)
@@ -142,7 +149,7 @@ impl Overlay {
             rect: RECT::default(),
             dpi: 1.0,
             size: 1.0,
-            drawn: (Vec::new(), 1.0),
+            drawn: (Vec::new(), overlay::Plate::Grey, overlay::Style::Plate),
             grab: None,
             game_screen: None,
             beneath: None,
@@ -163,7 +170,7 @@ impl Overlay {
         if lines.is_empty() {
             return self.hide();
         }
-        self.drawn = (lines, settings.opacity);
+        self.drawn = (lines, settings.plate, settings.style);
         // Held as the pointer has it while it is dragged.
         if self.grab.is_some() {
             let (width, height) = self.dims();
@@ -213,13 +220,13 @@ impl Overlay {
         // Placed above all again each time (a game may have taken the top),
         // but for the open panel.
         self.window.place_under(self.rect, self.beneath);
-        let (lines, opacity, scale) = (&self.drawn.0, self.drawn.1, self.dpi * self.size);
+        let (lines, plate, style, scale) = (&self.drawn.0, self.drawn.1, self.drawn.2, self.dpi * self.size);
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let dragged = self.grab.is_some();
         let surface = self.surface.as_mut().unwrap();
         let painted = surface.draw(&self.gfx, size, scale, |frame| {
             frame.crisp_text();
-            overlay::paint(frame, lines, opacity, dragged, scale);
+            overlay::paint(frame, lines, plate, style, dragged, scale);
         });
         if painted.is_err() {
             // Made again on a new device at the next sample.
@@ -266,11 +273,9 @@ impl Overlay {
         self.draw();
     }
 
-    /// Whether the button it is dragged by is still down (the left one, or
-    /// the right where they are swapped).
+    /// Whether the button it is dragged by is still down.
     pub fn held(&self) -> bool {
-        let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
-        self.grab.is_some() && unsafe { GetAsyncKeyState(button.0 as i32) } < 0
+        self.grab.is_some() && primary_down()
     }
 
     /// The pointer moved over it, or while it is dragged: it moves, or grows
