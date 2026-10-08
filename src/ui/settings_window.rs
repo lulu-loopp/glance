@@ -89,9 +89,6 @@ const ROW_SIDE: f32 = 20.0;
 const ROW_GAP: f32 = 4.0;
 /// The line of its own a row of choices with a word on it takes below.
 const CHOICE_LINE: f32 = 40.0;
-/// A drop-down list's box, and an option in its list.
-const DROPDOWN_WIDTH: f32 = 168.0;
-const MENU_ITEM: f32 = 36.0;
 /// A slider's track, the room for its value, and its thumb's radius.
 const SLIDER_WIDTH: f32 = 200.0;
 const SLIDER_VALUE: f32 = 44.0;
@@ -135,13 +132,6 @@ const COPIED_FOR: Duration = Duration::from_secs(2);
 
 /// The window, while it is open.
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
-/// For a comparison (to go once one is chosen): choices on drop-down
-/// lists rather than in segmented rows.
-static DROPDOWNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn dropdowns() -> bool {
-    DROPDOWNS.load(Ordering::Relaxed)
-}
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -356,8 +346,6 @@ impl Page {
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
-    /// For the comparison: segmented rows, or drop-down lists.
-    ChoiceStyle,
     Theme,
     Language,
     Edge,
@@ -425,8 +413,6 @@ enum Target {
     OverlayItem(&'static str),
     /// A slider's track.
     Slider(Field),
-    /// A drop-down list's box: opens its list.
-    Drop(Field),
     /// A page, in the pages' list.
     Page(Page),
     /// Asks for a newer release now.
@@ -517,9 +503,6 @@ struct Ui {
     drag: Option<Drag>,
     /// A slider being slid, and where its track is.
     sliding: Option<(Field, Rect)>,
-    /// A drop-down list open, under its box; and where its options are.
-    menu: Option<(Field, Rect)>,
-    menu_targets: Vec<(Rect, Target)>,
     /// The modules whose cards are open (all closed as the window opens).
     expanded: HashSet<String>,
     targets: Vec<(Rect, Target)>,
@@ -616,8 +599,6 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             keyboard: false,
             drag: None,
             sliding: None,
-            menu: None,
-            menu_targets: Vec::new(),
             expanded: HashSet::new(),
             targets: Vec::new(),
             relabel_at: None,
@@ -799,7 +780,7 @@ impl Ui {
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Title];
         match self.page {
-            Page::Appearance => rows.extend([Row::Choice(Field::ChoiceStyle), Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
+            Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
             Page::Opening => rows.extend([
                 Row::Choice(Field::Edge),
                 Row::Choice(Field::Anchor),
@@ -851,7 +832,6 @@ impl Ui {
 
     /// Shows page `page`, from its top.
     fn turn_to(&mut self, page: Page) {
-        self.menu = None;
         if page != self.page {
             self.page = page;
             self.scroll = 0.0;
@@ -948,11 +928,8 @@ impl Ui {
         22.0 + self.gfx.wrapped_height(&word, Font::new(Family::Segoe, 12.0, 400.0), room.max(40.0)) + 18.0
     }
 
-    /// How wide a row of choices is (a drop-down list, as wide as all).
+    /// How wide a row of choices is.
     fn segmented_width(&self, options: &[String]) -> f32 {
-        if dropdowns() {
-            return DROPDOWN_WIDTH;
-        }
         let font = Font::new(Family::Segoe, 13.0, 400.0);
         options.iter().map(|o| (self.gfx.measure(o, font) + 24.0).max(44.0)).sum::<f32>() + 4.0
     }
@@ -961,9 +938,6 @@ impl Ui {
     /// its name: when beside it, it would leave the word too narrow a column
     /// to read (a few characters to a line).
     fn stacked(&self, options: &[String]) -> bool {
-        if dropdowns() {
-            return false;
-        }
         let width = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
         width - self.segmented_width(options) - 16.0 < MIN_WORDS
     }
@@ -1082,11 +1056,6 @@ impl Ui {
         let (settings, prefs) = (&self.settings, &self.prefs);
         let at = |values: &[u64], value: u64| values.iter().position(|&v| v == value);
         match field {
-            Field::ChoiceStyle => (
-                pick(lang, "选项样式（对比用）", "Choices (comparison)"),
-                vec![s("分段", "Segmented"), s("下拉", "Drop-down")],
-                Some(dropdowns() as usize),
-            ),
             Field::Theme => (
                 pick(lang, "明暗", "Theme"),
                 vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Backdrop")],
@@ -1159,15 +1128,8 @@ impl Ui {
     }
 
     fn choose(&mut self, field: Field, index: usize) {
-        if field == Field::ChoiceStyle {
-            DROPDOWNS.store(index == 1, Ordering::Relaxed);
-            self.menu = None;
-            self.next_frame = Instant::now();
-            return;
-        }
         let (settings, prefs) = (&mut self.settings, &mut self.prefs);
         match field {
-            Field::ChoiceStyle => {}
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
@@ -1538,9 +1500,6 @@ impl Ui {
 
     fn hovered(&self) -> Option<Target> {
         let (x, y) = self.pointer?;
-        if self.menu.is_some() {
-            return self.menu_targets.iter().find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|(_, t)| t.clone());
-        }
         self.targets.iter().find(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h).map(|(_, t)| t.clone())
     }
 
@@ -1559,12 +1518,6 @@ impl Ui {
     fn press(&mut self, x: f32, y: f32) {
         self.pointer = Some((x, y));
         self.pressed = self.hovered();
-        // Open, a list takes the press on its options; one elsewhere closes it.
-        if self.menu.is_some() && self.pressed.is_none() {
-            self.menu = None;
-            self.next_frame = Instant::now();
-            return;
-        }
         // A press anywhere else gives up taking a new shortcut.
         if self.recording && !matches!(self.pressed, Some(Target::Shortcut | Target::ClearShortcut)) {
             self.record(false);
@@ -1644,14 +1597,7 @@ impl Ui {
                 .into();
                 self.save();
             }
-            Target::Choice(field, index) => {
-                self.menu = None;
-                self.choose(field, index);
-            }
-            Target::Drop(field) => {
-                let open = self.menu.is_some_and(|(open, _)| open == field);
-                self.menu = if open { None } else { self.targets.iter().find(|(_, t)| *t == Target::Drop(field)).map(|(r, _)| (field, *r)) };
-            }
+            Target::Choice(field, index) => self.choose(field, index),
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
@@ -1725,7 +1671,6 @@ impl Ui {
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
-                Row::Choice(field) if dropdowns() => vec![Target::Drop(field)],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
@@ -1738,7 +1683,6 @@ impl Ui {
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
-                Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) && dropdowns() => vec![Target::Drop(field)],
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
@@ -1781,11 +1725,9 @@ impl Ui {
                 self.focus = Some(stops[next].clone());
                 self.reveal_focus();
             }
-            VK_ESCAPE if self.menu.is_some() => self.menu = None,
             VK_ESCAPE => unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             },
-            VK_RETURN if self.menu.is_some() => self.menu = None,
             // Holding the key presses once.
             VK_SPACE | VK_RETURN if repeat => {}
             VK_SPACE | VK_RETURN => {
@@ -1797,14 +1739,6 @@ impl Ui {
                 let forward = key == VK_RIGHT || key == VK_DOWN;
                 match self.focus.clone() {
                     Some(Target::Module(id) | Target::Expand(id)) if moves_module => self.shift_module(&id, forward),
-                    Some(Target::Drop(field)) => {
-                        let (_, options, chosen) = self.choices(field);
-                        let index = chosen.unwrap_or(0);
-                        let next = if forward { (index + 1).min(options.len() - 1) } else { index.saturating_sub(1) };
-                        if next != index {
-                            self.choose(field, next);
-                        }
-                    }
                     Some(Target::Slider(field)) => {
                         let (_, min, max, step, value) = self.slider(field);
                         let next = (value + if forward { step } else { -step }).clamp(min, max);
@@ -1873,7 +1807,6 @@ impl Ui {
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Slider(f), Target::Slider(g)) => f == g,
-            (Row::Choice(f) | Row::ModuleChoice(_, f), Target::Drop(g)) => f == g,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
             (Row::Item(m, a), Target::Item(n, b)) => m == n && a == b,
             (Row::ModuleChoice(_, f), Target::Choice(g, _)) => f == g,
@@ -1891,7 +1824,6 @@ impl Ui {
     }
 
     fn wheel(&mut self, delta: i16) {
-        self.menu = None;
         let Some((x, _)) = self.pointer else { return };
         if !(NAV..NAV + PANE).contains(&x) {
             return;
@@ -2044,7 +1976,6 @@ impl Ui {
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, PANE, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         self.paint_list(frame, &palette, now, height);
         unsafe { frame.dc.PopAxisAlignedClip() };
-        self.paint_menu(frame, &palette, height);
         self.paint_preview(frame, &palette, width, height)
     }
 
@@ -2409,65 +2340,11 @@ impl Ui {
         rect.x
     }
 
-    /// A drop-down list's box, as Windows 11 draws one: the option chosen,
-    /// and a chevron, right-aligned at `right` and centred on `cy`; unless
-    /// `enabled`, dimmed and not to be pressed.
-    #[allow(clippy::too_many_arguments)]
-    fn dropdown(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, hovered: &Option<Target>) {
-        let font = Font::new(Family::Segoe, 13.0, 400.0);
-        let r = Rect { x: right - DROPDOWN_WIDTH, y: cy - 16.0, w: DROPDOWN_WIDTH, h: 32.0 };
-        let target = Target::Drop(field);
-        let lit = enabled && (*hovered == Some(target.clone()) || self.menu.is_some_and(|(open, _)| open == field));
-        fill(frame, if lit { palette.control_on.alpha(0.9) } else { palette.control_on }, r.x, r.y, r.w, r.h, 4.0);
-        stroke_inside(frame, r, 4.0, palette.control_ring);
-        let color = if enabled { palette.text } else { palette.text3 };
-        let text = chosen.and_then(|i| options.get(i)).map_or("", String::as_str);
-        text_centred(frame, text, font, color, r.x + 12.0, cy, r.w - 44.0, Align::Start);
-        let chevron = Font::new(Family::Icons, 12.0, 400.0);
-        text_centred(frame, "\u{E70D}", chevron, if enabled { palette.text2 } else { palette.text3 }, r.x + r.w - 28.0, cy, 20.0, Align::Start);
-        if enabled {
-            self.targets.push((r, target));
-        }
-    }
-
-    /// The open list, under its box (over it, if the window has no room
-    /// below): every option, the chosen one marked in the accent.
-    fn paint_menu(&mut self, frame: &Frame, palette: &Palette, height: f32) {
-        self.menu_targets.clear();
-        let Some((field, anchor)) = self.menu else { return };
-        let (_, options, chosen) = self.choices(field);
-        let font = Font::new(Family::Segoe, 13.0, 400.0);
-        let list = options.len() as f32 * MENU_ITEM + 8.0;
-        let below = anchor.y + anchor.h + 4.0;
-        let top = if below + list <= height - 8.0 { below } else { (anchor.y - 4.0 - list).max(8.0) };
-        let r = Rect { x: anchor.x, y: top, w: anchor.w, h: list };
-        let _ = skins::shadows(frame, &[(r, 8.0)], &[Shadow { y: 8.0, blur: 24.0, spread: 0.0, color: Color::hex(0, 0.18) }]);
-        fill(frame, palette.window, r.x, r.y, r.w, r.h, 8.0);
-        stroke_inside(frame, r, 8.0, palette.card_stroke);
-        let hovered = self.hovered();
-        for (i, option) in options.iter().enumerate() {
-            let item = Rect { x: r.x + 4.0, y: r.y + 4.0 + i as f32 * MENU_ITEM, w: r.w - 8.0, h: MENU_ITEM };
-            let target = Target::Choice(field, i);
-            let is_chosen = chosen == Some(i);
-            if is_chosen || hovered == Some(target.clone()) {
-                fill(frame, palette.hover, item.x, item.y, item.w, item.h, 4.0);
-            }
-            if is_chosen {
-                fill(frame, palette.selection, item.x, item.y + 10.0, 3.0, item.h - 20.0, 1.5);
-            }
-            text_centred(frame, option, font, palette.text, item.x + 12.0, item.y + item.h / 2.0, item.w - 16.0, Align::Start);
-            self.menu_targets.push((item, target));
-        }
-    }
-
     /// A row of options with one thumb that slides under the chosen one,
     /// right-aligned at `right` and centred on `cy`; unless `enabled`, dimmed
-    /// and not to be pressed. (For the comparison: a drop-down list instead.)
+    /// and not to be pressed.
     #[allow(clippy::too_many_arguments)]
     fn segmented(&mut self, frame: &Frame, palette: &Palette, field: Field, options: &[String], chosen: Option<usize>, enabled: bool, right: f32, cy: f32, now: Instant, hovered: &Option<Target>) {
-        if dropdowns() {
-            return self.dropdown(frame, palette, field, options, chosen, enabled, right, cy, hovered);
-        }
         let font = Font::new(Family::Segoe, 13.0, 400.0);
         let widths: Vec<f32> = options.iter().map(|o| (frame.gfx.measure(o, font) + 24.0).max(44.0)).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
