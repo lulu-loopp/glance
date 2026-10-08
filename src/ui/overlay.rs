@@ -48,11 +48,12 @@ const NAME: Color = Color::hex(0xFFFFFF, 0.74);
 const FIGURE: Color = Color::hex(0xFFFFFF, 1.0);
 /// The frame rate's name, set off from the rest.
 const FRAMES: Color = Color::hex(0x8FE3A4, 1.0);
-/// Readings are outlined on a plate less opaque than this, in this.
-const OUTLINED_BELOW: f32 = 0.35;
+/// The contrast the readings keep over any picture (WCAG's for ordinary
+/// text); on a plate too clear to give it, they are outlined, in this.
+const LEGIBLE: f32 = 4.5;
 const OUTLINE: Color = Color::hex(0x000000, 0.85);
 /// A reading to heed (a muted microphone).
-const HOT: Color = Color::hex(0xFF7B6B, 1.0);
+const HOT: Color = Color::hex(0xFF9A8E, 1.0);
 
 /// One line of the overlay: a name, its value, whether the value is to be
 /// heeded, and for each of the value's parts, the widest it can be written
@@ -204,6 +205,23 @@ pub fn size(lines: &[Line], px: f32, measure: impl Fn(&str, Font) -> f32) -> (f3
     (((2.0 * PAD.0 + label + LABEL_GAP + value) * px).ceil() / px, 2.0 * pad + lines.len() as f32 * line)
 }
 
+/// The contrast of text in `color` on the plate at `opacity`, both over a
+/// white screen: the brightest picture behind, and so the least contrast the
+/// text can have (white and light text; the plate is dark). Blended as the
+/// desktop blends them, in sRGB values; compared as WCAG compares, by
+/// relative luminance.
+fn contrast_over_white(color: Color, opacity: f32) -> f32 {
+    let plate = Color::hex(PLATE, 1.0);
+    let over = |top: f32, alpha: f32, under: f32| alpha * top + (1.0 - alpha) * under;
+    let linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let luminance = |r: f32, g: f32, b: f32| 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    let opacity = opacity.clamp(0.0, 1.0);
+    let ground = (over(plate.r, opacity, 1.0), over(plate.g, opacity, 1.0), over(plate.b, opacity, 1.0));
+    let text = (over(color.r, color.a, ground.0), over(color.g, color.a, ground.1), over(color.b, color.a, ground.2));
+    let (a, b) = (luminance(ground.0, ground.1, ground.2), luminance(text.0, text.1, text.2));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 /// Draws `lines` on their plate, `opacity` opaque (0–1), from the canvas's
 /// corner, at `px` physical pixels a DIP (each line put on a whole pixel,
 /// not smeared across two); `dragged`, on the plate that says it is being
@@ -221,7 +239,8 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px
     // On a plate too clear to set them off, the readings take an outline to
     // read over any picture: a steady one, a physical pixel wide. A faint
     // one, coming and going with what is behind, would only look unsteady.
-    let outline = (!dragged && opacity < OUTLINED_BELOW).then_some(OUTLINE);
+    let colors = lines.iter().flat_map(|line| [if line.name == "FPS" { FRAMES } else { NAME }, if line.hot { HOT } else { FIGURE }]);
+    let outline = (!dragged && { colors }.any(|color| contrast_over_white(color, opacity) < LEGIBLE)).then_some(OUTLINE);
     let pixel = 1.0 / px;
     let outlined = |text: &str, font: Font, color: Color, x: f32, y: f32, room: f32| {
         if let Some(outline) = outline {
@@ -247,6 +266,16 @@ pub fn paint(frame: &dyn Canvas, lines: &[Line], opacity: f32, dragged: bool, px
 mod tests {
     use super::*;
     use crate::reading::{MemorySample, SystemSample};
+
+    #[test]
+    fn outlined_on_a_plate_too_clear_for_the_text() {
+        // The least opacity at which each colour keeps its contrast over white.
+        let least = |color: Color| (0..=100).map(|i| i as f32 / 100.0).find(|&a| contrast_over_white(color, a) >= LEGIBLE).unwrap_or(f32::INFINITY);
+        let all = [least(NAME), least(FIGURE), least(FRAMES), least(HOT)];
+        // As opaque as by default, the readings need no outline; half
+        // clear, they do.
+        assert!(all.iter().all(|&a| a > 0.5 && a <= 0.85), "{all:?}");
+    }
 
     fn sample(game: bool) -> Sample {
         Sample {
