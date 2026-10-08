@@ -100,27 +100,22 @@ pub(crate) fn app() -> &'static App {
 
 #[cfg(windows)]
 impl App {
-    /// Takes new settings: the panel follows them at once, and they are kept
-    /// for next time.
-    pub fn save(&self, settings: Settings) {
-        self.change(|held| *held = settings);
-    }
-
     /// Changes the settings where they are held, under their lock, so that
     /// changes made at once in several places (the panel, the overlay, the
     /// settings window) all stand; keeps them; and only then has the panel,
     /// the settings window and the tray follow, so that they read them as
     /// changed.
     pub fn change(&self, change: impl FnOnce(&mut Settings)) {
-        let settings = {
+        {
             let mut held = self.settings.lock().unwrap();
             change(&mut held);
             if let Err(error) = held.save(&self.config) {
                 journal::note(format!("could not save settings: {error}"));
             }
-            held.clone()
-        };
-        self.controller.apply(&settings);
+            // Still under the lock: two changes at once reach the panel in
+            // the order they were made, the later last.
+            self.controller.apply(&held);
+        }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
     }

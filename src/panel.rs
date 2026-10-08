@@ -228,17 +228,20 @@ impl Controller {
                 std::thread::spawn(move || crate::app().offer_overlay(&name));
             }
         }
+        let keep = self.config.lock().unwrap().history;
+        {
+            let mut history = self.history.lock().unwrap();
+            while history.len() >= keep {
+                history.pop_front();
+            }
+            history.push_back(sample);
+        }
+        // Told once the sample is there to be drawn.
         if started || ended {
             // The bar's overlay button is lit while the overlay is up.
             self.post(RESTYLE);
         }
         self.post(OVERLAY);
-        let keep = self.config.lock().unwrap().history;
-        let mut history = self.history.lock().unwrap();
-        while history.len() >= keep {
-            history.pop_front();
-        }
-        history.push_back(sample);
     }
 
     pub fn is_shown(&self) -> bool {
@@ -485,9 +488,14 @@ impl Controller {
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().moved(),
-                // Let go, or the capture taken away mid-drag (the lock
-                // screen, another program): it stays where it was put.
-                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                // Followed while dragged, wherever the pointer is.
+                WM_TIMER if msg.wParam.0 == crate::overlay::FOLLOW_TIMER && overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd && o.held()) => {
+                    overlay.as_mut().unwrap().moved()
+                }
+                // Let go (where the overlay may not hear of it), or the
+                // capture taken away mid-drag (the lock screen, another
+                // program): it stays where it was put.
+                WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
                     if let Some(placed) = overlay.as_mut().unwrap().release() {
                         std::thread::spawn(move || crate::app().place_overlay(placed));
                     }

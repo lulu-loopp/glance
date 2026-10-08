@@ -267,9 +267,62 @@ impl Settings {
     }
 }
 
+/// `held` (the settings as they are now) with what `mine` changed from
+/// `base` (as they were when `mine` was taken from them): a change made
+/// elsewhere meanwhile stands unless `mine` changed the same setting.
+/// Compared setting by setting, down to each preference in `view`.
+pub fn merged(held: &Settings, base: &Settings, mine: &Settings) -> Settings {
+    fn merge(held: &mut serde_json::Value, base: &serde_json::Value, mine: &serde_json::Value) {
+        use serde_json::Value;
+        match (held, base, mine) {
+            (Value::Object(held), Value::Object(base), Value::Object(mine)) => {
+                for (key, value) in mine {
+                    match (held.get_mut(key), base.get(key)) {
+                        (Some(held), Some(base)) => merge(held, base, value),
+                        (_, Some(base)) if base == value => {}
+                        _ => {
+                            held.insert(key.clone(), value.clone());
+                        }
+                    }
+                }
+                // Taken out by `mine`.
+                for key in base.keys().filter(|key| !mine.contains_key(*key)) {
+                    held.remove(key);
+                }
+            }
+            (held, base, mine) => {
+                if base != mine {
+                    *held = mine.clone();
+                }
+            }
+        }
+    }
+    let mut value = serde_json::to_value(held).unwrap();
+    merge(&mut value, &serde_json::to_value(base).unwrap(), &serde_json::to_value(mine).unwrap());
+    serde_json::from_value(value).expect("settings merged from settings")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_made_elsewhere_stands() {
+        let base = Settings::default();
+        // The overlay moved from the overlay, a preference changed from the
+        // panel, while the settings window, from `base`, changed the size.
+        let mut held = base.clone();
+        held.overlay.at = (0.25, 0.75);
+        held.view = serde_json::json!({ "language": "zh" });
+        let mut mine = base.clone();
+        mine.panel_size = 1.5;
+        let merged = merged(&held, &base, &mine);
+        assert_eq!((merged.overlay.at, merged.panel_size), ((0.25, 0.75), 1.5));
+        assert_eq!(merged.view["language"], "zh");
+        // The same setting changed in both: the window's, made last, stands.
+        mine.overlay.at = (1.0, 0.0);
+        assert_eq!(super::merged(&held, &base, &mine).overlay.at, (1.0, 0.0));
+    }
 
     #[test]
     fn takes_only_shortcuts_that_leave_typing_alone() {

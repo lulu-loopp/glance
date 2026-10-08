@@ -177,10 +177,8 @@ pub fn follow_settings() {
         if ui.sliding.is_some() {
             return;
         }
-        let app = crate::app();
-        let settings = app.settings.lock().unwrap().clone();
-        ui.prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
-        ui.settings = settings;
+        let settings = crate::app().settings.lock().unwrap().clone();
+        ui.take(settings);
         ui.next_frame = Instant::now();
     });
 }
@@ -471,6 +469,9 @@ struct Ui {
     /// Physical pixels per DIP.
     scale: f32,
     settings: Settings,
+    /// The settings as this window last took them: what it changed since
+    /// is where `settings` differs.
+    base: Settings,
     prefs: Prefs,
     /// The page shown.
     page: Page,
@@ -579,6 +580,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             lang: Lang::resolve(prefs.language),
             dark: false,
             palette: Palette::new(false),
+            base: settings.clone(),
             settings,
             prefs,
             page: Page::Appearance,
@@ -787,11 +789,26 @@ impl Ui {
         self.restyle();
     }
 
-    /// Keeps the settings and hands them to the panel.
+    /// Keeps what was changed here and hands it to the panel: only that,
+    /// over the settings as they are now (changed elsewhere meanwhile,
+    /// perhaps, before this window followed).
     fn save(&mut self) {
         self.settings.view = serde_json::to_value(&self.prefs).unwrap();
-        crate::app().save(self.settings.clone());
+        let app = crate::app();
+        let mut now = None;
+        app.change(|held| {
+            *held = crate::settings::merged(held, &self.base, &self.settings);
+            now = Some(held.clone());
+        });
+        self.take(now.unwrap());
         self.next_frame = Instant::now();
+    }
+
+    /// Takes `settings`, as they are now, as its own.
+    fn take(&mut self, settings: Settings) {
+        self.prefs = Prefs::resolve(&settings.view, &crate::app().controller.known_modules());
+        self.base = settings.clone();
+        self.settings = settings;
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -1252,7 +1269,12 @@ impl Ui {
     /// while it slid (the overlay placed, a game's offer made) stand.
     fn keep_slider(&mut self, field: Field) {
         let value = self.slider(field).4;
-        crate::app().change(|held| put_slider(held, field, value));
+        let mut now = None;
+        crate::app().change(|held| {
+            put_slider(held, field, value);
+            now = Some(held.clone());
+        });
+        self.take(now.unwrap());
         self.next_frame = Instant::now();
     }
 

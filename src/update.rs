@@ -211,16 +211,15 @@ pub fn watch() {
 pub fn tell_if_updated() {
     let app = crate::app();
     let version = env!("CARGO_PKG_VERSION");
-    let mut settings = app.settings.lock().unwrap().clone();
-    let updated = match settings.last_version.as_deref() {
+    let last = app.settings.lock().unwrap().last_version.clone();
+    let updated = match last.as_deref() {
         Some(last) => newer(version, last),
         None => crate::settings::saved(&app.config),
     };
-    if settings.last_version.as_deref() == Some(version) {
+    if last.as_deref() == Some(version) {
         return;
     }
-    settings.last_version = Some(version.to_string());
-    app.save(settings);
+    app.change(|settings| settings.last_version = Some(version.to_string()));
     if updated {
         let (title, text) = match language() {
             Lang::Zh => (format!("Glance 已更新到 {version}"), "设置都已保留。".to_string()),

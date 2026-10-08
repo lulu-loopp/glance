@@ -10,10 +10,10 @@ use windows::core::{HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, LoadCursorW, PostMessageW, SetCursor, SetForegroundWindow,
-    TrackPopupMenuEx, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, GetSystemMetrics, KillTimer, LoadCursorW, PostMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, TrackPopupMenuEx, SM_SWAPBUTTON, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
 };
 
 use crate::reading::Sample;
@@ -82,6 +82,12 @@ impl Edges {
 /// How near its edge the pointer sizes it rather than moves it (DIPs).
 const EDGE: f32 = 6.0;
 
+/// While it is dragged, the pointer is followed this often (ms) by a timer
+/// of this id: never in front, the overlay is told of the pointer only
+/// while it is over it, and a quick drag leaves it.
+pub const FOLLOW_TIMER: usize = 1;
+const FOLLOW_MS: u32 = 8;
+
 /// Where it is moved to, and how large it is, as a drag left it.
 pub struct Placed {
     /// See `OverlaySettings::at`.
@@ -118,7 +124,14 @@ impl Overlay {
     pub fn new() -> windows::core::Result<Self> {
         let gfx = gfx::current()?;
         let window = Window::new()?;
-        let surface = Some(Surface::new(&gfx, window.hwnd)?);
+        let surface = match Surface::new(&gfx, window.hwnd) {
+            Ok(surface) => Some(surface),
+            Err(error) => {
+                // Tried again at the next sample, with a window of its own.
+                window.destroy();
+                return Err(error);
+            }
+        };
         Ok(Overlay {
             gfx,
             window,
@@ -246,8 +259,18 @@ impl Overlay {
         let Some(from) = cursor().filter(|_| !self.locked) else { return };
         let edges = self.edges_at(from);
         self.grab = Some(Grab { from, rect: self.rect, size: self.size, edges });
-        unsafe { SetCapture(self.window.hwnd) };
+        unsafe {
+            SetCapture(self.window.hwnd);
+            SetTimer(Some(self.window.hwnd), FOLLOW_TIMER, FOLLOW_MS, None);
+        }
         self.draw();
+    }
+
+    /// Whether the button it is dragged by is still down (the left one, or
+    /// the right where they are swapped).
+    pub fn held(&self) -> bool {
+        let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
+        self.grab.is_some() && unsafe { GetAsyncKeyState(button.0 as i32) } < 0
     }
 
     /// The pointer moved over it, or while it is dragged: it moves, or grows
@@ -265,8 +288,12 @@ impl Overlay {
         let (dx, dy) = (at.x - grab.from.x, at.y - grab.from.y);
         let r = grab.rect;
         if !grab.edges.any() {
-            self.rect = RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy };
-            self.window.place_under(self.rect, self.beneath);
+            let rect = RECT { left: r.left + dx, top: r.top + dy, right: r.right + dx, bottom: r.bottom + dy };
+            // Followed at every tick: moved only when the pointer has.
+            if rect != self.rect {
+                self.rect = rect;
+                self.window.place_under(self.rect, self.beneath);
+            }
             return;
         }
         let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
@@ -279,7 +306,11 @@ impl Overlay {
             (None, Some(d)) => d,
             (None, None) => 1.0,
         };
-        self.size = (grab.size * ratio).clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
+        let size = (grab.size * ratio).clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
+        if size == self.size {
+            return;
+        }
+        self.size = size;
         let (width, height) = self.dims();
         let x = if e.left { r.right - width } else { r.left };
         let y = if e.top { r.bottom - height } else { r.top };
@@ -292,6 +323,7 @@ impl Overlay {
     pub fn release(&mut self) -> Option<Placed> {
         self.grab.take()?;
         unsafe {
+            let _ = KillTimer(Some(self.window.hwnd), FOLLOW_TIMER);
             let _ = ReleaseCapture();
         }
         self.draw();
