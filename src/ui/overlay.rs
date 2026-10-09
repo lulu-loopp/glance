@@ -420,6 +420,7 @@ pub fn preview(s: &Sample, items: &[&str], lang: Lang) -> Vec<Reading> {
     let example = GameSample {
         name: String::new(),
         program: String::new(),
+        pid: 0,
         fps: 144.0,
         low: Some(118.0),
         longest_ms: 8.4,
@@ -942,6 +943,7 @@ mod tests {
             game: game.then(|| GameSample {
                 name: "Game".into(),
                 program: "game".into(),
+                pid: 1,
                 fps: 143.6,
                 low: None,
                 longest_ms: 9.26,

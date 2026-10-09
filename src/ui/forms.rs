@@ -204,8 +204,8 @@ impl Reading {
         match (self.kind, second) {
             // The game shown now: another's frames before it are not its own.
             (Kind::Game, _) => {
-                let playing = scene.history.last().and_then(|last| last.game.as_ref()).map(|g| g.program.as_str());
-                s.game.as_ref().filter(|g| Some(g.program.as_str()) == playing).map(|g| g.fps as f64)
+                let playing = scene.history.last().and_then(|last| last.game.as_ref()).map(|g| g.pid);
+                s.game.as_ref().filter(|g| Some(g.pid) == playing).map(|g| g.fps as f64)
             }
             (Kind::Cpu, _) => s.cpu.map(f64::from),
             (Kind::Gpu(index), _) => s.gpus.get(index)?.usage.map(f64::from),

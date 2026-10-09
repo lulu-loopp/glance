@@ -200,10 +200,10 @@ fn found_game(s: &Sample, panel: bool) -> Option<&crate::reading::GameSample> {
     s.game.as_ref().filter(|game| !(panel && game.by_hand))
 }
 
-/// The game in `s`, if it is the one `program` names: a chart of a game's
-/// frames is of that game's alone, not of another's before it.
-fn same_game<'a>(s: &'a Sample, panel: bool, program: &str) -> Option<&'a crate::reading::GameSample> {
-    found_game(s, panel).filter(|game| game.program == program)
+/// The game in `s`, if it is the process `pid`: a chart of a game's frames
+/// is of that game's alone, not of another's before it.
+fn same_game(s: &Sample, panel: bool, pid: Option<u32>) -> Option<&crate::reading::GameSample> {
+    found_game(s, panel).filter(|game| Some(game.pid) == pid)
 }
 
 /// (see `presents::GameMode`).
@@ -608,7 +608,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             // the widgets' own).
             let panel = scene.buttons;
             let game = found_game(s, panel);
-            let program = game.map(|g| g.program.clone()).unwrap_or_default();
+            let pid = game.map(|g| g.pid);
             // Its screen's refresh rate in the corner: the most frames it can show.
             let refresh = game.and_then(|g| g.refresh_hz);
             // A stutter: a frame taking as long as three at the screen's rate.
@@ -658,7 +658,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
-            let most = scene.history.iter().filter_map(|s| same_game(s, panel, &program).map(|g| g.fps as f64)).fold(0.0, f64::max);
+            let most = scene.history.iter().filter_map(|s| same_game(s, panel, pid).map(|g| g.fps as f64)).fold(0.0, f64::max);
             let scale = refresh.map(f64::from).map(|hz| hz.max(most));
             let mut blocks = vec![
                 head(lang.pick("游戏", "Game"), game.map_or_else(|| if by_hand { waiting(lang) } else { String::new() }, |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
@@ -666,10 +666,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    plot: chart.then(|| {
-                        let program = program.clone();
-                        Plot::new(scene, vec![Box::new(move |s| same_game(s, panel, &program).map(|g| g.fps as f64))], scale, None)
-                    }),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| same_game(s, panel, pid).map(|g| g.fps as f64))], scale, None)),
                 },
             ];
             if !full {
@@ -678,7 +675,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if full && frametimes {
                 // Full scale: two frames at the screen's rate, or the longest
                 // frame on screen, if longer, rounded up.
-                let series: Series = Box::new(move |s| same_game(s, panel, &program).map(|g| g.longest_ms as f64));
+                let series: Series = Box::new(move |s| same_game(s, panel, pid).map(|g| g.longest_ms as f64));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
                 blocks.push(Block::Trace {

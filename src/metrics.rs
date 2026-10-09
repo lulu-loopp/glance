@@ -249,6 +249,7 @@ impl Sampler {
         Some(GameSample {
             name: if presenting.title.is_empty() { program.clone() } else { presenting.title.clone() },
             program: program.clone(),
+            pid: presenting.pid,
             fps: presenting.stats.fps,
             low: presenting.stats.low,
             longest_ms: presenting.stats.longest_ms,

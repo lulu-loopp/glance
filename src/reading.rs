@@ -100,6 +100,8 @@ pub struct GameSample {
     pub name: String,
     /// Its program's name.
     pub program: String,
+    /// Its process: which game this is, its name read or not.
+    pub pid: u32,
     pub fps: f32,
     /// The 1% low, as frames a second; none until enough frames have come.
     pub low: Option<f32>,
