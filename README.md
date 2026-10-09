@@ -40,8 +40,9 @@ slim strip or rail, centred where you left it. Throw it off the screen to put
 it away (the tray icon's menu brings it back). Hover over it for its buttons:
 the game readings now (for a game Glance does not recognise as one), the
 settings, a pin that locks its place and size, and close. Right-click it to
-let clicks through to what is behind (hold Ctrl to handle it), to put it
-away, or for the settings. Widgets come back where you left them when Glance
+let clicks through to what is behind (hold Ctrl to handle it), to keep it
+on the desktop under your windows rather than above them (Win+D shows it with
+the desktop), to put it away, or for the settings. Widgets come back where you left them when Glance
 starts, in the panel's look.
 
 ![Widgets on the desktop in the frosted-glass look: the panel's lanes, tiles, a chart, a strip and rings](docs/images/widgets-en.webp)
