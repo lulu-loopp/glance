@@ -114,11 +114,12 @@ for administrator rights at every start and cannot start with Windows.
   which opens it at the pointer and closes it again.
 - **Games**: while a fullscreen game runs, a Game lane comes at the top of
   the panel; for its frame rate over the game itself, turn on "Show while
-  playing" on the settings' Overlay page. The panel shows over borderless
-  and windowed games as over anything else. A game set to exclusive "Fullscreen" steps out while
-  anything shows over it, as Windows works; the settings choose what may open
-  the panel over one (the shortcut only, by default), and the game comes back
-  when the panel closes.
+  playing" on the settings' Overlay page. Over a fullscreen game, borderless
+  or exclusive, the settings choose what may open the panel (the shortcut
+  only, by default: a push into the edge may be an accident mid-game). A game
+  set to exclusive "Fullscreen" steps out while anything shows over it, as
+  Windows works, and comes back when the panel closes; windowed games are
+  covered as anything else is.
 - **Choose what it shows**: in the settings, each module (CPU, each graphics
   card, memory, network, disk…) opens to its own items, each switched on or
   off; drag modules to change their order.

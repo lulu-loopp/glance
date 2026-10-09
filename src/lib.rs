@@ -186,6 +186,11 @@ impl App {
             settings.overlay.at = placed.at;
             settings.overlay.screen = Some(placed.point);
             settings.overlay.size = placed.size;
+            // Put on the game's screen as a game is played, or on another:
+            // where it shows over games from now.
+            if let Some(on_game) = placed.on_game {
+                settings.overlay.on_game_screen = on_game;
+            }
         });
     }
 }

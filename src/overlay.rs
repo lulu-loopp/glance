@@ -112,6 +112,9 @@ pub struct Placed {
     pub at: (f32, f32),
     /// A point on the screen it is over.
     pub point: (i32, i32),
+    /// Put on the game's screen (`Some(true)`) or another (`Some(false)`)
+    /// as a game was played; none, no game.
+    pub on_game: Option<bool>,
     pub size: f32,
 }
 
@@ -213,14 +216,15 @@ impl Overlay {
             self.rect = RECT { left: r.left, top: r.top, right: r.left + width, bottom: r.top + height };
             return self.draw();
         }
-        // Over a game, the game's screen; otherwise the one it was put on.
+        // Over a game, the game's screen (unless asked to stay where it was
+        // put); otherwise the one it was put on.
         if let Some(screen) = game.and_then(|game| game.screen) {
             self.game_screen = Some(screen);
         }
         if !playing {
             self.game_screen = None;
         }
-        let point = match self.game_screen {
+        let point = match self.game_screen.filter(|_| settings.on_game_screen) {
             Some([left, top, right, bottom]) => Some(((left + right) / 2, (top + bottom) / 2)),
             None => settings.screen,
         };
@@ -445,13 +449,10 @@ impl Overlay {
         self.draw();
         let (left, top, across, down) = room(self.screen, (glass.right - glass.left, glass.bottom - glass.top), self.dpi);
         let share = |at: i32, room: i32| if room > 0 { (at as f32 / room as f32).clamp(0.0, 1.0) } else { 0.0 };
-        Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size })
+        let on_game = self.game_screen.map(|[left, top, right, bottom]| (left..right).contains(&centre.x) && (top..bottom).contains(&centre.y));
+        Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size, on_game })
     }
 
-    /// A right click on it: its menu, at the pointer, and what was chosen.
-    /// The menu has to be in front to close on a click elsewhere: the window
-    /// that was in front before (a game, to be given the front back) is
-    /// returned too.
     /// Its menu, and what was chosen in it (the focus put back where it
     /// was by the menu itself).
     pub fn menu(&self) -> Option<Choice> {

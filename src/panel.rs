@@ -562,9 +562,10 @@ impl Controller {
                 OverFullscreen::Shortcut => (true, false),
                 OverFullscreen::Both => (true, true),
             };
-            // Over a game in exclusive fullscreen the panel sends the game to
-            // the background: it opens there only as the settings allow.
-            let may_open = |allowed: bool| allowed || !exclusive_fullscreen();
+            // Over a fullscreen game (one in exclusive fullscreen the panel
+            // sends to the background; a push into the edge may be an
+            // accident in either) it opens only as the settings allow.
+            let may_open = |allowed: bool| allowed || !fullscreen_game();
             // Where on the edge the pointer is, and how hard it has to push
             // there; never, with pushing turned off.
             let at_edge = |cursor: POINT| edge_contact(cursor, edge).zip(pressure);
@@ -2283,6 +2284,14 @@ fn until_refresh() -> Duration {
     // The first refresh after now.
     let next = last + ((now - last).div_euclid(period) + 1) * period;
     Duration::from_nanos(((next - now) as i128 * 1_000_000_000 / frequency as i128) as u64)
+}
+
+/// Whether a game holds the screen: in exclusive fullscreen, or in a
+/// borderless window in front covering its screen as it presents frames.
+/// Over one, the settings say what may open the panel (see
+/// `OverFullscreen`): a push into the edge may be an accident mid-game.
+fn fullscreen_game() -> bool {
+    exclusive_fullscreen() || crate::presents::presenting().iter().any(|game| game.in_front && game.fills_screen)
 }
 
 /// Whether a program holds the screen in exclusive fullscreen (Direct3D's
