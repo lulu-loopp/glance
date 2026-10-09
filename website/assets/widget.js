@@ -46,7 +46,7 @@
   for (var i = 0; i < THREADS; i++) R.threads.push(rnd() * 60);
   function walk(v, lo, hi, j) { return Math.min(hi, Math.max(lo, v + (rnd() - 0.5) * j)); }
   function sample() {
-    R.cpu = walk(R.cpu, 4, 92, 22); R.gpu = walk(R.gpu, 0, 92, 18); R.mem = walk(R.mem, 30, 52, 1.4);
+    R.cpu = walk(R.cpu, 6, 72, 20); R.gpu = walk(R.gpu, 8, 78, 16); R.mem = walk(R.mem, 30, 52, 1.4);
     R.temp = 44 + R.cpu * 0.42 + (rnd() - 0.5) * 2; R.gtemp = 38 + R.gpu * 0.4; R.ghz = 4.3 + R.cpu / 100 * 1.4;
     R.watt = 40 + R.cpu * 1.6; R.gwatt = 25 + R.gpu * 2.4; R.vram = walk(R.vram, 1.5, 9, 0.4);
     R.down = Math.max(800, walk(R.down, 0, 2.6e7, 6e6)); R.up = Math.max(400, walk(R.up, 0, 2e6, 3e5));

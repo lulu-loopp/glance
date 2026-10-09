@@ -61,7 +61,7 @@
       var bias = i % 2 ? 0.75 : 1.15;
       return Math.min(1, Math.max(0.03, t + (base * bias - t) * 0.5 + (Math.random() - 0.5) * 0.35));
     });
-    R.gpu = walk(R.gpu, 30, 92, 0.1, 16);
+    R.gpu = walk(R.gpu, 30, 80, 0.1, 16);
     push(R.gpuHist, R.gpu);
     R.gpuClock = 2200 + R.gpu * 5 + (Math.random() - 0.5) * 30;
     R.gpuPower = 30 + R.gpu * 2.4 + (Math.random() - 0.5) * 8;
