@@ -49,7 +49,7 @@ starts, in the panel's look.
 ## The overlay
 
 A few readings floating over the screen, all the time or only while a game
-runs, on the screen you put it on (never put anywhere, the game's). Laid out as a card (the frame rate large, its
+runs. Laid out as a card (the frame rate large, its
 last minute charted beside it, the rest in tiles) or as a strip of one to
 three rows, on frosted glass: the screen behind is blurred, and the glass is
 tinted dark or light by what is around it, just enough for every figure to
