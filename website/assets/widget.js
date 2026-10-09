@@ -26,10 +26,6 @@
   win.className = "gw-win";
   var cv = document.createElement("canvas");
   win.appendChild(cv);
-  var grip = document.createElement("div");
-  grip.className = "gw-grip";
-  grip.setAttribute("aria-hidden", "true");
-  win.appendChild(grip);
   host.appendChild(win);
   var ctx = cv.getContext("2d");
 
@@ -516,78 +512,129 @@
     c.globalAlpha = 1;
   }
 
-  // ---------------- the widget: sized by hand ----------------
-  var MORPH = 320;
-  var size = { w: 340, h: 300 }, shown = null, taken = null, turning = null, last = [], drag = null;
-  function room() { var r = host.getBoundingClientRect(); return { w: r.width - 32, h: r.height - 32 }; }
-  function clampSize() {
-    var r = room();
-    size.w = Math.max(110, Math.min(size.w, r.w));
-    size.h = Math.max(40, Math.min(size.h, r.h));
-  }
-  function choose(now) {
-    var next = chooseFor(size.w, size.h, shown && shown.c, taken && shown && taken.c === shown.c ? taken : null);
+  // ---------------- the widget: moved and sized by hand ----------------
+  // As Glance's: pressed within EDGE of an edge (CORNER of a corner) it is
+  // sized, else moved. Sized, its edges follow the hand only GIVE of the way
+  // past what its layout fills, and let go, it settles onto that.
+  var MORPH = 320, EDGE = 8, CORNER = 20, GIVE = 0.5, SETTLE = 260, MARGIN = 16;
+  var at = { x: MARGIN, y: MARGIN }, roomNow = null, surface = null, settle = null;
+  var shown = null, taken = null, turning = null, last = [], drag = null, keeps = { l: false, t: false };
+  var wanted = { w: 520, h: 400 };
+  function desk() { var r = host.getBoundingClientRect(); return { w: r.width, h: r.height }; }
+  function ease(t) { return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 4); }
+  function give(have, fill) { return have <= fill ? fill : fill + (have - fill) * GIVE; }
+  function choose(room, now) {
+    var next = chooseFor(room.w, room.h, shown && shown.c, taken && shown && taken.c === shown.c ? taken : null);
     if (!shown || next.c !== shown.c) {
       if (shown) turning = { from: last, at: now };
-      taken = { w: size.w, h: size.h, c: next.c };
+      taken = { w: room.w, h: room.h, c: next.c };
     }
     shown = next;
   }
+  // Kept on the desk: where it is, as far as its size lets it.
+  function keepIn() {
+    var d = desk();
+    at.x = Math.max(0, Math.min(at.x, d.w - surface.w));
+    at.y = Math.max(0, Math.min(at.y, d.h - surface.h));
+  }
   function paint(now) {
-    var w = size.w, h = size.h, k = window.devicePixelRatio || 1;
+    // Laid out for what it shows (stretched as far as that stretches).
+    var f = shown, fill = { w: f.w, h: f.h };
+    var size;
+    if (roomNow) size = { w: give(roomNow.w, fill.w), h: give(roomNow.h, fill.h) };
+    else if (settle) {
+      var t = (now - settle.at) / SETTLE, e = ease(t);
+      size = { w: settle.from.w + (fill.w - settle.from.w) * e, h: settle.from.h + (fill.h - settle.from.h) * e };
+      if (t >= 1) settle = null;
+    } else size = fill;
+    // Sized by its left or top edge, it grows and shrinks from the other.
+    if (surface && keeps.l) at.x += surface.w - size.w;
+    if (surface && keeps.t) at.y += surface.h - size.h;
+    surface = size;
+    if (!drag) keepIn();
+    var k = window.devicePixelRatio || 1, w = size.w, h = size.h;
+    win.style.left = at.x + "px";
+    win.style.top = at.y + "px";
     win.style.width = w + "px";
     win.style.height = h + "px";
     if (cv.width !== Math.round(w * k) || cv.height !== Math.round(h * k)) { cv.width = Math.round(w * k); cv.height = Math.round(h * k); }
-    // Laid out for the room (stretched as far as it stretches), and turning
-    // into it from what showed.
-    var f = fit(shown.c, w, h) || shown, els = elementsOf(f);
+    var els = elementsOf(f);
     if (turning) {
-      var t = (now - turning.at) / MORPH;
-      if (t >= 1) turning = null; else els = morph(turning.from, els, smooth(t));
+      var s = (now - turning.at) / MORPH;
+      if (s >= 1) turning = null; else els = morph(turning.from, els, smooth(s));
     }
     last = els;
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.setTransform(k, 0, 0, k, 0, 0);
+    // What it shows keeps to the edges not dragged.
+    var dx = keeps.l ? w - f.w : 0, dy = keeps.t ? h - f.h : 0;
+    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, cv.width, cv.height); ctx.setTransform(k, 0, 0, k, k * dx, k * dy);
     drawElements(ctx, els);
   }
   var queued = false;
   function frame(now) {
     queued = false;
     paint(now);
-    if (turning || drag) request();
+    if (turning || drag || settle) request();
   }
   function request() { if (!queued) { queued = true; requestAnimationFrame(frame); } }
 
-  // A press near the right or bottom edge, or on the corner's grip, sizes it.
-  function edgesAt(e) {
-    var r = win.getBoundingClientRect(), g = 12;
-    var right = e.clientX > r.right - g, bottom = e.clientY > r.bottom - g;
-    if (e.target === grip) return { right: true, bottom: true };
-    return right || bottom ? { right: right, bottom: bottom } : null;
+  // Pressed on its rectangle, as on Glance's window: a rounded corner's
+  // outside takes the corner too (the page itself hit-tests the curve).
+  function within(e) {
+    var r = win.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
   }
-  win.addEventListener("pointermove", function (e) {
-    if (drag) return;
+  function edgesAt(e) {
+    var r = win.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top, w = r.width, h = r.height;
+    var l = x < EDGE, rr = x > w - EDGE, t = y < EDGE, b = y > h - EDGE, side = l || rr, end = t || b;
+    var edges = { l: l || end && x < CORNER, r: rr || end && x > w - CORNER, t: t || side && y < CORNER, b: b || side && y > h - CORNER };
+    return edges.l || edges.r || edges.t || edges.b ? edges : null;
+  }
+  function cursorFor(edges) {
+    if (!edges) return "grab";
+    if (edges.l && edges.t || edges.r && edges.b) return "nwse-resize";
+    if (edges.r && edges.t || edges.l && edges.b) return "nesw-resize";
+    return edges.l || edges.r ? "ew-resize" : "ns-resize";
+  }
+  host.addEventListener("pointerdown", function (e) {
+    if (e.button !== 0 || !within(e)) return;
     var edges = edgesAt(e);
-    win.style.cursor = !edges ? "" : edges.right && edges.bottom ? "nwse-resize" : edges.right ? "ew-resize" : "ns-resize";
-  });
-  win.addEventListener("pointerdown", function (e) {
-    var edges = edgesAt(e);
-    if (!edges) return;
-    drag = { x: e.clientX, y: e.clientY, w: size.w, h: size.h, edges: edges };
-    win.setPointerCapture(e.pointerId);
-    host.classList.add("sizing");
+    drag = { x: e.clientX, y: e.clientY, at: { x: at.x, y: at.y }, edges: edges, room: { w: surface.w, h: surface.h } };
+    settle = null;
+    if (edges) { keeps = { l: edges.l, t: edges.t }; roomNow = { w: surface.w, h: surface.h }; }
+    host.setPointerCapture(e.pointerId);
+    host.classList.add("handled");
+    host.style.cursor = edges ? cursorFor(edges) : "grabbing";
     e.preventDefault();
     request();
   });
-  win.addEventListener("pointermove", function (e) {
-    if (!drag) return;
-    if (drag.edges.right) size.w = drag.w + e.clientX - drag.x;
-    if (drag.edges.bottom) size.h = drag.h + e.clientY - drag.y;
-    clampSize();
-    choose(performance.now());
+  host.addEventListener("pointermove", function (e) {
+    if (!drag) { host.style.cursor = within(e) ? cursorFor(edgesAt(e)) : ""; return; }
+    var dx = e.clientX - drag.x, dy = e.clientY - drag.y, d = desk(), ed = drag.edges;
+    if (!ed) {
+      at.x = Math.max(0, Math.min(drag.at.x + dx, d.w - surface.w));
+      at.y = Math.max(0, Math.min(drag.at.y + dy, d.h - surface.h));
+      request();
+      return;
+    }
+    // The room the hand gives, within the desk.
+    var w = drag.room.w + (ed.r ? dx : ed.l ? -dx : 0), h = drag.room.h + (ed.b ? dy : ed.t ? -dy : 0);
+    var right = drag.at.x + drag.room.w, bottom = drag.at.y + drag.room.h;
+    w = Math.max(1, Math.min(w, ed.l ? right : d.w - drag.at.x));
+    h = Math.max(1, Math.min(h, ed.t ? bottom : d.h - drag.at.y));
+    roomNow = { w: w, h: h };
+    wanted = roomNow;
+    choose(roomNow, performance.now());
   });
-  function letGo() { drag = null; host.classList.remove("sizing"); }
-  win.addEventListener("pointerup", letGo);
-  win.addEventListener("pointercancel", letGo);
+  function letGo() {
+    if (!drag) return;
+    if (roomNow) { roomNow = null; settle = { at: performance.now(), from: { w: surface.w, h: surface.h } }; }
+    drag = null;
+    host.classList.remove("handled");
+    host.style.cursor = "";
+    request();
+  }
+  host.addEventListener("pointerup", letGo);
+  host.addEventListener("pointercancel", letGo);
 
   // The look: as the page's buttons have it.
   function look() {
@@ -620,9 +667,10 @@
       }
     });
     if (widget) {
+      // Laid out for the room last asked of it, as much of it as the desk has.
       look();
-      clampSize();
-      choose(performance.now());
+      var d = desk();
+      choose({ w: Math.min(wanted.w, d.w - 2 * MARGIN), h: Math.min(wanted.h, d.h - 2 * MARGIN) }, performance.now());
       request();
     }
   }
