@@ -67,6 +67,8 @@ struct Slow {
 /// too old for the GPU ones) are absent here; what they measure then goes
 /// unreported, rather than everything else with it.
 pub struct Sampler {
+    /// When the system last started (see `Started`).
+    started: Started,
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
@@ -191,6 +193,7 @@ impl Sampler {
             playing: None,
             buf: Vec::new(),
             info,
+            started: Started::read(),
         }
     }
 
@@ -377,7 +380,7 @@ impl Sampler {
             volumes: volumes(),
             processes: self.slow.processes.clone(),
             system: SystemSample {
-                uptime_s: unsafe { GetTickCount64() } / 1000,
+                uptime_s: self.started.uptime_s(),
                 processes: perf.ProcessCount,
                 threads: perf.ThreadCount,
                 handles: perf.HandleCount,
@@ -531,6 +534,87 @@ unsafe extern "system" {
 
 /// Each active processor group's first processor, counted across the
 /// groups, and how many active processors there are in all.
+/// When the system last started: from off, a restart, or with Fast Startup
+/// on (where "Shut down" hibernates the system and the next start resumes
+/// it, the tick count running on) or out of hibernation. Waking from sleep
+/// is not starting it.
+struct Started {
+    /// The moment, as milliseconds of the tick count (which runs on through
+    /// sleep and hibernation).
+    at_tick: u64,
+    /// How long the system had been asleep or hibernating, all told, when
+    /// it was read (milliseconds): grown since, it may have started again.
+    suspended: u64,
+}
+
+impl Started {
+    fn read() -> Self {
+        let (tick, suspended) = ticks();
+        // The system's own record of the last start, else the tick count's
+        // (which knows only a start from off).
+        let at_tick = last_boot().map_or(0, |ago| tick.saturating_sub(ago));
+        Started { at_tick, suspended }
+    }
+
+    fn uptime_s(&mut self) -> u64 {
+        let (tick, suspended) = ticks();
+        // Suspended since it was read: out of hibernation, a start of its
+        // own (out of sleep, the record is as it was).
+        if suspended > self.suspended + 1000 {
+            *self = Started::read();
+        }
+        tick.saturating_sub(self.at_tick) / 1000
+    }
+}
+
+/// The tick count (milliseconds since the system last started from off,
+/// sleep and hibernation counted), and how much of it the system spent
+/// asleep or hibernating.
+fn ticks() -> (u64, u64) {
+    let tick = unsafe { GetTickCount64() };
+    let mut unbiased = 0u64;
+    let _ = unsafe { windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut unbiased) };
+    (tick, tick.saturating_sub(unbiased / 10_000))
+}
+
+/// How long ago the system last started (milliseconds), as its event log
+/// records it: Kernel-Boot's event 27, written at each start from off, by
+/// Fast Startup and out of hibernation, not out of sleep.
+fn last_boot() -> Option<u64> {
+    use windows::Win32::System::EventLog::{
+        EvtClose, EvtCreateRenderContext, EvtNext, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderContextValues, EvtRenderEventValues,
+        EvtVarTypeFileTime, EVT_HANDLE, EVT_VARIANT,
+    };
+    struct Handle(EVT_HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            let _ = unsafe { EvtClose(self.0) };
+        }
+    }
+    let query = w!("*[System[Provider[@Name='Microsoft-Windows-Kernel-Boot'] and EventID=27]]");
+    let results = Handle(unsafe { EvtQuery(None, w!("System"), query, EvtQueryChannelPath.0 | EvtQueryReverseDirection.0) }.ok()?);
+    let mut events = [0isize; 1];
+    let mut returned = 0u32;
+    unsafe { EvtNext(results.0, &mut events, 0, 0, &mut returned) }.ok()?;
+    if returned == 0 {
+        return None;
+    }
+    let event = Handle(EVT_HANDLE(events[0]));
+    let paths = [w!("Event/System/TimeCreated/@SystemTime")];
+    let context = Handle(unsafe { EvtCreateRenderContext(Some(&paths), EvtRenderContextValues.0) }.ok()?);
+    let mut value = EVT_VARIANT::default();
+    let (mut used, mut count) = (0u32, 0u32);
+    unsafe { EvtRender(Some(context.0), event.0, EvtRenderEventValues.0, size_of::<EVT_VARIANT>() as u32, Some(&mut value as *mut _ as *mut _), &mut used, &mut count) }.ok()?;
+    if value.Type != EvtVarTypeFileTime.0 as u32 {
+        return None;
+    }
+    // FILETIME (100 ns since 1601) against now.
+    let then = unsafe { value.Anonymous.FileTimeVal };
+    let now = unsafe { windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime() };
+    let now = (now.dwHighDateTime as u64) << 32 | now.dwLowDateTime as u64;
+    Some(now.saturating_sub(then) / 10_000)
+}
+
 fn processor_groups() -> (Vec<usize>, usize) {
     use windows::Win32::System::Threading::{GetActiveProcessorCount, GetActiveProcessorGroupCount};
     let mut starts = Vec::new();
@@ -1128,5 +1212,10 @@ mod tests {
         assert!(sample.processes.iter().any(|p| p.io > 0.0));
         assert!(sample.volumes.iter().any(|volume| volume.name == "C:"));
         assert!(sample.system.uptime_s > 0 && sample.system.processes > 0);
+        // The last start the system recorded, no earlier than the tick
+        // count's start from off.
+        let since = last_boot().expect("the last start in the event log");
+        assert!(since <= unsafe { GetTickCount64() } + 1000, "{since} ms ago, the tick count {}", unsafe { GetTickCount64() });
+        assert!(sample.system.uptime_s.abs_diff(since / 1000) <= 2);
     }
 }

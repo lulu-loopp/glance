@@ -272,6 +272,10 @@ pub struct Settings {
     pub overlay: OverlaySettings,
     /// See `PanelAt`; none while the panel opens from the edge.
     pub panel_at: Option<PanelAt>,
+    /// Pinned open at its edge, along it where this point is (physical px;
+    /// its screen's): open so again as Glance starts.
+    #[serde(default)]
+    pub panel_pinned: Option<(i32, i32)>,
     /// The desktop widgets torn off the panel.
     pub widgets: Vec<WidgetAt>,
     pub view: serde_json::Value,
@@ -298,6 +302,7 @@ impl Default for Settings {
             last_version: None,
             overlay: OverlaySettings::default(),
             panel_at: None,
+            panel_pinned: None,
             widgets: Vec::new(),
             view: serde_json::Value::Null,
         }

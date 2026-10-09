@@ -180,6 +180,12 @@ impl App {
         self.change(|settings| settings.panel_at = at);
     }
 
+    /// The panel pinned open at its edge, along it at `at` (physical px), or
+    /// no longer.
+    pub fn pin_panel(&self, at: Option<(i32, i32)>) {
+        self.change(|settings| settings.panel_pinned = at);
+    }
+
     /// The overlay was dragged where, and to the size, `placed` says.
     pub fn place_overlay(&self, placed: overlay::Placed) {
         self.change(|settings| {

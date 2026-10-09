@@ -138,6 +138,7 @@ struct Config {
     size: f32,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
+    panel_pinned: Option<(i32, i32)>,
     widgets: Vec<crate::settings::WidgetAt>,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
@@ -160,6 +161,7 @@ fn config_from(settings: &Settings) -> Config {
         size: settings.panel_size.clamp(SIZES.0, SIZES.1),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
+        panel_pinned: settings.panel_pinned,
         widgets: settings.widgets.clone(),
         pressure: settings.sensitivity.pressure(),
         seam: settings.seam,
@@ -470,6 +472,9 @@ impl Controller {
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
+        // Pinned open at its edge as Glance last ran: opened so again once
+        // there are readings to show.
+        let mut pinned_at = self.config.lock().unwrap().panel_pinned;
         let mut msg = MSG::default();
         // In motion: when the next frame is due, with the screen's. Messages
         // that come before are taken as they come, not each followed by a
@@ -514,6 +519,15 @@ impl Controller {
                         }
                     }
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
+                }
+                if let Some(point) = pinned_at.filter(|_| !self.history.lock().unwrap().is_empty()) {
+                    pinned_at = None;
+                    let point = POINT { x: point.0, y: point.1 };
+                    // On its screen, or the nearest, if it is gone.
+                    if let Some(contact) = monitor_at(point) {
+                        panel.open(point, contact, None, now);
+                        panel.pinned = panel.is_open();
+                    }
                 }
                 // Torn off, the widget now on the screen in its place (it may
                 // wait on the desktop behind it first): the panel goes.
@@ -1340,7 +1354,10 @@ impl<'a> Panel<'a> {
 
     fn begin_close(&mut self, now: Instant) {
         self.phase = Phase::Closing;
-        self.pinned = false;
+        // Pinned and closed by hand: no longer opened as Glance starts.
+        if std::mem::take(&mut self.pinned) && !self.floating() {
+            std::thread::spawn(|| crate::app().pin_panel(None));
+        }
         self.window.set_click_through(true);
         if reduced_motion() || self.floating() {
             self.opacity.retarget(0.0, PLAIN_FADE, LINEAR, now);
@@ -2049,6 +2066,10 @@ impl<'a> Panel<'a> {
                 self.pinned ^= true;
                 if self.floating() {
                     crate::app().place_panel(self.kept_at());
+                } else {
+                    // At its edge, kept so across restarts too.
+                    let at = self.placement.as_ref().filter(|_| self.pinned).map(|p| (p.anchor.x, p.anchor.y));
+                    crate::app().pin_panel(at);
                 }
             }
             Some(Hit::Overlay) => {
