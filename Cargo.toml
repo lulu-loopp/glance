@@ -98,6 +98,7 @@ features = [
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
     "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_Accessibility",
     "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Input",

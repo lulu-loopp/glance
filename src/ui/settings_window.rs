@@ -155,6 +155,12 @@ pub fn show() {
 }
 
 /// Makes the window, centred on the monitor the pointer is on, on the
+/// The settings window, while it is open.
+pub fn hwnd() -> Option<HWND> {
+    let hwnd = WINDOW.load(Ordering::Acquire);
+    (hwnd != 0).then_some(HWND(hwnd as *mut _))
+}
+
 /// calling thread, which then carries it (see `tick`).
 pub fn open() {
     if WINDOW.load(Ordering::Acquire) != 0 {
@@ -729,27 +735,29 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // Gone to another window: a new shortcut is no longer being taken.
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| ui.record(false));
-            crate::app().controller.settings_front(None);
+            crate::app().controller.settings_front();
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         // In front: the panel, staying up, gives way to it.
         WM_ACTIVATE => {
-            crate::app().controller.settings_front(Some(hwnd));
+            crate::app().controller.settings_front();
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_DESTROY => {
-            crate::app().controller.settings_front(None);
+            crate::app().controller.settings_front();
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back
-            // what they held.
+            // what they held (unless desktop widgets still draw with it).
             // Closed mid-drag: what was dragged is kept.
             with_ui(|ui| ui.let_go());
             let ui = UI.with(|cell| cell.borrow_mut().take());
             if let Some(ui) = ui {
                 let gfx = ui.gfx.clone();
                 drop(ui);
-                gfx.trim();
+                if !crate::widget::any_shown() {
+                    gfx.trim();
+                }
             }
             WINDOW.store(0, Ordering::Release);
             LRESULT(0)
@@ -1332,8 +1340,8 @@ impl Ui {
         let p = |zh, en| pick(lang, zh, en);
         let (name, hint, on) = match switch {
             Switch::Live => (
-                p("实时折射", "Live refraction"),
-                Some(p("面板打开时不进截图，录屏可能暂停", "While up, the panel stays out of captures; recorders may pause")),
+                p("背景实时刷新", "Live backdrop"),
+                Some(p("玻璃和亚克力背后的桌面随时更新；面板和小组件不进截图，录屏可能暂停", "The desktop behind glass and acrylic keeps up; the panel and widgets stay out of captures, and recorders may pause")),
                 self.settings.live_backdrop,
             ),
             // Only a copy no ordinary program can replace (one the installer
@@ -1535,6 +1543,7 @@ impl Ui {
                 ("network", "link") => seen.link,
                 ("disk", "drives") => !seen.drives.is_empty(),
                 ("disk", "active") => seen.disk_active,
+                ("storage", "volumes") => !seen.volumes.is_empty(),
                 _ => true,
             })
             .flat_map(|name| match (id, name) {
@@ -1544,6 +1553,8 @@ impl Ui {
                     let sensors = if name == "temps" { board.temps } else { board.fans };
                     sensors.into_iter().map(|sensor| format!("{name}:{sensor}")).collect()
                 }
+                // A switch for each drive.
+                ("storage", "volumes") => seen.volumes.iter().map(|volume| format!("volumes:{volume}")).collect(),
                 _ => vec![name.to_string()],
             })
             .collect()
@@ -1557,6 +1568,8 @@ impl Ui {
     /// What an item of module `id` is called, and a word on it.
     fn item_label(&self, id: &str, name: &str) -> (Cow<'static, str>, Option<&'static str>) {
         match name.split_once(':') {
+            // A drive, by its letter.
+            Some(("volumes", volume)) => (Cow::Owned(volume.to_string()), None),
             // One of the board's sensors, by its name on the panel.
             Some((group, sensor)) => (Cow::Owned(super::view::board_sensor(sensor, group, self.lang)), None),
             None => {
@@ -2614,8 +2627,8 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted() };
-        let heights = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
+        let probe = Scene { info: &app.info, prefs: &self.prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true };
+        let heights: Vec<f32> = view::lanes(&probe).iter().map(|lane| lane.height(&measure)).collect();
         let (sw, sh) = self.stage.size;
         let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size);
@@ -2634,7 +2647,7 @@ impl Ui {
         let dark = theme::is_dark(self.prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
         let theme = Theme::new(skin, dark);
         let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
-        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted() };
+        let scene = Scene { info: &app.info, prefs: &self.prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, process_scroll: 0.0, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true };
         let lanes = view::lanes(&scene);
 
         // The whole height of the screen, and the whole panel with a strip of
@@ -2675,8 +2688,9 @@ impl Ui {
             }
         }
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
-        let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest));
-        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge: Some(edge), backdrop, frost };
+        // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
+        let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.digest, zoom));
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: Some(edge), backdrop, frost, rough: false };
         let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));

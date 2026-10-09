@@ -50,6 +50,8 @@ mod ui;
 mod update;
 #[cfg(windows)]
 mod watch;
+#[cfg(windows)]
+mod widget;
 
 
 #[cfg(windows)]

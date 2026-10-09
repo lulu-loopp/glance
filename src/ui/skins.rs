@@ -73,8 +73,10 @@ pub struct Ground<'a> {
     pub lanes: &'a [Rect],
     pub bar: Rect,
     /// The desktop behind the window, with the panel's corner at `at` in it
-    /// (DIPs), for the skins that see it.
-    pub backdrop: Option<(&'a ID2D1Bitmap1, Vector2)>,
+    /// (DIPs), for the skins that see it; and how many of the desktop's
+    /// pixels a DIP of the panel covers (not the raster's scale, which may be
+    /// coarser while it moves, or smaller in a preview).
+    pub backdrop: Option<(&'a ID2D1Bitmap1, Vector2, f32)>,
     pub frost: f32,
 }
 
@@ -224,15 +226,29 @@ fn saturation(amount: f32) -> [f32; 20] {
 /// carried on outward, as SVG filters do with `edgeMode="duplicate"`. Where
 /// `area` reaches past the backdrop (beside the screen's edge), it is the
 /// backdrop's own edge that is carried on, not the nothing beyond it.
-fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), area: Rect) -> Result<ID2D1Effect> {
-    let (bitmap, at) = backdrop;
-    // The backdrop placed so the panel's corner is at the origin.
+fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), area: Rect) -> Result<ID2D1Effect> {
+    let (bitmap, at, shown) = backdrop;
+    // The backdrop placed so the panel's corner is at the origin, and as
+    // large as the screen is where it is drawn: a bitmap made at the
+    // screen's own scale serves a panel drawn larger or smaller (a widget
+    // at its zoom) without being made again.
     let image = effect_input(&frame.dc, bitmap)?;
+    // At the scale it is shown at, whatever the raster's: the desktop keeps
+    // its place and size under a panel drawn coarser while it moves.
+    let (mut made, mut unused) = (0.0, 0.0);
+    unsafe { bitmap.GetDpi(&mut made, &mut unused) };
+    let k = made / (96.0 * shown);
     let placed = effect(frame, &CLSID_D2D12DAffineTransform, &image)?;
-    prop(&placed, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0, D2D1_PROPERTY_TYPE_MATRIX_3X2, &Matrix3x2::translation(-at.X, -at.Y))?;
+    prop(&placed, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX.0, D2D1_PROPERTY_TYPE_MATRIX_3X2, &(Matrix3x2::scale(k, k) * Matrix3x2::translation(-at.X, -at.Y)))?;
     let size = unsafe { bitmap.GetSize() };
-    let (left, top) = (area.x.max(-at.X), area.y.max(-at.Y));
-    let (right, bottom) = ((area.x + area.w).min(size.width - at.X), (area.y + area.h).min(size.height - at.Y));
+    let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F { width: size.width * k, height: size.height * k };
+    // What of `area` the backdrop holds; past it altogether, the backdrop's
+    // nearest edge (one DIP of it), carried on.
+    let (x0, y0, x1, y1) = (-at.X, -at.Y, size.width - at.X, size.height - at.Y);
+    let left = area.x.clamp(x0, x1 - 1.0);
+    let top = area.y.clamp(y0, y1 - 1.0);
+    let right = (area.x + area.w).clamp(left + 1.0, x1);
+    let bottom = (area.y + area.h).clamp(top + 1.0, y1);
     let crop = effect(frame, &CLSID_D2D1Crop, &output(&placed)?)?;
     prop(&crop, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[left, top, right, bottom])?;
     let border = effect(frame, &CLSID_D2D1Border, &output(&crop)?)?;
@@ -303,13 +319,27 @@ fn fluent(frame: &Frame, ground: &Ground) -> Result<()> {
             _ => unsafe { frame.dc.FillRectangle(&area, frame.brush(Color { a: 1.0, ..theme.luminosity })) },
         }
         unsafe { frame.dc.FillRectangle(&area, frame.brush(theme.tint)) };
+        // Each lane on its card (not a small layout's one piece: the sheet
+        // is its card).
+        if theme.card.a > 0.0 {
+            for lane in ground.lanes.iter().filter(|lane| lane.w < sheet.w || lane.h < sheet.h) {
+                let card = rounded(*lane, CARD_RADIUS);
+                unsafe {
+                    frame.dc.FillRoundedRectangle(&card, frame.brush(theme.card));
+                    frame.dc.DrawRoundedRectangle(&rounded(grow(*lane, -0.5), CARD_RADIUS), frame.brush(theme.card_stroke), 1.0, None);
+                }
+            }
+        }
     })
 }
+
+/// Windows 11's cards' corners.
+const CARD_RADIUS: f32 = 4.0;
 
 /// The desktop behind the sheet blurred and a little more saturated, and
 /// the same with the luminosity layer's brightness in place of its own:
 /// its hue and saturation, `luminosity`'s lightness.
-fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), sheet: Rect, luminosity: Color) -> Result<(ID2D1Image, ID2D1Image)> {
+fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), sheet: Rect, luminosity: Color) -> Result<(ID2D1Image, ID2D1Image)> {
     let desktop = backdrop_within(frame, backdrop, sheet)?;
     let acrylic = saturated(frame, &blurred(frame, &desktop, ACRYLIC_BLUR)?, ACRYLIC_SATURATION)?;
     // Cropped back to the sheet: the blur spreads past it, and the flood
@@ -336,7 +366,7 @@ fn acrylic(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), sheet: Rect, lumin
 /// tint, glows faintly inside its edge and catches light along it.
 fn glass(frame: &Frame, ground: &Ground) -> Result<()> {
     let theme = ground.theme;
-    let pieces: Vec<(Rect, f32)> = ground.lanes.iter().chain([&ground.bar]).map(|r| (*r, theme.radius)).collect();
+    let pieces: Vec<(Rect, f32)> = ground.lanes.iter().chain([&ground.bar]).filter(|r| r.w > 0.0 && r.h > 0.0).map(|r| (*r, theme.radius)).collect();
     shadows(frame, &pieces, &theme.shadows)?;
     let tint = theme.glass.alpha(theme.glass_clear + theme.glass_frosted * ground.frost);
     for (piece, radius) in &pieces {
@@ -357,7 +387,7 @@ fn glass(frame: &Frame, ground: &Ground) -> Result<()> {
 
 /// The desktop behind a piece as its glass shows it: frosted by `blur`, bent
 /// outward across the rim, and a little more saturated.
-fn lens(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2), piece: Rect, radius: f32, blur: f32) -> Result<ID2D1Image> {
+fn lens(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), piece: Rect, radius: f32, blur: f32) -> Result<ID2D1Image> {
     // The rim bends in what lies up to BEND beyond the piece.
     let desktop = backdrop_within(frame, backdrop, grow(piece, BEND))?;
     let frosted = blurred(frame, &desktop, blur)?;
@@ -384,6 +414,16 @@ fn displacement_map(frame: &Frame, piece: Rect, radius: f32) -> Result<ID2D1Bitm
     unsafe { frame.dc.GetDpi(&mut dpi.0, &mut dpi.1) };
     let px = dpi.0 / 96.0;
     let (w, h) = ((piece.w * px).round() as usize, (piece.h * px).round() as usize);
+    // The same for every piece of this size, wherever it is: made once
+    // (not for each frame of a widget moved over the desktop).
+    let key = [piece.w.to_bits(), piece.h.to_bits(), radius.to_bits(), dpi.0.to_bits()];
+    frame.gfx.made(key, || made_displacement_map(frame, piece, radius, dpi, (w, h)))
+}
+
+/// A piece's displacement map, `size` pixels at `dpi` (see
+/// `displacement_map`).
+fn made_displacement_map(frame: &Frame, piece: Rect, radius: f32, dpi: (f32, f32), (w, h): (usize, usize)) -> Result<ID2D1Bitmap1> {
+    let px = dpi.0 / 96.0;
     let (hx, hy) = (piece.w / 2.0, piece.h / 2.0);
     let r = radius.min(hx).min(hy);
     let mut pixels = vec![0u8; w * h * 4];

@@ -32,7 +32,7 @@ pub struct Prefs {
     pub language: LanguagePref,
 }
 
-#[derive(Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Debug, Hash, Deserialize, Serialize)]
 pub struct ModuleEntry {
     pub id: String,
     pub on: bool,
@@ -70,6 +70,8 @@ const MEMORY: [Item; 4] = [item("chart", true), item("dimms", true), item("commi
 const NETWORK: [Item; 5] = [item("chart", true), item("adapter", false), item("address", false), item("link", false), item("totals", false)];
 const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
+/// Each drive the machine has, by its letter ("volumes:C:"), as the group.
+const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
@@ -94,6 +96,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "network" => &NETWORK,
         "disk" => &DISK,
         "board" => &BOARD,
+        "storage" => &STORAGE,
         "battery" => &BATTERY,
         "system" => &SYSTEM,
         "game" => &GAME,
@@ -229,6 +232,14 @@ fn fit(entries: &mut Vec<ModuleEntry>, known: &[String], on: impl Fn(&str) -> bo
 }
 
 impl Prefs {
+    /// What of it a small layout draws from (which readings, their items,
+    /// where they turn hot), hashed into `key`.
+    pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.modules.hash(key);
+        (self.hot_load.to_bits(), self.hot_temp.to_bits(), self.chart_seconds.to_bits()).hash(key);
+    }
+
     /// The stored preferences, completed with defaults, with the module list
     /// matched to this machine's modules (`known`, in default order):
     /// modules it no longer has are dropped, new ones appended.

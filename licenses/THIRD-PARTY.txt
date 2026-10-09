@@ -37,6 +37,15 @@ Inter (fonts, Latin subset)
   Copyright 2016 The Inter Project Authors.
   Licence: SIL Open Font License 1.1 (Inter-OFL.txt).
 
+Lucide (icons: cpu, gpu, memory-stick, hard-drive, arrow-down-up,
+  gamepad-2, pin, x, settings, check, mouse-pointer-2, panel-right, undo-2,
+  refresh-cw, power),
+  from lucide-static 1.53.0
+  Copyright (c) Lucide Icons and Contributors.
+  Licence: ISC (Lucide-ISC.txt); x comes from Feather,
+  Copyright (c) 2013-present Cole Bemis, under the MIT licence in the same
+  file. Their path data is built into glance.exe.
+
 Rust crates and the Rust standard library
   The crates compiled into glance.exe, each with the licence files it ships
   with, are listed in RUST-CRATES.txt; the standard library's notices are in

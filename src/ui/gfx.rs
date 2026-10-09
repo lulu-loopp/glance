@@ -41,10 +41,17 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
 };
 use windows::Win32::Graphics::Direct2D::{
-    ID2D1PathGeometry1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    ID2D1PathGeometry1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_BEZIER_SEGMENT, D2D1_FIGURE_END_CLOSED, D2D_SIZE_F};
+use windows::Win32::Graphics::Direct2D::{
+    ID2D1StrokeStyle, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_DASH_STYLE_CUSTOM, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND,
+    D2D1_STROKE_STYLE_PROPERTIES1, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+};
 use windows_numerics::{Matrix3x2, Vector2};
+
+use super::icons::{self, Icon, Segment};
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, FontKey, Point};
 
@@ -75,11 +82,22 @@ pub struct Gfx {
     archivo: (IDWriteFontCollection, HSTRING),
     inter: (IDWriteFontCollection, HSTRING),
     icons: PCWSTR,
-    formats: RefCell<HashMap<FontKey, IDWriteTextFormat3>>,
+    /// Each font's format, and when it was last asked for.
+    formats: RefCell<HashMap<FontKey, (IDWriteTextFormat3, Instant)>>,
     /// Laid-out text, kept while frames keep drawing it: most of a panel's
     /// words and figures are the same from one frame to the next. With when
     /// each was last drawn.
     layouts: RefCell<HashMap<LayoutKey, (IDWriteTextLayout, Instant)>>,
+    /// Strokes with round ends and joins, for rings and icons.
+    round: ID2D1StrokeStyle,
+    /// Dashes as long as the gaps between them, each twice the line's width.
+    dashed: ID2D1StrokeStyle,
+    /// Each icon's figures as a geometry, made when first drawn.
+    icon_paths: RefCell<HashMap<Icon, ID2D1PathGeometry1>>,
+    /// Bitmaps made from nothing but their key (the glass's displacement
+    /// maps, by size, radius and scale): kept while frames keep drawing
+    /// them, as text is.
+    made: RefCell<HashMap<[u32; 4], (ID2D1Bitmap1, Instant)>>,
 }
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
@@ -156,11 +174,40 @@ impl Gfx {
         let (archivo, inter, icons) = faces.inspect_err(|_| unsafe {
             let _ = write.UnregisterFontFileLoader(&loader);
         })?;
-        Ok(Gfx { factory, device, dxgi: dxgi.cast()?, dcomp, write, loader, archivo, inter, icons, formats: RefCell::new(HashMap::new()), layouts: RefCell::new(HashMap::new()) })
+        let round = unsafe {
+            factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES1 { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, dashCap: D2D1_CAP_STYLE_ROUND, lineJoin: D2D1_LINE_JOIN_ROUND, ..Default::default() },
+                None,
+            )?
+        };
+        let dashed = unsafe {
+            factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES1 { lineJoin: D2D1_LINE_JOIN_ROUND, dashStyle: D2D1_DASH_STYLE_CUSTOM, ..Default::default() },
+                Some(&[2.0, 2.0]),
+            )?
+        };
+        Ok(Gfx {
+            factory,
+            device,
+            dxgi: dxgi.cast()?,
+            dcomp,
+            write,
+            loader,
+            archivo,
+            inter,
+            icons,
+            formats: RefCell::new(HashMap::new()),
+            made: RefCell::new(HashMap::new()),
+            layouts: RefCell::new(HashMap::new()),
+            round: round.into(),
+            dashed: dashed.into(),
+            icon_paths: RefCell::new(HashMap::new()),
+        })
     }
 
     fn format(&self, font: Font) -> IDWriteTextFormat3 {
-        if let Some(format) = self.formats.borrow().get(&font.key()) {
+        if let Some((format, used)) = self.formats.borrow_mut().get_mut(&font.key()) {
+            *used = Instant::now();
             return format.clone();
         }
         let axes = [
@@ -187,7 +234,7 @@ impl Gfx {
             let sign = self.write.CreateEllipsisTrimmingSign(&format).unwrap();
             format.SetTrimming(&trimming, &sign).unwrap();
         }
-        self.formats.borrow_mut().insert(font.key(), format.clone());
+        self.formats.borrow_mut().insert(font.key(), (format.clone(), Instant::now()));
         format
     }
 
@@ -255,15 +302,44 @@ impl Gfx {
     /// Gives back what drawing holds on to while nothing is on screen.
     pub fn trim(&self) {
         self.layouts.borrow_mut().clear();
+        self.made.borrow_mut().clear();
         unsafe {
             self.device.ClearResources(0);
             self.dxgi.Trim();
         }
     }
 
-    /// Forgets the text no window has drawn for a while.
+    /// Forgets the text, and the fonts, no window has drawn for a while.
     pub fn sweep(&self) {
         self.layouts.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+        self.formats.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+        self.made.borrow_mut().retain(|_, (_, used)| used.elapsed() < TEXT_KEPT);
+    }
+
+    /// The bitmap `key` stands for: the one made for it before, else made
+    /// now by `make`. Those drawn least lately are let go of past
+    /// `MADE_BUDGET` (a widget sized frame by frame makes one for each size).
+    pub fn made(&self, key: [u32; 4], make: impl FnOnce() -> Result<ID2D1Bitmap1>) -> Result<ID2D1Bitmap1> {
+        let now = Instant::now();
+        if let Some((bitmap, used)) = self.made.borrow_mut().get_mut(&key) {
+            *used = now;
+            return Ok(bitmap.clone());
+        }
+        let bitmap = make()?;
+        let mut made = self.made.borrow_mut();
+        made.insert(key, (bitmap.clone(), now));
+        let bytes = |bitmap: &ID2D1Bitmap1| {
+            let size = unsafe { bitmap.GetPixelSize() };
+            size.width as usize * size.height as usize * 4
+        };
+        let mut total: usize = made.values().map(|(bitmap, _)| bytes(bitmap)).sum();
+        while total > MADE_BUDGET && made.len() > 1 {
+            let Some(oldest) = made.iter().filter(|(k, _)| **k != key).min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k) else { break };
+            if let Some((bitmap, _)) = made.remove(&oldest) {
+                total -= bytes(&bitmap);
+            }
+        }
+        Ok(bitmap)
     }
 
     /// How far below the top of its line box `text`'s ink starts and ends.
@@ -302,6 +378,44 @@ fn shipped_face(write: &IDWriteFactory6, loader: &IDWriteInMemoryFontFileLoader,
         names.GetString(0, &mut name)?;
         name.pop();
         Ok((collection, HSTRING::from_wide(&name)))
+    }
+}
+
+impl Gfx {
+    /// `icon`'s figures as one geometry, on its 24-unit grid; made once.
+    fn icon_path(&self, icon: Icon) -> Option<ID2D1PathGeometry1> {
+        if let Some(path) = self.icon_paths.borrow().get(&icon) {
+            return Some(path.clone());
+        }
+        let point = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
+        let path = (|| -> Result<ID2D1PathGeometry1> {
+            unsafe {
+                let path = self.factory.CreatePathGeometry()?;
+                let sink = path.Open()?;
+                for figure in icon.figures() {
+                    sink.BeginFigure(point(figure.start), D2D1_FIGURE_BEGIN_HOLLOW);
+                    for segment in &figure.segments {
+                        match *segment {
+                            Segment::Line(to) => sink.AddLine(point(to)),
+                            Segment::Arc { to, radii, rotation, large, clockwise } => sink.AddArc(&D2D1_ARC_SEGMENT {
+                                point: point(to),
+                                size: D2D_SIZE_F { width: radii.0, height: radii.1 },
+                                rotationAngle: rotation,
+                                sweepDirection: if clockwise { D2D1_SWEEP_DIRECTION_CLOCKWISE } else { D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE },
+                                arcSize: if large { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+                            }),
+                            Segment::Cubic(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: point(c1), point2: point(c2), point3: point(to) }),
+                        }
+                    }
+                    sink.EndFigure(if figure.closed { D2D1_FIGURE_END_CLOSED } else { D2D1_FIGURE_END_OPEN });
+                }
+                sink.Close()?;
+                Ok(path)
+            }
+        })()
+        .ok()?;
+        self.icon_paths.borrow_mut().insert(icon, path.clone());
+        Some(path)
     }
 }
 
@@ -362,6 +476,19 @@ impl Canvas for Frame<'_> {
         Frame::text(self, text, font, color, x, y, width, align);
     }
 
+    fn text_scaled(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, scale: f32) {
+        // Laid out at its own size and drawn larger or smaller about its
+        // corner: no font, nor glyphs, made for a size passed through.
+        let mut parent = Matrix3x2::default();
+        unsafe {
+            self.dc.GetTransform(&mut parent);
+            let about = Matrix3x2::translation(-x, -y) * Matrix3x2::scale(scale, scale) * Matrix3x2::translation(x, y);
+            self.dc.SetTransform(&(about * parent));
+        }
+        Frame::text(self, text, font, color, x, y, width / scale.max(0.01), align);
+        unsafe { self.dc.SetTransform(&parent) };
+    }
+
     fn measure(&self, text: &str, font: Font) -> f32 {
         self.gfx.measure(text, font)
     }
@@ -406,10 +533,62 @@ impl Canvas for Frame<'_> {
         }
     }
 
+    fn stroke_dashed(&self, points: &[Point], color: Color, width: f32) {
+        if let Some(path) = self.path(points, false) {
+            unsafe { self.dc.DrawGeometry(&path, self.brush(color), width, &self.gfx.dashed) };
+        }
+    }
+
     fn fill_shape(&self, points: &[Point], fill: Fill) {
         let Some(path) = self.path(points, true) else { return };
         if let Some(brush) = self.paint_with(fill) {
             unsafe { self.dc.FillGeometry(&path, &brush, None) };
+        }
+    }
+
+    fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32) {
+        let brush = self.brush(color);
+        if sweep >= std::f32::consts::TAU {
+            let circle = D2D1_ELLIPSE { point: Vector2 { X: centre.x, Y: centre.y }, radiusX: radius, radiusY: radius };
+            unsafe { self.dc.DrawEllipse(&circle, brush, width, None) };
+            return;
+        }
+        if sweep <= 0.0 {
+            return;
+        }
+        let at = |angle: f32| Vector2 { X: centre.x + radius * angle.sin(), Y: centre.y - radius * angle.cos() };
+        let made = (|| -> Result<ID2D1PathGeometry1> {
+            unsafe {
+                let path = self.gfx.factory.CreatePathGeometry()?;
+                let sink = path.Open()?;
+                sink.BeginFigure(at(from), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink.AddArc(&D2D1_ARC_SEGMENT {
+                    point: at(from + sweep),
+                    size: D2D_SIZE_F { width: radius, height: radius },
+                    rotationAngle: 0.0,
+                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                    arcSize: if sweep > std::f32::consts::PI { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+                });
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                sink.Close()?;
+                Ok(path)
+            }
+        })();
+        if let Ok(path) = made {
+            unsafe { self.dc.DrawGeometry(&path, brush, width, &self.gfx.round) };
+        }
+    }
+
+    fn icon(&self, icon: Icon, centre: Point, size: f32, color: Color) {
+        let Some(path) = self.gfx.icon_path(icon) else { return };
+        let scale = size / 24.0;
+        let mut parent = Matrix3x2::default();
+        unsafe {
+            self.dc.GetTransform(&mut parent);
+            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(centre.x - size / 2.0, centre.y - size / 2.0) * parent;
+            self.dc.SetTransform(&placed);
+            self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
+            self.dc.SetTransform(&parent);
         }
     }
 
@@ -490,7 +669,6 @@ impl<'a> Frame<'a> {
         match fill {
             Fill::Solid(color) => self.brush(color).cast().ok(),
             Fill::Down { top, from, bottom, to } => self.gradient(Vector2 { X: 0.0, Y: top }, from, Vector2 { X: 0.0, Y: bottom }, to),
-            Fill::Across { left, from, right, to } => self.gradient(Vector2 { X: left, Y: 0.0 }, from, Vector2 { X: right, Y: 0.0 }, to),
         }
     }
 
@@ -523,38 +701,6 @@ impl<'a> Frame<'a> {
             sink.Close().ok()?;
             Some(path)
         }
-    }
-
-    /// What `paint` draws, in a glow of `glow` spreading about `blur` DIPs
-    /// around it: drawn once into a picture of its own (in the frame's
-    /// DIPs), and that drawn blurred in the glow's colour, then sharp on
-    /// top, all through the frame's current transform.
-    pub fn glow(&self, glow: Color, blur: f32, paint: impl FnOnce(&Frame)) {
-        let dc = &self.dc;
-        // Without its picture (the device going, which the frame's end
-        // tells), nothing is drawn this time.
-        let _ = (|| -> Result<()> {
-            unsafe {
-                let list = dc.CreateCommandList()?;
-                let (target, mut transform) = (dc.GetTarget()?, Matrix3x2::default());
-                dc.GetTransform(&mut transform);
-                dc.SetTarget(&list);
-                dc.SetTransform(&Matrix3x2::identity());
-                paint(self);
-                dc.SetTarget(&target);
-                dc.SetTransform(&transform);
-                list.Close()?;
-                let picture: ID2D1Image = list.cast()?;
-                let halo = dc.CreateEffect(&CLSID_D2D1Shadow)?;
-                halo.SetInput(0, &picture, true);
-                halo.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &blur.to_ne_bytes())?;
-                let rgba = [glow.r, glow.g, glow.b, glow.a];
-                halo.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
-                dc.DrawImage(&halo.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                dc.DrawImage(&picture, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-            }
-            Ok(())
-        })();
     }
 
     /// Draws text from here on as sharply as grayscale antialiasing allows
@@ -649,6 +795,13 @@ impl<'a> Frame<'a> {
     }
 }
 
+/// How much the bitmaps made from their keys alone may hold (bytes; see
+/// `Gfx::made`).
+const MADE_BUDGET: usize = 32 << 20;
+
+/// The step a surface's size is made in (physical px; see `Surface::draw`).
+const SURFACE_STEP: u32 = 128;
+
 /// A window's content: a composition surface the size of the window.
 pub struct Surface {
     _target: IDCompositionTarget,
@@ -668,13 +821,18 @@ impl Surface {
     /// Draws one frame, at `scale` physical pixels per DIP, on a surface
     /// `size` physical pixels large.
     pub fn draw(&mut self, gfx: &Gfx, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<()> {
-        if self.surface.is_none() || self.size != size {
-            let surface = unsafe {
-                gfx.dcomp.CreateSurface(size.0.max(1), size.1.max(1), DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)?
-            };
+        // Made a little larger than asked, in steps, and kept while it holds
+        // what is asked without being much larger: a window sized frame by
+        // frame (a widget settling, sticking) draws on one surface, not a
+        // new one each frame. What lies past the window is not shown.
+        let step = |v: u32| v.max(1).div_ceil(SURFACE_STEP) * SURFACE_STEP;
+        let holds = self.size.0 >= size.0 && self.size.1 >= size.1 && self.size.0 <= step(size.0) + 2 * SURFACE_STEP && self.size.1 <= step(size.1) + 2 * SURFACE_STEP;
+        if self.surface.is_none() || !holds {
+            let made = (step(size.0), step(size.1));
+            let surface = unsafe { gfx.dcomp.CreateSurface(made.0, made.1, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED)? };
             unsafe { self.visual.SetContent(&surface)? };
             self.surface = Some(surface);
-            self.size = size;
+            self.size = made;
         }
         let surface = self.surface.as_ref().unwrap();
         let mut offset = POINT::default();
@@ -727,13 +885,19 @@ impl Layer {
         let dc = &frame.dc;
         if self.bitmap.as_ref().is_none_or(|(shown, _)| *shown != key) {
             let pixels = D2D_SIZE_U { width: (size.0 * scale).ceil() as u32, height: (size.1 * scale).ceil() as u32 };
-            // The same bitmap serves while the size holds.
+            // The same bitmap serves while it holds the size without being
+            // much larger: made in steps (as surfaces are), a layer sized
+            // frame by frame keeps one bitmap, not one for each size.
+            let step = |v: u32| v.max(1).div_ceil(SURFACE_STEP) * SURFACE_STEP;
             let reusable = self.bitmap.take().map(|(_, bitmap)| bitmap).filter(|bitmap| {
                 let have = unsafe { bitmap.GetPixelSize() };
                 let mut dpi = (0.0, 0.0);
                 unsafe { bitmap.GetDpi(&mut dpi.0, &mut dpi.1) };
-                have == pixels && dpi.0 == 96.0 * scale
+                let holds = have.width >= pixels.width && have.height >= pixels.height;
+                let near = have.width <= step(pixels.width) + 2 * SURFACE_STEP && have.height <= step(pixels.height) + 2 * SURFACE_STEP;
+                holds && near && dpi.0 == 96.0 * scale
             });
+            let pixels = D2D_SIZE_U { width: step(pixels.width), height: step(pixels.height) };
             let bitmap = match reusable {
                 Some(bitmap) => bitmap,
                 None => unsafe {
@@ -759,7 +923,11 @@ impl Layer {
                 dc.SetDpi(96.0 * scale, 96.0 * scale);
                 dc.SetTransform(&Matrix3x2::translation(-left, -top));
                 dc.Clear(Some(&D2D1_COLOR_F::default()));
+                // Its bitmap may be larger than asked (see above): what is
+                // drawn stays inside what was.
+                dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
                 let painted = paint(frame);
+                dc.PopAxisAlignedClip();
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
                 dc.SetTransform(&transform);

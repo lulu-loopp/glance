@@ -196,20 +196,27 @@ impl Sampler {
 
     /// The game to show: of the programs presenting frames, a game on the
     /// pointer's screen, else a game on another.
-    /// A game is one whose window covers its screen.
+    /// A game is one whose window covers its screen, or (asked for by hand,
+    /// see `presents::GameMode`) the one in front.
     /// Named by its window's title, its program from the process list, and
     /// its use of the machine from the counters (never by opening its
     /// process: anti-cheat watches for that). `collected` says whether the
     /// counters were read this time.
     fn game(&mut self, collected: bool) -> Option<GameSample> {
         // A game: a program presenting frames whose window covers its screen.
-        let found: Vec<crate::presents::Presenting> = crate::presents::presenting().into_iter().filter(|p| p.fills_screen).collect();
+        let front = crate::presents::game_mode() == crate::presents::GameMode::On;
+        let found: Vec<crate::presents::Presenting> = crate::presents::presenting().into_iter().filter(|p| p.fills_screen || (front && p.in_front)).collect();
         let now = Instant::now();
         let chosen = found
             .iter()
-            .find(|p| p.under_pointer)
+            .find(|p| front && p.in_front)
+            .or_else(|| found.iter().find(|p| p.under_pointer))
             .or_else(|| found.first());
         let Some(presenting) = chosen else {
+            // The game turned off by hand has gone: the next is shown as found.
+            if crate::presents::game_mode() == crate::presents::GameMode::Off {
+                crate::presents::set_game_mode(crate::presents::GameMode::Auto);
+            }
             self.forget_playing(now);
             return None;
         };
@@ -255,6 +262,7 @@ impl Sampler {
             vram,
             gpu_limit,
             playing_s,
+            by_hand: !presenting.fills_screen,
         })
     }
 

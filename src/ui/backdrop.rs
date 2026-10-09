@@ -1,15 +1,13 @@
 //! What is on screen behind the panel, for skins that draw the desktop
 //! through glass or acrylic.
 
-use std::hash::{DefaultHasher, Hash, Hasher};
-
 use windows::core::Result;
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, ID2D1DeviceContext, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC, ReleaseDC, SelectObject, BITMAPINFO,
     BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
 };
 
@@ -17,10 +15,46 @@ use windows::Win32::Graphics::Gdi::{
 pub struct Capture {
     /// Physical screen coordinates.
     pub rect: RECT,
-    /// Rows top to bottom, BGRA, opaque.
-    pixels: Vec<u8>,
+    /// Rows top to bottom, BGRA, opaque; none once let go of (see
+    /// `forget_pixels`).
+    pixels: Option<Vec<u8>>,
+    /// How light it is, a value (0–255) for each `LUMA_STEP` square of
+    /// pixels: what is read of it once its pixels are let go of.
+    luma: Vec<u8>,
     /// Tells one capture's content from another's.
     pub digest: u64,
+}
+
+/// The side of the squares of pixels the luminance is kept for.
+const LUMA_STEP: i32 = 2;
+
+/// What tells one screenful from another: every pixel, eight bytes at a
+/// time, mixed as FxHash mixes (a screen's worth in a few milliseconds,
+/// where a general hasher takes tens). Alpha, which the copy leaves as it
+/// is, is left out.
+fn digest(pixels: &[u8]) -> u64 {
+    const K: u64 = 0x517C_C1B7_2722_0A95;
+    const COLOUR: u64 = 0x00FF_FFFF_00FF_FFFF;
+    let mut hash = pixels.len() as u64;
+    let mut words = pixels.chunks_exact(8);
+    for word in &mut words {
+        let v = u64::from_le_bytes(word.try_into().unwrap()) & COLOUR;
+        hash = (hash.rotate_left(5) ^ v).wrapping_mul(K);
+    }
+    for &byte in words.remainder() {
+        hash = (hash.rotate_left(5) ^ byte as u64).wrapping_mul(K);
+    }
+    hash
+}
+
+/// How many `LUMA_STEP` squares span `pixels`.
+fn squares(pixels: i32) -> i32 {
+    (pixels + LUMA_STEP - 1) / LUMA_STEP
+}
+
+/// The relative luminance (0–1) of a BGRA pixel at `i`.
+fn pixel_luminance(pixels: &[u8], i: usize) -> f64 {
+    (0.2126 * pixels[i + 2] as f64 + 0.7152 * pixels[i + 1] as f64 + 0.0722 * pixels[i] as f64) / 255.0
 }
 
 impl Capture {
@@ -49,7 +83,9 @@ impl Capture {
             let mut bits = std::ptr::null_mut();
             let copied = CreateDIBSection(Some(memory), &info, DIB_RGB_COLORS, &mut bits, None, 0).ok().map(|bitmap| {
                 let previous = SelectObject(memory, bitmap.into());
-                let copied = BitBlt(memory, 0, 0, width, height, Some(screen), rect.left, rect.top, SRCCOPY).is_ok();
+                // Read once GDI has done the copy, not while it may still be
+                // queued.
+                let copied = BitBlt(memory, 0, 0, width, height, Some(screen), rect.left, rect.top, SRCCOPY).is_ok() && GdiFlush().as_bool();
                 if copied {
                     let length = pixels.len();
                     pixels.copy_from_slice(std::slice::from_raw_parts(bits as *const u8, length));
@@ -64,39 +100,81 @@ impl Capture {
                 return None;
             }
         }
-        // The copy leaves alpha at zero; the screen is opaque.
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[3] = 255;
-        }
-        let mut hasher = DefaultHasher::new();
-        pixels.hash(&mut hasher);
-        Some(Capture { rect, pixels, digest: hasher.finish() })
+        // The copy leaves alpha at zero: its bitmap ignores it (the screen
+        // is opaque), rather than every pixel being set.
+        Some(Capture::from_pixels(rect, pixels))
     }
 
     /// A picture already in memory (BGRA, opaque, rows top to bottom),
     /// standing for the screen inside `rect`.
     pub fn from_pixels(rect: RECT, pixels: Vec<u8>) -> Self {
-        let mut hasher = DefaultHasher::new();
-        pixels.hash(&mut hasher);
-        Capture { rect, pixels, digest: hasher.finish() }
+        let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+        let (columns, rows) = (squares(width), squares(height));
+        let mut luma = Vec::with_capacity((columns * rows) as usize);
+        for row in 0..rows {
+            for column in 0..columns {
+                let i = (((row * LUMA_STEP) * width + column * LUMA_STEP) * 4) as usize;
+                luma.push((pixel_luminance(&pixels, i) * 255.0).round() as u8);
+            }
+        }
+        let digest = digest(&pixels);
+        Capture { rect, pixels: Some(pixels), luma, digest }
+    }
+
+    /// The same capture without its pixels (what is read of it is from its
+    /// luminance): to be lent along with a bitmap already made of it.
+    pub fn without_pixels(&self) -> Self {
+        Capture { rect: self.rect, pixels: None, luma: self.luma.clone(), digest: self.digest }
     }
 
     fn width(&self) -> i32 {
         self.rect.right - self.rect.left
     }
 
+    /// Lets go of its pixels once they are a bitmap: a screen's worth of
+    /// memory. What is read of it after is from its luminance (see `luma`);
+    /// a bitmap is not made of it again.
+    pub fn forget_pixels(&mut self) {
+        self.pixels = None;
+    }
+
+    /// The relative luminance (0–1) at (`x`, `y`) from its corner: of the
+    /// pixel while it has its pixels, else of the square it is in.
+    fn luminance_at(&self, x: i32, y: i32) -> f64 {
+        match &self.pixels {
+            Some(pixels) => pixel_luminance(pixels, ((y * self.width() + x) * 4) as usize),
+            None => self.luma[((y / LUMA_STEP) * squares(self.width()) + x / LUMA_STEP) as usize] as f64 / 255.0,
+        }
+    }
+
     /// The capture as a bitmap at `px` physical pixels per DIP, so that it
     /// covers its rectangle's size in DIPs.
     pub fn bitmap(&self, dc: &ID2D1DeviceContext, px: f32) -> Result<ID2D1Bitmap1> {
+        let Some(pixels) = &self.pixels else { return Err(windows::Win32::Foundation::E_UNEXPECTED.into()) };
         let size = D2D_SIZE_U { width: self.width() as u32, height: (self.rect.bottom - self.rect.top) as u32 };
         let properties = D2D1_BITMAP_PROPERTIES1 {
-            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            // Opaque whatever its alpha bytes say (see `take`).
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
             dpiX: 96.0 * px,
             dpiY: 96.0 * px,
             bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
             ..Default::default()
         };
-        unsafe { dc.CreateBitmap(size, Some(self.pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
+        unsafe { dc.CreateBitmap(size, Some(pixels.as_ptr().cast()), (self.width() * 4) as u32, &properties) }
+    }
+
+    /// The relative luminance, as WCAG measures it (its channels made
+    /// linear first), at (`x`, `y`) from its corner, while it has its
+    /// pixels; else its luminance as kept.
+    fn wcag_at(&self, x: i32, y: i32) -> f32 {
+        let channel = |v: u8| v as f32 / 255.0;
+        match &self.pixels {
+            Some(pixels) => {
+                let i = ((y * self.width() + x) * 4) as usize;
+                crate::ui::overlay::luminance(channel(pixels[i + 2]), channel(pixels[i + 1]), channel(pixels[i]))
+            }
+            None => self.luminance_at(x, y) as f32,
+        }
     }
 
     /// The relative luminance (0–1, as WCAG measures it) of every `step`th
@@ -106,15 +184,13 @@ impl Capture {
         let r = self.rect;
         let (left, right) = (area.left.max(r.left), area.right.min(r.right));
         let (top, bottom) = (area.top.max(r.top), area.bottom.min(r.bottom));
-        let channel = |v: u8| v as f32 / 255.0;
         let mut luminances = Vec::new();
         for y in (top..bottom).step_by(step.max(1) as usize) {
             for x in (left..right).step_by(step.max(1) as usize) {
                 if x >= hole.left && x < hole.right && y >= hole.top && y < hole.bottom {
                     continue;
                 }
-                let i = (((y - r.top) * self.width() + x - r.left) * 4) as usize;
-                luminances.push(crate::ui::overlay::luminance(channel(self.pixels[i + 2]), channel(self.pixels[i + 1]), channel(self.pixels[i])));
+                luminances.push(self.wcag_at(x - r.left, y - r.top));
             }
         }
         luminances
@@ -143,9 +219,7 @@ impl Capture {
                 let mut count = 0;
                 for y in y0..y1.max(y0 + 1) {
                     for x in x0..x1.max(x0 + 1) {
-                        let i = ((y * self.width() + x) * 4) as usize;
-                        let (b, g, r) = (self.pixels[i] as f64, self.pixels[i + 1] as f64, self.pixels[i + 2] as f64);
-                        cell += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+                        cell += self.luminance_at(x, y);
                         count += 1;
                     }
                 }

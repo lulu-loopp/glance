@@ -8,7 +8,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, LoadCursorW, HWND_TOP, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
     SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
     PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
@@ -28,6 +28,8 @@ pub struct Window {
     click_through: bool,
     /// The window it gives way to while there is one (see `yield_to`).
     under: Cell<Option<HWND>>,
+    /// Where it was last put by `place_keeping`.
+    placed: Cell<RECT>,
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -62,17 +64,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 impl Window {
     /// A window that can let clicks through (see `set_click_through`).
     pub fn new() -> Result<Self> {
-        Self::make(true)
+        Self::make(true, false)
+    }
+
+    /// A window that can come to the front and take the keyboard, as a
+    /// menu does while it is up (see `menu`).
+    pub fn activating() -> Result<Self> {
+        Self::make(true, true)
     }
 
     /// A window that always takes its clicks, and that the system's
     /// compositor may draw the screen behind into, blurred (a layered
     /// window gets no host backdrop).
     pub fn see_through() -> Result<Self> {
-        Self::make(false)
+        Self::make(false, false)
     }
 
-    fn make(layered: bool) -> Result<Self> {
+    fn make(layered: bool, activating: bool) -> Result<Self> {
         let instance = unsafe { GetModuleHandleW(None)? };
         let class = WNDCLASSW {
             lpfnWndProc: Some(procedure),
@@ -85,7 +93,8 @@ impl Window {
         unsafe { RegisterClassW(&class) };
         // Layered so that it can let clicks through (see `set_click_through`);
         // fully opaque as a layer, its content's own alpha is what shows.
-        let style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
+        let style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP;
+        let style = if activating { style } else { style | WS_EX_NOACTIVATE };
         let hwnd = unsafe {
             CreateWindowExW(
                 if layered { style | WS_EX_LAYERED } else { style },
@@ -102,15 +111,20 @@ impl Window {
                 None,
             )?
         };
-        if layered {
-            unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)? };
-        }
-        // The panel animates itself; no system fade on top.
-        let disabled = BOOL::from(true);
-        unsafe {
-            DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<BOOL>() as u32)?
+        let set_up = || -> Result<()> {
+            if layered {
+                unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)? };
+            }
+            // The panel animates itself; no system fade on top.
+            let disabled = BOOL::from(true);
+            unsafe { DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<BOOL>() as u32) }
         };
-        Ok(Window { hwnd, click_through: false, under: Cell::new(None) })
+        // Not set up as it must be: not left behind either.
+        if let Err(error) = set_up() {
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(error);
+        }
+        Ok(Window { hwnd, click_through: false, under: Cell::new(None), placed: Cell::new(RECT::default()) })
     }
 
     pub fn place(&self, rect: RECT) {
@@ -139,6 +153,36 @@ impl Window {
             // Above whatever took the top since it was last shown (but the
             // window it gives way to).
             let _ = SetWindowPos(self.hwnd, Some(self.under.get().unwrap_or(HWND_TOPMOST)), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+        }
+    }
+
+    /// Placed at `rect`, where it is among the other windows kept; nothing
+    /// done where it is there already.
+    pub fn place_keeping(&self, rect: RECT) {
+        if self.placed.get() == rect {
+            return;
+        }
+        self.placed.set(rect);
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+    }
+
+    /// Shown if hidden, where it is among the other windows kept.
+    pub fn show_in_place(&self) {
+        unsafe {
+            if !IsWindowVisible(self.hwnd).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            }
+        }
+    }
+
+    /// In front of the windows of its kind (the topmost ones, or the others),
+    /// or, giving way to a window, just below it still.
+    pub fn raise(&self) {
+        let after = self.under.get().unwrap_or(HWND_TOP);
+        unsafe {
+            let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         }
     }
 

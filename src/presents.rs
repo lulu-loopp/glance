@@ -23,7 +23,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed,
 };
 
 use crate::frames::{FrameStats, Presents};
@@ -156,9 +156,38 @@ pub struct Presenting {
     pub fills_screen: bool,
     /// Whether that screen is the one the pointer is on.
     pub under_pointer: bool,
+    /// Whether its window is the one in front.
+    pub in_front: bool,
     pub refresh_hz: Option<u32>,
     /// Its screen, in physical pixels: left, top, right, bottom.
     pub screen: Option<[i32; 4]>,
+}
+
+/// Whether a game shows, as a widget's game button sets it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GameMode {
+    /// As found: a game whose window covers its screen.
+    Auto,
+    /// Asked for by hand: the window in front counts as a game whether or
+    /// not it covers its screen (a game played in a window).
+    On,
+    /// Turned off by hand: no game shows, found or not, until the game
+    /// found has gone (then `Auto` again).
+    Off,
+}
+
+static GAME_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn game_mode() -> GameMode {
+    match GAME_MODE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => GameMode::On,
+        2 => GameMode::Off,
+        _ => GameMode::Auto,
+    }
+}
+
+pub fn set_game_mode(mode: GameMode) {
+    GAME_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Every program presenting frames now, by its topmost window, topmost
@@ -180,6 +209,7 @@ pub fn presenting() -> Vec<Presenting> {
         return Vec::new();
     }
     let own = std::process::id();
+    let front = unsafe { GetForegroundWindow() };
     let mut cursor = POINT::default();
     let pointer_screen = unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) });
     // The top-level windows, topmost first.
@@ -206,6 +236,7 @@ pub fn presenting() -> Vec<Presenting> {
             title: String::from_utf16_lossy(&title[..length.max(0) as usize]).trim().to_string(),
             fills_screen,
             under_pointer: monitor.is_some() && monitor.map(|(monitor, _)| monitor) == pointer_screen,
+            in_front: window == front,
             refresh_hz,
             screen: monitor.map(|(_, r)| [r.left, r.top, r.right, r.bottom]),
         });

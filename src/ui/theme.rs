@@ -118,6 +118,9 @@ pub struct Theme {
     pub tint: Color,
     pub stroke: Color,
     pub footer: Color,
+    /// The card each lane sits on, and its stroke (clear: none).
+    pub card: Color,
+    pub card_stroke: Color,
     /// Glass: its tint at no frost, and how much more at full frost, and the
     /// faint halo that keeps text legible.
     pub glass: Color,
@@ -140,6 +143,11 @@ impl Theme {
         let kind = id.split(':').next().unwrap();
         self.inks.iter().find(|(module, _)| *module == kind).map_or(self.ink, |(_, ink)| *ink)
     }
+
+    /// Whether modules `a` and `b` are drawn in the same ink.
+    pub fn same_ink(&self, a: &str, b: &str) -> bool {
+        self.ink(a).trace == self.ink(b).trace
+    }
 }
 
 /// One colour at several strengths, as CSS's `color-mix(in srgb, c p%, transparent)`.
@@ -161,6 +169,8 @@ fn paper(dark: bool) -> Theme {
         (0xEEF2EC, 0x16221E, 0x55645C, 0x8A9990, 0xD3DBD2, 0.07, 0xD23F1C, (0x0A1410, 0.35, 0.12))
     };
     let ink = Ink { trace: rgba(text, 1.0), trace2: rgba(text3, 1.0), wash: rgba(text, wash), wash_end: rgba(text, wash) };
+    // A game in green: the one other ink, so that a game shows at a glance.
+    let game = self::ink(rgba(if dark { 0x4ECB82 } else { 0x1F8A4C }, 1.0), 0.5, 0.14, 0.14);
     Theme {
         skin: Skin::Paper,
         dark,
@@ -171,7 +181,7 @@ fn paper(dark: bool) -> Theme {
         track: rgba(text, wash),
         signal: rgba(signal, 1.0),
         hover: rgba(text, if dark { 0.07 } else { 0.06 }),
-        inks: Vec::new(),
+        inks: vec![("game", game)],
         ink,
         body: archivo(13.0, 500.0),
         small: archivo(12.0, 500.0),
@@ -207,6 +217,8 @@ fn paper(dark: bool) -> Theme {
         tint: Color::CLEAR,
         stroke: rgba(rule, 1.0),
         footer: Color::CLEAR,
+        card: Color::CLEAR,
+        card_stroke: Color::CLEAR,
         glass: Color::CLEAR,
         glass_clear: 0.0,
         glass_frosted: 0.0,
@@ -220,13 +232,15 @@ pub fn accent(dark: bool) -> Color {
     Color::hex(crate::os::accent(dark).unwrap_or(if dark { 0x99EBFF } else { 0x005FB8 }), 1.0)
 }
 
-/// Windows 11, as the Start menu and Quick Settings draw it: one acrylic
-/// sheet with an 8 px radius, a hairline stroke and a soft shadow; content
-/// grouped by headings and space rather than boxes; a slightly darker footer;
-/// the user's accent colour for anything that is data.
+/// Windows 11, as the Start menu, Quick Settings and Settings draw it: one
+/// acrylic sheet with an 8 px radius, a hairline stroke and a soft shadow;
+/// each lane on a card of its own (Settings' cards: a light layer, a faint
+/// stroke, 4 px corners) with room round and between them; a slightly
+/// darker footer; the user's accent colour for anything that is data.
 fn fluent(dark: bool) -> Theme {
     let segoe = |size, weight| Font::new(Family::Segoe, size, weight);
     let ink = ink(accent(dark), 0.5, 0.22, 0.0);
+    let game = self::ink(rgba(if dark { 0x6CCB5F } else { 0x0F7B0F }, 1.0), 0.5, 0.22, 0.0);
     let (on, a) = if dark { (0xFFFFFF, [1.0, 0.76, 0.5, 0.06, 0.14]) } else { (0x000000, [0.9, 0.6, 0.44, 0.06, 0.1]) };
     Theme {
         skin: Skin::Fluent,
@@ -238,7 +252,7 @@ fn fluent(dark: bool) -> Theme {
         track: rgba(on, a[4]),
         signal: if dark { rgba(0xFF99A4, 1.0) } else { rgba(0xC42B1C, 1.0) },
         hover: if dark { rgba(0xFFFFFF, 0.06) } else { rgba(0x000000, 0.04) },
-        inks: Vec::new(),
+        inks: vec![("game", game)],
         ink,
         body: segoe(13.0, 500.0),
         small: segoe(12.0, 500.0),
@@ -248,11 +262,11 @@ fn fluent(dark: bool) -> Theme {
         unit: segoe(15.0, 500.0),
         value: segoe(13.0, 500.0),
         pad_x: 16.0,
-        pad_top: 10.0,
+        pad_top: 12.0,
         pad_bottom: 12.0,
-        outer: (10.0, 6.0, 6.0),
-        lane_gap: 0.0,
-        column_gap: 0.0,
+        outer: (12.0, 12.0, 12.0),
+        lane_gap: 6.0,
+        column_gap: 6.0,
         bar_gap: 0.0,
         bar_height: 52.0,
         bar_pad: (22.0, 14.0),
@@ -281,6 +295,8 @@ fn fluent(dark: bool) -> Theme {
         tint: if dark { rgba(0x2C2C2C, 0.15) } else { rgba(0xFCFCFC, 0.0) },
         stroke: if dark { rgba(0xFFFFFF, 0.09) } else { rgba(0x000000, 0.1) },
         footer: rgba(0x000000, if dark { 0.18 } else { 0.035 }),
+        card: if dark { rgba(0xFFFFFF, 0.05) } else { rgba(0xFFFFFF, 0.7) },
+        card_stroke: if dark { rgba(0x000000, 0.1) } else { rgba(0x000000, 0.06) },
         glass: Color::CLEAR,
         glass_clear: 0.0,
         glass_frosted: 0.0,
@@ -294,10 +310,10 @@ fn fluent(dark: bool) -> Theme {
 /// backdrop, the more it frosts, so text stays legible over anything.
 fn glass(dark: bool) -> Theme {
     let inter = |size, weight| Font::new(Family::Inter, size, weight);
-    let [blue, green, orange, purple, teal] = if dark {
-        [0x3D9BFF, 0x30D158, 0xFF9F0A, 0xC77DFF, 0x5AC8F5]
+    let [blue, green, orange, purple, teal, mint] = if dark {
+        [0x3D9BFF, 0x30D158, 0xFF9F0A, 0xC77DFF, 0x5AC8F5, 0x63E6C8]
     } else {
-        [0x0A7AFF, 0x24A148, 0xE8890C, 0xA64FD6, 0x1491B8]
+        [0x0A7AFF, 0x24A148, 0xE8890C, 0xA64FD6, 0x1491B8, 0x00A88A]
     };
     let lane = |rgb| ink(rgba(rgb, 1.0), 0.55, 0.34, 0.0);
     let (on, a) = if dark { (0xFFFFFF, [0.95, 0.68, 0.46, 0.1, 0.16]) } else { (0x000000, [0.86, 0.58, 0.42, 0.08, 0.1]) };
@@ -312,6 +328,7 @@ fn glass(dark: bool) -> Theme {
         signal: if dark { rgba(0xFF6961, 1.0) } else { rgba(0xFF3B30, 1.0) },
         hover: if dark { rgba(0xFFFFFF, 0.1) } else { rgba(0xFFFFFF, 0.35) },
         inks: vec![
+            ("game", lane(mint)),
             ("gpu", lane(green)),
             ("memory", lane(orange)),
             ("network", lane(purple)),
@@ -360,6 +377,8 @@ fn glass(dark: bool) -> Theme {
         tint: Color::CLEAR,
         stroke: Color::CLEAR,
         footer: Color::CLEAR,
+        card: Color::CLEAR,
+        card_stroke: Color::CLEAR,
         glass: if dark { rgba(0x14141A, 1.0) } else { rgba(0xFFFFFF, 1.0) },
         glass_clear: if dark { 0.16 } else { 0.08 },
         glass_frosted: if dark { 0.68 } else { 0.78 },

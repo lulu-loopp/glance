@@ -29,6 +29,46 @@ pub enum Edge {
     Top,
 }
 
+/// What a desktop widget was sized to show (see `arrange::Choice`): its
+/// form by name ("full-2", "compact-1", "tiles-3x2", "rail", …), its
+/// scale, and how much wider and taller than designed it is drawn (DIPs).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PanelLayout {
+    pub form: String,
+    pub scale: f32,
+    pub extra: (f32, f32),
+}
+
+/// A desktop widget as it is kept: its surface's corner on the screen
+/// (physical px), what it shows, whether it is pinned (not moved or sized),
+/// lets clicks through and shows only while a game runs, the side of its
+/// screen it is stuck to, if it is, and what it showed before it was.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetAt {
+    pub at: (i32, i32),
+    pub layout: PanelLayout,
+    #[serde(default)]
+    pub pinned: bool,
+    /// Clicks pass through it (Ctrl held, it takes them).
+    #[serde(default)]
+    pub click_through: bool,
+    #[serde(default)]
+    pub game_only: bool,
+    #[serde(default)]
+    pub stuck: Option<WidgetSide>,
+    #[serde(default)]
+    pub before: Option<PanelLayout>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WidgetSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
 /// Where along the edge the panel opens.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -227,6 +267,8 @@ pub struct Settings {
     pub overlay: OverlaySettings,
     /// See `PanelAt`; none while the panel opens from the edge.
     pub panel_at: Option<PanelAt>,
+    /// The desktop widgets torn off the panel.
+    pub widgets: Vec<WidgetAt>,
     pub view: serde_json::Value,
 }
 
@@ -251,6 +293,7 @@ impl Default for Settings {
             last_version: None,
             overlay: OverlaySettings::default(),
             panel_at: None,
+            widgets: Vec::new(),
             view: serde_json::Value::Null,
         }
     }

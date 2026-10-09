@@ -6,15 +6,11 @@
 
 use std::rc::Rc;
 
-use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
-use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, GetForegroundWindow, GetSystemMetrics, KillTimer, PostMessageW, SetForegroundWindow,
-    SetTimer, TrackPopupMenuEx, SM_SWAPBUTTON, IDC_ARROW, MF_CHECKED, MF_SEPARATOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_NULL,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, KillTimer, SetTimer, SM_SWAPBUTTON, IDC_ARROW};
 
 use std::collections::VecDeque;
 
@@ -37,6 +33,8 @@ pub enum Choice {
 
 pub struct Overlay {
     gfx: Rc<Gfx>,
+    /// Where it was last placed, with its shadow (physical px).
+    placed: std::cell::Cell<RECT>,
     pub window: Window,
     /// Its content: the glass and what is on it.
     surface: Frosted,
@@ -175,6 +173,7 @@ impl Overlay {
             shade,
             shade_surface: None,
             shown: false,
+            placed: std::cell::Cell::new(RECT::default()),
             locked: false,
             lang: Lang::En,
             rect: RECT::default(),
@@ -294,6 +293,14 @@ impl Overlay {
     fn place(&self) {
         self.window.place_under(self.rect, self.beneath);
         self.shade.place_under(self.shadow_rect(), Some(self.window.hwnd));
+        // Where it was and where it is: a widget that took the desktop with
+        // it there takes it again.
+        let now = self.shadow_rect();
+        let was = self.placed.replace(now);
+        if was != now {
+            crate::widget::own_window_changed(was);
+            crate::widget::own_window_changed(now);
+        }
     }
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
@@ -444,9 +451,10 @@ impl Overlay {
     /// The menu has to be in front to close on a click elsewhere: the window
     /// that was in front before (a game, to be given the front back) is
     /// returned too.
-    pub fn menu(&self) -> (Option<Choice>, HWND) {
-        let before = unsafe { GetForegroundWindow() };
-        (self.choose(), before)
+    /// Its menu, and what was chosen in it (the focus put back where it
+    /// was by the menu itself).
+    pub fn menu(&self) -> Option<Choice> {
+        self.choose()
     }
 
     fn choose(&self) -> Option<Choice> {
@@ -454,21 +462,17 @@ impl Overlay {
         const LOCK: usize = 1;
         const CLOSE: usize = 2;
         const SETTINGS: usize = 3;
-        let mut cursor = POINT::default();
-        unsafe { GetCursorPos(&mut cursor) }.ok()?;
-        let chosen = unsafe {
-            let menu = CreatePopupMenu().ok()?;
-            let lock = HSTRING::from(if zh { "锁定位置" } else { "Lock position" });
-            let _ = AppendMenuW(menu, if self.locked { MF_STRING | MF_CHECKED } else { MF_STRING }, LOCK, &lock);
-            let _ = AppendMenuW(menu, MF_STRING, CLOSE, &HSTRING::from(if zh { "关闭悬浮窗" } else { "Close the overlay" }));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            let _ = AppendMenuW(menu, MF_STRING, SETTINGS, &HSTRING::from(if zh { "设置…" } else { "Settings…" }));
-            let hwnd = self.window.hwnd;
-            let _ = SetForegroundWindow(hwnd);
-            let chosen = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON).0, cursor.x, cursor.y, hwnd, None).0 as usize;
-            let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-            let _ = DestroyMenu(menu);
-            chosen
+        use crate::ui::icons::Icon;
+        use crate::ui::menu::{self, Item};
+        let items = [
+            Item { label: if zh { "锁定位置" } else { "Lock position" }, icon: Some(Icon::Pin), checked: self.locked, rule_before: false },
+            Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
+            Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
+        ];
+        let chosen = match menu::show(&items, crate::os::apps_dark())? {
+            0 => LOCK,
+            1 => CLOSE,
+            _ => SETTINGS,
         };
         match chosen {
             LOCK => Some(Choice::Lock(!self.locked)),
@@ -490,6 +494,8 @@ impl Overlay {
         self.shown = false;
         self.window.hide();
         self.shade.hide();
+        crate::widget::own_window_changed(self.shadow_rect());
+        self.placed.set(RECT::default());
         // The drawing memory is given back while it is away.
         self.surface.release();
         if let Some((gfx, surface)) = &mut self.shade_surface {

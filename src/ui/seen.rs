@@ -105,7 +105,9 @@ impl Seen {
         self.battery |= s.battery.is_some();
         self.battery_power |= s.battery.as_ref().is_some_and(|b| b.watts.is_some());
         self.battery_health |= s.battery.as_ref().is_some_and(|b| b.health.is_some());
-        self.game = s.game.is_some();
+        // Found, not taken for one by hand (that is the widgets' own: see
+        // `view::lanes_at`).
+        self.game = s.game.as_ref().is_some_and(|game| !game.by_hand);
         self.game_limit |= s.game.as_ref().is_some_and(|game| game.gpu_limit.is_some());
         self.mic |= s.mic_muted.is_some();
     }

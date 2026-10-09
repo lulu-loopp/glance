@@ -5,8 +5,8 @@
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
 
-use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{w, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
@@ -16,10 +16,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, CreateWindowExW, ASFW_ANY, DefWindowProcW, DestroyWindow, FindWindowW, MSGFLT_ALLOW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW,
     PostQuitMessage, RegisterClassW, RegisterWindowMessageW, HICON, IMAGE_ICON, LR_SHARED, MSG, SM_CXSMICON, SM_CYSMICON,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WNDCLASSW,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, SetForegroundWindow, TrackPopupMenuEx, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_NULL,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyNameTextW, MapVirtualKeyW, RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MAPVK_VK_TO_VSC, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN,
@@ -38,6 +34,8 @@ const HOTKEY_ID: i32 = 1;
 
 /// The tooltip: the readings in brief, kept for when the icon is added again.
 static TIP: Mutex<String> = Mutex::new(String::new());
+/// The icon's menu is up (see `show_menu`).
+static MENU_UP: AtomicBool = AtomicBool::new(false);
 /// The shortcut is wanted but another program has it.
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
 /// The shortcut is let go while the settings take a new one.
@@ -211,40 +209,42 @@ fn put(into: &mut [u16], text: &str) {
     into[..units.len()].copy_from_slice(&units);
 }
 
-/// The icon's menu, at `(x, y)` on the screen, and what was chosen in it.
-fn menu(hwnd: HWND, x: i32, y: i32) {
+/// The icon's menu, at `(x, y)` on the screen: shown by the panel's thread,
+/// which draws Glance's menus (see `show_menu`).
+fn menu(_hwnd: HWND, x: i32, y: i32) {
+    crate::app().controller.tray_menu(x, y);
+}
+
+/// The icon's menu, opening up from `(x, y)` on the screen as the
+/// taskbar's do, and what was chosen in it. On the panel's thread.
+pub fn show_menu(x: i32, y: i32) {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{self, Item};
     const OPEN: usize = 1;
     const SETTINGS: usize = 2;
     const CHECK: usize = 3;
     const QUIT: usize = 4;
+    const RECALL: usize = 5;
     let zh = crate::update::language() == crate::ui::text::Lang::Zh;
-    let items = [
-        (OPEN, if zh { "打开面板" } else { "Open the panel" }),
-        (SETTINGS, if zh { "设置" } else { "Settings" }),
-        (CHECK, if zh { "检查更新" } else { "Check for updates" }),
-        (0, ""),
-        (QUIT, if zh { "退出 Glance" } else { "Quit Glance" }),
-    ];
-    let chosen = unsafe {
-        let Ok(menu) = CreatePopupMenu() else { return };
-        for (id, text) in items {
-            if id == 0 {
-                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-            } else {
-                let text = HSTRING::from(text);
-                let _ = AppendMenuW(menu, MF_STRING, id, &text);
-            }
-        }
-        // The menu closes on a click elsewhere only while its window is in
-        // front; and is followed by a message, as the documentation asks.
-        let _ = SetForegroundWindow(hwnd);
-        let chosen = TrackPopupMenuEx(menu, (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN).0, x, y, hwnd, None).0 as usize;
-        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        chosen
-    };
+    let recall = crate::app().controller.widget_put_away();
+    // Each choice, its icon, and whether a rule sets it off; no widget to
+    // bring back, no choice for it.
+    let mut choices = vec![(OPEN, if zh { "打开面板" } else { "Open the panel" }, Icon::Panel, false)];
+    if recall {
+        choices.push((RECALL, if zh { "召回小组件" } else { "Bring the widget back" }, Icon::Restore, false));
+    }
+    choices.push((SETTINGS, if zh { "设置" } else { "Settings" }, Icon::Settings, false));
+    choices.push((CHECK, if zh { "检查更新" } else { "Check for updates" }, Icon::Update, false));
+    choices.push((QUIT, if zh { "退出 Glance" } else { "Quit Glance" }, Icon::Quit, true));
+    let items: Vec<Item> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, icon: Some(*icon), checked: false, rule_before: *rule_before }).collect();
+    MENU_UP.store(true, Ordering::Relaxed);
+    show_tip(false);
+    let chosen = menu::show_at(&items, crate::os::apps_dark(), POINT { x, y }, true).map_or(0, |i| choices[i].0);
+    MENU_UP.store(false, Ordering::Relaxed);
+    show_tip(true);
     match chosen {
         OPEN => crate::app().controller.open_from_tray(),
+        RECALL => crate::app().controller.recall_widget(),
         SETTINGS => crate::show_settings(),
         CHECK => crate::update::check_now(crate::update::Asker::Tray),
         QUIT => crate::quit(),
@@ -255,13 +255,21 @@ fn menu(hwnd: HWND, x: i32, y: i32) {
 /// Sets the icon's tooltip, from any thread.
 pub fn set_tip(text: &str) {
     *TIP.lock().unwrap() = text.to_string();
+    show_tip(!MENU_UP.load(Ordering::Relaxed));
+}
+
+/// The icon's tooltip as it now reads, shown as the pointer rests on the
+/// icon (`show`), or not (while the icon's menu is up, over which it would
+/// show).
+fn show_tip(show: bool) {
     let hwnd = WINDOW.load(Ordering::Acquire);
     if hwnd == 0 {
         return;
     }
+    let text = TIP.lock().unwrap().clone();
     let mut data = icon_data(HWND(hwnd as *mut _));
-    data.uFlags = NIF_TIP | NIF_SHOWTIP;
-    put(&mut data.szTip, text);
+    data.uFlags = if show { NIF_TIP | NIF_SHOWTIP } else { NIF_TIP };
+    put(&mut data.szTip, if text.is_empty() { "Glance" } else { &text });
     let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
 }
 

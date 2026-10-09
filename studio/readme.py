@@ -1,9 +1,11 @@
 """Composes the README's pictures from the studio's renders (see the
-readme-*.json scripts): the header, the three looks side by side and the
-panel on a desktop, in English and Chinese, each with rounded corners
-(GitHub cannot round a picture itself), as WebP.
+readme-*.json scripts): the header, the three looks side by side, the
+panel on a desktop and widgets on one, in English and Chinese, each with
+rounded corners (GitHub cannot round a picture itself), as WebP.
 
-    python studio/readme.py RENDERS FONT.ttf OUT-FOLDER
+    python studio/readme.py RENDERS FONT.ttf OUT-FOLDER [NAME...]
+
+Only the pictures NAMEd (banner, looks, desktop, widgets), if any are.
 """
 import json
 import sys
@@ -103,13 +105,27 @@ def desktop(renders, lang):
     return rounded(Image.open(renders / f"desktop-{lang}" / "00001.png"), radius=28)
 
 
+def widgets(renders, lang):
+    return rounded(Image.open(renders / f"widgets-{lang}" / "00001.png"), radius=28)
+
+
 if __name__ == "__main__":
     renders, font, out = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    chosen = sys.argv[4:]
     out.mkdir(parents=True, exist_ok=True)
     fonts = Fonts(font)
     wallpaper = Image.open("target/studio/wall-wide-dark.png").convert("RGB")
+    makers = {
+        "banner": lambda lang: banner(renders, fonts, lang),
+        "looks": lambda lang: looks(renders, fonts, lang, wallpaper),
+        "desktop": lambda lang: desktop(renders, lang),
+        "widgets": lambda lang: widgets(renders, lang),
+    }
     for lang in ("en", "zh"):
-        for name, picture in (("banner", banner(renders, fonts, lang)), ("looks", looks(renders, fonts, lang, wallpaper)), ("desktop", desktop(renders, lang))):
+        for name, make in makers.items():
+            if chosen and name not in chosen:
+                continue
+            picture = make(lang)
             path = out / f"{name}-{lang}.webp"
             picture.save(path, "WEBP", quality=92, method=6)
             print(f"{path}: {picture.width}x{picture.height}, {path.stat().st_size // 1024} KB")

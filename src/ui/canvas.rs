@@ -70,7 +70,7 @@ impl Font {
 
 pub(super) type FontKey = (Family, u32, u32, u32, u32);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Align {
     Start,
     End,
@@ -84,12 +84,11 @@ pub struct Point {
 }
 
 /// How a shape is filled: one colour, or a colour at `top` fading to another
-/// at `bottom` (both heights in DIPs), or at `left` to another at `right`.
+/// at `bottom` (both heights in DIPs).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Fill {
     Solid(Color),
     Down { top: f32, from: Color, bottom: f32, to: Color },
-    Across { left: f32, from: Color, right: f32, to: Color },
 }
 
 /// What the panel's readings are painted with: each platform paints these
@@ -100,6 +99,12 @@ pub trait Canvas {
     /// cut short with an ellipsis if it does not fit.
     #[allow(clippy::too_many_arguments)]
     fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align);
+    /// `text` laid out in `font` and drawn `scale` times as large about
+    /// (`x`, `y`), in `width` as drawn.
+    #[allow(clippy::too_many_arguments)]
+    fn text_scaled(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, scale: f32) {
+        self.text(text, Font { size: font.size * scale, ..font }, color, x, y, width, align);
+    }
     /// How wide `text` is in `font`.
     fn measure(&self, text: &str, font: Font) -> f32;
     /// The ascent and descent of `font`'s line box.
@@ -115,6 +120,8 @@ pub trait Canvas {
     fn fill_circle(&self, color: Color, centre: Point, radius: f32);
     /// The line through `points`, `width` DIPs wide.
     fn stroke(&self, points: &[Point], color: Color, width: f32);
+    /// The same, dashed.
+    fn stroke_dashed(&self, points: &[Point], color: Color, width: f32);
     /// The shape `points` outline, closed.
     fn fill_shape(&self, points: &[Point], fill: Fill);
     /// The outline of the rounded rectangle, a line `line` DIPs wide
@@ -126,4 +133,13 @@ pub trait Canvas {
     /// that what is drawn in it shows through clear.
     #[allow(clippy::too_many_arguments)]
     fn shadow(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, blur: f32, drop: f32);
+    /// An arc of the circle `radius` round `centre`, from `from` (radians
+    /// clockwise from twelve o'clock) through `sweep` more, `width` wide,
+    /// its ends round. A sweep of a whole turn or more is the circle.
+    fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32);
+    /// `icon` stroked in `color`, `size` DIPs square, centred on `centre`.
+    fn icon(&self, icon: super::icons::Icon, centre: Point, size: f32, color: Color);
+    /// Names what is drawn from here on (`""`: nothing), for a canvas that
+    /// tells one drawing's parts from another's (see `morph`).
+    fn key(&self, _key: &str) {}
 }

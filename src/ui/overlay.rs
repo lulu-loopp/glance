@@ -432,6 +432,7 @@ pub fn preview(s: &Sample, items: &[&str], lang: Lang) -> Vec<Reading> {
         vram: None,
         gpu_limit: None,
         playing_s: 0,
+        by_hand: false,
     };
     readings(s, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
 }
@@ -953,6 +954,7 @@ mod tests {
                 vram: None,
                 gpu_limit: None,
                 playing_s: 0,
+                by_hand: false,
             }),
         }
     }

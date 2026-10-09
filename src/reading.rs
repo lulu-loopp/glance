@@ -126,6 +126,10 @@ pub struct GameSample {
     /// How long it has been played (seconds): since it first presented
     /// frames, through short times away from it.
     pub playing_s: u64,
+    /// Taken for a game by hand (the window in front, not covering its
+    /// screen; see `presents::GameMode`): for the widget that asked,
+    /// not the game overlay.
+    pub by_hand: bool,
 }
 
 /// What holds a GPU's clock below what it could run at.

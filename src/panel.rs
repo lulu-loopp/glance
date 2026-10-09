@@ -49,7 +49,7 @@ use crate::overlay::{Choice as OverlayChoice, Overlay};
 use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Settings};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
-use crate::ui::arrange::{self, GAP};
+use crate::ui::arrange::{self, Form, GAP};
 use crate::ui::seen::Seen;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::motion::{Easing, Transition, LINEAR};
@@ -57,7 +57,7 @@ use crate::ui::prefs::Prefs;
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
-use crate::ui::view::{self, Hit, HitBox, Layout, Scene, TABLE_ROW};
+use crate::ui::view::{self, Detail, Hit, HitBox, Layout, Scene, TABLE_ROW};
 use crate::ui::settings_window;
 use crate::ui::window::Window;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -119,9 +119,13 @@ const OPEN_SETTINGS: u32 = WM_APP + 4;
 const TOGGLE: u32 = WM_APP + 5;
 /// A new sample: the overlay is drawn again.
 const OVERLAY: u32 = WM_APP + 7;
-/// The settings window came to the front (WPARAM 1, LPARAM its window), or
-/// left it (WPARAM 0).
+/// The settings window came to the front, or left it.
 const SETTINGS_FRONT: u32 = WM_APP + 9;
+/// Brings back the desktop widget put away last.
+const RECALL_WIDGET: u32 = WM_APP + 10;
+/// The tray icon's menu, opening up from the point in LPARAM (x low, y
+/// high, physical px).
+const TRAY_MENU: u32 = WM_APP + 11;
 /// The panel thread's own hotkey: Escape, while the panel is open.
 const ESCAPE_HOTKEY: i32 = 1;
 
@@ -134,6 +138,7 @@ struct Config {
     size: f32,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
+    widgets: Vec<crate::settings::WidgetAt>,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
     seam: bool,
@@ -155,6 +160,7 @@ fn config_from(settings: &Settings) -> Config {
         size: settings.panel_size.clamp(SIZES.0, SIZES.1),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
+        widgets: settings.widgets.clone(),
         pressure: settings.sensitivity.pressure(),
         seam: settings.seam,
         over_fullscreen: settings.over_fullscreen,
@@ -191,6 +197,8 @@ pub struct Controller {
     /// The input thread's message window, once it has one.
     sink: AtomicIsize,
     shown: AtomicBool,
+    /// A desktop widget was put away this session (the tray offers it back).
+    widget_put_away: AtomicBool,
 }
 
 impl Controller {
@@ -204,12 +212,23 @@ impl Controller {
             overlay_closed: AtomicBool::new(false),
             sink: AtomicIsize::new(0),
             shown: AtomicBool::new(false),
+            widget_put_away: AtomicBool::new(false),
         }
     }
 
     pub fn apply(&self, settings: &Settings) {
         *self.config.lock().unwrap() = config_from(settings);
         self.post(RESTYLE);
+    }
+
+    /// Shows the tray icon's menu from `(x, y)`: on this thread, which draws
+    /// Glance's menus.
+    pub fn tray_menu(&self, x: i32, y: i32) {
+        let sink = self.sink.load(Ordering::Acquire);
+        if sink != 0 {
+            let at = ((y as u16 as u32) << 16 | x as u16 as u32) as isize;
+            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), TRAY_MENU, WPARAM(0), LPARAM(at)) };
+        }
     }
 
     fn post(&self, message: u32) {
@@ -225,7 +244,8 @@ impl Controller {
         let now = Instant::now();
         let (started, ended) = {
             let mut playing = self.playing.lock().unwrap();
-            if sample.game.is_some() {
+            // A game taken by hand is the asking widget's alone.
+            if sample.game.as_ref().is_some_and(|game| !game.by_hand) {
                 playing.last = Some(now);
             }
             let was = playing.now;
@@ -309,6 +329,16 @@ impl Controller {
         self.post(OPEN_FROM_TRAY);
     }
 
+    /// Whether a desktop widget was put away that can be brought back.
+    pub fn widget_put_away(&self) -> bool {
+        self.widget_put_away.load(Ordering::Relaxed)
+    }
+
+    /// Brings back the desktop widget put away last.
+    pub fn recall_widget(&self) {
+        self.post(RECALL_WIDGET);
+    }
+
     /// Opens the panel at the pointer as the tray does, or closes it if it
     /// is open (pinned or not): the keyboard shortcut.
     pub fn toggle(&self) {
@@ -320,14 +350,12 @@ impl Controller {
         self.post(DISMISS);
     }
 
-    /// The settings window came to the front (`Some`) or left it: a panel
-    /// that stays up gives way to it meanwhile, so that it never covers it.
-    pub fn settings_front(&self, window: Option<HWND>) {
-        let sink = self.sink.load(Ordering::Acquire);
-        if sink != 0 {
-            let (front, window) = (window.is_some() as usize, window.map_or(0, |window| window.0 as isize));
-            let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), SETTINGS_FRONT, WPARAM(front), LPARAM(window)) };
-        }
+    /// The settings window came to the front or left it: a panel that
+    /// stays up gives way to it meanwhile, so that it never covers it. (Which
+    /// it is, is read as the message is taken: one taken late, after a menu,
+    /// does not undo a later one.)
+    pub fn settings_front(&self) {
+        self.post(SETTINGS_FRONT);
     }
 
     /// Opens the settings window, which this thread carries too.
@@ -382,6 +410,7 @@ impl Controller {
         // Made when first wanted; with no graphics device just then, tried
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
+        let mut widgets = crate::widget::Widgets::default();
         let draw_overlay = |overlay: &mut Option<Overlay>, panel: &Panel| {
             let playing = self.playing();
             let wanted = self.overlay_wanted();
@@ -430,8 +459,22 @@ impl Controller {
                 .or_else(|_| CreateWaitableTimerExW(None, None, 0, TIMER_ALL_ACCESS.0))
         }
         .expect("frame timer");
-        let mut restore = self.config.lock().unwrap().panel_at.is_some();
+        let left_out = self.config.lock().unwrap().panel_at;
+        if let Some(at) = left_out {
+            // A widget among the others as they are restored (and saved with
+            // them); the panel's place forgotten.
+            let layout = arrange::Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 0.0) }.kept();
+            // Its corner, as near as can be told from its middle.
+            let corner = (at.screen.0 - 356, at.screen.1 - 270);
+            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, stuck: None, before: None });
+            std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
+        }
+        let mut restore = false;
         let mut msg = MSG::default();
+        // In motion: when the next frame is due, with the screen's. Messages
+        // that come before are taken as they come, not each followed by a
+        // frame of its own.
+        let mut frame_at: Option<Instant> = None;
         loop {
             // The panel, while it is up, and the settings window, while it is
             // open, are drawn whenever they are due, between the messages
@@ -439,7 +482,16 @@ impl Controller {
             // message comes.
             if !unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
                 let now = Instant::now();
+                if frame_at.is_some_and(|at| now < at) {
+                    // The refresh timer is set for it.
+                    unsafe { MsgWaitForMultipleObjects(Some(&[refresh]), false, INFINITE, QS_ALLINPUT) };
+                    continue;
+                }
+                frame_at = None;
                 let mut wait = None;
+                // A capture of the desktop behind the panel come back, up or
+                // not (see `collect_behind`).
+                panel.collect_behind(now);
                 if panel.is_shown() {
                     panel.tick(now);
                     if panel.is_shown() {
@@ -450,6 +502,29 @@ impl Controller {
                 if let Some(due) = settings_window::tick(now) {
                     wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                 }
+                {
+                    let kept = self.config.lock().unwrap().widgets.clone();
+                    let seen = self.seen.lock().unwrap().clone();
+                    let mut history = self.history.lock().unwrap();
+                    let samples = history.make_contiguous();
+                    if !samples.is_empty() {
+                        let look = crate::widget::Look { prefs: &panel.prefs, skin: panel.skin, lang: panel.lang, live: panel.live };
+                        if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
+                            wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                        }
+                    }
+                    self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
+                }
+                // Torn off, the widget now on the screen in its place (it may
+                // wait on the desktop behind it first): the panel goes.
+                if panel.torn && widgets.torn_shown() {
+                    panel.torn = false;
+                    panel.dismiss();
+                } else if panel.torn && !widgets.torn_waiting() {
+                    // The widget gone before it showed: the panel is itself again.
+                    panel.torn = false;
+                    panel.exclude();
+                }
                 match wait {
                     // In motion: the next frame comes with the screen's, and
                     // the wait for it never outlasts one (DwmFlush, which
@@ -457,7 +532,11 @@ impl Controller {
                     // long as nothing on screen changes), nor holds back a
                     // message.
                     Some(wait) if wait.is_zero() => unsafe {
-                        let due = -((until_refresh().as_nanos() / 100) as i64).max(1);
+                        // From now, the frame drawn: the deadline and the
+                        // timer for the same moment.
+                        let until = until_refresh();
+                        frame_at = Some(Instant::now() + until);
+                        let due = -((until.as_nanos() / 100) as i64).max(1);
                         let _ = SetWaitableTimer(refresh, &due, 0, None, None, false);
                         MsgWaitForMultipleObjects(Some(&[refresh]), false, INFINITE, QS_ALLINPUT);
                     },
@@ -540,9 +619,28 @@ impl Controller {
                 // Placed, zoomed and backed for screens that are no longer
                 // so: taken down, and opened afresh.
                 // The panel's own (the overlay's follows its game's screen).
-                crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => panel.screens_changed(msg.wParam.0 as u32, now),
+                crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => {
+                    panel.screens_changed(msg.wParam.0 as u32, now);
+                    widgets.screens_changed();
+                }
+                crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) => widgets.screens_changed(),
+                crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
                 OPEN_SETTINGS => settings_window::open(),
-                SETTINGS_FRONT => panel.settings_front((msg.wParam.0 != 0).then_some(HWND(msg.lParam.0 as *mut _))),
+                TRAY_MENU => {
+                    let (x, y) = ((msg.lParam.0 & 0xFFFF) as u16 as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
+                    // (What comes for this thread while the menu is up waits:
+                    // see `menu::show`.)
+                    crate::tray::show_menu(x, y);
+                }
+                RECALL_WIDGET => {
+                    widgets.recall();
+                }
+                SETTINGS_FRONT => {
+                    let front = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+                    let settings = settings_window::hwnd().filter(|settings| *settings == front);
+                    panel.settings_front(settings);
+                    widgets.settings_front(settings);
+                }
                 RESTYLE => {
                     panel.restyle();
                     draw_overlay(&mut overlay, &panel);
@@ -566,7 +664,36 @@ impl Controller {
                     panel.press(lparam_point(msg.lParam))
                 }
                 WM_LBUTTONUP if msg.hwnd == panel.window.hwnd && std::mem::take(&mut panel.release_owed) => {}
-                WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => panel.dragged(now),
+                WM_TIMER if msg.hwnd == panel.window.hwnd && panel.held() => {
+                    panel.dragged(now);
+                    if let Some((form, scale, at, grab)) = panel.tear.take() {
+                        // The widget takes the desktop behind it before the
+                        // panel goes: without the panel in it (it is put back
+                        // in captures as it goes).
+                        panel.exclude();
+                        // The panel's desktop and its look, lent to the widget
+                        // till it has taken its own.
+                        let lent = panel.behind.as_ref().and_then(|behind| {
+                            Some(crate::widget::Lent { capture: behind.capture.without_pixels(), bitmap: behind.bitmap.as_ref()?.clone(), tone: behind.tone })
+                        });
+                        if !widgets.tear(form, scale, at, grab, lent) {
+                            panel.torn = false;
+                            panel.exclude();
+                        }
+                    }
+                }
+                // The desktop widgets: pressed, let go, their menu.
+                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if widgets.owns(msg.hwnd) => widgets.release(msg.hwnd, now),
+                WM_MOUSEMOVE if widgets.owns(msg.hwnd) => widgets.hover(msg.hwnd, lparam_point(msg.lParam)),
+                WM_RBUTTONUP if widgets.owns(msg.hwnd) => {
+                    // (What comes for this thread while the menu is up waits:
+                    // see `menu::show`.)
+                    let choice = widgets.menu(msg.hwnd, panel.lang);
+                    if let Some(crate::widget::WidgetChoice::Settings) = choice {
+                        crate::show_settings();
+                    }
+                }
                 WM_LBUTTONUP | WM_TIMER | crate::ui::window::CAPTURE_LOST if msg.hwnd == panel.window.hwnd && panel.drag.is_some() => {
                     // Kept here, in the order things happened (an unpin just
                     // after stands).
@@ -605,10 +732,9 @@ impl Controller {
                     }
                 }
                 WM_RBUTTONUP if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
-                    // What comes for this thread while the menu is up waits.
-                    hold_messages(true);
-                    let (choice, before) = overlay.as_ref().unwrap().menu();
-                    hold_messages(false);
+                    // (What comes for this thread while the menu is up waits:
+                    // see `menu::show`.)
+                    let choice = overlay.as_ref().unwrap().menu();
                     match choice {
                         Some(OverlayChoice::Settings) => {
                             if !panel.stays() {
@@ -616,17 +742,11 @@ impl Controller {
                             }
                             settings_window::open_at_overlay();
                         }
-                        choice => {
-                            // The game in front before the menu, in front again.
-                            bring_back(Some(before).filter(|window| !window.is_invalid()));
-                            match choice {
-                                Some(OverlayChoice::Lock(locked)) => {
-                                    std::thread::spawn(move || crate::app().lock_overlay(locked));
-                                }
-                                Some(OverlayChoice::Close) => self.set_overlay(false),
-                                _ => {}
-                            }
+                        Some(OverlayChoice::Lock(locked)) => {
+                            std::thread::spawn(move || crate::app().lock_overlay(locked));
                         }
+                        Some(OverlayChoice::Close) => self.set_overlay(false),
+                        None => {}
                     }
                 }
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
@@ -749,11 +869,13 @@ enum Phase {
     Closing,
 }
 
+/// A screen: its whole, its work area (physical px), and its scale (physical
+/// px per DIP).
 #[derive(Clone, Copy, PartialEq)]
-struct Contact {
-    monitor: RECT,
-    work: RECT,
-    scale: f32,
+pub(crate) struct Contact {
+    pub(crate) monitor: RECT,
+    pub(crate) work: RECT,
+    pub(crate) scale: f32,
 }
 
 /// Where the panel is, for the opening under way.
@@ -883,6 +1005,15 @@ impl Behind {
     }
 }
 
+/// A capture of the desktop behind the panel, asked for: for which
+/// `Panel::generation`, and whether it is taken again where the panel now is
+/// (the panel kept out of it; its theme following), else refreshed in place.
+struct PanelRequest {
+    receiver: std::sync::mpsc::Receiver<Option<Capture>>,
+    generation: u64,
+    afresh: bool,
+}
+
 /// The panel and its window, owned by the input thread.
 struct Panel<'a> {
     controller: &'a Controller,
@@ -934,11 +1065,13 @@ struct Panel<'a> {
     corner: (f32, f32),
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
+    /// Torn off as it was dragged: the widget to make (its form, scale and
+    /// corner on the screen, and where the hand holds it from that corner).
+    tear: Option<(Form, f32, POINT, POINT)>,
+    /// Torn off: to go once the widget is drawn.
+    torn: bool,
     /// A drag of the pinned panel under way.
     drag: Option<PanelDrag>,
-    /// The hint at the screen's edge while it is moved (made when first
-    /// needed).
-    dock_hint: Option<DockHint>,
     /// The largest size the panel still grows to on its screen (see
     /// `arrange::largest`), as it was last laid out.
     largest: f32,
@@ -948,6 +1081,16 @@ struct Panel<'a> {
     /// The desktop behind the glass is to be taken again (the panel moved
     /// or grew past what was taken).
     recapture: bool,
+    /// A capture of the desktop behind under way on another thread (see
+    /// `take_behind`).
+    capturing: Option<PanelRequest>,
+    /// Counts what makes a capture under way of no use: the panel closing,
+    /// the settings coming in front of it.
+    generation: u64,
+    /// The last capture asked for came back with nothing: when.
+    failed_behind: Option<Instant>,
+    /// Kept out of captures, as last set (see `exclude`).
+    excluded: bool,
     /// The screens changed while the panel was dragged: seen to as it is
     /// let go.
     screens_missed: bool,
@@ -997,11 +1140,16 @@ impl<'a> Panel<'a> {
             hits: Vec::new(),
             corner: (0.0, 0.0),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            tear: None,
+            torn: false,
             drag: None,
-            dock_hint: None,
             largest: SIZES.1,
             sizing: None,
             recapture: false,
+            capturing: None,
+            generation: 0,
+            failed_behind: None,
+            excluded: false,
             screens_missed: false,
             release_owed: false,
             last_frame: Instant::now(),
@@ -1062,8 +1210,21 @@ impl<'a> Panel<'a> {
         // (NVIDIA's Instant Replay stops for it), hidden or not.
         // (And while the desktop behind is about to be taken again, after a
         // drag.)
-        self.window.exclude_from_capture(self.live && self.is_shown());
+        self.exclude();
         self.dress();
+    }
+
+    /// Kept out of captures while it is up with live refraction (the
+    /// desktop behind it is taken without hiding it), while a widget torn
+    /// off it takes the desktop (it is not to be in it), and while the
+    /// desktop behind it is being taken; else in them.
+    fn exclude(&mut self) {
+        // (A capture under way, live or not, holds it out till it is done.)
+        let excluded = (self.is_shown() && (self.live || self.torn)) || self.capturing.is_some();
+        if excluded != self.excluded {
+            self.window.exclude_from_capture(excluded);
+            self.excluded = excluded;
+        }
     }
 
     /// Picks the theme, and how frosted the glass is, for the skin and the
@@ -1141,15 +1302,21 @@ impl<'a> Panel<'a> {
                 let area = match (placement.floating, self.edge) {
                     (Some(_), _) => placement.window,
                     (None, Edge::Left | Edge::Right) => RECT { top: monitor.top, bottom: monitor.bottom, ..placement.window },
-                    (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, bottom: monitor.bottom, ..placement.window },
+                    (None, Edge::Top) => RECT { left: monitor.left, right: monitor.right, ..placement.window },
                 };
                 self.behind = Capture::take(area).map(|capture| Behind::new(capture, placement, now));
+                // None readable (the lock screen): taken again once a second
+                // has passed.
+                if self.behind.is_none() {
+                    self.failed_behind = Some(now);
+                    self.recapture = true;
+                }
                 self.dress();
             }
         }
         self.phase = Phase::Open { entered: false, outside_since: None, dragging: false };
         self.controller.shown.store(true, Ordering::Relaxed);
-        self.window.exclude_from_capture(self.live);
+        self.exclude();
         // Away from the edge it has nowhere to slide from: it fades in.
         if reduced_motion() || self.floating() {
             self.shift.jump(0.0);
@@ -1163,6 +1330,9 @@ impl<'a> Panel<'a> {
         self.last_frame = now;
         self.frame(now);
         self.window.show();
+        if let Some(placement) = &self.placement {
+            crate::widget::own_window_changed(placement.window);
+        }
     }
 
     fn begin_close(&mut self, now: Instant) {
@@ -1230,18 +1400,25 @@ impl<'a> Panel<'a> {
         }
         self.end_drag();
         self.recapture = false;
+        self.generation += 1;
+        self.torn = false;
         self.game = None;
         self.phase = Phase::Hidden;
         self.pinned = false;
         self.window.hide();
-        self.window.exclude_from_capture(false);
+        if let Some(placement) = &self.placement {
+            crate::widget::own_window_changed(placement.window);
+        }
+        self.exclude();
         // The drawing memory is given back while the panel is away.
         if let Some(surface) = &mut self.surface {
             surface.release(&self.gfx);
         }
         self.layers.release();
         self.behind = None;
-        self.gfx.trim();
+        if !crate::widget::any_shown() {
+            self.gfx.trim();
+        }
         self.placement = None;
         self.controller.shown.store(false, Ordering::Relaxed);
     }
@@ -1249,6 +1426,11 @@ impl<'a> Panel<'a> {
     /// Follows the pointer while the panel is open: closes it once the
     /// pointer has been away long enough, or on a press elsewhere.
     fn track(&mut self, now: Instant) {
+        // Torn off, the widget not yet on the screen: the panel stays till
+        // it is (see the input loop), wherever the pointer goes.
+        if self.torn {
+            return;
+        }
         let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
         let on_panel = contains(&placement.panel, cursor);
         let in_reach = contains(&placement.reach, cursor);
@@ -1289,7 +1471,9 @@ impl<'a> Panel<'a> {
         if self.is_open() {
             self.track(now);
         }
-        if self.live && self.is_open() {
+        // Not while it gives way to the settings: they are in front of it,
+        // and would be taken as what is behind it.
+        if self.live && self.is_open() && self.capturing.is_none() && !self.window.yielding() {
             self.refresh_behind(now);
         }
         // A panel the desktop was taken behind, grown or moved past it
@@ -1304,8 +1488,9 @@ impl<'a> Panel<'a> {
         }
         // Not while it gives way to the settings: they are in front of it,
         // and would be taken as what is behind it.
-        if self.recapture && !self.window.yielding() {
-            self.recapture_behind(now);
+        let rested = self.failed_behind.is_none_or(|at| now.saturating_duration_since(at) >= Duration::from_secs(1));
+        if self.recapture && rested && self.capturing.is_none() && !self.window.yielding() {
+            self.recapture_behind();
         }
         if now >= self.next_frame {
             self.frame(now);
@@ -1313,48 +1498,86 @@ impl<'a> Panel<'a> {
     }
 
     /// With live refraction, captures the desktop behind the window again
-    /// every so often; only a capture that differs from the last is used.
+    /// every so often (on another thread: see `collect_behind`).
     fn refresh_behind(&mut self, now: Instant) {
         let Some(placement) = &self.placement else { return };
         // Tried again every so often, with or without a capture so far (the
         // first may have found the screen unreadable).
-        let last = self.behind.as_ref().map_or(self.tried_behind, |behind| behind.taken);
-        if now.duration_since(last) < LIVE_INTERVAL {
+        // From the last try (a capture that came back with nothing too).
+        if now.duration_since(self.tried_behind) < LIVE_INTERVAL {
             return;
         }
         self.tried_behind = now;
-        // The same desktop as before, or none readable just now: the last stands.
-        let capture = Capture::take(placement.window);
-        let Some(capture) = capture.filter(|capture| self.behind.as_ref().is_none_or(|behind| capture.digest != behind.digest)) else {
-            if let Some(behind) = &mut self.behind {
-                behind.taken = now;
-            }
-            return;
-        };
-        let behind = Behind::new(capture, placement, now);
-        // The theme holds for the opening; only the frost follows.
-        self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
-        self.behind = Some(behind);
-        self.next_frame = now;
+        let area = placement.window;
+        self.take_behind(area, false);
     }
 
     /// Takes the desktop behind the glass again where the panel now is,
     /// kept out of the capture itself for the while: once the desktop has
-    /// been composed again without it.
-    fn recapture_behind(&mut self, now: Instant) {
+    /// been composed again without it (on another thread: see
+    /// `collect_behind`).
+    fn recapture_behind(&mut self) {
+        let Some(placement) = &self.placement else { return };
+        let area = placement.window;
         self.recapture = false;
-        self.window.exclude_from_capture(true);
-        let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
-        if let Some(placement) = &self.placement {
-            if let Some(capture) = Capture::take(placement.window) {
-                // Moved or grown over another desktop: the theme follows it
-                // (live refraction, refreshing over the same place, leaves
-                // the theme be).
-                self.behind = Some(Behind::new(capture, placement, now));
-                self.dress();
+        self.take_behind(area, true);
+    }
+
+    /// Takes the desktop within `area` on another thread, once the desktop
+    /// has been composed again for a capture `afresh` (the panel kept out of
+    /// it meanwhile); the panel goes on with what it had.
+    fn take_behind(&mut self, area: RECT, afresh: bool) {
+        let (send, receiver) = std::sync::mpsc::channel();
+        self.capturing = Some(PanelRequest { receiver, generation: self.generation, afresh });
+        self.exclude();
+        std::thread::spawn(move || {
+            if afresh {
+                let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
             }
+            let _ = send.send(Capture::take(area));
+        });
+    }
+
+    /// A capture of the desktop behind come back, if it has (whether the
+    /// panel is up or not: what it holds is let go of either way). Asked for
+    /// what is still so: taken again where the panel now is, its theme
+    /// follows it (live refraction, refreshing over the same place, leaves
+    /// the theme be, and only the frost follows); the same desktop as
+    /// before, the last stands; none readable just now, it is asked for
+    /// again once a second has passed.
+    fn collect_behind(&mut self, now: Instant) {
+        let Some(request) = &self.capturing else { return };
+        let capture = match request.receiver.try_recv() {
+            Ok(capture) => capture,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        let request = self.capturing.take().unwrap();
+        self.exclude();
+        if request.generation != self.generation {
+            return;
         }
-        self.window.exclude_from_capture(self.live);
+        let Some(placement) = &self.placement else { return };
+        let Some(capture) = capture else {
+            self.failed_behind = Some(now);
+            self.recapture |= request.afresh;
+            return;
+        };
+        self.failed_behind = None;
+        if !request.afresh && self.behind.as_ref().is_some_and(|behind| capture.digest == behind.digest) {
+            if let Some(behind) = &mut self.behind {
+                behind.taken = now;
+            }
+            return;
+        }
+        let behind = Behind::new(capture, placement, now);
+        if request.afresh {
+            self.behind = Some(behind);
+            self.dress();
+        } else {
+            self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
+            self.behind = Some(behind);
+        }
         self.next_frame = now;
     }
 
@@ -1364,6 +1587,12 @@ impl<'a> Panel<'a> {
     fn settings_front(&mut self, settings: Option<HWND>) {
         let was = self.window.yielding();
         self.window.yield_to(settings);
+        // A capture under way may take the settings in: of no use when it
+        // comes back, and taken again once they have gone.
+        if settings.is_some() && self.capturing.is_some() {
+            self.generation += 1;
+            self.recapture = self.skin.sees_backdrop() && !self.live;
+        }
         if was && settings.is_none() && self.is_shown() && self.skin.sees_backdrop() && !self.live {
             self.recapture = true;
             self.next_frame = Instant::now();
@@ -1453,40 +1682,16 @@ impl<'a> Panel<'a> {
             if placement.held.is_none() && ((dx * dx + dy * dy) as f32) < from * from {
                 return;
             }
-            placement.held = Some(held);
-            if let Some(opening) = &self.opening {
-                place(placement, &self.window, self.edge, &self.theme, (opening.layout.width(), opening.layout.height()), opening.zoom);
-            }
-            // Where letting it go takes it back to the edge, shown, and lit
-            // once it is near enough.
-            let panel = placement.panel;
-            let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
-            if let Some(contact) = monitor_at(centre) {
-                if self.dock_hint.is_none() {
-                    self.dock_hint = DockHint::new();
-                }
-                let near = docks(self.edge, contact, panel);
-                if let Some(hint) = &mut self.dock_hint {
-                    hint.show(&self.gfx, self.lang, self.edge, contact, near, self.window.hwnd);
-                }
-                // Moved past the desktop taken behind it (taken along the
-                // edge it opened from), the glass would show nothing behind
-                // it there: the whole of the screen it is now over is taken,
-                // without the panel, once. Let go, it is taken again just
-                // behind it.
-                let taken = self.behind.as_ref().map(|behind| behind.capture.rect);
-                let on_screen = intersection(panel, contact.monitor);
-                if self.skin.sees_backdrop() && !self.live && !taken.is_some_and(|taken| covers(taken, on_screen)) {
-                    self.window.exclude_from_capture(true);
-                    let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
-                    if let (Some(capture), Some(placement)) = (Capture::take(contact.monitor), &self.placement) {
-                        let behind = Behind::new(capture, placement, now);
-                        self.frost = skins::frost(behind.tone.0, behind.tone.1, self.theme.dark);
-                        self.behind = Some(behind);
-                    }
-                    self.window.exclude_from_capture(false);
-                }
-            }
+            // Pulled far enough: a widget torn off, the panel as it shows,
+            // under the hand where it was taken; the panel goes once the
+            // widget is drawn, so that one is on the screen throughout.
+            let _ = held;
+            let Some(opening) = &self.opening else { return };
+            let form = Form::Lanes { detail: Detail::Full, columns: opening.layout.columns };
+            let at = POINT { x: placement.panel.left + dx, y: placement.panel.top + dy };
+            self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }));
+            self.end_drag();
+            self.torn = true;
             return;
         }
         let (width, height) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
@@ -1541,9 +1746,6 @@ impl<'a> Panel<'a> {
     /// Ends a drag under way.
     fn end_drag(&mut self) -> Option<PanelDrag> {
         self.sizing = None;
-        if let Some(hint) = &mut self.dock_hint {
-            hint.hide();
-        }
         let drag = self.drag.take()?;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
@@ -1642,7 +1844,7 @@ impl<'a> Panel<'a> {
                 // What the machine has shown since joins its lane where it
                 // fits (each lane measured holding what it would hold).
                 let probe = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
-                opening.grow(&now, &controller.info, |id, seen| view::lane_height(&probe, id, seen));
+                opening.grow(&now, &controller.info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
                 opening
             }
             None => {
@@ -1651,11 +1853,11 @@ impl<'a> Panel<'a> {
                     None => now,
                 };
                 let scene = scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &now);
-                let lanes = view::lanes(&scene);
-                let heights: Vec<(&str, f32)> = lanes.iter().map(|lane| (lane.id.as_str(), lane.height(theme))).collect();
-                let tall: Vec<f32> = heights.iter().map(|(_, height)| *height).collect();
+                let heights = view::heights(&scene);
+                let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1);
-                self.opening.insert(arrange::Opening::new(theme, self.edge, &heights, work, self.columns, self.size, now.clone()))
+                let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
         };
         let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, hover, pinned, samples, &opening.seen));
@@ -1756,9 +1958,9 @@ impl<'a> Panel<'a> {
                     X: (window.left - from.left) as f32 / px + rest.0,
                     Y: (window.top - from.top) as f32 / px + rest.1,
                 };
-                Some((&behind.bitmap.as_ref()?.0, at, behind.digest))
+                Some((&behind.bitmap.as_ref()?.0, at, behind.digest, px))
             });
-            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, edge, backdrop, frost };
+            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
             drawn = Some(layers.draw(frame, &picture, Matrix3x2::translation(x, y), px));
             if let Some((size, limit)) = sizing {
                 frame.place(Matrix3x2::translation(x, y));
@@ -1895,37 +2097,20 @@ fn scene<'s>(
         hover,
         pinned,
         overlay,
+        buttons: true,
     }
 }
 
-thread_local! {
-    /// While a menu runs its own loop on this thread: what was posted to
-    /// the sink meanwhile, which that loop hands to the sink's procedure.
-    static HELD: std::cell::RefCell<Option<Vec<(u32, WPARAM, LPARAM)>>> = const { std::cell::RefCell::new(None) };
+/// What a desktop widget's readings are drawn with at this moment.
+pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
+    Scene { buttons: false, ..scene(controller, prefs, theme, lang, 0.0, None, false, history, seen) }
 }
 
-/// Starts holding the sink's messages (`true`), or posts back what was held.
-fn hold_messages(hold: bool) {
-    let held = HELD.with(|held| std::mem::replace(&mut *held.borrow_mut(), hold.then(Vec::new)));
-    let sink = crate::app().controller.sink.load(Ordering::Acquire);
-    for (message, wparam, lparam) in held.unwrap_or_default() {
-        let _ = unsafe { PostMessageW(Some(HWND(sink as *mut _)), message, wparam, lparam) };
-    }
-}
-
-/// The sink's procedure. The input loop takes its messages before they are
-/// dispatched; only a loop of another's (a menu's) dispatches them here, and
-/// Glance's own are then held for the input loop.
+/// The sink's procedure: the input loop takes its messages before they are
+/// dispatched (a menu's loop sets them aside for it: see `menu::show`).
 unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if (WM_APP..0xC000).contains(&message) {
-        let held = HELD.with(|held| held.borrow_mut().as_mut().map(|held| held.push((message, wparam, lparam))).is_some());
-        if held {
-            return LRESULT(0);
-        }
-    }
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
-
 
 /// Positions the panel for a layout `size` DIPs large, and moves the window
 /// if that changed it.
@@ -1978,6 +2163,10 @@ fn place(placement: &mut Placement, panel_window: &Window, edge: Edge, theme: &T
     placement.reach = reach;
     placement.px = px;
     if placement.window != window {
+        // Where it was and where it is: a widget that took the desktop with
+        // it there takes it again.
+        crate::widget::own_window_changed(placement.window);
+        crate::widget::own_window_changed(window);
         placement.window = window;
         panel_window.place(window);
     }
@@ -1999,11 +2188,6 @@ fn size_badge(frame: &gfx::Frame, theme: &Theme, size: f32, limit: Option<Limit>
 /// Whether `outer` holds all of `inner`.
 fn covers(outer: RECT, inner: RECT) -> bool {
     inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
-}
-
-/// What `a` and `b` share: empty where they do not meet.
-fn intersection(a: RECT, b: RECT) -> RECT {
-    RECT { left: a.left.max(b.left), top: a.top.max(b.top), right: a.right.min(b.right).max(a.left.max(b.left)), bottom: a.bottom.min(b.bottom).max(a.top.max(b.top)) }
 }
 
 /// Whether a panel at `panel` (physical px) on `contact`'s screen is near
@@ -2039,200 +2223,6 @@ fn tag(frame: &gfx::Frame, theme: &Theme, text: &str, centre: (f32, f32), heed: 
     let line = 1.0;
     frame.stroke_rounded(Fill::Solid(edge), x + line / 2.0, y + line / 2.0, width - line, height - line, radius, line);
     Canvas::text(frame, text, font, ink, x + pad_x, y + pad_y, width, Align::Start);
-}
-
-/// While the panel is moved: a light along the edge of the screen it opens
-/// from, with words in its middle, where letting it go takes it back to the
-/// edge; brighter, the words saying so, once it is near enough for that
-/// (see `DOCK`). In a window of its own,
-/// under the panel, that every click passes through.
-struct DockHint {
-    window: Window,
-    /// Its content, on the device it was made on.
-    surface: Option<(Rc<Gfx>, Surface)>,
-    /// What it shows: where (physical px), and whether the panel is near.
-    shown: Option<(RECT, bool)>,
-    /// Whether what is behind its words is bright, as it was when it was
-    /// first shown there: bright enough that the accent's deep shade stands
-    /// out from it more than white does, its light and words then take
-    /// that shade, in a white glow.
-    bright: Option<(RECT, bool)>,
-}
-
-/// How far along the edge its words reach either way from its middle (DIPs).
-const HINT_WORDS: f32 = 120.0;
-
-/// How well text of luminance `text` reads on a ground of luminance `ground`
-/// (relative luminances, 0–1), as APCA measures it (its lightness contrast,
-/// sign dropped): unlike WCAG's ratio it does not favour dark text on
-/// middling grounds, where white reads better.
-fn contrast(text: f32, ground: f32) -> f32 {
-    // Near black, luminance is lifted as the eye sees it (soft clamp).
-    let clamp = |y: f32| if y < 0.022 { y + (0.022 - y).powf(1.414) } else { y };
-    let (text, ground) = (clamp(text), clamp(ground));
-    let lc = if ground > text {
-        (ground.powf(0.56) - text.powf(0.57)) * 1.14 - 0.027
-    } else {
-        (text.powf(0.62) - ground.powf(0.65)) * 1.14 - 0.027
-    };
-    lc.max(0.0)
-}
-
-/// How far into the screen the hint reaches (DIPs): its light, and room for
-/// its word.
-const HINT_DEPTH: f32 = 320.0;
-/// How far into the screen its light fades (DIPs).
-const HINT_GLOW: f32 = 110.0;
-/// Its words: the same on every skin, white in the light, small, light
-/// and widely spaced (Chinese in the system's face, at that weight); down
-/// a side, a third of a line between characters.
-const HINT_FONT: crate::ui::canvas::Font = crate::ui::canvas::Font::new(crate::ui::canvas::Family::SegoeDisplay, 13.0, 300.0).tracking(0.25);
-const HINT_LEADING: f32 = 1.35;
-
-impl DockHint {
-    fn new() -> Option<Self> {
-        let mut window = Window::new().ok()?;
-        window.set_click_through(true);
-        // Never in the desktop taken behind the glass while it shows.
-        window.exclude_from_capture(true);
-        Some(DockHint { window, surface: None, shown: None, bright: None })
-    }
-
-    /// Shows the hint along `edge` of `contact`'s screen, lit if the
-    /// panel is `near`; beneath `panel_window`.
-    #[allow(clippy::too_many_arguments)]
-    fn show(&mut self, gfx: &Rc<Gfx>, lang: Lang, edge: Edge, contact: Contact, near: bool, panel_window: HWND) {
-        let (monitor, work, scale) = (contact.monitor, contact.work, contact.scale);
-        let depth = (HINT_DEPTH * scale).round() as i32;
-        let rect = match edge {
-            Edge::Left => RECT { left: monitor.left, top: work.top, right: monitor.left + depth, bottom: work.bottom },
-            Edge::Right => RECT { left: monitor.right - depth, top: work.top, right: monitor.right, bottom: work.bottom },
-            Edge::Top => RECT { left: work.left, top: monitor.top, right: work.right, bottom: monitor.top + depth },
-        };
-        if self.shown == Some((rect, near)) {
-            return;
-        }
-        // Looked at once on each screen, before it shows (it is never in a
-        // capture itself): what is behind its words, in the middle of the
-        // edge.
-        let bright = match self.bright {
-            Some((at, bright)) if at == rect => bright,
-            _ => {
-                let px = |dips: f32| (dips * scale).round() as i32;
-                let (mx, my) = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-                let words = match edge {
-                    Edge::Left => RECT { left: rect.left + px(12.0), top: my - px(HINT_WORDS), right: rect.left + px(60.0), bottom: my + px(HINT_WORDS) },
-                    Edge::Right => RECT { left: rect.right - px(60.0), top: my - px(HINT_WORDS), right: rect.right - px(12.0), bottom: my + px(HINT_WORDS) },
-                    Edge::Top => RECT { left: mx - px(HINT_WORDS), top: rect.top + px(12.0), right: mx + px(HINT_WORDS), bottom: rect.top + px(48.0) },
-                };
-                let nothing = RECT::default();
-                let behind = Capture::take(words).map(|capture| capture.luminances(words, nothing, px(2.0).max(1)));
-                let bright = behind.filter(|behind| !behind.is_empty()).is_some_and(|behind| {
-                    let mean = behind.iter().sum::<f32>() / behind.len() as f32;
-                    let deep = theme::accent(false);
-                    contrast(crate::ui::overlay::luminance(deep.r, deep.g, deep.b), mean) > contrast(1.0, mean)
-                });
-                self.bright = Some((rect, bright));
-                bright
-            }
-        };
-        let surface = match self.surface.take() {
-            Some((made_on, surface)) if Rc::ptr_eq(&made_on, gfx) => Ok(surface),
-            _ => Surface::new(gfx, self.window.hwnd),
-        };
-        let Ok(mut surface) = surface else { return };
-        let size = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
-        let (width, height) = (size.0 as f32 / scale, size.1 as f32 / scale);
-        let drawn = surface.draw(gfx, size, scale, |frame| {
-            use crate::ui::canvas::{Align, Canvas, Color, Fill, Point};
-            // A soft light rising from the edge, in the system's accent;
-            // brighter once letting go would take the panel back.
-            let light = theme::accent(!bright);
-            let haze = if near { 0.32 } else { 0.14 };
-            let glow = HINT_GLOW;
-            let (band, fade) = match edge {
-                Edge::Left => ((0.0, 0.0, glow, height), Fill::Across { left: 0.0, from: light.alpha(haze), right: glow, to: light.alpha(0.0) }),
-                Edge::Right => ((width - glow, 0.0, glow, height), Fill::Across { left: width - glow, from: light.alpha(0.0), right: width, to: light.alpha(haze) }),
-                Edge::Top => ((0.0, 0.0, width, glow), Fill::Down { top: 0.0, from: light.alpha(haze), bottom: glow, to: light.alpha(0.0) }),
-            };
-            let (x, y, w, h) = band;
-            frame.fill_shape(&[Point { x, y }, Point { x: x + w, y }, Point { x: x + w, y: y + h }, Point { x, y: y + h }], fade);
-            // What the light is for, in its middle, running along the edge:
-            // white words in a glow of the light's own colour.
-            let word = match (near, lang) {
-                (false, Lang::Zh) => "拖至此处收回",
-                (true, Lang::Zh) => "松开收回",
-                (false, Lang::En) => "Drag here to tuck it away",
-                (true, Lang::En) => "Let go to tuck it away",
-            };
-            let font = HINT_FONT;
-            let (ascent, descent) = frame.baseline(font);
-            let step = ascent + descent;
-            let away = 20.0;
-            // White words in the light's glow; over a bright screen, the
-            // light's deep shade in a white glow.
-            let (ink, halo) = if bright {
-                (light.alpha(if near { 1.0 } else { 0.85 }), Color::hex(0xFFFFFF, if near { 0.95 } else { 0.8 }))
-            } else {
-                (Color::hex(0xFFFFFF, if near { 0.95 } else { 0.8 }), light.alpha(if near { 0.6 } else { 0.4 }))
-            };
-            let middle = match edge {
-                Edge::Left | Edge::Right => height / 2.0,
-                Edge::Top => width / 2.0,
-            };
-            // English along a side is turned to run with the edge, read from
-            // the screen's inside: up the left edge, down the right.
-            let turned = if edge == Edge::Left { (away + step / 2.0, -90.0) } else { (width - away - step / 2.0, 90.0) };
-            match (edge, lang) {
-                (Edge::Left | Edge::Right, Lang::En) => frame.place(Matrix3x2::rotation_around(turned.1, Vector2 { X: turned.0, Y: middle })),
-                _ => frame.origin(0.0, 0.0),
-            }
-            frame.glow(halo, 8.0, |frame| match (edge, lang) {
-                (Edge::Top, _) => {
-                    let w = frame.measure(word, font);
-                    Canvas::text(frame, word, font, ink, middle - w / 2.0, away, w + 1.0, Align::Start);
-                }
-                // Chinese down the side, a character under another.
-                (_, Lang::Zh) => {
-                    let characters: Vec<String> = word.chars().map(String::from).collect();
-                    let widest = characters.iter().map(|c| frame.measure(c, font)).fold(0.0, f32::max);
-                    let x = if edge == Edge::Left { away + widest / 2.0 } else { width - away - widest / 2.0 };
-                    let pitch = step * HINT_LEADING;
-                    let mut y = middle - (characters.len() as f32 * pitch - (pitch - step)) / 2.0;
-                    for c in &characters {
-                        let w = frame.measure(c, font);
-                        Canvas::text(frame, c, font, ink, x - w / 2.0, y, w + 1.0, Align::Start);
-                        y += pitch;
-                    }
-                }
-                // English turned (below) to run along the edge.
-                (_, Lang::En) => {
-                    let w = frame.measure(word, font);
-                    Canvas::text(frame, word, font, ink, turned.0 - w / 2.0, middle - step / 2.0, w + 1.0, Align::Start);
-                }
-            });
-            frame.origin(0.0, 0.0);
-        });
-        self.surface = Some((gfx.clone(), surface));
-        if drawn.is_err() {
-            return;
-        }
-        self.window.place_under(rect, Some(panel_window));
-        if self.shown.is_none() {
-            self.window.show();
-            self.window.place_under(rect, Some(panel_window));
-        }
-        self.shown = Some((rect, near));
-    }
-
-    fn hide(&mut self) {
-        if self.shown.take().is_some() {
-            self.window.hide();
-            if let Some((gfx, surface)) = &mut self.surface {
-                surface.release(gfx);
-            }
-        }
-    }
 }
 
 /// Whether Windows has animations turned off ("Animation effects" in its
@@ -2294,7 +2284,7 @@ fn exclusive_fullscreen() -> bool {
     unsafe { SHQueryUserNotificationState() }.is_ok_and(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
 }
 
-fn cursor_position() -> Option<POINT> {
+pub(crate) fn cursor_position() -> Option<POINT> {
     let mut point = POINT::default();
     unsafe { GetCursorPos(&mut point) }.ok().map(|_| point)
 }
@@ -2330,7 +2320,7 @@ fn read_motion(handle: HRAWINPUT, edge: Edge) -> Option<Motion> {
     Some(Motion::Relative { outward, along })
 }
 
-fn monitor_at(point: POINT) -> Option<Contact> {
+pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {
     let handle = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     unsafe { GetMonitorInfoW(handle, &mut info) }.ok().ok()?;
@@ -2404,17 +2394,4 @@ fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     }
     let neighbour = unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) };
     neighbour.is_invalid().then_some(contact)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::contrast;
-
-    #[test]
-    fn white_reads_on_a_middling_sky_and_deep_ink_on_white() {
-        // A clear blue sky (#4FA9F5) and a white page; ink a deep blue.
-        let (sky, page, deep) = (0.36, 0.9, 0.096);
-        assert!(contrast(1.0, sky) > contrast(deep, sky));
-        assert!(contrast(deep, page) > contrast(1.0, page));
-    }
 }

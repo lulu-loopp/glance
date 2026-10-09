@@ -24,6 +24,8 @@ const RATE_INDENT: f32 = 26.0;
 const LINE: f32 = 16.0;
 const FACT_GAP: f32 = 3.0;
 pub const TABLE_ROW: f32 = 22.0;
+/// The most processes a lane past `Detail::Full` lists.
+const COMPACT_PROCESSES: usize = 3;
 /// The settings button in the bar.
 const BUTTON: f32 = 32.0;
 /// Between two of the bar's buttons, so that two lit side by side stay two.
@@ -77,6 +79,10 @@ pub struct Scene<'a> {
     pub pinned: bool,
     /// The overlay is on.
     pub overlay: bool,
+    /// The bar has its buttons: the panel's, not a widget's (a widget has
+    /// its own pin and menu, and its game button: a game asked for or
+    /// turned off by hand shows in widgets, not the panel).
+    pub buttons: bool,
 }
 
 impl Scene<'_> {
@@ -163,9 +169,20 @@ impl Hash for Block {
     }
 }
 
+/// How much of its module a lane shows (see `arrange::Form`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Detail {
+    /// All of it.
+    #[default]
+    Full,
+    /// Its figure and chart, and what belongs with them (a card's video
+    /// memory, its volumes, a few processes); none of the rows below.
+    Compact,
+}
+
 pub struct Lane {
-    /// The module it shows ("cpu", "gpu:0", …).
-    pub id: String,
+    /// Its module's (what names its parts, see `morph`).
+    id: String,
     blocks: Vec<Block>,
     ink: Ink,
 }
@@ -176,20 +193,55 @@ impl Hash for Lane {
     }
 }
 
+/// Whether the window in front is taken for a game, asked for by hand
+/// The game in `s`: in the panel (`panel`), only one found, not one taken
+/// for a game by hand (that is the widgets' own).
+fn found_game(s: &Sample, panel: bool) -> Option<&crate::reading::GameSample> {
+    s.game.as_ref().filter(|game| !(panel && game.by_hand))
+}
+
+/// (see `presents::GameMode`).
+pub fn front_is_game() -> bool {
+    #[cfg(windows)]
+    return crate::presents::game_mode() == crate::presents::GameMode::On;
+    #[cfg(not(windows))]
+    false
+}
+
+/// Whether games are turned off by hand: none shows, found or not.
+pub fn game_hidden() -> bool {
+    #[cfg(windows)]
+    return crate::presents::game_mode() == crate::presents::GameMode::Off;
+    #[cfg(not(windows))]
+    false
+}
+
+/// What a game asked for by hand says before its first frames.
+pub fn waiting(lang: Lang) -> String {
+    if front_is_game() { lang.pick("等待画面", "No frames yet").into() } else { String::new() }
+}
+
+/// The lanes of the modules that are on and have something to show, all
+/// of each.
+pub fn lanes(scene: &Scene) -> Vec<Lane> {
+    lanes_at(scene, |_| Detail::Full)
+}
+
 impl Lane {
     pub fn height(&self, theme: &Theme) -> f32 {
         theme.pad_top + theme.pad_bottom + self.blocks.iter().map(Block::height).sum::<f32>()
     }
 }
 
-/// The lanes of the modules that are on and have something to show.
-pub fn lanes(scene: &Scene) -> Vec<Lane> {
+/// The lanes of the modules that are on and have something to show, each
+/// showing as much as `detail` says for it.
+pub fn lanes_at(scene: &Scene, detail: impl Fn(&str) -> Detail) -> Vec<Lane> {
     scene
         .prefs
         .modules
         .iter()
         .filter(|entry| entry.on)
-        .filter_map(|entry| Some(Lane { id: entry.id.clone(), blocks: lane(scene, &entry.id)?, ink: scene.theme.ink(&entry.id) }))
+        .filter_map(|entry| Some(Lane { id: entry.id.clone(), blocks: lane(scene, &entry.id, detail(&entry.id))?, ink: scene.theme.ink(&entry.id) }))
         .collect()
 }
 
@@ -209,11 +261,25 @@ fn shown<T>(value: Option<T>, show: impl Fn(T) -> String) -> String {
     value.map_or_else(|| UNREAD.to_string(), show)
 }
 
-/// The height of the lane of module `id`, holding what `seen` holds; `None`
-/// where there is no such lane.
-pub fn lane_height(scene: &Scene, id: &str, seen: &Seen) -> Option<f32> {
+/// Each lane's module and its height at every detail (see
+/// `arrange::Heights`), for the modules that are on and have something to
+/// show.
+pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
+    let height = |id: &str, detail: Detail| lane(scene, id, detail).map(|blocks| scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>());
+    scene
+        .prefs
+        .modules
+        .iter()
+        .filter(|entry| entry.on)
+        .filter_map(|entry| Some((entry.id.clone(), [height(&entry.id, Detail::Full)?, height(&entry.id, Detail::Compact)?])))
+        .collect()
+}
+
+/// The height of the lane of module `id` showing `detail`, holding what
+/// `seen` holds; `None` where there is no such lane.
+pub fn lane_height(scene: &Scene, id: &str, seen: &Seen, detail: Detail) -> Option<f32> {
     let scene = Scene { seen, ..*scene };
-    let blocks = lane(&scene, id)?;
+    let blocks = lane(&scene, id, detail)?;
     Some(scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>())
 }
 
@@ -228,10 +294,13 @@ pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
     }
 }
 
-fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
+/// The blocks of module `id`'s lane: all of it, or (`Compact`) none of the
+/// rows below its figure and chart.
+fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
     let (s, prefs, lang, info) = (scene.latest(), scene.prefs, scene.lang, scene.info);
     let hot_load = prefs.hot_load;
     let hot_temp = prefs.hot_temp;
+    let full = detail == Detail::Full;
     // Whether the module's item is switched on.
     let on = |item: &str| prefs.shows(id, item);
     let chart = on("chart");
@@ -271,13 +340,16 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     facts.push((format!("CCD {}", ccd + 1), shown(value, celsius), value.is_some_and(|v| v > hot_temp)));
                 }
             }
+            if !full {
+                facts.clear();
+            }
             let mut blocks = vec![
                 head("CPU", &info.cpu_name, aside, had_temp && temp.is_some_and(|t| t > hot_temp)),
                 readout(s.cpu, Box::new(|s| s.cpu.map(f64::from))),
                 Block::Facts { rows: facts, gap: 10.0 },
             ];
             let threads = scene.seen.threads;
-            if on("threads") && threads > 0 {
+            if full && on("threads") && threads > 0 {
                 let load = |i: usize| s.threads.get(i).copied().flatten();
                 blocks.push(Block::Threads((0..threads).map(|i| (load(i).map(|load| load / 100.0), load(i).is_some_and(|load| load > hot_load))).collect()));
             }
@@ -306,7 +378,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     gap: 8.0,
                 });
             }
-            if on("engines") {
+            if full && on("engines") {
                 // An engine the counters no longer list has nothing running
                 // on it; with the engines unread, none is known.
                 const SHOWN: [&str; 6] = ["3D", "Copy", "VideoDecode", "VideoEncode", "VideoCodec", "Compute"];
@@ -336,7 +408,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if on("shared") && gpu.shared_total > 0 {
                 facts.push((lang.pick("共享显存", "Shared").into(), shown(reading.and_then(|g| g.shared_used), |used| text::usage(used, gpu.shared_total)), false));
             }
-            blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+            if full {
+                blocks.push(Block::Facts { rows: facts, gap: 10.0 });
+            }
             blocks
         }
         "memory" => {
@@ -354,6 +428,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             }
             if on("cached") {
                 facts.push((lang.pick("缓存", "Cached").into(), text::size(s.memory.cached), false));
+            }
+            if !full {
+                facts.clear();
             }
             vec![
                 head(lang.pick("内存", "Memory"), info.memory_modules.clone().unwrap_or_default(), text::usage(s.memory.used, info.mem_total), false),
@@ -386,6 +463,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 let (down, up) = (text::bytes(s.net_total_down as f64), text::bytes(s.net_total_up as f64));
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
                 facts.push((lang.pick("开机以来", "Since boot").into(), total, false));
+            }
+            if !full {
+                facts.clear();
             }
             vec![
                 // The adapter traffic leaves by now, which may have changed.
@@ -428,6 +508,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 }
                 shown(hottest, celsius)
             };
+            if !full {
+                facts.clear();
+            }
             vec![
                 head(lang.pick("磁盘", "Disk"), info.drives.join(", "), aside, hottest.is_some_and(|t| t > hot_temp)),
                 Block::Rates {
@@ -456,12 +539,17 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                     .iter()
                     .map(|p| [p.name.clone(), text::percent(p.cpu), text::size(p.mem), text::rate(p.io, false), shown(p.gpu, text::percent)])
                     .collect(),
-                visible: prefs.processes.count,
+                visible: if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) },
             }]
         }
         "storage" => {
             let mut blocks = vec![head(lang.pick("存储", "Storage"), "", "", false)];
-            for (i, name) in scene.seen.volumes.iter().enumerate() {
+            // The drives switched on (see `Prefs::shows`); none, no lane.
+            let drives: Vec<&String> = scene.seen.volumes.iter().filter(|name| on(&format!("volumes:{name}"))).collect();
+            if drives.is_empty() {
+                return None;
+            }
+            for (i, name) in drives.into_iter().enumerate() {
                 let volume = s.volumes.iter().find(|v| v.name == *name);
                 let fraction = volume.map_or(0.0, |v| v.used as f32 / v.total.max(1) as f32);
                 blocks.push(Block::Meter {
@@ -497,6 +585,7 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
                 Block::Facts {
                     rows: fans
                         .iter()
+                        .filter(|_| full)
                         .map(|n| (named(n, "fans"), shown(value(board.map(|b| &b.fans), n), |rpm| format!("{rpm:.0} RPM")), false))
                         .collect(),
                     gap: 10.0,
@@ -504,10 +593,15 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ]
         }
         "game" => {
-            if !scene.seen.game {
+            // A game played, or asked for by hand (waiting for its frames).
+            let by_hand = !scene.buttons;
+            if !(scene.seen.game || by_hand && front_is_game()) || (by_hand && game_hidden()) {
                 return None;
             }
-            let game = s.game.as_ref();
+            // In the panel, only a game found (one taken for a game by hand is
+            // the widgets' own).
+            let panel = scene.buttons;
+            let game = found_game(s, panel);
             // Its screen's refresh rate in the corner: the most frames it can show.
             let refresh = game.and_then(|g| g.refresh_hz);
             // A stutter: a frame taking as long as three at the screen's rate.
@@ -557,21 +651,24 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             }
             // Full scale: the screen's rate, or the most frames drawn, if more
             // (a game not held to the screen's rate draws frames it never shows).
-            let most = scene.history.iter().filter_map(|s| s.game.as_ref().map(|g| g.fps as f64)).fold(0.0, f64::max);
+            let most = scene.history.iter().filter_map(|s| found_game(s, panel).map(|g| g.fps as f64)).fold(0.0, f64::max);
             let scale = refresh.map(f64::from).map(|hz| hz.max(most));
             let mut blocks = vec![
-                head(lang.pick("游戏", "Game"), game.map_or(String::new(), |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
+                head(lang.pick("游戏", "Game"), game.map_or_else(|| if by_hand { waiting(lang) } else { String::new() }, |g| g.name.clone()), shown(refresh, |hz| lang.pick(&format!("屏幕 {hz} Hz"), &format!("Screen {hz} Hz")).to_string()), false),
                 Block::Readout {
                     figure: shown(game.map(|g| g.fps), |fps| format!("{fps:.0}")),
                     unit: "FPS",
                     hot: false,
-                    plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.game.as_ref().map(|g| g.fps as f64))], scale, None)),
+                    plot: chart.then(|| Plot::new(scene, vec![Box::new(move |s| found_game(s, panel).map(|g| g.fps as f64))], scale, None)),
                 },
             ];
-            if frametimes {
+            if !full {
+                facts.clear();
+            }
+            if full && frametimes {
                 // Full scale: two frames at the screen's rate, or the longest
                 // frame on screen, if longer, rounded up.
-                let series: Series = Box::new(|s| s.game.as_ref().map(|g| g.longest_ms as f64));
+                let series: Series = Box::new(move |s| found_game(s, panel).map(|g| g.longest_ms as f64));
                 let floor = stutter.map_or(MIN_FRAME_SCALE, |stutter| (stutter * 2.0 / 3.0).max(MIN_FRAME_SCALE));
                 let peak = visible_peak(scene, &series).max(floor);
                 blocks.push(Block::Trace {
@@ -614,6 +711,9 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             if scene.seen.battery_health && on("health") {
                 facts.push((lang.pick("健康度", "Health").to_string(), shown(battery.and_then(|b| b.health), |h| format!("{h:.0}%")), false));
             }
+            if !full {
+                facts.clear();
+            }
             vec![
                 head(lang.pick("电池", "Battery"), "", state, false),
                 Block::Readout {
@@ -634,7 +734,16 @@ fn lane(scene: &Scene, id: &str) -> Option<Vec<Block>> {
             ];
             vec![
                 head(lang.pick("系统", "System"), "", "", false),
-                Block::Facts { rows: rows.into_iter().filter(|(item, ..)| on(item)).map(|(_, label, value)| (label.into(), value, false)).collect(), gap: 0.0 },
+                // Past `Full`, the first of them alone.
+                Block::Facts {
+                    rows: rows
+                        .into_iter()
+                        .filter(|(item, ..)| on(item))
+                        .map(|(_, label, value)| (label.into(), value, false))
+                        .take(if full { usize::MAX } else { 1 })
+                        .collect(),
+                    gap: 0.0,
+                },
             ]
         }
         _ => return None,
@@ -745,6 +854,11 @@ pub struct Layout {
     column_gap: f32,
     bar_gap: f32,
     bar_height: f32,
+    /// Each column's width: as designed, or wider (see `stretched`).
+    column_width: f32,
+    /// How much taller than its lanes need each column was made, for their
+    /// charts to grow into (see `stretched`).
+    grow: f32,
 }
 
 impl Layout {
@@ -783,11 +897,35 @@ impl Layout {
             column_gap: theme.column_gap,
             bar_gap: theme.bar_gap,
             bar_height: theme.bar_height,
+            column_width: COLUMN_WIDTH,
+            grow: 0.0,
         }
     }
 
+    /// The same, `by` DIPs wider and taller: the width shared out among
+    /// the columns, the height given to every column, for its charts (see
+    /// `grows`).
+    pub fn stretched(mut self, by: (f32, f32)) -> Self {
+        self.column_width += by.0.max(0.0) / self.columns as f32;
+        self.lanes_height += by.1.max(0.0);
+        self.grow = by.1.max(0.0);
+        self
+    }
+
+    /// How much each lane's charts may grow, in order of the lanes: its
+    /// column's share of what the layout was stretched by.
+    pub fn grows(&self) -> Vec<f32> {
+        (0..self.columns)
+            .flat_map(|column| {
+                let start = self.cuts[column];
+                let end = self.cuts.get(column + 1).copied().unwrap_or(self.heights.len());
+                std::iter::repeat_n(self.grow / (end - start).max(1) as f32, end - start)
+            })
+            .collect()
+    }
+
     pub fn width(&self) -> f32 {
-        self.columns as f32 * COLUMN_WIDTH + (self.columns - 1) as f32 * self.column_gap
+        self.columns as f32 * self.column_width + (self.columns - 1) as f32 * self.column_gap
     }
 
     pub fn height(&self) -> f32 {
@@ -833,8 +971,8 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
     let theme = scene.theme;
     let mut hits = Vec::new();
     let boxes = layout.lanes();
-    for (lane, area) in lanes.iter().zip(&boxes) {
-        paint_lane(frame, scene, lane, *area, pass, &mut hits);
+    for ((lane, area), grow) in lanes.iter().zip(&boxes).zip(layout.grows()) {
+        paint_lane(frame, scene, lane, *area, grow, pass, &mut hits);
         // Chart paper rules each lane off below; the last rule in a column
         // also sets off the bar.
         if pass == Pass::Content && theme.ruled {
@@ -863,7 +1001,9 @@ fn text_on_line(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32
     frame.text(text, font, color, x, baseline - ascent, width, Align::Start);
 }
 
-fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: Pass, hits: &mut Vec<HitBox>) {
+/// Draws `lane` in `area`, its charts `grow` DIPs taller between them (each
+/// at most twice as tall as designed).
+fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: f32, pass: Pass, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let ink = lane.ink;
     let left = area.x + theme.pad_x;
@@ -871,24 +1011,55 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
     let plot_left = left + LABEL + LABEL_GAP;
     let plot_width = left + width - plot_left;
     let mut y = area.y + theme.pad_top;
+    let charts = lane.blocks.iter().filter(|block| matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. })).count();
+    let taller = if charts > 0 { (grow / charts as f32).min(RATE_PLOT) } else { 0.0 };
+    // Each part named by its lane and what it is, the small layouts naming
+    // theirs alike (see `morph`): the CPU's figure is "cpu.value" in both.
+    let id = &lane.id;
+    let name = |part: &str| frame.key(&format!("{id}.{part}"));
+    let mut kinds: Vec<&str> = Vec::new();
     for block in &lane.blocks {
-        let height = block.height();
+        let kind = match block {
+            Block::Head { .. } => "head",
+            Block::Readout { .. } => "readout",
+            Block::Rates { .. } => "rates",
+            Block::Trace { .. } => "trace",
+            Block::Threads(_) => "threads",
+            Block::Meter { .. } => "meter",
+            Block::Facts { .. } => "facts",
+            Block::Table { .. } => "table",
+        };
+        let nth = kinds.iter().filter(|k| **k == kind).count();
+        kinds.push(kind);
+        let part = |what: &str| name(&format!("{kind}{nth}.{what}"));
+        let charted = matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. });
+        let height = block.height() + if charted { taller } else { 0.0 };
         match (block, pass) {
-            (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height),
-            (Block::Rates { plot: Some(plot), .. }, Pass::Plots) => {
-                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height)
+            (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => {
+                name("chart");
+                paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height);
             }
-            (Block::Trace { plot, gap, .. }, Pass::Plots) => paint_plot(frame, scene, ink, plot, plot_left, y + gap, plot_width, height - gap),
+            (Block::Rates { plot: Some(plot), .. }, Pass::Plots) => {
+                name("chart");
+                paint_plot(frame, scene, ink, plot, plot_left + RATE_INDENT, y, plot_width - RATE_INDENT, height);
+            }
+            (Block::Trace { plot, gap, .. }, Pass::Plots) => {
+                part("chart");
+                paint_plot(frame, scene, ink, plot, plot_left, y + gap, plot_width, height - gap);
+            }
             (_, Pass::Plots) => {}
             (Block::Head { title, device, aside, aside_hot }, Pass::Content) => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
+                name("label");
                 frame.text(title, theme.title, theme.text, left, row, width, Align::Start);
                 let aside_width = if aside.is_empty() { 0.0 } else { frame.measure(aside, theme.body) };
                 let device_left = left + title_width + 8.0;
                 let device_width = width - title_width - 8.0 - if aside_width > 0.0 { aside_width + 8.0 } else { 0.0 };
+                name("device");
                 frame.text(device, theme.small, theme.text3, device_left, row + 1.0, device_width, Align::Start);
                 let color = if *aside_hot { theme.signal } else { theme.text2 };
+                name("detail");
                 frame.text(aside, theme.body, color, left, row, width, Align::End);
             }
             (Block::Readout { figure, unit, hot, .. }, Pass::Content) => {
@@ -896,7 +1067,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                 // The figure and its unit stand on the chart's baseline.
                 let figure_width = frame.measure(figure, theme.figure);
                 let bottom = y + height;
+                name("value");
                 text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, LABEL);
+                name("unit");
                 text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, 30.0);
             }
             (Block::Rates { rows, .. }, Pass::Content) => {
@@ -904,18 +1077,23 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                     let row_y = y + height - (rows.len() - i) as f32 * (LINE + 2.0) + 1.0;
                     // A stroke sample in front of each label says which trace it names.
                     let stroke = if i == 0 { (ink.trace, 2.0) } else { (ink.trace2, 1.0) };
+                    let which = if i == 0 { "a" } else { "b" };
+                    name(&format!("{which}.mark"));
                     frame.fill(stroke.0, left, row_y + LINE / 2.0, 10.0, stroke.1);
                     frame.text(label, theme.small, theme.text2, left + 15.0, row_y + 1.0, 40.0, Align::Start);
+                    name(&format!("{which}.value"));
                     frame.text(value, theme.value, theme.text, left, row_y, LABEL + RATE_INDENT, Align::End);
                 }
             }
             (Block::Trace { label, value, hot, .. }, Pass::Content) => {
                 // The value on the chart's baseline, its name above it.
                 let bottom = y + height;
+                part("text");
                 frame.text(label, theme.small, theme.text2, left, bottom - 2.0 * LINE - 2.0, LABEL, Align::Start);
                 frame.text(value, theme.value, if *hot { theme.signal } else { theme.text }, left, bottom - LINE, LABEL, Align::Start);
             }
             (Block::Threads(cells), Pass::Content) => {
+                part("cells");
                 let gap = 2.0;
                 let count = cells.len().max(1) as f32;
                 let cell = (width - gap * (count - 1.0)) / count;
@@ -937,6 +1115,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
             }
             (Block::Meter { label, fraction, value, hot, gap }, Pass::Content) => {
                 let row_y = y + gap;
+                part("meter");
                 frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
                 let value_width = frame.measure(value, theme.small);
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
@@ -954,12 +1133,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
             (Block::Facts { rows, gap }, Pass::Content) => {
                 for (i, (label, value, hot)) in rows.iter().enumerate() {
                     let row_y = y + gap + i as f32 * (LINE + FACT_GAP);
+                    part(&i.to_string());
                     frame.text(label, theme.small, theme.text2, left, row_y, LABEL, Align::Start);
                     let color = if *hot { theme.signal } else { theme.text };
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
                 }
             }
             (Block::Table { headings, sort, rows, visible }, Pass::Content) => {
+                part("rows");
                 // The headings share the lane's head row, after the title.
                 let head_y = y - HEAD - HEAD_GAP;
                 let columns = table_columns(left, width);
@@ -1004,6 +1185,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, pass: 
                 }
             }
         }
+        frame.key("");
         y += height;
     }
 }
@@ -1099,6 +1281,7 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
 fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let bar = layout.bar();
+    frame.key("bar");
     // Windows 11 sets the bar off as a slightly darker footer strip.
     if theme.skin == Skin::Fluent {
         frame.fill(theme.footer, bar.x, bar.y, bar.w, bar.h);
@@ -1111,6 +1294,13 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     let pin = settings - BUTTON_GAP - BUTTON;
     let overlay = pin - BUTTON_GAP - BUTTON;
     let uptime = scene.lang.duration(scene.latest().system.uptime_s);
+    if !scene.buttons {
+        let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
+        let start = bar.x + theme.bar_pad.0;
+        frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, bar.w - 2.0 * start, Align::Start);
+        frame.key("");
+        return;
+    }
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     let start = bar.x + theme.bar_pad.0;
     frame.text(&label, theme.small, theme.text2, start, bar.y + (bar.h - LINE) / 2.0, overlay - 8.0 - start, Align::Start);
@@ -1127,6 +1317,7 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
         frame.text(glyph, icon, if hovered || lit { theme.text } else { theme.text2 }, glyph_left, top + 8.0, BUTTON, Align::Start);
         hits.push((left, top, BUTTON, BUTTON, hit));
     }
+    frame.key("");
 }
 
 #[cfg(test)]
@@ -1238,31 +1429,31 @@ mod tests {
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
-        let gpu = lane(&scene(history), "gpu:0").unwrap();
+        let gpu = lane(&scene(history), "gpu:0", Detail::Full).unwrap();
         assert!(facts(&gpu).contains(&("Clock".into(), UNREAD.into())));
-        let battery = lane(&scene(history), "battery").expect("the battery lane stays");
+        let battery = lane(&scene(history), "battery", Detail::Full).expect("the battery lane stays");
         assert!(matches!(&battery[1], Block::Readout { figure, .. } if figure == UNREAD));
-        let board = lane(&scene(history), "board").expect("the board lane stays");
+        let board = lane(&scene(history), "board", Detail::Full).expect("the board lane stays");
         assert_eq!(facts(&board), vec![("Fan 1".to_string(), UNREAD.to_string())]);
         // Read again: shown.
         let history = leak(vec![sample(None, None, None), sample(Some(1350.0), Some(80), Some(900.0))]);
-        assert!(facts(&lane(&scene(history), "gpu:0").unwrap()).contains(&("Clock".into(), "1350 MHz".into())));
+        assert!(facts(&lane(&scene(history), "gpu:0", Detail::Full).unwrap()).contains(&("Clock".into(), "1350 MHz".into())));
         // Never read in the span: no row, no lane.
         let history = leak(vec![sample(None, None, None), sample(None, None, None)]);
-        assert!(!facts(&lane(&scene(history), "gpu:0").unwrap()).iter().any(|(label, _)| label == "Clock"));
-        assert!(lane(&scene(history), "battery").is_none());
-        assert!(lane(&scene(history), "board").is_none());
+        assert!(!facts(&lane(&scene(history), "gpu:0", Detail::Full).unwrap()).iter().any(|(label, _)| label == "Clock"));
+        assert!(lane(&scene(history), "battery", Detail::Full).is_none());
+        assert!(lane(&scene(history), "board", Detail::Full).is_none());
     }
 
     #[test]
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -1272,11 +1463,11 @@ mod tests {
         };
         // Two drives of one model: a row each.
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0), (1, 95.0)])]);
-        let disk = facts(&lane(&scene(history), "disk").unwrap());
+        let disk = facts(&lane(&scene(history), "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("SSD".to_string(), "35 °C".to_string()), ("SSD".to_string(), "95 °C".to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
         let history = leak(vec![with(vec![(0, 40.0), (1, 95.0)], Vec::new()), with(vec![(1, 95.0)], Vec::new())]);
-        let cpu = facts(&lane(&scene(history), "cpu").unwrap());
+        let cpu = facts(&lane(&scene(history), "cpu", Detail::Full).unwrap());
         assert!(cpu.contains(&("CCD 1".into(), UNREAD.into())));
         assert!(cpu.contains(&("CCD 2".into(), "95 °C".into())));
     }
