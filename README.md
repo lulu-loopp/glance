@@ -29,6 +29,23 @@ out with everything your PC is doing; move away and it slides back.
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
+## Desktop widgets
+
+Drag the panel away from the edge and it tears off as a widget that stays on
+the desktop. Size it by any edge or corner and it lays itself out for the
+room: the panel's lanes, tiles, a chart with the figures beneath, a strip,
+or a few rings, each turning smoothly into the next. Bring it near an edge of
+the screen and it shows where it would sit; let go and it sits there as a
+slim strip or rail, centred where you left it. Throw it off the screen to put
+it away (the tray icon's menu brings it back). Hover over it for its buttons:
+the game readings now (for a game Glance does not recognise as one), the
+settings, a pin that locks its place and size, and close. Right-click it to
+let clicks through to what is behind (hold Ctrl to handle it), to put it
+away, or for the settings. Widgets come back where you left them when Glance
+starts, in the panel's look.
+
+![Widgets on the desktop in the frosted-glass look: the panel's lanes, tiles, a chart, a strip and rings](docs/images/widgets-en.webp)
+
 ## The overlay
 
 A few readings floating over the screen, all the time or only while a game
@@ -106,13 +123,11 @@ for administrator rights at every start and cannot start with Windows.
   card, memory, network, disk…) opens to its own items, each switched on or
   off; drag modules to change their order.
 - **Close it**: move the pointer away, or press Esc.
-- **Move it, keep it**: drag the panel anywhere, onto another screen too,
-  and drag its edges to size it, as soon as it opens. Moved off the edge, it
-  stays on the desktop where you left it, Glance restarting too; drag it back
-  to the edge (a soft light there shows where) and it tucks away again. The
-  shortcut closes it.
-- **Pin it**: the pin in its bottom bar locks it where it is: it no longer
-  moves or sizes, and stays open while you work elsewhere.
+- **Size it**: drag the panel's edges, as soon as it opens.
+- **Keep it on the desktop**: drag the panel away from the edge and it tears
+  off as a widget (see [Desktop widgets](#desktop-widgets)), onto another
+  screen too.
+- **Pin it**: the pin in its bottom bar keeps it open while you work elsewhere.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the
   tray when the CPU or a graphics card stays at the temperature alert for

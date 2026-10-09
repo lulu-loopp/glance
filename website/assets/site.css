@@ -335,6 +335,7 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
 /* The overlay over a soft dusk (drawn by overlay.js), in the colours of
    the desktop above. */
 .scene { position: relative; display: block; height: 360px; padding: 0; }
+.picture { display: block; width: 100%; height: auto; border-radius: 20px; }
 .scene .art { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .ov-glass { position: absolute; top: 24px; left: 24px; max-width: calc(100% - 48px); color: #fff; text-align: left;
   font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
