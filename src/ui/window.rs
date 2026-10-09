@@ -30,6 +30,11 @@ pub struct Window {
     under: Cell<Option<HWND>>,
     /// Where it was last put by `place_keeping`.
     placed: Cell<RECT>,
+    /// Kept on the desktop, under every other window (see `set_on_desktop`),
+    /// rather than above them all.
+    on_desktop: Cell<bool>,
+    /// Above them all for now, kept on the desktop or not (see `lift`).
+    lifted: Cell<bool>,
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -124,7 +129,7 @@ impl Window {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err(error);
         }
-        Ok(Window { hwnd, click_through: false, under: Cell::new(None), placed: Cell::new(RECT::default()) })
+        Ok(Window { hwnd, click_through: false, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false) })
     }
 
     pub fn place(&self, rect: RECT) {
@@ -134,6 +139,13 @@ impl Window {
     /// Placed at `rect`, above all, or just below `above` (another window
     /// above all) while there is one, or the window it gives way to.
     pub fn place_under(&self, rect: RECT, above: Option<HWND>) {
+        if self.low() {
+            unsafe {
+                let _ = SetWindowPos(self.hwnd, None, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, SWP_NOACTIVATE | SWP_NOZORDER);
+            }
+            self.sink();
+            return;
+        }
         unsafe {
             let _ = SetWindowPos(
                 self.hwnd,
@@ -150,6 +162,12 @@ impl Window {
     pub fn show(&self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        if self.low() {
+            self.sink();
+            return;
+        }
+        unsafe {
             // Above whatever took the top since it was last shown (but the
             // window it gives way to).
             let _ = SetWindowPos(self.hwnd, Some(self.under.get().unwrap_or(HWND_TOPMOST)), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
@@ -180,6 +198,9 @@ impl Window {
     /// In front of the windows of its kind (the topmost ones, or the others),
     /// or, giving way to a window, just below it still.
     pub fn raise(&self) {
+        if self.low() {
+            return;
+        }
         let after = self.under.get().unwrap_or(HWND_TOP);
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
@@ -196,6 +217,10 @@ impl Window {
     /// above all again.
     pub fn yield_to(&self, window: Option<HWND>) {
         self.under.set(window);
+        // On the desktop, it is under that window already.
+        if self.low() {
+            return;
+        }
         let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
         unsafe {
             if let Some(window) = window {
@@ -206,6 +231,69 @@ impl Window {
             } else {
                 let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             }
+        }
+    }
+
+    /// Whether it is under every other window now: kept on the desktop, not
+    /// lifted.
+    fn low(&self) -> bool {
+        self.on_desktop.get() && !self.lifted.get()
+    }
+
+    /// Kept on the desktop (`true`): under every other window, just above
+    /// the desktop's own (so that the desktop shown, its icons and all, it
+    /// shows too); else above them all, as it was made.
+    pub fn set_on_desktop(&self, on_desktop: bool) {
+        self.on_desktop.set(on_desktop);
+        if self.low() {
+            self.sink();
+        } else {
+            self.yield_to(self.under.get());
+        }
+    }
+
+    /// Above them all for now (`true`: while it is moved or sized by hand,
+    /// to be seen), or back where it is kept.
+    pub fn lift(&self, lifted: bool) {
+        if self.lifted.replace(lifted) == lifted || !self.on_desktop.get() {
+            return;
+        }
+        if lifted {
+            self.yield_to(self.under.get());
+        } else {
+            self.sink();
+        }
+    }
+
+    /// Kept on the desktop: put just above the desktop's own window, wherever
+    /// that is among the others (shown with Win+D, it comes in front of
+    /// them; see `widget::window_changed`). Nothing done where it is there.
+    pub fn sink(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GetWindowLongPtrW, GW_HWNDPREV, HWND_BOTTOM};
+        if !self.low() {
+            return;
+        }
+        let topmost = |window: HWND| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
+        let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
+        unsafe {
+            // Out of the topmost windows first.
+            if topmost(self.hwnd) {
+                let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+            }
+            let after = match desktop_window() {
+                Some(desktop) => match GetWindow(desktop, GW_HWNDPREV) {
+                    // There already.
+                    Ok(above) if above == self.hwnd => return,
+                    // Below the window just above the desktop's: between them.
+                    Ok(above) if !topmost(above) => above,
+                    // The desktop in front of every ordinary window: in
+                    // front of them too.
+                    _ => HWND_TOP,
+                },
+                // No desktop (Explorer not running): under all.
+                None => HWND_BOTTOM,
+            };
+            let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, flags);
         }
     }
 
@@ -248,6 +336,26 @@ impl Window {
             let style = if through { style | WS_EX_TRANSPARENT.0 as isize } else { style & !(WS_EX_TRANSPARENT.0 as isize) };
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style);
             let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        }
+    }
+}
+
+/// The desktop's own window: the one holding its icons (Progman, or the
+/// WorkerW Explorer puts them in behind an animated wallpaper).
+pub fn desktop_window() -> Option<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+    let icons = |window: HWND| unsafe { FindWindowExW(Some(window), None, w!("SHELLDLL_DefView"), PCWSTR::null()) }.is_ok_and(|view| !view.is_invalid());
+    let progman = unsafe { FindWindowExW(None, None, w!("Progman"), PCWSTR::null()) }.ok().filter(|w| !w.is_invalid());
+    if let Some(progman) = progman.filter(|w| icons(*w)) {
+        return Some(progman);
+    }
+    let mut worker = None;
+    loop {
+        worker = unsafe { FindWindowExW(None, worker, w!("WorkerW"), PCWSTR::null()) }.ok().filter(|w| !w.is_invalid());
+        match worker {
+            Some(w) if icons(w) => return Some(w),
+            Some(_) => continue,
+            None => return progman,
         }
     }
 }

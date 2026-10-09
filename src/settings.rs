@@ -54,6 +54,10 @@ pub struct WidgetAt {
     pub click_through: bool,
     #[serde(default)]
     pub game_only: bool,
+    /// Kept on the desktop, under every other window, rather than above
+    /// them all.
+    #[serde(default)]
+    pub on_desktop: bool,
     #[serde(default)]
     pub stuck: Option<WidgetSide>,
     #[serde(default)]

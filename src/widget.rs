@@ -97,6 +97,10 @@ static WIDGET_AREAS: std::sync::Mutex<Vec<RECT>> = std::sync::Mutex::new(Vec::ne
 /// Where each window that changed was last (physical px): one moving away
 /// from behind a widget changes what is behind it too.
 static WINDOW_PLACES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<isize, RECT>>> = std::sync::LazyLock::new(Default::default);
+/// The order of the windows on the screens changed: the desktop's own may
+/// have moved among the others (Win+D brings it in front of them, after the
+/// front has changed), and the widgets kept on it are put back just above it.
+static ORDER_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// How many widgets are on the desktop, shown: while there are, the device
 /// they draw with keeps what it holds (see `any_shown`).
 static SHOWN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -130,7 +134,8 @@ static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// Has the system say whenever another program's window moves, is sized,
 /// comes to the front, opens, closes or is minimized (each widget's
-/// backdrop may have changed). Out of context: called on this thread, as
+/// backdrop may have changed), and whenever the windows' order changes (the
+/// widgets kept on the desktop follow it). Out of context: called on this thread, as
 /// its messages are taken.
 fn watch_windows() -> Option<windows::Win32::UI::Accessibility::HWINEVENTHOOK> {
     use windows::Win32::UI::Accessibility::SetWinEventHook;
@@ -160,9 +165,14 @@ unsafe extern "system" fn window_changed(
     _time: u32,
 ) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetAncestor, IsWindowVisible, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
+        GetAncestor, IsWindowVisible, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
         EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GA_ROOT, OBJID_WINDOW,
     };
+    // The system says so of the screen's own window, whose children the
+    // windows are.
+    if event == EVENT_OBJECT_REORDER && window == unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() } {
+        ORDER_CHANGED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // A window gone: let go of, from where it was last (it may be gone
     // past asking about it).
     if event == EVENT_OBJECT_DESTROY && object == OBJID_WINDOW.0 && child == 0 {
@@ -347,6 +357,9 @@ struct Widget {
     pinned: bool,
     click_through: bool,
     game_only: bool,
+    /// Kept on the desktop, under every other window (one shown only with
+    /// a game is above them all still).
+    on_desktop: bool,
     /// What it showed last frame.
     last: Option<Shown>,
     /// Turning from one layout into the one it shows: since when, from
@@ -643,6 +656,11 @@ impl Widgets {
         match choice {
             WidgetChoice::Pin => self.list[index].pinned ^= true,
             WidgetChoice::ClickThrough => self.list[index].click_through ^= true,
+            WidgetChoice::AboveOthers => {
+                let widget = &mut self.list[index];
+                widget.on_desktop ^= true;
+                widget.window.set_on_desktop(widget.low());
+            }
             WidgetChoice::Close => {
                 let widget = self.list.remove(index);
                 self.put_away.push(widget.kept());
@@ -672,6 +690,12 @@ impl Widgets {
         }
         if self.watching.is_none() {
             self.watching = watch_windows();
+        }
+        // Those kept on the desktop, just above it again wherever it went.
+        if ORDER_CHANGED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            for widget in &self.list {
+                widget.window.sink();
+            }
         }
         // Where they are, for what changes behind them (see `window_changed`);
         // one of them moved, sized, come or gone where it meets another
@@ -779,6 +803,7 @@ impl Widgets {
 pub enum WidgetChoice {
     Pin,
     ClickThrough,
+    AboveOthers,
     Close,
     Settings,
 }
@@ -841,6 +866,7 @@ impl Widget {
             pinned: false,
             click_through: false,
             game_only: false,
+            on_desktop: false,
             last: None,
             morph: None,
             drawn: Vec::new(),
@@ -877,6 +903,8 @@ impl Widget {
         widget.pinned = kept.pinned;
         widget.click_through = kept.click_through;
         widget.game_only = kept.game_only;
+        widget.on_desktop = kept.on_desktop;
+        widget.window.set_on_desktop(widget.low());
         widget.stuck = kept.stuck.map(Side::from_kept);
         widget.before = kept.before.as_ref().and_then(Choice::from_kept);
         Some(widget)
@@ -889,6 +917,7 @@ impl Widget {
             pinned: self.pinned,
             click_through: self.click_through,
             game_only: self.game_only,
+            on_desktop: self.on_desktop,
             stuck: self.stuck.map(Side::kept),
             before: self.before.map(Choice::kept),
         }
@@ -1032,6 +1061,8 @@ impl Widget {
             self.drag = Some(Drag::Move { grab: POINT { x: from.x - self.at.x, y: from.y - self.at.y }, trail: Vec::new(), torn: false, moved: false });
         }
         unsafe { SetCapture(self.window.hwnd) };
+        // Above every window while it is in hand, kept on the desktop or not.
+        self.window.lift(true);
         self.window.raise();
         // Over the others now where they meet: a widget that took the
         // desktop with them there takes it again.
@@ -1110,6 +1141,8 @@ impl Widget {
 
     fn release(&mut self, now: Instant) -> Released {
         let _ = unsafe { ReleaseCapture() };
+        // Back where it is kept, let go.
+        self.window.lift(false);
         self.hide_hint();
         // (The capture's end after a release comes here too, with nothing.)
         let Some(drag) = self.drag.take() else { return Released::Nothing };
@@ -1302,6 +1335,11 @@ impl Widget {
         // taken a moment ago (as it was torn off), for taking it shows.
         let fresh = self.behind.as_ref().is_some_and(|behind| behind.taken.elapsed() < RETAKE_AFTER);
         self.retake |= !self.excluded && !fresh;
+    }
+
+    /// Whether it is kept under every other window.
+    fn low(&self) -> bool {
+        self.on_desktop && !self.game_only
     }
 
     fn margin_px(&self) -> i32 {
@@ -1790,10 +1828,11 @@ impl Widget {
 
     fn menu(&self, lang: Lang) -> Option<WidgetChoice> {
         // As the apps are, light or dark.
-        match crate::ui::menu::show(&menu_items(lang, self.pinned, self.click_through), crate::os::apps_dark())? {
+        match crate::ui::menu::show(&menu_items(lang, self.pinned, self.click_through, !self.on_desktop), crate::os::apps_dark())? {
             0 => Some(WidgetChoice::Pin),
             1 => Some(WidgetChoice::ClickThrough),
-            2 => Some(WidgetChoice::Close),
+            2 => Some(WidgetChoice::AboveOthers),
+            3 => Some(WidgetChoice::Close),
             _ => Some(WidgetChoice::Settings),
         }
     }
@@ -1829,12 +1868,13 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
 }
 
 /// A widget's menu: pinned or not, letting clicks through or not.
-pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool) -> [crate::ui::menu::Item<'static>; 4] {
+pub(crate) fn menu_items(lang: Lang, pinned: bool, through: bool, above: bool) -> [crate::ui::menu::Item<'static>; 5] {
     use crate::ui::menu::Item;
     let item = |zh, en, icon, checked, rule_before| Item { label: lang.pick(zh, en), icon: Some(icon), checked, rule_before };
     [
         item("固定位置和大小", "Pin where it is", Icon::Pin, pinned, false),
         item("鼠标穿透（按住 Ctrl 再操作）", "Let clicks through (hold Ctrl to use it)", Icon::Pointer, through, false),
+        item("置于其他窗口之上", "Keep above other windows", Icon::Layers, above, false),
         item("收起", "Put away", Icon::Close, false, false),
         item("设置…", "Settings…", Icon::Settings, false, true),
     ]

@@ -466,7 +466,7 @@ impl Controller {
             let layout = arrange::Choice { form: Form::Lanes { detail: Detail::Full, columns: 2 }, scale: 1.0, extra: (0.0, 0.0) }.kept();
             // Its corner, as near as can be told from its middle.
             let corner = (at.screen.0 - 356, at.screen.1 - 270);
-            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, stuck: None, before: None });
+            widgets.adopt(crate::settings::WidgetAt { at: corner, layout, pinned: at.locked, click_through: false, game_only: false, on_desktop: false, stuck: None, before: None });
             std::thread::spawn(|| crate::app().change(|settings| settings.panel_at = None));
         }
         let mut restore = false;
