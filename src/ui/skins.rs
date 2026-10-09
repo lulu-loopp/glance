@@ -244,11 +244,13 @@ fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), area:
     let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F { width: size.width * k, height: size.height * k };
     // What of `area` the backdrop holds; past it altogether, the backdrop's
     // nearest edge (one DIP of it), carried on.
+    // (A backdrop narrower than a DIP, a sliver of a screen, is carried on
+    // whole.)
     let (x0, y0, x1, y1) = (-at.X, -at.Y, size.width - at.X, size.height - at.Y);
-    let left = area.x.clamp(x0, x1 - 1.0);
-    let top = area.y.clamp(y0, y1 - 1.0);
-    let right = (area.x + area.w).clamp(left + 1.0, x1);
-    let bottom = (area.y + area.h).clamp(top + 1.0, y1);
+    let left = area.x.max(x0).min((x1 - 1.0).max(x0));
+    let top = area.y.max(y0).min((y1 - 1.0).max(y0));
+    let right = (area.x + area.w).min(x1).max((left + 1.0).min(x1));
+    let bottom = (area.y + area.h).min(y1).max((top + 1.0).min(y1));
     let crop = effect(frame, &CLSID_D2D1Crop, &output(&placed)?)?;
     prop(&crop, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[left, top, right, bottom])?;
     let border = effect(frame, &CLSID_D2D1Border, &output(&crop)?)?;

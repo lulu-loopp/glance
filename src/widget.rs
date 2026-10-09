@@ -1327,6 +1327,11 @@ impl Widget {
             let travel = (1.0 - keep) / -FRICTION.ln();
             self.at.x += (vx * travel * scale) as i32;
             self.at.y += (vy * travel * scale) as i32;
+            // Onto another screen on its way: on that one now.
+            let r = self.rect();
+            if let Some(contact) = monitor_at(POINT { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 }) {
+                self.moved_to(contact);
+            }
             let (vx, vy) = (vx * keep, vy * keep);
             self.fling = Some((vx, vy));
             let screens = unsafe {
@@ -1574,7 +1579,7 @@ impl Widget {
         self.exclude(live || self.pending.is_some());
         // Let go or come to rest: light or dark as the desktop is where it
         // is now, measured on what was taken there (none under way).
-        if self.tone_due && self.drag.is_none() && self.fling.is_none() && self.pending.is_none() {
+        if self.tone_due && self.drag.is_none() && self.fling.is_none() && self.settle.is_none() && self.pending.is_none() {
             self.tone_due = false;
             let rect = self.rect();
             if let Some(behind) = &mut self.behind {
