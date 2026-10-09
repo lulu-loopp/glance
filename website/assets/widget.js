@@ -13,11 +13,11 @@
   var zh = root.lang.indexOf("zh") === 0;
   var W = zh ? {
     cpu: "CPU", gpu: "GPU", mem: "内存", net: "网络", disk: "磁盘", proc: "进程", store: "存储",
-    clock: "频率", power: "功耗", vram: "显存", module: "内存条", down: "下载", up: "上传", read: "读取", write: "写入",
+    fps: "帧率", game: "游戏", screen: "屏幕 165 Hz", clock: "频率", power: "功耗", vram: "显存", module: "内存条", down: "下载", up: "上传", read: "读取", write: "写入",
     rd: "读", wr: "写", uptime: "已开机 3 天 22 小时", cols: ["CPU", "内存", "读写", "GPU"]
   } : {
     cpu: "CPU", gpu: "GPU", mem: "Memory", net: "Network", disk: "Disk", proc: "Processes", store: "Storage",
-    clock: "Clock", power: "Power", vram: "VRAM", module: "Module", down: "Down", up: "Up", read: "Read", write: "Write",
+    fps: "Frame rate", game: "Game", screen: "Screen 165 Hz", clock: "Clock", power: "Power", vram: "VRAM", module: "Module", down: "Down", up: "Up", read: "Read", write: "Write",
     rd: "R", wr: "W", uptime: "Up 3 d 22 h", cols: ["CPU", "Mem", "I/O", "GPU"]
   };
 
@@ -41,8 +41,11 @@
   var seed = 7;
   function rnd() { return (seed = (seed * 16807) % 2147483647) / 2147483647; }
   var N = 90, THREADS = 32;
-  var H = { cpu: [], gpu: [], mem: [], down: [], up: [], read: [], write: [] };
-  var R = { cpu: 38, gpu: 22, mem: 35.4, temp: 58, gtemp: 47, down: 2.4e6, up: 1.9e5, read: 4.4e7, write: 6.8e5, ghz: 5.25, watt: 92, gwatt: 51, vram: 3.0, threads: [], procs: [] };
+  var H = { cpu: [], gpu: [], mem: [], down: [], up: [], read: [], write: [], fps: [] };
+  // A game played (the switch on the desk): its frame rate first in every
+  // layout, its lane at the top of the panel's.
+  var GAME = false;
+  var R = { fps: 0, low: 0, cpu: 38, gpu: 22, mem: 35.4, temp: 58, gtemp: 47, down: 2.4e6, up: 1.9e5, read: 4.4e7, write: 6.8e5, ghz: 5.25, watt: 92, gwatt: 51, vram: 3.0, threads: [], procs: [] };
   for (var i = 0; i < THREADS; i++) R.threads.push(rnd() * 60);
   function walk(v, lo, hi, j) { return Math.min(hi, Math.max(lo, v + (rnd() - 0.5) * j)); }
   function sample() {
@@ -51,6 +54,7 @@
     R.watt = 40 + R.cpu * 1.6; R.gwatt = 25 + R.gpu * 2.4; R.vram = walk(R.vram, 1.5, 9, 0.4);
     R.down = Math.max(800, walk(R.down, 0, 2.6e7, 6e6)); R.up = Math.max(400, walk(R.up, 0, 2e6, 3e5));
     R.read = Math.max(0, walk(R.read, 0, 2.2e8, 4e7)); R.write = Math.max(0, walk(R.write, 0, 6e7, 8e6));
+    R.fps = GAME ? walk(R.fps || 142, 96, 165, 18) : 0; R.low = GAME ? R.fps * (0.62 + rnd() * 0.12) : 0;
     R.threads = R.threads.map(function (t) { return walk(t * 0.6 + R.cpu * 0.4, 0, 100, 40); });
     R.procs = [["blender", 3.0], ["chrome", 1.6], ["glance", 0.9], ["dwm", 0.5], ["svchost", 0.5], ["explorer", 0.3]]
       .map(function (p) { return [p[0], Math.max(0, p[1] * (R.cpu / 30) * (0.6 + rnd() * 0.8))]; }).sort(function (a, b) { return b[1] - a[1]; });
@@ -74,6 +78,7 @@
     mem: ["M12 12v-2", "M12 18v-2", "M16 12v-2", "M16 18v-2", "M2 11h1.5", "M20 18v-2", "M20.5 11H22", "M4 18v-2", "M8 12v-2", "M8 18v-2", "M4 6h16a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"],
     disk: ["M10 16h.01", "M2.212 11.577a2 2 0 0 0-.212.896V18a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-5.527a2 2 0 0 0-.212-.896L18.55 5.11A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z", "M21.946 12.013H2.054", "M6 16h.01"],
     net: ["m3 16 4 4 4-4", "M7 20V4", "m21 8-4-4-4 4", "M17 4v16"],
+    game: ["M6 11h4", "M8 9v4", "M15 12h.01", "M18 10h.01", "M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z"],
     list: ["M3 5h.01", "M3 12h.01", "M3 19h.01", "M8 5h13", "M8 12h13", "M8 19h13"]
   };
   var PATHS = {};
@@ -110,6 +115,7 @@
   // ---------------- readings, as every layout shows them ----------------
   function readings() {
     var list = [];
+    if (GAME) list.push({ id: "fps", icon: "game", label: W.fps, share: null, value: R.fps.toFixed(0), unit: "FPS", sub: "", detail: "1% low " + R.low.toFixed(0), hot: false, series: H.fps, max: 165 });
     list.push({ id: "cpu", icon: "cpu", label: W.cpu, share: R.cpu / 100, value: R.cpu.toFixed(0), unit: "%", sub: R.temp.toFixed(0) + "°", detail: R.temp.toFixed(0) + " °C", hot: R.cpu > HOT || R.temp > 85, series: H.cpu, max: 100 });
     list.push({ id: "gpu", icon: "gpu", label: W.gpu, share: R.gpu / 100, value: R.gpu.toFixed(0), unit: "%", sub: R.gtemp.toFixed(0) + "°", detail: R.gtemp.toFixed(0) + " °C", hot: R.gpu > HOT, series: H.gpu, max: 100 });
     list.push({ id: "mem", icon: "mem", label: W.mem, share: R.mem / 100, value: R.mem.toFixed(0), unit: "%", sub: "", detail: (R.mem / 100 * 61.6).toFixed(1) + " GB", hot: R.mem > HOT, series: H.mem, max: 100 });
@@ -170,7 +176,8 @@
   var COL = 356, PADX = 18, PADT = 12, PADB = 12, HEAD = 25, PLOT = 40, RPLOT = 36, LINE = 16, FG = 3, ROW = 22, BAR = 44, LABEL = 96;
   function lanes(full) {
     function facts(rows) { return full ? rows : []; }
-    return [
+    return (GAME ? [{ id: "fps", title: W.game, dev: "Cyberpunk 2077", aside: function () { return W.screen; }, hot: function () { return false; },
+      blocks: [["readout", "fps"], ["facts", facts([["1% low", function () { return R.low.toFixed(0) + " FPS"; }]])]] }] : []).concat([
       { id: "cpu", title: W.cpu, dev: "AMD Ryzen 9 9950X", aside: function () { return R.temp.toFixed(0) + " °C"; }, hot: function () { return R.temp > 85; },
         blocks: [["readout", "cpu"], ["facts", facts([[W.clock, function () { return R.ghz.toFixed(2) + " GHz"; }], [W.power, function () { return R.watt.toFixed(1) + " W"; }], ["CCD 1", function () { return (R.temp + 1).toFixed(0) + " °C"; }], ["CCD 2", function () { return (R.temp - 18).toFixed(0) + " °C"; }]])]].concat(full ? [["threads"]] : []) },
       { id: "gpu", title: W.gpu, dev: "NVIDIA GeForce RTX 5070 Ti", aside: function () { return R.gtemp.toFixed(0) + " °C"; }, hot: function () { return false; },
@@ -181,7 +188,7 @@
       { id: "disk", title: W.disk, dev: "Sandisk Optimus 5100 2TB", aside: function () { return "34 °C"; }, hot: function () { return false; }, blocks: [["rates", "disk", [W.read, W.write]]] },
       { id: "proc", title: W.proc, dev: "", aside: function () { return ""; }, hot: function () { return false; }, blocks: [["table", full ? 5 : 3]] },
       { id: "store", title: W.store, dev: "", aside: function () { return ""; }, hot: function () { return false; }, blocks: [["meter0", "C:", function () { return 0.47; }, function () { return "283 / 600 GB"; }], ["meter", "D:", function () { return 0.39; }, function () { return "496 / 1262 GB"; }]] }
-    ];
+    ]);
   }
   function blockHeight(b) {
     switch (b[0]) {
@@ -319,18 +326,18 @@
   function layCorner(L, w, h) {
     var list = readings(), pad = 14;
     L.chart("cpu.chart", pad, pad, w - 2 * pad, h - 2 * pad - 70, H.cpu, 100, H.gpu, "gpu", BOTH);
-    row(L, keys(["cpu", "gpu", "mem"], list), pad, w - pad, h - pad - 46, 14, true, 10);
+    row(L, keys(GAME ? ["fps", "cpu", "gpu"] : ["cpu", "gpu", "mem"], list), pad, w - pad, h - pad - 46, 14, true, 10);
     row(L, keys(["net", "disk"], list), pad, w - pad, h - pad - 12, 13, false, 10);
   }
   function layStrip(L, rich, w, h) {
-    var list = keys(["cpu", "gpu", "mem", "net"], readings()), parts = [], mid = h / 2;
+    var list = keys(GAME ? ["fps", "cpu", "gpu", "mem", "net"] : ["cpu", "gpu", "mem", "net"], readings()), parts = [], mid = h / 2;
     if (rich) parts.push({ w: 84, lay: function (x) { L.chart("cpu.chart", x, 7, 84, h - 14, H.cpu, 100); } });
     list.forEach(function (r) { parts.push({ w: chipWidth(r, 14, rich), lay: function (x) { chip(L, r, x, mid, 14, rich, 8.5); } }); });
     var used = parts.reduce(function (a, p) { return a + p.w; }, 0), gap = Math.max(10, (w - 24 - used) / (parts.length - 1)), x = 12;
     parts.forEach(function (p) { p.lay(x); x += p.w + gap; });
   }
   function layRail(L, w, h) {
-    var list = keys(["cpu", "gpu", "mem", "net", "disk"], readings()), pad = 10, each = 36;
+    var list = keys(GAME ? ["fps", "cpu", "gpu", "mem", "net", "disk"] : ["cpu", "gpu", "mem", "net", "disk"], readings()), pad = 10, each = 36;
     var ch = Math.max(36, h - 2 * pad - list.length * each - 8);
     L.chart("cpu.chart", pad, pad, w - 2 * pad, ch, H.cpu, 100, H.gpu, "gpu", BOTH);
     var gap = Math.max(0, (h - 2 * pad - ch - 8 - list.length * each) / list.length), wide = w >= 150;
@@ -349,7 +356,7 @@
     });
   }
   function layMicro(L, w, h) {
-    var list = keys(["cpu", "gpu", "mem"], readings()), cell = (w - 16) / list.length;
+    var list = keys(GAME ? ["fps", "cpu", "gpu"] : ["cpu", "gpu", "mem"], readings()), cell = (w - 16) / list.length;
     list.forEach(function (r, i) { L.ring(r.id + ".icon", 8 + cell * (i + 0.5), h / 2, Math.min(h / 2 - 5, 13), r.icon, r.share, r.hot); });
   }
 
@@ -368,9 +375,9 @@
       stretch: { w: 36 * c, h: 30 * tileRows(c) }, lay: function (L, w, h) { layTiles(L, c, tileRows(c), w, h); } });
   });
   LADDER.push({ key: "corner", level: 3, floor: 0.85, measure: function () { return { w: 300, h: 176 }; }, stretch: { w: 200, h: 170 }, lay: layCorner });
-  LADDER.push({ key: "strip", level: 4, floor: 0.76, measure: function () { return { w: 700, h: 36 }; }, stretch: { w: 260, h: 10 }, lay: function (L, w, h) { layStrip(L, true, w, h); } });
+  LADDER.push({ key: "strip", level: 4, floor: 0.76, measure: function () { return { w: GAME ? 820 : 700, h: 36 }; }, stretch: { w: 260, h: 10 }, lay: function (L, w, h) { layStrip(L, true, w, h); } });
   LADDER.push({ key: "rail", level: 4, floor: 0.76, measure: function () { return { w: 96, h: 120 + readings().length * 36 }; }, stretch: { w: 96, h: 160 }, lay: layRail });
-  LADDER.push({ key: "strip2", level: 5, floor: 0.76, measure: function () { return { w: 420, h: 36 }; }, stretch: { w: 120, h: 10 }, lay: function (L, w, h) { layStrip(L, false, w, h); } });
+  LADDER.push({ key: "strip2", level: 5, floor: 0.76, measure: function () { return { w: GAME ? 520 : 420, h: 36 }; }, stretch: { w: 120, h: 10 }, lay: function (L, w, h) { layStrip(L, false, w, h); } });
   LADDER.push({ key: "micro", level: 6, floor: 0.9, measure: function () { return { w: 120, h: 40 }; }, stretch: { w: 30, h: 6 }, lay: layMicro });
 
   var MAX_SCALE = 1.3, STICK = 1.05, UP = 1.08;
@@ -516,10 +523,16 @@
   // As Glance's: pressed within EDGE of an edge (CORNER of a corner) it is
   // sized, else moved. Sized, its edges follow the hand only GIVE of the way
   // past what its layout fills, and let go, it settles onto that.
-  var MORPH = 320, EDGE = 8, CORNER = 20, GIVE = 0.5, SETTLE = 260, MARGIN = 16;
+  // Let go within STICK of the desk's edge, it sticks to it (a rail on a
+  // side, a short strip at the top or bottom), the place shown from
+  // HINT_SEEN on; pulled UNSTICK away, it is as it was.
+  var MORPH = 320, EDGE = 8, CORNER = 20, GIVE = 0.5, SETTLE = 260, MARGIN = 16, MOVE_FROM = 4, STICK = 36, UNSTICK = 52, HINT_SEEN = 64;
   var at = { x: MARGIN, y: MARGIN }, roomNow = null, surface = null, settle = null;
   var shown = null, taken = null, turning = null, last = [], drag = null, keeps = { l: false, t: false };
-  var wanted = { w: 520, h: 400 };
+  var wanted = { w: 520, h: 400 }, stuck = null;
+  var ghost = document.createElement("div");
+  ghost.className = "gw-ghost";
+  host.insertBefore(ghost, win);
   function desk() { var r = host.getBoundingClientRect(); return { w: r.width, h: r.height }; }
   function ease(t) { return 1 - Math.pow(1 - Math.min(1, Math.max(0, t)), 4); }
   function give(have, fill) { return have <= fill ? fill : fill + (have - fill) * GIVE; }
@@ -530,6 +543,42 @@
       taken = { w: room.w, h: room.h, c: next.c };
     }
     shown = next;
+  }
+  // What it shows stuck to `side`: a rail on the left or right, a short
+  // strip at the top or bottom, at their own size.
+  function stuckForm(side) {
+    var c = LADDER.find(function (c) { return c.key === (side === "l" || side === "r" ? "rail" : "strip2"); }), m = c.measure();
+    return { c: c, scale: 1, ex: { w: 0, h: 0 }, w: m.w, h: m.h };
+  }
+  // The desk's edge it is nearest, and how near.
+  function nearest() {
+    var d = desk();
+    return [["l", at.x], ["r", d.w - at.x - surface.w], ["t", at.y], ["b", d.h - at.y - surface.h]]
+      .reduce(function (a, b) { return b[1] < a[1] ? b : a; });
+  }
+  // Where something `size` large stuck to `side` has its corner, its middle
+  // where its middle is now.
+  function stuckAt(side, size) {
+    var d = desk(), mx = at.x + surface.w / 2, my = at.y + surface.h / 2;
+    var x = side === "l" ? 0 : side === "r" ? d.w - size.w : mx - size.w / 2;
+    var y = side === "t" ? 0 : side === "b" ? d.h - size.h : my - size.h / 2;
+    return { x: Math.max(0, Math.min(x, d.w - size.w)), y: Math.max(0, Math.min(y, d.h - size.h)) };
+  }
+  // A new layout, turning into it from what shows, settling onto its size.
+  function turnTo(next, now) {
+    if (shown && next.c !== shown.c) turning = { from: last, at: now };
+    shown = next;
+    settle = { at: now, from: { w: surface.w, h: surface.h } };
+  }
+  // Moved near an edge, not stuck: where it would stick, firmer the nearer.
+  function hint() {
+    var near = drag && drag.moved && !drag.edges && !stuck ? nearest() : null;
+    if (!near || near[1] >= HINT_SEEN) { ghost.classList.remove("on", "firm"); return; }
+    var f = stuckForm(near[0]), p = stuckAt(near[0], f), firm = near[1] < STICK;
+    ghost.style.left = p.x + "px"; ghost.style.top = p.y + "px"; ghost.style.width = f.w + "px"; ghost.style.height = f.h + "px";
+    ghost.style.opacity = firm ? 1 : 0.25 + 0.5 * (1 - (near[1] - STICK) / (HINT_SEEN - STICK));
+    ghost.classList.add("on");
+    ghost.classList.toggle("firm", firm);
   }
   // Kept on the desk: where it is, as far as its size lets it.
   function keepIn() {
@@ -598,7 +647,7 @@
   host.addEventListener("pointerdown", function (e) {
     if (e.button !== 0 || !within(e)) return;
     var edges = edgesAt(e);
-    drag = { x: e.clientX, y: e.clientY, at: { x: at.x, y: at.y }, edges: edges, room: { w: surface.w, h: surface.h } };
+    drag = { x: e.clientX, y: e.clientY, at: { x: at.x, y: at.y }, edges: edges, room: { w: surface.w, h: surface.h }, moved: false };
     settle = null;
     if (edges) { keeps = { l: edges.l, t: edges.t }; roomNow = { w: surface.w, h: surface.h }; }
     host.setPointerCapture(e.pointerId);
@@ -611,11 +660,33 @@
     if (!drag) { host.style.cursor = within(e) ? cursorFor(edgesAt(e)) : ""; return; }
     var dx = e.clientX - drag.x, dy = e.clientY - drag.y, d = desk(), ed = drag.edges;
     if (!ed) {
+      if (!drag.moved && Math.hypot(dx, dy) < MOVE_FROM) return;
+      drag.moved = true;
       at.x = Math.max(0, Math.min(drag.at.x + dx, d.w - surface.w));
       at.y = Math.max(0, Math.min(drag.at.y + dy, d.h - surface.h));
+      // Pulled away from the edge it is stuck to: as it was, under the
+      // hand where it was taken.
+      if (stuck) {
+        var away = { l: drag.at.x + dx, r: d.w - (drag.at.x + dx + surface.w), t: drag.at.y + dy, b: d.h - (drag.at.y + dy + surface.h) }[stuck];
+        if (away > UNSTICK) {
+          var box = win.getBoundingClientRect(), gx = (e.clientX - box.left) / box.width, gy = (e.clientY - box.top) / box.height;
+          var next = chooseFor(wanted.w, wanted.h, null, null), hostBox = host.getBoundingClientRect();
+          stuck = null;
+          keeps = { l: false, t: false };
+          taken = { w: wanted.w, h: wanted.h, c: next.c };
+          turnTo(next, performance.now());
+          settle = null;
+          surface = { w: next.w, h: next.h };
+          at.x = Math.max(0, Math.min(e.clientX - hostBox.left - gx * next.w, d.w - next.w));
+          at.y = Math.max(0, Math.min(e.clientY - hostBox.top - gy * next.h, d.h - next.h));
+          drag.x = e.clientX; drag.y = e.clientY; drag.at = { x: at.x, y: at.y };
+        }
+      }
+      hint();
       request();
       return;
     }
+    stuck = null;
     // The room the hand gives, within the desk.
     var w = drag.room.w + (ed.r ? dx : ed.l ? -dx : 0), h = drag.room.h + (ed.b ? dy : ed.t ? -dy : 0);
     var right = drag.at.x + drag.room.w, bottom = drag.at.y + drag.room.h;
@@ -628,6 +699,19 @@
   function letGo() {
     if (!drag) return;
     if (roomNow) { roomNow = null; settle = { at: performance.now(), from: { w: surface.w, h: surface.h } }; }
+    // Let go near an edge: stuck to it; already stuck, flush with it again.
+    if (!drag.edges && drag.moved) {
+      var near = nearest(), side = near[1] < STICK ? near[0] : stuck;
+      if (side) {
+        var f = stuck ? shown : stuckForm(side), p = stuckAt(side, f), d = desk();
+        if (!stuck) turnTo(f, performance.now());
+        stuck = side;
+        // The edge it is stuck to stays where it is as it settles.
+        keeps = { l: side === "r", t: side === "b" };
+        at = { x: side === "l" ? 0 : side === "r" ? d.w - surface.w : p.x, y: side === "t" ? 0 : side === "b" ? d.h - surface.h : p.y };
+      }
+    }
+    ghost.classList.remove("on", "firm");
     drag = null;
     host.classList.remove("handled");
     host.style.cursor = "";
@@ -669,11 +753,45 @@
     if (widget) {
       // Laid out for the room last asked of it, as much of it as the desk has.
       look();
-      var d = desk();
-      choose({ w: Math.min(wanted.w, d.w - 2 * MARGIN), h: Math.min(wanted.h, d.h - 2 * MARGIN) }, performance.now());
-      request();
+      relayout();
     }
   }
+  // Laid out again for what it shows now (the desk's size, a game): stuck,
+  // as stuck; else for the room last asked of it, as much as the desk has.
+  function relayout() {
+    var d = desk(), now = performance.now();
+    if (stuck) {
+      if (surface) turnTo(stuckForm(stuck), now); else shown = stuckForm(stuck);
+    } else {
+      choose({ w: Math.min(wanted.w, d.w - 2 * MARGIN), h: Math.min(wanted.h, d.h - 2 * MARGIN) }, now);
+      if (surface) settle = { at: now, from: { w: surface.w, h: surface.h } };
+    }
+    request();
+  }
+
+  // A game played, or not: the switch on the desk.
+  var play = document.createElement("button");
+  play.type = "button";
+  play.className = "gw-play";
+  play.setAttribute("aria-pressed", "false");
+  play.textContent = zh ? "模拟玩游戏" : "Play a game";
+  host.appendChild(play);
+  play.addEventListener("pointerdown", function (e) { e.stopPropagation(); });
+  play.addEventListener("click", function () {
+    GAME = !GAME;
+    play.setAttribute("aria-pressed", GAME ? "true" : "false");
+    if (GAME) {
+      // Its last minute, as if it had been played that long.
+      H.fps = [];
+      R.fps = 0;
+      for (var i = 0; i < N; i++) { R.fps = walk(R.fps || 142, 96, 165, 18); H.fps.push(R.fps); }
+      R.low = R.fps * 0.68;
+    }
+    taken = null;
+    relayout();
+    // A reading come or gone: what shows turns into it, whatever its layout.
+    turning = { from: last, at: performance.now() };
+  });
   if (seg) {
     seg.addEventListener("click", function (e) {
       var b = e.target.closest("button[data-shape]");

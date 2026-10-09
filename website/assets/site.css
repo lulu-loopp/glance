@@ -476,6 +476,24 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
   box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.12); }
 .gw-win { pointer-events: none; }
 .desk.handled, .desk.handled * { user-select: none; }
+/* Where the widget let go would stick: faint as it nears an edge, firm once
+   letting go would stick it there, as each look draws it in Glance. */
+.gw-ghost { position: absolute; pointer-events: none; opacity: 0; visibility: hidden; border-radius: 24px;
+  background: rgba(22, 22, 28, 0.2); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6); backdrop-filter: blur(16px) saturate(1.6);
+  transition: left .12s, top .12s, width .12s, height .12s, background-color .12s; }
+.gw-ghost.on { visibility: visible; }
+.gw-ghost.firm { background: rgba(22, 22, 28, 0.38); }
+[data-look="win11"] .gw-ghost { border-radius: 8px; background: rgba(96, 205, 255, 0.14); box-shadow: inset 0 0 0 1px rgba(96, 205, 255, 0.45); }
+[data-look="win11"] .gw-ghost.firm { background: rgba(96, 205, 255, 0.26); box-shadow: inset 0 0 0 1px #60cdff; }
+[data-look="paper"] .gw-ghost { border-radius: 16px; background: rgba(20, 35, 31, 0.45); box-shadow: none; outline: 1.5px dashed #6b7b73; outline-offset: -1.5px;
+  -webkit-backdrop-filter: none; backdrop-filter: none; }
+[data-look="paper"] .gw-ghost.firm { background: rgba(20, 35, 31, 0.75); outline-style: solid; outline-color: #a1b0a8; }
+/* A game played or not: the switch in the desk's corner. */
+.gw-play { position: absolute; right: 12px; bottom: 12px; appearance: none; cursor: pointer; font: inherit; font-size: 13.5px;
+  color: var(--ink-2); padding: 6px 13px; border-radius: 999px; background: rgba(10, 12, 34, 0.3); border: 1px solid var(--glass-edge);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); transition: color .2s, background-color .2s; }
+.gw-play[aria-pressed="true"] { color: var(--button-ink); background: var(--button); font-weight: 600; }
 @media (max-width: 440px) { .desk { height: 460px; } }
 
 /* ---------- parts rising into place ---------- */
