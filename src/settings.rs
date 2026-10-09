@@ -140,12 +140,10 @@ pub struct OverlaySettings {
     /// Where it is on its screen: how far across and down the room there is
     /// for it (0 at the left or top, 1 at the right or bottom).
     pub at: (f32, f32),
-    /// A point on the screen it was put on (physical pixels), where it shows
-    /// when no game decides the screen.
+    /// A point on the screen it was put on (physical pixels), where it
+    /// shows, a game played or not; never put anywhere, it shows over the
+    /// game's screen.
     pub screen: Option<(i32, i32)>,
-    /// While a game is played, on the game's screen (else the one it was
-    /// put on). Put on another screen as a game is played, it stays there.
-    pub on_game_screen: bool,
     /// Locked where it is: not dragged.
     pub locked: bool,
     /// A card or a strip.
@@ -180,7 +178,6 @@ impl Default for OverlaySettings {
             items: None,
             at: (0.0, 0.0),
             screen: None,
-            on_game_screen: true,
             locked: false,
             layout: Default::default(),
             rows: 1,

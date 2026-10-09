@@ -368,7 +368,6 @@ enum Field {
     PanelSize,
     OverlayLayout,
     OverlayRows,
-    OverlayScreen,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -858,10 +857,6 @@ impl Ui {
                 if self.settings.overlay.layout == Layout::Strip {
                     rows.push(Row::Choice(Field::OverlayRows));
                 }
-                // Which screen, only with more than one.
-                if unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CMONITORS) } > 1 {
-                    rows.push(Row::Choice(Field::OverlayScreen));
-                }
                 // What it shows, group by group, as the panel's modules are.
                 for entry in &self.settings.overlay.groups {
                     let id = format!("{OVERLAY}{}", entry.id);
@@ -1144,11 +1139,6 @@ impl Ui {
                 ROWS.iter().map(|rows| rows.to_string()).collect(),
                 ROWS.iter().position(|&rows| rows == settings.overlay.rows),
             ),
-            Field::OverlayScreen => (
-                pick(lang, "游戏时显示在", "While playing, on"),
-                vec![s("游戏所在屏幕", "The game's screen"), s("放置的屏幕", "Where I put it")],
-                Some(if settings.overlay.on_game_screen { 0 } else { 1 }),
-            ),
             Field::Anchor => (
                 pick(lang, "面板位置", "Position"),
                 vec![s("鼠标处", "By the mouse"), s("边缘正中", "Centred")],
@@ -1214,7 +1204,6 @@ impl Ui {
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
             Field::OverlayLayout => settings.overlay.layout = [Layout::Card, Layout::Strip][index],
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
-            Field::OverlayScreen => settings.overlay.on_game_screen = index == 0,
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
@@ -1340,11 +1329,6 @@ impl Ui {
                 "鼠标移到屏幕边缘后再往外推一下就会打开；力度越重越不容易误触",
                 "Move the mouse to the edge and push on: the panel opens. Firmer is harder to set off by accident",
             )),
-            Field::OverlayScreen => Some(pick(
-                self.lang,
-                "游戏中把悬浮窗拖到另一块屏幕，它就会留在那里；拖回游戏所在屏幕，就又跟着游戏",
-                "Dragged onto another screen during a game, it stays there; dragged back onto the game's, it follows the game again",
-            )),
             Field::OverFullscreen => Some(pick(
                 self.lang,
                 "全屏和无边框全屏的游戏都算。全屏模式的游戏会暂时切出，收起面板后自动回来",
@@ -1381,8 +1365,8 @@ impl Ui {
             Switch::OverlayInGame => (
                 p("游戏时自动显示", "Show while playing"),
                 Some(p(
-                    "全屏游戏运行期间显示于游戏所在屏幕，游戏结束后隐藏。帧率、1% low 与帧时间仅在游戏期间显示",
-                    "Shown on the game's screen while a fullscreen game runs, hidden when it ends. Frame rate, 1% low and frame time show only during a game",
+                    "全屏游戏运行期间显示，游戏结束后隐藏；显示在你放置它的屏幕上（没放置过就在游戏所在屏幕）。帧率、1% low 与帧时间仅在游戏期间显示",
+                    "Shown while a fullscreen game runs, hidden when it ends; on the screen you put it on (never put anywhere, the game's). Frame rate, 1% low and frame time show only during a game",
                 )),
                 self.settings.overlay.in_game,
             ),
