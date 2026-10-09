@@ -14,9 +14,10 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preload" href="assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
 <script src="assets/lang.js?v=1"></script>
-<link rel="stylesheet" href="assets/site.css?v=12">
+<link rel="stylesheet" href="assets/site.css?v=13">
 <script src="assets/site.js?v=6" defer></script>
-<script src="assets/demo.js?v=5" defer></script>
+<script src="assets/demo.js?v=6" defer></script>
+<script src="assets/widget.js?v=1" defer></script>
 <script src="assets/overlay.js?v=4" defer></script>
 </head>
 <body>
@@ -112,16 +113,23 @@
       <div class="looks">
         <div class="looks-text">
           <div>
-            <h3>三种外观，点一下就换</h3>
-            <p>记录纸、磨砂玻璃、Windows 11。下面这块面板和 Glance 画得一样，数字也在跑：换一种外观看看。</p>
+            <h3>三种外观，也能撕成小组件</h3>
+            <p>记录纸、磨砂玻璃、Windows 11。下面这块面板和 Glance 画得一样，数字也在跑：换一种外观看看；切到“小组件”，拖它的右下角改变大小，看它怎么重新排版。</p>
+          </div>
+          <div class="segs">
+          <div class="seg" role="group" aria-label="面板还是小组件" data-shape>
+          <button type="button" data-shape="panel" aria-pressed="true">面板</button>
+          <button type="button" data-shape="widget" aria-pressed="false">小组件</button>
           </div>
           <div class="seg" role="group" data-looks>
           <button type="button" data-look="paper" aria-pressed="false">记录纸</button>
           <button type="button" data-look="glass" aria-pressed="true">磨砂玻璃</button>
           <button type="button" data-look="win11" aria-pressed="false">Windows 11</button>
           </div>
+          </div>
         </div>
         <div class="stage" data-demo></div>
+        <div class="stage desk" data-widget aria-label="可调整大小的小组件演示" hidden></div>
       </div>
 
       <div class="looks">
@@ -138,15 +146,6 @@
         <div class="stage scene" data-overlay-stage></div>
       </div>
 
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>桌面小组件：要多大有多大</h3>
-            <p>同一块面板，按你给的空间排成各栏、方块、曲线卡片、横条或小圆环。三种外观都适用。</p>
-          </div>
-        </div>
-        <img class="picture" src="assets/img/widgets-zh.webp" alt="磨砂玻璃外观的小组件：面板各栏、方块、曲线卡片、横条和小圆环" width="1920" height="1080" loading="lazy">
-      </div>
     </div>
   </section>
 

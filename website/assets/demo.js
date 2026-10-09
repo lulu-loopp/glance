@@ -341,7 +341,17 @@
   });
   if (!panels.length) return;
 
-  function refresh() { panels.forEach(function (p) { p.update(); }); }
+  // What else draws the readings (the widget: see widget.js).
+  var others = [];
+  window.GlanceDemo = {
+    readings: R, el: el, svg: svg, chart: chart, words: T, rate: rate,
+    onTick: function (f) { others.push(f); }
+  };
+
+  function refresh() {
+    panels.forEach(function (p) { p.update(); });
+    others.forEach(function (f) { f(); });
+  }
   // A minute of readings already behind the charts, as in a panel just opened.
   for (var i = 0; i < HISTORY; i++) step();
   refresh();

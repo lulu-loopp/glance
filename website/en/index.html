@@ -13,9 +13,10 @@
 <link rel="icon" href="../favicon.ico" sizes="32x32">
 <link rel="apple-touch-icon" href="../apple-touch-icon.png">
 <link rel="preload" href="../assets/fonts/archivo-600.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="../assets/site.css?v=12">
+<link rel="stylesheet" href="../assets/site.css?v=13">
 <script src="../assets/site.js?v=6" defer></script>
-<script src="../assets/demo.js?v=5" defer></script>
+<script src="../assets/demo.js?v=6" defer></script>
+<script src="../assets/widget.js?v=1" defer></script>
 <script src="../assets/overlay.js?v=4" defer></script>
 </head>
 <body>
@@ -110,16 +111,23 @@
       <div class="looks">
         <div class="looks-text">
           <div>
-            <h3>Three looks, one click apart</h3>
-            <p>Chart paper, frosted glass, Windows 11. The panel below is laid out as Glance draws it, readings running: try another look.</p>
+            <h3>Three looks, and a widget</h3>
+            <p>Chart paper, frosted glass, Windows 11. The panel below is laid out as Glance draws it, readings running: try another look. Switch to the widget and drag its corner to see it lay itself out for the room.</p>
+          </div>
+          <div class="segs">
+          <div class="seg" role="group" aria-label="Panel or widget" data-shape>
+          <button type="button" data-shape="panel" aria-pressed="true">Panel</button>
+          <button type="button" data-shape="widget" aria-pressed="false">Widget</button>
           </div>
           <div class="seg" role="group" data-looks>
           <button type="button" data-look="paper" aria-pressed="false">Chart paper</button>
           <button type="button" data-look="glass" aria-pressed="true">Frosted glass</button>
           <button type="button" data-look="win11" aria-pressed="false">Windows 11</button>
           </div>
+          </div>
         </div>
         <div class="stage" data-demo></div>
+        <div class="stage desk" data-widget aria-label="A widget to size" hidden></div>
       </div>
 
       <div class="looks">
@@ -136,15 +144,6 @@
         <div class="stage scene" data-overlay-stage></div>
       </div>
 
-      <div class="looks">
-        <div class="looks-text">
-          <div>
-            <h3>Widgets, as large as you like</h3>
-            <p>The same panel laid out for the room you give it: its lanes, tiles, a chart, a strip or a few rings. In each of the three looks.</p>
-          </div>
-        </div>
-        <img class="picture" src="../assets/img/widgets-en.webp" alt="Widgets on the desktop in the frosted-glass look: the panel's lanes, tiles, a chart, a strip and rings" width="1920" height="1080" loading="lazy">
-      </div>
     </div>
   </section>
 
