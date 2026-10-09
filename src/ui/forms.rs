@@ -202,7 +202,11 @@ impl Reading {
     /// second rate.
     fn value(&self, s: &Sample, scene: &Scene, second: bool) -> Option<f64> {
         match (self.kind, second) {
-            (Kind::Game, _) => s.game.as_ref().map(|g| g.fps as f64),
+            // The game shown now: another's frames before it are not its own.
+            (Kind::Game, _) => {
+                let playing = scene.history.last().and_then(|last| last.game.as_ref()).map(|g| g.program.as_str());
+                s.game.as_ref().filter(|g| Some(g.program.as_str()) == playing).map(|g| g.fps as f64)
+            }
             (Kind::Cpu, _) => s.cpu.map(f64::from),
             (Kind::Gpu(index), _) => s.gpus.get(index)?.usage.map(f64::from),
             (Kind::Memory, _) => Some(s.memory.used as f64 / scene.info.mem_total.max(1) as f64 * 100.0),
