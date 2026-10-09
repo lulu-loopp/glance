@@ -1284,6 +1284,9 @@ impl Widget {
         if self.hint.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
+            // Never in the desktop a widget takes behind it: it is where the
+            // widget would go, not part of the desktop.
+            window.exclude_from_capture(true);
             let surface = Surface::new(&self.gfx, window.hwnd).ok();
             self.hint = Some(Hint { window, surface, drawn: None });
         }
@@ -1292,12 +1295,6 @@ impl Widget {
         if hint.drawn == Some(this) {
             return;
         }
-        // Moved from where it was: a widget that took the desktop with it
-        // there takes it again.
-        if let Some((was, ..)) = hint.drawn.filter(|(was, ..)| *was != rect) {
-            own_window_changed(was);
-        }
-        own_window_changed(rect);
         hint.drawn = Some(this);
         // Above the widget, which may be large enough to cover it: see-through
         // and letting the pointer through, it hides nothing that matters.
@@ -1315,9 +1312,6 @@ impl Widget {
 
     fn hide_hint(&mut self) {
         if let Some(hint) = self.hint.take() {
-            if let Some((was, ..)) = hint.drawn {
-                own_window_changed(was);
-            }
             hint.window.destroy();
         }
         self.hint_size = None;
