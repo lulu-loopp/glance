@@ -380,6 +380,9 @@ struct Widget {
     shown_once: bool,
     /// How frosted it was, measured where it was (see `draw`).
     frost_at: Option<(RECT, f32)>,
+    /// Light or dark is to be measured again where it comes to rest (see
+    /// `retone`).
+    tone_due: bool,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
@@ -852,6 +855,7 @@ impl Widget {
             failed: None,
             shown_once: false,
             frost_at: None,
+            tone_due: false,
             taken: None,
             hover: false,
             behind: None,
@@ -906,8 +910,9 @@ impl Widget {
         self.replace = None;
         self.frost_at = None;
         match (Some(capture), &mut self.behind) {
-            // The same desktop as before: the last stands.
-            (Some(capture), Some(behind)) if capture.digest == behind.capture.digest && !moved => behind.taken = now,
+            // The same desktop as before, taken where the last was: the last
+            // stands.
+            (Some(capture), Some(behind)) if capture.digest == behind.capture.digest && capture.rect == behind.capture.rect && !moved => behind.taken = now,
             // Refreshed in place, the theme holds (as the panel's does); a
             // first or a new place's sets it.
             (Some(capture), behind) => {
@@ -1289,10 +1294,9 @@ impl Widget {
     /// serves still (it was taken without the widget); only how light it
     /// is where the widget now is, which the theme follows, is read again.
     fn retone(&mut self) {
-        let (rect, px) = (self.rect(), self.contact.scale * self.zoom);
-        if let Some(behind) = &mut self.behind {
-            behind.tone = behind.capture.luminance(rect, px);
-        }
+        // Measured once it is where it comes to rest, on what is taken
+        // there (see `frame`).
+        self.tone_due = true;
         // Without live refraction, what is behind it now is taken once,
         // the desktop having changed meanwhile, or not; not when it was
         // taken a moment ago (as it was torn off), for taking it shows.
@@ -1568,6 +1572,15 @@ impl Widget {
         }
         // Out of captures with live refraction, or while one is taken.
         self.exclude(live || self.pending.is_some());
+        // Let go or come to rest: light or dark as the desktop is where it
+        // is now, measured on what was taken there (none under way).
+        if self.tone_due && self.drag.is_none() && self.fling.is_none() && self.pending.is_none() {
+            self.tone_due = false;
+            let rect = self.rect();
+            if let Some(behind) = &mut self.behind {
+                behind.tone = behind.capture.luminance(rect, px);
+            }
+        }
         // Nothing yet behind a skin that sees it: drawn once it is there
         // (as it shows for the first time, it shows on it).
         if sees && self.behind.is_none() {

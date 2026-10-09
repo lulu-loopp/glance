@@ -39,6 +39,10 @@ const TEXT_LEFT: f32 = 44.0;
 const MIN_WIDTH: f32 = 200.0;
 /// Room round the sheet for its shadow.
 const SHADOW: f32 = 16.0;
+
+/// Counts menus shown and gone: a capture of the desktop taken while one
+/// was up may hold it (see `Panel::collect_behind`).
+pub static SHOWN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const FONT: Font = Font::new(Family::Segoe, 14.0, 400.0);
 
 /// Shows `items` at the pointer, light or `dark`; the index of the one
@@ -111,6 +115,7 @@ pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usi
     // Up, and gone: a widget that took the desktop with it there takes it
     // again.
     crate::widget::own_window_changed(rect);
+    SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // In front, with the keyboard and the mouse, as a system menu is: its
     // keys come to it, not to the program behind; a click anywhere comes
     // to it too; and it is left as anything else comes to the front.
@@ -209,6 +214,7 @@ pub fn show_at(items: &[Item], dark: bool, at: POINT, above: bool) -> Option<usi
     }
     window.destroy();
     crate::widget::own_window_changed(rect);
+    SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // (A game that went down, a fullscreen one stepping out as the menu
     // came, is restored as a click on its taskbar button would.)
     if held && !before.is_invalid() {

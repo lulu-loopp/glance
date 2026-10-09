@@ -1011,6 +1011,8 @@ impl Behind {
 struct PanelRequest {
     receiver: std::sync::mpsc::Receiver<Option<Capture>>,
     generation: u64,
+    /// Menus shown and gone as it was asked for (see `menu::SHOWN`).
+    menus: u64,
     afresh: bool,
 }
 
@@ -1528,7 +1530,8 @@ impl<'a> Panel<'a> {
     /// it meanwhile); the panel goes on with what it had.
     fn take_behind(&mut self, area: RECT, afresh: bool) {
         let (send, receiver) = std::sync::mpsc::channel();
-        self.capturing = Some(PanelRequest { receiver, generation: self.generation, afresh });
+        let menus = crate::ui::menu::SHOWN.load(Ordering::Relaxed);
+        self.capturing = Some(PanelRequest { receiver, generation: self.generation, menus, afresh });
         self.exclude();
         std::thread::spawn(move || {
             if afresh {
@@ -1555,6 +1558,11 @@ impl<'a> Panel<'a> {
         let request = self.capturing.take().unwrap();
         self.exclude();
         if request.generation != self.generation {
+            return;
+        }
+        // A menu came or went meanwhile: it may be in it; taken again.
+        if request.menus != crate::ui::menu::SHOWN.load(Ordering::Relaxed) {
+            self.recapture |= request.afresh;
             return;
         }
         let Some(placement) = &self.placement else { return };

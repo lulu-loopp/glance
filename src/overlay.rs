@@ -198,7 +198,8 @@ impl Overlay {
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
-        let game = sample.and_then(|s| s.game.as_ref()).filter(|_| playing);
+        // A game found (one taken for a game by hand is the widgets' own).
+        let game = sample.and_then(|s| s.game.as_ref()).filter(|game| playing && !game.by_hand);
         let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, game, playing, &settings.chosen(), lang)).unwrap_or_default();
         if readings.is_empty() {
             return self.hide();

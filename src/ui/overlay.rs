@@ -408,7 +408,7 @@ pub fn frames<'a>(history: impl DoubleEndedIterator<Item = &'a Sample>, playing:
     if !playing {
         return Vec::new();
     }
-    let mut frames: Vec<Option<f32>> = history.rev().take(CHART).map(|s| s.game.as_ref().map(|game| game.fps)).collect();
+    let mut frames: Vec<Option<f32>> = history.rev().take(CHART).map(|s| s.game.as_ref().filter(|game| !game.by_hand).map(|game| game.fps)).collect();
     frames.reverse();
     frames
 }
