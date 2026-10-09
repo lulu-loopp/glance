@@ -457,68 +457,28 @@ html[lang="en"] .looks-text h3 { font-weight: 600; letter-spacing: -0.015em; }
 .stage[hidden] { display: none; }
 .segs { display: flex; flex-wrap: wrap; gap: 10px; }
 .desk { position: relative; display: block; height: 560px; padding: 0; touch-action: none; }
-.gw { position: absolute; left: 16px; top: 16px; overflow: hidden; color: #fff; text-align: left;
-  font-family: "Segoe UI Variable Text", "Segoe UI", -apple-system, "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
-  font-size: 12px; line-height: 1.35; font-variant-numeric: tabular-nums;
-  border-radius: 16px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.5);
-  -webkit-backdrop-filter: blur(14px) saturate(170%); backdrop-filter: blur(14px) saturate(170%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 12px 30px -14px rgba(8, 10, 40, 0.55); }
-.gw-grip { position: absolute; width: 22px; height: 22px; cursor: nwse-resize; touch-action: none; border-radius: 6px; }
-.gw-grip::after { content: ""; position: absolute; right: 5px; bottom: 5px; width: 9px; height: 9px;
-  border-right: 2px solid rgba(255, 255, 255, 0.75); border-bottom: 2px solid rgba(255, 255, 255, 0.75); border-bottom-right-radius: 3px; }
-.desk.sizing, .desk.sizing * { cursor: nwse-resize; user-select: none; }
-.gw-face { position: absolute; inset: 0; padding: 12px 14px; opacity: 0; transition: opacity .26s ease; }
-.gw-face.in { opacity: 1; }
-.gw-face.leaving { opacity: 0; }
-.gw-icon { width: 15px; height: 15px; flex: none; }
-.gw-icon.cpu, .gw-ring.cpu { color: #5aa9ff; } .gw-icon.gpu, .gw-ring.gpu { color: #41d27a; }
-.gw-icon.mem, .gw-ring.mem { color: #ffad42; } .gw-icon.net { color: #c58bff; }
-.gw .chart { display: block; width: 100%; height: 100%; overflow: visible; }
-.gw .chart .grid { stroke: rgba(255, 255, 255, 0.12); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.gw-fig { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.gw-fig b { font: 600 15px/1 "Archivo", var(--sans); }
-.gw-fig .u, .gw .u { font-size: 11px; color: rgba(255, 255, 255, 0.7); }
-.gw-fig .rate { font-weight: 600; }
-.gw-micro { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px; }
-.gw-ring { width: 36px; height: 36px; flex: none; }
-.gw-ring .track { fill: none; stroke: rgba(255, 255, 255, 0.14); stroke-width: 3.2; }
-.gw-ring .arc { fill: none; stroke: currentColor; stroke-width: 3.2; stroke-linecap: round; transition: stroke-dasharray .5s; }
-.gw-strip { display: flex; align-items: center; gap: 16px; overflow: hidden; padding: 0 16px; }
-.gw-rail { display: flex; flex-direction: column; gap: 10px; }
-.gw-rail .chart { flex: 1; min-height: 40px; }
-.gw-corner { display: flex; flex-direction: column; gap: 10px; }
-.gw-corner .plot { position: relative; flex: 1; min-height: 50px; }
-.gw-corner .plot .chart { position: absolute; inset: 0; }
-.gw-corner .plot .chart.second polyline { stroke-dasharray: 3 3; }
-.gw-corner .plot .chart.second path { display: none; }
-.gw-corner .figs { display: flex; flex-wrap: wrap; gap: 8px 16px; }
-.gw-tiles { display: grid; gap: 8px; align-content: stretch; grid-auto-rows: 1fr; }
-.gw-tiles .tile { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px 10px; border-radius: 10px; background: rgba(255, 255, 255, 0.07); }
-.gw-tiles .th { display: flex; align-items: center; gap: 6px; color: rgba(255, 255, 255, 0.8); }
-.gw-tiles .tn b { font: 600 24px/1 "Archivo", var(--sans); }
-.gw-tiles .tr { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.gw-tiles .chart { flex: 1; min-height: 18px; }
-.gw-lanes { display: grid; gap: 8px; grid-auto-rows: 1fr; }
-.gw-lanes .lane { display: flex; flex-direction: column; min-width: 0; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.07); }
-.gw-lanes .lh b { font-weight: 600; font-size: 12.5px; }
-.gw-lanes .top { flex: 1; display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: center; gap: 10px; }
-.gw-lanes .top .chart { height: 100%; min-height: 30px; }
-.gw-lanes .big .n { font: 600 32px/1 "Archivo", var(--sans); }
-.gw-lanes .tr { font-weight: 600; white-space: nowrap; }
-[data-look="paper"] .gw { background: #17201c; border: 0; border-radius: 12px; -webkit-backdrop-filter: none; backdrop-filter: none;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 20px 50px -20px rgba(0, 0, 0, 0.7); }
-[data-look="paper"] .gw .tile, [data-look="paper"] .gw .lane { background: none; border-radius: 0; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
-[data-look="paper"] .gw .chart polyline { stroke: #eef3ee; } [data-look="paper"] .gw .chart circle { fill: #eef3ee; }
-[data-look="paper"] .gw .chart path { fill: rgba(238, 243, 238, 0.06); }
-[data-look="paper"] .gw-icon, [data-look="paper"] .gw-ring { color: #eef3ee; }
-[data-look="win11"] .gw { border-radius: 8px; background: rgba(32, 30, 44, 0.72); border: 1px solid rgba(255, 255, 255, 0.1);
-  -webkit-backdrop-filter: blur(40px) saturate(170%); backdrop-filter: blur(40px) saturate(170%); box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.65); }
-[data-look="win11"] .gw .tile, [data-look="win11"] .gw .lane { border-radius: 4px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.06); }
-[data-look="win11"] .gw .chart polyline { stroke: #60cdff; } [data-look="win11"] .gw .chart circle { fill: #60cdff; }
-[data-look="win11"] .gw .chart path { fill: rgba(96, 205, 255, 0.12); }
-[data-look="win11"] .gw-icon, [data-look="win11"] .gw-ring { color: #60cdff; }
+/* The window; widget.js draws into its canvas with these colours (the
+   prototype's dark tokens for each look). */
+.gw-win { position: absolute; left: 16px; top: 16px; border-radius: 24px;
+  --ink: #ffffff; --ink-2: rgba(255, 255, 255, 0.7); --ink-3: rgba(255, 255, 255, 0.48); --rule: rgba(255, 255, 255, 0.1); --wash: rgba(255, 255, 255, 0.1);
+  --signal: #ff6961; --chip: rgba(40, 40, 48, 0.75); --accent: #60cdff;
+  --h-cpu: #3d9bff; --h-gpu: #30d158; --h-mem: #ff9f0a; --h-net: #c77dff; --h-disk: #5ac8f5;
+  background: rgba(22, 22, 28, 0.38); -webkit-backdrop-filter: blur(16px) saturate(1.6); backdrop-filter: blur(16px) saturate(1.6);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.16), 0 8px 32px rgba(0, 0, 0, 0.4); }
+.gw-win canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; border-radius: inherit; }
+[data-look="win11"] .gw-win { border-radius: 8px; --ink-2: #c5c5c5; --ink-3: #8f8f8f; --rule: rgba(255, 255, 255, 0.08); --wash: rgba(255, 255, 255, 0.08);
+  --signal: #ff99a4; --chip: #2c2c2c;
+  background: rgba(40, 40, 40, 0.84); -webkit-backdrop-filter: blur(30px) saturate(1.3); backdrop-filter: blur(30px) saturate(1.3);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.09), 0 8px 32px rgba(0, 0, 0, 0.55); }
+[data-look="paper"] .gw-win { border-radius: 16px; --ink: #e7eee7; --ink-2: #a1b0a8; --ink-3: #6b7b73; --rule: #263732; --wash: rgba(231, 238, 231, 0.08);
+  --signal: #ff7b4a; --chip: #14231f;
+  background: #14231f; -webkit-backdrop-filter: none; backdrop-filter: none;
+  box-shadow: 0 18px 40px -12px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.12); }
+.gw-grip { position: absolute; right: 0; bottom: 0; width: 22px; height: 22px; cursor: nwse-resize; touch-action: none; }
+.gw-grip::after { content: ""; position: absolute; right: 6px; bottom: 6px; width: 8px; height: 8px;
+  border-right: 2px solid var(--ink-3); border-bottom: 2px solid var(--ink-3); border-bottom-right-radius: 3px; }
+.desk.sizing, .desk.sizing * { user-select: none; }
 @media (max-width: 440px) { .desk { height: 460px; } }
-@media (prefers-reduced-motion: reduce) { .gw-face { transition: none; } }
 
 /* ---------- parts rising into place ---------- */
 .rise { opacity: 0; transform: translateY(18px);
