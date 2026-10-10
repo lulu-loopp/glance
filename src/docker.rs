@@ -185,6 +185,12 @@ impl Connection {
     }
 }
 
+/// Whether `id` is a container's id as Docker makes them: hexadecimal, 12
+/// (short) to 64 characters.
+fn is_container_id(id: &str) -> bool {
+    (12..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// The path of the pipe an `npipe://` address names (`//./pipe/name`, the
 /// slashes as the CLI writes them): a pipe on this machine, its name plain,
 /// or none.
@@ -335,6 +341,11 @@ fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>,
         if stop.load(Ordering::Relaxed) {
             break;
         }
+        // An id as the engine makes them, or the answer is not the
+        // engine's: nothing else goes into a request.
+        if !is_container_id(&container.id) {
+            continue;
+        }
         let name = container.names.first().map(|name| name.trim_start_matches('/').to_string()).unwrap_or_else(|| container.id.chars().take(12).collect());
         let stats: Option<Stats> = ask(&host, &format!("/containers/{}/stats?stream=false&one-shot=true", container.id), asking).ok().flatten();
         let Some(stats) = stats else {
@@ -429,6 +440,16 @@ mod tests {
         assert_eq!(level, SecurityIdentification);
         let _ = unsafe { windows::Win32::Foundation::CloseHandle(token) };
         let _ = unsafe { windows::Win32::Foundation::CloseHandle(server) };
+    }
+
+    #[test]
+    fn takes_ids_as_docker_makes_them_alone() {
+        assert!(is_container_id("80e0444e7b3da5bf04062aae9bb387a6a5d41dda7e073448038ed5e19778e429"));
+        assert!(is_container_id("80e0444e7b3d"));
+        for not in ["", "80e0", "example HTTP/1.1
+POST /containers/x/stop", "../../info", "80e0444e7b3d/stop"] {
+            assert!(!is_container_id(not), "{not}");
+        }
     }
 
     #[test]
