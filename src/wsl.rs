@@ -46,8 +46,12 @@ pub struct Wsl {
     /// among them (its id, in capitals, as the counters name it).
     partitions: Vec<String>,
     partition: Option<String>,
-    /// When WSL's machine was last looked for.
+    /// When WSL's machine was last looked for, a look under way (on a
+    /// thread of its own: the service can take seconds), and what the last
+    /// one found, not yet taken in.
     looked: Option<Instant>,
+    looking: Arc<AtomicBool>,
+    found: Arc<Mutex<Option<Option<String>>>>,
     /// The distributions running, as last listed, and when that was asked.
     distros: Arc<Mutex<Option<Vec<String>>>>,
     listed: Option<Instant>,
@@ -75,6 +79,8 @@ impl Wsl {
             partitions: Vec::new(),
             partition: None,
             looked: None,
+            looking: Arc::new(AtomicBool::new(false)),
+            found: Arc::new(Mutex::new(None)),
             distros: Arc::new(Mutex::new(None)),
             listed: None,
             listing: Arc::new(AtomicBool::new(false)),
@@ -99,15 +105,31 @@ impl Wsl {
         // WSL's asked again.
         let mut partitions: Vec<String> = pages.iter().map(|(name, _)| name.to_uppercase()).filter(|name| name != "_TOTAL").collect();
         partitions.sort();
+        // A look come back: WSL's machine, if it is among them; one gone
+        // from among them, gone.
+        if let Some(found) = self.found.lock().unwrap().take() {
+            self.partition = found;
+        }
+        if self.partition.as_ref().is_some_and(|id| !partitions.contains(id)) {
+            self.partition = None;
+        }
         // Looked for as the partitions change, and again now and then
         // while there are some and it was not found among them (the
-        // service may not have said yet, or not answered).
+        // service may not have said yet, or not answered); one look at a
+        // time, off the sampler's thread.
         let missing = self.partition.is_none() && !partitions.is_empty() && self.looked.is_none_or(|at| at.elapsed() >= LISTED);
-        if partitions != self.partitions || missing {
-            self.partition = wsl_partition().filter(|id| partitions.contains(id));
-            self.partitions = partitions;
+        if (partitions != self.partitions || missing) && !self.looking.swap(true, Ordering::Relaxed) {
             self.looked = Some(Instant::now());
+            let (found, looking, stop) = (self.found.clone(), self.looking.clone(), self.stop.clone());
+            std::thread::spawn(move || {
+                let partition = wsl_partition();
+                if !stop.load(Ordering::Relaxed) {
+                    *found.lock().unwrap() = Some(partition);
+                }
+                looking.store(false, Ordering::Relaxed);
+            });
         }
+        self.partitions = partitions;
         let Some(id) = self.partition.clone() else {
             self.listed = None;
             *self.distros.lock().unwrap() = None;
@@ -221,7 +243,15 @@ fn running_distros() -> Option<Vec<String>> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut child = std::process::Command::new("wsl.exe")
+    // Windows' own, by its full path: a wsl.exe beside Glance (which runs
+    // elevated) is never the one run.
+    let mut system = [0u16; 260];
+    let length = unsafe { windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut system)) } as usize;
+    if length == 0 || length >= system.len() {
+        return None;
+    }
+    let wsl = std::path::PathBuf::from(String::from_utf16_lossy(&system[..length])).join("wsl.exe");
+    let mut child = std::process::Command::new(wsl)
         .args(["--list", "--running", "--quiet"])
         .env("WSL_UTF8", "1")
         .stdin(std::process::Stdio::null())

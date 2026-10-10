@@ -37,7 +37,7 @@ impl Docker {
             let mut before: HashMap<String, Counters> = HashMap::new();
             while !stopping.load(Ordering::Relaxed) {
                 let started = Instant::now();
-                let sample = read(&mut before, &busy);
+                let sample = read(&mut before, &busy, &stopping);
                 if stopping.load(Ordering::Relaxed) {
                     break;
                 }
@@ -70,9 +70,19 @@ impl Docker {
 
 impl Drop for Docker {
     fn drop(&mut self) {
-        // The worker stops at once, a request under way cut short.
+        // The worker stops: told to, and its requests cut short until it
+        // has (one it was about to make as it was told is cut short too),
+        // by a thread of its own that outlives this.
         self.stop.store(true, Ordering::Relaxed);
-        self.cancel();
+        let worker = std::mem::replace(&mut self.worker, std::thread::spawn(|| {}));
+        std::thread::spawn(move || {
+            use std::os::windows::io::AsRawHandle;
+            let thread = windows::Win32::Foundation::HANDLE(worker.as_raw_handle());
+            while !worker.is_finished() {
+                let _ = unsafe { windows::Win32::System::IO::CancelSynchronousIo(thread) };
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
     }
 }
 
@@ -295,7 +305,7 @@ struct Counters {
 
 /// The engine asked once: its containers running, each with what it uses
 /// (rates against what `before` holds of the last time).
-fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>) -> DockerSample {
+fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>, stop: &AtomicBool) -> DockerSample {
     let Endpoint { context, host } = endpoint();
     let listed: Vec<Listed> = match ask(&host, "/containers/json", asking) {
         Ok(Some(listed)) => listed,
@@ -308,6 +318,10 @@ fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>)
     let mut containers = Vec::new();
     let mut kept = HashMap::new();
     for container in listed {
+        // Switched off meanwhile: no more asked.
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let name = container.names.first().map(|name| name.trim_start_matches('/').to_string()).unwrap_or_else(|| container.id.chars().take(12).collect());
         let stats: Option<Stats> = ask(&host, &format!("/containers/{}/stats?stream=false&one-shot=true", container.id), asking).ok().flatten();
         let Some(stats) = stats else {
@@ -397,11 +411,11 @@ mod tests {
     #[test]
     #[ignore = "asks this machine's Docker engine, with containers running; run with --ignored"]
     fn reads_docker() {
-        let (mut before, asking) = (HashMap::new(), Mutex::new(None));
+        let (mut before, asking, stop) = (HashMap::new(), Mutex::new(None), AtomicBool::new(false));
         for _ in 0..3 {
-            println!("{}", serde_json::to_string(&read(&mut before, &asking)).unwrap());
+            println!("{}", serde_json::to_string(&read(&mut before, &asking, &stop)).unwrap());
             std::thread::sleep(Duration::from_secs(1));
         }
-        assert!(matches!(read(&mut before, &asking), DockerSample::Running { .. }));
+        assert!(matches!(read(&mut before, &asking, &stop), DockerSample::Running { .. }));
     }
 }
