@@ -150,9 +150,8 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
-    /// How clear its glass is: 0, frosted (what is behind blurred); 1,
-    /// clear (what is behind as it is, under the tint that keeps the words
-    /// legible).
+    /// How clear its glass is: 0, all there (what is behind blurred and
+    /// tinted); 1, gone (the words alone over what is behind).
     pub clear: f32,
     /// Clicks pass through it (Ctrl held, it takes them).
     pub click_through: bool,

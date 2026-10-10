@@ -2692,9 +2692,10 @@ impl Ui {
         let whole = |v: f32| v.round() as i32;
         let hole = RECT { left: whole(x), top: whole(y), right: whole(x + w), bottom: whole(y + h) };
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
-        let glass = super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None);
+        let frost = 1.0 - overlay.clear.clamp(0.0, 1.0);
+        let glass = super::overlay::Glass { presence: frost, ..super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None) };
         if let Some((_, bitmap)) = &self.stage.bitmap {
-            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed, 1.0 - overlay.clear.clamp(0.0, 1.0));
+            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed, frost);
         }
         frame.place(placed);
         frame.crisp_text();

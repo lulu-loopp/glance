@@ -150,6 +150,9 @@ pub enum Tone {
 pub struct Glass {
     pub tone: Tone,
     pub opacity: f32,
+    /// How much of the glass there is: 1, all of it; 0, none (its tint,
+    /// rim, tiles and shadow gone, the words alone over the screen).
+    pub presence: f32,
 }
 
 /// The colours of a tone.
@@ -219,7 +222,7 @@ impl Tone {
 }
 
 /// The glass while it is dragged: deep blue, whatever is behind.
-const DRAGGED: Glass = Glass { tone: Tone::Dark, opacity: 0.9 };
+const DRAGGED: Glass = Glass { tone: Tone::Dark, opacity: 0.9, presence: 1.0 };
 const DRAGGED_TINT: u32 = 0x1D4F91;
 
 /// The contrast every word on the glass keeps over what is behind (WCAG's
@@ -704,10 +707,10 @@ pub fn radius(readings: &[Reading], shape: Shape, px: f32, m: &Metrics) -> f32 {
 pub fn shadow(frame: &dyn Canvas, readings: &[Reading], shape: Shape, glass: Glass, dragged: bool, px: f32) {
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
-    let palette = if dragged { DRAGGED.tone.palette() } else { glass.tone.palette() };
+    let (palette, presence) = if dragged { (DRAGGED.tone.palette(), DRAGGED.presence) } else { (glass.tone.palette(), glass.presence) };
     let (width, height) = arranged.size;
     for (color, blur, drop) in palette.shadows {
-        frame.shadow(color, 0.0, 0.0, width, height, arranged.radius, blur, drop);
+        frame.shadow(color.alpha(presence), 0.0, 0.0, width, height, arranged.radius, blur, drop);
     }
 }
 
@@ -733,7 +736,7 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     let palette = glass.tone.palette();
     let (width, height) = arranged.size;
     let (x0, y0, radius) = (0.0, 0.0, arranged.radius);
-    frame.fill_rounded(Color::hex(tint, glass.opacity), x0, y0, width, height, radius);
+    frame.fill_rounded(Color::hex(tint, glass.opacity * glass.presence), x0, y0, width, height, radius);
     if taken {
         frame.stroke_rounded(Fill::Solid(palette.second), x0 + 0.75, y0 + 0.75, width - 1.5, height - 1.5, radius - 0.75, 1.5);
     }
@@ -744,19 +747,19 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     };
     for piece in &arranged.pieces {
         match *piece {
-            Piece::Tile { x, y, width, height } => frame.fill_rounded(palette.tile, x0 + x, y0 + y, width, height, TILE_RADIUS),
+            Piece::Tile { x, y, width, height } => frame.fill_rounded(palette.tile.alpha(glass.presence), x0 + x, y0 + y, width, height, TILE_RADIUS),
             Piece::Mark { kind, x, y } => frame.fill_circle(kind.mark(palette), Point { x: x0 + x + MARK / 2.0, y: y0 + y }, MARK / 2.0),
             Piece::Text { ref text, font, ink: color, x, baseline } => {
                 let (ascent, _) = frame.baseline(font);
                 frame.text(text, font, ink(color), x0 + x, y0 + baseline - ascent, frame.measure(text, font) + 1.0, Align::Start);
             }
-            Piece::Rule { x, y, height } => frame.fill(palette.rim.1, x0 + x, y0 + y, 1.0 / px, height),
+            Piece::Rule { x, y, height } => frame.fill(palette.rim.1.alpha(glass.presence), x0 + x, y0 + y, 1.0 / px, height),
             Piece::Chart { x, y, width, height } => chart(frame, frames, Kind::Frames.mark(palette), x0 + x, y0 + y, width, height, px),
         }
     }
     // The rim: one pixel inside the glass's edge, lit from above.
     let line = 1.0 / px;
-    let rim = Fill::Down { top: y0, from: palette.rim.0, bottom: y0 + height, to: palette.rim.1 };
+    let rim = Fill::Down { top: y0, from: palette.rim.0.alpha(glass.presence), bottom: y0 + height, to: palette.rim.1.alpha(glass.presence) };
     frame.stroke_rounded(rim, x0 + line / 2.0, y0 + line / 2.0, width - line, height - line, radius - line / 2.0, line);
 }
 
@@ -878,7 +881,7 @@ pub fn glass(behind: &mut [f32], before: Option<Glass>) -> Glass {
         Some(before) if before.tone == tone => needed.max(before.opacity - CLEARING),
         _ => needed,
     };
-    Glass { tone, opacity }
+    Glass { tone, opacity, presence: 1.0 }
 }
 
 #[cfg(test)]
@@ -920,9 +923,9 @@ mod tests {
         specks[..5].fill(1.0);
         assert_eq!(glass(&mut specks, Some(first)), first);
         // Clearing slowly, darkening at once.
-        let dense = Glass { tone: Tone::Dark, opacity: 0.9 };
+        let dense = Glass { tone: Tone::Dark, opacity: 0.9, presence: 1.0 };
         assert!((glass(&mut dark_scene(), Some(dense)).opacity - (0.9 - CLEARING)).abs() < 1e-6);
-        let thin = Glass { tone: Tone::Dark, opacity: LEAST };
+        let thin = Glass { tone: Tone::Dark, opacity: LEAST, presence: 1.0 };
         assert_eq!(glass(&mut vec![0.2; 100], Some(thin)).opacity, least_tint(Tone::Dark, 0.2));
         // Unseen, the tint is enough for anything.
         let unseen = glass(&mut [], None);

@@ -330,7 +330,7 @@ impl Overlay {
         // but for the open panel.
         self.place();
         let scale = self.scale();
-        let glass = self.glass.unwrap_or_else(|| overlay::glass(&mut [], None));
+        let glass = Glass { presence: 1.0 - self.clear, ..self.glass.unwrap_or_else(|| overlay::glass(&mut [], None)) };
         let (width, height, radius) = self.measures();
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
