@@ -11,7 +11,7 @@ use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1DisplacementMap, CLSID_D2D1Flood, CLSID_D2D1GaussianBlur, CLSID_D2D1Shadow, ID2D1Bitmap1, ID2D1Effect,
     ID2D1Geometry, ID2D1Image, D2D1_2DAFFINETRANSFORM_PROP_TRANSFORM_MATRIX, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1RenderTarget,
-    D2D1_BLEND_PROP_MODE, D2D1_BORDER_EDGE_MODE_CLAMP, D2D1_BORDER_PROP_EDGE_MODE_X, D2D1_BORDER_PROP_EDGE_MODE_Y,
+    D2D1_BLEND_PROP_MODE, D2D1_BORDER_EDGE_MODE_MIRROR, D2D1_BORDER_PROP_EDGE_MODE_X, D2D1_BORDER_PROP_EDGE_MODE_Y,
     D2D1_CHANNEL_SELECTOR_G, D2D1_CHANNEL_SELECTOR_R, D2D1_COLORMATRIX_PROP_COLOR_MATRIX, D2D1_CROP_PROP_RECT,
     D2D1_DISPLACEMENTMAP_PROP_SCALE, D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT, D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
     D2D1_EXTEND_MODE_CLAMP, D2D1_FLOOD_PROP_COLOR, D2D1_GAMMA_2_2,
@@ -222,10 +222,11 @@ fn saturation(amount: f32) -> [f32; 20] {
     ]
 }
 
-/// The backdrop inside `area` (DIPs from the panel's corner), its edges
-/// carried on outward, as SVG filters do with `edgeMode="duplicate"`. Where
-/// `area` reaches past the backdrop (beside the screen's edge), it is the
-/// backdrop's own edge that is carried on, not the nothing beyond it.
+/// The backdrop inside `area` (DIPs from the panel's corner), mirrored past
+/// its edges. Where `area` reaches past the backdrop (beside the screen's
+/// edge), what is beyond is the backdrop seen in the edge as in a mirror,
+/// not the nothing there; nor the edge's last pixels drawn out, which make a
+/// thin line along the screen's edge (a window's border) a broad band.
 fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), area: Rect) -> Result<ID2D1Effect> {
     let (bitmap, at, shown) = backdrop;
     // The backdrop placed so the panel's corner is at the origin, and as
@@ -243,7 +244,7 @@ fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), area:
     let size = unsafe { bitmap.GetSize() };
     let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_F { width: size.width * k, height: size.height * k };
     // What of `area` the backdrop holds; past it altogether, the backdrop's
-    // nearest edge (one DIP of it), carried on.
+    // nearest edge (one DIP of it), which mirrored is that edge carried on.
     // (A backdrop narrower than a DIP, a sliver of a screen, is carried on
     // whole.)
     let (x0, y0, x1, y1) = (-at.X, -at.Y, size.width - at.X, size.height - at.Y);
@@ -254,8 +255,8 @@ fn backdrop_within(frame: &Frame, backdrop: (&ID2D1Bitmap1, Vector2, f32), area:
     let crop = effect(frame, &CLSID_D2D1Crop, &output(&placed)?)?;
     prop(&crop, D2D1_CROP_PROP_RECT.0, D2D1_PROPERTY_TYPE_VECTOR4, &[left, top, right, bottom])?;
     let border = effect(frame, &CLSID_D2D1Border, &output(&crop)?)?;
-    prop(&border, D2D1_BORDER_PROP_EDGE_MODE_X.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_CLAMP.0)?;
-    prop(&border, D2D1_BORDER_PROP_EDGE_MODE_Y.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_CLAMP.0)?;
+    prop(&border, D2D1_BORDER_PROP_EDGE_MODE_X.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_MIRROR.0)?;
+    prop(&border, D2D1_BORDER_PROP_EDGE_MODE_Y.0, D2D1_PROPERTY_TYPE_ENUM, &D2D1_BORDER_EDGE_MODE_MIRROR.0)?;
     Ok(border)
 }
 

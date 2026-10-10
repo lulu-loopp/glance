@@ -7,4 +7,4 @@ compatibility_date = "2026-09-01"
 [[d1_databases]]
 binding = "STATS"
 database_name = "glance-stats"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "faec5b1d-7fad-40cd-9817-b95269c2795f"

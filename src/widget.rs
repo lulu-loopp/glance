@@ -1548,7 +1548,7 @@ impl Widget {
         // A desktop taken on another thread, come back.
         self.collect(live, px);
         // Moved past what was taken round it (that part of it on its screen:
-        // beyond, the capture's edge is carried on), or onto another screen;
+        // beyond, the capture is mirrored in its edge), or onto another screen;
         // in hand, near the edge of it already, so that the next is there by
         // the time it gets past (taken on another thread, the widget kept out
         // of it, nothing of it shows).
