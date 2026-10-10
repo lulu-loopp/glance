@@ -571,14 +571,14 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (pressure, over_fullscreen, seam) = {
+            let (pressure, over_fullscreen) = {
                 let config = self.config.lock().unwrap();
-                (config.pressure, config.over_fullscreen, config.seam)
+                (config.pressure, config.over_fullscreen)
             };
-            // The edges of a screen that open the panel.
+            // How the edges of a screen open the panel.
             let lit = |monitor: RECT| {
                 let config = self.config.lock().unwrap();
-                crate::screens::lit(&config.screens, config.edge, monitor)
+                crate::screens::lit(&config.screens, config.edge, config.seam, monitor)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -596,7 +596,7 @@ impl Controller {
             let at_edge = |cursor: POINT| {
                 let pressure = pressure?;
                 let here = monitor_at(cursor)?;
-                lit(here.monitor).each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
+                lit(here.monitor).edges.each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
             };
             if panel.is_shown() {
                 armed = false;
@@ -614,8 +614,7 @@ impl Controller {
                 // screen the pointer is on before the one it came from.
                 let found = EDGES
                     .into_iter()
-                    .filter(|_| seam)
-                    .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).has(edge)).map(|contact| (contact, edge)))
+                    .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).seams.has(edge)).map(|contact| (contact, edge)))
                     .min_by_key(|(contact, _)| Some(contact.monitor) != here);
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
@@ -1309,7 +1308,7 @@ impl<'a> Panel<'a> {
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
         let config = self.controller.config.lock().unwrap();
         let m = contact.monitor;
-        crate::screens::lit(&config.screens, config.edge, m).nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edge)
+        crate::screens::lit(&config.screens, config.edge, config.seam, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edge)
     }
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
@@ -1842,7 +1841,7 @@ impl<'a> Panel<'a> {
         // and open from the edge again.
         let lit = {
             let config = self.controller.config.lock().unwrap();
-            crate::screens::lit(&config.screens, config.edge, contact.monitor)
+            crate::screens::lit(&config.screens, config.edge, config.seam, contact.monitor).any()
         };
         if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
             self.edge = edge;
@@ -2446,14 +2445,15 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
     let overshot = came_from.is_some_and(|from| monitor_at(behind_point).is_some_and(|behind| behind.monitor == from));
     let far = if overshot { (SEAM_OVERSHOOT * here.scale).round() as i32 } else { near };
     let exists = |point: POINT| !unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_invalid();
-    // Near this screen's own edge with a screen beyond it, or near the
-    // opposite side of it with a screen behind it whose edge that is.
-    let (own, beyond, other, behind) = match edge {
-        Edge::Right => (cursor.x >= m.right - near, POINT { x: m.right, y: cursor.y }, cursor.x < m.left + far, behind_point),
-        Edge::Left => (cursor.x < m.left + near, POINT { x: m.left - 1, y: cursor.y }, cursor.x >= m.right - far, behind_point),
-        Edge::Top => (cursor.y < m.top + near, POINT { x: cursor.x, y: m.top - 1 }, cursor.y >= m.bottom - far, behind_point),
+    // Near this screen's own edge where the pointer passes on from it, or
+    // near the opposite side of it with a screen behind it whose edge that
+    // is.
+    let (own, along, other, behind) = match edge {
+        Edge::Right => (cursor.x >= m.right - near, cursor.y, cursor.x < m.left + far, behind_point),
+        Edge::Left => (cursor.x < m.left + near, cursor.y, cursor.x >= m.right - far, behind_point),
+        Edge::Top => (cursor.y < m.top + near, cursor.x, cursor.y >= m.bottom - far, behind_point),
     };
-    let target = if own && exists(beyond) {
+    let target = if own && crate::screens::passes(m, edge, along) {
         here
     } else if other && exists(behind) {
         monitor_at(behind)?
@@ -2471,24 +2471,20 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
 
 /// Describes the monitor under the cursor if the cursor is pressed against its
 /// trigger edge with intent to point: visible, no button held, clear of the
-/// corners, and with no other monitor continuing past that edge.
+/// corners, and where the edge stops it (it does not pass on to another
+/// screen there).
 fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     let contact = monitor_at(cursor)?;
     let monitor = contact.monitor;
     let corner = (CORNER_EXCLUSION * contact.scale as f64).round() as i32;
     let along_height = (monitor.top + corner..monitor.bottom - corner).contains(&cursor.y);
-    let (on_edge, beyond, clear_of_corners) = match edge {
-        Edge::Left => (cursor.x <= monitor.left, POINT { x: monitor.left - 1, y: cursor.y }, along_height),
-        Edge::Right => (cursor.x >= monitor.right - 1, POINT { x: monitor.right, y: cursor.y }, along_height),
-        Edge::Top => (
-            cursor.y <= monitor.top,
-            POINT { x: cursor.x, y: monitor.top - 1 },
-            (monitor.left + corner..monitor.right - corner).contains(&cursor.x),
-        ),
+    let (on_edge, along, clear_of_corners) = match edge {
+        Edge::Left => (cursor.x <= monitor.left, cursor.y, along_height),
+        Edge::Right => (cursor.x >= monitor.right - 1, cursor.y, along_height),
+        Edge::Top => (cursor.y <= monitor.top, cursor.x, (monitor.left + corner..monitor.right - corner).contains(&cursor.x)),
     };
     if !on_edge || !clear_of_corners || buttons_down() || !cursor_showing() {
         return None;
     }
-    let neighbour = unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) };
-    neighbour.is_invalid().then_some(contact)
+    (!crate::screens::passes(monitor, edge, along)).then_some(contact)
 }

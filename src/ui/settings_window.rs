@@ -107,11 +107,9 @@ const ITEM_ROW: f32 = 48.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
-/// The map of the screens: the room above it for its name and its word,
-/// the most height it takes, how deep into a screen an edge takes a click
-/// and how far short of the screen's corners, and how thick a lit edge is
-/// drawn and how far inside the screen.
-const MAP_HEAD: f32 = 64.0;
+/// The map of the screens: the most height it takes, how deep into a
+/// screen an edge takes a click and how far short of the screen's corners,
+/// and how thick an edge is drawn and how far inside the screen.
 const MAP_MOST: f32 = 180.0;
 const MAP_BAND: f32 = 12.0;
 const MAP_CORNER: f32 = 6.0;
@@ -398,7 +396,6 @@ type ButtonRow = (String, String, Vec<(String, Target, Button)>);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
     Live,
-    Seam,
     Startup,
     Updates,
     HeatAlert,
@@ -426,9 +423,10 @@ enum Target {
     ClearShortcut,
     /// A slider's track.
     Slider(Field),
-    /// An edge of a screen (by its name) in the map of the screens: it
-    /// opens the panel, or does not.
-    ScreenEdge(String, Edge),
+    /// An edge of a screen (by its name) in the map of the screens, where
+    /// the pointer stops at it or (true) where it passes on to another
+    /// screen: it opens the panel there, or does not.
+    ScreenEdge(String, Edge, bool),
     /// A page, in the pages' list.
     Page(Page),
     /// Opens or closes the fold of the modules few want.
@@ -478,9 +476,20 @@ struct Drag {
     pointer: f32,
 }
 
+/// An edge of a screen in the map (the screen by its place among them): its
+/// stretches (see `screens::stretches`).
+struct MapEdge {
+    screen: usize,
+    edge: Edge,
+    stretches: Vec<(i32, i32, bool)>,
+}
+
 /// The desktop the preview shows, at the size of the work area (DIPs).
 struct Stage {
     size: (f32, f32),
+    /// The screen it is, by its name, once one was chosen in the map (till
+    /// then, the one the window opened on).
+    screen: Option<String>,
     desktop: Capture,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
@@ -604,7 +613,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let settings = app.settings.lock().unwrap().clone();
         let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
-        let stage = Stage { size, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+        let stage = Stage { size, screen: None, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
             hwnd,
@@ -872,7 +881,6 @@ impl Ui {
             Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
             Page::Opening => rows.extend([
                 Row::Screens,
-                Row::Switch(Switch::Seam),
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
@@ -998,7 +1006,7 @@ impl Ui {
                 Row::Title => (0.0, TITLE),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
-                Row::Screens => (if after_heading { 8.0 } else { ROW_GAP }, MAP_HEAD + self.map().2 + ROW_SIDE),
+                Row::Screens => (if after_heading { 8.0 } else { ROW_GAP }, self.map_head() + self.map().2 + ROW_SIDE),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
                 Row::Choice(field) if self.choice_hint(*field).is_some() => {
@@ -1038,6 +1046,52 @@ impl Ui {
         (k, across * k, down * k, left, top)
     }
 
+    /// The map's name, and its word.
+    fn map_words(&self) -> (&'static str, &'static str) {
+        (
+            pick(self.lang, "呼出位置", "Where it opens"),
+            pick(
+                self.lang,
+                "点屏幕的一条边，面板就能从那里呼出，再点一次取消。实线：鼠标推到边上呼出；虚线连着另一块屏幕：鼠标贴着它停半秒呼出",
+                "Click an edge of a screen for the panel to open from it, and again to turn it off. Solid: push the pointer into it. Dashed, where it leads to another screen: rest the pointer on it for half a second",
+            ),
+        )
+    }
+
+    /// The room above the map for its name and its word (as a row's: see
+    /// `words_height`).
+    fn map_head(&self) -> f32 {
+        let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
+        22.0 + self.gfx.wrapped_height(self.map_words().1, Font::new(Family::Segoe, 12.0, 400.0), room) + 18.0
+    }
+
+    /// How the edges of the screen named `screen` open the panel.
+    fn edges_of(&self, screen: &str) -> crate::settings::Opens {
+        crate::settings::lit(&self.settings.screens, self.settings.edge, self.settings.seam, screen)
+    }
+
+    /// The edges of each screen as the map has them: where the pointer
+    /// stops at them and where it passes on (see `screens::stretches`), in
+    /// physical pixels along the edge.
+    fn map_edges(&self) -> Vec<MapEdge> {
+        let monitors: Vec<RECT> = self.screens.iter().map(|screen| screen.monitor).collect();
+        let eased = crate::screens::eased();
+        (0..monitors.len()).flat_map(|index| EDGES.map(|edge| MapEdge { screen: index, edge, stretches: crate::screens::stretches(&monitors, index, edge, eased) })).collect()
+    }
+
+    /// The preview shows the screen named `screen`: its desktop, at its
+    /// size.
+    fn show_screen(&mut self, screen: &str) {
+        if self.stage.screen.as_deref() == Some(screen) {
+            return;
+        }
+        let Some(m) = self.screens.iter().find(|known| known.id == screen).map(|known| known.monitor) else { return };
+        let Some(contact) = crate::panel::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 }) else { return };
+        let work = contact.work;
+        let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
+        self.stage = Stage { size, screen: Some(screen.to_string()), desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+    }
+
     /// The edge the preview's panel opens from: the one last turned on in
     /// the map; before any was, the first that opens the panel on the
     /// screen this window is on (the one of a screen not set otherwise,
@@ -1049,7 +1103,7 @@ impl Ui {
             let centre = POINT { x: (window.left + window.right) / 2, y: (window.top + window.bottom) / 2 };
             let here = crate::panel::monitor_at(centre).map(|contact| contact.monitor);
             let screen = self.screens.iter().find(|screen| Some(screen.monitor) == here);
-            screen.and_then(|screen| crate::settings::lit(&self.settings.screens, self.settings.edge, &screen.id).each().next()).unwrap_or(self.settings.edge)
+            screen.and_then(|screen| self.edges_of(&screen.id).any().each().next()).unwrap_or(self.settings.edge)
         })
     }
 
@@ -1472,11 +1526,6 @@ impl Ui {
                 )),
                 self.settings.overlay.in_game,
             ),
-            Switch::Seam => (
-                p("在屏幕相接处呼出", "Open where screens meet"),
-                Some(p("鼠标在两块屏幕的相接处停留约半秒，即可在呼出边所在一侧的屏幕上呼出面板", "Rest the pointer where two screens meet for half a second to open the panel on the screen whose edge it is")),
-                self.settings.seam,
-            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("达到温度警示值 30 秒后从托盘提醒", "A tray warning after 30 s at the alert")),
@@ -1514,7 +1563,6 @@ impl Ui {
         let settings = &mut self.settings;
         match switch {
             Switch::Live => settings.live_backdrop ^= true,
-            Switch::Seam => settings.seam ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::Overlay => {
@@ -1854,15 +1902,15 @@ impl Ui {
                 self.save();
             }
             Target::Choice(field, index) => self.choose(field, index),
-            Target::ScreenEdge(screen, edge) => {
-                let default = self.settings.edge;
-                crate::settings::flip_edge(&mut self.settings.screens, default, &screen, edge);
-                // Turned on, the preview opens from it.
-                if crate::settings::lit(&self.settings.screens, default, &screen).has(edge) {
-                    self.shown_edge = Some(edge);
-                } else if self.shown_edge == Some(edge) {
-                    self.shown_edge = None;
-                }
+            Target::ScreenEdge(screen, edge, seam) => {
+                let (default, default_seam) = (self.settings.edge, self.settings.seam);
+                crate::settings::flip_edge(&mut self.settings.screens, default, default_seam, &screen, edge, seam);
+                // The preview shows that screen: the panel opening from the
+                // edge turned on; from another of its edges that opens it,
+                // one turned off.
+                let any = self.edges_of(&screen).any();
+                self.shown_edge = Some(edge).filter(|edge| any.has(*edge)).or(any.each().next());
+                self.show_screen(&screen);
                 self.save();
             }
             Target::Switch(switch) => self.flip(switch),
@@ -1936,7 +1984,15 @@ impl Ui {
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
-                Row::Screens => self.screens.iter().flat_map(|screen| EDGES.map(|edge| Target::ScreenEdge(screen.id.clone(), edge))).collect(),
+                // Each edge where the pointer stops at it, then where it passes on.
+                Row::Screens => self
+                    .map_edges()
+                    .into_iter()
+                    .flat_map(|MapEdge { screen: index, edge, stretches }| {
+                        let id = &self.screens[index].id;
+                        [false, true].into_iter().filter(|seam| stretches.iter().any(|(.., is)| is == seam)).map(|seam| Target::ScreenEdge(id.clone(), edge, seam)).collect::<Vec<_>>()
+                    })
+                    .collect(),
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
@@ -1976,7 +2032,11 @@ impl Ui {
         if alt && !moves_module {
             return false;
         }
-        self.keyboard = true;
+        // The focus shows once a key that moves it or acts on it is used
+        // (not for a key that does nothing here: one of a shortcut, say).
+        if matches!(key, VK_TAB | VK_SPACE | VK_RETURN | VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN) {
+            self.keyboard = true;
+        }
         self.next_frame = Instant::now();
         let stops = self.stops();
         let at = self.focus.as_ref().and_then(|focus| stops.iter().position(|stop| stop == focus));
@@ -2402,70 +2462,67 @@ impl Ui {
                 }
                 Row::Screens => {
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let name = pick(lang, "呼出位置", "Where it opens");
-                    let word = pick(lang, "点屏幕的一条边，面板就能从那里呼出；再点一次取消", "Click an edge of a screen for the panel to open from it; click again to turn it off");
-                    field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + MAP_HEAD / 2.0, width - 2.0 * ROW_SIDE);
+                    let (name, word) = self.map_words();
+                    let head = self.map_head();
+                    field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + head / 2.0, width - 2.0 * ROW_SIDE);
                     let (k, map_width, _, desk_left, desk_top) = self.map();
-                    let (ox, oy) = (left + (width - map_width) / 2.0, y + MAP_HEAD);
+                    let (ox, oy) = (left + (width - map_width) / 2.0, y + head);
+                    let across = |x: i32| ox + (x - desk_left) as f32 * k;
+                    let down = |y: i32| oy + (y - desk_top) as f32 * k;
+                    // A hair between a screen and the next.
+                    let boxed = |m: RECT| Rect { x: across(m.left) + 1.0, y: down(m.top) + 1.0, w: (m.right - m.left) as f32 * k - 2.0, h: (m.bottom - m.top) as f32 * k - 2.0 };
                     let screens = self.screens.clone();
-                    let monitors: Vec<RECT> = screens.iter().map(|screen| screen.monitor).collect();
                     let number = Font::new(Family::SegoeDisplay, 15.0, 600.0);
                     for (index, screen) in screens.iter().enumerate() {
-                        let m = screen.monitor;
-                        let across = |x: i32| ox + (x - desk_left) as f32 * k;
-                        let down = |y: i32| oy + (y - desk_top) as f32 * k;
-                        // A hair between it and the next.
-                        let r = Rect { x: across(m.left) + 1.0, y: down(m.top) + 1.0, w: (m.right - m.left) as f32 * k - 2.0, h: (m.bottom - m.top) as f32 * k - 2.0 };
+                        let r = boxed(screen.monitor);
                         fill(frame, palette.control, r.x, r.y, r.w, r.h, 4.0);
                         stroke_inside(frame, r, 4.0, palette.card_stroke);
                         let digit = (index + 1).to_string();
                         let digit_width = frame.gfx.measure(&digit, number);
                         text_centred(frame, &digit, number, palette.text2, r.x + (r.w - digit_width) / 2.0, r.y + r.h / 2.0, digit_width + 1.0, Align::Start);
-                        let lit = crate::settings::lit(&self.settings.screens, self.settings.edge, &screen.id);
-                        for edge in EDGES {
-                            let upright = edge != Edge::Top;
-                            let band = match edge {
-                                Edge::Left => Rect { x: r.x, y: r.y + MAP_CORNER, w: MAP_BAND, h: r.h - 2.0 * MAP_CORNER },
-                                Edge::Right => Rect { x: r.x + r.w - MAP_BAND, y: r.y + MAP_CORNER, w: MAP_BAND, h: r.h - 2.0 * MAP_CORNER },
-                                Edge::Top => Rect { x: r.x + MAP_CORNER, y: r.y, w: r.w - 2.0 * MAP_CORNER, h: MAP_BAND },
-                            };
-                            if band.w <= 0.0 || band.h <= 0.0 {
+                    }
+                    for MapEdge { screen: index, edge, stretches } in self.map_edges() {
+                        let (screen, r) = (&screens[index], boxed(screens[index].monitor));
+                        let opens = self.edges_of(&screen.id);
+                        let upright = edge != Edge::Top;
+                        // Along the edge, short of the screen's corners.
+                        let (from, to) = if upright { (r.y + MAP_CORNER, r.y + r.h - MAP_CORNER) } else { (r.x + MAP_CORNER, r.x + r.w - MAP_CORNER) };
+                        for (a, b, seam) in stretches {
+                            let (a, b) = if upright { (down(a), down(b)) } else { (across(a), across(b)) };
+                            let (a, b) = (a.max(from), b.min(to));
+                            if b <= a {
                                 continue;
                             }
-                            let target = Target::ScreenEdge(screen.id.clone(), edge);
-                            let (on, hover) = (lit.has(edge), hovered.as_ref() == Some(&target));
-                            if on || hover {
-                                // Along the edge, short of the corners: where
-                                // it is open, whole; where another screen
-                                // lies against it, dashed, and lit only while
-                                // the place where screens meet opens the panel.
-                                let (from, to) = if upright { (band.y, band.y + band.h) } else { (band.x, band.x + band.w) };
-                                let bar = |a: f32, b: f32, color: Color| {
-                                    let (a, b) = (a.max(from), b.min(to));
-                                    if b <= a {
-                                        return;
-                                    }
-                                    match edge {
-                                        Edge::Left => fill(frame, color, r.x + MAP_INSET, a, MAP_BAR, b - a, MAP_BAR / 2.0),
-                                        Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR, a, MAP_BAR, b - a, MAP_BAR / 2.0),
-                                        Edge::Top => fill(frame, color, a, r.y + MAP_INSET, b - a, MAP_BAR, MAP_BAR / 2.0),
-                                    }
-                                };
-                                let strength = if on { 1.0 } else { 0.4 };
-                                for (a, b, seam) in crate::screens::stretches(&monitors, index, edge) {
-                                    let (a, b) = if upright { (down(a), down(b)) } else { (across(a), across(b)) };
-                                    if !seam {
-                                        bar(a, b, palette.selection.alpha(strength));
-                                        continue;
-                                    }
-                                    let color = if self.settings.seam { palette.selection } else { palette.text3 };
-                                    let mut at = a;
-                                    while at < b {
-                                        bar(at, (at + 5.0).min(b), color.alpha(strength));
-                                        at += 9.0;
-                                    }
+                            let target = Target::ScreenEdge(screen.id.clone(), edge, seam);
+                            let on = if seam { opens.seams.has(edge) } else { opens.edges.has(edge) };
+                            // Lit, it opens the panel; under the pointer, it
+                            // shows what a click would light; else faint.
+                            let color = if on {
+                                palette.selection
+                            } else if hovered.as_ref() == Some(&target) {
+                                palette.selection.alpha(0.45)
+                            } else {
+                                palette.text3.alpha(0.45)
+                            };
+                            let bar = |a: f32, b: f32| match edge {
+                                Edge::Left => fill(frame, color, r.x + MAP_INSET, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                Edge::Top => fill(frame, color, a, r.y + MAP_INSET, b - a, MAP_BAR, MAP_BAR / 2.0),
+                            };
+                            if seam {
+                                let mut at = a;
+                                while at < b {
+                                    bar(at, (at + 5.0).min(b));
+                                    at += 9.0;
                                 }
+                            } else {
+                                bar(a, b);
                             }
+                            let band = match edge {
+                                Edge::Left => Rect { x: r.x, y: a, w: MAP_BAND, h: b - a },
+                                Edge::Right => Rect { x: r.x + r.w - MAP_BAND, y: a, w: MAP_BAND, h: b - a },
+                                Edge::Top => Rect { x: a, y: r.y, w: b - a, h: MAP_BAND },
+                            };
                             self.targets.push((band, target));
                         }
                     }

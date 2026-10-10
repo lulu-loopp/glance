@@ -33,11 +33,15 @@ pub enum Edge {
 pub const EDGES: [Edge; 3] = [Edge::Left, Edge::Top, Edge::Right];
 
 /// The edges of one screen that open the panel: the screen by the name
-/// that stays its own (see `screens`), and any of its edges, or none.
+/// that stays its own (see `screens`); those that open it where they are
+/// open, to a pointer pushed into them; and those that open it where
+/// another screen lies against them (a seam), to a pointer resting there.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ScreenEdges {
     pub screen: String,
     pub edges: Vec<Edge>,
+    #[serde(default)]
+    pub seams: Vec<Edge>,
 }
 
 /// Which of a screen's edges open the panel.
@@ -77,22 +81,40 @@ impl Lit {
     }
 }
 
-/// The edges of the screen named `screen` that open the panel, as `kept`
-/// has them; `default` alone, for a screen it does not name.
-pub fn lit(kept: &[ScreenEdges], default: Edge, screen: &str) -> Lit {
-    match kept.iter().find(|entry| entry.screen == screen) {
-        Some(entry) => Lit::of(&entry.edges),
-        None => Lit::of(&[default]),
+/// How a screen's edges open the panel: where they are open, and where
+/// another screen lies against them.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Opens {
+    pub edges: Lit,
+    pub seams: Lit,
+}
+
+impl Opens {
+    /// The edges that open the panel one way or the other.
+    pub fn any(self) -> Lit {
+        Lit { left: self.edges.left || self.seams.left, top: self.edges.top || self.seams.top, right: self.edges.right || self.seams.right }
     }
 }
 
-/// Turns `edge` of the screen named `screen` on, or off, in `kept`.
-pub fn flip_edge(kept: &mut Vec<ScreenEdges>, default: Edge, screen: &str, edge: Edge) {
-    let now = lit(kept, default, screen);
-    let edges = EDGES.into_iter().filter(|e| now.has(*e) != (*e == edge)).collect();
+/// How the edges of the screen named `screen` open the panel, as `kept`
+/// has it; for a screen it does not name, `default` alone, and where
+/// another screen lies against it only if `seam`.
+pub fn lit(kept: &[ScreenEdges], default: Edge, seam: bool, screen: &str) -> Opens {
+    match kept.iter().find(|entry| entry.screen == screen) {
+        Some(entry) => Opens { edges: Lit::of(&entry.edges), seams: Lit::of(&entry.seams) },
+        None => Opens { edges: Lit::of(&[default]), seams: if seam { Lit::of(&[default]) } else { Lit::default() } },
+    }
+}
+
+/// Turns `edge` of the screen named `screen` on, or off, in `kept`: where
+/// it is open, or (`on_seam`) where another screen lies against it.
+pub fn flip_edge(kept: &mut Vec<ScreenEdges>, default: Edge, seam: bool, screen: &str, edge: Edge, on_seam: bool) {
+    let now = lit(kept, default, seam, screen);
+    let flipped = |lit: Lit, flip: bool| EDGES.into_iter().filter(|e| lit.has(*e) != (flip && *e == edge)).collect();
+    let (edges, seams) = (flipped(now.edges, !on_seam), flipped(now.seams, on_seam));
     match kept.iter_mut().find(|entry| entry.screen == screen) {
-        Some(entry) => entry.edges = edges,
-        None => kept.push(ScreenEdges { screen: screen.to_string(), edges }),
+        Some(entry) => (entry.edges, entry.seams) = (edges, seams),
+        None => kept.push(ScreenEdges { screen: screen.to_string(), edges, seams }),
     }
 }
 
@@ -324,8 +346,9 @@ pub struct Settings {
     /// How large the panel is drawn, 1 as designed (0.75 to 2).
     pub panel_size: f32,
     pub sensitivity: Sensitivity,
-    /// The seam between two screens opens the panel too, on the screen
-    /// whose edge it is, to a pointer resting on it.
+    /// Whether that edge opens the panel where another screen lies against
+    /// it too (a seam), to a pointer resting there: for every screen
+    /// `screens` does not name, as `edge` is.
     pub seam: bool,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -520,18 +543,28 @@ mod tests {
 
     #[test]
     fn a_screen_opens_the_panel_from_the_edges_chosen_for_it() {
-        // None chosen for it: the one edge every screen had.
+        // None chosen for it: the one edge every screen had, and where
+        // another screen lies against it only if that was asked for.
         let mut kept = Vec::new();
-        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::of(&[Edge::Left]));
+        let only = |edges: &[Edge]| Opens { edges: Lit::of(edges), seams: Lit::default() };
+        assert_eq!(lit(&kept, Edge::Left, false, "a"), only(&[Edge::Left]));
+        assert_eq!(lit(&kept, Edge::Left, true, "a"), Opens { edges: Lit::of(&[Edge::Left]), seams: Lit::of(&[Edge::Left]) });
         // One more turned on, the first turned off, the last too: none.
-        flip_edge(&mut kept, Edge::Left, "a", Edge::Top);
-        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::of(&[Edge::Left, Edge::Top]));
-        flip_edge(&mut kept, Edge::Left, "a", Edge::Left);
-        flip_edge(&mut kept, Edge::Left, "a", Edge::Top);
-        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::default());
+        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Top, false);
+        assert_eq!(lit(&kept, Edge::Left, false, "a"), only(&[Edge::Left, Edge::Top]));
+        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Left, false);
+        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Top, false);
+        assert_eq!(lit(&kept, Edge::Left, false, "a"), Opens::default());
         assert_eq!(kept.len(), 1);
+        // Where another screen lies against an edge is turned on apart.
+        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Right, true);
+        assert_eq!(lit(&kept, Edge::Left, false, "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Right]) });
+        assert_eq!(lit(&kept, Edge::Left, false, "a").any(), Lit::of(&[Edge::Right]));
         // Another screen is as it was.
-        assert_eq!(lit(&kept, Edge::Left, "b"), Lit::of(&[Edge::Left]));
+        assert_eq!(lit(&kept, Edge::Left, false, "b"), only(&[Edge::Left]));
+        // A screen named before seams were chosen apart has none.
+        let before: Vec<ScreenEdges> = serde_json::from_str(r#"[{"screen":"c","edges":["top"]}]"#).unwrap();
+        assert_eq!(lit(&before, Edge::Left, true, "c"), only(&[Edge::Top]));
         // Opened by hand: from the nearest of them.
         let both = Lit::of(&[Edge::Left, Edge::Right]);
         assert_eq!(both.nearest((0, 0, 1000, 500), (700, 20)), Some(Edge::Right));
