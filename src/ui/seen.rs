@@ -24,6 +24,8 @@ pub struct Seen {
     /// Each of the machine's GPUs, as `StaticInfo::gpus` lists them.
     pub gpus: Vec<GpuSeen>,
     pub dimms: usize,
+    /// The most containers Docker has run at once.
+    pub containers: usize,
     /// The disks' busy time (which macOS does not keep).
     pub disk_active: bool,
     pub address: bool,
@@ -90,6 +92,9 @@ impl Seen {
             merge(&mut seen.engines, gpu.engines.iter().flatten().map(|(kind, _)| kind.clone()), |a, b| a == b);
         }
         self.dimms = self.dimms.max(s.dimm_temps.len());
+        if let Some(crate::reading::DockerSample::Running { containers, .. }) = &s.docker {
+            self.containers = self.containers.max(containers.len());
+        }
         self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
@@ -131,6 +136,8 @@ impl Seen {
             }
             // A module's temperature at a time.
             "memory" => news.extend((self.dimms + 1..=other.dimms).map(Item::Dimms)),
+            // A container's row at a time.
+            "docker" => news.extend((self.containers + 1..=other.containers).map(Item::Containers)),
             "network" => {
                 flag(self.address, other.address, Item::Address);
                 flag(self.link, other.link, Item::Link);
@@ -179,7 +186,7 @@ impl Seen {
     /// This and `other` together: everything either holds.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
-        let mut lanes: Vec<String> = ["game", "cpu", "memory", "network", "disk", "storage", "board", "battery"].map(String::from).to_vec();
+        let mut lanes: Vec<String> = ["game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker"].map(String::from).to_vec();
         lanes.extend(info.gpu_modules());
         for id in &lanes {
             for item in joined.news(other, id, info) {
@@ -206,6 +213,7 @@ impl Seen {
             Item::Threads(count) => seen.threads = *count,
             Item::Ccd(ccd) => add(&mut seen.ccds, &other.ccds, |key| key == ccd, |a, b| a == b),
             Item::Dimms(count) => seen.dimms = *count,
+            Item::Containers(count) => seen.containers = *count,
             Item::Address => seen.address = true,
             Item::Link => seen.link = true,
             Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
@@ -258,6 +266,8 @@ pub enum Item {
     Ccd(usize),
     /// The memory modules' temperatures, this many (one more).
     Dimms(usize),
+    /// Docker's containers, this many (one more).
+    Containers(usize),
     Address,
     Link,
     Drive(u32),

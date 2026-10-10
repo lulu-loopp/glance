@@ -15,40 +15,64 @@ use crate::reading::{ContainerSample, DockerSample};
 
 /// How long an answer may take before the engine is taken as not answering.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// The most an answer may hold (a container's statistics are a few
+/// kilobytes; the list, some per container).
+const MOST: usize = 8 << 20;
 
 pub struct Docker {
     latest: Arc<Mutex<Option<DockerSample>>>,
     stop: Arc<AtomicBool>,
+    /// When the request under way began, if one is.
+    asking: Arc<Mutex<Option<Instant>>>,
+    worker: std::thread::JoinHandle<()>,
 }
 
 impl Docker {
     pub fn new() -> Self {
         let latest = Arc::new(Mutex::new(None));
         let stop = Arc::new(AtomicBool::new(false));
-        let (shared, stopping) = (latest.clone(), stop.clone());
-        std::thread::spawn(move || {
+        let asking = Arc::new(Mutex::new(None));
+        let (shared, stopping, busy) = (latest.clone(), stop.clone(), asking.clone());
+        let worker = std::thread::spawn(move || {
             let mut before: HashMap<String, Counters> = HashMap::new();
             while !stopping.load(Ordering::Relaxed) {
                 let started = Instant::now();
-                let sample = read(&mut before);
+                let sample = read(&mut before, &busy);
+                if stopping.load(Ordering::Relaxed) {
+                    break;
+                }
                 *shared.lock().unwrap() = Some(sample);
                 // As often as Glance samples.
                 let every = crate::app().settings.lock().unwrap().interval();
                 std::thread::sleep(every.saturating_sub(started.elapsed()));
             }
         });
-        Docker { latest, stop }
+        Docker { latest, stop, asking, worker }
     }
 
-    /// What was read last; none until the first answer.
+    /// What was read last; none until the first answer. A request under way
+    /// longer than it may take is cut short (a pipe has no time limit of
+    /// its own).
     pub fn read(&self) -> Option<DockerSample> {
+        if self.asking.lock().unwrap().is_some_and(|since| since.elapsed() > PATIENCE) {
+            self.cancel();
+        }
         self.latest.lock().unwrap().clone()
+    }
+
+    /// Ends the worker's blocking read or write, if it is in one.
+    fn cancel(&self) {
+        use std::os::windows::io::AsRawHandle;
+        let thread = windows::Win32::Foundation::HANDLE(self.worker.as_raw_handle());
+        let _ = unsafe { windows::Win32::System::IO::CancelSynchronousIo(thread) };
     }
 }
 
 impl Drop for Docker {
     fn drop(&mut self) {
+        // The worker stops at once, a request under way cut short.
         self.stop.store(true, Ordering::Relaxed);
+        self.cancel();
     }
 }
 
@@ -147,12 +171,23 @@ impl Connection {
     }
 }
 
-/// Everything until the other end closes (a pipe closed says so as an error).
+/// Everything until the other end closes (a pipe closed says so as an
+/// error), up to `MOST`: an answer longer is not one.
 fn read_all(from: &mut impl Read, into: &mut Vec<u8>) -> std::io::Result<()> {
-    match from.read_to_end(into) {
-        Ok(_) => Ok(()),
-        Err(error) if error.raw_os_error() == Some(109) && !into.is_empty() => Ok(()),
-        Err(error) => Err(error),
+    let mut chunk = [0u8; 16 << 10];
+    loop {
+        match from.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(n) => {
+                if into.len() + n > MOST {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "an answer past its bound"));
+                }
+                into.extend_from_slice(&chunk[..n]);
+            }
+            Err(error) if error.raw_os_error() == Some(109) && !into.is_empty() => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -180,10 +215,14 @@ fn parse(answer: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
     }
 }
 
-/// GET `path` from the engine at `host`, its body read as JSON.
-fn ask<T: for<'a> Deserialize<'a>>(host: &str, path: &str) -> std::io::Result<Option<T>> {
-    let Some(connection) = Connection::open(host) else { return Ok(None) };
-    let (status, body) = connection?.get(path)?;
+/// GET `path` from the engine at `host`, its body read as JSON; `asking`
+/// says when it began, while it is under way.
+fn ask<T: for<'a> Deserialize<'a>>(host: &str, path: &str, asking: &Mutex<Option<Instant>>) -> std::io::Result<Option<T>> {
+    *asking.lock().unwrap() = Some(Instant::now());
+    let answer = Connection::open(host).map(|connection| connection.and_then(|connection| connection.get(path)));
+    *asking.lock().unwrap() = None;
+    let Some(answer) = answer else { return Ok(None) };
+    let (status, body) = answer?;
     if status != 200 {
         return Err(std::io::Error::other(format!("{path}: {status}")));
     }
@@ -256,9 +295,9 @@ struct Counters {
 
 /// The engine asked once: its containers running, each with what it uses
 /// (rates against what `before` holds of the last time).
-fn read(before: &mut HashMap<String, Counters>) -> DockerSample {
+fn read(before: &mut HashMap<String, Counters>, asking: &Mutex<Option<Instant>>) -> DockerSample {
     let Endpoint { context, host } = endpoint();
-    let listed: Vec<Listed> = match ask(&host, "/containers/json") {
+    let listed: Vec<Listed> = match ask(&host, "/containers/json", asking) {
         Ok(Some(listed)) => listed,
         Ok(None) => return DockerSample::Unsupported { context, host },
         Err(_) => {
@@ -270,7 +309,7 @@ fn read(before: &mut HashMap<String, Counters>) -> DockerSample {
     let mut kept = HashMap::new();
     for container in listed {
         let name = container.names.first().map(|name| name.trim_start_matches('/').to_string()).unwrap_or_else(|| container.id.chars().take(12).collect());
-        let stats: Option<Stats> = ask(&host, &format!("/containers/{}/stats?stream=false&one-shot=true", container.id)).ok().flatten();
+        let stats: Option<Stats> = ask(&host, &format!("/containers/{}/stats?stream=false&one-shot=true", container.id), asking).ok().flatten();
         let Some(stats) = stats else {
             containers.push(ContainerSample { name, status: container.status, cpu: None, mem: None, limit: None, net: None, io: None });
             continue;
@@ -310,6 +349,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cuts_short_an_engine_that_does_not_answer() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::core::w;
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
+        // An engine that takes the request and never answers.
+        let server = unsafe { CreateNamedPipeW(w!(r"\\.\pipe\glance-test-silent"), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
+        assert!(!server.is_invalid());
+        let asking = Arc::new(Mutex::new(None));
+        let busy = asking.clone();
+        let started = Instant::now();
+        let worker = std::thread::spawn(move || ask::<serde_json::Value>("npipe:////./pipe/glance-test-silent", "/containers/json", &busy));
+        while asking.lock().unwrap().is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let thread = windows::Win32::Foundation::HANDLE(worker.as_raw_handle());
+        // Cut short, as `Docker::read` does once it has taken too long.
+        while !worker.is_finished() {
+            let _ = unsafe { windows::Win32::System::IO::CancelSynchronousIo(thread) };
+            std::thread::sleep(Duration::from_millis(20));
+            assert!(started.elapsed() < Duration::from_secs(5), "the request was not cut short");
+        }
+        assert!(worker.join().unwrap().is_err());
+        assert!(asking.lock().unwrap().is_none());
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(server) };
+    }
+
+    #[test]
+    fn bounds_an_answer() {
+        // An answer that goes on past the bound is no answer.
+        let mut endless = std::io::repeat(b'x');
+        let mut into = Vec::new();
+        assert!(read_all(&mut endless, &mut into).is_err());
+        assert!(into.len() <= MOST);
+    }
+
+    #[test]
     fn joins_chunks() {
         let answer = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         assert_eq!(parse(answer).unwrap(), (200, b"hello world".to_vec()));
@@ -320,11 +397,11 @@ mod tests {
     #[test]
     #[ignore = "asks this machine's Docker engine, with containers running; run with --ignored"]
     fn reads_docker() {
-        let mut before = HashMap::new();
+        let (mut before, asking) = (HashMap::new(), Mutex::new(None));
         for _ in 0..3 {
-            println!("{}", serde_json::to_string(&read(&mut before)).unwrap());
+            println!("{}", serde_json::to_string(&read(&mut before, &asking)).unwrap());
             std::thread::sleep(Duration::from_secs(1));
         }
-        assert!(matches!(read(&mut before), DockerSample::Running { .. }));
+        assert!(matches!(read(&mut before, &asking), DockerSample::Running { .. }));
     }
 }

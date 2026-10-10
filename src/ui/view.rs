@@ -793,8 +793,10 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         .iter()
                         .map(|c| [c.name.clone(), shown(c.cpu, text::percent), shown(c.mem, text::size), shown(c.net, |rate| text::rate(rate, false)), shown(c.io, |rate| text::rate(rate, false))])
                         .collect(),
-                    // A row for each, as many as the processes' list shows at most.
-                    visible: containers.len().min(if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) }),
+                    // A row for each of the most there have been at once (an
+                    // open panel is laid out for those), as many as the
+                    // processes' list shows at most.
+                    visible: scene.seen.containers.min(if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) }),
                     scrolls: false,
                     widths: CONTAINER_COLUMNS,
                 },
