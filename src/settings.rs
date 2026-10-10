@@ -236,6 +236,8 @@ impl Sensitivity {
 #[serde(default)]
 pub struct Settings {
     pub edge: Edge,
+    /// Windows display device name; none follows the pointer.
+    pub panel_screen: Option<String>,
     pub skin: String,
     pub anchor: Anchor,
     /// How many columns the panel's lanes are dealt into; none chosen, as
@@ -285,6 +287,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             edge: Edge::default(),
+            panel_screen: None,
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
@@ -441,6 +444,7 @@ mod tests {
     fn settings_from_before_take_the_defaults() {
         let mut settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
         settings.carry_over();
+        assert_eq!(settings.panel_screen, None);
         assert_eq!(settings.shortcut, Some(Shortcut::default()));
         assert!(settings.over_fullscreen == OverFullscreen::Shortcut);
         assert_eq!(settings.columns, None);
@@ -459,5 +463,19 @@ mod tests {
         settings.carry_over();
         assert_eq!(settings.overlay.chosen(), ["gpu", "down", "up"]);
         assert!(!serde_json::to_string(&settings).unwrap().contains("\"items\":[\""));
+    }
+
+    #[test]
+    fn a_display_choice_is_saved_and_merged_with_other_changes() {
+        let base = Settings::default();
+        let mut mine = base.clone();
+        mine.panel_screen = Some(r"\\.\DISPLAY2".into());
+        let saved: Settings = serde_json::from_str(&serde_json::to_string(&mine).unwrap()).unwrap();
+        assert_eq!(saved.panel_screen, mine.panel_screen);
+        let mut held = base.clone();
+        held.panel_size = 1.5;
+        let result = merged(&held, &base, &mine);
+        assert_eq!(result.panel_screen, mine.panel_screen);
+        assert_eq!(result.panel_size, 1.5);
     }
 }

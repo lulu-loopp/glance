@@ -130,6 +130,7 @@ const TRAY_MENU: u32 = WM_APP + 11;
 const ESCAPE_HOTKEY: i32 = 1;
 
 struct Config {
+    panel_screen: Option<String>,
     edge: Edge,
     skin: String,
     live: bool,
@@ -152,6 +153,7 @@ struct Config {
 
 fn config_from(settings: &Settings) -> Config {
     Config {
+        panel_screen: settings.panel_screen.clone(),
         edge: settings.edge,
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
@@ -428,6 +430,7 @@ impl Controller {
         self.sink.store(sink.0 as isize, Ordering::Release);
 
         let mut detector = Detector::default();
+        let mut displays = crate::os::displays();
         // Once the panel has been up, the pointer has to leave the edge before
         // it can open the panel again: pushing on after it closed is the same
         // gesture, not a new one.
@@ -443,6 +446,7 @@ impl Controller {
         // pointer is then treated as one that cannot push, and opens the
         // panel by resting on the edge.
         let mut last_cursor = cursor_position().unwrap_or_default();
+        let mut seam_cursor = last_cursor;
         let mut raw_since_watch = false;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
@@ -567,9 +571,25 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (edge, pressure, over_fullscreen, seam) = {
+            if msg.message == RESTYLE || msg.message == crate::ui::window::SCREENS_CHANGED {
+                displays = crate::os::displays();
+            }
+            let (edge, pressure, over_fullscreen, seam, selected) = {
                 let config = self.config.lock().unwrap();
-                (config.edge, config.pressure, config.over_fullscreen, config.seam)
+                let selected = config.panel_screen.as_deref().and_then(|id| {
+                    let bounds = crate::os::selected_display(&displays, id)?.bounds;
+                    monitor_at(POINT {
+                        x: bounds.left + (bounds.right - bounds.left) / 2,
+                        y: bounds.top + (bounds.bottom - bounds.top) / 2,
+                    })
+                });
+                (
+                    config.edge,
+                    config.pressure,
+                    config.over_fullscreen,
+                    config.seam,
+                    selected,
+                )
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -582,25 +602,70 @@ impl Controller {
             let may_open = |allowed: bool| allowed || !fullscreen_game();
             // Where on the edge the pointer is, and how hard it has to push
             // there; never, with pushing turned off.
-            let at_edge = |cursor: POINT| edge_contact(cursor, edge).zip(pressure);
+            let on_selected = |contact: &Contact| {
+                selected.is_none_or(|selected| contact.monitor == selected.monitor)
+            };
+            let at_edge =
+                |cursor: POINT| edge_contact(cursor, edge).filter(on_selected).zip(pressure);
+            // A fixed display can have its chosen edge against another display:
+            // the pointer crosses it instead of accumulating outward pressure.
             if panel.is_shown() {
                 armed = false;
                 seam_armed = false;
             }
             // The pointer resting on the seam, where the panel opens.
             let mut on_seam = |cursor: POINT, panel: &mut Panel| {
+                let previous = std::mem::replace(&mut seam_cursor, cursor);
+                if let Some(contact) = selected.filter(|_| pressure.is_some()) {
+                    let m = contact.monitor;
+                    let beyond = match edge {
+                        Edge::Right => POINT {
+                            x: m.right,
+                            y: cursor.y,
+                        },
+                        Edge::Left => POINT {
+                            x: m.left - 1,
+                            y: cursor.y,
+                        },
+                        Edge::Top => POINT {
+                            x: cursor.x,
+                            y: m.top - 1,
+                        },
+                    };
+                    let shared =
+                        !unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) }.is_invalid();
+                    if shared
+                        && seam_armed
+                        && !panel.is_open()
+                        && crossed_edge(previous, cursor, contact, edge)
+                    {
+                        seam_armed = false;
+                        seam_rest = None;
+                        if may_open(fullscreen_edge) {
+                            panel.open(cursor, contact, None, now);
+                        }
+                        return;
+                    }
+                }
                 let here = monitor_at(cursor).map(|contact| contact.monitor);
                 if here != on_screen {
                     crossed = on_screen.map(|from| (from, now));
                     on_screen = here;
                 }
                 let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
-                let Some(contact) = seam_contact(cursor, edge, came_from).filter(|_| seam) else {
+                let Some(contact) = seam_contact(cursor, edge, came_from).filter(|contact| {
+                    (seam || (selected.is_some() && pressure.is_some())) && on_selected(contact)
+                }) else {
                     seam_rest = None;
                     seam_armed = !panel.is_shown();
                     return;
                 };
                 if !seam_armed || panel.is_open() {
+                    return;
+                }
+                // Fixed displays open on the outward crossing above, without
+                // a dwell or opening when returning from the other display.
+                if selected.is_some() && pressure.is_some() {
                     return;
                 }
                 let still = (SEAM_STILL * contact.scale).round() as i32;
@@ -658,6 +723,7 @@ impl Controller {
                 }
                 RESTYLE => {
                     panel.restyle();
+                    panel.screens_changed(0, now);
                     draw_overlay(&mut overlay, &panel);
                     // An open settings window takes what was changed elsewhere.
                     settings_window::follow_settings();
@@ -886,7 +952,7 @@ enum Phase {
 
 /// A screen: its whole, its work area (physical px), and its scale (physical
 /// px per DIP).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Contact {
     pub(crate) monitor: RECT,
     pub(crate) work: RECT,
@@ -1283,6 +1349,20 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.restyle();
+            let selected = self
+                .controller
+                .config
+                .lock()
+                .unwrap()
+                .panel_screen
+                .as_deref()
+                .and_then(selected_contact);
+            let (cursor, contact) = selected.map_or((cursor, contact), |target| {
+                (
+                    point_on_display(cursor, contact.monitor, target.monitor),
+                    target,
+                )
+            });
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
             self.held = None;
@@ -1383,7 +1463,15 @@ impl<'a> Panel<'a> {
             // A game leaving exclusive fullscreen sets the display mode back
             // just as the panel comes up over it, often to what it was: a
             // panel whose screen is as it was stays as it is.
-            monitor_at(placement.anchor) != Some(placement.contact)
+            let selected = self
+                .controller
+                .config
+                .lock()
+                .unwrap()
+                .panel_screen
+                .as_deref()
+                .and_then(selected_contact);
+            selected.or_else(|| monitor_at(placement.anchor)) != Some(placement.contact)
         } else {
             (dpi as f32 / 96.0 - placement.contact.scale).abs() > 0.001
         };
@@ -2367,6 +2455,31 @@ pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {
     Some(Contact { monitor: info.rcMonitor, work: info.rcWork, scale: dpi as f32 / 96.0 })
 }
 
+fn selected_contact(id: &str) -> Option<Contact> {
+    let displays = crate::os::displays();
+    let bounds = crate::os::selected_display(&displays, id)?.bounds;
+    monitor_at(POINT {
+        x: bounds.left + (bounds.right - bounds.left) / 2,
+        y: bounds.top + (bounds.bottom - bounds.top) / 2,
+    })
+}
+
+/// Keep the pointer's relative position when opening on a different display,
+/// including displays to the left or above the primary one.
+fn point_on_display(point: POINT, from: RECT, to: RECT) -> POINT {
+    let coordinate = |value: i32, start: i32, end: i32, target: i32, target_end: i32| {
+        let fraction = ((value - start) as f64 / (end - start).max(1) as f64).clamp(0.0, 1.0);
+        target + (fraction * (target_end - target - 1).max(0) as f64).round() as i32
+    };
+    if from == to {
+        return point;
+    }
+    POINT {
+        x: coordinate(point.x, from.left, from.right, to.left, to.right),
+        y: coordinate(point.y, from.top, from.bottom, to.top, to.bottom),
+    }
+}
+
 /// The screen to open on when the pointer is on the seam where a screen's
 /// `edge` meets another screen: within a few pixels of that line, on
 /// either side of it (further past it, on the other screen, when it has
@@ -2375,6 +2488,50 @@ pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {
 /// edge it is.
 fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Contact> {
     let here = monitor_at(cursor)?;
+    let target = seam_target(cursor, edge, came_from, here, |point| {
+        if unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_invalid() {
+            None
+        } else {
+            monitor_at(point)
+        }
+    })?;
+    (!buttons_down() && cursor_showing()).then_some(target)
+}
+
+fn crossed_edge(previous: POINT, cursor: POINT, contact: Contact, edge: Edge) -> bool {
+    let m = contact.monitor;
+    if !contains(&m, previous) {
+        return false;
+    }
+    let corner = (CORNER_EXCLUSION * contact.scale as f64).round() as i32;
+    match edge {
+        Edge::Right => {
+            cursor.x > previous.x
+                && cursor.x >= m.right - 1
+                && (m.top + corner..m.bottom - corner).contains(&cursor.y)
+        }
+        Edge::Left => {
+            cursor.x < previous.x
+                && cursor.x <= m.left
+                && (m.top + corner..m.bottom - corner).contains(&cursor.y)
+        }
+        Edge::Top => {
+            cursor.y < previous.y
+                && cursor.y <= m.top
+                && (m.left + corner..m.right - corner).contains(&cursor.x)
+        }
+    }
+}
+
+/// Resolve the edge's display on either side of a seam, independently of
+/// Windows input so left/right and top/bottom layouts can be verified.
+fn seam_target(
+    cursor: POINT,
+    edge: Edge,
+    came_from: Option<RECT>,
+    here: Contact,
+    at: impl Fn(POINT) -> Option<Contact>,
+) -> Option<Contact> {
     let m = here.monitor;
     let near = (SEAM_ZONE * here.scale).round() as i32;
     // How far from its own side the pointer may be on this screen, when the
@@ -2384,9 +2541,8 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
         Edge::Left => POINT { x: m.right, y: cursor.y },
         Edge::Top => POINT { x: cursor.x, y: m.bottom },
     };
-    let overshot = came_from.is_some_and(|from| monitor_at(behind_point).is_some_and(|behind| behind.monitor == from));
+    let overshot = came_from.is_some_and(|from| at(behind_point).is_some_and(|behind| behind.monitor == from));
     let far = if overshot { (SEAM_OVERSHOOT * here.scale).round() as i32 } else { near };
-    let exists = |point: POINT| !unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONULL) }.is_invalid();
     // Near this screen's own edge with a screen beyond it, or near the
     // opposite side of it with a screen behind it whose edge that is.
     let (own, beyond, other, behind) = match edge {
@@ -2394,10 +2550,10 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
         Edge::Left => (cursor.x < m.left + near, POINT { x: m.left - 1, y: cursor.y }, cursor.x >= m.right - far, behind_point),
         Edge::Top => (cursor.y < m.top + near, POINT { x: cursor.x, y: m.top - 1 }, cursor.y >= m.bottom - far, behind_point),
     };
-    let target = if own && exists(beyond) {
+    let target = if own && at(beyond).is_some() {
         here
-    } else if other && exists(behind) {
-        monitor_at(behind)?
+    } else if other {
+        at(behind)?
     } else {
         return None;
     };
@@ -2407,7 +2563,7 @@ fn seam_contact(cursor: POINT, edge: Edge, came_from: Option<RECT>) -> Option<Co
         Edge::Left | Edge::Right => (t.top + corner..t.bottom - corner).contains(&cursor.y),
         Edge::Top => (t.left + corner..t.right - corner).contains(&cursor.x),
     };
-    (clear && !buttons_down() && cursor_showing()).then_some(target)
+    clear.then_some(target)
 }
 
 /// Describes the monitor under the cursor if the cursor is pressed against its
@@ -2432,4 +2588,135 @@ fn edge_contact(cursor: POINT, edge: Edge) -> Option<Contact> {
     }
     let neighbour = unsafe { MonitorFromPoint(beyond, MONITOR_DEFAULTTONULL) };
     neighbour.is_invalid().then_some(contact)
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn a_left_displays_right_edge_stays_on_that_display_after_crossing() {
+        let left = Contact {
+            monitor: RECT {
+                left: -1920,
+                top: 0,
+                right: 0,
+                bottom: 1080,
+            },
+            work: RECT {
+                left: -1920,
+                top: 0,
+                right: 0,
+                bottom: 1040,
+            },
+            scale: 1.0,
+        };
+        let right = Contact {
+            monitor: RECT {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1440,
+            },
+            work: RECT {
+                left: 0,
+                top: 0,
+                right: 2560,
+                bottom: 1400,
+            },
+            scale: 1.5,
+        };
+        let at = |point| {
+            [left, right]
+                .into_iter()
+                .find(|contact| contains(&contact.monitor, point))
+        };
+        assert!(crossed_edge(
+            POINT { x: -20, y: 500 },
+            POINT { x: 1, y: 500 },
+            left,
+            Edge::Right
+        ));
+        assert!(!crossed_edge(
+            POINT { x: 1, y: 500 },
+            POINT { x: -20, y: 500 },
+            left,
+            Edge::Right
+        ));
+        assert!(!crossed_edge(
+            POINT { x: -20, y: 500 },
+            POINT { x: -10, y: 500 },
+            left,
+            Edge::Right
+        ));
+        assert!(!crossed_edge(
+            POINT { x: -20, y: 0 },
+            POINT { x: 1, y: 0 },
+            left,
+            Edge::Right
+        ));
+        assert_eq!(
+            seam_target(POINT { x: -1, y: 500 }, Edge::Right, None, left, at),
+            Some(left)
+        );
+        assert_eq!(
+            seam_target(
+                POINT { x: 1, y: 500 },
+                Edge::Right,
+                Some(left.monitor),
+                right,
+                at
+            ),
+            Some(left)
+        );
+        // Far into the primary screen is no longer the external screen's edge.
+        assert_eq!(
+            seam_target(
+                POINT { x: 500, y: 500 },
+                Edge::Right,
+                Some(left.monitor),
+                right,
+                at
+            ),
+            None
+        );
+        // Avoid the corners, where other desktop gestures live.
+        assert_eq!(
+            seam_target(POINT { x: -1, y: 0 }, Edge::Right, None, left, at),
+            None
+        );
+        // The mirrored layout resolves to the right display's left edge.
+        assert_eq!(
+            seam_target(
+                POINT { x: -1, y: 500 },
+                Edge::Left,
+                Some(right.monitor),
+                left,
+                at
+            ),
+            Some(right)
+        );
+    }
+
+    #[test]
+    fn opens_at_the_same_fraction_on_a_display_left_and_above() {
+        let primary = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        let external = RECT {
+            left: -2560,
+            top: -1440,
+            right: 0,
+            bottom: 0,
+        };
+        let middle = point_on_display(POINT { x: 960, y: 540 }, primary, external);
+        assert!((middle.x + 1280).abs() <= 1 && (middle.y + 720).abs() <= 1);
+        let outside = point_on_display(POINT { x: 4000, y: -500 }, primary, external);
+        assert_eq!(outside, POINT { x: -1, y: -1440 });
+        let unchanged = POINT { x: 1500, y: 800 };
+        assert_eq!(point_on_display(unchanged, primary, primary), unchanged);
+    }
 }
