@@ -72,7 +72,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "glance"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "embed-resource",
  "libc",
