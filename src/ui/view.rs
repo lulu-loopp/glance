@@ -45,6 +45,9 @@ pub enum Hit {
     Processes(u32),
     /// The overlay's switch.
     Overlay,
+    /// A thread's cell in the CPU's grid: its clock and load shown while the
+    /// pointer is on it.
+    Thread(u16),
 }
 
 impl Hit {
@@ -327,7 +330,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let had_clock = on("clock") && scene.seen.cpu_clock;
             // The temperature takes the corner, as on the GPU lanes; the
             // clock, the power and each chiplet's temperature go below.
-            let aside = if had_temp {
+            let mut aside = if had_temp {
                 shown(temp, celsius)
             } else if had_clock {
                 clock.clone().unwrap_or_else(|| UNREAD.into())
@@ -335,9 +338,31 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 String::new()
             };
             let mut facts = Vec::new();
+            // The thread the pointer is on in the grid: its clock and load,
+            // in the clock's place.
+            let thread = match scene.hover {
+                Some(Hit::Thread(i)) if full && on("threads") => Some(i as usize),
+                _ => None,
+            };
+            let thread_label = |i: usize| if lang == Lang::Zh { format!("线程 {}", i + 1) } else { format!("Thread {}", i + 1) };
+            let thread_text = |i: usize| {
+                let (ghz, load) = (s.threads_ghz.get(i).copied().flatten(), s.threads.get(i).copied().flatten());
+                format!("{} · {}", shown(ghz, |ghz| format!("{ghz:.2} GHz")), shown(load, text::percent))
+            };
             // Cores of more than one kind: each kind's clock, the big first.
             let kinds = &s.kinds_ghz;
-            if on("clock") && kinds.len() > 1 {
+            // The rows the clock takes (none where it is in the corner).
+            let clock_rows = if on("clock") && kinds.len() > 1 { kinds.len() } else { usize::from(had_temp && had_clock) };
+            if let Some(i) = thread.filter(|_| clock_rows > 0) {
+                facts.push((thread_label(i), thread_text(i), false));
+                // The rest of the kinds' rows kept, so the lane keeps its size.
+                for _ in 1..clock_rows {
+                    facts.push((String::new(), String::new(), false));
+                }
+            } else if let Some(i) = thread.filter(|_| !had_temp && had_clock) {
+                // The clock in the corner: the thread's there.
+                aside = format!("{} · {}", thread_label(i), thread_text(i));
+            } else if on("clock") && kinds.len() > 1 {
                 let names: &[(&str, &str)] = if kinds.len() == 2 { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock")] } else { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock"), ("低功耗核频率", "LP E-core clock")] };
                 for (ghz, (zh, en)) in kinds.iter().zip(names) {
                     facts.push((lang.pick(zh, en).into(), shown(*ghz, |ghz| format!("{ghz:.2} GHz")), false));
@@ -780,9 +805,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                         .iter()
                         .map(|c| [c.name.clone(), shown(c.cpu, text::percent), shown(c.mem, text::size), shown(c.net, |rate| text::rate(rate, false)), shown(c.io, |rate| text::rate(rate, false))])
                         .collect(),
-                    // Room for as many as the processes' list has, kept as
-                    // they come and go.
-                    visible: if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) },
+                    // A row for each, as many as the processes' list shows at most.
+                    visible: containers.len().min(if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) }),
                     scrolls: false,
                     widths: CONTAINER_COLUMNS,
                 },
@@ -793,31 +817,52 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             use crate::reading::WslSample;
             // What it is doing at the top; a machine stopped or not there
             // keeps its rows, unread, so the lane does not change size.
-            let (state, distros, cpu, used, total) = match &s.wsl {
-                Some(WslSample::Missing) => (lang.pick("未安装", "Not installed"), None, None, None, None),
-                Some(WslSample::Stopped) => (lang.pick("已停止", "Stopped"), None, None, None, None),
-                Some(WslSample::Running { distros, cpu, used, total }) => (lang.pick("运行中", "Running"), distros.as_ref(), *cpu, *used, *total),
-                None => (UNREAD, None, None, None, None),
+            let (state, distros, cpu, used, total, gpu) = match &s.wsl {
+                Some(WslSample::Missing) => (lang.pick("未安装", "Not installed"), None, None, None, None, None),
+                Some(WslSample::Stopped) => (lang.pick("已停止", "Stopped"), None, None, None, None, None),
+                Some(WslSample::Running { distros, cpu, used, total, gpu }) => (lang.pick("运行中", "Running"), distros.as_ref(), *cpu, *used, *total, *gpu),
+                None => (UNREAD, None, None, None, None, None),
             };
             let names = match distros {
                 Some(names) if names.is_empty() => lang.pick("没有发行版在运行", "No distribution running").to_string(),
                 Some(names) => names.join(", "),
                 None => String::new(),
             };
-            let mut blocks = vec![
-                head("WSL", if on("distros") { names } else { String::new() }, state, false),
-                readout(cpu, Box::new(|s| match &s.wsl {
-                    Some(crate::reading::WslSample::Running { cpu, .. }) => cpu.map(f64::from),
-                    _ => None,
-                })),
-            ];
+            // Its processors in the figure (named, as the lane is not theirs
+            // alone), its memory charted under them, its GPU's use below.
+            let mut figure = readout(cpu, Box::new(|s| match &s.wsl {
+                Some(crate::reading::WslSample::Running { cpu, .. }) => cpu.map(f64::from),
+                _ => None,
+            }));
+            if let Block::Readout { unit, .. } = &mut figure {
+                *unit = "% CPU";
+            }
+            let mut blocks = vec![head("WSL", if on("distros") { names } else { String::new() }, state, false), figure];
             if on("memory") {
                 let both = used.zip(total);
+                let value = shown(both, |(used, total)| text::usage(used, total));
+                let series: Series = Box::new(|s| match &s.wsl {
+                    Some(crate::reading::WslSample::Running { used: Some(used), total: Some(total), .. }) => Some(*used as f64 / (*total).max(1) as f64 * 100.0),
+                    _ => None,
+                });
+                if chart {
+                    blocks.push(Block::Trace { label: lang.pick("内存", "Memory").into(), value, hot: false, plot: Plot::new(scene, vec![series], Some(100.0), None), gap: 10.0 });
+                } else {
+                    blocks.push(Block::Meter {
+                        label: lang.pick("内存", "Memory").into(),
+                        fraction: both.map_or(0.0, |(used, total)| used as f32 / total.max(1) as f32),
+                        value,
+                        hot: false,
+                        gap: 8.0,
+                    });
+                }
+            }
+            if on("gpu") {
                 blocks.push(Block::Meter {
-                    label: lang.pick("内存", "Memory").into(),
-                    fraction: both.map_or(0.0, |(used, total)| used as f32 / total.max(1) as f32),
-                    value: shown(both, |(used, total)| text::usage(used, total)),
-                    hot: false,
+                    label: "GPU".into(),
+                    fraction: gpu.unwrap_or(0.0) / 100.0,
+                    value: shown(gpu, text::percent),
+                    hot: gpu.is_some_and(|gpu| gpu > hot_load),
                     gap: 8.0,
                 });
             }
@@ -1168,7 +1213,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 name("value");
                 text_on_line(frame, figure, theme.figure, color, left, bottom, theme.figure.size * theme.figure_line, LABEL);
                 name("unit");
-                text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, 30.0);
+                text_on_line(frame, unit, theme.unit, theme.text2, left + figure_width + 3.0, bottom, theme.unit.size, (LABEL - figure_width - 3.0).max(30.0));
             }
             (Block::Rates { rows, .. }, Pass::Content) => {
                 for (i, (label, value)) in rows.iter().enumerate() {
@@ -1201,7 +1246,10 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     let Some(load) = load else { continue };
                     let cx = left + i as f32 * (cell + gap);
                     let cy = y + 10.0;
-                    frame.fill_rounded(theme.track, cx, cy, cell, 14.0, radius);
+                    // Its clock and load, in the CPU's facts, while the pointer is on it.
+                    hits.push((cx - gap / 2.0, y, cell + gap, 24.0, Hit::Thread(i as u16)));
+                    let track = if scene.hover == Some(Hit::Thread(i as u16)) { theme.text3 } else { theme.track };
+                    frame.fill_rounded(track, cx, cy, cell, 14.0, radius);
                     let filled = 14.0 * load.clamp(0.0, 1.0);
                     if filled > 0.0 {
                         // The load fills from the bottom, inside the cell's rounding.
@@ -1484,6 +1532,7 @@ mod tests {
             threads: vec![Some(10.0); 4],
             ghz: Some(3.0),
             kinds_ghz: Vec::new(),
+            threads_ghz: Vec::new(),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
             gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
             net_down: Some(0.0),
@@ -1535,6 +1584,23 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    #[test]
+    fn shows_the_clock_of_the_thread_pointed_at() {
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let mut read = sample(None, None, None);
+        read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
+        read.cpu_sensors = Some(crate::reading::CpuSensors { temp: Some(60.0), ccds: Vec::new(), power: None });
+        let history = leak(vec![read]);
+        let seen = Box::leak(Box::new(Seen::of(history)));
+        let scene = |hover| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover, pinned: false, overlay: false, buttons: true };
+        let still = lane(&scene(None), "cpu", Detail::Full).unwrap();
+        let pointed = lane(&scene(Some(Hit::Thread(2))), "cpu", Detail::Full).unwrap();
+        assert!(facts(&pointed).contains(&("Thread 3".into(), "5.40 GHz · 10%".into())), "{:?}", facts(&pointed));
+        // In the clock's place: the lane keeps its size.
+        assert_eq!(facts(&still).len(), facts(&pointed).len());
     }
 
     #[test]

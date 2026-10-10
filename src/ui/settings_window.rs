@@ -427,8 +427,8 @@ enum Target {
     Quit,
 }
 
-/// Modules few want: listed under "More" while off, out of the way.
-const MORE: [&str; 5] = ["board", "battery", "system", "wsl", "docker"];
+/// Modules for developers: listed under "More" while off, out of the way.
+const MORE: [&str; 2] = ["wsl", "docker"];
 
 enum Row {
     /// The page's name.
@@ -928,19 +928,10 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
-    /// The modules of `MORE` listed with the rest from here on: those on that
-    /// this machine has (one it has nothing for, a battery on a desktop, is
-    /// folded away on or off); the fold closed.
+    /// The modules of `MORE` listed with the rest from here on: those on; the
+    /// fold closed.
     fn raise_more(&mut self) {
-        let has = |id: &str| {
-            let seen = crate::app().controller.seen.lock().unwrap();
-            match id {
-                "battery" => seen.battery,
-                "board" => seen.board.is_some(),
-                _ => true,
-            }
-        };
-        self.raised = self.prefs.modules.iter().filter(|entry| MORE.contains(&entry.id.as_str()) && entry.on && has(&entry.id)).map(|entry| entry.id.clone()).collect();
+        self.raised = self.prefs.modules.iter().filter(|entry| MORE.contains(&entry.id.as_str()) && entry.on).map(|entry| entry.id.clone()).collect();
         self.more_open = false;
     }
 
@@ -1663,8 +1654,9 @@ impl Ui {
             ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("显卡是否被功耗墙或温度墙压住了频率（N 卡）", "Whether the GPU's clock is held back by its power or temperature limit (NVIDIA)"))),
             ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
-            ("wsl", "memory") => (p("内存", "Memory"), Some(p("WSL 占用的内存和它最多能用的内存", "What WSL holds of the memory, and the most it may"))),
+            ("wsl", "memory") => (p("内存", "Memory"), Some(p("WSL 占用的内存和它最多能用的内存；开着占用图表时画出走势", "What WSL holds of the memory, and the most it may; charted with the usage chart on"))),
             ("wsl", "distros") => (p("运行中的发行版", "Distributions running"), None),
+            ("wsl", "gpu") => ("GPU".into(), Some(p("WSL 里的程序（CUDA、图形界面等）占用的 GPU", "The GPU that programs in WSL use (CUDA, their windows)"))),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),

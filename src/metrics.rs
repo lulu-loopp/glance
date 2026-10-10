@@ -76,10 +76,9 @@ pub struct Sampler {
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
-    /// On a processor with cores of more than one kind: each logical
-    /// processor's performance and nominal clock, and its kind (see
-    /// `Kinds`).
-    kinds: Option<Kinds>,
+    /// Each logical processor's performance and nominal clock, and, on a
+    /// processor with cores of more than one kind, its kind (see `Cores`).
+    cores: Cores,
     gpu_engine: Option<PDH_HCOUNTER>,
     gpu_dedicated: Option<PDH_HCOUNTER>,
     gpu_shared: Option<PDH_HCOUNTER>,
@@ -133,12 +132,11 @@ impl Sampler {
         };
         let cpu_time = add(w!(r"\Processor Information(*)\% Processor Time"));
         let cpu_performance = add(w!(r"\Processor Information(_Total)\% Processor Performance"));
-        // Read for each logical processor only where there are kinds to tell apart.
-        let kinds = Kinds::of_this_machine().map(|classes| Kinds {
-            classes,
+        let cores = Cores {
+            classes: Cores::kinds_of_this_machine(),
             performance: add(w!(r"\Processor Information(*)\% Processor Performance")),
             nominal: add(w!(r"\Processor Information(*)\Processor Frequency")),
-        });
+        };
         let gpu_engine = add(w!(r"\GPU Engine(*)\Utilization Percentage"));
         let gpu_dedicated = add(w!(r"\GPU Adapter Memory(*)\Dedicated Usage"));
         let gpu_shared = add(w!(r"\GPU Adapter Memory(*)\Shared Usage"));
@@ -185,7 +183,7 @@ impl Sampler {
             query,
             cpu_time,
             cpu_performance,
-            kinds,
+            cores,
             gpu_engine,
             gpu_dedicated,
             gpu_shared,
@@ -335,6 +333,8 @@ impl Sampler {
                 }
             }
         }
+        // Each thread's clock, and each kind of core's.
+        let (kinds_ghz, threads_ghz) = if collected { self.cores.read(&group_starts, processors, &mut self.buf) } else { (Vec::new(), Vec::new()) };
         // Without the counters, the whole processor's use from the kernel's
         // own account of its time (and no per-thread grid).
         let times = system_times();
@@ -390,10 +390,8 @@ impl Sampler {
             cpu,
             threads,
             ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
-            kinds_ghz: match &self.kinds {
-                Some(kinds) if collected => kinds.read(&mut self.buf),
-                _ => Vec::new(),
-            },
+            kinds_ghz,
+            threads_ghz,
             memory: MemorySample {
                 used: (perf.PhysicalTotal - perf.PhysicalAvailable) as u64 * page,
                 committed: perf.CommitTotal as u64 * page,
@@ -423,7 +421,7 @@ impl Sampler {
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
-            wsl: self.wsl.as_mut().map(crate::wsl::Wsl::read),
+            wsl: self.wsl.as_mut().map(|wsl| wsl.read(self.gpu_by_pid.as_ref(), &self.processes.names)),
             docker: self.docker.as_ref().and_then(crate::docker::Docker::read),
             game: self.game(collected),
         })
@@ -568,20 +566,20 @@ unsafe extern "system" {
 
 /// Each active processor group's first processor, counted across the
 /// groups, and how many active processors there are in all.
-/// The kinds of cores a processor has (big and little: Windows' efficiency
-/// classes, the most capable highest), with what reads each logical
-/// processor's clock.
-struct Kinds {
+/// What reads each logical processor's clock, and the kinds of cores a
+/// processor has (big and little: Windows' efficiency classes, the most
+/// capable highest), where it has more than one.
+struct Cores {
     /// Each logical processor's class, by its counters' instance name
-    /// ("group,number").
-    classes: HashMap<String, u8>,
+    /// ("group,number"); none where they are all alike.
+    classes: Option<HashMap<String, u8>>,
     performance: Option<PDH_HCOUNTER>,
     nominal: Option<PDH_HCOUNTER>,
 }
 
-impl Kinds {
+impl Cores {
     /// Each logical processor's class, if they are not all alike.
-    fn of_this_machine() -> Option<HashMap<String, u8>> {
+    fn kinds_of_this_machine() -> Option<HashMap<String, u8>> {
         use windows::Win32::System::SystemInformation::{GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION};
         let mut needed = 0u32;
         let _ = unsafe { GetSystemCpuSetInformation(None, 0, &mut needed, None, None) };
@@ -608,15 +606,27 @@ impl Kinds {
         (kinds.len() > 1).then_some(classes)
     }
 
-    /// Each kind's clock now (GHz), the most capable first.
-    fn read(&self, buf: &mut Vec<u64>) -> Vec<Option<f32>> {
+    /// Each kind's clock now (GHz), the most capable first (none for a
+    /// processor whose cores are alike), and each of the `processors`
+    /// logical processors' (placed as `group_starts` say, as the threads'
+    /// loads are).
+    fn read(&self, group_starts: &[usize], processors: usize, buf: &mut Vec<u64>) -> (Vec<Option<f32>>, Vec<Option<f32>>) {
         let performance = self.performance.and_then(|c| read_array(c, buf)).unwrap_or_default();
         let nominal: HashMap<String, f64> = self.nominal.and_then(|c| read_array(c, buf)).unwrap_or_default().into_iter().filter_map(|(name, mhz)| Some((name, mhz?))).collect();
-        let clocks = performance.into_iter().filter_map(|(name, share)| {
-            let class = *self.classes.get(&name)?;
-            Some((class, share? / 100.0 * nominal.get(&name)? / 1000.0))
-        });
-        average_by_kind(&self.classes, clocks)
+        let clocks: Vec<(String, f64)> = performance.into_iter().filter_map(|(name, share)| Some((name.clone(), share? / 100.0 * nominal.get(&name)? / 1000.0))).collect();
+        let mut threads = vec![None; processors];
+        for (name, ghz) in &clocks {
+            let Some((group, index)) = name.split_once(',') else { continue };
+            let (Ok(group), Ok(index)) = (group.parse::<usize>(), index.parse::<usize>()) else { continue };
+            if let Some(cell) = group_starts.get(group).map(|start| start + index).and_then(|place| threads.get_mut(place)) {
+                *cell = Some(*ghz as f32);
+            }
+        }
+        let kinds = match &self.classes {
+            Some(classes) => average_by_kind(classes, clocks.iter().filter_map(|(name, ghz)| Some((*classes.get(name)?, *ghz)))),
+            None => Vec::new(),
+        };
+        (kinds, threads)
     }
 }
 
@@ -1303,14 +1313,16 @@ mod tests {
             let mut counter = PDH_HCOUNTER::default();
             (unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) } == ERROR_SUCCESS.0).then_some(counter)
         };
-        let kinds = Kinds { classes, performance: add(w!(r"\Processor Information(*)\% Processor Performance")), nominal: add(w!(r"\Processor Information(*)\Processor Frequency")) };
+        let kinds = Cores { classes: Some(classes), performance: add(w!(r"\Processor Information(*)\% Processor Performance")), nominal: add(w!(r"\Processor Information(*)\Processor Frequency")) };
         unsafe { PdhCollectQueryData(query) };
         std::thread::sleep(std::time::Duration::from_millis(1000));
         unsafe { PdhCollectQueryData(query) };
-        let read = kinds.read(&mut Vec::new());
-        println!("{read:?}");
+        let (starts, processors) = processor_groups();
+        let (read, threads) = kinds.read(&starts, processors, &mut Vec::new());
+        println!("{read:?} {threads:?}");
         assert!(read.len() == 2 && read.iter().all(|ghz| ghz.is_some_and(|ghz| (0.4..8.0).contains(&ghz))));
-        assert_eq!(Kinds::of_this_machine().map(|classes| classes.len()), None, "this machine's cores are all of one kind");
+        assert!(threads.len() == processors && threads.iter().all(Option::is_some));
+        assert_eq!(Cores::kinds_of_this_machine().map(|classes| classes.len()), None, "this machine's cores are all of one kind");
     }
 
     #[test]

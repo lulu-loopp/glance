@@ -6,8 +6,11 @@
 //! WSL owns; how busy its processors are is the hypervisor's own count of
 //! the time each spends running the guest, and what it takes of the
 //! machine's memory is the working set of the process that holds it
-//! (`vmmemWSL`), as Task Manager shows it.
+//! (`vmmemWSL`), as Task Manager shows it; the GPU its programs use is
+//! what Windows counts for the process that runs the machine (`vmwp`, given
+//! the machine's id when it is started).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +42,8 @@ pub struct Wsl {
     /// The distributions running, as last listed, and when that was asked.
     distros: Arc<Mutex<Option<Vec<String>>>>,
     listed: Option<Instant>,
+    /// The process running the machine whose id is the first, once found.
+    worker: Option<(String, usize)>,
     buf: Vec<u64>,
 }
 
@@ -59,6 +64,7 @@ impl Wsl {
             partition: None,
             distros: Arc::new(Mutex::new(None)),
             listed: None,
+            worker: None,
             buf: Vec::new(),
         };
         // A first reading, for the rates the next one gives.
@@ -66,7 +72,9 @@ impl Wsl {
         wsl
     }
 
-    pub fn read(&mut self) -> WslSample {
+    /// What WSL is doing now; `gpu_by_pid`, each process's use of the GPU,
+    /// and `names`, each process's name, as the sampler last read them.
+    pub fn read(&mut self, gpu_by_pid: Option<&HashMap<usize, Option<f32>>>, names: &HashMap<usize, String>) -> WslSample {
         if !installed() {
             return WslSample::Missing;
         }
@@ -106,7 +114,18 @@ impl Wsl {
             });
         }
         let distros = self.distros.lock().unwrap().clone();
-        WslSample::Running { distros, cpu, used, total }
+        // The process running this machine: found among those called vmwp
+        // by its id, once (a new machine has a new one).
+        if self.worker.as_ref().is_none_or(|(of, _)| *of != id) {
+            self.worker = names
+                .iter()
+                .filter(|(_, name)| name.eq_ignore_ascii_case("vmwp"))
+                .find(|(pid, _)| command_line(**pid as u32).is_some_and(|line| line.to_uppercase().contains(&id)))
+                .map(|(pid, _)| (id.clone(), *pid));
+        }
+        // One the counters list nothing for uses none.
+        let gpu = self.worker.as_ref().zip(gpu_by_pid).and_then(|((_, pid), by_pid)| by_pid.get(pid).copied().unwrap_or(Some(0.0)));
+        WslSample::Running { distros, cpu, used, total, gpu }
     }
 }
 
@@ -114,6 +133,25 @@ impl Drop for Wsl {
     fn drop(&mut self) {
         unsafe { PdhCloseQuery(self.query) };
     }
+}
+
+/// The command line process `pid` was started with.
+fn command_line(pid: u32) -> Option<String> {
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessCommandLineInformation};
+    use windows::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let mut buf = vec![0u64; 512];
+    let mut length = 0u32;
+    let status = unsafe { NtQueryInformationProcess(process, ProcessCommandLineInformation, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut length) };
+    let _ = unsafe { CloseHandle(process) };
+    if status.is_err() {
+        return None;
+    }
+    // A UNICODE_STRING, its characters after it in the same buffer.
+    let text = unsafe { &*(buf.as_ptr() as *const UNICODE_STRING) };
+    let chars = unsafe { std::slice::from_raw_parts(text.Buffer.0, text.Length as usize / 2) };
+    Some(String::from_utf16_lossy(chars))
 }
 
 /// Whether WSL has a distribution registered for this user.
@@ -188,8 +226,8 @@ mod tests {
         let mut wsl = Wsl::new();
         for _ in 0..4 {
             std::thread::sleep(Duration::from_millis(1000));
-            println!("{}", serde_json::to_string(&wsl.read()).unwrap());
+            println!("{}", serde_json::to_string(&wsl.read(None, &HashMap::new())).unwrap());
         }
-        assert!(matches!(wsl.read(), WslSample::Running { distros: Some(_), cpu: Some(_), used: Some(_), total: Some(_) }));
+        assert!(matches!(wsl.read(None, &HashMap::new()), WslSample::Running { distros: Some(_), cpu: Some(_), used: Some(_), total: Some(_), .. }));
     }
 }

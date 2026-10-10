@@ -846,6 +846,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         threads,
         ghz: Some(ghz),
         kinds_ghz: Vec::new(),
+        threads_ghz: Vec::new(),
         memory: MemorySample { used, committed: used + 6 * gb, commit_limit: info.mem_total + 8 * gb, cached: 12 * gb },
         gpus,
         net_down: Some(net_down),
@@ -891,6 +892,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
             cpu: Some(4.0 + 18.0 * busy),
             used: Some(6 * gb + (busy * 2.0 * gb as f32) as u64),
             total: Some(31 * gb),
+            gpu: Some(12.0 * busy),
         }),
         docker: Some(crate::reading::DockerSample::Running {
             context: "desktop-linux".into(),

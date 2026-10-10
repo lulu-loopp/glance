@@ -38,6 +38,7 @@ windows-core = "0.62"
 version = "0.62"
 features = [
     "Wdk_Graphics_Direct3D",
+    "Wdk_System_Threading",
     "Foundation",
     "Graphics",
     "Graphics_DirectX",

@@ -66,6 +66,8 @@ pub struct Sample {
     /// each kind's clock, its cores' average (GHz), the most capable kind
     /// first; empty on one whose cores are all alike.
     pub kinds_ghz: Vec<Option<f32>>,
+    /// Each logical processor's clock (GHz), in the order of `threads`.
+    pub threads_ghz: Vec<Option<f32>>,
     pub memory: MemorySample,
     pub gpus: Vec<GpuSample>,
     pub net_down: Option<f64>,
@@ -143,6 +145,10 @@ pub enum WslSample {
         /// What it takes of the machine's memory, and what it may (bytes).
         used: Option<u64>,
         total: Option<u64>,
+        /// How much of the GPU its programs use (CUDA, DirectML, its
+        /// desktop's windows), as Windows counts it for the machine's
+        /// worker process (percent).
+        gpu: Option<f32>,
     },
 }
 
