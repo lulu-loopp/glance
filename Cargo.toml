@@ -79,6 +79,7 @@ features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinHttp",
     "Win32_Networking_WinSock",
+    "Win32_System_HostComputeSystem",
     "Win32_System_IO",
     "Win32_System_Ioctl",
     "Win32_System_Memory",

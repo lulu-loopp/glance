@@ -958,6 +958,7 @@ mod tests {
                 playing_s: 0,
                 by_hand: false,
             }),
+            wsl: None,
         }
     }
 

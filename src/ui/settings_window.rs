@@ -417,6 +417,8 @@ enum Target {
     Slider(Field),
     /// A page, in the pages' list.
     Page(Page),
+    /// Opens or closes the fold of the modules few want.
+    More,
     /// Asks for a newer release now.
     CheckNow,
     Diagnostics,
@@ -425,9 +427,14 @@ enum Target {
     Quit,
 }
 
+/// Modules few want: listed under "More" while off, out of the way.
+const MORE: [&str; 4] = ["board", "battery", "system", "wsl"];
+
 enum Row {
     /// The page's name.
     Title,
+    /// The fold of the modules few want, and how many it holds.
+    More(usize),
     Skins,
     Choice(Field),
     Switch(Switch),
@@ -508,6 +515,11 @@ struct Ui {
     sliding: Option<(Field, Rect)>,
     /// The modules whose cards are open (all closed as the window opens).
     expanded: HashSet<String>,
+    /// The modules of `MORE` listed with the rest (those on as the page was
+    /// turned to: one switched on or off there stays where it is till then),
+    /// and whether the fold of the others is open.
+    raised: HashSet<String>,
+    more_open: bool,
     targets: Vec<(Rect, Target)>,
     relabel_at: Option<Instant>,
     stage: Stage,
@@ -604,6 +616,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             drag: None,
             sliding: None,
             expanded: HashSet::new(),
+            raised: HashSet::new(),
+            more_open: false,
             targets: Vec::new(),
             relabel_at: None,
             stage,
@@ -612,6 +626,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             next_frame: Instant::now(),
             failed: false,
         };
+        ui.raise_more();
         ui.restyle();
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
@@ -842,12 +857,24 @@ impl Ui {
             ]),
             Page::Shown => {
                 rows.push(Row::Choice(Field::Columns));
-                for entry in &self.prefs.modules {
-                    rows.push(Row::Module(entry.id.clone()));
+                let module = |rows: &mut Vec<Row>, id: &str| {
+                    rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
-                    if self.opened(&entry.id) > 0.0 {
-                        rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
-                        rows.extend(module_fields(&entry.id).iter().map(|field| Row::ModuleChoice(entry.id.clone(), *field)));
+                    if self.opened(id) > 0.0 {
+                        rows.extend(self.items_here(id).into_iter().map(|name| Row::Item(id.to_string(), name)));
+                        rows.extend(module_fields(id).iter().map(|field| Row::ModuleChoice(id.to_string(), *field)));
+                    }
+                };
+                let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) = self.prefs.modules.iter().partition(|entry| self.folded(&entry.id));
+                for entry in listed {
+                    module(&mut rows, &entry.id);
+                }
+                if !folded.is_empty() {
+                    rows.push(Row::More(folded.len()));
+                    if self.more_open {
+                        for entry in folded {
+                            module(&mut rows, &entry.id);
+                        }
                     }
                 }
             }
@@ -896,8 +923,30 @@ impl Ui {
             self.scroll = 0.0;
             self.scroll_target = 0.0;
             self.drag = None;
+            self.raise_more();
         }
         self.next_frame = Instant::now();
+    }
+
+    /// The modules of `MORE` listed with the rest from here on: those on that
+    /// this machine has (one it has nothing for, a battery on a desktop, is
+    /// folded away on or off); the fold closed.
+    fn raise_more(&mut self) {
+        let has = |id: &str| {
+            let seen = crate::app().controller.seen.lock().unwrap();
+            match id {
+                "battery" => seen.battery,
+                "board" => seen.board.is_some(),
+                _ => true,
+            }
+        };
+        self.raised = self.prefs.modules.iter().filter(|entry| MORE.contains(&entry.id.as_str()) && entry.on && has(&entry.id)).map(|entry| entry.id.clone()).collect();
+        self.more_open = false;
+    }
+
+    /// Whether module `id` is listed in the fold rather than with the rest.
+    fn folded(&self, id: &str) -> bool {
+        MORE.contains(&id) && !self.raised.contains(id)
     }
 
     /// Each row with its top and height, from the top of the list (DIPs).
@@ -1469,6 +1518,7 @@ impl Ui {
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
+            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
     }
@@ -1611,6 +1661,8 @@ impl Ui {
             ("game", "limit") => (p("显卡限制", "GPU limit"), Some(p("显卡是否被功耗墙或温度墙压住了频率（N 卡）", "Whether the GPU's clock is held back by its power or temperature limit (NVIDIA)"))),
             ("game", "mic") => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音，静音时标红", "Whether the default microphone is muted: red while it is"))),
             ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
+            ("wsl", "memory") => (p("内存", "Memory"), Some(p("WSL 占用的内存和它最多能用的内存", "What WSL holds of the memory, and the most it may"))),
+            ("wsl", "distros") => (p("运行中的发行版", "Distributions running"), None),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),
@@ -1760,6 +1812,10 @@ impl Ui {
                 let open = !self.expanded.contains(&id);
                 self.set_open(&id, open, false);
             }
+            Target::More => {
+                self.more_open ^= true;
+                self.animate("chevron:more".into(), if self.more_open { 180.0 } else { 0.0 }, SLIDE, Instant::now(), false);
+            }
             // An item is changed only while its module is on.
             Target::Item(id, name) if self.module_on(&id) => {
                 let on = self.item_on(&id, &name);
@@ -1830,6 +1886,7 @@ impl Ui {
                 Row::Diagnostics => vec![Target::Diagnostics],
                 Row::Uninstall => vec![Target::Uninstall],
                 Row::Quit => vec![Target::Quit],
+                Row::More(_) => vec![Target::More],
                 Row::Title => vec![],
             }))
             .collect()
@@ -1920,13 +1977,27 @@ impl Ui {
     /// Moves module `id` one place up or down the list.
     fn shift_module(&mut self, id: &str, down: bool) {
         let before = self.row_tops();
-        let (list, bare) = self.list(id);
-        let Some(at) = list.iter().position(|entry| entry.id == bare) else { return };
-        let to = if down { at + 1 } else { at.wrapping_sub(1) };
-        if to >= list.len() {
+        // Past the next module listed with it: one in the fold, or listed
+        // there, is passed over.
+        let folded = |other: &str| !id.starts_with(OVERLAY) && self.folded(other);
+        if folded(id) {
             return;
         }
-        list.swap(at, to);
+        let skip: Vec<String> = self.prefs.modules.iter().filter(|entry| folded(&entry.id)).map(|entry| entry.id.clone()).collect();
+        let (list, bare) = self.list(id);
+        let Some(at) = list.iter().position(|entry| entry.id == bare) else { return };
+        let mut to = at;
+        loop {
+            to = if down { to + 1 } else { to.wrapping_sub(1) };
+            if to >= list.len() {
+                return;
+            }
+            if !skip.contains(&list[to].id) {
+                break;
+            }
+        }
+        let entry = list.remove(at);
+        list.insert(to, entry);
         self.glide_rows(before, "");
         self.save();
         self.reveal_focus();
@@ -1989,7 +2060,7 @@ impl Ui {
         let (list, bare) = self.list(&id);
         let held = list.iter().position(|entry| entry.id == bare).unwrap();
         let entry = list.remove(held);
-        let next = list.iter().position(|other| middle < before[&format!("{prefix}{}", other.id)] + ROW / 2.0).unwrap_or(list.len());
+        let next = list.iter().position(|other| before.get(&format!("{prefix}{}", other.id)).is_some_and(|top| middle < top + ROW / 2.0)).unwrap_or(list.len());
         list.insert(next, entry);
         if next == held {
             return;
@@ -2009,12 +2080,13 @@ impl Ui {
         let after = self.row_tops();
         let id = moved.to_string();
         for (other, was) in before {
-            if other == id || after[&other] == was {
+            let Some(&now_at) = after.get(&other) else { continue };
+            if other == id || now_at == was {
                 continue;
             }
             let key = format!("row:{other}");
             let current = self.motion.get(&key).map_or(0.0, |t| t.value(now));
-            let mut glide = Transition::settled(was - after[&other] + current);
+            let mut glide = Transition::settled(was - now_at + current);
             glide.retarget(0.0, GLIDE.0, GLIDE.1, now);
             self.motion.insert(key, glide);
         }
@@ -2198,6 +2270,7 @@ impl Ui {
             };
             let usable = inside.unwrap_or(true);
             match row {
+                Row::More(count) => self.more_row(frame, palette, count, left, y, width, row_height, now),
                 Row::Title => {
                     let title = Font::new(Family::SegoeDisplay, 28.0, 600.0);
                     text_centred(frame, self.page.name(lang), title, palette.text, left, y + 22.0, width, Align::Start);
@@ -2369,6 +2442,29 @@ impl Ui {
 
     /// A module's row, and when its card is open (`reach` below the row's
     /// top), the card around the rows inside it: one rounded box.
+    /// The fold of the modules few want: its name, what is in it, and a
+    /// chevron that turns over as it opens.
+    #[allow(clippy::too_many_arguments)]
+    fn more_row(&mut self, frame: &Frame, palette: &Palette, count: usize, left: f32, y: f32, width: f32, height: f32, now: Instant) {
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
+        let hint = Font::new(Family::Segoe, 12.0, 400.0);
+        card(frame, palette, left, y, width, height, palette.card);
+        let cy = y + height / 2.0;
+        let turn = self.animate("chevron:more".into(), if self.more_open { 180.0 } else { 0.0 }, SLIDE, now, false);
+        let chevron = Font::new(Family::Icons, 12.0, 400.0);
+        let glyph = "\u{E70D}";
+        let glyph_w = frame.gfx.measure(glyph, chevron);
+        let cx = left + width - ROW_SIDE - 6.0;
+        frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
+        text_centred(frame, glyph, chevron, palette.text2, cx - glyph_w / 2.0, cy, glyph_w + 4.0, Align::Start);
+        frame.origin(0.0, 0.0);
+        let names: Vec<String> = self.prefs.modules.iter().filter(|entry| self.folded(&entry.id)).map(|entry| self.module(&entry.id).0).collect();
+        let title = if self.lang == Lang::Zh { format!("更多模块（{count}）") } else { format!("More modules ({count})") };
+        let text_left = left + ITEM_INSET;
+        field_label_line(frame, palette, &title, Some(&names.join(pick(self.lang, "、", ", "))), label, hint, text_left, cy, cx - 24.0 - text_left);
+        self.targets.push((Rect { x: left, y, w: width, h: height }, Target::More));
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn module_row(&mut self, frame: &Frame, palette: &Palette, id: &str, left: f32, y: f32, width: f32, height: f32, reach: f32, now: Instant, hovered: &Option<Target>, held: bool) {
         let label = Font::new(Family::Segoe, 14.0, 400.0);
@@ -2387,12 +2483,14 @@ impl Ui {
         }
         let on = self.module_on(id);
         let (title, detail) = self.module(id);
-        // The grip: six dots, to drag the row by.
+        // The grip: six dots, to drag the row by (none in the fold, where a
+        // module has no place among the others).
         let grip = Rect { x: left + 12.0, y: y + height / 2.0 - 16.0, w: 20.0, h: 32.0 };
-        if *hovered == Some(Target::Grip(id.to_string())) || held {
+        let draggable = !self.folded(id);
+        if draggable && (*hovered == Some(Target::Grip(id.to_string())) || held) {
             fill(frame, palette.hover, grip.x, grip.y, grip.w, grip.h, 4.0);
         }
-        for (dx, dy) in [(-2.0, -5.0), (2.0, -5.0), (-2.0, 0.0), (2.0, 0.0), (-2.0, 5.0), (2.0, 5.0)] {
+        for (dx, dy) in [(-2.0, -5.0), (2.0, -5.0), (-2.0, 0.0), (2.0, 0.0), (-2.0, 5.0), (2.0, 5.0)].into_iter().filter(|_| draggable) {
             let dot = D2D1_ELLIPSE { point: Vector2 { X: grip.x + 10.0 + dx, Y: grip.y + 16.0 + dy }, radiusX: 1.2, radiusY: 1.2 };
             unsafe { frame.dc.FillEllipse(&dot, frame.brush(palette.text3)) };
         }
@@ -2419,7 +2517,9 @@ impl Ui {
         if !held {
             // The grip drags, the switch switches, and the rest of the row
             // opens and closes the card (or, with none, switches too).
-            self.targets.push((grip, Target::Grip(id.to_string())));
+            if draggable {
+                self.targets.push((grip, Target::Grip(id.to_string())));
+            }
             let switch_area = Rect { x: switch_left - 12.0, y, w: 40.0 + 24.0, h: height };
             self.targets.push((switch_area, Target::Module(id.to_string())));
             let row = Rect { x: left, y, w: width, h: height };

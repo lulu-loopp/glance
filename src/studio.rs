@@ -458,7 +458,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -883,6 +883,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
         mic_muted: Some(false),
         game,
+        wsl: None,
     }
 }
 

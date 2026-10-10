@@ -69,6 +69,8 @@ struct Slow {
 pub struct Sampler {
     /// When the system last started (see `Started`).
     started: Started,
+    /// WSL, while its module is on.
+    wsl: Option<crate::wsl::Wsl>,
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
@@ -194,6 +196,7 @@ impl Sampler {
             buf: Vec::new(),
             info,
             started: Started::read(),
+            wsl: None,
         }
     }
 
@@ -281,7 +284,13 @@ impl Sampler {
     /// the expensive part and nothing charts it, so the caller says when it is
     /// worth refreshing. Returns `None` when PDH has no valid data for this
     /// interval (it reports that for a tick now and then, e.g. after resume).
-    pub fn sample(&mut self, refresh_slow: bool) -> Option<Sample> {
+    /// A sample now; `refresh_slow`, with what is read less often read
+    /// again; `wsl`, with WSL watched (its module on).
+    pub fn sample(&mut self, refresh_slow: bool, wsl: bool) -> Option<Sample> {
+        // Watched only while asked for: nothing is read for it otherwise.
+        if wsl != self.wsl.is_some() {
+            self.wsl = wsl.then(crate::wsl::Wsl::new);
+        }
         // Counters not collected this time read as absent, not as their
         // last values; what does not depend on them is sampled regardless.
         let collected = unsafe { PdhCollectQueryData(self.query) } == ERROR_SUCCESS.0;
@@ -391,6 +400,7 @@ impl Sampler {
             drive_temps: crate::drives::temperatures(),
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
+            wsl: self.wsl.as_mut().map(crate::wsl::Wsl::read),
             game: self.game(collected),
         })
     }
@@ -660,7 +670,7 @@ fn valid(status: u32) -> bool {
     status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA
 }
 
-fn read_scalar(counter: PDH_HCOUNTER, format: PDH_FMT) -> Option<f64> {
+pub(crate) fn read_scalar(counter: PDH_HCOUNTER, format: PDH_FMT) -> Option<f64> {
     let mut value = PDH_FMT_COUNTERVALUE::default();
     let status = unsafe { PdhGetFormattedCounterValue(counter, format, None, &mut value) };
     (status == ERROR_SUCCESS.0 && valid(value.CStatus)).then(|| unsafe { value.Anonymous.doubleValue })
@@ -668,7 +678,7 @@ fn read_scalar(counter: PDH_HCOUNTER, format: PDH_FMT) -> Option<f64> {
 
 /// Reads every instance of a wildcard counter as (instance name, value); an
 /// instance whose data is not valid this time has no value.
-fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Vec<(String, Option<f64>)>> {
+pub(crate) fn read_array(counter: PDH_HCOUNTER, buf: &mut Vec<u64>) -> Option<Vec<(String, Option<f64>)>> {
     loop {
         let mut bytes = (buf.len() * 8) as u32;
         let mut count = 0u32;
@@ -1198,7 +1208,7 @@ mod tests {
     fn samples_this_machine() {
         let mut sampler = Sampler::new();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let sample = sampler.sample(true).expect("a valid sample after one interval");
+        let sample = sampler.sample(true, true).expect("a valid sample after one interval");
         println!("{}", serde_json::to_string_pretty(&sampler.info).unwrap());
         println!("{}", serde_json::to_string_pretty(&sample).unwrap());
         assert_eq!(sample.threads.len(), sampler.info.threads);

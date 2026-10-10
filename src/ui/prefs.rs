@@ -73,6 +73,7 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
+const WSL: [Item; 3] = [item("chart", true), item("memory", true), item("distros", true)];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
 const GAME: [Item; 9] = [
     item("chart", true),
@@ -99,6 +100,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "storage" => &STORAGE,
         "battery" => &BATTERY,
         "system" => &SYSTEM,
+        "wsl" => &WSL,
         "game" => &GAME,
         _ => &[],
     }
@@ -215,7 +217,13 @@ impl Default for ProcessPrefs {
 }
 
 /// Modules off until chosen.
-const DEFAULT_OFF: [&str; 1] = ["system"];
+const DEFAULT_OFF: [&str; 2] = ["system", "wsl"];
+
+/// Whether module `id` is on in the stored preferences `stored` (as kept,
+/// before they are resolved: off unless listed on).
+pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
+    stored["modules"].as_array().is_some_and(|modules| modules.iter().any(|entry| entry["id"] == id && entry["on"] == true))
+}
 
 /// `entries` matched to this machine's modules (`known`, in default order):
 /// modules it no longer has are dropped, new ones put where the default

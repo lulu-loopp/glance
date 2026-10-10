@@ -208,6 +208,7 @@ impl Sampler {
             dimm_temps: Vec::new(),
             mic_muted: None,
             game: None,
+            wsl: None,
         };
         self.previous = Previous {
             at: now,

@@ -732,6 +732,40 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 Block::Facts { rows: facts, gap: 8.0 },
             ]
         }
+        "wsl" => {
+            use crate::reading::WslSample;
+            // What it is doing at the top; a machine stopped or not there
+            // keeps its rows, unread, so the lane does not change size.
+            let (state, distros, cpu, used, total) = match &s.wsl {
+                Some(WslSample::Missing) => (lang.pick("未安装", "Not installed"), None, None, None, None),
+                Some(WslSample::Stopped) => (lang.pick("已停止", "Stopped"), None, None, None, None),
+                Some(WslSample::Running { distros, cpu, used, total }) => (lang.pick("运行中", "Running"), distros.as_ref(), *cpu, *used, *total),
+                None => (UNREAD, None, None, None, None),
+            };
+            let names = match distros {
+                Some(names) if names.is_empty() => lang.pick("没有发行版在运行", "No distribution running").to_string(),
+                Some(names) => names.join(", "),
+                None => String::new(),
+            };
+            let mut blocks = vec![
+                head("WSL", if on("distros") { names } else { String::new() }, state, false),
+                readout(cpu, Box::new(|s| match &s.wsl {
+                    Some(crate::reading::WslSample::Running { cpu, .. }) => cpu.map(f64::from),
+                    _ => None,
+                })),
+            ];
+            if on("memory") {
+                let both = used.zip(total);
+                blocks.push(Block::Meter {
+                    label: lang.pick("内存", "Memory").into(),
+                    fraction: both.map_or(0.0, |(used, total)| used as f32 / total.max(1) as f32),
+                    value: shown(both, |(used, total)| text::usage(used, total)),
+                    hot: false,
+                    gap: 8.0,
+                });
+            }
+            blocks
+        }
         "system" => {
             let rows = [
                 ("uptime", lang.pick("开机时长", "Uptime"), lang.duration(s.system.uptime_s)),
@@ -1403,6 +1437,7 @@ mod tests {
             dimm_temps: Vec::new(),
             mic_muted: None,
             game: None,
+            wsl: None,
         }
     }
 

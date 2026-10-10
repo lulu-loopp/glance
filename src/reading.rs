@@ -91,6 +91,26 @@ pub struct Sample {
     /// The game presenting frames, the one on the pointer's screen first;
     /// none while no game presents frames.
     pub game: Option<GameSample>,
+    /// WSL 2, while its module is on (none: not watched).
+    pub wsl: Option<WslSample>,
+}
+
+/// WSL 2 as Windows sees it.
+#[derive(Clone, Serialize)]
+pub enum WslSample {
+    /// No distribution registered.
+    Missing,
+    /// Its virtual machine not running.
+    Stopped,
+    Running {
+        /// The distributions running, by name; none until first listed.
+        distros: Option<Vec<String>>,
+        /// How busy its processors are, all of them on average (percent).
+        cpu: Option<f32>,
+        /// What it takes of the machine's memory, and what it may (bytes).
+        used: Option<u64>,
+        total: Option<u64>,
+    },
 }
 
 /// A game and its frames.

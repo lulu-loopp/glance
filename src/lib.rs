@@ -52,6 +52,8 @@ mod update;
 mod watch;
 #[cfg(windows)]
 mod widget;
+#[cfg(windows)]
+mod wsl;
 
 
 #[cfg(windows)]
@@ -332,7 +334,10 @@ pub fn run() {
         let mut watch = watch::Watch::default();
         let mut next = Instant::now();
         for tick in 0u64.. {
-            let interval = app().settings.lock().unwrap().interval();
+            let (interval, wsl) = {
+                let settings = app().settings.lock().unwrap();
+                (settings.interval(), ui::prefs::module_on(&settings.view, "wsl"))
+            };
             next += interval;
             // Fallen far behind (the machine slept): carry on from now rather
             // than sampling again and again to catch up.
@@ -342,7 +347,7 @@ pub fn run() {
             }
             thread::sleep(next.saturating_duration_since(now));
             let refresh_slow = controller.is_shown() || ui::settings_window::is_open() || tick % HIDDEN_SLOW_TICKS == 0;
-            if let Some(sample) = sampler.sample(refresh_slow) {
+            if let Some(sample) = sampler.sample(refresh_slow, wsl) {
                 watch.sample(&sample, Instant::now());
                 controller.record(sample);
             }
