@@ -127,6 +127,12 @@ for administrator rights at every start and cannot start with Windows.
   off; drag modules to change their order. WSL and Docker are folded away
   under *More modules* until switched on.
 - **Close it**: move the pointer away, or press Esc.
+- **Fix the display**: turn on Fixed display in Settings → Opening, then
+  choose a Windows display. Off by default, the panel follows the mouse.
+  When on, the shortcut and tray open on the chosen display, and
+  pushing the edge works only on that display. Moving outward across a shared
+  edge opens immediately, unless edge opening is off. A disconnected display falls
+  back to the primary until reconnected. Desktop widgets can still move independently.
 - **Size it**: drag the panel's edges, as soon as it opens.
 - **Keep it on the desktop**: drag the panel away from the edge and it tears
   off as a widget (see [Desktop widgets](#desktop-widgets)), onto another

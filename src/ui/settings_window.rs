@@ -42,7 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
-    WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_DPICHANGED, WM_DISPLAYCHANGE, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows_numerics::{Matrix3x2, Vector2};
@@ -65,6 +65,7 @@ use crate::metrics;
 use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
 use crate::panel::SIZES;
 use crate::update;
+use windows::Win32::Graphics::Gdi::ClientToScreen;
 
 /// The window's size, and the least it can be resized to (DIPs).
 const SIZE: (f32, f32) = (1300.0, 760.0);
@@ -348,6 +349,7 @@ impl Page {
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
+    Screen,
     Theme,
     Language,
     Edge,
@@ -387,6 +389,7 @@ type ButtonRow = (String, String, Vec<(String, Target, Button)>);
 /// A row that is on or off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Switch {
+    FixedScreen,
     Live,
     Seam,
     Startup,
@@ -470,6 +473,7 @@ struct Stage {
 }
 
 struct Ui {
+    displays: Vec<crate::os::Display>,
     hwnd: HWND,
     gfx: Rc<Gfx>,
     /// Out of the struct while a frame is drawn on it.
@@ -586,6 +590,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let stage = Stage { size, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
+            displays: crate::os::displays(),
             hwnd,
             gfx,
             surface,
@@ -628,6 +633,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         };
         ui.raise_more();
         ui.restyle();
+        ui.preview_display();
         ui.draw(Instant::now());
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
         // Glance started hidden (by the scheduler, an installer, a script)
@@ -654,6 +660,17 @@ fn point(lparam: LPARAM) -> (i32, i32) {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
+        WM_DISPLAYCHANGE => {
+            with_ui(|ui| {
+                ui.displays = crate::os::displays();
+                ui.pressed = None;
+                ui.focus = None;
+                ui.targets.clear();
+                ui.preview_display();
+                ui.next_frame = Instant::now();
+            });
+            LRESULT(0)
+        }
         WM_GETMINMAXINFO => {
             let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
             let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
@@ -837,24 +854,32 @@ impl Ui {
 
     /// Takes `settings`, as they are now, as its own.
     fn take(&mut self, settings: Settings) {
+        let screen_changed = self.settings.panel_screen != settings.panel_screen;
         self.prefs = Prefs::resolve(&settings.view, &crate::app().controller.known_modules());
         self.base = settings.clone();
         self.settings = settings;
+        if screen_changed { self.preview_display(); }
     }
 
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![Row::Title];
         match self.page {
             Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
-            Page::Opening => rows.extend([
-                Row::Choice(Field::Edge),
-                Row::Choice(Field::Anchor),
-                Row::Choice(Field::Push),
-                Row::Switch(Switch::Seam),
-                Row::Choice(Field::CloseDelay),
-                Row::Shortcut,
-                Row::Choice(Field::OverFullscreen),
-            ]),
+            Page::Opening => {
+                rows.push(Row::Switch(Switch::FixedScreen));
+                if self.settings.panel_screen.is_some() {
+                    rows.push(Row::Choice(Field::Screen));
+                }
+                rows.extend([
+                    Row::Choice(Field::Edge),
+                    Row::Choice(Field::Anchor),
+                    Row::Choice(Field::Push),
+                    Row::Switch(Switch::Seam),
+                    Row::Choice(Field::CloseDelay),
+                    Row::Shortcut,
+                    Row::Choice(Field::OverFullscreen),
+                ]);
+            }
             Page::Shown => {
                 rows.push(Row::Choice(Field::Columns));
                 let module = |rows: &mut Vec<Row>, id: &str| {
@@ -964,6 +989,7 @@ impl Ui {
             // A heading's space above it takes in the title's below; the
             // first row of a group sits 8 under its heading, the rest 4 apart.
             let (before, height) = match &row {
+                Row::Choice(Field::Screen) => (ROW_GAP, ROW),
                 Row::Title => (0.0, TITLE),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
@@ -1154,6 +1180,34 @@ impl Ui {
         let (settings, prefs) = (&self.settings, &self.prefs);
         let at = |values: &[u64], value: u64| values.iter().position(|&v| v == value);
         match field {
+            Field::Screen => {
+                let mut options = Vec::new();
+                options.extend(self.displays.iter().map(|display| {
+                    let number = display.id.rsplit("DISPLAY").next().unwrap_or(&display.id);
+                    let primary = if display.primary {
+                        pick(lang, " · 主屏", " · Primary")
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{} {} · {}×{}{}",
+                        pick(lang, "屏幕", "Display"),
+                        number,
+                        display.bounds.right - display.bounds.left,
+                        display.bounds.bottom - display.bounds.top,
+                        primary
+                    )
+                }));
+                let chosen = match settings.panel_screen.as_deref() {
+                    None => None,
+                    Some(id) => self.displays.iter().position(|display| display.id == id),
+                };
+                if chosen.is_none() {
+                    options.push(s("已断开 · 暂用主屏", "Disconnected · Using primary"));
+                }
+                let chosen = chosen.or(Some(options.len() - 1));
+                (pick(lang, "选择屏幕", "Choose display"), options, chosen)
+            }
             Field::Theme => (
                 pick(lang, "明暗", "Theme"),
                 vec![s("跟随系统", "System"), s("浅色", "Light"), s("深色", "Dark"), s("跟随背景", "Backdrop")],
@@ -1238,6 +1292,13 @@ impl Ui {
     fn choose(&mut self, field: Field, index: usize) {
         let (settings, prefs) = (&mut self.settings, &mut self.prefs);
         match field {
+            Field::Screen => {
+                if let Some(display) = self.displays.get(index) {
+                    settings.panel_screen = Some(display.id.clone());
+                } else {
+                    return;
+                }
+            }
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
             Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
@@ -1259,11 +1320,42 @@ impl Ui {
         }
         self.save();
         match field {
+            Field::Screen => self.preview_display(),
             Field::Theme => self.restyle(),
             // Everything is relabelled in the new language once the thumb
             // has slid; mid-way it would jump.
             Field::Language => self.relabel_at = Some(Instant::now() + SLIDE.0),
             _ => {}
+        }
+    }
+
+    /// Lay out the preview at the selected display's actual work area and DPI.
+    fn preview_display(&mut self) {
+        let selected = self
+            .settings
+            .panel_screen
+            .as_deref()
+            .and_then(|id| crate::os::selected_display(&self.displays, id))
+            .and_then(|display| {
+                let bounds = display.bounds;
+                crate::panel::monitor_at(POINT {
+                    x: bounds.left + (bounds.right - bounds.left) / 2,
+                    y: bounds.top + (bounds.bottom - bounds.top) / 2,
+                })
+            })
+            .map(|contact| (contact.work, contact.scale as f64))
+            .or_else(crate::panel::work_area_at_cursor);
+        if let Some((work, scale)) = selected {
+            let size = (
+                (work.right - work.left) as f32 / scale as f32,
+                (work.bottom - work.top) as f32 / scale as f32,
+            );
+            self.stage = Stage {
+                size,
+                desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32),
+                bitmap: None,
+            };
+            self.layers.release();
         }
     }
 
@@ -1383,6 +1475,11 @@ impl Ui {
         let lang = self.lang;
         let p = |zh, en| pick(lang, zh, en);
         let (name, hint, on) = match switch {
+            Switch::FixedScreen => (
+                p("固定屏幕", "Fixed display"),
+                Some(p("在指定屏幕显示面板", "Show the panel on a chosen display")),
+                self.settings.panel_screen.is_some(),
+            ),
             Switch::Live => (
                 p("背景实时刷新", "Live backdrop"),
                 Some(p("玻璃和亚克力背后的桌面随时更新；面板和小组件不进截图，录屏可能暂停", "The desktop behind glass and acrylic keeps up; the panel and widgets stay out of captures, and recorders may pause")),
@@ -1451,6 +1548,17 @@ impl Ui {
     fn flip(&mut self, switch: Switch) {
         let settings = &mut self.settings;
         match switch {
+            Switch::FixedScreen => {
+                settings.panel_screen = if settings.panel_screen.is_some() {
+                    None
+                } else {
+                    self.displays
+                        .iter()
+                        .find(|display| display.primary)
+                        .or_else(|| self.displays.first())
+                        .map(|display| display.id.clone())
+                };
+            }
             Switch::Live => settings.live_backdrop ^= true,
             Switch::Seam => settings.seam ^= true,
             Switch::Updates => settings.check_updates ^= true,
@@ -1475,6 +1583,7 @@ impl Ui {
             }
         }
         self.save();
+        if switch == Switch::FixedScreen { self.preview_display(); }
     }
 
     /// A module's title and what it describes on this machine.
@@ -1790,6 +1899,7 @@ impl Ui {
                 .into();
                 self.save();
             }
+            Target::Choice(Field::Screen, _) => self.screen_menu(),
             Target::Choice(field, index) => self.choose(field, index),
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
@@ -1840,6 +1950,40 @@ impl Ui {
             Target::Grip(_) | Target::Slider(_) => {}
         }
         self.next_frame = Instant::now();
+    }
+
+    /// Open the display list directly below its field, with the current
+    /// selection checked. The shared menu supports arrows, Enter and Escape.
+    fn screen_menu(&mut self) {
+        let Some((bounds, _)) = self
+            .targets
+            .iter()
+            .find(|(_, target)| matches!(target, Target::Choice(Field::Screen, _)))
+        else {
+            return;
+        };
+        let mut at = POINT {
+            x: (bounds.x * self.scale) as i32,
+            y: ((bounds.y + bounds.h + 4.0) * self.scale) as i32,
+        };
+        if !unsafe { ClientToScreen(self.hwnd, &mut at) }.as_bool() {
+            return;
+        }
+        let (_, options, chosen) = self.choices(Field::Screen);
+        let items: Vec<_> = options
+            .iter()
+            .enumerate()
+            .map(|(index, label)| super::menu::Item {
+                label,
+                icon: None,
+                checked: chosen == Some(index),
+                rule_before: false,
+            })
+            .collect();
+        if let Some(index) = super::menu::show_at(&items, self.dark, at, false) {
+            self.choose(Field::Screen, index);
+            self.focus = Some(Target::Choice(Field::Screen, index));
+        }
     }
 
     // ---- Keyboard ----
@@ -1942,7 +2086,11 @@ impl Ui {
                         let count = self.choices(field).1.len();
                         let next = if forward { (index + 1).min(count - 1) } else { index.saturating_sub(1) };
                         if next != index {
-                            self.activate(Target::Choice(field, next));
+                            if field == Field::Screen {
+                                self.choose(field, next);
+                            } else {
+                                self.activate(Target::Choice(field, next));
+                            }
                             self.focus = Some(Target::Choice(field, next));
                         }
                     }
@@ -2323,6 +2471,73 @@ impl Ui {
                 }
                 Row::Choice(field) => {
                     card(frame, palette, left, y, width, row_height, palette.card);
+                    if field == Field::Screen {
+                        let (name, options, chosen) = self.choices(field);
+                        let dropdown = Rect {
+                            x: left + width - ROW_SIDE - 250.0,
+                            y: y + (ROW - 32.0) / 2.0,
+                            w: 250.0,
+                            h: 32.0,
+                        };
+                        let target = Target::Choice(field, chosen.unwrap_or(0));
+                        text_centred(
+                            frame,
+                            name,
+                            label,
+                            palette.text,
+                            left + ROW_SIDE,
+                            y + ROW / 2.0,
+                            dropdown.x - left - ROW_SIDE - 12.0,
+                            Align::Start,
+                        );
+                        fill(
+                            frame,
+                            if hovered.as_ref() == Some(&target) {
+                                palette.hover
+                            } else {
+                                palette.control
+                            },
+                            dropdown.x,
+                            dropdown.y,
+                            dropdown.w,
+                            dropdown.h,
+                            6.0,
+                        );
+                        stroke_inside(frame, dropdown, 6.0, palette.rule);
+                        let text = chosen
+                            .and_then(|index| options.get(index))
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        unsafe {
+                            frame.dc.PushAxisAlignedClip(
+                                &rect(dropdown.x + 10.0, dropdown.y, dropdown.w - 38.0, dropdown.h),
+                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                            )
+                        };
+                        text_centred(
+                            frame,
+                            text,
+                            Font::new(Family::Segoe, 13.0, 400.0),
+                            palette.text,
+                            dropdown.x + 10.0,
+                            y + ROW / 2.0,
+                            dropdown.w - 38.0,
+                            Align::Start,
+                        );
+                        unsafe { frame.dc.PopAxisAlignedClip() };
+                        text_centred(
+                            frame,
+                            "\u{E70D}",
+                            Font::new(Family::Icons, 10.0, 400.0),
+                            palette.text2,
+                            dropdown.x + dropdown.w - 23.0,
+                            y + ROW / 2.0,
+                            16.0,
+                            Align::Start,
+                        );
+                        self.targets.push((dropdown, target));
+                        continue;
+                    }
                     let (name, options, chosen) = self.choices(field);
                     let right = left + width - ROW_SIDE;
                     match self.choice_hint(field) {
