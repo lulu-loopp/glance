@@ -200,6 +200,14 @@ impl Frosted {
         frame.map(|_| ())
     }
 
+    /// How frosted the glass is: 1, the screen behind blurred; 0, as it
+    /// is (the frosting gone, what is drawn over it standing).
+    pub fn set_frost(&mut self, frost: f32) {
+        if let Some(pane) = &self.pane {
+            let _ = pane.sprite.SetOpacity(frost.clamp(0.0, 1.0));
+        }
+    }
+
     /// Lets go of the drawing memory while the window is away.
     pub fn release(&mut self) {
         if self.surface.take().is_some() {

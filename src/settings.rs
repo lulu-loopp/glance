@@ -150,6 +150,12 @@ pub struct OverlaySettings {
     pub screen: Option<(i32, i32)>,
     /// Locked where it is: not dragged.
     pub locked: bool,
+    /// How clear its glass is: 0, frosted (what is behind blurred); 1,
+    /// clear (what is behind as it is, under the tint that keeps the words
+    /// legible).
+    pub clear: f32,
+    /// Clicks pass through it (Ctrl held, it takes them).
+    pub click_through: bool,
     /// A card or a strip.
     pub layout: crate::ui::overlay::Layout,
     /// A strip's rows (see `ui::overlay::ROWS`).
@@ -183,6 +189,8 @@ impl Default for OverlaySettings {
             at: (0.0, 0.0),
             screen: None,
             locked: false,
+            clear: 0.0,
+            click_through: false,
             layout: Default::default(),
             rows: 1,
             size: 1.0,

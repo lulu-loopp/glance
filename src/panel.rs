@@ -760,6 +760,9 @@ impl Controller {
                         Some(OverlayChoice::Lock(locked)) => {
                             std::thread::spawn(move || crate::app().lock_overlay(locked));
                         }
+                        Some(OverlayChoice::Through(through)) => {
+                            std::thread::spawn(move || crate::app().overlay_through(through));
+                        }
                         Some(OverlayChoice::Close) => self.set_overlay(false),
                         None => {}
                     }
@@ -798,6 +801,9 @@ impl Controller {
                 // While another desktop has the input (a UAC prompt, the lock
                 // screen) the pointer cannot be read, and is left alone.
                 WM_TIMER if msg.wParam.0 == WATCH_TIMER => {
+                    if let Some(overlay) = &mut overlay {
+                        overlay.take_clicks();
+                    }
                     let Some(cursor) = cursor_position() else { continue };
                     if !panel.is_open() {
                         on_seam(cursor, &mut panel);

@@ -27,6 +27,7 @@ use crate::ui::window::Window;
 /// What its right-click menu offers.
 pub enum Choice {
     Lock(bool),
+    Through(bool),
     Close,
     Settings,
 }
@@ -45,6 +46,10 @@ pub struct Overlay {
     shade_surface: Option<(Rc<Gfx>, Surface)>,
     shown: bool,
     locked: bool,
+    /// How clear its glass is (see `OverlaySettings::clear`), and whether
+    /// clicks pass through it.
+    clear: f32,
+    through: bool,
     lang: Lang,
     /// Where its glass is on screen (physical pixels).
     rect: RECT,
@@ -175,6 +180,8 @@ impl Overlay {
             shown: false,
             placed: std::cell::Cell::new(RECT::default()),
             locked: false,
+            clear: 0.0,
+            through: false,
             lang: Lang::En,
             rect: RECT::default(),
             screen: RECT::default(),
@@ -195,6 +202,9 @@ impl Overlay {
     /// `beneath` (the open panel's window).
     pub fn show(&mut self, history: &VecDeque<Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
+        self.clear = settings.clear.clamp(0.0, 1.0);
+        self.through = settings.click_through;
+        self.take_clicks();
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
@@ -316,6 +326,7 @@ impl Overlay {
         let (width, height, radius) = self.measures();
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
+        self.surface.set_frost(1.0 - self.clear);
         let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
             overlay::paint(frame, readings, frames, shape, glass, dragged, scale);
@@ -447,6 +458,13 @@ impl Overlay {
         Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size })
     }
 
+    /// Letting clicks through, it takes them while Ctrl is held (to be
+    /// moved, or for its menu): called as often as the key is looked at.
+    pub fn take_clicks(&mut self) {
+        let ctrl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32) } < 0;
+        self.window.set_click_through(self.through && !ctrl);
+    }
+
     /// Its menu, and what was chosen in it (the focus put back where it
     /// was by the menu itself).
     pub fn menu(&self) -> Option<Choice> {
@@ -458,20 +476,24 @@ impl Overlay {
         const LOCK: usize = 1;
         const CLOSE: usize = 2;
         const SETTINGS: usize = 3;
+        const THROUGH: usize = 4;
         use crate::ui::icons::Icon;
         use crate::ui::menu::{self, Item};
         let items = [
             Item { label: if zh { "锁定位置" } else { "Lock position" }, icon: Some(Icon::Pin), checked: self.locked, rule_before: false },
+            Item { label: if zh { "鼠标穿透（按住 Ctrl 再操作）" } else { "Let clicks through (hold Ctrl to use it)" }, icon: Some(Icon::Pointer), checked: self.through, rule_before: false },
             Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, icon: Some(Icon::Close), checked: false, rule_before: false },
             Item { label: if zh { "设置…" } else { "Settings…" }, icon: Some(Icon::Settings), checked: false, rule_before: true },
         ];
         let chosen = match menu::show(&items, crate::os::apps_dark())? {
             0 => LOCK,
-            1 => CLOSE,
+            1 => THROUGH,
+            2 => CLOSE,
             _ => SETTINGS,
         };
         match chosen {
             LOCK => Some(Choice::Lock(!self.locked)),
+            THROUGH => Some(Choice::Through(!self.through)),
             CLOSE => Some(Choice::Close),
             SETTINGS => Some(Choice::Settings),
             _ => None,

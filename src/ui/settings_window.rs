@@ -365,6 +365,7 @@ enum Field {
     TempAlert,
     /// Set on a slider (see `slider`).
     OverlaySize,
+    OverlayClear,
     PanelSize,
     OverlayLayout,
     OverlayRows,
@@ -394,6 +395,7 @@ enum Switch {
     HeatAlert,
     Overlay,
     OverlayInGame,
+    OverlayThrough,
 }
 
 /// What a press lands on.
@@ -785,6 +787,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 fn put_slider(settings: &mut Settings, field: Field, value: f32) {
     match field {
         Field::PanelSize => settings.panel_size = value,
+        Field::OverlayClear => settings.overlay.clear = value,
         _ => settings.overlay.size = value,
     }
 }
@@ -879,7 +882,14 @@ impl Ui {
                 }
             }
             Page::Overlay => {
-                rows.extend([Row::Switch(Switch::Overlay), Row::Switch(Switch::OverlayInGame), Row::Slider(Field::OverlaySize), Row::Choice(Field::OverlayLayout)]);
+                rows.extend([
+                    Row::Switch(Switch::Overlay),
+                    Row::Switch(Switch::OverlayInGame),
+                    Row::Slider(Field::OverlaySize),
+                    Row::Slider(Field::OverlayClear),
+                    Row::Switch(Switch::OverlayThrough),
+                    Row::Choice(Field::OverlayLayout),
+                ]);
                 // Rows only for a strip.
                 if self.settings.overlay.layout == Layout::Strip {
                     rows.push(Row::Choice(Field::OverlayRows));
@@ -1225,7 +1235,7 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlaySize | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
+            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
             Field::LoadAlert => (pick(lang, "负载警示", "Load alert"), vec!["70%".into(), "85%".into(), "95%".into()], at(&[70, 85, 95], prefs.hot_load as u64)),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -1254,7 +1264,7 @@ impl Ui {
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
             Field::LoadAlert => prefs.hot_load = [70.0, 85.0, 95.0][index],
-            Field::OverlaySize | Field::PanelSize => {}
+            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
         }
         self.save();
@@ -1322,6 +1332,7 @@ impl Ui {
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
             Field::PanelSize => (pick(lang, "面板大小", "Panel size"), sizes.0, sizes.1, 0.05, self.settings.panel_size.clamp(sizes.0, sizes.1)),
+            Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
     }
@@ -1402,6 +1413,11 @@ impl Ui {
                 Some(p("始终显示在屏幕上。可拖动调整位置，右键可锁定、关闭或打开设置", "Always on screen. Drag to move; right-click to lock, close or open settings")),
                 self.settings.overlay.on,
             ),
+            Switch::OverlayThrough => (
+                p("鼠标穿透", "Let clicks through"),
+                Some(p("点击会落到悬浮窗后面的游戏或窗口上；按住 Ctrl 才能拖动它或打开右键菜单", "Clicks go to the game or window behind it; hold Ctrl to move it or for its menu")),
+                self.settings.overlay.click_through,
+            ),
             Switch::OverlayInGame => (
                 p("游戏时自动显示", "Show while playing"),
                 Some(p(
@@ -1463,6 +1479,7 @@ impl Ui {
                 settings.overlay.in_game ^= true;
                 settings.overlay.offered = true;
             }
+            Switch::OverlayThrough => settings.overlay.click_through ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;

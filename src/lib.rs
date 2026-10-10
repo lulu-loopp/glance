@@ -179,6 +179,11 @@ impl App {
         self.change(|settings| settings.overlay.locked = locked);
     }
 
+    /// The overlay lets clicks through, or takes them.
+    pub fn overlay_through(&self, through: bool) {
+        self.change(|settings| settings.overlay.click_through = through);
+    }
+
     /// The pinned panel moved away from the edge to `at`, or (none) unpinned.
     pub fn place_panel(&self, at: Option<settings::PanelAt>) {
         self.change(|settings| settings.panel_at = at);
