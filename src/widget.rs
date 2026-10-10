@@ -254,7 +254,8 @@ impl Side {
 
 /// A widget in hand: moved, from where it was taken (the pointer's offset
 /// from its corner, physical px), the pointer's last places (for a fling)
-/// and whether it was just torn off (a tear is put down, never flung); or
+/// and whether it was just torn off and has not left the edge yet (put
+/// down there, it is neither flung nor stuck back to it); or
 /// sized by `edges` (left, right, top, bottom), from the pointer and its
 /// room as the drag began.
 enum Drag {
@@ -1120,6 +1121,13 @@ impl Widget {
                 if let Some(contact) = monitor_at(cursor) {
                     self.moved_to(contact);
                 }
+                // Torn off and now well clear of every edge: in hand as any
+                // widget is, to stick where it is brought back to one.
+                if self.nearest_side().is_some_and(|(_, away)| away > UNSTICK) {
+                    if let Some(Drag::Move { torn, .. }) = &mut self.drag {
+                        *torn = false;
+                    }
+                }
             }
             Some(Drag::Size { edges, from, room, corner }) => {
                 let (dx, dy) = ((cursor.x - from.x) as f32 / scale, (cursor.y - from.y) as f32 / scale);
@@ -1198,7 +1206,7 @@ impl Widget {
                     }
                 }
                 self.retone();
-                // Torn off the panel, it is put down where it is let go.
+                // Torn off the panel and still at its edge, it is put down where it is let go.
                 if !torn {
                     self.stick(now);
                 }
@@ -1503,7 +1511,7 @@ impl Widget {
         // Moved near an edge, not stuck: where it would stick, as it would
         // be there, nearer and firmer the nearer it is.
         let near = match (&self.drag, self.stuck) {
-            // Torn off the panel, it is put down where it is let go.
+            // Torn off the panel and still at its edge, it is put down where it is let go.
             (Some(Drag::Move { moved: true, torn: false, .. }), None) => self.nearest_side().filter(|(_, away)| *away < HINT_SEEN),
             _ => None,
         };

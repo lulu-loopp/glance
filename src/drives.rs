@@ -1,5 +1,7 @@
 //! Drive temperatures, as the drives report them to Windows. Asking for a
 //! drive's properties needs no access to its data, so no administrator rights.
+//! A SATA drive that gives Windows none is asked for its SMART attributes
+//! itself (which does need them), now and then, and never out of standby.
 
 use crate::reading::DriveTemperature;
 use windows::core::PCWSTR;
@@ -18,10 +20,10 @@ use windows::Win32::System::IO::DeviceIoControl;
 /// Physical drives are numbered from zero; a gap this long means no more.
 const MAX_GAP: u32 = 4;
 
-/// The model name of every physical drive.
-pub fn models() -> Vec<String> {
+/// Every physical drive: its number, and its model name.
+pub fn models() -> Vec<(u32, String)> {
     let mut found = Vec::new();
-    each_drive(|index, handle| found.push(model(handle).unwrap_or_else(|| format!("Disk {index}"))));
+    each_drive(|index, handle| found.push((index, model(handle).unwrap_or_else(|| format!("Disk {index}")))));
     found
 }
 
@@ -29,11 +31,130 @@ pub fn models() -> Vec<String> {
 pub fn temperatures() -> Vec<DriveTemperature> {
     let mut found = Vec::new();
     each_drive(|index, handle| {
-        if let Some(celsius) = temperature(handle) {
+        if let Some(celsius) = temperature(handle).or_else(|| smart_temperature(index, handle)) {
             found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
     });
     found
+}
+
+/// How often a SATA drive is asked for its SMART attributes.
+const SMART_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+/// IOCTL_ATA_PASS_THROUGH, and its flags: the drive must be ready, and the
+/// command reads data in.
+const ATA_PASS_THROUGH: u32 = 0x0004_D02C;
+const ATA_DRDY_REQUIRED: u16 = 0x01;
+const ATA_DATA_IN: u16 = 0x02;
+/// The SATA and (parallel) ATA buses, as STORAGE_BUS_TYPE numbers them.
+const BUS_ATA: i32 = 3;
+const BUS_SATA: i32 = 11;
+
+/// ATA_PASS_THROUGH_EX, the data read following it in one buffer.
+#[repr(C)]
+#[derive(Default)]
+struct AtaCommand {
+    length: u16,
+    flags: u16,
+    path: u8,
+    target: u8,
+    lun: u8,
+    reserved: u8,
+    data_length: u32,
+    timeout_s: u32,
+    reserved2: u32,
+    data_offset: usize,
+    previous: [u8; 8],
+    /// Features, sector count, LBA low, mid and high, device, command, reserved.
+    task: [u8; 8],
+}
+
+/// A SATA drive's temperature from its SMART attributes, read at most every
+/// `SMART_EVERY` (what was read last stands between), and only while the
+/// drive is spinning: a drive in standby is left there, unread.
+fn smart_temperature(index: u32, properties: HANDLE) -> Option<f32> {
+    static LAST: std::sync::Mutex<Vec<(u32, std::time::Instant, Option<f32>)>> = std::sync::Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap();
+    if let Some((_, at, celsius)) = last.iter().find(|(drive, ..)| *drive == index) {
+        if at.elapsed() < SMART_EVERY {
+            return *celsius;
+        }
+    }
+    let read = (|| {
+        if !matches!(bus(properties)?, BUS_ATA | BUS_SATA) {
+            return None;
+        }
+        // Commands to the drive itself need it opened for reading and
+        // writing (they touch none of its data).
+        let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
+        let drive = unsafe {
+            CreateFileW(PCWSTR(path.as_ptr()), 0xC000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+        }
+        .ok()?;
+        // CHECK POWER MODE: a sector count of zero is standby.
+        let awake = ata(drive, [0, 0, 0, 0, 0, 0xA0, 0xE5, 0], None).is_some_and(|task| task[1] != 0);
+        let mut data = [0u8; 512];
+        // SMART READ DATA.
+        let attributes = awake.then(|| ata(drive, [0xD0, 1, 0, 0x4F, 0xC2, 0xA0, 0xB0, 0], Some(&mut data))).flatten();
+        let _ = unsafe { CloseHandle(drive) };
+        attributes.and_then(|_| smart_celsius(&data))
+    })();
+    last.retain(|(drive, ..)| *drive != index);
+    last.push((index, std::time::Instant::now(), read));
+    read
+}
+
+/// Sends the drive an ATA command (its task file), reading 512 bytes into
+/// `data` if given: the task file it answers with.
+fn ata(drive: HANDLE, task: [u8; 8], data: Option<&mut [u8; 512]>) -> Option<[u8; 8]> {
+    #[repr(C)]
+    struct Buffer {
+        command: AtaCommand,
+        data: [u8; 512],
+    }
+    let reads = data.is_some();
+    let mut buffer = Buffer {
+        command: AtaCommand {
+            length: size_of::<AtaCommand>() as u16,
+            flags: ATA_DRDY_REQUIRED | if reads { ATA_DATA_IN } else { 0 },
+            data_length: if reads { 512 } else { 0 },
+            timeout_s: 3,
+            data_offset: std::mem::offset_of!(Buffer, data),
+            task,
+            ..Default::default()
+        },
+        data: [0; 512],
+    };
+    let mut returned = 0u32;
+    let size = size_of::<Buffer>() as u32;
+    let pointer = &mut buffer as *mut Buffer as *mut core::ffi::c_void;
+    unsafe { DeviceIoControl(drive, ATA_PASS_THROUGH, Some(pointer), size, Some(pointer), size, Some(&mut returned), None) }.ok()?;
+    // An error bit in the status it answers with: not done.
+    if buffer.command.task[6] & 1 != 0 {
+        return None;
+    }
+    if let Some(data) = data {
+        *data = buffer.data;
+    }
+    Some(buffer.command.task)
+}
+
+/// The temperature among a drive's SMART attributes: attribute 194
+/// (temperature), else 190 (airflow temperature, which some drives give in
+/// its place), the first byte of its raw value.
+fn smart_celsius(data: &[u8; 512]) -> Option<f32> {
+    // Thirty attributes of twelve bytes from the third byte: its number,
+    // flags (2), value, worst, raw (6), reserved.
+    let attribute = |id: u8| data[2..362].chunks_exact(12).find(|entry| entry[0] == id).map(|entry| entry[5] as i16);
+    attribute(194).or_else(|| attribute(190)).filter(|celsius| plausible(*celsius) && *celsius > 0).map(f32::from)
+}
+
+/// The bus a drive is on, as STORAGE_BUS_TYPE numbers it.
+fn bus(handle: HANDLE) -> Option<i32> {
+    let mut buf = [0u64; 128];
+    if !query(handle, StorageDeviceProperty, &mut buf) {
+        return None;
+    }
+    Some(unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) }.BusType.0)
 }
 
 /// Calls `visit` with each physical drive, opened for its properties only.
@@ -125,6 +246,23 @@ fn model(handle: HANDLE) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reads_a_temperature_from_smart_attributes() {
+        fn put(data: &mut [u8; 512], slot: usize, id: u8, raw: u8) {
+            data[2 + slot * 12] = id;
+            data[2 + slot * 12 + 5] = raw;
+        }
+        let mut data = [0u8; 512];
+        // As a Samsung 750 EVO gives it: no 194, the airflow temperature.
+        put(&mut data, 0, 9, 200);
+        put(&mut data, 1, 190, 30);
+        assert_eq!(super::smart_celsius(&data), Some(30.0));
+        // 194 where there is one.
+        put(&mut data, 2, 194, 41);
+        assert_eq!(super::smart_celsius(&data), Some(41.0));
+        assert_eq!(super::smart_celsius(&[0u8; 512]), None);
+    }
+
     #[test]
     fn tells_readings_from_markers() {
         assert!(super::plausible(34));

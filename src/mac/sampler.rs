@@ -88,6 +88,7 @@ impl Sampler {
             cpu_name: sysctl_string("machdep.cpu.brand_string").unwrap_or_default(),
             memory_modules: None,
             memory_speed: None,
+            drive_ids: (0..drive_models().len() as u32).collect(),
             drives: drive_models(),
             network_adapter: primary.as_ref().map(|adapter| adapter.model.clone()),
             board: sysctl_string("hw.model").unwrap_or_default(),

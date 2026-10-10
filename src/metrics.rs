@@ -167,11 +167,13 @@ impl Sampler {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
         }));
         let modules = crate::smbios::memory_modules();
+        let drives = crate::drives::models();
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&modules),
             memory_speed: crate::smbios::speed(&modules),
-            drives: crate::drives::models(),
+            drives: drives.iter().map(|(_, name)| name.clone()).collect(),
+            drive_ids: drives.iter().map(|(id, _)| *id).collect(),
             network_adapter: default_interface().map(|adapter| adapter.model),
             board: reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),

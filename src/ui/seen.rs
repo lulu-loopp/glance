@@ -325,6 +325,7 @@ mod tests {
             memory_modules: None,
             memory_speed: None,
             drives: Vec::new(),
+            drive_ids: Vec::new(),
             network_adapter: None,
             board: String::new(),
             threads: 1,

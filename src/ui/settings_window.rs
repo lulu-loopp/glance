@@ -1588,7 +1588,7 @@ impl Ui {
                 ("battery", "health") => seen.battery_health,
                 ("network", "address") => seen.address,
                 ("network", "link") => seen.link,
-                ("disk", "drives") => !seen.drives.is_empty(),
+                ("disk", "drives") => !seen.drives.is_empty() || info.drives.len() > 1,
                 ("disk", "active") => seen.disk_active,
                 ("storage", "volumes") => !seen.volumes.is_empty(),
                 _ => true,

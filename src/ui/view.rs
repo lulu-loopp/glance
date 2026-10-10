@@ -527,10 +527,17 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             // A drive's temperature takes the corner, as a GPU's does, and the
             // chart's scale moves below.
             let mut facts: Vec<(String, String, bool)> = Vec::new();
-            if drives.len() > 1 {
-                for (id, name) in drives {
+            // More than one drive: each on a line of its own, by name, with
+            // its temperature (unread, for one that gives none).
+            // (Those the machine started with, and any that has given a
+            // temperature since: one plugged in later.)
+            let mut all: Vec<(u32, &String)> = info.drive_ids.iter().copied().zip(&info.drives).collect();
+            all.extend(drives.iter().filter(|(id, _)| !info.drive_ids.contains(id)).map(|(id, name)| (*id, name)));
+            let every = if on("drives") { all.len() } else { 0 };
+            if every > 1 {
+                for (id, name) in &all {
                     let value = temp(*id);
-                    facts.push((name.clone(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
+                    facts.push(((*name).clone(), shown(value, celsius), value.is_some_and(|t| t > hot_temp)));
                 }
             }
             if on("active") {
@@ -549,7 +556,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 facts.clear();
             }
             vec![
-                head(lang.pick("磁盘", "Disk"), info.drives.join(", "), aside, hottest.is_some_and(|t| t > hot_temp)),
+                // Named below, where there are several.
+                head(lang.pick("磁盘", "Disk"), if every > 1 { if lang == Lang::Zh { format!("{every} 块硬盘") } else { format!("{every} drives") } } else { info.drives.join(", ") }, aside, hottest.is_some_and(|t| t > hot_temp)),
                 Block::Rates {
                     rows: vec![
                         (lang.pick("读取", "Read").into(), shown(s.disk_read, |rate| text::rate(rate, false))),
@@ -1579,6 +1587,7 @@ mod tests {
             memory_modules: None,
             memory_speed: None,
             drives: Vec::new(),
+            drive_ids: Vec::new(),
             network_adapter: None,
             board: "Board".into(),
             threads: 4,
@@ -1667,6 +1676,15 @@ mod tests {
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0), (1, 95.0)])]);
         let disk = facts(&lane(&scene(history), "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("SSD".to_string(), "35 °C".to_string()), ("SSD".to_string(), "95 °C".to_string())]);
+        // A drive that gives no temperature (a SATA one unread) has its row
+        // all the same, by its name.
+        let mut two = self::info();
+        two.drives = vec!["NVMe".into(), "SATA".into()];
+        two.drive_ids = vec![0, 1];
+        let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
+        let scene_two = Scene { info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
+        assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
         let history = leak(vec![with(vec![(0, 40.0), (1, 95.0)], Vec::new()), with(vec![(1, 95.0)], Vec::new())]);
         let cpu = facts(&lane(&scene(history), "cpu", Detail::Full).unwrap());

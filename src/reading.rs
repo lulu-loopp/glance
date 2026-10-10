@@ -13,6 +13,8 @@ pub struct StaticInfo {
     pub memory_speed: Option<(u16, Option<u16>)>,
     /// The model of each physical drive.
     pub drives: Vec<String>,
+    /// Each of `drives`' number among the physical drives.
+    pub drive_ids: Vec<u32>,
     /// The model of the adapter internet traffic leaves by, when the app started.
     pub network_adapter: Option<String>,
     /// The motherboard's model, as its firmware names it.
@@ -325,6 +327,7 @@ mod tests {
             memory_modules: None,
             memory_speed: None,
             drives: Vec::new(),
+            drive_ids: Vec::new(),
             network_adapter: None,
             board: String::new(),
             threads: 1,
