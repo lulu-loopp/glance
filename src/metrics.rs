@@ -71,6 +71,8 @@ pub struct Sampler {
     started: Started,
     /// WSL, while its module is on.
     wsl: Option<crate::wsl::Wsl>,
+    /// Docker, while its module is on.
+    docker: Option<crate::docker::Docker>,
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
@@ -197,6 +199,7 @@ impl Sampler {
             info,
             started: Started::read(),
             wsl: None,
+            docker: None,
         }
     }
 
@@ -285,11 +288,14 @@ impl Sampler {
     /// worth refreshing. Returns `None` when PDH has no valid data for this
     /// interval (it reports that for a tick now and then, e.g. after resume).
     /// A sample now; `refresh_slow`, with what is read less often read
-    /// again; `wsl`, with WSL watched (its module on).
-    pub fn sample(&mut self, refresh_slow: bool, wsl: bool) -> Option<Sample> {
-        // Watched only while asked for: nothing is read for it otherwise.
+    /// again; `wsl` and `docker`, with those watched (their modules on).
+    pub fn sample(&mut self, refresh_slow: bool, wsl: bool, docker: bool) -> Option<Sample> {
+        // Watched only while asked for: nothing is read for them otherwise.
         if wsl != self.wsl.is_some() {
             self.wsl = wsl.then(crate::wsl::Wsl::new);
+        }
+        if docker != self.docker.is_some() {
+            self.docker = docker.then(crate::docker::Docker::new);
         }
         // Counters not collected this time read as absent, not as their
         // last values; what does not depend on them is sampled regardless.
@@ -401,6 +407,7 @@ impl Sampler {
             dimm_temps: self.dimms.as_mut().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
             wsl: self.wsl.as_mut().map(crate::wsl::Wsl::read),
+            docker: self.docker.as_ref().and_then(crate::docker::Docker::read),
             game: self.game(collected),
         })
     }
@@ -1208,7 +1215,7 @@ mod tests {
     fn samples_this_machine() {
         let mut sampler = Sampler::new();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let sample = sampler.sample(true, true).expect("a valid sample after one interval");
+        let sample = sampler.sample(true, true, false).expect("a valid sample after one interval");
         println!("{}", serde_json::to_string_pretty(&sampler.info).unwrap());
         println!("{}", serde_json::to_string_pretty(&sample).unwrap());
         assert_eq!(sample.threads.len(), sampler.info.threads);

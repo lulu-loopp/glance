@@ -959,6 +959,7 @@ mod tests {
                 by_hand: false,
             }),
             wsl: None,
+            docker: None,
         }
     }
 

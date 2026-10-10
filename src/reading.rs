@@ -93,6 +93,33 @@ pub struct Sample {
     pub game: Option<GameSample>,
     /// WSL 2, while its module is on (none: not watched).
     pub wsl: Option<WslSample>,
+    /// Docker, while its module is on and once its engine was first asked.
+    pub docker: Option<DockerSample>,
+}
+
+/// Docker's engine, as the CLI's current context reaches it.
+#[derive(Clone, Serialize)]
+pub enum DockerSample {
+    /// Not answering (Docker not running).
+    Stopped { context: String },
+    /// At an address this does not reach (ssh, TLS).
+    Unsupported { context: String, host: String },
+    Running { context: String, containers: Vec<ContainerSample> },
+}
+
+/// A container running, and what it uses: its share of the processors
+/// (percent of all of them), memory in use and its limit (bytes), and the
+/// network and disk traffic it makes (bytes a second, both ways together);
+/// rates none the first time it is seen.
+#[derive(Clone, Serialize)]
+pub struct ContainerSample {
+    pub name: String,
+    pub status: String,
+    pub cpu: Option<f32>,
+    pub mem: Option<u64>,
+    pub limit: Option<u64>,
+    pub net: Option<f64>,
+    pub io: Option<f64>,
 }
 
 /// WSL 2 as Windows sees it.

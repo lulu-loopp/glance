@@ -209,6 +209,7 @@ impl Sampler {
             mic_muted: None,
             game: None,
             wsl: None,
+            docker: None,
         };
         self.previous = Previous {
             at: now,

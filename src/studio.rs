@@ -458,7 +458,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
-    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl"].map(String::from));
+    known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "wsl", "docker"].map(String::from));
     let mut prefs = Prefs::resolve(&serde_json::Value::Null, &known);
     if let Some(shown) = &shot.modules {
         prefs.modules.sort_by_key(|entry| shown.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
@@ -883,7 +883,29 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         dimm_temps: vec![35.0 + 7.0 * busy, 34.0 + 7.0 * busy],
         mic_muted: Some(false),
         game,
-        wsl: None,
+        // A machine working: WSL with a distribution up, and a few
+        // containers in it.
+        wsl: Some(crate::reading::WslSample::Running {
+            distros: Some(vec!["Ubuntu-24.04".into()]),
+            cpu: Some(4.0 + 18.0 * busy),
+            used: Some(6 * gb + (busy * 2.0 * gb as f32) as u64),
+            total: Some(31 * gb),
+        }),
+        docker: Some(crate::reading::DockerSample::Running {
+            context: "desktop-linux".into(),
+            containers: [("postgres", 3.1, 640u64, 2048u64, 120e3, 2.4e6), ("web", 1.4, 256, 512, 860e3, 0.0), ("redis", 0.3, 48, 0, 15e3, 4e3)]
+                .into_iter()
+                .map(|(name, cpu, mem, limit, net, io)| crate::reading::ContainerSample {
+                    name: name.into(),
+                    status: "Up 3 hours".into(),
+                    cpu: Some(cpu * (0.6 + busy)),
+                    mem: Some(mem << 20),
+                    limit: (limit > 0).then_some(limit << 20),
+                    net: Some(net * (0.5 + busy) as f64),
+                    io: Some(io * busy as f64),
+                })
+                .collect(),
+        }),
     }
 }
 

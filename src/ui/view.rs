@@ -129,7 +129,9 @@ enum Block {
     Threads(Vec<(Option<f32>, bool)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
-    Table { headings: Vec<(String, ProcessSort)>, sort: ProcessSort, rows: Vec<[String; 5]>, visible: usize },
+    /// A list in five columns: headings that sort it (the processes'), or
+    /// not; scrolled through past `visible` rows, or not.
+    Table { headings: Vec<(String, Option<ProcessSort>)>, sort: Option<ProcessSort>, rows: Vec<[String; 5]>, visible: usize, scrolls: bool, widths: [f32; 4] },
 }
 
 impl Block {
@@ -161,9 +163,9 @@ impl Hash for Block {
             Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
-            Block::Table { headings, sort, rows, visible } => {
-                headings.iter().for_each(|(label, key)| (label, *key as u8).hash(state));
-                (*sort as u8, rows, visible).hash(state);
+            Block::Table { headings, sort, rows, visible, scrolls, widths } => {
+                headings.iter().for_each(|(label, key)| (label, key.map(|key| key as u8)).hash(state));
+                (sort.map(|sort| sort as u8), rows, visible, scrolls, widths.map(f32::to_bits)).hash(state);
             }
         }
     }
@@ -535,12 +537,14 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             ranked.sort_by(|a, b| sort_value(b, sort).total_cmp(&sort_value(a, sort)));
             vec![head(lang.pick("进程", "Processes"), "", "", false), Block::Table {
                 headings: vec![
-                    ("CPU".into(), ProcessSort::Cpu),
-                    (lang.pick("内存", "Memory").into(), ProcessSort::Memory),
-                    (lang.pick("读写", "I/O").into(), ProcessSort::Io),
-                    ("GPU".into(), ProcessSort::Gpu),
+                    ("CPU".into(), Some(ProcessSort::Cpu)),
+                    (lang.pick("内存", "Memory").into(), Some(ProcessSort::Memory)),
+                    (lang.pick("读写", "I/O").into(), Some(ProcessSort::Io)),
+                    ("GPU".into(), Some(ProcessSort::Gpu)),
                 ],
-                sort,
+                sort: Some(sort),
+                scrolls: true,
+                widths: PROCESS_COLUMNS,
                 rows: ranked
                     .iter()
                     .map(|p| [p.name.clone(), text::percent(p.cpu), text::size(p.mem), text::rate(p.io, false), shown(p.gpu, text::percent)])
@@ -730,6 +734,43 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     plot: chart.then(|| Plot::new(scene, vec![Box::new(|s| s.battery.as_ref().map(|b| b.percent as f64))], Some(100.0), None)),
                 },
                 Block::Facts { rows: facts, gap: 8.0 },
+            ]
+        }
+        "docker" => {
+            use crate::reading::DockerSample;
+            let (context, state, mut containers) = match &s.docker {
+                Some(DockerSample::Stopped { context }) => (context.clone(), lang.pick("未运行", "Not running").to_string(), Vec::new()),
+                Some(DockerSample::Unsupported { context, .. }) => (context.clone(), lang.pick("不支持这种连接", "Connection not supported").to_string(), Vec::new()),
+                Some(DockerSample::Running { context, containers }) => {
+                    let count = containers.len();
+                    (context.clone(), if lang == Lang::Zh { format!("{count} 个容器") } else if count == 1 { "1 container".into() } else { format!("{count} containers") }, containers.iter().collect())
+                }
+                None => (String::new(), UNREAD.to_string(), Vec::new()),
+            };
+            containers.sort_by(|a, b| b.cpu.unwrap_or(0.0).total_cmp(&a.cpu.unwrap_or(0.0)));
+            vec![
+                // The head row holds the table's headings: the engine and
+                // what it is doing go under the list.
+                head("Docker", "", "", false),
+                Block::Table {
+                    headings: vec![
+                        ("CPU".into(), None),
+                        (lang.pick("内存", "Memory").into(), None),
+                        (lang.pick("网络", "Network").into(), None),
+                        (lang.pick("读写", "I/O").into(), None),
+                    ],
+                    sort: None,
+                    rows: containers
+                        .iter()
+                        .map(|c| [c.name.clone(), shown(c.cpu, text::percent), shown(c.mem, text::size), shown(c.net, |rate| text::rate(rate, false)), shown(c.io, |rate| text::rate(rate, false))])
+                        .collect(),
+                    // Room for as many as the processes' list has, kept as
+                    // they come and go.
+                    visible: if full { prefs.processes.count } else { prefs.processes.count.min(COMPACT_PROCESSES) },
+                    scrolls: false,
+                    widths: CONTAINER_COLUMNS,
+                },
+                Block::Facts { rows: vec![(if context.is_empty() { "Docker".into() } else { context }, state, false)], gap: 6.0 },
             ]
         }
         "wsl" => {
@@ -1180,11 +1221,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     frame.text(value, theme.small, color, plot_left, row_y, left + width - plot_left, Align::Start);
                 }
             }
-            (Block::Table { headings, sort, rows, visible }, Pass::Content) => {
+            (Block::Table { headings, sort, rows, visible, scrolls, widths }, Pass::Content) => {
                 part("rows");
                 // The headings share the lane's head row, after the title.
                 let head_y = y - HEAD - HEAD_GAP;
-                let columns = table_columns(left, width);
+                let columns = table_columns(left, width, *widths);
                 // Every heading's ink centred on the title's: Chinese, from
                 // another face than the Latin, and a heavier weight each sit
                 // differently in their line boxes.
@@ -1195,15 +1236,19 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 };
                 let centre = title_top + middle(scene.lang.pick("进程", "Processes"), theme.title);
                 for ((label, key), (cx, cw)) in headings.iter().zip(&columns[1..]) {
-                    let chosen = key == sort;
+                    let chosen = key.is_some() && key == sort;
                     let font = if chosen { Font { weight: 650.0, ..theme.small } } else { theme.small };
-                    let lit = chosen || scene.hover == Some(Hit::Sort(*key));
+                    let lit = chosen || key.is_some_and(|key| scene.hover == Some(Hit::Sort(key)));
                     frame.text(label, font, if lit { theme.text } else { theme.text2 }, *cx, centre - middle(label, font), *cw, Align::End);
-                    hits.push((*cx, head_y, *cw, HEAD, Hit::Sort(*key)));
+                    if let Some(key) = key {
+                        hits.push((*cx, head_y, *cw, HEAD, Hit::Sort(*key)));
+                    }
                 }
                 let list_height = *visible as f32 * TABLE_ROW;
-                let max_scroll = (rows.len().saturating_sub(*visible)) as f32 * TABLE_ROW;
-                hits.push((left, y, width, list_height, Hit::Processes(max_scroll.to_bits())));
+                let max_scroll = if *scrolls { (rows.len().saturating_sub(*visible)) as f32 * TABLE_ROW } else { 0.0 };
+                if *scrolls {
+                    hits.push((left, y, width, list_height, Hit::Processes(max_scroll.to_bits())));
+                }
                 let scroll = scene.process_scroll.clamp(0.0, max_scroll);
                 frame.clip(left, y, width, list_height);
                 for (i, row) in rows.iter().enumerate() {
@@ -1231,9 +1276,14 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     }
 }
 
-/// x and width of the name and the four measures of the process table.
-fn table_columns(left: f32, width: f32) -> [(f32, f32); 5] {
-    let widths = [40.0, 52.0, 62.0, 36.0];
+/// The widths of the process table's four measures: a share, a size, a
+/// rate and a share.
+const PROCESS_COLUMNS: [f32; 4] = [40.0, 52.0, 62.0, 36.0];
+/// The container table's: a share, a size and two rates.
+const CONTAINER_COLUMNS: [f32; 4] = [40.0, 52.0, 62.0, 62.0];
+
+/// x and width of a table's name and its four measures, `widths` wide.
+fn table_columns(left: f32, width: f32, widths: [f32; 4]) -> [(f32, f32); 5] {
     let gap = 6.0;
     let measures: f32 = widths.iter().sum::<f32>() + gap * widths.len() as f32;
     let mut columns = [(left, width - measures); 5];
@@ -1438,6 +1488,7 @@ mod tests {
             mic_muted: None,
             game: None,
             wsl: None,
+            docker: None,
         }
     }
 

@@ -428,7 +428,7 @@ enum Target {
 }
 
 /// Modules few want: listed under "More" while off, out of the way.
-const MORE: [&str; 4] = ["board", "battery", "system", "wsl"];
+const MORE: [&str; 5] = ["board", "battery", "system", "wsl", "docker"];
 
 enum Row {
     /// The page's name.
@@ -1518,6 +1518,7 @@ impl Ui {
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("笔记本电脑", "Laptops"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间和它占用的资源", "A fullscreen game's frame rate, frame times and what it uses"))),
+            "docker" => ("Docker".into(), Some(p("运行中的容器各占多少处理器、内存、网络和磁盘，问的是 Docker 当前连接的引擎", "What each container running uses, as the engine Docker's current context points at says"))),
             "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器和内存占用，只从 Windows 读取，不会启动或唤醒发行版", "WSL 2's processors and memory, read from Windows alone: no distribution is started or kept up"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程和句柄数", "Uptime, processes, handles"))),
         }
