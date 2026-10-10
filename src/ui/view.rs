@@ -128,8 +128,9 @@ enum Block {
     /// A second chart below a readout's, aligned with it, `gap` below it:
     /// what it charts named over its value.
     Trace { label: String, value: String, hot: bool, plot: Plot, gap: f32 },
-    /// Each thread's load (0–1), unread where `None`, and whether it is hot.
-    Threads(Vec<(Option<f32>, bool)>),
+    /// Each thread's load (0–1), unread where `None`, whether it is hot,
+    /// and what the tag over it says while the pointer is on it.
+    Threads(Vec<(Option<f32>, bool, String)>),
     Meter { label: String, fraction: f32, value: String, hot: bool, gap: f32 },
     Facts { rows: Vec<(String, String, bool)>, gap: f32 },
     /// A list in five columns: headings that sort it (the processes'), or
@@ -163,7 +164,7 @@ impl Hash for Block {
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
             Block::Rates { rows, plot } => (rows, plot.as_ref().map(|plot| plot.max.to_bits())).hash(state),
             Block::Trace { label, value, hot, plot, gap } => (label, value, hot, plot.max.to_bits(), gap.to_bits()).hash(state),
-            Block::Threads(cells) => cells.iter().for_each(|(load, hot)| (load.map(f32::to_bits), hot).hash(state)),
+            Block::Threads(cells) => cells.iter().for_each(|(load, hot, tag)| (load.map(f32::to_bits), hot, tag).hash(state)),
             Block::Meter { label, fraction, value, hot, gap } => (label, fraction.to_bits(), value, hot, gap.to_bits()).hash(state),
             Block::Facts { rows, gap } => (rows, gap.to_bits()).hash(state),
             Block::Table { headings, sort, rows, visible, scrolls, widths } => {
@@ -330,7 +331,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let had_clock = on("clock") && scene.seen.cpu_clock;
             // The temperature takes the corner, as on the GPU lanes; the
             // clock, the power and each chiplet's temperature go below.
-            let mut aside = if had_temp {
+            let aside = if had_temp {
                 shown(temp, celsius)
             } else if had_clock {
                 clock.clone().unwrap_or_else(|| UNREAD.into())
@@ -338,31 +339,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 String::new()
             };
             let mut facts = Vec::new();
-            // The thread the pointer is on in the grid: its clock and load,
-            // in the clock's place.
-            let thread = match scene.hover {
-                Some(Hit::Thread(i)) if full && on("threads") => Some(i as usize),
-                _ => None,
-            };
-            let thread_label = |i: usize| if lang == Lang::Zh { format!("线程 {}", i + 1) } else { format!("Thread {}", i + 1) };
-            let thread_text = |i: usize| {
-                let (ghz, load) = (s.threads_ghz.get(i).copied().flatten(), s.threads.get(i).copied().flatten());
-                format!("{} · {}", shown(ghz, |ghz| format!("{ghz:.2} GHz")), shown(load, text::percent))
-            };
             // Cores of more than one kind: each kind's clock, the big first.
             let kinds = &s.kinds_ghz;
-            // The rows the clock takes (none where it is in the corner).
-            let clock_rows = if on("clock") && kinds.len() > 1 { kinds.len() } else { usize::from(had_temp && had_clock) };
-            if let Some(i) = thread.filter(|_| clock_rows > 0) {
-                facts.push((thread_label(i), thread_text(i), false));
-                // The rest of the kinds' rows kept, so the lane keeps its size.
-                for _ in 1..clock_rows {
-                    facts.push((String::new(), String::new(), false));
-                }
-            } else if let Some(i) = thread.filter(|_| !had_temp && had_clock) {
-                // The clock in the corner: the thread's there.
-                aside = format!("{} · {}", thread_label(i), thread_text(i));
-            } else if on("clock") && kinds.len() > 1 {
+            if on("clock") && kinds.len() > 1 {
                 let names: &[(&str, &str)] = if kinds.len() == 2 { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock")] } else { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock"), ("低功耗核频率", "LP E-core clock")] };
                 for (ghz, (zh, en)) in kinds.iter().zip(names) {
                     facts.push((lang.pick(zh, en).into(), shown(*ghz, |ghz| format!("{ghz:.2} GHz")), false));
@@ -391,7 +370,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let threads = scene.seen.threads;
             if full && on("threads") && threads > 0 {
                 let load = |i: usize| s.threads.get(i).copied().flatten();
-                blocks.push(Block::Threads((0..threads).map(|i| (load(i).map(|load| load / 100.0), load(i).is_some_and(|load| load > hot_load))).collect()));
+                // Each one's tag: which thread, its clock and its load.
+                let tag = |i: usize| {
+                    let ghz = s.threads_ghz.get(i).copied().flatten();
+                    let thread = if lang == Lang::Zh { format!("线程 {}", i + 1) } else { format!("Thread {}", i + 1) };
+                    match ghz {
+                        Some(ghz) => format!("{thread} · {ghz:.2} GHz · {}", shown(load(i), text::percent)),
+                        None => format!("{thread} · {}", shown(load(i), text::percent)),
+                    }
+                };
+                blocks.push(Block::Threads((0..threads).map(|i| (load(i).map(|load| load / 100.0), load(i).is_some_and(|load| load > hot_load), tag(i))).collect()));
             }
             blocks
         }
@@ -829,7 +817,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 None => String::new(),
             };
             // Its processors in the figure (named, as the lane is not theirs
-            // alone), its memory charted under them, its GPU's use below.
+            // alone), its memory and its GPU charted under them.
             let mut figure = readout(cpu, Box::new(|s| match &s.wsl {
                 Some(crate::reading::WslSample::Running { cpu, .. }) => cpu.map(f64::from),
                 _ => None,
@@ -857,14 +845,19 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     });
                 }
             }
+            // The GPU as the memory: charted with the usage chart on.
             if on("gpu") {
-                blocks.push(Block::Meter {
-                    label: "GPU".into(),
-                    fraction: gpu.unwrap_or(0.0) / 100.0,
-                    value: shown(gpu, text::percent),
-                    hot: gpu.is_some_and(|gpu| gpu > hot_load),
-                    gap: 8.0,
-                });
+                let value = shown(gpu, text::percent);
+                let hot = gpu.is_some_and(|gpu| gpu > hot_load);
+                if chart {
+                    let series: Series = Box::new(|s| match &s.wsl {
+                        Some(crate::reading::WslSample::Running { gpu, .. }) => gpu.map(f64::from),
+                        _ => None,
+                    });
+                    blocks.push(Block::Trace { label: "GPU".into(), value, hot, plot: Plot::new(scene, vec![series], Some(100.0), Some(hot_load as f64)), gap: 10.0 });
+                } else {
+                    blocks.push(Block::Meter { label: "GPU".into(), fraction: gpu.unwrap_or(0.0) / 100.0, value, hot, gap: 8.0 });
+                }
             }
             blocks
         }
@@ -1241,7 +1234,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let count = cells.len().max(1) as f32;
                 let cell = (width - gap * (count - 1.0)) / count;
                 let radius = theme.thread_radius;
-                for (i, (load, hot)) in cells.iter().enumerate() {
+                for (i, (load, hot, _)) in cells.iter().enumerate() {
                     // A thread not read leaves its cell empty.
                     let Some(load) = load else { continue };
                     let cx = left + i as f32 * (cell + gap);
@@ -1256,6 +1249,20 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                         frame.clip(cx, cy + 14.0 - filled, cell, filled);
                         frame.fill_rounded(if *hot { theme.signal } else { ink.trace }, cx, cy, cell, 14.0, radius);
                         frame.unclip();
+                    }
+                }
+                // The cell pointed at: its tag over it, in the ink's colour
+                // and against it, inside the lane.
+                if let Some(Hit::Thread(i)) = scene.hover {
+                    if let Some((_, _, tag)) = cells.get(i as usize) {
+                        let width_of = frame.measure(tag, theme.small) + 16.0;
+                        let centre = left + i as f32 * (cell + gap) + cell / 2.0;
+                        let tag_left = (centre - width_of / 2.0).clamp(left, (left + width - width_of).max(left));
+                        let (tag_height, tag_top) = (LINE + 6.0, y + 10.0 - LINE - 10.0);
+                        let ink_on = if theme.dark { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
+                        name("tag");
+                        frame.fill_rounded(theme.text, tag_left, tag_top, width_of, tag_height, theme.control_radius.min(tag_height / 2.0));
+                        frame.text(tag, theme.small, ink_on, tag_left + 8.0, tag_top + 3.0, width_of - 16.0, Align::Start);
                     }
                 }
             }
@@ -1587,20 +1594,17 @@ mod tests {
     }
 
     #[test]
-    fn shows_the_clock_of_the_thread_pointed_at() {
+    fn tags_the_thread_pointed_at() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let mut read = sample(None, None, None);
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
-        read.cpu_sensors = Some(crate::reading::CpuSensors { temp: Some(60.0), ccds: Vec::new(), power: None });
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = |hover| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover, pinned: false, overlay: false, buttons: true };
-        let still = lane(&scene(None), "cpu", Detail::Full).unwrap();
-        let pointed = lane(&scene(Some(Hit::Thread(2))), "cpu", Detail::Full).unwrap();
-        assert!(facts(&pointed).contains(&("Thread 3".into(), "5.40 GHz · 10%".into())), "{:?}", facts(&pointed));
-        // In the clock's place: the lane keeps its size.
-        assert_eq!(facts(&still).len(), facts(&pointed).len());
+        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
+        let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
+        assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
     }
 
     #[test]
