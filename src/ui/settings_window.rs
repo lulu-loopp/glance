@@ -1656,7 +1656,7 @@ impl Ui {
             ("game", "time") => (p("游玩时长", "Time played"), Some(p("这次玩了多久，离开不到 5 分钟不重新计时", "How long this session has run; away for under 5 minutes, it carries on"))),
             ("wsl", "memory") => (p("内存", "Memory"), Some(p("WSL 占用的内存和它最多能用的内存；开着占用图表时画出走势", "What WSL holds of the memory, and the most it may; charted with the usage chart on"))),
             ("wsl", "distros") => (p("运行中的发行版", "Distributions running"), None),
-            ("wsl", "gpu") => ("GPU".into(), Some(p("WSL 里的程序（CUDA、图形界面等）占用的 GPU", "The GPU that programs in WSL use (CUDA, their windows)"))),
+            ("wsl", "gpu") => ("GPU", Some(p("WSL 里的程序（CUDA、图形界面等）占用的 GPU", "The GPU that programs in WSL use (CUDA, their windows)"))),
             (_, "chart") => (p("占用图表", "Usage chart"), Some(p("关闭后只显示数字，面板更紧凑", "Off, the figures alone: a more compact panel"))),
             ("system", "uptime") => (p("开机时长", "Uptime"), None),
             ("system", "processes") => (p("进程数", "Processes"), None),
