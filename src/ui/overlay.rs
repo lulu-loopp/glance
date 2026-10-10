@@ -711,11 +711,22 @@ pub fn shadow(frame: &dyn Canvas, readings: &[Reading], shape: Shape, glass: Gla
     }
 }
 
+/// How the overlay is in hand: not; taken (letting clicks through, it
+/// takes them now); dragged.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Hand {
+    Free,
+    Taken,
+    Dragged,
+}
+
 /// Draws the glass for `readings` from the canvas's corner: its tint (over
 /// the screen behind, blurred, which the window draws), rim, and the
-/// readings on it, at `px` physical pixels a DIP; `dragged`, in the colour
-/// that says it is being moved. Its shadow is drawn apart (see `shadow`).
-pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, dragged: bool, px: f32) {
+/// readings on it, at `px` physical pixels a DIP; dragged, in the colour
+/// that says it is being moved; taken, outlined (as a widget says it). Its
+/// shadow is drawn apart (see `shadow`).
+pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], shape: Shape, glass: Glass, hand: Hand, px: f32) {
+    let (dragged, taken) = (hand == Hand::Dragged, hand == Hand::Taken);
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
     let (glass, tint) = if dragged { (DRAGGED, DRAGGED_TINT) } else { (glass, glass.tone.palette().tint) };
@@ -723,6 +734,9 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     let (width, height) = arranged.size;
     let (x0, y0, radius) = (0.0, 0.0, arranged.radius);
     frame.fill_rounded(Color::hex(tint, glass.opacity), x0, y0, width, height, radius);
+    if taken {
+        frame.stroke_rounded(Fill::Solid(palette.second), x0 + 0.75, y0 + 0.75, width - 1.5, height - 1.5, radius - 0.75, 1.5);
+    }
     let ink = |ink: Ink| match ink {
         Ink::Main => palette.ink,
         Ink::Second => palette.second,

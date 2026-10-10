@@ -9,7 +9,7 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_LBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, KillTimer, SetTimer, SM_SWAPBUTTON, IDC_ARROW};
 
 use std::collections::VecDeque;
@@ -19,7 +19,7 @@ use crate::settings::OverlaySettings;
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::glass::Frosted;
-use crate::ui::overlay::{self, Glass, Layout, Metrics, Shape, INSET, MARGIN};
+use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, INSET, MARGIN};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
 
@@ -50,6 +50,8 @@ pub struct Overlay {
     /// clicks pass through it.
     clear: f32,
     through: bool,
+    /// Letting clicks through, and Ctrl held: it takes them now.
+    taken: bool,
     lang: Lang,
     /// Where its glass is on screen (physical pixels).
     rect: RECT,
@@ -145,6 +147,10 @@ pub fn primary_down() -> bool {
     (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
 }
 
+fn ctrl_down() -> bool {
+    (unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) }) < 0
+}
+
 fn cursor() -> Option<POINT> {
     let mut cursor = POINT::default();
     unsafe { GetCursorPos(&mut cursor) }.ok().map(|_| cursor)
@@ -182,6 +188,7 @@ impl Overlay {
             locked: false,
             clear: 0.0,
             through: false,
+            taken: false,
             lang: Lang::En,
             rect: RECT::default(),
             screen: RECT::default(),
@@ -204,7 +211,8 @@ impl Overlay {
         self.locked = settings.locked;
         self.clear = settings.clear.clamp(0.0, 1.0);
         self.through = settings.click_through;
-        self.take_clicks();
+        self.taken = self.through && ctrl_down();
+        self.window.set_click_through(self.through && !self.taken);
         self.beneath = beneath;
         self.lang = lang;
         let sample = history.back();
@@ -326,10 +334,17 @@ impl Overlay {
         let (width, height, radius) = self.measures();
         let (readings, frames, shape) = (&self.drawn.0, &self.drawn.1, self.drawn.2);
         let dragged = self.grab.is_some();
+        let hand = if dragged {
+            Hand::Dragged
+        } else if self.taken {
+            Hand::Taken
+        } else {
+            Hand::Free
+        };
         self.surface.set_frost(1.0 - self.clear);
         let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
-            overlay::paint(frame, readings, frames, shape, glass, dragged, scale);
+            overlay::paint(frame, readings, frames, shape, glass, hand, scale);
         });
         // Its shadow, on a surface made on this device.
         let shade_surface = match self.shade_surface.take() {
@@ -461,8 +476,16 @@ impl Overlay {
     /// Letting clicks through, it takes them while Ctrl is held (to be
     /// moved, or for its menu): called as often as the key is looked at.
     pub fn take_clicks(&mut self) {
-        let ctrl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL.0 as i32) } < 0;
-        self.window.set_click_through(self.through && !ctrl);
+        // In hand until let go of, Ctrl still held or not.
+        let taken = self.through && (ctrl_down() || self.grab.is_some());
+        if taken == self.taken {
+            return;
+        }
+        self.taken = taken;
+        self.window.set_click_through(self.through && !taken);
+        if self.shown {
+            self.draw();
+        }
     }
 
     /// Its menu, and what was chosen in it (the focus put back where it

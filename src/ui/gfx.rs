@@ -721,8 +721,9 @@ impl<'a> Frame<'a> {
     /// The picture `bitmap`, placed by `placed` from the surface's corner,
     /// frosted as the glass frosts what is behind it (see `glass`), inside
     /// the rounded rectangle `pane` (left, top, width, height, radius)
-    /// placed by `at`. For the glass where no compositor draws it.
-    pub fn frosted(&self, bitmap: &ID2D1Bitmap1, placed: Matrix3x2, pane: (f32, f32, f32, f32, f32), at: Matrix3x2) {
+    /// placed by `at`, as much of it as `frost` (1, all; 0, none: the
+    /// picture as it is). For the glass where no compositor draws it.
+    pub fn frosted(&self, bitmap: &ID2D1Bitmap1, placed: Matrix3x2, pane: (f32, f32, f32, f32, f32), at: Matrix3x2, frost: f32) {
         use windows::Win32::Graphics::Direct2D::{CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_LAYER_PARAMETERS1, D2D1_PROPERTY_TYPE_ENUM, D2D1_SATURATION_PROP_SATURATION};
         let (x, y, width, height, radius) = pane;
         let dc = &self.dc;
@@ -745,7 +746,7 @@ impl<'a> Frame<'a> {
                     geometricMask: std::mem::ManuallyDrop::new(Some(mask.cast()?)),
                     maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                     maskTransform: at * self.base,
-                    opacity: 1.0,
+                    opacity: frost,
                     ..Default::default()
                 };
                 dc.SetTransform(&Matrix3x2::identity());

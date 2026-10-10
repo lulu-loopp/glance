@@ -2694,12 +2694,12 @@ impl Ui {
         let ring = RECT { left: whole(x - around), top: whole(y - around), right: whole(x + w + around), bottom: whole(y + h + around) };
         let glass = super::overlay::glass(&mut self.stage.desktop.luminances(ring, hole, 1), None);
         if let Some((_, bitmap)) = &self.stage.bitmap {
-            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed);
+            frame.frosted(bitmap, screen, (0.0, 0.0, gw, gh, radius), placed, 1.0 - overlay.clear.clamp(0.0, 1.0));
         }
         frame.place(placed);
         frame.crisp_text();
         super::overlay::shadow(frame, &readings, shape, glass, false, px);
-        super::overlay::paint(frame, &readings, &frames, shape, glass, false, px);
+        super::overlay::paint(frame, &readings, &frames, shape, glass, super::overlay::Hand::Free, px);
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
     }

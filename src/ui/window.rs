@@ -26,6 +26,9 @@ pub const CAPTURE_LOST: u32 = WM_APP + 8;
 pub struct Window {
     pub hwnd: HWND,
     click_through: bool,
+    /// Made layered, and so always: one that is not is while it lets
+    /// clicks through, and only then (see `set_click_through`).
+    layered: bool,
     /// The window it gives way to while there is one (see `yield_to`).
     under: Cell<Option<HWND>>,
     /// Where it was last put by `place_keeping`.
@@ -129,7 +132,7 @@ impl Window {
             let _ = unsafe { DestroyWindow(hwnd) };
             return Err(error);
         }
-        Ok(Window { hwnd, click_through: false, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false) })
+        Ok(Window { hwnd, click_through: false, layered, under: Cell::new(None), placed: Cell::new(RECT::default()), on_desktop: Cell::new(false), lifted: Cell::new(false) })
     }
 
     pub fn place(&self, rect: RECT) {
@@ -325,7 +328,10 @@ impl Window {
         let _ = unsafe { SetWindowDisplayAffinity(self.hwnd, affinity) };
     }
 
-    /// Lets clicks through to whatever is underneath, or takes them.
+    /// Lets clicks through to whatever is underneath, or takes them. Only
+    /// a layered window lets them through to another program's: one made
+    /// without the style has it for as long as it does (given no layer
+    /// attributes, it keeps the backdrop the compositor draws into it).
     pub fn set_click_through(&mut self, through: bool) {
         if self.click_through == through {
             return;
@@ -333,7 +339,8 @@ impl Window {
         self.click_through = through;
         unsafe {
             let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
-            let style = if through { style | WS_EX_TRANSPARENT.0 as isize } else { style & !(WS_EX_TRANSPARENT.0 as isize) };
+            let styles = if self.layered { WS_EX_TRANSPARENT.0 } else { WS_EX_TRANSPARENT.0 | WS_EX_LAYERED.0 } as isize;
+            let style = if through { style | styles } else { style & !styles };
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style);
             let _ = SetWindowPos(self.hwnd, None, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
         }
