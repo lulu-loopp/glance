@@ -20,13 +20,80 @@ pub fn saved(dir: &Path) -> bool {
 #[cfg(windows)]
 const MOST: u64 = 1 << 20;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Edge {
     Left,
     #[default]
     Right,
     Top,
+}
+
+/// The edges a panel can open from, in the order they are gone through.
+pub const EDGES: [Edge; 3] = [Edge::Left, Edge::Top, Edge::Right];
+
+/// The edges of one screen that open the panel: the screen by the name
+/// that stays its own (see `screens`), and any of its edges, or none.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ScreenEdges {
+    pub screen: String,
+    pub edges: Vec<Edge>,
+}
+
+/// Which of a screen's edges open the panel.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Lit {
+    pub left: bool,
+    pub top: bool,
+    pub right: bool,
+}
+
+impl Lit {
+    pub fn of(edges: &[Edge]) -> Lit {
+        Lit { left: edges.contains(&Edge::Left), top: edges.contains(&Edge::Top), right: edges.contains(&Edge::Right) }
+    }
+
+    pub fn has(self, edge: Edge) -> bool {
+        match edge {
+            Edge::Left => self.left,
+            Edge::Top => self.top,
+            Edge::Right => self.right,
+        }
+    }
+
+    pub fn each(self) -> impl Iterator<Item = Edge> {
+        EDGES.into_iter().filter(move |edge| self.has(*edge))
+    }
+
+    /// The one of them nearest `point` on a screen at `monitor` (left, top,
+    /// right, bottom); none, when none of its edges opens the panel.
+    pub fn nearest(self, monitor: (i32, i32, i32, i32), point: (i32, i32)) -> Option<Edge> {
+        let (left, top, right, _) = monitor;
+        self.each().min_by_key(|edge| match edge {
+            Edge::Left => point.0 - left,
+            Edge::Top => point.1 - top,
+            Edge::Right => right - point.0,
+        })
+    }
+}
+
+/// The edges of the screen named `screen` that open the panel, as `kept`
+/// has them; `default` alone, for a screen it does not name.
+pub fn lit(kept: &[ScreenEdges], default: Edge, screen: &str) -> Lit {
+    match kept.iter().find(|entry| entry.screen == screen) {
+        Some(entry) => Lit::of(&entry.edges),
+        None => Lit::of(&[default]),
+    }
+}
+
+/// Turns `edge` of the screen named `screen` on, or off, in `kept`.
+pub fn flip_edge(kept: &mut Vec<ScreenEdges>, default: Edge, screen: &str, edge: Edge) {
+    let now = lit(kept, default, screen);
+    let edges = EDGES.into_iter().filter(|e| now.has(*e) != (*e == edge)).collect();
+    match kept.iter_mut().find(|entry| entry.screen == screen) {
+        Some(entry) => entry.edges = edges,
+        None => kept.push(ScreenEdges { screen: screen.to_string(), edges }),
+    }
 }
 
 /// What a desktop widget was sized to show (see `arrange::Choice`): its
@@ -242,7 +309,13 @@ impl Sensitivity {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// The edge of a screen that opens the panel, for every screen
+    /// `screens` does not name (one not seen before, and all of them up
+    /// to 0.2.6).
     pub edge: Edge,
+    /// The screens whose edges were chosen, each with those that open the
+    /// panel.
+    pub screens: Vec<ScreenEdges>,
     pub skin: String,
     pub anchor: Anchor,
     /// How many columns the panel's lanes are dealt into; none chosen, as
@@ -292,6 +365,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             edge: Edge::default(),
+            screens: Vec::new(),
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
@@ -442,6 +516,27 @@ mod tests {
         // Modifiers alone are no shortcut.
         assert!(!key(true, true, false, false, 0x12));
         assert!(!key(true, false, false, false, 0x5B));
+    }
+
+    #[test]
+    fn a_screen_opens_the_panel_from_the_edges_chosen_for_it() {
+        // None chosen for it: the one edge every screen had.
+        let mut kept = Vec::new();
+        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::of(&[Edge::Left]));
+        // One more turned on, the first turned off, the last too: none.
+        flip_edge(&mut kept, Edge::Left, "a", Edge::Top);
+        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::of(&[Edge::Left, Edge::Top]));
+        flip_edge(&mut kept, Edge::Left, "a", Edge::Left);
+        flip_edge(&mut kept, Edge::Left, "a", Edge::Top);
+        assert_eq!(lit(&kept, Edge::Left, "a"), Lit::default());
+        assert_eq!(kept.len(), 1);
+        // Another screen is as it was.
+        assert_eq!(lit(&kept, Edge::Left, "b"), Lit::of(&[Edge::Left]));
+        // Opened by hand: from the nearest of them.
+        let both = Lit::of(&[Edge::Left, Edge::Right]);
+        assert_eq!(both.nearest((0, 0, 1000, 500), (700, 20)), Some(Edge::Right));
+        assert_eq!(both.nearest((0, 0, 1000, 500), (300, 20)), Some(Edge::Left));
+        assert_eq!(Lit::default().nearest((0, 0, 1000, 500), (300, 20)), None);
     }
 
     #[test]

@@ -62,7 +62,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut};
+use crate::settings::{Anchor, Edge, OverFullscreen, Sensitivity, Settings, Shortcut, EDGES};
 use crate::panel::SIZES;
 use crate::update;
 
@@ -107,6 +107,16 @@ const ITEM_ROW: f32 = 48.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
+/// The map of the screens: the room above it for its name and its word,
+/// the most height it takes, how deep into a screen an edge takes a click
+/// and how far short of the screen's corners, and how thick a lit edge is
+/// drawn and how far inside the screen.
+const MAP_HEAD: f32 = 64.0;
+const MAP_MOST: f32 = 180.0;
+const MAP_BAND: f32 = 12.0;
+const MAP_CORNER: f32 = 6.0;
+const MAP_BAR: f32 = 3.0;
+const MAP_INSET: f32 = 3.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
@@ -350,7 +360,6 @@ impl Page {
 enum Field {
     Theme,
     Language,
-    Edge,
     Anchor,
     Columns,
     OverFullscreen,
@@ -417,6 +426,9 @@ enum Target {
     ClearShortcut,
     /// A slider's track.
     Slider(Field),
+    /// An edge of a screen (by its name) in the map of the screens: it
+    /// opens the panel, or does not.
+    ScreenEdge(String, Edge),
     /// A page, in the pages' list.
     Page(Page),
     /// Opens or closes the fold of the modules few want.
@@ -438,6 +450,9 @@ enum Row {
     /// The fold of the modules few want, and how many it holds.
     More(usize),
     Skins,
+    /// The screens as they are arranged, each with the edges that open
+    /// the panel.
+    Screens,
     Choice(Field),
     Switch(Switch),
     Module(String),
@@ -508,6 +523,10 @@ struct Ui {
     needs_modifier: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
+    /// The screens, as the map shows them.
+    screens: Vec<crate::screens::Screen>,
+    /// The edge last turned on in the map: the one the preview opens from.
+    shown_edge: Option<Edge>,
     /// The control the keyboard acts on, and whether the keyboard has been
     /// used since the last click (the focus is shown only then).
     focus: Option<Target>,
@@ -613,6 +632,8 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
             needs_modifier: false,
             pointer: None,
             pressed: None,
+            screens: crate::screens::all(),
+            shown_edge: None,
             focus: None,
             keyboard: false,
             drag: None,
@@ -850,10 +871,10 @@ impl Ui {
         match self.page {
             Page::Appearance => rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme), Row::Switch(Switch::Live), Row::Choice(Field::Language)]),
             Page::Opening => rows.extend([
-                Row::Choice(Field::Edge),
+                Row::Screens,
+                Row::Switch(Switch::Seam),
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
-                Row::Switch(Switch::Seam),
                 Row::Choice(Field::CloseDelay),
                 Row::Shortcut,
                 Row::Choice(Field::OverFullscreen),
@@ -977,6 +998,7 @@ impl Ui {
                 Row::Title => (0.0, TITLE),
                 Row::Slider(_) => (if after_heading { 8.0 } else { ROW_GAP }, ROW),
                 Row::Skins => (if after_heading { 8.0 } else { ROW_GAP }, SKINS_ROW),
+                Row::Screens => (if after_heading { 8.0 } else { ROW_GAP }, MAP_HEAD + self.map().2 + ROW_SIDE),
                 // A choice with a word on it: the word above, the choices on
                 // a line of their own.
                 Row::Choice(field) if self.choice_hint(*field).is_some() => {
@@ -999,6 +1021,36 @@ impl Ui {
         }
         let _ = y;
         placed
+    }
+
+    /// The map of the screens in the room a row has: how many DIPs a pixel
+    /// of the desktop is on it, its width and height, and the desktop's
+    /// corner.
+    fn map(&self) -> (f32, f32, f32, i32, i32) {
+        let room = PANE - 2.0 * PAD_SIDE - GUTTER - 2.0 * ROW_SIDE;
+        let bound = |pick: fn(&RECT) -> i32, most: bool| {
+            let all = self.screens.iter().map(|screen| pick(&screen.monitor));
+            if most { all.max() } else { all.min() }.unwrap_or(0)
+        };
+        let (left, top, right, bottom) = (bound(|m| m.left, false), bound(|m| m.top, false), bound(|m| m.right, true), bound(|m| m.bottom, true));
+        let (across, down) = ((right - left).max(1) as f32, (bottom - top).max(1) as f32);
+        let k = (room / across).min(MAP_MOST / down);
+        (k, across * k, down * k, left, top)
+    }
+
+    /// The edge the preview's panel opens from: the one last turned on in
+    /// the map; before any was, the first that opens the panel on the
+    /// screen this window is on (the one of a screen not set otherwise,
+    /// where none does).
+    fn preview_edge(&self) -> Edge {
+        self.shown_edge.unwrap_or_else(|| {
+            let mut window = RECT::default();
+            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut window) };
+            let centre = POINT { x: (window.left + window.right) / 2, y: (window.top + window.bottom) / 2 };
+            let here = crate::panel::monitor_at(centre).map(|contact| contact.monitor);
+            let screen = self.screens.iter().find(|screen| Some(screen.monitor) == here);
+            screen.and_then(|screen| crate::settings::lit(&self.settings.screens, self.settings.edge, &screen.id).each().next()).unwrap_or(self.settings.edge)
+        })
     }
 
     /// How tall a row has to be for its name and its word, the word broken
@@ -1174,11 +1226,6 @@ impl Ui {
                 vec![s("跟随系统", "System"), "中文".into(), "English".into()],
                 [LanguagePref::System, LanguagePref::Zh, LanguagePref::En].iter().position(|&l| l == prefs.language),
             ),
-            Field::Edge => (
-                pick(lang, "屏幕边缘", "Screen edge"),
-                vec![s("左侧", "Left"), s("顶部", "Top"), s("右侧", "Right")],
-                [Edge::Left, Edge::Top, Edge::Right].iter().position(|&e| e == settings.edge),
-            ),
             Field::OverlayLayout => (
                 pick(lang, "布局", "Layout"),
                 vec![s("卡片", "Card"), s("横条", "Strip")],
@@ -1250,7 +1297,6 @@ impl Ui {
         match field {
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
             Field::Language => prefs.language = [LanguagePref::System, LanguagePref::Zh, LanguagePref::En][index],
-            Field::Edge => settings.edge = [Edge::Left, Edge::Top, Edge::Right][index],
             Field::Anchor => settings.anchor = [Anchor::Pointer, Anchor::Center][index],
             Field::OverlayLayout => settings.overlay.layout = [Layout::Card, Layout::Strip][index],
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
@@ -1808,6 +1854,17 @@ impl Ui {
                 self.save();
             }
             Target::Choice(field, index) => self.choose(field, index),
+            Target::ScreenEdge(screen, edge) => {
+                let default = self.settings.edge;
+                crate::settings::flip_edge(&mut self.settings.screens, default, &screen, edge);
+                // Turned on, the preview opens from it.
+                if crate::settings::lit(&self.settings.screens, default, &screen).has(edge) {
+                    self.shown_edge = Some(edge);
+                } else if self.shown_edge == Some(edge) {
+                    self.shown_edge = None;
+                }
+                self.save();
+            }
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
@@ -1879,6 +1936,7 @@ impl Ui {
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
+                Row::Screens => self.screens.iter().flat_map(|screen| EDGES.map(|edge| Target::ScreenEdge(screen.id.clone(), edge))).collect(),
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
@@ -2147,6 +2205,10 @@ impl Ui {
     }
 
     fn draw(&mut self, now: Instant) {
+        // The screens as they are now, for the map.
+        if self.page == Page::Opening {
+            self.screens = crate::screens::all();
+        }
         let dt = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.scroll += (self.scroll_target - self.scroll) * (1.0 - E.powf(-dt / SCROLL_EASE));
@@ -2336,6 +2398,76 @@ impl Ui {
                         let font = if chosen { Font::new(Family::Segoe, 13.0, 600.0) } else { Font::new(Family::Segoe, 13.0, 400.0) };
                         text_centred(frame, name, font, if chosen { palette.text } else { palette.text2 }, x, y + 16.0 + 72.0 + 10.0 + 9.0, cell, Align::Start);
                         self.targets.push((Rect { x, y: y + 16.0, w: cell, h: 72.0 + 10.0 + 18.0 }, Target::Skin(skin)));
+                    }
+                }
+                Row::Screens => {
+                    card(frame, palette, left, y, width, row_height, palette.card);
+                    let name = pick(lang, "呼出位置", "Where it opens");
+                    let word = pick(lang, "点屏幕的一条边，面板就能从那里呼出；再点一次取消", "Click an edge of a screen for the panel to open from it; click again to turn it off");
+                    field_label(frame, palette, name, Some(word), label, hint, left + ROW_SIDE, y + MAP_HEAD / 2.0, width - 2.0 * ROW_SIDE);
+                    let (k, map_width, _, desk_left, desk_top) = self.map();
+                    let (ox, oy) = (left + (width - map_width) / 2.0, y + MAP_HEAD);
+                    let screens = self.screens.clone();
+                    let monitors: Vec<RECT> = screens.iter().map(|screen| screen.monitor).collect();
+                    let number = Font::new(Family::SegoeDisplay, 15.0, 600.0);
+                    for (index, screen) in screens.iter().enumerate() {
+                        let m = screen.monitor;
+                        let across = |x: i32| ox + (x - desk_left) as f32 * k;
+                        let down = |y: i32| oy + (y - desk_top) as f32 * k;
+                        // A hair between it and the next.
+                        let r = Rect { x: across(m.left) + 1.0, y: down(m.top) + 1.0, w: (m.right - m.left) as f32 * k - 2.0, h: (m.bottom - m.top) as f32 * k - 2.0 };
+                        fill(frame, palette.control, r.x, r.y, r.w, r.h, 4.0);
+                        stroke_inside(frame, r, 4.0, palette.card_stroke);
+                        let digit = (index + 1).to_string();
+                        let digit_width = frame.gfx.measure(&digit, number);
+                        text_centred(frame, &digit, number, palette.text2, r.x + (r.w - digit_width) / 2.0, r.y + r.h / 2.0, digit_width + 1.0, Align::Start);
+                        let lit = crate::settings::lit(&self.settings.screens, self.settings.edge, &screen.id);
+                        for edge in EDGES {
+                            let upright = edge != Edge::Top;
+                            let band = match edge {
+                                Edge::Left => Rect { x: r.x, y: r.y + MAP_CORNER, w: MAP_BAND, h: r.h - 2.0 * MAP_CORNER },
+                                Edge::Right => Rect { x: r.x + r.w - MAP_BAND, y: r.y + MAP_CORNER, w: MAP_BAND, h: r.h - 2.0 * MAP_CORNER },
+                                Edge::Top => Rect { x: r.x + MAP_CORNER, y: r.y, w: r.w - 2.0 * MAP_CORNER, h: MAP_BAND },
+                            };
+                            if band.w <= 0.0 || band.h <= 0.0 {
+                                continue;
+                            }
+                            let target = Target::ScreenEdge(screen.id.clone(), edge);
+                            let (on, hover) = (lit.has(edge), hovered.as_ref() == Some(&target));
+                            if on || hover {
+                                // Along the edge, short of the corners: where
+                                // it is open, whole; where another screen
+                                // lies against it, dashed, and lit only while
+                                // the place where screens meet opens the panel.
+                                let (from, to) = if upright { (band.y, band.y + band.h) } else { (band.x, band.x + band.w) };
+                                let bar = |a: f32, b: f32, color: Color| {
+                                    let (a, b) = (a.max(from), b.min(to));
+                                    if b <= a {
+                                        return;
+                                    }
+                                    match edge {
+                                        Edge::Left => fill(frame, color, r.x + MAP_INSET, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                        Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                        Edge::Top => fill(frame, color, a, r.y + MAP_INSET, b - a, MAP_BAR, MAP_BAR / 2.0),
+                                    }
+                                };
+                                let strength = if on { 1.0 } else { 0.4 };
+                                for (a, b, seam) in crate::screens::stretches(&monitors, index, edge) {
+                                    let (a, b) = if upright { (down(a), down(b)) } else { (across(a), across(b)) };
+                                    if !seam {
+                                        bar(a, b, palette.selection.alpha(strength));
+                                        continue;
+                                    }
+                                    let color = if self.settings.seam { palette.selection } else { palette.text3 };
+                                    let mut at = a;
+                                    while at < b {
+                                        bar(at, (at + 5.0).min(b), color.alpha(strength));
+                                        at += 9.0;
+                                    }
+                                }
+                            }
+                            self.targets.push((band, target));
+                        }
                     }
                 }
                 Row::Choice(field) => {
@@ -2731,7 +2863,7 @@ impl Ui {
         // along its edge.
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
-        let edge = self.settings.edge;
+        let edge = self.preview_edge();
         let interval = self.settings.interval_ms as f64;
         // Held while the preview is drawn; the sampler waits that long.
         let mut history = app.controller.history.lock().unwrap();

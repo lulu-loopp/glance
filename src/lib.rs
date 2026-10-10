@@ -35,6 +35,8 @@ mod presents;
 mod os;
 mod reading;
 #[cfg(windows)]
+mod screens;
+#[cfg(windows)]
 mod sensors;
 #[cfg(all(windows, feature = "studio"))]
 mod studio;

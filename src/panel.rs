@@ -46,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::detector::{Detector, Motion};
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Settings};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, ScreenEdges, Settings, EDGES};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
@@ -130,7 +130,10 @@ const TRAY_MENU: u32 = WM_APP + 11;
 const ESCAPE_HOTKEY: i32 = 1;
 
 struct Config {
+    /// The edge of a screen that opens the panel, for a screen `screens`
+    /// does not name; and those it names, with theirs.
     edge: Edge,
+    screens: Vec<ScreenEdges>,
     skin: String,
     live: bool,
     anchor: Anchor,
@@ -153,6 +156,7 @@ struct Config {
 fn config_from(settings: &Settings) -> Config {
     Config {
         edge: settings.edge,
+        screens: settings.screens.clone(),
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
         anchor: settings.anchor,
@@ -525,7 +529,7 @@ impl Controller {
                     let point = POINT { x: point.0, y: point.1 };
                     // On its screen, or the nearest, if it is gone.
                     if let Some(contact) = monitor_at(point) {
-                        panel.open(point, contact, None, now);
+                        panel.open(point, contact, panel.edge_for(point, contact), None, now);
                         panel.pinned = panel.is_open();
                     }
                 }
@@ -567,9 +571,14 @@ impl Controller {
                 return;
             }
             let now = Instant::now();
-            let (edge, pressure, over_fullscreen, seam) = {
+            let (pressure, over_fullscreen, seam) = {
                 let config = self.config.lock().unwrap();
-                (config.edge, config.pressure, config.over_fullscreen, config.seam)
+                (config.pressure, config.over_fullscreen, config.seam)
+            };
+            // The edges of a screen that open the panel.
+            let lit = |monitor: RECT| {
+                let config = self.config.lock().unwrap();
+                crate::screens::lit(&config.screens, config.edge, monitor)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -580,9 +589,15 @@ impl Controller {
             // sends to the background; a push into the edge may be an
             // accident in either) it opens only as the settings allow.
             let may_open = |allowed: bool| allowed || !fullscreen_game();
-            // Where on the edge the pointer is, and how hard it has to push
-            // there; never, with pushing turned off.
-            let at_edge = |cursor: POINT| edge_contact(cursor, edge).zip(pressure);
+            // Where the pointer is on an edge of its screen that opens the
+            // panel, which edge, and how hard it has to push there; never,
+            // with pushing turned off. (The ends of an edge open nothing: the
+            // pointer is on one edge at a time, and off them all between two.)
+            let at_edge = |cursor: POINT| {
+                let pressure = pressure?;
+                let here = monitor_at(cursor)?;
+                lit(here.monitor).each().find_map(|edge| edge_contact(cursor, edge).map(|contact| (contact, edge, pressure)))
+            };
             if panel.is_shown() {
                 armed = false;
                 seam_armed = false;
@@ -595,7 +610,14 @@ impl Controller {
                     on_screen = here;
                 }
                 let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
-                let Some(contact) = seam_contact(cursor, edge, came_from).filter(|_| seam) else {
+                // On a seam that is an edge that opens the panel, of the
+                // screen the pointer is on before the one it came from.
+                let found = EDGES
+                    .into_iter()
+                    .filter(|_| seam)
+                    .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).has(edge)).map(|contact| (contact, edge)))
+                    .min_by_key(|(contact, _)| Some(contact.monitor) != here);
+                let Some((contact, edge)) = found else {
                     seam_rest = None;
                     seam_armed = !panel.is_shown();
                     return;
@@ -611,7 +633,7 @@ impl Controller {
                 if now.duration_since(since) >= SEAM_DWELL {
                     seam_rest = None;
                     if may_open(fullscreen_edge) {
-                        panel.open(cursor, contact, None, now);
+                        panel.open(cursor, contact, edge, None, now);
                     } else {
                         seam_armed = false;
                     }
@@ -635,6 +657,7 @@ impl Controller {
                 // so: taken down, and opened afresh.
                 // The panel's own (the overlay's follows its game's screen).
                 crate::ui::window::SCREENS_CHANGED if msg.hwnd == panel.window.hwnd => {
+                    crate::screens::changed();
                     panel.screens_changed(msg.wParam.0 as u32, now);
                     widgets.screens_changed();
                 }
@@ -777,15 +800,15 @@ impl Controller {
                     if let Some(cursor) = cursor_position() {
                         on_seam(cursor, &mut panel);
                     }
-                    let motion = read_motion(HRAWINPUT(msg.lParam.0 as *mut _), edge);
-                    if let (Some(motion), Some(cursor)) = (motion, cursor_position()) {
+                    let moved = read_motion(HRAWINPUT(msg.lParam.0 as *mut _));
+                    if let (Some(moved), Some(cursor)) = (moved, cursor_position()) {
                         match at_edge(cursor) {
-                            Some((contact, pressure)) if armed && detector.motion(motion, now, pressure) => {
+                            Some((contact, edge, pressure)) if armed && detector.motion(moved.toward(edge), now, pressure) => {
                                 detector.reset();
                                 // Not over this game: not again until the
                                 // pointer has left the edge.
                                 if may_open(fullscreen_edge) {
-                                    panel.open(cursor, contact, None, now);
+                                    panel.open(cursor, contact, edge, None, now);
                                 } else {
                                     armed = false;
                                 }
@@ -811,7 +834,7 @@ impl Controller {
                     let moved = cursor.x != last_cursor.x || cursor.y != last_cursor.y;
                     if moved && !raw_since_watch && !panel.is_open() {
                         match at_edge(cursor) {
-                            Some((_, pressure)) if armed => {
+                            Some((_, _, pressure)) if armed => {
                                 detector.motion(Motion::Absolute, now, pressure);
                             }
                             Some(_) => {}
@@ -828,10 +851,10 @@ impl Controller {
                     let Some(cursor) = cursor_position() else { continue };
                     on_seam(cursor, &mut panel);
                     match at_edge(cursor) {
-                        Some((contact, _)) if armed && detector.dwell_elapsed(now) => {
+                        Some((contact, edge, _)) if armed && detector.dwell_elapsed(now) => {
                             detector.reset();
                             if may_open(fullscreen_edge) {
-                                panel.open(cursor, contact, None, now);
+                                panel.open(cursor, contact, edge, None, now);
                             } else {
                                 armed = false;
                             }
@@ -1190,12 +1213,11 @@ impl<'a> Panel<'a> {
         matches!(self.phase, Phase::Open { .. })
     }
 
-    /// The settings changed: what is shown, how, and from which edge.
+    /// The settings changed: what is shown, and how.
     fn restyle(&mut self) {
         self.next_frame = Instant::now();
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
-        self.edge = config.edge;
         self.columns = config.columns;
         // Mid-drag, the size is the drag's.
         if self.drag.is_none() {
@@ -1268,7 +1290,7 @@ impl<'a> Panel<'a> {
             let point = POINT { x, y };
             if let Some(contact) = monitor_at(point) {
                 let was_shown = self.is_shown();
-                self.open(point, contact, Some(at), now);
+                self.open(point, contact, self.edge_for(point, contact), Some(at), now);
                 // Opened there, pinned there if it was; one picked up on its
                 // way out (opened from the edge) stays as it was.
                 if !was_shown && self.is_open() {
@@ -1276,18 +1298,29 @@ impl<'a> Panel<'a> {
                 }
             }
         } else if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
-            self.open(cursor, contact, None, now);
+            self.open(cursor, contact, self.edge_for(cursor, contact), None, now);
         }
     }
 
-    /// Opens the panel on `contact`'s screen: along its edge at `cursor`,
+    /// The edge the panel opens from on `contact`'s screen when nothing
+    /// pushed into one (the shortcut, the tray): of those that open it
+    /// there, the nearest to `point`; where none does, the one of a screen
+    /// not set otherwise.
+    fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
+        let config = self.controller.config.lock().unwrap();
+        let m = contact.monitor;
+        crate::screens::lit(&config.screens, config.edge, m).nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edge)
+    }
+
+    /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
     /// or `floating` where it was moved to (see `Placement::floating`).
-    fn open(&mut self, cursor: POINT, contact: Contact, floating: Option<(f32, f32)>, now: Instant) {
+    fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, now: Instant) {
         if self.is_open() || self.controller.history.lock().unwrap().is_empty() {
             return;
         }
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
+            self.edge = edge;
             self.restyle();
             // A new opening is laid out for what the machine shows now.
             self.opening = None;
@@ -1411,7 +1444,7 @@ impl<'a> Panel<'a> {
             self.pinned = pinned;
         } else if open {
             if let Some((cursor, contact)) = cursor_position().and_then(|cursor| Some((cursor, monitor_at(cursor)?))) {
-                self.open(cursor, contact, None, now);
+                self.open(cursor, contact, self.edge_for(cursor, contact), None, now);
                 self.pinned = pinned;
                 self.game = game;
             }
@@ -1804,10 +1837,15 @@ impl<'a> Panel<'a> {
         let panel = placement.panel;
         let centre = POINT { x: (panel.left + panel.right) / 2, y: (panel.top + panel.bottom) / 2 };
         let contact = monitor_at(centre)?;
-        // Let go against its screen's edge (the side it opens from): back to
-        // the edge, centred where it was let go, to close as the pointer
-        // leaves and open from the edge again.
-        if docks(self.edge, contact, panel) {
+        // Let go against an edge of its screen that opens it: back to that
+        // edge, centred where it was let go, to close as the pointer leaves
+        // and open from the edge again.
+        let lit = {
+            let config = self.controller.config.lock().unwrap();
+            crate::screens::lit(&config.screens, config.edge, contact.monitor)
+        };
+        if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
+            self.edge = edge;
             placement.contact = contact;
             placement.px = contact.scale;
             placement.floating = None;
@@ -2342,7 +2380,28 @@ fn cursor_showing() -> bool {
     unsafe { GetCursorInfo(&mut info) }.is_ok() && info.flags.0 & CURSOR_SHOWING.0 != 0
 }
 
-fn read_motion(handle: HRAWINPUT, edge: Edge) -> Option<Motion> {
+/// How the mouse moved, as it says itself: to a place, or by so many
+/// counts across and down.
+#[derive(Clone, Copy)]
+enum Moved {
+    To,
+    By(i32, i32),
+}
+
+impl Moved {
+    /// The move as a push into `edge`.
+    fn toward(self, edge: Edge) -> Motion {
+        let Moved::By(x, y) = self else { return Motion::Absolute };
+        let (outward, along) = match edge {
+            Edge::Left => (-x, y),
+            Edge::Right => (x, y),
+            Edge::Top => (-y, x),
+        };
+        Motion::Relative { outward, along }
+    }
+}
+
+fn read_motion(handle: HRAWINPUT) -> Option<Moved> {
     let mut raw = RAWINPUT::default();
     let mut size = size_of::<RAWINPUT>() as u32;
     let read = unsafe {
@@ -2353,15 +2412,9 @@ fn read_motion(handle: HRAWINPUT, edge: Edge) -> Option<Motion> {
     }
     let mouse = unsafe { raw.data.mouse };
     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE != 0 {
-        return Some(Motion::Absolute);
+        return Some(Moved::To);
     }
-    let outward = match edge {
-        Edge::Left => -mouse.lLastX,
-        Edge::Right => mouse.lLastX,
-        Edge::Top => -mouse.lLastY,
-    };
-    let along = if edge == Edge::Top { mouse.lLastX } else { mouse.lLastY };
-    Some(Motion::Relative { outward, along })
+    Some(Moved::By(mouse.lLastX, mouse.lLastY))
 }
 
 pub(crate) fn monitor_at(point: POINT) -> Option<Contact> {

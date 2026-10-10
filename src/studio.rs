@@ -656,7 +656,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let glass = overlay::glass(&mut desktop.luminances(ring, hole, 1), None);
                     let at = Matrix3x2::translation(INSET, INSET);
                     if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
-                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at);
+                        frame.frosted(&bitmap, Matrix3x2::identity(), (0.0, 0.0, w, h, radius), at, 1.0);
                     }
                     frame.place(at);
                     frame.crisp_text();
