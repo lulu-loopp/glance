@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Glance 网站统计</title>
+<link rel="stylesheet" href="stats.css?v=1">
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <h1>Glance 网站统计</h1>
+    <div class="seg" role="group" aria-label="时间范围" data-days>
+      <button type="button" data-d="1">今天</button>
+      <button type="button" data-d="7">7 天</button>
+      <button type="button" data-d="30" aria-pressed="true">30 天</button>
+      <button type="button" data-d="90">90 天</button>
+    </div>
+  </div>
+
+  <div class="card" data-login hidden>
+    <form data-form>
+      <input type="password" placeholder="统计密钥" autocomplete="current-password" data-key>
+      <button class="go" type="submit">查看</button>
+    </form>
+    <p class="note">密钥只存在这个浏览器里；用这个浏览器打开官网不会被计入统计。</p>
+  </div>
+
+  <div data-board hidden>
+    <div class="tiles" data-tiles></div>
+    <div class="card gap">
+      <h2>每天</h2>
+      <div class="legend"><span><i class="s1"></i>独立访客</span><span><i class="s2"></i>点了下载的访客</span></div>
+      <div class="chart" data-chart><svg role="img" aria-label="每天的独立访客和点了下载的访客"></svg><div class="tip" data-tip></div></div>
+      <details class="gap-s"><summary>按天看数字</summary><table data-daily></table></details>
+    </div>
+    <div class="cols gap">
+      <div class="card"><h2>国家和地区</h2><table data-countries></table></div>
+      <div class="card"><h2>下载来源</h2><table data-sources></table><h2 class="gap-l">页面</h2><table data-pages></table></div>
+      <div class="card"><h2>从哪些网站来</h2><table data-refs></table></div>
+    </div>
+    <p class="note">访客按天计：同一天里同一个网络、同一个浏览器算一个人，跨天不追踪。"点了下载"是点了下载按钮，不代表下载完成或已安装。自动更新不经过官网，不在这里。</p>
+  </div>
+</div>
+<script src="stats.js?v=2" defer></script>
+</body>
+</html>

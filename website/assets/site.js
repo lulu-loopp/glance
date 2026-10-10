@@ -249,6 +249,23 @@
     });
   });
 
+  // ---- the site's own count (see _worker.js) ----
+  // The page shown, and the installer taken: what, from where, in which
+  // language; nothing that tells who. A browser the owner marked on the
+  // stats page is not counted.
+  var counted = true;
+  try { counted = localStorage.getItem("glance-notrack") !== "1"; } catch (e) { /* counted */ }
+  function tell(event) {
+    if (!counted || !navigator.sendBeacon) return;
+    try { navigator.sendBeacon("/api/e", JSON.stringify(event)); } catch (e) { /* not counted */ }
+  }
+  tell({ k: "view", p: location.pathname, r: document.referrer, l: lang });
+  each("[data-dl=\"primary\"]", function (a) {
+    a.addEventListener("click", function () {
+      tell({ k: "download", p: location.pathname, s: a.href.indexOf("gitee.com") >= 0 ? "gitee" : "github", l: lang });
+    });
+  });
+
   // The header takes its glass once the page is scrolled under it.
   var top = document.querySelector(".top");
   if (top) {

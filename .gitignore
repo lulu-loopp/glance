@@ -1,2 +1,5 @@
 target/
 __pycache__/
+
+# Wrangler's local state (the site's count, run here)
+.wrangler/

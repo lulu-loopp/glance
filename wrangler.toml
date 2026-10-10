@@ -1,0 +1,10 @@
+# The site (website/, published with `wrangler pages deploy`) and the
+# database its own count keeps (see website/_worker.js, scripts/stats.sql).
+name = "glancepc"
+pages_build_output_dir = "website"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "STATS"
+database_name = "glance-stats"
+database_id = "00000000-0000-0000-0000-000000000000"
