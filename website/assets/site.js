@@ -259,7 +259,11 @@
     if (!counted || !navigator.sendBeacon) return;
     try { navigator.sendBeacon("/api/e", JSON.stringify(event)); } catch (e) { /* not counted */ }
   }
-  tell({ k: "view", p: location.pathname, r: document.referrer, l: lang });
+  // A link given out with ?from=name (a profile, a post) says where its
+  // visitors come from, which an app opening it does not.
+  var from = "";
+  try { from = new URLSearchParams(location.search).get("from") || ""; } catch (e) { /* none */ }
+  tell({ k: "view", p: location.pathname, r: document.referrer, l: lang, f: from });
   each("[data-dl=\"primary\"]", function (a) {
     a.addEventListener("click", function () {
       tell({ k: "download", p: location.pathname, s: a.href.indexOf("gitee.com") >= 0 ? "gitee" : "github", l: lang });

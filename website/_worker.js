@@ -47,12 +47,18 @@ async function record(request, env) {
   const day = dayOf(now);
   const address = request.headers.get("cf-connecting-ip") || "";
   const visitor = (await hex(`${await saltOf(env.STATS, day)}|${address}|${ua}`)).slice(0, 16);
-  // Where it came from: the other site's name alone, not the page.
+  // Where it came from: the name its link carried (?from=name), else the
+  // other site's name alone, not the page.
   let from = "";
-  try {
-    const ref = new URL(clip(event.r, 500));
-    if (ref.hostname !== new URL(request.url).hostname) from = ref.hostname;
-  } catch {}
+  const tag = clip(event.f, 24).toLowerCase();
+  if (/^[a-z0-9_-]+$/.test(tag)) {
+    from = `tag:${tag}`;
+  } else {
+    try {
+      const ref = new URL(clip(event.r, 500));
+      if (ref.hostname !== new URL(request.url).hostname) from = ref.hostname;
+    } catch {}
+  }
   await env.STATS.prepare(
     "INSERT INTO events (ts, day, kind, path, ref, country, visitor, source, lang) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
@@ -82,7 +88,7 @@ async function stats(request, env) {
            FROM events WHERE day >= ? GROUP BY day, country)
          GROUP BY country ORDER BY visitors DESC`),
     all(`SELECT source, COUNT(*) AS downloads FROM events WHERE day >= ? AND kind = 'download' GROUP BY source ORDER BY downloads DESC`),
-    all(`SELECT ref, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' AND ref != '' GROUP BY ref ORDER BY views DESC LIMIT 20`),
+    all(`SELECT ref, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY ref ORDER BY views DESC LIMIT 20`),
     all(`SELECT path, COUNT(*) AS views FROM events WHERE day >= ? AND kind = 'view' GROUP BY path ORDER BY views DESC LIMIT 20`),
   ]);
   return json({ since, days, daily, countries, sources, refs, pages });

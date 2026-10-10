@@ -88,7 +88,7 @@
     table($("[data-countries]"), ["国家和地区", "访客", "下载", "转化"], data.countries.map(function (c) { return [place(c.country), fmt(c.visitors), fmt(c.downloaders), pct(c.downloaders, c.visitors)]; }));
     table($("[data-sources]"), ["来源", "下载点击"], data.sources.map(function (s) { return [s.source === "gitee" ? "Gitee" : s.source === "github" ? "GitHub" : s.source || "未知", fmt(s.downloads)]; }));
     table($("[data-pages]"), ["页面", "浏览"], data.pages.map(function (p) { return [p.path === "/" ? "中文首页" : p.path === "/en/" ? "英文首页" : p.path, fmt(p.views)]; }));
-    table($("[data-refs]"), ["网站", "浏览"], data.refs.map(function (r) { return [r.ref, fmt(r.views)]; }));
+    table($("[data-refs]"), ["来源", "浏览"], data.refs.map(function (r) { return [r.ref === "" ? "不带来源（App 内打开、直接访问等）" : r.ref.indexOf("tag:") === 0 ? "标记：" + r.ref.slice(4) : r.ref, fmt(r.views)]; }));
   }
 
   function load() {

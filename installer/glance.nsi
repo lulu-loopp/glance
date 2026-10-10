@@ -58,8 +58,9 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
-!insertmacro MUI_LANGUAGE "SimpChinese"
+; English first: a system in neither language gets the first.
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "SimpChinese"
 
 LangString OpenFolderAsk ${LANG_SIMPCHINESE} "所选位置不受保护。$\r$\n$\r$\n该位置的上级文件夹可由普通程序重命名或更改权限，因此安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都需要确认管理员权限；$\r$\n　· 无法启用“开机时启动”。$\r$\n$\r$\n建议安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此位置？"
 LangString OpenFolderAsk ${LANG_ENGLISH} "The selected location is not protected.$\r$\n$\r$\nA folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nTo keep it safe, when installed here:$\r$\n  · Glance asks for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" cannot be turned on.$\r$\n$\r$\nInstalling to Program Files, or to a new folder at the root of a drive (for example D:\Glance), is recommended.$\r$\n$\r$\nInstall to this location anyway?"
