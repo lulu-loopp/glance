@@ -147,10 +147,14 @@ impl Connection {
     /// (ssh, TLS), and an error for one it could not.
     fn open(host: &str) -> Option<std::io::Result<Connection>> {
         if let Some(pipe) = host.strip_prefix("npipe://") {
-            // npipe:////./pipe/name, the slashes the CLI's own.
-            let path = pipe.trim_start_matches('/').replace('/', "\\");
-            let path = format!("\\\\{path}");
-            return Some(std::fs::OpenOptions::new().read(true).write(true).open(path).map(Connection::Pipe));
+            use std::os::windows::fs::OpenOptionsExt;
+            // A pipe on this machine and nothing else: a context pointing
+            // anywhere else (a file) is not one Glance, elevated, opens.
+            let Some(path) = pipe_path(pipe) else { return Some(Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a pipe on this machine"))) };
+            // Whoever serves the pipe may tell who asks, not act as them.
+            const SECURITY_IDENTIFICATION: u32 = 1 << 16;
+            let opened = std::fs::OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(path);
+            return Some(opened.map(Connection::Pipe));
         }
         if let Some(address) = host.strip_prefix("tcp://") {
             let opened = std::net::TcpStream::connect(address.trim_end_matches('/')).and_then(|stream| {
@@ -179,6 +183,15 @@ impl Connection {
         }
         parse(&answer)
     }
+}
+
+/// The path of the pipe an `npipe://` address names (`//./pipe/name`, the
+/// slashes as the CLI writes them): a pipe on this machine, its name plain,
+/// or none.
+fn pipe_path(address: &str) -> Option<String> {
+    let name = address.trim_start_matches('/').strip_prefix("./pipe/")?;
+    let plain = !name.is_empty() && name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    plain.then(|| format!(r"\\.\pipe\{name}"))
 }
 
 /// Everything until the other end closes (a pipe closed says so as an
@@ -389,6 +402,42 @@ mod tests {
         assert!(worker.join().unwrap().is_err());
         assert!(asking.lock().unwrap().is_none());
         let _ = unsafe { windows::Win32::Foundation::CloseHandle(server) };
+    }
+
+    #[test]
+    fn lets_a_pipe_server_identify_glance_and_no_more() {
+        use windows::core::w;
+        use windows::Win32::Security::{GetTokenInformation, RevertToSelf, SecurityIdentification, TokenImpersonationLevel, SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY};
+        use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+        use windows::Win32::System::Pipes::{CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT};
+        use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
+        let server = unsafe { CreateNamedPipeW(w!(r"\\.\pipe\glance-test-identify"), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, None) };
+        assert!(!server.is_invalid());
+        let Some(Ok(Connection::Pipe(mut client))) = Connection::open("npipe:////./pipe/glance-test-identify") else { panic!("not opened") };
+        // A byte from the client, so the server may impersonate it.
+        client.write_all(b"x").unwrap();
+        let mut byte = [0u8; 1];
+        let _ = unsafe { windows::Win32::Storage::FileSystem::ReadFile(server, Some(&mut byte), None, None) };
+        unsafe { ImpersonateNamedPipeClient(server) }.unwrap();
+        let mut token = windows::Win32::Foundation::HANDLE::default();
+        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
+        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
+        let mut length = 0u32;
+        let read = opened.and_then(|_| unsafe { GetTokenInformation(token, TokenImpersonationLevel, Some(&mut level as *mut _ as *mut _), size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32, &mut length) });
+        unsafe { RevertToSelf() }.unwrap();
+        read.unwrap();
+        assert_eq!(level, SecurityIdentification);
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(token) };
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(server) };
+    }
+
+    #[test]
+    fn opens_pipes_alone() {
+        assert_eq!(pipe_path("////./pipe/dockerDesktopLinuxEngine").as_deref(), Some(r"\\.\pipe\dockerDesktopLinuxEngine"));
+        assert_eq!(pipe_path("//./pipe/docker_engine").as_deref(), Some(r"\\.\pipe\docker_engine"));
+        for elsewhere in ["////?/C:/Windows/System32/drivers/etc/hosts", "////./pipe/../../C:/x", "////./pipe/a/b", "////server/pipe/x", "////./pipe/", "////./pipe/.."] {
+            assert_eq!(pipe_path(elsewhere), None, "{elsewhere}");
+        }
     }
 
     #[test]
