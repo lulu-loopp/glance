@@ -1254,14 +1254,19 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 // The cell pointed at: its tag over it, in the ink's colour
                 // and against it, inside the lane.
                 if let Some(Hit::Thread(i)) = scene.hover {
-                    if let Some((_, _, tag)) = cells.get(i as usize) {
+                    if let Some((_, hot, tag)) = cells.get(i as usize) {
                         let width_of = frame.measure(tag, theme.small) + 16.0;
                         let centre = left + i as f32 * (cell + gap) + cell / 2.0;
                         let tag_left = (centre - width_of / 2.0).clamp(left, (left + width - width_of).max(left));
                         let (tag_height, tag_top) = (LINE + 6.0, y + 10.0 - LINE - 10.0);
-                        let ink_on = if theme.dark { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
+                        // A hot thread's tag in the signal colour, as its cell is.
+                        let (ground, ink_on) = match (hot, theme.dark) {
+                            (true, _) => (theme.signal, Color::hex(0xFFFFFF, 1.0)),
+                            (false, true) => (theme.text, Color::hex(0x000000, 1.0)),
+                            (false, false) => (theme.text, Color::hex(0xFFFFFF, 1.0)),
+                        };
                         name("tag");
-                        frame.fill_rounded(theme.text, tag_left, tag_top, width_of, tag_height, theme.control_radius.min(tag_height / 2.0));
+                        frame.fill_rounded(ground, tag_left, tag_top, width_of, tag_height, theme.control_radius.min(tag_height / 2.0));
                         frame.text(tag, theme.small, ink_on, tag_left + 8.0, tag_top + 3.0, width_of - 16.0, Align::Start);
                     }
                 }
