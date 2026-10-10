@@ -19,14 +19,15 @@ out with everything your PC is doing; move away and it slides back.
 
 ## What it shows
 
-- **CPU**: usage, every thread, clock, temperature, package power, each chiplet's temperature
+- **CPU**: usage, every thread (point at one for its clock), clock (each kind's on processors with big and little cores), temperature, package power, each chiplet's temperature
 - **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards
-- **Memory**: use, and each module's temperature
+- **Memory**: use, its speed (and what the modules are rated for, if it runs below that), and each module's temperature
 - **Network and disk**: traffic, and the drive's temperature
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
+- **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
 ## Desktop widgets
@@ -123,13 +124,14 @@ for administrator rights at every start and cannot start with Windows.
   covered as anything else is.
 - **Choose what it shows**: in the settings, each module (CPU, each graphics
   card, memory, network, disk…) opens to its own items, each switched on or
-  off; drag modules to change their order.
+  off; drag modules to change their order. WSL and Docker are folded away
+  under *More modules* until switched on.
 - **Close it**: move the pointer away, or press Esc.
 - **Size it**: drag the panel's edges, as soon as it opens.
 - **Keep it on the desktop**: drag the panel away from the edge and it tears
   off as a widget (see [Desktop widgets](#desktop-widgets)), onto another
   screen too.
-- **Pin it**: the pin in its bottom bar keeps it open while you work elsewhere.
+- **Pin it**: the pin in its bottom bar keeps it open while you work elsewhere, and open again when Glance starts.
 - **At a glance**: hovering over the tray icon shows the CPU, graphics and
   memory in brief. A heat alert (off unless you turn it on) tells from the
   tray when the CPU or a graphics card stays at the temperature alert for
