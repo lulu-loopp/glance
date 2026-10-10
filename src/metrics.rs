@@ -76,6 +76,10 @@ pub struct Sampler {
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
+    /// On a processor with cores of more than one kind: each logical
+    /// processor's performance and nominal clock, and its kind (see
+    /// `Kinds`).
+    kinds: Option<Kinds>,
     gpu_engine: Option<PDH_HCOUNTER>,
     gpu_dedicated: Option<PDH_HCOUNTER>,
     gpu_shared: Option<PDH_HCOUNTER>,
@@ -129,6 +133,12 @@ impl Sampler {
         };
         let cpu_time = add(w!(r"\Processor Information(*)\% Processor Time"));
         let cpu_performance = add(w!(r"\Processor Information(_Total)\% Processor Performance"));
+        // Read for each logical processor only where there are kinds to tell apart.
+        let kinds = Kinds::of_this_machine().map(|classes| Kinds {
+            classes,
+            performance: add(w!(r"\Processor Information(*)\% Processor Performance")),
+            nominal: add(w!(r"\Processor Information(*)\Processor Frequency")),
+        });
         let gpu_engine = add(w!(r"\GPU Engine(*)\Utilization Percentage"));
         let gpu_dedicated = add(w!(r"\GPU Adapter Memory(*)\Dedicated Usage"));
         let gpu_shared = add(w!(r"\GPU Adapter Memory(*)\Shared Usage"));
@@ -158,9 +168,11 @@ impl Sampler {
         found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
             format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
         }));
+        let modules = crate::smbios::memory_modules();
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
-            memory_modules: crate::smbios::describe(&crate::smbios::memory_modules()),
+            memory_modules: crate::smbios::describe(&modules),
+            memory_speed: crate::smbios::speed(&modules),
             drives: crate::drives::models(),
             network_adapter: default_interface().map(|adapter| adapter.model),
             board: reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")),
@@ -173,6 +185,7 @@ impl Sampler {
             query,
             cpu_time,
             cpu_performance,
+            kinds,
             gpu_engine,
             gpu_dedicated,
             gpu_shared,
@@ -377,6 +390,10 @@ impl Sampler {
             cpu,
             threads,
             ghz: Some((self.base_mhz * performance / 100_000.0) as f32),
+            kinds_ghz: match &self.kinds {
+                Some(kinds) if collected => kinds.read(&mut self.buf),
+                _ => Vec::new(),
+            },
             memory: MemorySample {
                 used: (perf.PhysicalTotal - perf.PhysicalAvailable) as u64 * page,
                 committed: perf.CommitTotal as u64 * page,
@@ -551,6 +568,72 @@ unsafe extern "system" {
 
 /// Each active processor group's first processor, counted across the
 /// groups, and how many active processors there are in all.
+/// The kinds of cores a processor has (big and little: Windows' efficiency
+/// classes, the most capable highest), with what reads each logical
+/// processor's clock.
+struct Kinds {
+    /// Each logical processor's class, by its counters' instance name
+    /// ("group,number").
+    classes: HashMap<String, u8>,
+    performance: Option<PDH_HCOUNTER>,
+    nominal: Option<PDH_HCOUNTER>,
+}
+
+impl Kinds {
+    /// Each logical processor's class, if they are not all alike.
+    fn of_this_machine() -> Option<HashMap<String, u8>> {
+        use windows::Win32::System::SystemInformation::{GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION};
+        let mut needed = 0u32;
+        let _ = unsafe { GetSystemCpuSetInformation(None, 0, &mut needed, None, None) };
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        if !unsafe { GetSystemCpuSetInformation(Some(buf.as_mut_ptr().cast()), needed, &mut needed, None, None) }.as_bool() {
+            return None;
+        }
+        // Records one after another, each as long as it says.
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), needed as usize) };
+        let mut classes = HashMap::new();
+        let mut at = 0;
+        while at + size_of::<SYSTEM_CPU_SET_INFORMATION>() <= bytes.len() {
+            let record = unsafe { &*(bytes.as_ptr().add(at) as *const SYSTEM_CPU_SET_INFORMATION) };
+            if record.Size == 0 {
+                break;
+            }
+            let set = unsafe { record.Anonymous.CpuSet };
+            classes.insert(format!("{},{}", set.Group, set.LogicalProcessorIndex), set.EfficiencyClass);
+            at += record.Size as usize;
+        }
+        let mut kinds: Vec<u8> = classes.values().copied().collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        (kinds.len() > 1).then_some(classes)
+    }
+
+    /// Each kind's clock now (GHz), the most capable first.
+    fn read(&self, buf: &mut Vec<u64>) -> Vec<Option<f32>> {
+        let performance = self.performance.and_then(|c| read_array(c, buf)).unwrap_or_default();
+        let nominal: HashMap<String, f64> = self.nominal.and_then(|c| read_array(c, buf)).unwrap_or_default().into_iter().filter_map(|(name, mhz)| Some((name, mhz?))).collect();
+        let clocks = performance.into_iter().filter_map(|(name, share)| {
+            let class = *self.classes.get(&name)?;
+            Some((class, share? / 100.0 * nominal.get(&name)? / 1000.0))
+        });
+        average_by_kind(&self.classes, clocks)
+    }
+}
+
+/// Each class's average of `clocks` (class, GHz), the highest class first;
+/// a class `classes` has that has no clock read, none.
+fn average_by_kind(classes: &HashMap<String, u8>, clocks: impl Iterator<Item = (u8, f64)>) -> Vec<Option<f32>> {
+    let mut kinds: Vec<u8> = classes.values().copied().collect();
+    kinds.sort_unstable_by(|a, b| b.cmp(a));
+    kinds.dedup();
+    let mut sums: HashMap<u8, (f64, u32)> = HashMap::new();
+    for (class, ghz) in clocks {
+        let sum = sums.entry(class).or_default();
+        *sum = (sum.0 + ghz, sum.1 + 1);
+    }
+    kinds.iter().map(|class| sums.get(class).map(|(total, count)| (total / *count as f64) as f32)).collect()
+}
+
 /// When the system last started: from off, a restart, or with Fast Startup
 /// on (where "Shut down" hibernates the system and the next start resumes
 /// it, the tick count running on) or out of hibernation. Waking from sleep
@@ -1196,6 +1279,38 @@ mod tests {
         let system = ticks(k) + ticks(u);
         let cpus = std::thread::available_parallelism().unwrap().get() as u64;
         assert!(total.abs_diff(system) < cpus * 10_000_000, "{total} vs {system}");
+    }
+
+    #[test]
+    fn averages_each_kind_of_core() {
+        // Two big cores (class 1), two little (class 0).
+        let classes: HashMap<String, u8> = [("0,0", 1), ("0,1", 1), ("0,2", 0), ("0,3", 0)].map(|(n, c)| (n.to_string(), c)).into_iter().collect();
+        let kinds = average_by_kind(&classes, [(1, 5.0), (1, 4.6), (0, 3.6), (0, 3.2)].into_iter());
+        assert_eq!(kinds.len(), 2);
+        assert!((kinds[0].unwrap() - 4.8).abs() < 1e-5 && (kinds[1].unwrap() - 3.4).abs() < 1e-5);
+        // A kind none of whose clocks was read: none, in its place.
+        assert_eq!(average_by_kind(&classes, [(1, 5.0)].into_iter())[1], None);
+    }
+
+    #[test]
+    #[ignore = "reads this machine's processors, its first half taken for one kind of core and the rest another; run with --ignored"]
+    fn reads_kinds_of_cores() {
+        let threads = processor_groups().1;
+        let classes: HashMap<String, u8> = (0..threads).map(|i| (format!("0,{i}"), u8::from(i < threads / 2))).collect();
+        let mut query = PDH_HQUERY::default();
+        let _ = unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) };
+        let add = |path| {
+            let mut counter = PDH_HCOUNTER::default();
+            (unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) } == ERROR_SUCCESS.0).then_some(counter)
+        };
+        let kinds = Kinds { classes, performance: add(w!(r"\Processor Information(*)\% Processor Performance")), nominal: add(w!(r"\Processor Information(*)\Processor Frequency")) };
+        unsafe { PdhCollectQueryData(query) };
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        unsafe { PdhCollectQueryData(query) };
+        let read = kinds.read(&mut Vec::new());
+        println!("{read:?}");
+        assert!(read.len() == 2 && read.iter().all(|ghz| ghz.is_some_and(|ghz| (0.4..8.0).contains(&ghz))));
+        assert_eq!(Kinds::of_this_machine().map(|classes| classes.len()), None, "this machine's cores are all of one kind");
     }
 
     #[test]

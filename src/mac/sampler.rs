@@ -87,6 +87,7 @@ impl Sampler {
         let info = StaticInfo {
             cpu_name: sysctl_string("machdep.cpu.brand_string").unwrap_or_default(),
             memory_modules: None,
+            memory_speed: None,
             drives: drive_models(),
             network_adapter: primary.as_ref().map(|adapter| adapter.model.clone()),
             board: sysctl_string("hw.model").unwrap_or_default(),
@@ -181,6 +182,7 @@ impl Sampler {
             cpu,
             threads,
             ghz: report.cpu_mhz.map(|mhz| mhz / 1000.0),
+            kinds_ghz: Vec::new(),
             memory: memory(self.info.mem_total),
             gpus,
             net_down: net_rates.map(|rates| rates.0),

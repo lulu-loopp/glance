@@ -66,7 +66,7 @@ const GPU: [Item; 8] = [
     item("shared", true),
     item("engines", false),
 ];
-const MEMORY: [Item; 4] = [item("chart", true), item("dimms", true), item("committed", false), item("cached", false)];
+const MEMORY: [Item; 5] = [item("chart", true), item("speed", true), item("dimms", true), item("committed", false), item("cached", false)];
 const NETWORK: [Item; 5] = [item("chart", true), item("adapter", false), item("address", false), item("link", false), item("totals", false)];
 const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];

@@ -845,6 +845,7 @@ fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: Option<&str
         cpu: Some(cpu),
         threads,
         ghz: Some(ghz),
+        kinds_ghz: Vec::new(),
         memory: MemorySample { used, committed: used + 6 * gb, commit_limit: info.mem_total + 8 * gb, cached: 12 * gb },
         gpus,
         net_down: Some(net_down),

@@ -9,6 +9,8 @@ pub struct StaticInfo {
     pub cpu_name: String,
     /// The memory modules, as "2 × 32 GB DDR5-6000", when the firmware says.
     pub memory_modules: Option<String>,
+    /// What the memory runs at (MT/s), and what it is rated for where more.
+    pub memory_speed: Option<(u16, Option<u16>)>,
     /// The model of each physical drive.
     pub drives: Vec<String>,
     /// The model of the adapter internet traffic leaves by, when the app started.
@@ -60,6 +62,10 @@ pub struct Sample {
     pub threads: Vec<Option<f32>>,
     /// The cores' clock, where the system says it.
     pub ghz: Option<f32>,
+    /// On a processor with cores of more than one kind (big and little),
+    /// each kind's clock, its cores' average (GHz), the most capable kind
+    /// first; empty on one whose cores are all alike.
+    pub kinds_ghz: Vec<Option<f32>>,
     pub memory: MemorySample,
     pub gpus: Vec<GpuSample>,
     pub net_down: Option<f64>,
@@ -311,6 +317,7 @@ mod tests {
         let info = StaticInfo {
             cpu_name: String::new(),
             memory_modules: None,
+            memory_speed: None,
             drives: Vec::new(),
             network_adapter: None,
             board: String::new(),

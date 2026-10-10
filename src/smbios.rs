@@ -14,8 +14,11 @@ const RAW_HEADER: usize = 8;
 pub struct Module {
     pub megabytes: u64,
     pub kind: &'static str,
-    /// The speed the module runs at, in MT/s, if the firmware says.
+    /// The speed the module runs at, in MT/s, if the firmware says (else
+    /// what it is rated for).
     pub speed: Option<u16>,
+    /// The speed it is rated for (MT/s).
+    pub rated: Option<u16>,
 }
 
 /// Every populated memory slot.
@@ -80,8 +83,16 @@ fn memory_device(fields: &[u8]) -> Option<Module> {
         _ => "",
     };
     // The configured speed (what it runs at) where given, else the rated one.
-    let speed = word(fields, 0x20).filter(|&s| s != 0).or_else(|| word(fields, 0x15).filter(|&s| s != 0));
-    Some(Module { megabytes, kind, speed })
+    let rated = word(fields, 0x15).filter(|&s| s != 0);
+    let speed = word(fields, 0x20).filter(|&s| s != 0).or(rated);
+    Some(Module { megabytes, kind, speed, rated })
+}
+
+/// What the memory runs at (MT/s, the first module's), and what it is
+/// rated for, where that is more: run below it (XMP or EXPO off, often).
+pub fn speed(modules: &[Module]) -> Option<(u16, Option<u16>)> {
+    let first = modules.first()?;
+    Some((first.speed?, first.rated.filter(|&rated| rated > first.speed.unwrap_or(0))))
 }
 
 /// "2 × 32 GB DDR5-6000", or as much of it as is known.
@@ -111,13 +122,21 @@ mod tests {
     #[test]
     fn reads_this_machines_memory() {
         let modules = memory_modules();
-        println!("{modules:?} -> {:?}", describe(&modules));
+        println!("{modules:?} -> {:?}, {:?}", describe(&modules), speed(&modules));
         assert!(!modules.is_empty());
     }
 
     #[test]
+    fn tells_a_speed_below_the_rated_one() {
+        let module = |speed, rated| Module { megabytes: 16384, kind: "DDR5", speed: Some(speed), rated: Some(rated) };
+        assert_eq!(speed(&[module(4800, 6000)]), Some((4800, Some(6000))));
+        assert_eq!(speed(&[module(6000, 6000)]), Some((6000, None)));
+        assert_eq!(speed(&[]), None);
+    }
+
+    #[test]
     fn describes_modules() {
-        let ddr5 = |mb| Module { megabytes: mb, kind: "DDR5", speed: Some(6000) };
+        let ddr5 = |mb| Module { megabytes: mb, kind: "DDR5", speed: Some(6000), rated: Some(6000) };
         assert_eq!(describe(&[ddr5(32768), ddr5(32768)]).unwrap(), "2 × 32 GB DDR5-6000");
         assert_eq!(describe(&[ddr5(16384), ddr5(32768)]).unwrap(), "48 GB DDR5-6000");
         assert_eq!(describe(&[]), None);

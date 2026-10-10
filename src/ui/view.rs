@@ -335,7 +335,14 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 String::new()
             };
             let mut facts = Vec::new();
-            if had_temp && had_clock {
+            // Cores of more than one kind: each kind's clock, the big first.
+            let kinds = &s.kinds_ghz;
+            if on("clock") && kinds.len() > 1 {
+                let names: &[(&str, &str)] = if kinds.len() == 2 { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock")] } else { &[("大核频率", "P-core clock"), ("小核频率", "E-core clock"), ("低功耗核频率", "LP E-core clock")] };
+                for (ghz, (zh, en)) in kinds.iter().zip(names) {
+                    facts.push((lang.pick(zh, en).into(), shown(*ghz, |ghz| format!("{ghz:.2} GHz")), false));
+                }
+            } else if had_temp && had_clock {
                 facts.push((lang.pick("频率", "Clock").into(), clock.unwrap_or_else(|| UNREAD.into()), false));
             }
             if on("power") && scene.seen.cpu_power {
@@ -425,6 +432,15 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let total = info.mem_total.max(1) as f64;
             let percent = (s.memory.used as f64 / total * 100.0) as f32;
             let mut facts = Vec::new();
+            // What it runs at, and what it is rated for where that is more.
+            if let Some((speed, rated)) = info.memory_speed.filter(|_| on("speed")) {
+                let value = match rated {
+                    Some(rated) if lang == Lang::Zh => format!("{speed} MT/s（额定 {rated}）"),
+                    Some(rated) => format!("{speed} MT/s (rated {rated})"),
+                    None => format!("{speed} MT/s"),
+                };
+                facts.push((lang.pick("频率", "Speed").into(), value, false));
+            }
             // Each module's own temperature, as each chiplet's on the CPU lane.
             for i in 0..if on("dimms") { scene.seen.dimms } else { 0 } {
                 let name = if lang == Lang::Zh { format!("内存条 {}", i + 1) } else { format!("Module {}", i + 1) };
@@ -1467,6 +1483,7 @@ mod tests {
             cpu: Some(10.0),
             threads: vec![Some(10.0); 4],
             ghz: Some(3.0),
+            kinds_ghz: Vec::new(),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
             gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), clock_mhz: clock, fan_rpm: None, power: None }],
             net_down: Some(0.0),
@@ -1497,6 +1514,7 @@ mod tests {
         StaticInfo {
             cpu_name: "CPU".into(),
             memory_modules: None,
+            memory_speed: None,
             drives: Vec::new(),
             network_adapter: None,
             board: "Board".into(),
@@ -1517,6 +1535,20 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    #[test]
+    fn shows_each_kind_of_cores_clock() {
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene = |history: &'static [Sample]| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, process_scroll: 0.0, hover: None, pinned: false, overlay: false, buttons: true };
+        // Big and little cores: each kind's clock, in place of the one clock.
+        let mut hybrid = sample(None, None, None);
+        hybrid.kinds_ghz = vec![Some(5.2), None];
+        let cpu = lane(&scene(leak(vec![hybrid])), "cpu", Detail::Full).unwrap();
+        let shown = facts(&cpu);
+        assert!(shown.contains(&("P-core clock".into(), "5.20 GHz".into())) && shown.contains(&("E-core clock".into(), UNREAD.into())));
+        assert!(!shown.iter().any(|(label, _)| label == "Clock"));
     }
 
     #[test]

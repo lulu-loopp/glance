@@ -623,6 +623,7 @@ mod tests {
         let info = StaticInfo {
             cpu_name: String::new(),
             memory_modules: None,
+            memory_speed: None,
             drives: Vec::new(),
             network_adapter: None,
             board: String::new(),

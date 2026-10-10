@@ -921,6 +921,7 @@ mod tests {
             cpu: Some(40.0),
             threads: Vec::new(),
             ghz: None,
+            kinds_ghz: Vec::new(),
             memory: MemorySample { used: 8 << 30, committed: 0, commit_limit: 0, cached: 0 },
             gpus: Vec::new(),
             net_down: None,
