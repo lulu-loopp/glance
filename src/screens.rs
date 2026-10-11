@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, EnumDisplayMonitors, Ge
 
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
-use crate::settings::{Edge, Opens, ScreenEdges};
+use crate::settings::{Edge, Opens, Rest, ScreenEdges};
 
 /// The first Windows that eases the pointer between displays (see `eased`).
 const FIRST_EASING_BUILD: u32 = 22557;
@@ -109,14 +109,14 @@ pub fn changed() {
 
 /// How the edges of the screen at `monitor` open the panel (see
 /// `settings::lit`); none does, for no screen of the desktop.
-pub fn lit(kept: &[ScreenEdges], default: Edge, seam: bool, monitor: RECT) -> Opens {
+pub fn lit(kept: &[ScreenEdges], rest: Rest, monitor: RECT) -> Opens {
     KNOWN.with(|known| {
         let mut known = known.borrow_mut();
         // One not known: the screens are not as they were.
         if !known.iter().any(|screen| screen.monitor == monitor) {
             *known = all();
         }
-        known.iter().find(|screen| screen.monitor == monitor).map(|screen| crate::settings::lit(kept, default, seam, &screen.id)).unwrap_or_default()
+        known.iter().find(|screen| screen.monitor == monitor).map(|screen| crate::settings::lit(kept, rest, &screen.id)).unwrap_or_default()
     })
 }
 

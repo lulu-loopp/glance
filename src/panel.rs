@@ -46,7 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::detector::{Detector, Motion};
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, ScreenEdges, Settings, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Rest, ScreenEdges, Settings, EDGES};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
@@ -130,9 +130,9 @@ const TRAY_MENU: u32 = WM_APP + 11;
 const ESCAPE_HOTKEY: i32 = 1;
 
 struct Config {
-    /// The edge of a screen that opens the panel, for a screen `screens`
-    /// does not name; and those it names, with theirs.
-    edge: Edge,
+    /// How the edges of a screen `screens` does not name open the panel;
+    /// and those it names, with theirs.
+    rest: Rest,
     screens: Vec<ScreenEdges>,
     skin: String,
     live: bool,
@@ -145,7 +145,6 @@ struct Config {
     widgets: Vec<crate::settings::WidgetAt>,
     /// None: pushing into the edge opens nothing.
     pressure: Option<i32>,
-    seam: bool,
     over_fullscreen: OverFullscreen,
     close_delay: Duration,
     interval: Duration,
@@ -155,7 +154,7 @@ struct Config {
 
 fn config_from(settings: &Settings) -> Config {
     Config {
-        edge: settings.edge,
+        rest: settings.rest(),
         screens: settings.screens.clone(),
         skin: settings.skin.clone(),
         live: settings.live_backdrop,
@@ -168,7 +167,6 @@ fn config_from(settings: &Settings) -> Config {
         panel_pinned: settings.panel_pinned,
         widgets: settings.widgets.clone(),
         pressure: settings.sensitivity.pressure(),
-        seam: settings.seam,
         over_fullscreen: settings.over_fullscreen,
         close_delay: settings.close_delay(),
         interval: settings.interval(),
@@ -578,7 +576,7 @@ impl Controller {
             // How the edges of a screen open the panel.
             let lit = |monitor: RECT| {
                 let config = self.config.lock().unwrap();
-                crate::screens::lit(&config.screens, config.edge, config.seam, monitor)
+                crate::screens::lit(&config.screens, config.rest, monitor)
             };
             let (fullscreen_hotkey, fullscreen_edge) = match over_fullscreen {
                 OverFullscreen::Never => (false, false),
@@ -1314,7 +1312,7 @@ impl<'a> Panel<'a> {
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
         let config = self.controller.config.lock().unwrap();
         let m = contact.monitor;
-        crate::screens::lit(&config.screens, config.edge, config.seam, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edge)
+        crate::screens::lit(&config.screens, config.rest, m).any().nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.rest.edge)
     }
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,
@@ -1847,7 +1845,7 @@ impl<'a> Panel<'a> {
         // and open from the edge again.
         let lit = {
             let config = self.controller.config.lock().unwrap();
-            crate::screens::lit(&config.screens, config.edge, config.seam, contact.monitor).any()
+            crate::screens::lit(&config.screens, config.rest, contact.monitor).any()
         };
         if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
             self.edge = edge;

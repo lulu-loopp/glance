@@ -714,6 +714,19 @@ pub fn shadow(frame: &dyn Canvas, readings: &[Reading], shape: Shape, glass: Gla
     }
 }
 
+/// A word said over the glass for a moment (how clear it was just made):
+/// in the middle of glass `size` large (DIPs), on a plate of the colour the
+/// glass has while it is in hand, whatever is behind.
+pub fn say(frame: &dyn Canvas, text: &str, size: (f32, f32)) {
+    let font = Font::new(Family::Segoe, 13.0, 600.0);
+    let (ascent, descent) = frame.baseline(font);
+    let width = frame.measure(text, font);
+    let (w, h) = ((width + 24.0).min(size.0), (ascent + descent + 8.0).min(size.1));
+    let (x, y) = ((size.0 - w) / 2.0, (size.1 - h) / 2.0);
+    frame.fill_rounded(Color::hex(DRAGGED_TINT, 0.95), x, y, w, h, h / 2.0);
+    frame.text(text, font, DRAGGED.tone.palette().ink, x + (w - width) / 2.0, y + (h - ascent - descent) / 2.0, width + 1.0, Align::Start);
+}
+
 /// How the overlay is in hand: not; taken (letting clicks through, it
 /// takes them now); dragged.
 #[derive(Clone, Copy, PartialEq)]

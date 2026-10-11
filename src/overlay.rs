@@ -52,6 +52,9 @@ pub struct Overlay {
     through: bool,
     /// Letting clicks through, and Ctrl held: it takes them now.
     taken: bool,
+    /// How clear its glass was just made, and when: said on it for a
+    /// moment.
+    said: Option<(std::time::Instant, f32)>,
     lang: Lang,
     /// Where its glass is on screen (physical pixels).
     rect: RECT,
@@ -147,6 +150,9 @@ pub fn primary_down() -> bool {
     (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
 }
 
+/// How long the overlay says how clear its glass was just made.
+const SAID_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+
 fn ctrl_down() -> bool {
     (unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) }) < 0
 }
@@ -189,6 +195,7 @@ impl Overlay {
             clear: 0.0,
             through: false,
             taken: false,
+            said: None,
             lang: Lang::En,
             rect: RECT::default(),
             screen: RECT::default(),
@@ -209,7 +216,11 @@ impl Overlay {
     /// `beneath` (the open panel's window).
     pub fn show(&mut self, history: &VecDeque<Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
-        self.clear = settings.clear.clamp(0.0, 1.0);
+        let clear = settings.clear.clamp(0.0, 1.0);
+        if self.shown && clear != self.clear {
+            self.said = Some((std::time::Instant::now(), clear));
+        }
+        self.clear = clear;
         self.through = settings.click_through;
         self.taken = self.through && ctrl_down();
         self.window.set_click_through(self.through && !self.taken);
@@ -342,9 +353,15 @@ impl Overlay {
             Hand::Free
         };
         self.surface.set_frost(1.0 - self.clear);
+        // Said until the readings are next drawn after a moment.
+        self.said = self.said.filter(|(at, _)| at.elapsed() < SAID_FOR);
+        let said = self.said.map(|(_, clear)| format!("{} {:.0}%", if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, clear * 100.0));
         let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
             overlay::paint(frame, readings, frames, shape, glass, hand, scale);
+            if let Some(said) = &said {
+                overlay::say(frame, said, (width as f32 / scale, height as f32 / scale));
+            }
         });
         // Its shadow, on a surface made on this device.
         let shade_surface = match self.shade_surface.take() {

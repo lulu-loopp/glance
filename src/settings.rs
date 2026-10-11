@@ -96,20 +96,31 @@ impl Opens {
     }
 }
 
+/// How the edges of a screen the settings do not name open the panel (one
+/// not seen before, and all of them up to 0.2.6): from one `edge`, where
+/// the pointer stops at it if `pushed`, and where another screen lies
+/// against it if `seam`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Rest {
+    pub edge: Edge,
+    pub pushed: bool,
+    pub seam: bool,
+}
+
 /// How the edges of the screen named `screen` open the panel, as `kept`
-/// has it; for a screen it does not name, `default` alone, and where
-/// another screen lies against it only if `seam`.
-pub fn lit(kept: &[ScreenEdges], default: Edge, seam: bool, screen: &str) -> Opens {
+/// has it; as `rest` has it, for a screen it does not name.
+pub fn lit(kept: &[ScreenEdges], rest: Rest, screen: &str) -> Opens {
+    let one = |on: bool| if on { Lit::of(&[rest.edge]) } else { Lit::default() };
     match kept.iter().find(|entry| entry.screen == screen) {
         Some(entry) => Opens { edges: Lit::of(&entry.edges), seams: Lit::of(&entry.seams) },
-        None => Opens { edges: Lit::of(&[default]), seams: if seam { Lit::of(&[default]) } else { Lit::default() } },
+        None => Opens { edges: one(rest.pushed), seams: one(rest.seam) },
     }
 }
 
 /// Turns `edge` of the screen named `screen` on, or off, in `kept`: where
 /// it is open, or (`on_seam`) where another screen lies against it.
-pub fn flip_edge(kept: &mut Vec<ScreenEdges>, default: Edge, seam: bool, screen: &str, edge: Edge, on_seam: bool) {
-    let now = lit(kept, default, seam, screen);
+pub fn flip_edge(kept: &mut Vec<ScreenEdges>, rest: Rest, screen: &str, edge: Edge, on_seam: bool) {
+    let now = lit(kept, rest, screen);
     let flipped = |lit: Lit, flip: bool| EDGES.into_iter().filter(|e| lit.has(*e) != (flip && *e == edge)).collect();
     let (edges, seams) = (flipped(now.edges, !on_seam), flipped(now.seams, on_seam));
     match kept.iter_mut().find(|entry| entry.screen == screen) {
@@ -305,7 +316,8 @@ pub enum OverFullscreen {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sensitivity {
-    /// Pushing into the edge opens nothing: the shortcut and the tray do.
+    /// Up to 0.2.6, pushing into the edge opened nothing; read as no edge
+    /// opening the panel so (see `Settings::pushed`), and not written again.
     Off,
     Light,
     #[default]
@@ -332,9 +344,10 @@ impl Sensitivity {
 #[serde(default)]
 pub struct Settings {
     /// The edge of a screen that opens the panel, for every screen
-    /// `screens` does not name (one not seen before, and all of them up
-    /// to 0.2.6).
+    /// `screens` does not name (see `Rest`).
     pub edge: Edge,
+    /// Whether that edge opens the panel to a pointer pushed into it.
+    pub pushed: bool,
     /// The screens whose edges were chosen, each with those that open the
     /// panel.
     pub screens: Vec<ScreenEdges>,
@@ -388,6 +401,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             edge: Edge::default(),
+            pushed: true,
             screens: Vec::new(),
             skin: "paper".into(),
             anchor: Anchor::default(),
@@ -456,12 +470,21 @@ impl Settings {
             self.overlay.groups = crate::ui::overlay::carried_over(&items);
         }
         crate::ui::overlay::complete(&mut self.overlay.groups);
+        if self.sensitivity == Sensitivity::Off {
+            self.pushed = false;
+            self.sensitivity = Sensitivity::default();
+        }
         if self.hotkey.take() == Some(false) {
             self.shortcut = None;
         }
         if self.shortcut.is_some_and(|shortcut| !shortcut.usable()) {
             self.shortcut = Some(Shortcut::default());
         }
+    }
+
+    /// How the edges of a screen `screens` does not name open the panel.
+    pub fn rest(&self) -> Rest {
+        Rest { edge: self.edge, pushed: self.pushed, seam: self.seam }
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
@@ -543,33 +566,42 @@ mod tests {
 
     #[test]
     fn a_screen_opens_the_panel_from_the_edges_chosen_for_it() {
-        // None chosen for it: the one edge every screen had, and where
-        // another screen lies against it only if that was asked for.
+        // None chosen for it: the one edge every screen had, pushed into
+        // and where another screen lies against it as that was asked for.
         let mut kept = Vec::new();
+        let rest = Rest { edge: Edge::Left, pushed: true, seam: false };
         let only = |edges: &[Edge]| Opens { edges: Lit::of(edges), seams: Lit::default() };
-        assert_eq!(lit(&kept, Edge::Left, false, "a"), only(&[Edge::Left]));
-        assert_eq!(lit(&kept, Edge::Left, true, "a"), Opens { edges: Lit::of(&[Edge::Left]), seams: Lit::of(&[Edge::Left]) });
+        assert_eq!(lit(&kept, rest, "a"), only(&[Edge::Left]));
+        assert_eq!(lit(&kept, Rest { seam: true, ..rest }, "a"), Opens { edges: Lit::of(&[Edge::Left]), seams: Lit::of(&[Edge::Left]) });
+        assert_eq!(lit(&kept, Rest { pushed: false, seam: true, ..rest }, "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Left]) });
         // One more turned on, the first turned off, the last too: none.
-        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Top, false);
-        assert_eq!(lit(&kept, Edge::Left, false, "a"), only(&[Edge::Left, Edge::Top]));
-        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Left, false);
-        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Top, false);
-        assert_eq!(lit(&kept, Edge::Left, false, "a"), Opens::default());
+        flip_edge(&mut kept, rest, "a", Edge::Top, false);
+        assert_eq!(lit(&kept, rest, "a"), only(&[Edge::Left, Edge::Top]));
+        flip_edge(&mut kept, rest, "a", Edge::Left, false);
+        flip_edge(&mut kept, rest, "a", Edge::Top, false);
+        assert_eq!(lit(&kept, rest, "a"), Opens::default());
         assert_eq!(kept.len(), 1);
         // Where another screen lies against an edge is turned on apart.
-        flip_edge(&mut kept, Edge::Left, false, "a", Edge::Right, true);
-        assert_eq!(lit(&kept, Edge::Left, false, "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Right]) });
-        assert_eq!(lit(&kept, Edge::Left, false, "a").any(), Lit::of(&[Edge::Right]));
+        flip_edge(&mut kept, rest, "a", Edge::Right, true);
+        assert_eq!(lit(&kept, rest, "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Right]) });
+        assert_eq!(lit(&kept, rest, "a").any(), Lit::of(&[Edge::Right]));
         // Another screen is as it was.
-        assert_eq!(lit(&kept, Edge::Left, false, "b"), only(&[Edge::Left]));
+        assert_eq!(lit(&kept, rest, "b"), only(&[Edge::Left]));
         // A screen named before seams were chosen apart has none.
         let before: Vec<ScreenEdges> = serde_json::from_str(r#"[{"screen":"c","edges":["top"]}]"#).unwrap();
-        assert_eq!(lit(&before, Edge::Left, true, "c"), only(&[Edge::Top]));
+        assert_eq!(lit(&before, Rest { seam: true, ..rest }, "c"), only(&[Edge::Top]));
         // Opened by hand: from the nearest of them.
         let both = Lit::of(&[Edge::Left, Edge::Right]);
         assert_eq!(both.nearest((0, 0, 1000, 500), (700, 20)), Some(Edge::Right));
         assert_eq!(both.nearest((0, 0, 1000, 500), (300, 20)), Some(Edge::Left));
         assert_eq!(Lit::default().nearest((0, 0, 1000, 500), (300, 20)), None);
+        // Pushing turned off before: no edge opens the panel so, where
+        // screens meet as it was; how hard to push, as it is at first.
+        let mut settings: Settings = serde_json::from_str(r#"{"edge":"top","sensitivity":"off","seam":true}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(lit(&settings.screens, settings.rest(), "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Top]) });
+        assert!(settings.sensitivity == Sensitivity::default());
+        assert!(Settings::default().pushed);
     }
 
     #[test]

@@ -107,23 +107,23 @@ const ITEM_ROW: f32 = 48.0;
 const ITEM_INSET: f32 = 12.0 + 20.0 + 12.0;
 /// Room at the right of a module's row for its chevron, after its switch.
 const CHEVRON_ROOM: f32 = 28.0;
-/// The map of the screens: the most height it takes, how deep into a
-/// screen an edge takes a click and how far short of the screen's corners,
-/// and how thick an edge is drawn and how far inside the screen.
+/// The map of the screens: the most height it takes; the room around a
+/// screen's picture inside its place, where its edges are drawn; how deep
+/// into its place an edge takes a click; how thick an edge is drawn and how
+/// far inside the place; the picture's corners; the plate its number is on
+/// (its radius); and the dashes of an edge the pointer passes on from (the
+/// least they are long, and apart).
 const MAP_MOST: f32 = 180.0;
+const MAP_ROOM: f32 = 6.0;
+const MAP_BAND: f32 = 12.0;
+const MAP_BAR: f32 = 2.0;
+const MAP_INSET: f32 = 1.5;
+const MAP_RADIUS: f32 = 3.0;
+const MAP_PLATE: f32 = 9.0;
+const MAP_DASH: f32 = 4.0;
+const MAP_GAP: f32 = 3.0;
 /// The well the map lies in: the room around the map inside it.
 const MAP_WELL: f32 = 14.0;
-const MAP_BAND: f32 = 12.0;
-const MAP_CORNER: f32 = 6.0;
-const MAP_BAR: f32 = 4.0;
-const MAP_INSET: f32 = 4.0;
-/// A screen's corners on the map, the plate its number is on (its
-/// radius), and the dashes of an edge the pointer passes on from (the
-/// least they are long, and apart).
-const MAP_RADIUS: f32 = 4.0;
-const MAP_PLATE: f32 = 9.0;
-const MAP_DASH: f32 = 6.0;
-const MAP_GAP: f32 = 5.0;
 const SKINS_ROW: f32 = 16.0 + 72.0 + 10.0 + 18.0 + 16.0;
 /// Desktop shown beside the panel in the preview (DIPs of screen).
 const PREVIEW_MARGIN: f32 = 160.0;
@@ -1095,7 +1095,7 @@ impl Ui {
 
     /// How the edges of the screen named `screen` open the panel.
     fn edges_of(&self, screen: &str) -> crate::settings::Opens {
-        crate::settings::lit(&self.settings.screens, self.settings.edge, self.settings.seam, screen)
+        crate::settings::lit(&self.settings.screens, self.settings.rest(), screen)
     }
 
     /// The edges of each screen as the map has them: where the pointer
@@ -1373,8 +1373,8 @@ impl Ui {
             ),
             Field::Push => (
                 pick(lang, "推边缘呼出", "Push into the edge"),
-                vec![s("关闭", "Off"), s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
-                [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm].iter().position(|&p| p == settings.sensitivity),
+                vec![s("轻", "Light"), s("中", "Medium"), s("重", "Firm")],
+                [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm].iter().position(|&p| p == settings.sensitivity),
             ),
             Field::CloseDelay => (
                 pick(lang, "离开后收起", "Close after"),
@@ -1422,7 +1422,7 @@ impl Ui {
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
             Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
-            Field::Push => settings.sensitivity = [Sensitivity::Off, Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
+            Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
@@ -1543,8 +1543,8 @@ impl Ui {
             Field::Anchor => Some(pick(self.lang, "面板沿屏幕边缘弹出，出现在鼠标所在的位置，或边缘正中", "Along the edge: where the mouse is, or in the middle")),
             Field::Push => Some(pick(
                 self.lang,
-                "鼠标移到屏幕边缘后再往外推一下就会打开；力度越重越不容易误触",
-                "Move the mouse to the edge and push on: the panel opens. Firmer is harder to set off by accident",
+                "鼠标移到实线边后再往外推一下就会打开；力度越重越不容易误触",
+                "Move the mouse to a solid edge and push on: the panel opens. Firmer is harder to set off by accident",
             )),
             Field::OverFullscreen => Some(pick(
                 self.lang,
@@ -1969,8 +1969,8 @@ impl Ui {
             }
             Target::Choice(field, index) => self.choose(field, index),
             Target::ScreenEdge(screen, edge, seam) => {
-                let (default, default_seam) = (self.settings.edge, self.settings.seam);
-                crate::settings::flip_edge(&mut self.settings.screens, default, default_seam, &screen, edge, seam);
+                let rest = self.settings.rest();
+                crate::settings::flip_edge(&mut self.settings.screens, rest, &screen, edge, seam);
                 // The preview shows that screen: the panel opening from the
                 // edge turned on; from another of its edges that opens it,
                 // one turned off.
@@ -2546,48 +2546,37 @@ impl Ui {
                     let (ox, oy) = (well.x + (well.w - map_width) / 2.0, well.y + MAP_WELL);
                     let across = |x: i32| ox + (x - desk_left) as f32 * k;
                     let down = |y: i32| oy + (y - desk_top) as f32 * k;
-                    // A hair between a screen and the next.
+                    // A screen's place, a hair from the next; its picture
+                    // inside, its edges in the room around the picture.
                     let boxed = |m: RECT| Rect { x: across(m.left) + 1.0, y: down(m.top) + 1.0, w: (m.right - m.left) as f32 * k - 2.0, h: (m.bottom - m.top) as f32 * k - 2.0 };
+                    let pictured = |r: Rect| Rect { x: r.x + MAP_ROOM, y: r.y + MAP_ROOM, w: (r.w - 2.0 * MAP_ROOM).max(1.0), h: (r.h - 2.0 * MAP_ROOM).max(1.0) };
                     let screens = self.screens.clone();
                     let shown = self.stage.screen.clone();
                     let number = Font::new(Family::Segoe, 12.0, 600.0);
                     for (index, screen) in screens.iter().enumerate() {
-                        let r = boxed(screen.monitor);
-                        // Its desktop, as the preview shows it large.
+                        let r = pictured(boxed(screen.monitor));
+                        // The one the preview shows stands out: the others'
+                        // desktops paler, its number on the accent.
+                        let shown = shown.as_deref() == Some(screen.id.as_str());
                         let pixels = ((r.w * self.scale).round().max(1.0) as u32, (r.h * self.scale).round().max(1.0) as u32);
                         match self.map_picture(frame, &screen.id, screen.monitor, pixels) {
-                            Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS),
+                            Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS, if shown { 1.0 } else { 0.55 }),
                             None => fill(frame, palette.switch_off, r.x, r.y, r.w, r.h, MAP_RADIUS),
                         }
-                        // The one the preview shows, ringed as a chosen skin is.
-                        if shown.as_deref() == Some(screen.id.as_str()) {
-                            stroke_outside(frame, r, MAP_RADIUS, palette.selection, 2.0);
-                        } else {
-                            stroke_inside(frame, r, MAP_RADIUS, palette.card_stroke);
-                        }
-                        // Its number, on a plate of its own over the picture.
+                        stroke_inside(frame, r, MAP_RADIUS, palette.card_stroke);
                         let digit = (index + 1).to_string();
                         let digit_width = frame.gfx.measure(&digit, number);
                         let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
-                        fill(frame, palette.window.alpha(0.92), cx - MAP_PLATE, cy - MAP_PLATE, 2.0 * MAP_PLATE, 2.0 * MAP_PLATE, MAP_PLATE);
-                        text_centred(frame, &digit, number, palette.text, cx - digit_width / 2.0, cy, digit_width + 1.0, Align::Start);
+                        let (plate, ink) = if shown { (palette.switch_on, Color::hex(0xFFFFFF, 1.0)) } else { (palette.window.alpha(0.92), palette.text) };
+                        fill(frame, plate, cx - MAP_PLATE, cy - MAP_PLATE, 2.0 * MAP_PLATE, 2.0 * MAP_PLATE, MAP_PLATE);
+                        text_centred(frame, &digit, number, ink, cx - digit_width / 2.0, cy, digit_width + 1.0, Align::Start);
                     }
                     for MapEdge { screen: index, edge, stretches } in self.map_edges() {
                         let (screen, r) = (&screens[index], boxed(screens[index].monitor));
                         let opens = self.edges_of(&screen.id);
                         let upright = edge != Edge::Top;
-                        // Along the edge, short of the screen's corners.
-                        let (from, to) = if upright { (r.y + MAP_CORNER, r.y + r.h - MAP_CORNER) } else { (r.x + MAP_CORNER, r.x + r.w - MAP_CORNER) };
-                        // A bar along the edge from `a` to `b`, `grown` wider
-                        // and longer all round.
-                        let bar = |a: f32, b: f32, color: Color, grown: f32| {
-                            let (a, b, thick) = (a - grown, b + grown, MAP_BAR + 2.0 * grown);
-                            match edge {
-                                Edge::Left => fill(frame, color, r.x + MAP_INSET - grown, a, thick, b - a, thick / 2.0),
-                                Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR - grown, a, thick, b - a, thick / 2.0),
-                                Edge::Top => fill(frame, color, a, r.y + MAP_INSET - grown, b - a, thick, thick / 2.0),
-                            }
-                        };
+                        // Along the edge, as long as the picture.
+                        let (from, to) = if upright { (r.y + MAP_ROOM, r.y + r.h - MAP_ROOM) } else { (r.x + MAP_ROOM, r.x + r.w - MAP_ROOM) };
                         for (a, b, seam) in stretches {
                             let (a, b) = if upright { (down(a), down(b)) } else { (across(a), across(b)) };
                             let (a, b) = (a.max(from), b.min(to));
@@ -2596,31 +2585,32 @@ impl Ui {
                             }
                             let target = Target::ScreenEdge(screen.id.clone(), edge, seam);
                             let on = if seam { opens.seams.has(edge) } else { opens.edges.has(edge) };
-                            let hover = hovered.as_ref() == Some(&target);
                             // Lit, it opens the panel; under the pointer, it
                             // shows what a click would light; else a pale
-                            // line. Each over a rim that sets it off from
-                            // the picture.
-                            let (color, rim) = if on {
-                                (palette.selection, palette.window)
-                            } else if hover {
-                                (mix(palette.window, palette.selection, 0.55), palette.window.alpha(0.6))
+                            // line.
+                            let color = if on {
+                                palette.selection
+                            } else if hovered.as_ref() == Some(&target) {
+                                palette.selection.alpha(0.5)
                             } else {
-                                (palette.window.alpha(0.75), Color::hex(0, 0.25))
+                                palette.text3.alpha(0.5)
                             };
-                            // Where the pointer passes on, dashed.
-                            let pieces: Vec<(f32, f32)> = if seam {
+                            let bar = |a: f32, b: f32| match edge {
+                                Edge::Left => fill(frame, color, r.x + MAP_INSET, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                Edge::Right => fill(frame, color, r.x + r.w - MAP_INSET - MAP_BAR, a, MAP_BAR, b - a, MAP_BAR / 2.0),
+                                Edge::Top => fill(frame, color, a, r.y + MAP_INSET, b - a, MAP_BAR, MAP_BAR / 2.0),
+                            };
+                            // Where the pointer passes on, dashed: as many
+                            // dashes as fit, each as long as the others.
+                            if seam {
                                 let count = ((b - a + MAP_GAP) / (MAP_DASH + MAP_GAP)).floor().max(1.0);
                                 let dash = ((b - a) - (count - 1.0) * MAP_GAP) / count;
-                                (0..count as usize).map(|i| a + i as f32 * (dash + MAP_GAP)).map(|at| (at, at + dash)).collect()
+                                for i in 0..count as usize {
+                                    let at = a + i as f32 * (dash + MAP_GAP);
+                                    bar(at, at + dash);
+                                }
                             } else {
-                                vec![(a, b)]
-                            };
-                            for (a, b) in &pieces {
-                                bar(*a, *b, rim, 1.0);
-                            }
-                            for (a, b) in &pieces {
-                                bar(*a, *b, color, 0.0);
+                                bar(a, b);
                             }
                             let band = match edge {
                                 Edge::Left => Rect { x: r.x, y: a, w: MAP_BAND, h: b - a },
@@ -3134,15 +3124,16 @@ fn fill(frame: &Frame, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32
     unsafe { frame.dc.FillRoundedRectangle(&rounded(Rect { x, y, w, h }, radius), frame.brush(color)) };
 }
 
-/// The picture `bitmap` filling the box `r`, its corners rounded.
-fn picture_rounded(frame: &Frame, bitmap: &ID2D1Bitmap1, r: Rect, radius: f32) {
+/// The picture `bitmap` filling the box `r`, its corners rounded, as
+/// opaque as `opacity`.
+fn picture_rounded(frame: &Frame, bitmap: &ID2D1Bitmap1, r: Rect, radius: f32, opacity: f32) {
     let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(r, radius)) }) else { return };
     let layer = D2D1_LAYER_PARAMETERS1 {
         contentBounds: rect(r.x, r.y, r.w, r.h),
         geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
         maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
         maskTransform: Matrix3x2::identity(),
-        opacity: 1.0,
+        opacity,
         ..Default::default()
     };
     unsafe {
