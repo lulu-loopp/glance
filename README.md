@@ -22,7 +22,7 @@ out with everything your PC is doing; move away and it slides back.
 - **CPU**: usage, every thread (point at one for its clock), clock (each kind's on processors with big and little cores), temperature, package power, each chiplet's temperature
 - **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards
 - **Memory**: use, its speed (and what the modules are rated for, if it runs below that), and each module's temperature
-- **Network and disk**: traffic, and the drive's temperature
+- **Network and disk**: traffic, and each drive's temperature, every drive on a line of its own
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
 - **Storage**: space on each drive
 - **Motherboard**: temperatures and fan speeds
@@ -56,7 +56,10 @@ last minute charted beside it, the rest in tiles) or as a strip of one to
 three rows, on frosted glass: the screen behind is blurred, and the glass is
 tinted dark or light by what is around it, just enough for every figure to
 read (on Windows 10 it is tinted, not blurred). Drag it into place, drag its
-edges to size it, right-click it to lock it or close it. Choose what it shows
+edges to size it, right-click it to lock it or close it. Turn the mouse wheel
+over it, or use the slider in the settings, to make the glass clearer, down
+to the figures alone over the screen; and let clicks pass through it to the
+game behind (hold Ctrl to move it then). Choose what it shows
 group by group, as for the panel (frame rate, CPU, GPU, memory, video memory,
 download and upload, microphone), each group's figures one by one, and drag
 the groups into the order you want.
@@ -109,10 +112,12 @@ for administrator rights at every start and cannot start with Windows.
 ## Use
 
 - **Open the panel**: push the pointer against the screen's right edge (the
-  edge, the push needed, where the panel appears, how many columns it takes
-  and how large it is are in the settings, and pushing can be turned off).
-  A deliberate push is needed, so scroll bars at
-  the edge stay usable. Or press **Ctrl+Alt+G** (or a shortcut of your own),
+  push needed, where the panel appears, how many columns it takes and how
+  large it is are in the settings). A deliberate push is needed, so scroll
+  bars at the edge stay usable. With several screens, the settings show them
+  as they are arranged: click an edge of any of them, left, top or right, for
+  the panel to open from it, and again to turn it off. Where an edge leads on
+  to another screen, rest the pointer on it for half a second instead. Or press **Ctrl+Alt+G** (or a shortcut of your own),
   which opens it at the pointer and closes it again.
 - **Games**: while a fullscreen game runs, a Game lane comes at the top of
   the panel; for its frame rate over the game itself, turn on "Show while

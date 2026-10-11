@@ -719,7 +719,9 @@ impl Controller {
                         let lent = panel.behind.as_ref().and_then(|behind| {
                             Some(crate::widget::Lent { capture: behind.capture.without_pixels(), bitmap: behind.bitmap.as_ref()?.clone(), tone: behind.tone })
                         });
-                        if !widgets.tear(form, scale, at, grab, lent) {
+                        // The edge it was at, unless it had been moved away.
+                        let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
+                        if !widgets.tear(form, scale, at, grab, lent, from) {
                             panel.torn = false;
                             panel.exclude();
                         }

@@ -358,7 +358,7 @@ struct Widget {
     pinned: bool,
     click_through: bool,
     /// Torn off the panel and not clear of where it came from yet: the
-    /// edge it was nearest as it was torn off, and its screen then.
+    /// edge the panel was at (none: moved away from it), and its screen.
     torn_from: Option<(Option<Side>, RECT)>,
     game_only: bool,
     /// Kept on the desktop, under every other window (one shown only with
@@ -452,8 +452,9 @@ impl Widgets {
     /// corner at `at` on `contact`'s screen, in hand, the pointer `grab`
     /// from its corner; on the desktop the panel had taken (`lent`: its
     /// capture, as a bitmap, and its tone), if it had, till it takes its own
-    /// (on another thread: it is drawn at once).
-    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, lent: Option<Lent>) -> bool {
+    /// (on another thread: it is drawn at once). `from`: the edge the panel
+    /// was at, if it was at one.
+    pub fn tear(&mut self, form: Form, scale: f32, at: POINT, grab: POINT, lent: Option<Lent>, from: Option<Edge>) -> bool {
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form, scale, extra: (0.0, 0.0) };
         let made = Instant::now();
@@ -463,6 +464,12 @@ impl Widgets {
             note(format!("widget: made in {:.1} ms", made.as_secs_f32() * 1000.0));
         }
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: true, moved: true });
+        let side = from.map(|edge| match edge {
+            Edge::Left => Side::Left,
+            Edge::Right => Side::Right,
+            Edge::Top => Side::Top,
+        });
+        widget.torn_from = Some((side, contact.monitor));
         if let Some(Lent { capture, bitmap, tone }) = lent {
             widget.behind = Some(Behind { capture, bitmap: Some(bitmap), tone, taken: Instant::now() });
             widget.replace = Some(false);
@@ -1125,13 +1132,14 @@ impl Widget {
                 if let Some(contact) = monitor_at(cursor) {
                     self.moved_to(contact);
                 }
-                // Torn off and now well clear of the edge it came from (the
-                // nearest as it was torn off), or on another screen: in hand
-                // as any widget is, to stick where it is brought to an edge.
-                if matches!(self.drag, Some(Drag::Move { torn: true, .. })) {
+                // Torn off and now well clear of the edge the panel was at
+                // (off a panel at none, at once), or on another screen: in
+                // hand as any widget is, to stick where it is brought to an
+                // edge. (Once it has a size: how far it is from an edge is
+                // not known before.)
+                if matches!(self.drag, Some(Drag::Move { torn: true, .. })) && self.surface_size != (0.0, 0.0) {
                     let here = self.contact.monitor;
-                    let (side, screen) = *self.torn_from.get_or_insert((self.nearest_side().map(|(side, _)| side), here));
-                    if screen != here || side.is_none_or(|side| self.away_from(side) > UNSTICK) {
+                    if self.torn_from.is_none_or(|(side, screen)| screen != here || side.is_none_or(|side| self.away_from(side) > UNSTICK)) {
                         self.torn_from = None;
                         if let Some(Drag::Move { torn, .. }) = &mut self.drag {
                             *torn = false;
