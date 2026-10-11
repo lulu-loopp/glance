@@ -790,6 +790,12 @@ impl Controller {
                     }
                 }
                 WM_MOUSEMOVE if msg.hwnd == panel.window.hwnd => panel.hover_at(lparam_point(msg.lParam)),
+                // The wheel over the overlay: its glass clearer (up) or
+                // less clear, a step of the settings' slider a notch.
+                WM_MOUSEWHEEL if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => {
+                    let notches = (msg.wParam.0 >> 16) as u16 as i16 as f32 / 120.0;
+                    std::thread::spawn(move || crate::app().clear_overlay(notches * 0.05));
+                }
                 WM_MOUSEWHEEL if msg.hwnd == panel.window.hwnd => {
                     let delta = (msg.wParam.0 >> 16) as u16 as i16;
                     panel.wheel(lparam_point(msg.lParam), delta);

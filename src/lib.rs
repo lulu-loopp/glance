@@ -181,6 +181,11 @@ impl App {
         self.change(|settings| settings.overlay.locked = locked);
     }
 
+    /// The overlay's glass made clearer by `by` (less clear, below zero).
+    pub fn clear_overlay(&self, by: f32) {
+        self.change(|settings| settings.overlay.clear = (settings.overlay.clear + by).clamp(0.0, 1.0));
+    }
+
     /// The overlay lets clicks through, or takes them.
     pub fn overlay_through(&self, through: bool) {
         self.change(|settings| settings.overlay.click_through = through);
