@@ -754,6 +754,7 @@ impl Controller {
                 // The overlay dragged into place.
                 WM_LBUTTONDOWN if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().press(),
                 WM_MOUSEMOVE if overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().moved(),
+                WM_TIMER if msg.wParam.0 == crate::overlay::SAID_TIMER && overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd) => overlay.as_mut().unwrap().hush(),
                 // Followed while dragged, wherever the pointer is.
                 WM_TIMER if msg.wParam.0 == crate::overlay::FOLLOW_TIMER && overlay.as_ref().is_some_and(|o| msg.hwnd == o.window.hwnd && o.held()) => {
                     overlay.as_mut().unwrap().moved()

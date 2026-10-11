@@ -714,17 +714,28 @@ pub fn shadow(frame: &dyn Canvas, readings: &[Reading], shape: Shape, glass: Gla
     }
 }
 
-/// A word said over the glass for a moment (how clear it was just made):
-/// in the middle of glass `size` large (DIPs), on a plate of the colour the
-/// glass has while it is in hand, whatever is behind.
-pub fn say(frame: &dyn Canvas, text: &str, size: (f32, f32)) {
-    let font = Font::new(Family::Segoe, 13.0, 600.0);
-    let (ascent, descent) = frame.baseline(font);
-    let width = frame.measure(text, font);
-    let (w, h) = ((width + 24.0).min(size.0), (ascent + descent + 8.0).min(size.1));
+/// A reading said over the glass while it is being set (how clear it is
+/// made): `name`, `figure` and `unit` written as the overlay's own readings
+/// are, in the middle of glass `size` large (DIPs), on a plate of the
+/// glass's tint, near opaque, under its rim.
+pub fn say(frame: &dyn Canvas, (name, figure, unit): (&str, &str, &str), size: (f32, f32), glass: Glass) {
+    let palette = glass.tone.palette();
+    let parts = [(name, NAME, palette.second, 6.0), (figure, STRIP_FIGURE, palette.ink, 3.0), (unit, UNIT, palette.second, 0.0)];
+    let width: f32 = parts.iter().map(|(text, font, _, after)| frame.measure(text, *font) + after).sum();
+    let (ascent, descent) = frame.baseline(STRIP_FIGURE);
+    let (w, h) = ((width + 28.0).min(size.0), (ascent + descent + 8.0).min(size.1));
     let (x, y) = ((size.0 - w) / 2.0, (size.1 - h) / 2.0);
-    frame.fill_rounded(Color::hex(DRAGGED_TINT, 0.95), x, y, w, h, h / 2.0);
-    frame.text(text, font, DRAGGED.tone.palette().ink, x + (w - width) / 2.0, y + (h - ascent - descent) / 2.0, width + 1.0, Align::Start);
+    frame.fill_rounded(Color::hex(palette.tint, 0.92), x, y, w, h, h / 2.0);
+    let rim = Fill::Down { top: y, from: palette.rim.0, bottom: y + h, to: palette.rim.1 };
+    frame.stroke_rounded(rim, x + 0.5, y + 0.5, w - 1.0, h - 1.0, h / 2.0 - 0.5, 1.0);
+    // On one baseline, the figure's.
+    let baseline = y + (h - ascent - descent) / 2.0 + ascent;
+    let mut at = x + (w - width) / 2.0;
+    for (text, font, ink, after) in parts {
+        let wide = frame.measure(text, font);
+        frame.text(text, font, ink, at, baseline - frame.baseline(font).0, wide + 1.0, Align::Start);
+        at += wide + after;
+    }
 }
 
 /// How the overlay is in hand: not; taken (letting clicks through, it

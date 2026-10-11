@@ -436,6 +436,8 @@ enum Target {
     /// the pointer stops at it or (true) where it passes on to another
     /// screen: it opens the panel there, or does not.
     ScreenEdge(String, Edge, bool),
+    /// A screen (by its name) in the map: the preview shows it.
+    Screen(String),
     /// A page, in the pages' list.
     Page(Page),
     /// Opens or closes the fold of the modules few want.
@@ -1968,6 +1970,12 @@ impl Ui {
                 self.save();
             }
             Target::Choice(field, index) => self.choose(field, index),
+            Target::Screen(screen) => {
+                // The panel opening from the first of its edges that
+                // opens it.
+                self.shown_edge = None;
+                self.map_screen = Some(screen);
+            }
             Target::ScreenEdge(screen, edge, seam) => {
                 let rest = self.settings.rest();
                 crate::settings::flip_edge(&mut self.settings.screens, rest, &screen, edge, seam);
@@ -2050,14 +2058,17 @@ impl Ui {
         pages.chain(self.layout().into_iter()
             .flat_map(|(row, ..)| match row {
                 Row::Skins => vec![Target::Skin(Skin::named(&self.settings.skin))],
-                // Each edge where the pointer stops at it, then where it passes on.
+                // The screens; then each edge where the pointer stops at
+                // it, then where it passes on.
                 Row::Screens => self
-                    .map_edges()
-                    .into_iter()
+                    .screens
+                    .iter()
+                    .map(|screen| Target::Screen(screen.id.clone()))
+                    .chain(self.map_edges().into_iter()
                     .flat_map(|MapEdge { screen: index, edge, stretches }| {
                         let id = &self.screens[index].id;
                         [false, true].into_iter().filter(|seam| stretches.iter().any(|(.., is)| is == seam)).map(|seam| Target::ScreenEdge(id.clone(), edge, seam)).collect::<Vec<_>>()
-                    })
+                    }))
                     .collect(),
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
@@ -2556,11 +2567,13 @@ impl Ui {
                     for (index, screen) in screens.iter().enumerate() {
                         let r = pictured(boxed(screen.monitor));
                         // The one the preview shows stands out: the others'
-                        // desktops paler, its number on the accent.
+                        // desktops paler (less so under the pointer, which
+                        // a click makes it), its number on the accent.
                         let shown = shown.as_deref() == Some(screen.id.as_str());
+                        let pointed = hovered == Some(Target::Screen(screen.id.clone()));
                         let pixels = ((r.w * self.scale).round().max(1.0) as u32, (r.h * self.scale).round().max(1.0) as u32);
                         match self.map_picture(frame, &screen.id, screen.monitor, pixels) {
-                            Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS, if shown { 1.0 } else { 0.55 }),
+                            Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS, if shown { 1.0 } else if pointed { 0.8 } else { 0.55 }),
                             None => fill(frame, palette.switch_off, r.x, r.y, r.w, r.h, MAP_RADIUS),
                         }
                         stroke_inside(frame, r, MAP_RADIUS, palette.card_stroke);
@@ -2619,6 +2632,11 @@ impl Ui {
                             };
                             self.targets.push((band, target));
                         }
+                    }
+                    // A screen's picture takes a click where no edge does
+                    // (those, pushed first, are found first).
+                    for screen in &screens {
+                        self.targets.push((pictured(boxed(screen.monitor)), Target::Screen(screen.id.clone())));
                     }
                 }
                 Row::Choice(field) => {

@@ -52,9 +52,9 @@ pub struct Overlay {
     through: bool,
     /// Letting clicks through, and Ctrl held: it takes them now.
     taken: bool,
-    /// How clear its glass was just made, and when: said on it for a
-    /// moment.
-    said: Option<(std::time::Instant, f32)>,
+    /// How clear its glass was just made: said on it until it has been
+    /// left so for a moment (see `SAID_MS`).
+    said: Option<f32>,
     lang: Lang,
     /// Where its glass is on screen (physical pixels).
     rect: RECT,
@@ -103,7 +103,7 @@ impl Edges {
 }
 
 /// How near its edge the pointer sizes it rather than moves it (DIPs).
-const EDGE: f32 = 6.0;
+const EDGE: f32 = 8.0;
 
 /// How far around the overlay's shadow the screen is looked at, for how to
 /// tint the glass (DIPs): what is behind it, blurred, is much like what is
@@ -150,8 +150,14 @@ pub fn primary_down() -> bool {
     (unsafe { GetAsyncKeyState(button.0 as i32) }) < 0
 }
 
-/// How long the overlay says how clear its glass was just made.
-const SAID_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
+/// The timer that ends the overlay's saying how clear its glass was made,
+/// and how long after it was last changed (as the panel's size is said
+/// only while it is being set).
+pub const SAID_TIMER: usize = 7;
+const SAID_MS: u32 = 600;
+/// How near a corner the pointer sizes it by both edges there (DIPs): no
+/// nearer than half its shorter side lets.
+const CORNER: f32 = 16.0;
 
 fn ctrl_down() -> bool {
     (unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) }) < 0
@@ -218,7 +224,8 @@ impl Overlay {
         self.locked = settings.locked;
         let clear = settings.clear.clamp(0.0, 1.0);
         if self.shown && clear != self.clear {
-            self.said = Some((std::time::Instant::now(), clear));
+            self.said = Some(clear);
+            unsafe { SetTimer(Some(self.window.hwnd), SAID_TIMER, SAID_MS, None) };
         }
         self.clear = clear;
         self.through = settings.click_through;
@@ -353,14 +360,12 @@ impl Overlay {
             Hand::Free
         };
         self.surface.set_frost(1.0 - self.clear);
-        // Said until the readings are next drawn after a moment.
-        self.said = self.said.filter(|(at, _)| at.elapsed() < SAID_FOR);
-        let said = self.said.map(|(_, clear)| format!("{} {:.0}%", if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, clear * 100.0));
+        let said = self.said.map(|clear| (if self.lang == Lang::Zh { "透明度" } else { "Clarity" }, format!("{:.0}", clear * 100.0)));
         let painted = self.surface.draw(&self.gfx, (width as u32, height as u32), scale, (0.0, 0.0, width as f32, height as f32, radius), |frame| {
             frame.crisp_text();
             overlay::paint(frame, readings, frames, shape, glass, hand, scale);
-            if let Some(said) = &said {
-                overlay::say(frame, said, (width as f32 / scale, height as f32 / scale));
+            if let Some((name, figure)) = &said {
+                overlay::say(frame, (name, figure, "%"), (width as f32 / scale, height as f32 / scale), Glass { presence: 1.0, ..glass });
             }
         });
         // Its shadow, on a surface made on this device.
@@ -398,7 +403,12 @@ impl Overlay {
     fn edges_at(&self, at: POINT) -> Edges {
         let near = (EDGE * self.dpi).round() as i32;
         let r = self.rect;
-        Edges { left: at.x < r.left + near, right: at.x >= r.right - near, top: at.y < r.top + near, bottom: at.y >= r.bottom - near }
+        let corner = ((CORNER * self.dpi).round() as i32).min((r.right - r.left).min(r.bottom - r.top) / 2).max(near);
+        // How far in from each edge; near one, or in a corner, near both
+        // of the corner's.
+        let (left, right, top, bottom) = (at.x - r.left, r.right - 1 - at.x, at.y - r.top, r.bottom - 1 - at.y);
+        let on = |own: i32, a: i32, b: i32| own < near || (own < corner && (a < corner || b < corner));
+        Edges { left: on(left, top, bottom), right: on(right, top, bottom), top: on(top, left, right), bottom: on(bottom, left, right) }
     }
 
     /// The pointer's shape over edges `edges` (none: the whole overlay).
@@ -501,6 +511,16 @@ impl Overlay {
         self.taken = taken;
         self.window.set_click_through(self.through && !taken);
         if self.shown {
+            self.draw();
+        }
+    }
+
+    /// Its glass left as clear as it was made for a moment: no longer said.
+    pub fn hush(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.window.hwnd), SAID_TIMER);
+        }
+        if self.said.take().is_some() && self.shown {
             self.draw();
         }
     }
