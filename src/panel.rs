@@ -610,8 +610,16 @@ impl Controller {
                 let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
                 // On a seam that is an edge that opens the panel, of the
                 // screen the pointer is on before the one it came from.
+                // (No seam is looked for along an edge that opens the panel
+                // on no screen: this is asked at every move of the mouse.)
+                let sought = {
+                    let config = self.config.lock().unwrap();
+                    EDGES.map(|edge| crate::settings::seam_anywhere(&config.screens, config.rest, edge))
+                };
                 let found = EDGES
                     .into_iter()
+                    .zip(sought)
+                    .filter_map(|(edge, sought)| sought.then_some(edge))
                     .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).seams.has(edge)).map(|contact| (contact, edge)))
                     .min_by_key(|(contact, _)| Some(contact.monitor) != here);
                 let Some((contact, edge)) = found else {

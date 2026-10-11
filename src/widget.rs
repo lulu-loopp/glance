@@ -357,6 +357,9 @@ struct Widget {
     anchor: Option<POINT>,
     pinned: bool,
     click_through: bool,
+    /// Torn off the panel and not clear of where it came from yet: the
+    /// edge it was nearest as it was torn off, and its screen then.
+    torn_from: Option<(Option<Side>, RECT)>,
     game_only: bool,
     /// Kept on the desktop, under every other window (one shown only with
     /// a game is above them all still).
@@ -866,6 +869,7 @@ impl Widget {
             anchor: None,
             pinned: false,
             click_through: false,
+            torn_from: None,
             game_only: false,
             on_desktop: false,
             last: None,
@@ -1121,11 +1125,17 @@ impl Widget {
                 if let Some(contact) = monitor_at(cursor) {
                     self.moved_to(contact);
                 }
-                // Torn off and now well clear of every edge: in hand as any
-                // widget is, to stick where it is brought back to one.
-                if self.nearest_side().is_some_and(|(_, away)| away > UNSTICK) {
-                    if let Some(Drag::Move { torn, .. }) = &mut self.drag {
-                        *torn = false;
+                // Torn off and now well clear of the edge it came from (the
+                // nearest as it was torn off), or on another screen: in hand
+                // as any widget is, to stick where it is brought to an edge.
+                if matches!(self.drag, Some(Drag::Move { torn: true, .. })) {
+                    let here = self.contact.monitor;
+                    let (side, screen) = *self.torn_from.get_or_insert((self.nearest_side().map(|(side, _)| side), here));
+                    if screen != here || side.is_none_or(|side| self.away_from(side) > UNSTICK) {
+                        self.torn_from = None;
+                        if let Some(Drag::Move { torn, .. }) = &mut self.drag {
+                            *torn = false;
+                        }
                     }
                 }
             }
@@ -1239,17 +1249,19 @@ impl Widget {
 
     /// The edge of its screen's work area it is nearest, and how near (DIPs).
     fn nearest_side(&self) -> Option<(Side, f32)> {
-        let scale = self.contact.scale;
+        [Side::Left, Side::Right, Side::Top, Side::Bottom].into_iter().map(|side| (side, self.away_from(side))).min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// How far it is from `side` of its screen's work area (DIPs).
+    fn away_from(&self, side: Side) -> f32 {
         let (work, rect) = (self.contact.work, self.rect());
-        [
-            (Side::Left, rect.left - work.left),
-            (Side::Right, work.right - rect.right),
-            (Side::Top, rect.top - work.top),
-            (Side::Bottom, work.bottom - rect.bottom),
-        ]
-        .into_iter()
-        .map(|(side, away)| (side, away as f32 / scale))
-        .min_by(|a, b| a.1.total_cmp(&b.1))
+        let away = match side {
+            Side::Left => rect.left - work.left,
+            Side::Right => work.right - rect.right,
+            Side::Top => rect.top - work.top,
+            Side::Bottom => work.bottom - rect.bottom,
+        };
+        away as f32 / self.contact.scale
     }
 
     /// Where its middle is along `side` now (physical px).

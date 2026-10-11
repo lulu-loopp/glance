@@ -229,7 +229,7 @@ impl Overlay {
         }
         self.clear = clear;
         self.through = settings.click_through;
-        self.taken = self.through && ctrl_down();
+        self.taken = self.through && (ctrl_down() || self.grab.is_some());
         self.window.set_click_through(self.through && !self.taken);
         self.beneath = beneath;
         self.lang = lang;

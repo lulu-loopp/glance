@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, EnumDisplayMonitors, Ge
 
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 
-use crate::settings::{Edge, Opens, Rest, ScreenEdges};
+use crate::settings::{Edge, Opens, Rest, ScreenEdges, EDGES};
 
 /// The first Windows that eases the pointer between displays (see `eased`).
 const FIRST_EASING_BUILD: u32 = 22557;
@@ -58,9 +58,45 @@ pub fn all() -> Vec<Screen> {
     found
 }
 
+/// The screens as they were last asked for, and each one's edges (left,
+/// top, right: see `stretches`) for the pointer eased between displays or
+/// not, as it was then.
+struct Known {
+    screens: Vec<Screen>,
+    eased: bool,
+    edges: Vec<[Vec<(i32, i32, bool)>; 3]>,
+}
+
+impl Known {
+    const fn none() -> Known {
+        Known { screens: Vec::new(), eased: false, edges: Vec::new() }
+    }
+
+    /// Takes `screens`, and works their edges out.
+    fn take(&mut self, screens: Vec<Screen>, eased: bool) {
+        let monitors: Vec<RECT> = screens.iter().map(|screen| screen.monitor).collect();
+        self.edges = (0..monitors.len()).map(|index| EDGES.map(|edge| stretches(&monitors, index, edge, eased))).collect();
+        self.screens = screens;
+        self.eased = eased;
+    }
+
+    /// Where the screen at `monitor` is among them: asked for anew if it
+    /// is not known (the screens are not as they were), or if the pointer
+    /// is no longer eased as it was.
+    fn find(&mut self, monitor: RECT, eased: bool) -> Option<usize> {
+        let known = self.screens.iter().position(|screen| screen.monitor == monitor);
+        if known.is_none() {
+            self.take(all(), eased);
+        } else if self.eased != eased {
+            let screens = std::mem::take(&mut self.screens);
+            self.take(screens, eased);
+        }
+        self.screens.iter().position(|screen| screen.monitor == monitor)
+    }
+}
+
 thread_local! {
-    /// The screens as they were last asked for on this thread.
-    static KNOWN: RefCell<Vec<Screen>> = const { RefCell::new(Vec::new()) };
+    static KNOWN: RefCell<Known> = const { RefCell::new(Known::none()) };
     /// Whether the pointer is eased between displays, and when that was
     /// last asked.
     static EASED: RefCell<Option<(Instant, bool)>> = const { RefCell::new(None) };
@@ -93,30 +129,24 @@ pub fn passes(monitor: RECT, edge: Edge, along: i32) -> bool {
     let eased = eased();
     KNOWN.with(|known| {
         let mut known = known.borrow_mut();
-        if !known.iter().any(|screen| screen.monitor == monitor) {
-            *known = all();
-        }
-        let monitors: Vec<RECT> = known.iter().map(|screen| screen.monitor).collect();
-        let Some(index) = monitors.iter().position(|m| *m == monitor) else { return false };
-        stretches(&monitors, index, edge, eased).into_iter().any(|(from, to, seam)| seam && (from..to).contains(&along))
+        let Some(index) = known.find(monitor, eased) else { return false };
+        let at = EDGES.iter().position(|e| *e == edge).unwrap();
+        known.edges[index][at].iter().any(|(from, to, seam)| *seam && (*from..*to).contains(&along))
     })
 }
 
 /// The screens changed: they are asked for anew.
 pub fn changed() {
-    KNOWN.with(|known| known.borrow_mut().clear());
+    KNOWN.with(|known| *known.borrow_mut() = Known::none());
 }
 
 /// How the edges of the screen at `monitor` open the panel (see
 /// `settings::lit`); none does, for no screen of the desktop.
 pub fn lit(kept: &[ScreenEdges], rest: Rest, monitor: RECT) -> Opens {
+    let eased = eased();
     KNOWN.with(|known| {
         let mut known = known.borrow_mut();
-        // One not known: the screens are not as they were.
-        if !known.iter().any(|screen| screen.monitor == monitor) {
-            *known = all();
-        }
-        known.iter().find(|screen| screen.monitor == monitor).map(|screen| crate::settings::lit(kept, rest, &screen.id)).unwrap_or_default()
+        known.find(monitor, eased).map(|index| crate::settings::lit(kept, rest, &known.screens[index].id)).unwrap_or_default()
     })
 }
 

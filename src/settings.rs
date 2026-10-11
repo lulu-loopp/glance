@@ -117,6 +117,12 @@ pub fn lit(kept: &[ScreenEdges], rest: Rest, screen: &str) -> Opens {
     }
 }
 
+/// Whether `edge` of any screen opens the panel where another screen lies
+/// against it, as `kept` and `rest` have it.
+pub fn seam_anywhere(kept: &[ScreenEdges], rest: Rest, edge: Edge) -> bool {
+    (rest.seam && rest.edge == edge) || kept.iter().any(|entry| entry.seams.contains(&edge))
+}
+
 /// Turns `edge` of the screen named `screen` on, or off, in `kept`: where
 /// it is open, or (`on_seam`) where another screen lies against it.
 pub fn flip_edge(kept: &mut Vec<ScreenEdges>, rest: Rest, screen: &str, edge: Edge, on_seam: bool) {
@@ -457,8 +463,14 @@ impl Settings {
     pub fn load(dir: &Path) -> Self {
         let mut settings: Settings =
             crate::elevation::read_in_place(dir, FILE, MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        // A number too large to be one (it reads as infinite, and is written
+        // as none at all): not a file Glance wrote.
+        if serde_json::to_value(&settings).and_then(serde_json::from_value::<Settings>).is_err() {
+            settings = Settings::default();
+        }
         settings.interval_ms = settings.interval_ms.clamp(250, 10_000);
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
+        settings.overlay.clear = settings.overlay.clear.clamp(0.0, 1.0);
         settings.carry_over();
         settings
     }
@@ -602,6 +614,16 @@ mod tests {
         assert_eq!(lit(&settings.screens, settings.rest(), "a"), Opens { edges: Lit::default(), seams: Lit::of(&[Edge::Top]) });
         assert!(settings.sensitivity == Sensitivity::default());
         assert!(Settings::default().pushed);
+    }
+
+    #[test]
+    fn a_number_too_large_is_none_glance_wrote() {
+        // Read as infinite, it would be written as nothing, and what was
+        // written not read again (see `merged`).
+        let settings: Settings = serde_json::from_str(r#"{"overlay":{"clear":1e39}}"#).unwrap();
+        assert!(serde_json::to_value(&settings).and_then(serde_json::from_value::<Settings>).is_err());
+        let sound = Settings::default();
+        assert!(serde_json::to_value(&sound).and_then(serde_json::from_value::<Settings>).is_ok());
     }
 
     #[test]

@@ -115,7 +115,7 @@ const CHEVRON_ROOM: f32 = 28.0;
 /// least they are long, and apart).
 const MAP_MOST: f32 = 180.0;
 const MAP_ROOM: f32 = 6.0;
-const MAP_BAND: f32 = 12.0;
+const MAP_BAND: f32 = 18.0;
 const MAP_BAR: f32 = 2.0;
 const MAP_INSET: f32 = 1.5;
 const MAP_RADIUS: f32 = 3.0;
@@ -499,6 +499,8 @@ struct MapEdge {
 /// picture's size (physical px), and the picture as a bitmap once drawn.
 struct MapArt {
     id: String,
+    /// Where the screen was as the picture was taken (physical px).
+    monitor: RECT,
     size: (u32, u32),
     desktop: Capture,
     bitmap: Option<ID2D1Bitmap1>,
@@ -507,8 +509,10 @@ struct MapArt {
 /// The desktop the preview shows, at the size of the work area (DIPs).
 struct Stage {
     size: (f32, f32),
-    /// The screen it is, by its name.
+    /// The screen it is, by its name, and its work area as the desktop
+    /// was taken (physical px).
     screen: Option<String>,
+    work: RECT,
     desktop: Capture,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
@@ -640,7 +644,7 @@ fn make(gfx: Rc<Gfx>) -> Option<HWND> {
         let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
         let centre = POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 };
         let screen = crate::screens::all().into_iter().find(|screen| crate::panel::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
-        let stage = Stage { size, screen, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+        let stage = Stage { size, screen, work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
         let window_scale = GetDpiForWindow(hwnd) as f32 / 96.0;
         let mut ui = Ui {
             hwnd,
@@ -1112,14 +1116,15 @@ impl Ui {
     /// The preview shows the screen named `screen`: its desktop, at its
     /// size.
     fn show_screen(&mut self, screen: &str) {
-        if self.stage.screen.as_deref() == Some(screen) {
-            return;
-        }
         let Some(m) = self.screens.iter().find(|known| known.id == screen).map(|known| known.monitor) else { return };
         let Some(contact) = crate::panel::monitor_at(POINT { x: (m.left + m.right) / 2, y: (m.top + m.bottom) / 2 }) else { return };
         let work = contact.work;
         let size = (((work.right - work.left) as f32 / contact.scale).round(), ((work.bottom - work.top) as f32 / contact.scale).round());
-        self.stage = Stage { size, screen: Some(screen.to_string()), desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
+        // Shown already, and as it is now (its size, scale and place the same).
+        if self.stage.screen.as_deref() == Some(screen) && self.stage.work == work && self.stage.size == size {
+            return;
+        }
+        self.stage = Stage { size, screen: Some(screen.to_string()), work, desktop: wallpaper::desktop(work, size.0 as u32, size.1 as u32), bitmap: None };
     }
 
     /// The screen the preview shows, by its name: on the page of the map,
@@ -1158,9 +1163,9 @@ impl Ui {
     /// size changes.
     fn map_picture(&mut self, frame: &Frame, id: &str, monitor: RECT, size: (u32, u32)) -> Option<ID2D1Bitmap1> {
         let at = match self.map_art.iter().position(|art| art.id == id) {
-            Some(at) if self.map_art[at].size == size => at,
+            Some(at) if self.map_art[at].size == size && self.map_art[at].monitor == monitor => at,
             found => {
-                let art = MapArt { id: id.to_string(), size, desktop: wallpaper::desktop(monitor, size.0, size.1), bitmap: None };
+                let art = MapArt { id: id.to_string(), monitor, size, desktop: wallpaper::desktop(monitor, size.0, size.1), bitmap: None };
                 match found {
                     Some(at) => self.map_art[at] = art,
                     None => self.map_art.push(art),
