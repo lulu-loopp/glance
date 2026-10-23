@@ -237,6 +237,23 @@ mod placed_tests {
         let small = rect(0, 0, 2000, 1200);
         assert_eq!(placed_clear_of(small, size, Some(rect(990, 590, 1010, 610)), 18), ((2000 - 1932) / 2, (1200 - 1131) / 2));
     }
+
+    /// On the owner's tall screen at 200%, 1080 DIPs across (no wider than the window can be), the settings asked from
+    /// the gear at the foot of the panel's rail open as wide as the screen, as the system holds them, over the gear:
+    /// clear of it above, on the screen whole (they were placed nine tenths as wide, right of the gear, then widened
+    /// past the screen's side).
+    #[test]
+    fn the_settings_open_as_large_as_they_are_on_a_narrow_screen() {
+        let work = rect(-2905, -1459, -745, 2381);
+        let size = super::opening_size(work, 2.0);
+        assert_eq!(size, (2160, 1520));
+        assert!(size.0 >= super::least_size(work, 2.0).0 && size.1 >= super::least_size(work, 2.0).1);
+        let gear = rect(-2863, 1188, -2803, 1248);
+        let (x, y) = placed_clear_of(work, size, Some(gear), 24);
+        assert_eq!((x, y + size.1), (-2905, 1188 - 24));
+        // Where the screen is wider than the least: as large as it opens anywhere.
+        assert_eq!(super::opening_size(rect(-745, -1440, 2695, -48), 1.5), (1950, 1140));
+    }
 }
 
 #[cfg(test)]
@@ -1738,6 +1755,21 @@ fn placed_clear_of(work: RECT, (width, height): (i32, i32), from: Option<RECT>, 
     .unwrap_or(middle)
 }
 
+/// The least the window can be sized to in `work` at `scale` (physical px): `MIN_SIZE`, as far as `work` holds it. (A
+/// screen narrower than that, as a tall one at 200%, was widened past by the system, the window placed for less: off
+/// the screen's side, where no screen shows it.)
+fn least_size(work: RECT, scale: f32) -> (i32, i32) {
+    (((MIN_SIZE.0 * scale) as i32).min(work.right - work.left), ((MIN_SIZE.1 * scale) as i32).min(work.bottom - work.top))
+}
+
+/// The size the window opens at in `work` at `scale` (physical px): `SIZE`, within nine tenths of `work`, never less
+/// than it can be (see `least_size`).
+fn opening_size(work: RECT, scale: f32) -> (i32, i32) {
+    let least = least_size(work, scale);
+    let (work_w, work_h) = (work.right - work.left, work.bottom - work.top);
+    (((SIZE.0 * scale) as i32).min(work_w * 9 / 10).max(least.0), ((SIZE.1 * scale) as i32).min(work_h * 9 / 10).max(least.1))
+}
+
 fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWND> {
     let (work, scale) = crate::panel::work_area_at_cursor()?;
     let scale = scale as f32;
@@ -1756,9 +1788,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         };
         RegisterClassExW(&class);
         // Sized and centred in physical pixels of the monitor it opens on.
-        let (work_w, work_h) = (work.right - work.left, work.bottom - work.top);
-        let width = ((SIZE.0 * scale) as i32).min(work_w * 9 / 10);
-        let height = ((SIZE.1 * scale) as i32).min(work_h * 9 / 10);
+        let (width, height) = opening_size(work, scale);
         let placed = placed_clear_of(work, (width, height), shown.flatten(), (CLEAR_OF * scale).round() as i32);
         let hwnd = CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP,
@@ -1792,7 +1822,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         let app = crate::app();
         let settings = app.settings.lock().unwrap().clone();
         let prefs = Prefs::resolve(&settings.view, &app.controller.known_modules());
-        let size = ((work_w as f32 / scale).round(), (work_h as f32 / scale).round());
+        let size = (((work.right - work.left) as f32 / scale).round(), ((work.bottom - work.top) as f32 / scale).round());
         let centre = POINT { x: (work.left + work.right) / 2, y: (work.top + work.bottom) / 2 };
         let screen = crate::screens::all().into_iter().find(|screen| crate::mouse::monitor_at(centre).is_some_and(|contact| contact.monitor == screen.monitor)).map(|screen| screen.id);
         // On the desktop as it was last read, if it was (see `DESKTOPS`): light or dark as it is from the first frame
@@ -2041,9 +2071,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_GETMINMAXINFO => {
+            use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
             let scale = unsafe { GetDpiForWindow(hwnd) } as f32 / 96.0;
-            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-            info.ptMinTrackSize = POINT { x: (MIN_SIZE.0 * scale) as i32, y: (MIN_SIZE.1 * scale) as i32 };
+            let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            if unsafe { GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor) }.as_bool() {
+                let (x, y) = least_size(monitor.rcWork, scale);
+                let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize = POINT { x, y };
+            }
             LRESULT(0)
         }
         WM_DPICHANGED => {
