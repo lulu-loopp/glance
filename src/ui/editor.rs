@@ -218,6 +218,22 @@ impl Editor {
         self.kept.changed.replace(false)
     }
 
+    /// How far its words are scrolled down (pixels).
+    pub fn scrolled(&self) -> i32 {
+        let mut at = POINT::default();
+        self.send(EM_GETSCROLLPOS, WPARAM(0), LPARAM(&mut at as *mut POINT as isize));
+        at.y
+    }
+
+    /// Its words scrolled `down` pixels down (as far as they go).
+    pub fn scroll_to(&self, down: i32) {
+        // (Laid out to their end first: the text services lay out only as far as they have drawn, and scrolled before
+        // that, stopped at what was laid out.)
+        let _ = self.character_anywhere(self.text().encode_utf16().count().saturating_sub(1));
+        let mut at = POINT { x: 0, y: down.max(0) };
+        self.send(EM_SETSCROLLPOS, WPARAM(0), LPARAM(&mut at as *mut POINT as isize));
+    }
+
     /// A window message for it (the keys, the input method's, the pointer's, its timers'): what it answers.
     /// (None: not theirs, `S_FALSE`, for the window's own handling to see to, as an input method's message may be.)
     /// Writing after erasing, erasing after writing, and what the input method gives each begin a step of their own

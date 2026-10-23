@@ -20,22 +20,32 @@ use super::icons::Icon;
 use super::window::{Window, CAPTURE_LOST};
 
 /// How a menu looks: in the skin of what it is opened on (`skin`: the panel's, a widget's, the page beside), or as
-/// Windows' own (none: the tray's, the overlay's, which are Windows' things); light or `dark`.
+/// Windows' own (none: the tray's, the overlay's, which are Windows' things); light or `dark`. On glass, as frosted as
+/// the glass it is opened on is drawn (`frost`, 0–1), so that it is a piece of that glass: as clear over a calm
+/// desktop, as tinted, its colours as lifted.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Look {
     pub skin: Option<super::theme::Skin>,
     pub dark: bool,
+    pub frost: f32,
 }
 
 impl Look {
     /// As Windows' own menus, light or dark as the apps are.
     pub fn system() -> Look {
-        Look { skin: None, dark: crate::os::apps_dark() }
+        Look { skin: None, dark: crate::os::apps_dark(), frost: 1.0 }
     }
 
-    /// In `skin`, light or `dark`.
+    /// In `skin`, light or `dark`, as frosted as glass is at its most (glass with no picture of what is behind it is
+    /// drawn so: see `skins::glass_tint`).
     pub fn of(skin: super::theme::Skin, dark: bool) -> Look {
-        Look { skin: Some(skin), dark }
+        Look { skin: Some(skin), dark, frost: 1.0 }
+    }
+
+    /// The same, opened on glass drawn `frost` frosted: `behind`, with a picture of what is behind it to frost (without
+    /// one, glass is drawn as at its most frosted).
+    pub fn frosted(self, frost: f32, behind: bool) -> Look {
+        Look { frost: if behind { frost.clamp(0.0, 1.0) } else { 1.0 }, ..self }
     }
 }
 
@@ -122,6 +132,8 @@ pub struct Menu {
     before: HWND,
     /// Opened with the panel up (see `over_the_panel`).
     with_the_panel: bool,
+    /// Its choices as drawn on glass, ringed by the glass's halo as the lanes' words are (see `draw`).
+    choices: gfx::Layer,
     /// Shown till it goes (see `life`): counted before its surface is made, so that it is let go of after it.
     _showing: super::life::Showing,
 }
@@ -141,11 +153,18 @@ impl Menu {
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
-        // (Glass's over the screen frosted, as its lanes are over the desktop; Windows 11's too, as its acrylic is.)
-        let frosted = matches!(look.skin, Some(super::theme::Skin::Glass | super::theme::Skin::Fluent)).then(|| super::glass::Frosted::new(&gfx, window.hwnd).ok()).flatten();
+        // (Glass's over the screen frosted as the glass it is opened on is, blurred and its colour lifted as its lanes
+        // are; Windows 11's as its acrylic is.)
+        use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
+        let glass = match look.skin {
+            Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
+            Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
+            _ => None,
+        };
+        let frosted = glass.and_then(|(frosting, frost)| super::glass::Frosted::new(&gfx, window.hwnd, frosting).ok().map(|frosted| (frosted, frost)));
         let surface = match frosted {
-            Some(mut frosted) => {
-                frosted.set_frost(1.0);
+            Some((mut frosted, frost)) => {
+                frosted.set_frost(frost);
                 Drawn::Frosted(frosted)
             }
             None => match Surface::new(&gfx, window.hwnd) {
@@ -174,7 +193,7 @@ impl Menu {
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
         let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, _showing: showing };
+        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), _showing: showing };
         if !menu.draw() {
             menu.window.destroy();
             return None;
@@ -285,7 +304,7 @@ impl Menu {
     }
 
     fn draw(&mut self) -> bool {
-        let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
+        let (sheet, items, look, lit, choices) = (&self.sheet, &self.items, self.look, self.lit, &mut self.choices);
         let size = (self.size.0 as u32, self.size.1 as u32);
         let drawn = match &mut self.surface {
             Drawn::Plain(surface) => surface.draw(&self.gfx, size, self.scale, |frame| {
@@ -295,9 +314,20 @@ impl Menu {
             Drawn::Frosted(frosted) => {
                 let px = self.scale;
                 let pane = (SHADOW * px, SHADOW * px, sheet.width * px, sheet.height * px, Colours::new(look, true).radius * px);
+                // (Glass's words ringed by its faint halo, as the lanes' are: read over the glass as clearly as theirs.)
+                let halo = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark).legibility);
                 frosted.draw(&self.gfx, size, px, pane, |frame| {
                     frame.origin(SHADOW, SHADOW);
-                    sheet.paint(frame, items, look, lit, true);
+                    sheet.paint_sheet(frame, items, look, lit, true);
+                    let key = lit.map_or(u64::MAX, |row| row as u64);
+                    let area = (0.0, 0.0, sheet.width, sheet.height);
+                    let laid = choices.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, halo, |frame| {
+                        sheet.paint_choices(frame, items, look, true);
+                        Ok(())
+                    });
+                    if let Err(error) = laid {
+                        gfx::failed("menu", Some(&error));
+                    }
                 })
             }
         };
@@ -359,6 +389,12 @@ impl Sheet {
     /// as `look` has it, the choice `lit` highlighted; over the screen behind
     /// it, `frosted` (see `Drawn`).
     pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
+        self.paint_sheet(frame, items, look, lit, frosted);
+        self.paint_choices(frame, items, look, frosted);
+    }
+
+    /// Its sheet: the plate, the rules between groups and the choice `lit`'s highlight.
+    fn paint_sheet(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let (width, height) = (self.width, self.height);
         let colours = Colours::new(look, frosted);
         let (radius, highlight_radius) = (colours.radius, colours.radius - INSET);
@@ -376,6 +412,14 @@ impl Sheet {
             if lit == Some(i) {
                 frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, ROW, highlight_radius);
             }
+        }
+    }
+
+    /// What is on its sheet: each choice's mark, words and tick.
+    fn paint_choices(&self, frame: &gfx::Frame, items: &[Item], look: Look, frosted: bool) {
+        let width = self.width;
+        let colours = Colours::new(look, frosted);
+        for (item, top) in items.iter().zip(&self.tops) {
             let middle = top + ROW / 2.0;
             match item.mark {
                 Some(Mark::Icon(icon)) => frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, colours.icon),
@@ -435,11 +479,10 @@ impl Colours {
         let theme = look.skin.map(|skin| super::theme::Theme::new(skin, dark));
         match (look.skin, theme) {
             (Some(Skin::Glass), Some(theme)) => Colours {
-                // (Over the screen frosted, a tint of it as the lanes' over the desktop; else near opaque, what is
-                // behind it sharp.)
+                // (Over the screen frosted, tinted as the lanes of the glass it is opened on are, as frosted as they
+                // are; else near opaque, what is behind it sharp.)
                 sheet: match (dark, frosted) {
-                    (true, true) => Color::hex(0x23262E, 0.6),
-                    (false, true) => Color::hex(0xFFFFFF, 0.55),
+                    (_, true) => super::skins::glass_tint(&theme, look.frost, true),
                     (true, false) => Color::hex(0x2A2D35, 0.94),
                     (false, false) => Color::hex(0xF7F8FA, 0.94),
                 },
@@ -501,7 +544,7 @@ mod tests {
         let gfx = gfx::Gfx::new().expect("graphics");
         let pink = Color::hex(0xEE556D, 1.0);
         let items = vec![Item { label: "粉色", mark: Some(Mark::Colour(pink)), checked: false, rule_before: false }];
-        for look in [Look { skin: None, dark: false }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
+        for look in [Look { skin: None, dark: false, frost: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
             let sheet = Sheet::new(&gfx, &items, look);
             let (w, h) = (sheet.width.ceil() as u32, sheet.height.ceil() as u32);
             let pixels = gfx.draw_offscreen((w, h), 1.0, |frame| sheet.paint(frame, &items, look, None, false)).expect("drawn");
@@ -513,6 +556,21 @@ mod tests {
             // Its middle the colour; a corner of the icon's square (outside the round dot) not.
             assert_eq!(at(INSET + 16.0, middle), (0xEE, 0x55, 0x6D), "{look:?}");
             assert_ne!(at(INSET + 16.0 - DOT / 2.0 + 0.5, middle - DOT / 2.0 + 0.5), (0xEE, 0x55, 0x6D), "{look:?}: not round");
+        }
+    }
+
+    /// A menu opened on glass is tinted as that glass's lanes are, as frosted as they are drawn; on glass with nothing
+    /// behind it to frost (drawn as at its most frosted), as at its most frosted.
+    #[test]
+    fn a_menu_on_glass_is_tinted_as_the_glass_it_is_opened_on() {
+        use super::super::theme::{Skin, Theme};
+        for dark in [false, true] {
+            let theme = Theme::new(Skin::Glass, dark);
+            for frost in [0.0, 0.35, 1.0] {
+                let look = Look::of(Skin::Glass, dark).frosted(frost, true);
+                assert_eq!(Colours::new(look, true).sheet, super::super::skins::glass_tint(&theme, frost, true), "dark {dark}, frost {frost}");
+            }
+            assert_eq!(Look::of(Skin::Glass, dark).frosted(0.2, false).frost, 1.0);
         }
     }
 
@@ -533,7 +591,7 @@ mod tests {
             Item { label: "列表", mark: Some(Mark::Icon(Icon::List)), checked: true, rule_before: false },
             Item { label: "清空中转站", mark: None, checked: false, rule_before: true },
         ];
-        let looks = [Look { skin: None, dark: false }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
+        let looks = [Look { skin: None, dark: false, frost: 1.0 }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true, frost: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
         let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();
         let widest = sheets.iter().map(|sheet| sheet.width).fold(0.0, f32::max);
         let (cell_w, cell_h, px) = (widest + 2.0 * SHADOW, sheets[0].height + 2.0 * SHADOW, 2.0f32);

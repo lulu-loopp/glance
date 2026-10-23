@@ -314,7 +314,13 @@ pub enum List {
     Recent,
     Apps,
     Notes,
+    /// A note's words on its card stuck on the desktop, while it is not written in (written in, the box it is written
+    /// in scrolls them).
+    Words,
 }
+
+/// How many lists there are.
+const LISTS: usize = 7;
 
 /// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (each
 /// of the last two, those its filter takes).
@@ -345,12 +351,12 @@ impl Tab {
 /// How far each list is scrolled (DIPs), and how far it is going (each frame a little nearer: see `ease`).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Scrolls {
-    at: [f32; 6],
-    to: [f32; 6],
+    at: [f32; LISTS],
+    to: [f32; LISTS],
     /// Where each list turned by pages is turned to, before it comes to a page (see `turn_pages`).
-    turning: [f32; 6],
+    turning: [f32; LISTS],
     /// What each shows (see `lists_show`), as it was scrolled for it.
-    shows: [u8; 6],
+    shows: [u8; LISTS],
 }
 
 impl Scrolls {
@@ -385,6 +391,13 @@ impl Scrolls {
     pub fn to_page(&mut self, list: List, at: f32, most: f32) {
         let at = at.clamp(0.0, most);
         (self.to[list as usize], self.turning[list as usize]) = (at, at);
+    }
+
+    /// `list` at `at` (DIPs) at once: where what scrolled it last left it (a note's words, where the box they were
+    /// written in left them).
+    pub fn set(&mut self, list: List, at: f32) {
+        let (at, list) = (at.max(0.0), list as usize);
+        (self.at[list], self.to[list], self.turning[list]) = (at, at, at);
     }
 
     /// `list`, turned through by pages, held at `at` (DIPs, within `most`) by a hand swiping it: there at once.
@@ -427,7 +440,7 @@ impl Scrolls {
 
     /// What each list shows now (see `lists_show`): one showing its things another way, or other things, back at its
     /// top (scrolled as far as it was for what it showed before, it would open part way down).
-    pub fn follow(&mut self, shows: [u8; 6]) {
+    pub fn follow(&mut self, shows: [u8; LISTS]) {
         for list in 0..shows.len() {
             if self.shows[list] != shows[list] {
                 (self.at[list], self.to[list], self.turning[list]) = (0.0, 0.0, 0.0);
@@ -437,15 +450,15 @@ impl Scrolls {
     }
 
     /// As each is scrolled, for what is drawn to tell one drawing from another.
-    pub fn bits(&self) -> [u32; 6] {
+    pub fn bits(&self) -> [u32; LISTS] {
         self.at.map(f32::to_bits)
     }
 }
 
 /// What each list shows, as far as one is scrolled for it alone (see `Scrolls::follow`): the station's things in their
 /// view, what was copied lately and the files come lately under the filters chosen on `tab`, the notes in their view.
-pub fn lists_show(tab: Tab) -> [u8; 6] {
-    let mut shows = [0; 6];
+pub fn lists_show(tab: Tab) -> [u8; LISTS] {
+    let mut shows = [0; LISTS];
     shows[List::Shelf as usize] = crate::station::run::shown().view as u8;
     shows[List::Copies as usize] = if let Tab::Copies(filter) = tab { filter as u8 + 1 } else { 0 };
     shows[List::Recent as usize] = if let Tab::Recent(filter) = tab { filter as u8 + 1 } else { 0 };
@@ -3589,15 +3602,21 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Notes { notes, view, tall }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
             }
-            // (All the room it is given, whatever its size. Written in where it is, drawn by what writes it.)
+            // (All the room it is given, whatever its size. Written in where it is, drawn by what writes it. Not written
+            // in, its words scrolled by the wheel as far as they reach past their box.)
             (Block::StuckNote(note), Pass::Content) => {
                 let room = (left, y, width, (area.y + area.h - pad_bottom - y).max(0.0));
-                if !note.written {
-                    super::note::paint_stuck(frame, theme, scene.lang, &note.text, note.colour, &note.when, &note.name, room);
+                let most = (!note.written).then(|| super::note::stuck_scrolls(frame, &note.text, (room.2, room.3)));
+                if let Some(most) = most {
+                    let scrolled = scene.scrolls.at(List::Words).clamp(0.0, most);
+                    super::note::paint_stuck(frame, theme, scene.lang, &note.text, note.colour, &note.when, &note.name, room, scrolled);
                 }
                 let (wx, wy, ww, wh) = super::note::words_in(room.2, room.3);
                 hits.push((room.0 + wx, room.1 + wy, ww, wh, Hit::Words(note.number)));
                 hits.push((room.0, room.1, room.2, room.3, Hit::Note(note.number)));
+                if let Some(most) = most.filter(|most| *most > 0.0) {
+                    hits.push((room.0 + wx, room.1 + wy, ww, wh, Hit::List(List::Words, most.to_bits())));
+                }
             }
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
                 paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, *over, hits);
@@ -5999,7 +6018,10 @@ six".into()));
 
     impl Canvas for Nothing {
         fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
-        fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
         fn measure(&self, text: &str, font: Font) -> f32 {
             text.chars().count() as f32 * font.size * 0.6
         }
@@ -6068,10 +6090,13 @@ six".into()));
                 self.drew_box(from, y, wide, font.size * 1.3);
             }
         }
-        fn markdown(&self, text: &str, _: Font, _: super::super::canvas::Inks, x: f32, y: f32, w: f32, h: f32) {
+        fn markdown(&self, text: &str, _: Font, _: super::super::canvas::Inks, x: f32, y: f32, w: f32, h: f32, _: f32) {
             if !text.trim().is_empty() {
                 self.drew_box(x, y, w, h);
             }
+        }
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
         }
         fn measure(&self, text: &str, font: Font) -> f32 {
             Nothing.measure(text, font)
@@ -6134,7 +6159,10 @@ six".into()));
         struct Icons(std::cell::RefCell<Vec<Color>>, std::cell::Cell<usize>);
         impl Canvas for Icons {
             fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
-            fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32) {}
+            fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
             fn measure(&self, text: &str, font: Font) -> f32 {
                 text.chars().count() as f32 * font.size * 0.6
             }
@@ -6811,15 +6839,15 @@ six".into()));
     #[test]
     fn a_list_shown_another_way_starts_at_its_top() {
         let mut scrolls = Scrolls::default();
-        scrolls.follow([0, 0, 0, 0, 0, 1]);
+        scrolls.follow([0, 0, 0, 0, 0, 1, 0]);
         scrolls.turn(List::Notes, 80.0, 500.0);
         scrolls.turn(List::Recent, 40.0, 500.0);
         for _ in 0..200 {
             scrolls.ease(1.0, 0.1);
         }
-        scrolls.follow([0, 0, 0, 0, 0, 1]);
+        scrolls.follow([0, 0, 0, 0, 0, 1, 0]);
         assert!(scrolls.at(List::Notes) > 79.0 && scrolls.at(List::Recent) > 39.0);
-        scrolls.follow([0, 0, 0, 0, 0, 2]);
+        scrolls.follow([0, 0, 0, 0, 0, 2, 0]);
         assert_eq!(scrolls.at(List::Notes), 0.0);
         assert!(scrolls.at(List::Recent) > 39.0);
         scrolls.ease(1.0, 0.1);

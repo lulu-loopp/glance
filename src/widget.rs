@@ -2181,9 +2181,9 @@ impl Widgets {
         widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
-    /// How a menu opened on the widget at `hwnd` looks: in its skin, light or dark as it is drawn.
+    /// How a menu opened on the widget at `hwnd` looks: in its skin, light or dark and as frosted as it is drawn.
     pub fn look_of(&self, hwnd: HWND) -> crate::ui::menu::Look {
-        self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(crate::ui::menu::Look::system, |w| crate::ui::menu::Look::of(w.drawn_look.0, w.drawn_look.1))
+        self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(crate::ui::menu::Look::system, Widget::menu_look)
     }
 
     /// The menu of the widget at `hwnd` (a right click on it), up (see `chose`).
@@ -2657,6 +2657,8 @@ impl Widget {
                 let end = writing.editor.text().trim_end_matches('\n').encode_utf16().count() as i32;
                 writing.editor.select((end, end));
             }
+            // (Its words scrolled where its card had them: written in, they stay where they were read.)
+            writing.editor.scroll_to((self.content.scrolls().at(view::List::Words) * px).round() as i32);
             view::written_in_place(&name, true);
             let now = Instant::now();
             let chosen = writing.editor.selection();
@@ -2700,6 +2702,11 @@ impl Widget {
         crate::ui::keys::give_back(self.window.hwnd);
         // (What the input method is composing written, the caret hidden.)
         in_place.writing.focus(false);
+        // Its card's words left where the box they were written in had them.
+        let px = self.contact.scale * self.zoom;
+        if let Some(readings) = self.content.readings_mut() {
+            readings.scrolls.set(view::List::Words, in_place.writing.editor.scrolled() as f32 / px);
+        }
         let _ = in_place.writing.written();
         let now = Instant::now();
         in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
@@ -4549,9 +4556,15 @@ impl Widget {
         frost
     }
 
-    /// Its menu, up (in its skin, light or dark as it is drawn).
+    /// Its menu, up (see `menu_look`).
     fn menu(&self, lang: Lang, over_the_panel: bool) -> Option<crate::ui::menu::Menu> {
-        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), crate::ui::menu::Look::of(self.drawn_look.0, self.drawn_look.1), over_the_panel)
+        crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), self.menu_look(), over_the_panel)
+    }
+
+    /// How a menu opened on it looks: in its skin, light or dark and as frosted as it was last drawn.
+    fn menu_look(&self) -> crate::ui::menu::Look {
+        let frost = self.frost_shown.map_or(1.0, |(shown, _, _)| shown);
+        crate::ui::menu::Look::of(self.drawn_look.0, self.drawn_look.1).frosted(frost, self.behind.is_some())
     }
 
     /// Whether it shows what plays, alone or merged with others (and so offers it over the whole screen). (Not by its

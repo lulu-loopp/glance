@@ -1081,8 +1081,12 @@ pub struct Frame<'a> {
 }
 
 impl Canvas for Frame<'_> {
-    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
-        Frame::markdown(self, text, font, inks, x, y, width, height);
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32, scrolled: f32) {
+        Frame::markdown(self, text, font, inks, x, y, width, height, scrolled);
+    }
+
+    fn markdown_tall(&self, text: &str, font: Font, width: f32) -> f32 {
+        Frame::markdown_tall(self, text, font, width)
     }
 
     fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
@@ -1801,14 +1805,38 @@ impl<'a> Frame<'a> {
     /// and slant, as the text services choose them, slanted where the face has no italic); each line set as tall as
     /// `markdown::line_heights` says, its words as far above its foot as plain words reach below their baseline, as the text
     /// services set a line exactly so tall. Its blocks of code's boxes drawn under them, reaching out past its sides.
+    /// Scrolled `scrolled` down (DIPs, put on whole pixels as the box scrolls by them): its lines from there drawn.
     #[allow(clippy::too_many_arguments)]
-    pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32) {
-        use crate::notes::markdown::{line_heights, Drawn, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, CODE_OUT};
+    pub fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32, scrolled: f32) {
         // (Clipped, its blocks of code's boxes' sides within, and let go of whatever fails in between: the clip left on,
         // the whole frame was lost.)
-        let out = CODE_OUT * font.size + 1.0;
+        let out = crate::notes::markdown::CODE_OUT * font.size + 1.0;
         Canvas::clip(self, x - out, y, width + 2.0 * out, height);
-        let drawn = (|| -> Result<()> {
+        let drawn = self.markdown_laid(text, font, inks, (x, y, width, height), Some(scrolled));
+        Canvas::unclip(self);
+        if let Err(error) = drawn {
+            self.fail(error);
+        }
+    }
+
+    /// How tall a note's words `text` are, written `width` wide in `font` as `markdown` writes them: all their lines
+    /// laid out (nothing drawn), to the foot of the last, in DIPs on whole pixels.
+    pub fn markdown_tall(&self, text: &str, font: Font, width: f32) -> f32 {
+        let clear = Inks { words: Color::CLEAR, faint: Color::CLEAR, accent: Color::CLEAR };
+        match self.markdown_laid(text, font, clear, (0.0, 0.0, width, f32::INFINITY), None) {
+            Ok(tall) => tall,
+            Err(error) => {
+                self.fail(error);
+                0.0
+            }
+        }
+    }
+
+    /// A note's words laid out as `markdown` lays them out in the box `(x, y, width, height)`, and, `scrolled` that far
+    /// (DIPs), drawn there (none: laid out only, every line). How far down the lines laid out reach.
+    fn markdown_laid(&self, text: &str, font: Font, inks: Inks, (x, y, width, height): (f32, f32, f32, f32), scrolled: Option<f32>) -> Result<f32> {
+        use crate::notes::markdown::{line_heights, Drawn, BOX_IN, BOX_RISE, BOX_ROOM, BOX_SIDE, CODE_OUT};
+        {
             let wide: Vec<u16> = text.encode_utf16().collect();
             let factory: IDWriteFactory = self.gfx.write.cast()?;
             let weight = |bold: bool| if bold { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT(font.weight.round() as i32) };
@@ -1834,6 +1862,11 @@ impl<'a> Frame<'a> {
             let nothing: IDWriteInlineObject = Room { width: 0.0 }.into();
             let room = |wide: f32| -> IDWriteInlineObject { Room { width: (wide * size * per).round() / per }.into() };
             let (left, top) = self.on_pixel(x, y);
+            // (Scrolled by whole pixels, as the box is: its glyphs stay on them.)
+            let scrolled_by = scrolled.map_or(0.0, |scrolled| (scrolled.max(0.0) * per).round() / per);
+            let top = top - scrolled_by;
+            // Laid out as far as is seen (all of it, where only its height is asked).
+            let until = if scrolled.is_some() { scrolled_by + height } else { f32::INFINITY };
             // Its tables laid out in its room (in pixels), their lines as tall as they take, and its rules.
             let pixels = size * per;
             let tables: Vec<_> = shown.tables.iter().map(|table| (table, self.gfx.table_laid(table, font.family, pixels, per, (width * per).floor()))).collect();
@@ -1906,7 +1939,7 @@ impl<'a> Frame<'a> {
             let mut laid: Vec<Line> = Vec::new();
             let mut down = 0.0;
             for (line, tall) in line_heights(text, pixels, &drawn) {
-                if down >= height {
+                if down >= until {
                     break;
                 }
                 // (Its words, without its line break: a `\r` before it too, as a file written on Windows has.)
@@ -1940,6 +1973,9 @@ impl<'a> Frame<'a> {
             }
             // How far down each line's foot is.
             let foot = |line: &Line| line.down + line.rows.len().max(1) as f32 * line.tall;
+            if scrolled.is_none() {
+                return Ok(down);
+            }
             for code in &shown.codes {
                 let first = laid.iter().find(|line| line.words.start == code.span.start);
                 let last = laid.iter().rev().find(|line| line.words.start <= code.span.end);
@@ -1947,7 +1983,8 @@ impl<'a> Frame<'a> {
                     super::canvas::code_box(self, inks, left - out, top + first.down, width + 2.0 * out, foot(last) - first.down, size);
                 }
             }
-            for line in &laid {
+            // (Those scrolled out of sight above left undrawn.)
+            for line in laid.iter().filter(|line| foot(line) > scrolled_by) {
                 let (words, down, tall) = (&line.words, line.down, line.tall);
                 if let Some((_, laid)) = tables.iter().find(|(table, _)| table.span.start == words.start) {
                     self.table(laid, inks, left, top + down, (y, y + height), None, None);
@@ -1979,11 +2016,7 @@ impl<'a> Frame<'a> {
                     }
                 }
             }
-            Ok(())
-        })();
-        Canvas::unclip(self);
-        if let Err(error) = drawn {
-            self.fail(error);
+            Ok(down)
         }
     }
 
@@ -2686,7 +2719,7 @@ mod tests {
         for scale in [1.0f32, 1.5, 2.0] {
             let (wide, tall) = ((200.0 * scale) as u32, (40.0 * scale) as u32);
             let first = |text: &str| {
-                let pixels = gfx.draw_offscreen((wide, tall), scale, |frame| frame.markdown(text, Font::new(Family::Segoe, 15.0, 400.0), inks, 0.0, 0.0, 200.0, 40.0)).expect("drawn");
+                let pixels = gfx.draw_offscreen((wide, tall), scale, |frame| frame.markdown(text, Font::new(Family::Segoe, 15.0, 400.0), inks, 0.0, 0.0, 200.0, 40.0, 0.0)).expect("drawn");
                 (0..wide).find(|&x| (0..tall).any(|y| pixels[((y * wide + x) * 4 + 3) as usize] > 0)).expect("words drawn") as f32
             };
             let (alone, tabbed) = (first("X"), first("	X"));
@@ -2710,7 +2743,7 @@ mod tests {
             let mut failed = None;
             let pixels = gfx
                 .draw_offscreen((wide, tall), 1.0, |frame| {
-                    frame.markdown(&text, Font::new(Family::YaHei, 15.0, 400.0), inks, 0.0, 0.0, wide as f32, tall as f32);
+                    frame.markdown(&text, Font::new(Family::YaHei, 15.0, 400.0), inks, 0.0, 0.0, wide as f32, tall as f32, 0.0);
                     failed = frame.failed.borrow().clone();
                 })
                 .expect("drawn");

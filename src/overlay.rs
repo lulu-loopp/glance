@@ -249,7 +249,7 @@ impl Overlay {
                 return Err(error);
             }
         };
-        let surface = match Frosted::new(&gfx, stage.hwnd) {
+        let surface = match Frosted::new(&gfx, stage.hwnd, (crate::ui::glass::BLUR, crate::ui::glass::SATURATION)) {
             Ok(surface) => surface,
             Err(error) => {
                 // Tried again at the next sample, with windows of its own.

@@ -209,10 +209,12 @@ pub trait Canvas {
         self.text(text, Font { size: font.size * scale, ..font }, color, x, y, width, align);
     }
     /// `text`, a note's words in Markdown, as the box it is written in writes them (see `notes::markdown::dressing`): in
-    /// lines `width` wide from (`x`, `y`), in `font`, each stretch dressed as its looks make it, in `inks`; what is past
-    /// `height` down cut off.
+    /// lines `width` wide from (`x`, `y`), in `font`, each stretch dressed as its looks make it, in `inks`, scrolled
+    /// `scrolled` down (DIPs: what is above it out of sight); what is past `height` down cut off.
     #[allow(clippy::too_many_arguments)]
-    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32);
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, width: f32, height: f32, scrolled: f32);
+    /// How tall `text`, a note's words, is written `width` wide in `font` (see `markdown`): all of its lines, to its foot.
+    fn markdown_tall(&self, text: &str, font: Font, width: f32) -> f32;
     /// How wide `text` is in `font`.
     fn measure(&self, text: &str, font: Font) -> f32;
     /// The ascent and descent of `font`'s line box.

@@ -47,11 +47,11 @@ const CONTRAST_SPAN: f32 = 0.35;
 const BUSY: f32 = 0.14;
 const CALM: f32 = 0.03;
 /// Blur of fully frosted glass (DIPs).
-const FROST_BLUR: f32 = 9.0;
+pub(crate) const FROST_BLUR: f32 = 9.0;
 /// Windows 11's acrylic: a wide blur and a lift in saturation.
-const ACRYLIC_BLUR: f32 = 30.0;
-const ACRYLIC_SATURATION: f32 = 1.25;
-const GLASS_SATURATION: f32 = 1.3;
+pub(crate) const ACRYLIC_BLUR: f32 = 30.0;
+pub(crate) const ACRYLIC_SATURATION: f32 = 1.25;
+pub(crate) const GLASS_SATURATION: f32 = 1.3;
 
 /// How frosted glass over a backdrop of luminance `mean` and spread
 /// `spread` should be, 0–1: more when what is behind is busy, and more when
@@ -597,7 +597,7 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
 
 /// The glass's tint, `frost` asked for (as the desktop behind needs it: see `frost`), and whether a picture of the
 /// desktop is had to frost.
-fn glass_tint(theme: &Theme, frost: f32, behind: bool) -> Color {
+pub(crate) fn glass_tint(theme: &Theme, frost: f32, behind: bool) -> Color {
     // With none, as at its most frosted: the desktop shows through sharp, and how busy it is is not known.
     let frost = if behind { frost } else { 1.0 };
     theme.glass.alpha(theme.glass_clear + theme.glass_frosted * frost)

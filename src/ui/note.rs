@@ -147,12 +147,20 @@ pub fn paint_button(frame: &dyn Canvas, theme: &Theme, place: (f32, f32, f32, f3
 
 /// A note stuck on the desktop, `width` × `height` from (`x`, `y`), not written in: its page as it is written in (see
 /// `Writing::paint`) but for what is pressed there and the caret, its words as the page writes them: its words `text`, its
-/// colour `colour`, written `when` (how long ago), kept in the file `name`.
+/// colour `colour`, written `when` (how long ago), kept in the file `name`, scrolled `scrolled` down (DIPs: see
+/// `stuck_scrolls`).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_stuck(frame: &dyn Canvas, theme: &Theme, lang: Lang, text: &str, colour: crate::notes::Colour, when: &str, name: &str, (x, y, width, height): (f32, f32, f32, f32)) {
+pub(crate) fn paint_stuck(frame: &dyn Canvas, theme: &Theme, lang: Lang, text: &str, colour: crate::notes::Colour, when: &str, name: &str, (x, y, width, height): (f32, f32, f32, f32), scrolled: f32) {
     face(frame, theme, colour, &said(Some(when), lang), Some(&counted(text, lang)), Some(name), (x, y, width, height));
     let (left, top, wide, tall) = words_in(width, height);
-    frame.markdown(text, Font::new(Family::YaHei, WORDS, 400.0), word_inks(theme, colour), x + left, y + top, wide, tall);
+    frame.markdown(text, Font::new(Family::YaHei, WORDS, 400.0), word_inks(theme, colour), x + left, y + top, wide, tall, scrolled);
+}
+
+/// How far the words `text` of a note stuck on the desktop, on a card `width` × `height`, scroll (DIPs): as far as they
+/// reach past the foot of their box (none, where they fit in it).
+pub(crate) fn stuck_scrolls(frame: &dyn Canvas, text: &str, (width, height): (f32, f32)) -> f32 {
+    let (_, _, wide, tall) = words_in(width, height);
+    (frame.markdown_tall(text, Font::new(Family::YaHei, WORDS, 400.0), wide) - tall).max(0.0)
 }
 
 /// Where a to-do's box is drawn, in the room drawn for it from `left`, by its line's `baseline` (in the window: see
@@ -1884,7 +1892,7 @@ mod pictures {
             let size = ((w * scale) as u32, (h * scale) as u32);
             let theme = Theme::new(Skin::Fluent, true);
             let mut writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
-            let not = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, "x", "a.md", (0.0, 0.0, w, h))).unwrap();
+            let not = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, "x", "a.md", (0.0, 0.0, w, h), 0.0)).unwrap();
             crate::studio::save_png(&out.join(format!("alike-{name}-{scale}-face.png")), size.0, size.1, &not).unwrap();
             let opened: Vec<Option<(usize, usize, usize)>> = if cells.is_empty() { vec![None] } else { cells.iter().copied().map(Some).collect() };
             for cell in opened {
@@ -1993,7 +2001,7 @@ mod pictures {
         assert_eq!(text.trim_end_matches('\n'), "```c\n#include 你好\n```");
         let size = (w as u32, h as u32);
         let written = gfx.draw_offscreen(size, 1.0, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), 1.0, false)).unwrap();
-        let not = gfx.draw_offscreen(size, 1.0, |frame| paint_stuck(frame, &theme, Lang::Zh, text.strip_suffix('\n').unwrap_or(&text), writing.colour, "x", "a.md", (0.0, 0.0, w, h))).unwrap();
+        let not = gfx.draw_offscreen(size, 1.0, |frame| paint_stuck(frame, &theme, Lang::Zh, text.strip_suffix('\n').unwrap_or(&text), writing.colour, "x", "a.md", (0.0, 0.0, w, h), 0.0)).unwrap();
         crate::studio::save_png(&out.join("typed-code-page.png"), size.0, size.1, &written).unwrap();
         crate::studio::save_png(&out.join("typed-code-face.png"), size.0, size.1, &not).unwrap();
         unsafe {
@@ -2006,6 +2014,75 @@ mod pictures {
         drop(gfx);
         super::super::gfx::let_go();
         assert_eq!(differ, 0);
+    }
+
+    /// A note too long for its card, not written in, scrolls as far as the box it is written in scrolls it, and shows
+    /// there what that box shows, pixel for pixel: its lines, a list, a quote, a block of code and a table scrolled
+    /// past its top among them, at each scale. Short, it does not scroll.
+    #[test]
+    #[ignore = "makes a window of this session's"]
+    fn a_long_note_scrolls_as_its_box_does() {
+        use windows::core::w;
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let gfx = super::super::gfx::current().unwrap();
+        let text = format!(
+            "## 很长的便签\n{}- 苹果\n  - 红的\n- [ ] 买牛奶\n> 引用的话，很长很长很长很长很长很长很长很长很长很长很长很长\n| 名称 | 说明 |\n| - | - |\n| 苹果 | 红的，很甜 |\n```rust\nlet a = 1;\n```\n{}最后一行",
+            "第一段很长很长很长很长很长很长很长很长很长很长很长很长很长的字\n".repeat(6),
+            "又一行\n".repeat(12)
+        );
+        let folder = std::env::temp_dir().join(format!("glance-note-long-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.md"), &text).unwrap();
+        let theme = Theme::new(Skin::Fluent, true);
+        let (mut differs, mut reach) = (Vec::new(), Vec::new());
+        for scale in [1.0f32, 1.5] {
+            let (w, h) = super::super::view::STUCK_NOTE;
+            let size = ((w * scale) as u32, (h * scale) as u32);
+            let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, size.0 as i32, size.1 as i32, None, None, None, None) }.unwrap();
+            let writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
+            let words = writing.editor.text();
+            let words = words.strip_suffix('\n').unwrap_or(&words);
+            // As far as it scrolls: as far as its box does.
+            let most = std::cell::Cell::new(0.0);
+            gfx.draw_offscreen(size, scale, |frame| most.set(stuck_scrolls(frame, words, (w, h)))).unwrap();
+            let most = most.get();
+            // Its words reach as far down as the box sets its last line's foot.
+            let (_, top, _, tall) = words_in(w, h);
+            let foot = writing.editor.character_anywhere(words.encode_utf16().count() - 1).map_or(0.0, |drawn| drawn.bottom as f32 / scale - top);
+            reach.push((scale, most + tall, foot));
+            // Part way, and to its foot: the same pixels.
+            for down in [((most * 0.45) * scale).round() as i32, (most * scale).round() as i32] {
+                writing.editor.scroll_to(down);
+                let scrolled = writing.editor.scrolled() as f32 / scale;
+                let written = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
+                let not = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, words, writing.colour, "x", "a.md", (0.0, 0.0, w, h), scrolled)).unwrap();
+                let (left, top, wide, tall) = words_in(w, h);
+                let (left, top, wide, tall) = ((left * scale) as u32, (top * scale).ceil() as u32, (wide * scale) as u32, (tall * scale) as u32);
+                let differ = (top..top + tall).flat_map(|y| (left..left + wide).map(move |x| ((y * size.0 + x) * 4) as usize)).filter(|&at| written[at..at + 4] != not[at..at + 4]).count();
+                if differ > 0 {
+                    let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
+                    std::fs::create_dir_all(&out).unwrap();
+                    crate::studio::save_png(&out.join(format!("long-{scale}-{down}-page.png")), size.0, size.1, &written).unwrap();
+                    crate::studio::save_png(&out.join(format!("long-{scale}-{down}-face.png")), size.0, size.1, &not).unwrap();
+                }
+                differs.push((scale, down, differ));
+            }
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+        }
+        let short = std::cell::Cell::new(-1.0);
+        gfx.draw_offscreen((10, 10), 1.0, |frame| short.set(stuck_scrolls(frame, "短的", super::super::view::STUCK_NOTE))).unwrap();
+        let short = short.get();
+        let _ = std::fs::remove_dir_all(&folder);
+        drop(gfx);
+        super::super::gfx::let_go();
+        assert_eq!(short, 0.0);
+        assert!(reach.iter().all(|(scale, reach, foot)| *reach > 400.0 && (reach - foot).abs() <= 1.0 / scale + 0.01), "how far down its words reach, and its box' last line' foot: {reach:?}");
+        assert!(differs.iter().all(|(.., differ)| *differ == 0), "pixels apart: {differs:?}");
     }
 
     /// A table below its box's room is found where it would be (below the box, not at its top: the text services'
@@ -2147,7 +2224,7 @@ mod pictures {
             let mut writing = Writing::open(hwnd, words_box(0, 0, size.0 as i32, size.1 as i32, scale), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("a.md".into()), &theme, WORDS * scale).unwrap();
             let now = crate::station::now_ms();
             let when = super::super::text::since(writing.written_ms, now, Lang::Zh);
-            let face = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, &when, "a.md", (0.0, 0.0, w, h))).unwrap();
+            let face = gfx.draw_offscreen(size, scale, |frame| paint_stuck(frame, &theme, Lang::Zh, text, writing.colour, &when, "a.md", (0.0, 0.0, w, h), 0.0)).unwrap();
             crate::studio::save_png(&out.join(format!("note-{name}-face.png")), size.0, size.1, &face).unwrap();
             let page = gfx.draw_offscreen(size, scale, |frame| writing.paint(frame, &theme, Lang::Zh, (0.0, 0.0, w, h), (0.0, 0.0), scale, false)).unwrap();
             crate::studio::save_png(&out.join(format!("note-{name}-page.png")), size.0, size.1, &page).unwrap();

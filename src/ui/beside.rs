@@ -975,10 +975,16 @@ impl Beside {
         }
     }
 
+    /// How a menu opened on it looks: in its skin, light or dark and as frosted as it is drawn.
+    fn menu_look(&self) -> super::menu::Look {
+        let behind = BEHIND.with(|held| held.borrow().1.is_some());
+        super::menu::Look::of(self.theme.skin, self.theme.dark).frosted(self.frost, behind)
+    }
+
     /// The note's writing menu (see `note::writing_menu`), at `at` on the screen, where it was asked for.
     fn writing_menu(&self, at: POINT) {
         let (items, choices) = super::note::writing_menu(self.lang, self.writing.as_ref().map(super::note::Writing::spot).unwrap_or_default());
-        if let Some(menu) = super::menu::Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
+        if let Some(menu) = super::menu::Menu::open_at(items, self.menu_look(), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
         }
     }
@@ -1006,7 +1012,7 @@ impl Beside {
     fn note_menu(&self, at: POINT) {
         let Some(writing) = &self.writing else { return };
         let (items, choices) = super::note::menu(self.lang, writing.colour, writing.name.is_some(), false);
-        if let Some(menu) = super::menu::Menu::open_at(items, super::menu::Look::of(self.theme.skin, self.theme.dark), at, false, false) {
+        if let Some(menu) = super::menu::Menu::open_at(items, self.menu_look(), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
         }
     }

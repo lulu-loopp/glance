@@ -2737,9 +2737,9 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// How a menu opened on it looks: in its skin, light or dark as it is drawn.
+    /// How a menu opened on it looks: in its skin, light or dark and as frosted as it is drawn.
     fn menu_look(&self) -> crate::ui::menu::Look {
-        crate::ui::menu::Look::of(self.theme.skin, self.theme.dark)
+        crate::ui::menu::Look::of(self.theme.skin, self.theme.dark).frosted(self.frost, self.behind.is_some())
     }
 
     /// Whether it is moved away from the edge.

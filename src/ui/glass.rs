@@ -26,9 +26,9 @@ use windows_numerics::{Vector2, Vector3};
 
 use super::gfx::{Frame, Gfx};
 
-/// How much the glass blurs what is behind beyond the backdrop's own blur
-/// (a deviation, DIPs), and how much colour it leaves it (1 as it is).
-const BLUR: f32 = 20.0;
+/// How much the overlay's glass blurs what is behind beyond the backdrop's own blur (a deviation, DIPs), and how much
+/// colour it leaves it (1 as it is): grey, for its words over a game's colours.
+pub const BLUR: f32 = 20.0;
 pub const SATURATION: f32 = 0.5;
 
 thread_local! {
@@ -120,10 +120,16 @@ pub struct Frosted {
     /// Its window, and whether the compositor is asked for what is behind it (see `set_frost`).
     hwnd: HWND,
     frosting: bool,
+    /// How much it blurs what is behind beyond the backdrop's own blur (DIPs), and how much colour it leaves it.
+    blur: f32,
+    saturation: f32,
 }
 
 impl Frosted {
-    pub fn new(gfx: &Rc<Gfx>, hwnd: HWND) -> Result<Self> {
+    /// The glass of `hwnd`, blurring what is behind by `blur` (DIPs) beyond the backdrop's own blur and leaving it
+    /// `saturation` of its colour (1 as it is): the overlay's (`BLUR`, `SATURATION`), or the skin's of what a menu is
+    /// opened on.
+    pub fn new(gfx: &Rc<Gfx>, hwnd: HWND, (blur, saturation): (f32, f32)) -> Result<Self> {
         let compositor = compositor()?;
         let target = unsafe { compositor.cast::<ICompositorDesktopInterop>()?.CreateDesktopWindowTarget(hwnd, true)? };
         let root = compositor.CreateContainerVisual()?;
@@ -143,7 +149,7 @@ impl Frosted {
         let content = compositor.CreateSpriteVisual()?;
         root.Children()?.InsertAtTop(&content)?;
         let graphics = graphics(&compositor, gfx)?;
-        Ok(Frosted { compositor, _target: target, root, pane, content, gfx: gfx.clone(), graphics, surface: None, size: (0, 0), hwnd, frosting: true })
+        Ok(Frosted { compositor, _target: target, root, pane, content, gfx: gfx.clone(), graphics, surface: None, size: (0, 0), hwnd, frosting: true, blur, saturation })
     }
 
     /// Draws one frame on `gfx` (the thread's device: a new one, after the
@@ -162,7 +168,7 @@ impl Frosted {
         // A pane the compositor will not frost (an effect it cannot run) is
         // let go of, and the glass left clear: that is no lost device.
         if let Some(glass) = &mut self.pane {
-            if place(glass, &self.compositor, scale, pane).is_err() {
+            if place(glass, &self.compositor, scale, (self.blur, self.saturation), pane).is_err() {
                 let _ = self.root.Children().and_then(|children| children.Remove(&glass.sprite));
                 self.pane = None;
             }
@@ -223,26 +229,25 @@ impl Frosted {
     }
 }
 
-/// The backdrop, frosted: blurred further at `scale`, its colour
-/// softened.
-fn frost(compositor: &Compositor, scale: f32) -> Result<windows::UI::Composition::CompositionEffectBrush> {
+/// The backdrop, frosted: blurred further by `blur` (DIPs) at `scale`, `saturation` of its colour left.
+fn frost(compositor: &Compositor, scale: f32, (blur, saturation): (f32, f32)) -> Result<windows::UI::Composition::CompositionEffectBrush> {
     let single = |v: f32| -> Result<IPropertyValue> { PropertyValue::CreateSingle(v)?.cast() };
     let whole = |v: u32| -> Result<IPropertyValue> { PropertyValue::CreateUInt32(v)?.cast() };
     let backdrop: IGraphicsEffectSource = CompositionEffectSourceParameter::Create(&HSTRING::from("backdrop"))?.cast()?;
-    let softened: IGraphicsEffect = Effect { id: CLSID_D2D1Saturation, properties: vec![single(SATURATION)?], source: backdrop }.into();
+    let softened: IGraphicsEffect = Effect { id: CLSID_D2D1Saturation, properties: vec![single(saturation)?], source: backdrop }.into();
     // Blurred with its edges hard: the pane's rim is not darkened by
     // the transparent nothing past it.
-    let blurred: IGraphicsEffect = Effect { id: CLSID_D2D1GaussianBlur, properties: vec![single(BLUR * scale)?, whole(1)?, whole(1)?], source: softened.cast()? }.into();
+    let blurred: IGraphicsEffect = Effect { id: CLSID_D2D1GaussianBlur, properties: vec![single(blur * scale)?, whole(1)?, whole(1)?], source: softened.cast()? }.into();
     let brush = compositor.CreateEffectFactory(&blurred)?.CreateBrush()?;
     brush.SetSourceParameter(&HSTRING::from("backdrop"), &compositor.CreateHostBackdropBrush()?)?;
     Ok(brush)
 }
 
 /// Puts the pane at `at` (left, top, width, height and corner radius,
-/// physical pixels), frosted for `scale`.
-fn place(glass: &mut Pane, compositor: &Compositor, scale: f32, at: (f32, f32, f32, f32, f32)) -> Result<()> {
+/// physical pixels), frosted for `scale` as `frosting` has it (see `frost`).
+fn place(glass: &mut Pane, compositor: &Compositor, scale: f32, frosting: (f32, f32), at: (f32, f32, f32, f32, f32)) -> Result<()> {
     if glass.scale != scale {
-        glass.sprite.SetBrush(&frost(compositor, scale)?)?;
+        glass.sprite.SetBrush(&frost(compositor, scale, frosting)?)?;
         glass.scale = scale;
     }
     let (left, top, width, height, radius) = at;

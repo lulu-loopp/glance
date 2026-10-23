@@ -16,7 +16,7 @@ pub enum Op {
     /// drawn larger or smaller rather than set in a font for each).
     Text { text: String, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align, inked: f32, scale: f32 },
     /// A note's words in Markdown, written in lines in their box (see `Canvas::markdown`).
-    Markdown { text: String, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32 },
+    Markdown { text: String, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32, scrolled: f32 },
     /// To a box, or (`part`) the part of it a fraction fills, from its bottom or its left (see `Canvas::clip_part`).
     Clip { x: f32, y: f32, w: f32, h: f32, part: Option<(f32, bool)> },
     Unclip,
@@ -198,9 +198,9 @@ impl Op {
                 let (x, y, w, h) = rect(x, y, w, h);
                 Op::Clip { x, y, w, h, part }
             }
-            Op::Markdown { text, font, inks, x, y, w, h } => {
+            Op::Markdown { text, font, inks, x, y, w, h, scrolled } => {
                 let (x, y, w, h) = rect(x, y, w, h);
-                Op::Markdown { text, font: Font { size: map.length(font.size), ..font }, inks, x, y, w, h }
+                Op::Markdown { text, font: Font { size: map.length(font.size), ..font }, inks, x, y, w, h, scrolled: map.length(scrolled) }
             }
             Op::Unclip => Op::Unclip,
             Op::Fill { color, x, y, w, h } => {
@@ -276,8 +276,8 @@ impl Op {
             }
             (Op::Unclip, Op::Unclip) => vec![Op::Unclip],
             // (The same words in the same inks: their box and size between; other words, each faded on its own way.)
-            (Op::Markdown { text: at, font: af, inks: ai, x: ax, y: ay, w: aw, h: ah }, Op::Markdown { text: bt, font: bf, inks: bi, x: bx, y: by, w: bw, h: bh }) if at == bt && ai == bi && af.family == bf.family => {
-                vec![Op::Markdown { text: bt.clone(), font: Font { size: lerp(af.size, bf.size, t), ..*bf }, inks: *bi, x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t) }]
+            (Op::Markdown { text: at, font: af, inks: ai, x: ax, y: ay, w: aw, h: ah, scrolled: a_scrolled }, Op::Markdown { text: bt, font: bf, inks: bi, x: bx, y: by, w: bw, h: bh, scrolled: b_scrolled }) if at == bt && ai == bi && af.family == bf.family => {
+                vec![Op::Markdown { text: bt.clone(), font: Font { size: lerp(af.size, bf.size, t), ..*bf }, inks: *bi, x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), scrolled: lerp(*a_scrolled, *b_scrolled, t) }]
             }
             (Op::Fill { color: ac, x: ax, y: ay, w: aw, h: ah }, Op::Fill { color: bc, x: bx, y: by, w: bw, h: bh }) => {
                 vec![Op::Fill { color: lerp_color(*ac, *bc, t), x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t) }]
@@ -356,7 +356,7 @@ impl Op {
         match self {
             Op::Text { text, font, color, x, y, width, align, scale, .. } if (scale - 1.0).abs() < 1e-3 => canvas.text(text, *font, *color, *x, *y, *width, *align),
             Op::Text { text, font, color, x, y, width, align, scale, .. } => canvas.text_scaled(text, *font, *color, *x, *y, *width, *align, *scale),
-            Op::Markdown { text, font, inks, x, y, w, h } => canvas.markdown(text, *font, *inks, *x, *y, *w, *h),
+            Op::Markdown { text, font, inks, x, y, w, h, scrolled } => canvas.markdown(text, *font, *inks, *x, *y, *w, *h, *scrolled),
             Op::Clip { x, y, w, h, part: None } => canvas.clip(*x, *y, *w, *h),
             Op::Clip { x, y, w, h, part: Some((fraction, up)) } => canvas.clip_part(*x, *y, *w, *h, *fraction, *up),
             Op::Unclip => canvas.unclip(),
@@ -514,8 +514,12 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Text { text: text.into(), font, color, x, y, width, align, inked, scale });
     }
 
-    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32) {
-        self.push(Op::Markdown { text: text.into(), font, inks, x, y, w, h });
+    fn markdown(&self, text: &str, font: Font, inks: Inks, x: f32, y: f32, w: f32, h: f32, scrolled: f32) {
+        self.push(Op::Markdown { text: text.into(), font, inks, x, y, w, h, scrolled });
+    }
+
+    fn markdown_tall(&self, text: &str, font: Font, width: f32) -> f32 {
+        self.measure.markdown_tall(text, font, width)
     }
 
     fn measure(&self, text: &str, font: Font) -> f32 {
@@ -700,7 +704,10 @@ mod tests {
         struct Measure;
         impl Canvas for Measure {
             fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
-            fn markdown(&self, _: &str, _: Font, _: Inks, _: f32, _: f32, _: f32, _: f32) {}
+            fn markdown(&self, _: &str, _: Font, _: Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+                0.0
+            }
             fn measure(&self, text: &str, _: Font) -> f32 {
                 text.len() as f32
             }
