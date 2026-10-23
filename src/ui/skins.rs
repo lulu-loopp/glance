@@ -582,17 +582,30 @@ fn glass(frame: &Frame, ground: &Ground, part: Part) -> Result<()> {
             }
             continue;
         }
-        unsafe { frame.dc.FillRoundedRectangle(&rounded(*piece, *radius), frame.brush(tint)) };
-        // Light caught just inside the edge: strongest from above.
-        let white = |a| Color::hex(0xFFFFFF, a);
-        // (Lit along the top, a little light back along the foot: the owner's "适中", of three looked at; the first,
-        // bright all round, read as a tube of metal.)
-        inset_shadow(frame, *piece, *radius, 1.0, 2.0, white(0.5))?;
-        inset_shadow(frame, *piece, *radius, -1.0, 2.0, white(0.12))?;
-        inset_shadow(frame, *piece, *radius, 0.0, 18.0, white(0.07))?;
-        rim(frame, *piece, *radius)?;
+        glass_piece(frame, *piece, *radius, tint)?;
     }
     Ok(())
+}
+
+/// A piece of glass over what is seen through it: its `tint`, the light caught inside its edge and along it.
+fn glass_piece(frame: &Frame, piece: Rect, radius: f32, tint: Color) -> Result<()> {
+    unsafe { frame.dc.FillRoundedRectangle(&rounded(piece, radius), frame.brush(tint)) };
+    // Light caught just inside the edge: strongest from above.
+    let white = |a| Color::hex(0xFFFFFF, a);
+    // (Lit along the top, a little light back along the foot: the owner's "适中", of three looked at; the first,
+    // bright all round, read as a tube of metal.)
+    inset_shadow(frame, piece, radius, 1.0, 2.0, white(0.5))?;
+    inset_shadow(frame, piece, radius, -1.0, 2.0, white(0.12))?;
+    inset_shadow(frame, piece, radius, 0.0, 18.0, white(0.07))?;
+    rim(frame, piece, radius)
+}
+
+/// A sheet of `theme`'s glass, `piece` round by `radius`, over what the compositor frosts behind it `frost` frosted (a
+/// menu's): as a lane of the glass is drawn, its shadows cast outside it, its tint as that frost has it, the light
+/// inside its edge and along it.
+pub fn glass_sheet(frame: &Frame, theme: &Theme, piece: Rect, radius: f32, frost: f32) -> Result<()> {
+    shadows_outside(frame, &[(piece, radius)], &theme.shadows)?;
+    glass_piece(frame, piece, radius, glass_tint(theme, frost, true))
 }
 
 /// The glass's tint, `frost` asked for (as the desktop behind needs it: see `frost`), and whether a picture of the

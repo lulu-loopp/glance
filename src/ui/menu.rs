@@ -124,6 +124,8 @@ pub struct Menu {
     sheet: Sheet,
     look: Look,
     scale: f32,
+    /// The room round its sheet for its shadows (DIPs).
+    room: f32,
     /// Its window's size (physical px) and where it is.
     size: (i32, i32),
     rect: RECT,
@@ -178,9 +180,14 @@ impl Menu {
         };
         let scale = contact.scale;
         let sheet = Sheet::new(&gfx, &items, look);
+        // Room round it for its shadows: glass's as far as its lanes' reach.
+        let room = match (&surface, look.skin) {
+            (Drawn::Frosted(_), Some(super::theme::Skin::Glass)) => super::theme::room(&super::theme::Theme::new(super::theme::Skin::Glass, look.dark).shadows).max(SHADOW),
+            _ => SHADOW,
+        };
         // At the pointer, turned back where it would leave its screen.
-        let (w, h) = (((sheet.width + 2.0 * SHADOW) * scale) as i32, ((sheet.height + 2.0 * SHADOW) * scale) as i32);
-        let margin = (SHADOW * scale) as i32;
+        let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.height + 2.0 * room) * scale) as i32);
+        let margin = (room * scale) as i32;
         let work = contact.work;
         let mut left = at.x - margin;
         if left + w - margin > work.right {
@@ -193,7 +200,7 @@ impl Menu {
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
         let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), _showing: showing };
+        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, room, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), _showing: showing };
         if !menu.draw() {
             menu.window.destroy();
             return None;
@@ -304,21 +311,34 @@ impl Menu {
     }
 
     fn draw(&mut self) -> bool {
-        let (sheet, items, look, lit, choices) = (&self.sheet, &self.items, self.look, self.lit, &mut self.choices);
+        let (sheet, items, look, lit, choices, room) = (&self.sheet, &self.items, self.look, self.lit, &mut self.choices, self.room);
         let size = (self.size.0 as u32, self.size.1 as u32);
         let drawn = match &mut self.surface {
             Drawn::Plain(surface) => surface.draw(&self.gfx, size, self.scale, |frame| {
-                frame.origin(SHADOW, SHADOW);
+                frame.origin(room, room);
                 sheet.paint(frame, items, look, lit, false);
             }),
             Drawn::Frosted(frosted) => {
                 let px = self.scale;
-                let pane = (SHADOW * px, SHADOW * px, sheet.width * px, sheet.height * px, Colours::new(look, true).radius * px);
-                // (Glass's words ringed by its faint halo, as the lanes' are: read over the glass as clearly as theirs.)
-                let halo = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark).legibility);
+                let radius = Colours::new(look, true).radius;
+                let pane = (room * px, room * px, sheet.width * px, sheet.height * px, radius * px);
+                // Glass's a piece of the glass it is opened on, drawn as its lanes are (their shadows, the light inside
+                // their edge and along it), its words ringed by their faint halo, read over it as clearly as theirs.
+                let glass = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark));
+                let halo = glass.as_ref().map(|theme| theme.legibility);
                 frosted.draw(&self.gfx, size, px, pane, |frame| {
-                    frame.origin(SHADOW, SHADOW);
-                    sheet.paint_sheet(frame, items, look, lit, true);
+                    frame.origin(room, room);
+                    match &glass {
+                        Some(theme) => {
+                            let piece = super::view::Rect { x: 0.0, y: 0.0, w: sheet.width, h: sheet.height };
+                            if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
+                                gfx::failed("menu", Some(&error));
+                            }
+                            frame.origin(room, room);
+                            sheet.paint_rows(frame, items, look, lit, true);
+                        }
+                        None => sheet.paint_sheet(frame, items, look, lit, true),
+                    }
                     let key = lit.map_or(u64::MAX, |row| row as u64);
                     let area = (0.0, 0.0, sheet.width, sheet.height);
                     let laid = choices.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, halo, |frame| {
@@ -339,7 +359,7 @@ impl Menu {
 
     /// Which choice a point in the window (physical px) is on.
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
-        let (x, y) = (x as f32 / self.scale - SHADOW, y as f32 / self.scale - SHADOW);
+        let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
         if x < 0.0 || x > self.sheet.width {
             return None;
         }
@@ -350,11 +370,11 @@ impl Menu {
     pub fn row_on_screen(&self, row: usize) -> Option<RECT> {
         let top = *self.sheet.tops.get(row)?;
         let px = |dips: f32| (dips * self.scale).round() as i32;
-        Some(RECT { left: self.rect.left + px(SHADOW), top: self.rect.top + px(SHADOW + top), right: self.rect.left + px(SHADOW + self.sheet.width), bottom: self.rect.top + px(SHADOW + top + ROW) })
+        Some(RECT { left: self.rect.left + px(self.room), top: self.rect.top + px(self.room + top), right: self.rect.left + px(self.room + self.sheet.width), bottom: self.rect.top + px(self.room + top + ROW) })
     }
 
     fn inside(&self, x: i32, y: i32) -> bool {
-        let (x, y) = (x as f32 / self.scale - SHADOW, y as f32 / self.scale - SHADOW);
+        let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
         x >= 0.0 && x <= self.sheet.width && y >= 0.0 && y <= self.sheet.height
     }
 }
@@ -397,7 +417,7 @@ impl Sheet {
     fn paint_sheet(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let (width, height) = (self.width, self.height);
         let colours = Colours::new(look, frosted);
-        let (radius, highlight_radius) = (colours.radius, colours.radius - INSET);
+        let radius = colours.radius;
         frame.shadow(colours.shadow, 0.0, 0.0, width, height, radius, 12.0, 6.0);
         frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, radius);
         frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, radius, 1.0);
@@ -405,6 +425,14 @@ impl Sheet {
             // (Glass's: lit along its top, as its lanes are.)
             frame.stroke_rounded(Fill::Down { top: 0.0, from: rim, bottom: height, to: rim.alpha(rim.a * 0.3) }, 1.0, 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
         }
+        self.paint_rows(frame, items, look, lit, frosted);
+    }
+
+    /// On its sheet: the rules between groups and the choice `lit`'s highlight.
+    fn paint_rows(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
+        let width = self.width;
+        let colours = Colours::new(look, frosted);
+        let highlight_radius = colours.radius - INSET;
         for (i, (item, top)) in items.iter().zip(&self.tops).enumerate() {
             if item.rule_before {
                 frame.fill(colours.rule, 0.0, top - RULE / 2.0 - 0.5, width, 1.0);
@@ -574,8 +602,9 @@ mod tests {
         }
     }
 
-    /// A menu in each look, light and dark, a row lit (`cargo test --features studio --lib -- --ignored menu_looks`
-    /// writes `target/looks/menus.png`).
+    /// A menu in each look, light and dark, a row lit, and under them glass's as it is opened on glass (a piece of it,
+    /// over what the compositor frosts behind it, drawn here over a plain ground) (`cargo test --features studio --lib
+    /// -- --ignored menu_looks` writes `target/looks/menus.png`).
     #[test]
     #[ignore = "writes a picture to look at"]
     fn menu_looks() {
@@ -594,14 +623,27 @@ mod tests {
         let looks = [Look { skin: None, dark: false, frost: 1.0 }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true, frost: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
         let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();
         let widest = sheets.iter().map(|sheet| sheet.width).fold(0.0, f32::max);
-        let (cell_w, cell_h, px) = (widest + 2.0 * SHADOW, sheets[0].height + 2.0 * SHADOW, 2.0f32);
-        let (w, h) = ((3.0 * cell_w * px) as u32, (2.0 * cell_h * px) as u32);
+        let room = super::super::theme::room(&super::super::theme::Theme::new(Skin::Glass, false).shadows).max(SHADOW);
+        let (cell_w, cell_h, px) = (widest + 2.0 * room, sheets[0].height + 2.0 * room, 2.0f32);
+        let (w, h) = ((3.0 * cell_w * px) as u32, (3.0 * cell_h * px) as u32);
         let pixels = gfx.draw_offscreen((w, h), px, |frame| {
             frame.fill(Color::hex(0x8899AA, 1.0), 0.0, 0.0, 3.0 * cell_w, cell_h);
             frame.fill(Color::hex(0x223344, 1.0), 0.0, cell_h, 3.0 * cell_w, cell_h);
+            frame.fill(Color::hex(0x8899AA, 1.0), 0.0, 2.0 * cell_h, 1.5 * cell_w, cell_h);
+            frame.fill(Color::hex(0x223344, 1.0), 1.5 * cell_w, 2.0 * cell_h, 1.5 * cell_w, cell_h);
             for (at, (look, sheet)) in looks.iter().zip(&sheets).enumerate() {
-                frame.origin((at % 3) as f32 * cell_w + SHADOW, (at / 3) as f32 * cell_h + SHADOW);
+                frame.origin((at % 3) as f32 * cell_w + room, (at / 3) as f32 * cell_h + room);
                 sheet.paint(frame, &items, *look, Some(1), false);
+            }
+            for (at, dark) in [false, true].into_iter().enumerate() {
+                let look = Look::of(Skin::Glass, dark);
+                let sheet = Sheet::new(&gfx, &items, look);
+                let (x, y) = (at as f32 * 1.5 * cell_w + room, 2.0 * cell_h + room);
+                frame.origin(x, y);
+                let piece = super::super::view::Rect { x: 0.0, y: 0.0, w: sheet.width, h: sheet.height };
+                super::super::skins::glass_sheet(frame, &super::super::theme::Theme::new(Skin::Glass, dark), piece, Colours::new(look, true).radius, look.frost).unwrap();
+                frame.origin(x, y);
+                sheet.paint_rows(frame, &items, look, Some(1), true);
             }
         }).expect("drawn");
         let out = std::path::PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));

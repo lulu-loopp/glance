@@ -42,7 +42,7 @@ pub struct Shadow {
 /// reach furthest (DIPs): a shadow's blur radius is where it has all but
 /// faded (twice the Gaussian's deviation), past its spread, on the side it
 /// is offset to. A window with less room than this cuts its shadow off.
-fn room(shadows: &[Shadow]) -> f32 {
+pub(crate) fn room(shadows: &[Shadow]) -> f32 {
     shadows.iter().map(|shadow| shadow.blur + shadow.spread + shadow.y.abs()).fold(0.0, f32::max).ceil()
 }
 
