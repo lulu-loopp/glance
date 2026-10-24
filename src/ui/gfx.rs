@@ -1502,7 +1502,8 @@ impl<'a> Frame<'a> {
     }
 
     /// `draw` done on its context counted in physical pixels (as the text services count: see `editor`), at the
-    /// frame's place; its DIPs as they were after.
+    /// frame's place, grown and turned as it is there (a note lifted and leaning: see `widget::Widget::carry`); its DIPs
+    /// as they were after.
     pub fn in_pixels(&self, draw: impl FnOnce(&windows::Win32::Graphics::Direct2D::ID2D1RenderTarget)) {
         let (mut x, mut y) = (96.0, 96.0);
         let mut was = Matrix3x2::default();
@@ -1510,7 +1511,7 @@ impl<'a> Frame<'a> {
             self.dc.GetDpi(&mut x, &mut y);
             self.dc.GetTransform(&mut was);
             self.dc.SetDpi(96.0, 96.0);
-            self.dc.SetTransform(&Matrix3x2 { M31: was.M31 * x / 96.0, M32: was.M32 * y / 96.0, ..Matrix3x2::identity() });
+            self.dc.SetTransform(&in_pixels(was, (x / 96.0, y / 96.0)));
         }
         if let Ok(target) = self.dc.cast() {
             draw(&target);
@@ -2462,6 +2463,12 @@ fn whole_pixel(at: f32) -> f32 {
     ((at * 64.0).round() / 64.0 + 0.5).floor()
 }
 
+/// `transform` (counted in DIPs, `k` physical pixels a DIP each way) counted in physical pixels: what it grows and
+/// turns by kept, its place as many pixels away.
+fn in_pixels(transform: Matrix3x2, k: (f32, f32)) -> Matrix3x2 {
+    Matrix3x2 { M11: transform.M11, M12: transform.M12 * k.1 / k.0, M21: transform.M21 * k.0 / k.1, M22: transform.M22, M31: transform.M31 * k.0, M32: transform.M32 * k.1 }
+}
+
 /// How much larger `transform` makes what it draws, on average each way (turned or not: its first entry alone shrank a
 /// turned shadow's blur to nothing as the record's arm swung).
 fn stretch(transform: &Matrix3x2) -> f32 {
@@ -2706,6 +2713,23 @@ pub(crate) fn threads_now() -> usize {
 #[cfg(test)]
 mod tests {
     use super::room;
+
+    /// What is drawn counted in pixels (a note's words written in where it is) comes where the same drawn in DIPs
+    /// would, grown and turned as it would be: a note lifted and leaning had its words drawn as large and as straight
+    /// as at rest, its page lifted and leaning round them.
+    #[test]
+    fn a_place_counted_in_pixels_grows_and_turns_as_in_dips() {
+        use windows_numerics::{Matrix3x2, Vector2};
+        let k = (1.5f32, 1.25f32);
+        let dips = Matrix3x2::translation(-30.0, -10.0) * Matrix3x2::scale(1.04, 1.04) * Matrix3x2::rotation_around(4.0, Vector2 { X: 0.0, Y: 0.0 }) * Matrix3x2::translation(42.0, 17.0);
+        let pixels = super::in_pixels(dips, k);
+        let through = |m: &Matrix3x2, (x, y): (f32, f32)| (x * m.M11 + y * m.M21 + m.M31, x * m.M12 + y * m.M22 + m.M32);
+        for (x, y) in [(0.0f32, 0.0f32), (100.0, 0.0), (0.0, 60.0), (73.0, 41.0)] {
+            let (dx, dy) = through(&dips, (x, y));
+            let (px, py) = through(&pixels, (x * k.0, y * k.1));
+            assert!((px - dx * k.0).abs() < 1e-3 && (py - dy * k.1).abs() < 1e-3, "({x}, {y}): {px},{py} for {},{}", dx * k.0, dy * k.1);
+        }
+    }
 
     /// A frame something of which failed as it was drawn is not had to be shown: what it was for shows what it
     /// showed. (Drawn straight onto its surface, a panel sized on a card short of memory showed its ground with a

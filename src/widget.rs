@@ -4800,15 +4800,19 @@ impl Widget {
                         }
                         in_place.card = card;
                         frame.origin(0.0, 0.0);
-                        in_place.writing.paint(frame, theme, scene.lang, card, (0.0, 0.0), px, in_place.taking && in_place.caret_on(now));
-                        if in_place.taking {
-                            let place = in_place.menu_button();
-                            let lit = cursor_position().is_some_and(|c| {
-                                let (x, y) = ((c.x - window.left) as f32 / px, (c.y - window.top) as f32 / px);
-                                x >= place.0 && x < place.0 + place.2 && y >= place.1 && y < place.1 + place.3
-                            });
-                            crate::ui::note::paint_button(frame, theme, place, Icon::Ellipsis, lit);
-                        }
+                        // (Lifted and leaning as the rest of it is, carried: its card is placed from the window's
+                        // corner, the rest from inside its margin.)
+                        drawn_in(frame, Matrix3x2::translation(-margin, -margin) * local, || {
+                            in_place.writing.paint(frame, theme, scene.lang, card, (0.0, 0.0), px, in_place.taking && in_place.caret_on(now));
+                            if in_place.taking {
+                                let place = in_place.menu_button();
+                                let lit = cursor_position().is_some_and(|c| {
+                                    let (x, y) = ((c.x - window.left) as f32 / px, (c.y - window.top) as f32 / px);
+                                    x >= place.0 && x < place.0 + place.2 && y >= place.1 && y < place.1 + place.3
+                                });
+                                crate::ui::note::paint_button(frame, theme, place, Icon::Ellipsis, lit);
+                            }
+                        });
                     }
                     None => card_gone = true,
                 }
