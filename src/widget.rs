@@ -225,7 +225,8 @@ const LIVE_INTERVAL: Duration = crate::ui::scene::LIVE;
 const RETAKE_AFTER: Duration = Duration::from_secs(3);
 /// Without live refraction, how long the windows on the desktop are left
 /// to settle after one changed (moved, came to the front, opened, closed)
-/// before the desktop is taken again; and how often at most it is.
+/// before the desktop is taken again; and how often at most it is. (With it,
+/// taken again as they change: see `WindowWatch`.)
 const SETTLED: Duration = Duration::from_millis(300);
 const RETAKE_EVERY: Duration = Duration::from_secs(1);
 
@@ -261,8 +262,12 @@ pub fn own_window_changed(rect: RECT) {
 }
 static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// How often the other programs' windows are looked at, while a widget is shown.
+/// How often the other programs' windows are looked at, while a widget is shown: with live refraction, as often as what
+/// is behind is taken again (`LIVE_INTERVAL`), a window moved behind one followed as it goes.
 const WINDOWS_LOOKED_AT: Duration = Duration::from_millis(250);
+/// Whether the widgets are drawn with live refraction (see `Widgets::live`): their windows looked at as often, and
+/// their thread woken as one changes behind them (see `WindowWatch`).
+static WATCHED_LIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The other programs' windows, looked at on a thread of their own every `WINDOWS_LOOKED_AT` for as long as this is
 /// kept: one shown that meets a widget moved, sized, come or gone, or put in front of another there (each widget's
@@ -322,10 +327,15 @@ impl WindowWatch {
         let (ends, ended) = std::sync::mpsc::channel::<()>();
         std::thread::Builder::new().name("glance: windows watched".into()).spawn(move || {
             let mut seen = WindowsSeen::look();
-            while ended.recv_timeout(WINDOWS_LOOKED_AT) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            let every = || if WATCHED_LIVE.load(std::sync::atomic::Ordering::Relaxed) { LIVE_INTERVAL } else { WINDOWS_LOOKED_AT };
+            while ended.recv_timeout(every()) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
                 let now = WindowsSeen::look();
                 if now.meeting != seen.meeting {
                     behind_changed();
+                    // (Live, the widgets' thread woken for it: what is behind them taken again at once.)
+                    if WATCHED_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+                        crate::app().controller.wake();
+                    }
                 }
                 // (The widgets' thread woken for it: they follow at once.)
                 if now.above_desktop != seen.above_desktop && !ORDER_CHANGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -2279,6 +2289,7 @@ impl Widgets {
         // one of them moved, sized, come or gone where it meets another
         // changes what is behind that one too, as another program's would.
         self.live = look.live && look.skin.sees_backdrop();
+        WATCHED_LIVE.store(self.live, std::sync::atomic::Ordering::Relaxed);
         // Each shown, with its shadow and the room for its buttons round it.
         let areas: Vec<(isize, RECT)> = shown
             .iter()
@@ -2336,6 +2347,10 @@ impl Widgets {
                 widget.next_frame = now;
             }
             let behind_due = widget.backdrop_wait(self.live && sees);
+            // (Windows behind it changed: put together again now, live.)
+            if sees && widget.windows_moved_behind(now, self.live) {
+                widget.next_frame = now;
+            }
             // Drawn when it is due: in hand, flung or turning, at once; else
             // after its rest, not each time the panel draws a frame.
             let due_now = widget.drag.is_some() || widget.fling.is_some() || now >= widget.next_frame;
@@ -3136,6 +3151,12 @@ impl Widget {
     /// What is behind looked at between its frames (see `collect`): a frame of it read, taken; one due, wanted (read
     /// on another thread, which tells the thread that draws as it has been). Whether what it shows changed, or what
     /// is to be done about it (to be drawn at once): a live backdrop the same as before is not drawn again.
+    /// Whether other windows changed behind it since they were put together there (see `Scene::arrange`): with live
+    /// refraction, as they change; without, once they have settled. Not while it is in hand.
+    fn windows_moved_behind(&self, now: Instant, live: bool) -> bool {
+        self.drag.is_none() && self.fling.is_none() && windows_changed().zip(self.arranged).is_some_and(|(changed, arranged)| changed > arranged && (live || now.saturating_duration_since(changed) >= SETTLED))
+    }
+
     fn look_behind(&mut self, live: bool) -> bool {
         if self.backdrop.is_none() {
             return false;
@@ -4193,11 +4214,7 @@ impl Widget {
             other_screen || past
         });
         let retake = self.retake && self.drag.is_none() && !sizing;
-        // Other windows changed since they were looked at, and have settled;
-        // not while it is in hand.
-        let moved_behind = self.drag.is_none()
-            && self.fling.is_none()
-            && windows_changed().zip(self.arranged).is_some_and(|(changed, arranged)| changed > arranged && now.saturating_duration_since(changed) >= SETTLED);
+        let moved_behind = self.windows_moved_behind(now, live);
         let due = self.behind.is_none() || self.replace.is_some() || elsewhere || retake || moved_behind;
         // None could be taken last time (the lock screen): not again at once.
         let rested = self.failed.is_none_or(|at| now.saturating_duration_since(at) >= RETAKE_EVERY);
