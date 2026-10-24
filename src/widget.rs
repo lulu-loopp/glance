@@ -2066,12 +2066,25 @@ impl Widgets {
     pub fn note_menu(&self, hwnd: HWND, number: u64, lang: Lang, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
         let widget = self.list.iter().find(|w| w.window.hwnd == hwnd)?;
         card_in(&widget.hits, widget.hits_from, number, 0.0)?;
-        let name = crate::notes::named(number)?;
         let written = widget.in_place.as_ref().filter(|in_place| in_place.number == number).map(|in_place| in_place.writing.colour);
+        self.menu_of_note(number, written, lang, self.look_of(hwnd), over_the_panel)
+    }
+
+    /// The menu of the note numbered `number` (see `note_menu`), its colour as it is being written (`written`) or as it
+    /// was kept, in `look`: stuck on the desktop, taken off it, or not, stuck there (its card on the panel's, or on a
+    /// workbench of the desktop's).
+    pub fn menu_of_note(&self, number: u64, written: Option<crate::notes::Colour>, lang: Lang, look: crate::ui::menu::Look, over_the_panel: bool) -> Option<(crate::ui::menu::Menu, String, Vec<crate::ui::note::Choice>)> {
+        let name = crate::notes::named(number)?;
         let colour = written.or_else(|| crate::notes::shown().iter().find(|note| note.name == name).map(|note| note.colour)).unwrap_or_default();
-        let (items, choices) = crate::ui::note::menu(lang, colour, true, true);
-        let open = crate::ui::menu::Menu::open(items, self.look_of(hwnd), over_the_panel)?;
+        let (items, choices) = crate::ui::note::menu(lang, colour, true, self.note_stuck(&name));
+        let open = crate::ui::menu::Menu::open(items, look, over_the_panel)?;
         Some((open, name, choices))
+    }
+
+    /// Whether the note `name` is stuck on the desktop.
+    fn note_stuck(&self, name: &str) -> bool {
+        let only = format!("{}{name}", view::STUCK_NOTE_LANE);
+        self.list.iter().any(|widget| widget.content.holding(&only).is_some())
     }
 
     /// `choice` made in the menu of the note `name` stuck on the desktop (see `note_menu`): its colour, or it taken off the
