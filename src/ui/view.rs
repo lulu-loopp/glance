@@ -858,16 +858,14 @@ impl Tile {
 /// What a note stuck on the desktop is shown as: a lane of this name and its file's (see `stuck_note_lane`).
 pub const STUCK_NOTE_LANE: &str = "note:";
 
-/// How tall the room under a whole notes lane's head is at most (as tall as its notes take, up to this: the rest
-/// scrolled to), and a small lane's.
+/// How tall the room under a whole notes lane's head is, and a small lane's.
 const NOTES_TALL: f32 = 250.0;
 const NOTE_SMALL: f32 = 64.0;
 /// A note's title strip in the deck, a row of the list, a small card.
 const NOTE_STRIP: f32 = 30.0;
 const NOTE_ROW: f32 = 40.0;
 const NOTE_CARD: f32 = 104.0;
-/// How many cards go across, and the gap between them.
-const NOTE_CARDS_ACROSS: usize = 2;
+/// The gap between the cards, two across.
 const NOTE_CARDS_GAP: f32 = 8.0;
 /// How far a note's strip in the deck is lifted under the pointer (DIPs).
 const NOTE_LIFT: f32 = 3.0;
@@ -884,8 +882,7 @@ fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     };
     let view = crate::notes::view();
     if full {
-        let tall = notes_whole(notes.len(), view).clamp(NOTE_CARD, NOTES_TALL);
-        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes, view, tall }]
+        vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes, view, tall: NOTES_TALL }]
     } else {
         vec![head(lang.pick("便签", "Notes"), count, "", false), Block::Notes { notes: notes.into_iter().take(1).collect(), view: crate::settings::NotesView::Deck, tall: NOTE_SMALL }]
     }
@@ -1152,18 +1149,6 @@ pub(crate) fn note_radius(theme: &Theme, small: bool) -> f32 {
     }
 }
 
-/// How tall `count` notes are laid out as `view` lays them (see `paint_notes`): the deck's strips over the last written
-/// whole, the cards two across, the rows. (None: room for saying so, a card's.)
-fn notes_whole(count: usize, view: crate::settings::NotesView) -> f32 {
-    use crate::settings::NotesView;
-    match (count, view) {
-        (0, _) => NOTE_CARD,
-        (_, NotesView::Deck) => (count - 1) as f32 * NOTE_STRIP + NOTE_CARD,
-        (_, NotesView::Cards) => count.div_ceil(NOTE_CARDS_ACROSS) as f32 * (NOTE_CARD + NOTE_CARDS_GAP) - NOTE_CARDS_GAP,
-        (_, NotesView::List) => count as f32 * NOTE_ROW,
-    }
-}
-
 /// The notes (see `Block::Notes`) from (`left`, `top`), `width` across, in room `tall` high, as `view` lays them out:
 /// pressed, each is opened beside.
 #[allow(clippy::too_many_arguments)]
@@ -1281,10 +1266,11 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
             frame.key("");
         }
         NotesView::Cards => {
-            let across = NOTE_CARDS_ACROSS;
+            let across = 2;
             let gap = NOTE_CARDS_GAP;
             let card_w = (width - gap) / across as f32;
-            let (most, scroll) = notes_scroll(scene, notes_whole(notes.len(), view), tall);
+            let whole = notes.len().div_ceil(across) as f32 * (NOTE_CARD + gap) - gap;
+            let (most, scroll) = notes_scroll(scene, whole, tall);
             for (at, note) in notes.iter().enumerate() {
                 let (x, y) = (left + (at % across) as f32 * (card_w + gap), top + (at / across) as f32 * (NOTE_CARD + gap) - scroll);
                 if y + NOTE_CARD < top || y > top + tall {
@@ -1302,7 +1288,7 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
         NotesView::List => {
             // A row each: its colour (Windows 11's a band of it, the others' a dot), its title over its first line,
             // when it was written (no rule between them: as the station's rows are not).
-            let (most, scroll) = notes_scroll(scene, notes_whole(notes.len(), view), tall);
+            let (most, scroll) = notes_scroll(scene, notes.len() as f32 * NOTE_ROW, tall);
             for (at, note) in notes.iter().enumerate() {
                 let y = top + at as f32 * NOTE_ROW - scroll;
                 if y + NOTE_ROW < top || y > top + tall {
@@ -5382,21 +5368,6 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
 
 #[cfg(test)]
 mod tests {
-
-    /// The notes take as much room as they are laid out in, a card's at the least (none: saying so), at most
-    /// `NOTES_TALL` (the rest scrolled to): three cards two across, two rows of them, no room left under them.
-    #[test]
-    fn the_notes_take_the_room_they_are_laid_out_in() {
-        use crate::settings::NotesView;
-        use super::{notes_whole, NOTES_TALL, NOTE_CARD, NOTE_CARDS_GAP, NOTE_ROW, NOTE_STRIP};
-        let tall = |count, view| notes_whole(count, view).clamp(NOTE_CARD, NOTES_TALL);
-        assert_eq!(tall(3, NotesView::Cards), 2.0 * NOTE_CARD + NOTE_CARDS_GAP);
-        assert_eq!(tall(1, NotesView::Cards), NOTE_CARD);
-        assert_eq!(tall(3, NotesView::Deck), 2.0 * NOTE_STRIP + NOTE_CARD);
-        assert_eq!(tall(2, NotesView::List), NOTE_CARD.max(2.0 * NOTE_ROW));
-        assert_eq!(tall(0, NotesView::List), NOTE_CARD);
-        assert_eq!(tall(30, NotesView::Cards), NOTES_TALL);
-    }
 
     /// The frosted glass's sliders, at rest, under the pointer and held, on a light and a dark ground:
     /// `cargo test --features studio --lib -- --ignored glass_sliders` writes `target/glass-sliders.png`.
