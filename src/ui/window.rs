@@ -34,6 +34,7 @@ pub const CLOSE_ASKED: u32 = WM_APP + 19;
 /// screen (as where a widget would stick was, the widget put away as it was dragged).
 impl Drop for Window {
     fn drop(&mut self) {
+        LIFTED.lock().unwrap().retain(|&lifted| lifted != self.hwnd.0 as isize);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         super::tip::went(self.hwnd);
     }
@@ -63,6 +64,10 @@ pub struct Window {
 /// How many times a window kept under the panel has come to the top of the windows above all, or been let go from
 /// the hand there (see `Window::under_the_panel`): the panel, open, comes over it again as this changes (see `panel`).
 static ON_TOP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The windows lifted now, in hand (see `Window::lift`): over every other window of Glance's, the panel's too, however
+/// that comes to the top meanwhile (see `came_to_top`).
+static LIFTED: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 
 /// How many times a window kept under the panel has come to the top (see `ON_TOP`).
 pub fn on_top() -> u64 {
@@ -200,9 +205,25 @@ impl Window {
     }
 
     /// Come to the top: told, where it is kept under the panel (not while it is lifted, in hand: over the panel then).
+    /// Another (the panel), the windows in hand put over it again.
     fn came_to_top(&self) {
-        if self.under_panel.get() && !self.lifted.get() {
-            ON_TOP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.under_panel.get() {
+            if !self.lifted.get() {
+                ON_TOP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return;
+        }
+        // (A window of another thread is placed by that thread: asked, not waited for, and not with the list held, which
+        // that thread may be waiting on.)
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, SWP_ASYNCWINDOWPOS};
+        let lifted = LIFTED.lock().unwrap().clone();
+        for lifted in lifted.into_iter().filter(|&lifted| lifted != self.hwnd.0 as isize).map(|lifted| HWND(lifted as *mut _)) {
+            let elsewhere = unsafe { GetWindowThreadProcessId(lifted, None) } != unsafe { GetCurrentThreadId() };
+            let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | if elsewhere { SWP_ASYNCWINDOWPOS } else { Default::default() };
+            unsafe {
+                let _ = SetWindowPos(lifted, Some(HWND_TOP), 0, 0, 0, 0, flags);
+            }
         }
     }
 
@@ -338,6 +359,12 @@ impl Window {
     /// to be seen), the panel too, or back where it is kept (under the panel again, kept under it).
     pub fn lift(&self, lifted: bool) {
         if self.lifted.replace(lifted) != lifted {
+            let mut held = LIFTED.lock().unwrap();
+            held.retain(|&window| window != self.hwnd.0 as isize);
+            if lifted {
+                held.push(self.hwnd.0 as isize);
+            }
+            drop(held);
             self.stand_as_kept();
             if !lifted && !self.low() {
                 self.came_to_top();
@@ -526,21 +553,43 @@ mod tests {
         assert!(window.low());
     }
 
-    /// A window kept under the panel, lifted into the hand and raised, is left over it (the panel is not told to come
-    /// over it); let go, it is (see `ON_TOP`).
+    /// A window kept under the panel, lifted into the hand, leaves the panel where it is (the panel is not told to come
+    /// over it), and is over the panel come to the top even so: as one pulled off the panel is, which came to the top
+    /// before it was lifted, made and given way to first, and the panel came over it as told. Let go, the panel is told
+    /// and comes over it again. (One test: what the panel is told is counted for the whole process.)
     #[test]
-    fn a_window_in_hand_stays_over_the_panel_till_it_is_let_go() {
-        let window = Window::new().unwrap();
-        window.under_the_panel();
+    fn a_window_in_hand_is_over_the_panel_till_it_is_let_go() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDPREV};
+        // Whether `upper` is above `lower` among the windows.
+        let above = |upper: HWND, lower: HWND| {
+            let mut at = lower;
+            while let Ok(prev) = unsafe { GetWindow(at, GW_HWNDPREV) }.map_err(|_| ()).and_then(|prev| if prev.is_invalid() { Err(()) } else { Ok(prev) }) {
+                if prev == upper {
+                    return true;
+                }
+                at = prev;
+            }
+            false
+        };
+        let (panel, widget) = (Window::new().unwrap(), Window::new().unwrap());
+        widget.under_the_panel();
+        widget.yield_to(None);
         let before = on_top();
-        window.lift(true);
-        window.raise();
-        window.show();
-        let held = on_top();
-        window.lift(false);
+        widget.lift(true);
+        widget.raise();
+        widget.show();
+        let told = on_top();
+        panel.stand_again();
+        let held = above(widget.hwnd, panel.hwnd);
+        widget.lift(false);
         let let_go = on_top();
-        window.destroy();
-        assert_eq!(held, before);
+        panel.stand_again();
+        let under = above(panel.hwnd, widget.hwnd);
+        widget.destroy();
+        panel.destroy();
+        assert_eq!(told, before);
+        assert!(held);
         assert_eq!(let_go, before + 1);
+        assert!(under);
     }
 }
