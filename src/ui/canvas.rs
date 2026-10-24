@@ -253,6 +253,32 @@ pub trait Canvas {
     /// centred on it.
     #[allow(clippy::too_many_arguments)]
     fn stroke_rounded(&self, fill: Fill, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32);
+    /// The outline of the rounded rectangle, dashed, a line `line` DIPs wide inside its edge: its corners each a
+    /// quarter circle in steps (as `stroke_dashed` draws), where it is not drawn as one.
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
+        let (x, y, width, height) = (x + line / 2.0, y + line / 2.0, width - line, height - line);
+        let radius = (radius - line / 2.0).clamp(0.0, width.min(height) / 2.0);
+        const STEPS: usize = 6;
+        // Each corner's middle and the angle it starts at (clockwise from the top left's).
+        let corners = [
+            (x + width - radius, y + radius, -std::f32::consts::FRAC_PI_2),
+            (x + width - radius, y + height - radius, 0.0),
+            (x + radius, y + height - radius, std::f32::consts::FRAC_PI_2),
+            (x + radius, y + radius, std::f32::consts::PI),
+        ];
+        let mut points: Vec<Point> = corners
+            .iter()
+            .flat_map(|&(cx, cy, from)| {
+                (0..=STEPS).map(move |step| {
+                    let angle = from + std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
+                    Point { x: cx + radius * angle.cos(), y: cy + radius * angle.sin() }
+                })
+            })
+            .collect();
+        points.push(points[0]);
+        self.stroke_dashed(&points, color, line);
+    }
     /// The shadow the rounded rectangle casts, `drop` DIPs below it and
     /// blurred by a deviation of `blur` DIPs: outside the rectangle only, so
     /// that what is drawn in it shows through clear.

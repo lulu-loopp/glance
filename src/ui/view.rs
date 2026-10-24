@@ -666,7 +666,8 @@ fn bench_pads(theme: &Theme) -> (f32, f32, f32) {
     (theme.pad_x.min(BENCH_PAD), theme.pad_top.min(BENCH_PAD), theme.pad_bottom.min(BENCH_PAD))
 }
 
-/// A note as its card shows it: its title, its first lines, how long ago it was written, its colour.
+/// A note as its card shows it: its title, its first lines, how long ago it was written, its colour, and whether it is
+/// held from the panel.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub struct NoteCard {
     /// Its number, as a press on it names it (see `notes::number_of`).
@@ -675,7 +676,68 @@ pub struct NoteCard {
     lines: Vec<String>,
     when: String,
     colour: crate::notes::Colour,
+    held: Held,
 }
+
+/// A note's card as it is held from the panel: pressed there (pulled off as the pointer goes far enough), drawn pressed
+/// in a little; or carried away, the room it left outlined till it is put down elsewhere or comes back to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Held {
+    #[default]
+    Not,
+    Pressed,
+    Away,
+}
+
+/// The note pressed on the panel to be pulled off it, by its number (see `press_note`).
+static PRESSED_NOTE: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+/// The notes carried off the panel now, by their numbers (see `carry_notes`).
+static AWAY_NOTES: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// The note pressed on the panel to be pulled off it (its number), or none; whether that changed.
+pub fn press_note(number: Option<u64>) -> bool {
+    std::mem::replace(&mut *PRESSED_NOTE.lock().unwrap(), number) != number
+}
+
+/// The notes carried off the panel now (their numbers: in hand, or going back to it); whether they changed.
+pub fn carry_notes(numbers: Vec<u64>) -> bool {
+    let mut away = AWAY_NOTES.lock().unwrap();
+    let changed = *away != numbers;
+    *away = numbers;
+    changed
+}
+
+/// How the note numbered `number` is held from the panel.
+fn held(number: u64) -> Held {
+    if AWAY_NOTES.lock().unwrap().contains(&number) {
+        Held::Away
+    } else if *PRESSED_NOTE.lock().unwrap() == Some(number) {
+        Held::Pressed
+    } else {
+        Held::Not
+    }
+}
+
+/// What is drawn of a note's card held from the panel in the box `room`, its corners rounded by `radius`: carried away,
+/// the room it left, outlined (none: nothing of the card drawn there); pressed, the box drawn in by a little round its
+/// middle; else the box.
+fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, f32, f32, f32), radius: f32) -> Option<(f32, f32, f32, f32)> {
+    match held {
+        Held::Not => Some((x, y, w, h)),
+        Held::Pressed => {
+            let (dx, dy) = (w * (1.0 - PRESSED_IN) / 2.0, h * (1.0 - PRESSED_IN) / 2.0);
+            Some((x + dx, y + dy, w - 2.0 * dx, h - 2.0 * dy))
+        }
+        Held::Away => {
+            frame.fill_rounded(theme.text.alpha(0.03), x, y, w, h, radius);
+            frame.stroke_rounded_dashed(theme.text.alpha(0.22), x, y, w, h, radius, 1.5);
+            None
+        }
+    }
+}
+
+/// How large a note's card pressed to be pulled off the panel is drawn, of its box.
+const PRESSED_IN: f32 = 0.97;
 
 /// A note stuck on the desktop as its page shows it (see `ui::note::paint_stuck`): its number (as a press on it names
 /// it), its words, its colour, how long ago it was written, its file's name, and whether it is written in where it is
@@ -869,12 +931,14 @@ const NOTE_CARD: f32 = 104.0;
 const NOTE_CARDS_GAP: f32 = 8.0;
 /// How far a note's strip in the deck is lifted under the pointer (DIPs).
 const NOTE_LIFT: f32 = 3.0;
+/// How many of a note's lines after its title its card in the notes' lane is given.
+const NOTE_CARD_LINES: usize = 6;
 
 /// The notes' lane: whole (`full`), its name and how many there are, the menu of how they show and a new note, over
 /// them as they show; else the last written alone.
 fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     let now = crate::station::now_ms();
-    let notes: Vec<NoteCard> = crate::notes::shown().iter().map(|note| note_card(note, lang, now, 6)).collect();
+    let notes: Vec<NoteCard> = crate::notes::shown().iter().map(|note| note_card(note, lang, now, NOTE_CARD_LINES)).collect();
     // (The number alone, as the station's count is.)
     let count = match notes.len() {
         0 => String::new(),
@@ -903,7 +967,17 @@ fn note_card(note: &crate::notes::Note, lang: Lang, now: u64, lines: usize) -> N
         lines: read.iter().skip(1).take(lines).cloned().collect(),
         when: text::since(note.stamp.written_ms, now, lang),
         colour: note.colour,
+        held: held(crate::notes::number_of(&note.name)),
     }
+}
+
+/// The note numbered `number` as its card on the panel shows it (in its lane's cards: as many of its lines), in the box
+/// (`x`, `y`, `w`, `h`), held by nothing: as it is carried off the panel (see `widget`). Nothing where it is gone.
+pub(crate) fn paint_carried_card(frame: &dyn Canvas, scene: &Scene, number: u64, room: (f32, f32, f32, f32)) {
+    let shown = crate::notes::shown();
+    let Some(note) = shown.iter().find(|note| crate::notes::number_of(&note.name) == number) else { return };
+    let card = NoteCard { held: Held::Not, ..note_card(note, scene.lang, crate::station::now_ms(), NOTE_CARD_LINES) };
+    paint_note_card(frame, scene, &card, room, false);
 }
 
 /// A note stuck on the desktop (`name`, its file's): its page as it is written in (see `ui::note::paint_stuck`), so that
@@ -1212,13 +1286,19 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
                 // What it lies over: the strips before it, as they show.
                 let under = |frame: &dyn Canvas| {
                     frame.clip(left - side, top - 2.0, width + 2.0 * side, under_room);
-                    for below in (1..at).filter(|below| shows(*below)) {
+                    for below in (1..at).filter(|below| shows(*below) && notes[*below].held != Held::Away) {
                         let (x, w) = across(below);
                         note_card_ground(frame, theme, notes[below].colour, (x, strip_y(below), w, NOTE_STRIP + foot), radius, false, true, None);
                     }
                     frame.unclip();
                 };
                 let (x, w) = across(at);
+                if note.held == Held::Away {
+                    if !plain {
+                        held_room(frame, theme, Held::Away, (x, y, w, NOTE_STRIP), radius);
+                    }
+                    return;
+                }
                 note_card_ground(frame, theme, note.colour, (x, y, w, NOTE_STRIP + foot), radius, !plain && lit(at), plain, (at > 1).then_some(&under as Under));
                 let (title_ink, _, faint) = note_inks(theme, note.colour);
                 let line = y + (NOTE_STRIP - LINE) / 2.0 + banded;
@@ -1310,8 +1390,9 @@ fn paint_notes(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32,
 /// A note's card as the cards show it, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer: its colour's ground,
 /// its title (after its colour's dot, on chart paper), as many of its lines as fit over when it was written, at its
 /// foot.
-fn paint_note_card(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (x, y, w, h): (f32, f32, f32, f32), lit: bool) {
+fn paint_note_card(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, room: (f32, f32, f32, f32), lit: bool) {
     let theme = scene.theme;
+    let Some((x, y, w, h)) = held_room(frame, theme, note.held, room, note_radius(theme, true)) else { return };
     note_card_ground(frame, theme, note.colour, (x, y, w, h), note_radius(theme, true), lit, false, None);
     let (title_ink, words, faint) = note_inks(theme, note.colour);
     let inner = if theme.skin == Skin::Glass { 13.0 } else { 11.0 };
@@ -1334,8 +1415,9 @@ fn paint_note_card(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (x, y, w,
 
 /// A note's row as the list shows it, in the box (`left`, `y`, `width`, `h`), `lit` under the pointer: its colour
 /// (Windows 11's a band of it, the others' a dot), its title over its first line, when it was written at its end.
-fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, h): (f32, f32, f32, f32), lit: bool) {
+fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, room: (f32, f32, f32, f32), lit: bool) {
     let theme = scene.theme;
+    let Some((left, y, width, h)) = held_room(frame, theme, note.held, room, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0)) else { return };
     if lit {
         frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, h - 2.0, plate_round(theme, GLASS_ROW_ROUND - 4.0, 4.0));
     }
@@ -1364,8 +1446,9 @@ fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, 
 /// The deck's last written note, whole, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer, over what `below`
 /// draws (see `note_card_ground`): when it was written, its title, as many of its lines as fit.
 #[allow(clippy::too_many_arguments)]
-fn paint_front_note(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, (left, y, width, card): (f32, f32, f32, f32), lit: bool, below: Option<Under>, hits: &mut Vec<HitBox>) {
+fn paint_front_note(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, room: (f32, f32, f32, f32), lit: bool, below: Option<Under>, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
+    let Some((left, y, width, card)) = held_room(frame, theme, note.held, room, note_radius(theme, false)) else { return };
     note_card_ground(frame, theme, note.colour, (left, y, width, card), note_radius(theme, false), lit, false, below);
     let (title_ink, words, faint) = note_inks(theme, note.colour);
     let x = left + if theme.skin == Skin::Glass { 16.0 } else { 14.0 };
@@ -6058,6 +6141,8 @@ six".into()));
         /// The clips begun and not ended.
         clips: std::cell::RefCell<Vec<(f32, f32, f32, f32)>>,
         reach: std::cell::Cell<Option<(f32, f32, f32, f32)>>,
+        /// What it was given to write.
+        said: std::cell::RefCell<Vec<String>>,
     }
 
     impl Reach {
@@ -6085,6 +6170,7 @@ six".into()));
 
     impl Canvas for Reach {
         fn text(&self, text: &str, font: Font, _: Color, x: f32, y: f32, width: f32, align: Align) {
+            self.said.borrow_mut().push(text.to_string());
             let wide = Nothing.measure(text, font).min(width);
             let from = match align {
                 Align::Start => x,
@@ -6374,7 +6460,7 @@ six".into()));
         let mut hits = Vec::new();
         paint_recent(&Nothing, &scene, ink, (0.0, top, width), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
         within(&hits, top + CHIP_H + 6.0, STATION_TALL - CHIP_H - 6.0, "recent");
-        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         for view in [crate::settings::NotesView::Deck, crate::settings::NotesView::Cards, crate::settings::NotesView::List] {
             let mut hits = Vec::new();
             paint_notes(&Nothing, &scene, (0.0, top, width), &notes, view, NOTES_TALL, &mut hits);
@@ -6749,7 +6835,7 @@ six".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let pressed = |scrolls: Scrolls| {
             let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let mut hits = Vec::new();
@@ -6821,6 +6907,36 @@ six".into()));
         }
     }
 
+    /// A note's card carried off the panel leaves the room it took outlined, none of its words written; pressed, all of
+    /// it is drawn within its box drawn in a little; as a row, alike.
+    #[test]
+    fn a_card_held_from_the_panel_is_drawn_as_it_is_held() {
+        let theme = Theme::new(Skin::Paper, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let card = |held| NoteCard { number: 1, title: "Title".into(), lines: vec!["line".into()], when: "now".into(), colour: Default::default(), held };
+        let room = (10.0, 20.0, 170.0, 104.0);
+        type Paint = fn(&dyn Canvas, &Scene, &NoteCard, (f32, f32, f32, f32), bool);
+        for (paint, what) in [(paint_note_card as Paint, "card"), (paint_note_row as Paint, "row")] {
+            let drawn = |held| {
+                let reach = Reach::default();
+                paint(&reach, &scene, &card(held), room, false);
+                (reach.reach.get().unwrap(), reach.said.take())
+            };
+            let (away, said) = drawn(Held::Away);
+            assert!(said.is_empty(), "{what}: {said:?}");
+            assert!((away.0 - 10.0).abs() < 1.0 && (away.1 - 20.0).abs() < 1.0 && (away.2 - 180.0).abs() < 1.0 && (away.3 - 124.0).abs() < 1.0, "{what}: {away:?}");
+            let ((pressed, said), (whole, _)) = (drawn(Held::Pressed), drawn(Held::Not));
+            assert!(said.contains(&"Title".to_string()), "{what}: {said:?}");
+            let (dx, dy) = (170.0 * (1.0 - PRESSED_IN) / 2.0, 104.0 * (1.0 - PRESSED_IN) / 2.0);
+            // (Within the box drawn in, but for as far as it reaches past its box unpressed: its rim.)
+            let past = (10.0 - whole.0).max(20.0 - whole.1).max(whole.2 - 180.0).max(whole.3 - 124.0).max(0.0) + 0.01;
+            assert!(pressed.0 >= 10.0 + dx - past && pressed.1 >= 20.0 + dy - past && pressed.2 <= 180.0 - dx + past && pressed.3 <= 124.0 - dy + past, "{what}: {pressed:?} in {whole:?}");
+        }
+    }
+
     /// A lane given more room than its blocks take (its column taller): the notes' list at its foot goes down to the
     /// lane's foot, not stopping part way.
     #[test]
@@ -6830,7 +6946,7 @@ six".into()));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default() }).collect();
+        let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
         let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
         let mut hits = Vec::new();

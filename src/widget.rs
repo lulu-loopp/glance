@@ -80,6 +80,7 @@ use crate::ui::forms::{self, Small};
 use crate::ui::gfx::{self, Gfx, Layer, Surface};
 use crate::ui::icons::Icon;
 use crate::ui::morph::{self, Part};
+use crate::ui::motion::Spring;
 use crate::ui::music::{self, Music, Shows};
 use crate::ui::prefs::Prefs;
 use crate::ui::life::Lives;
@@ -464,33 +465,107 @@ pub(crate) enum Ground {
     Tint(Color),
 }
 
-/// A note pulled off the panel (see `Widgets::stick_note_held`): its file's name, where it is put (its corner) and where
-/// the hand holds it, as large as its card was (physical px), and where the panel is (let go over it, it is not stuck).
+/// A note pulled off the panel (see `Widgets::stick_note_held`): its file's name, its card's box on the screen and
+/// where the hand pressed it (physical px), and where the panel is (let go over it, it goes back).
 pub struct NotePulled {
     pub name: String,
-    pub at: POINT,
-    pub grab: POINT,
-    pub card: (i32, i32),
+    pub card: RECT,
+    pub from: POINT,
     pub over: RECT,
 }
 
-/// A note pulled off the panel, in hand: where the panel is, how large its card there was (DIPs), and whether the
-/// pointer is over the panel. Over it, the note keeps its card's size (let go there, it goes back: see `release`); off
-/// it, it grows to a note's, and back over it, it shrinks to its card's again.
+/// A note pulled off the panel, carried (in hand, put down and settling, or going back to the panel): its number, where
+/// the panel is, its card's box there (physical px), where it is held (across, a share of its width; down, how far
+/// from its top it was on its card, DIPs), between its card and a note (see `CARD_TO_NOTE`), and going back to the
+/// panel, its corner on its way there (physical px). Over the panel it is its card (let go there, it goes back: see
+/// `release`); off it, a note, its title drawn up under the pointer (see `grab_at`), and back over it, its card again.
 struct Pulled {
+    number: u64,
     over: RECT,
-    card: (f32, f32),
-    on_panel: bool,
+    card: RECT,
+    grab: (f32, f32),
+    morph: Spring,
+    back: Option<(Spring, Spring)>,
 }
 
+/// How a note pulled off the panel turns between its card and a note, and how it goes back to the panel (stiffness,
+/// damping: see `Spring`; the first a little past, as it comes, about a quarter of a second).
+const CARD_TO_NOTE: (f32, f32) = (260.0, 26.0);
+const GOING_BACK: (f32, f32) = (220.0, 28.0);
+/// How a note is lifted in hand and put down, and how it leans as it is moved across (degrees, the most; and per
+/// DIP a millisecond across), pulled off the panel or moved on the desktop.
+const LIFTING: (f32, f32) = (500.0, 40.0);
+const LEANING: (f32, f32) = (300.0, 22.0);
+const LEAN_PULLED: (f32, f32) = (4.0, 6.0);
+const LEAN_MOVED: (f32, f32) = (2.0, 3.0);
+/// How much larger a note lifted in hand is drawn.
+const LIFTED_BY: f32 = 0.04;
+/// How fast a note asked for while it is on the desktop already is lifted for a moment (see `Widgets::raise_note`).
+const NUDGE: f32 = 36.0;
+
 impl Pulled {
-    /// The size it is to be (DIPs), the pointer at `cursor`, a note's `shown`: and whether the pointer has crossed the
-    /// panel's edge since it was last asked (it settles from where it is then).
-    fn size(&mut self, cursor: Option<POINT>, shown: (f32, f32)) -> ((f32, f32), bool) {
-        let on_panel = cursor.is_some_and(|cursor| crate::panel::contains(&self.over, cursor));
-        let crossed = std::mem::replace(&mut self.on_panel, on_panel) != on_panel;
-        (if on_panel { self.card } else { shown }, crossed)
+    /// Where it is going, the pointer at `cursor`: its card (0) over the panel, a note (1) off it.
+    fn wants(&self, cursor: Option<POINT>) -> f32 {
+        if cursor.is_some_and(|cursor| crate::panel::contains(&self.over, cursor)) { 0.0 } else { 1.0 }
     }
+
+    /// Where it is held (DIPs from its corner), `size` large: across as far as it was on its card, by share; down, as
+    /// far as it was on its card, drawn up into a note's head as it turns into one (no further down than the middle of
+    /// it), that the note grows down from under the pointer.
+    fn grab_at(&self, size: (f32, f32)) -> (f32, f32) {
+        let m = self.morph.value.clamp(0.0, 1.0);
+        let down = self.grab.1.min(crate::ui::note::HEAD / 2.0);
+        (self.grab.0 * size.0, self.grab.1 + (down - self.grab.1) * m)
+    }
+}
+
+/// How long back the hand's moves tell how fast a note in hand goes across (see `Widget::carry`).
+const LEAN_SPAN: Duration = Duration::from_millis(60);
+
+/// The shadow under a note lifted (see `Widget::lift`): how blurred (a deviation, DIPs), how far it drops, how dark.
+struct Lifted {
+    blur: f32,
+    drop: f32,
+    dark: f32,
+}
+
+impl Lifted {
+    /// How far past the note it reaches (DIPs).
+    fn reach(&self) -> f32 {
+        3.0 * self.blur + self.drop
+    }
+}
+
+/// The shadow under a note lifted `lift` of the way: deeper and further down the higher it is.
+fn lifted_shadow(lift: f32) -> Lifted {
+    let lift = lift.clamp(0.0, 1.2);
+    Lifted { blur: 4.0 + 10.0 * lift, drop: 2.0 + 8.0 * lift, dark: 0.28 * lift.min(1.0) }
+}
+
+/// What `draw` draws, seen through as much as `opacity` says (1: as it is).
+fn faded(frame: &gfx::Frame, opacity: f32, draw: impl FnOnce()) {
+    if opacity >= 1.0 {
+        draw();
+        return;
+    }
+    let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+    let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
+    unsafe { frame.dc.PushLayer(&layer, None) };
+    draw();
+    unsafe { frame.dc.PopLayer() };
+}
+
+/// How far a surface `size` large (DIPs) reaches past its own box, drawn `scale` as large about `about` and turned by
+/// `lean` degrees there, its shadow `shadow` further: the room round it its window needs.
+fn carried_reach(size: (f32, f32), about: (f32, f32), scale: f32, lean: f32, shadow: f32) -> f32 {
+    let (sin, cos) = lean.to_radians().sin_cos();
+    let corners = [(0.0, 0.0), (size.0, 0.0), (0.0, size.1), (size.0, size.1)];
+    let placed = corners.map(|(x, y)| {
+        let (dx, dy) = ((x - about.0) * scale, (y - about.1) * scale);
+        (about.0 + dx * cos - dy * sin, about.1 + dx * sin + dy * cos)
+    });
+    let past = placed.iter().fold(0.0f32, |most, &(x, y)| most.max(-x).max(x - size.0).max(-y).max(y - size.1));
+    past.max(0.0) + shadow
 }
 
 /// The desktop the panel had taken, lent to a widget torn off it: its
@@ -580,8 +655,13 @@ struct Widget {
     /// Let go after it was sized or stuck: since when, and from what
     /// surface (DIPs), it settles onto what it shows.
     settle: Option<(Instant, (f32, f32))>,
-    /// A note pulled off the panel, in hand still (see `Pulled`).
+    /// A note pulled off the panel, carried (see `Pulled`).
     pulled: Option<Pulled>,
+    /// A note's: how far it is lifted (0 at rest, 1 in hand) and how it leans (degrees), and where (DIPs from its corner:
+    /// where it is held, else its middle).
+    lift: Spring,
+    lean: Spring,
+    about: (f32, f32),
     /// The sides of its surface what it shows keeps to (right, bottom).
     keeps_to: (bool, bool),
     drag: Option<Drag>,
@@ -1610,6 +1690,8 @@ impl Widgets {
         let only = format!("{}{name}", view::STUCK_NOTE_LANE);
         let Some(widget) = self.list.iter_mut().find(|widget| widget.content.holding(&only).is_some()) else { return false };
         widget.window.raise();
+        // (Lifted for a moment where it is, that it is seen to be the one.)
+        widget.lift.speed = NUDGE;
         widget.next_frame = Instant::now();
         true
     }
@@ -1618,20 +1700,23 @@ impl Widgets {
     /// hand, the pointer `grab` from its corner, to be put down where it is let go. Where it is stuck already, that one
     /// raised instead (a note is never on the desktop twice); whether one was made.
     pub fn stick_note_held(&mut self, pulled: NotePulled) -> bool {
-        let NotePulled { name, at, grab, card, over } = pulled;
+        let NotePulled { name, card, from, over } = pulled;
         if self.raise_note(&name) {
             return false;
         }
+        let at = POINT { x: card.left, y: card.top };
+        let grab = POINT { x: from.x - card.left, y: from.y - card.top };
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
-        // Lifted off its card: as large as that was while over the panel (see `Pulled`).
-        let card = (card.0 as f32 / contact.scale, card.1 as f32 / contact.scale);
-        widget.surface_size = card;
-        widget.pulled = Some(Pulled { over, card, on_panel: true });
+        // Lifted off its card, as large and where it was (see `Pulled`).
+        widget.surface_size = ((card.right - card.left) as f32 / contact.scale, (card.bottom - card.top) as f32 / contact.scale);
+        let held = ((from.x - card.left) as f32 / (card.right - card.left).max(1) as f32, (from.y - card.top) as f32 / contact.scale);
+        widget.pulled = Some(Pulled { number: crate::notes::number_of(&name), over, card, grab: held, morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None });
+        widget.about = (grab.x as f32 / contact.scale, grab.y as f32 / contact.scale);
         widget.window.yield_to(self.settings);
         widget.window.lift(true);
         widget.window.raise();
@@ -1655,6 +1740,12 @@ impl Widgets {
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
         true
+    }
+
+    /// The notes carried off the panel now, by their numbers: in hand, or going back to it (see `Pulled`).
+    pub fn carried(&self) -> Vec<u64> {
+        let in_hand = |widget: &Widget| matches!(widget.drag, Some(Drag::Move { .. }));
+        self.list.iter().filter_map(|widget| widget.pulled.as_ref().filter(|pulled| pulled.back.is_some() || in_hand(widget)).map(|pulled| pulled.number)).collect()
     }
 
     /// Whether the widget `hwnd` is in hand (moved, sized, or its sound's track slid).
@@ -2002,12 +2093,6 @@ impl Widgets {
         widget.next_frame = now;
         match widget.release(now, cancelled) {
             Released::Closed => self.put_away_at(index),
-            Released::Back => {
-                let mut widget = self.list.remove(index);
-                note("widget: a note pulled off the panel let go over it, not stuck");
-                widget.gone();
-                widget.window.destroy();
-            }
             Released::Changed => {}
             Released::Settings(place) => {
                 // (What its button said goes with the settings coming.)
@@ -2366,6 +2451,7 @@ impl Widgets {
         self.look_for_a_drop(now);
         let mut due = REST_FRAME;
         let mut gone = Vec::new();
+        let mut back = Vec::new();
         let mut torn = Vec::new();
         for (index, widget) in self.list.iter_mut().enumerate() {
             // (Letting clicks through, but for the one on its button; and over its shadow.)
@@ -2414,6 +2500,7 @@ impl Widgets {
             }
             match widget.frame(now, look, history, seen, controller) {
                 Frame::Gone => gone.push(index),
+                Frame::Back => back.push(index),
                 Frame::Moving => {
                     widget.next_frame = now;
                     due = Duration::ZERO;
@@ -2444,8 +2531,18 @@ impl Widgets {
         if rested && gone.is_empty() {
             self.save();
         }
-        for index in gone.into_iter().rev() {
-            self.put_away_at(index);
+        // (From the last: each taken out before the ones before it.)
+        let mut ended: Vec<(usize, bool)> = gone.into_iter().map(|index| (index, false)).chain(back.into_iter().map(|index| (index, true))).collect();
+        ended.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        for (index, back) in ended {
+            if back {
+                let mut widget = self.list.remove(index);
+                note("widget: a note pulled off the panel gone back to it, not stuck");
+                widget.gone();
+                widget.window.destroy();
+            } else {
+                self.put_away_at(index);
+            }
             self.save();
         }
         // (None shown, nothing is due of them: a game come, a sample wakes the thread, and they show.)
@@ -2597,8 +2694,6 @@ enum Released {
     Full,
     /// One of its station's head's buttons pressed: its menu asked for.
     Menu(view::Hit),
-    /// A note pulled off the panel let go over it: gone back to it, not stuck.
-    Back,
 }
 
 enum Frame {
@@ -2607,6 +2702,8 @@ enum Frame {
     /// Not drawn: waiting on the desktop behind it (see `CAPTURED`).
     Waiting,
     Gone,
+    /// A note pulled off the panel come back to it (see `Pulled`): no longer on the desktop.
+    Back,
 }
 
 /// What is behind a widget arranged anew, its frame awaited: when, for
@@ -2941,6 +3038,9 @@ impl Widget {
             room: None,
             settle: None,
             pulled: None,
+            lift: Spring::at(0.0, LIFTING.0, LIFTING.1),
+            lean: Spring::at(0.0, LEANING.0, LEANING.1),
+            about: (0.0, 0.0),
             keeps_to: (false, false),
             drag: None,
             fling: None,
@@ -3642,11 +3742,24 @@ impl Widget {
                 if !moved && cancelled {
                     return Released::Nothing;
                 }
-                // A note pulled off the panel let go over it again: not stuck.
-                if let Some(pulled) = self.pulled.take() {
-                    if cursor_position().is_some_and(|cursor| crate::panel::contains(&pulled.over, cursor)) {
-                        return Released::Back;
+                // A note pulled off the panel let go over it again: back to its card there; elsewhere, a note where it is
+                // put down (not flung: as it is let go, it is still settling into a note).
+                if let Some(pulled) = &mut self.pulled {
+                    if pulled.wants(cursor_position()) == 0.0 {
+                        note("widget: a note pulled off the panel let go over it, going back");
+                        let to = |at: i32, card: i32| {
+                            let mut spring = Spring::at(at as f32, GOING_BACK.0, GOING_BACK.1);
+                            spring.target = card as f32;
+                            spring
+                        };
+                        pulled.back = Some((to(self.at.x, pulled.card.left), to(self.at.y, pulled.card.top)));
+                        pulled.morph.target = 0.0;
+                        return Released::Nothing;
                     }
+                    pulled.morph.target = 1.0;
+                    self.retone();
+                    self.stick();
+                    return Released::Changed;
                 }
                 if !moved {
                     // A press let go where it was: a button, if it was on one.
@@ -3896,6 +4009,64 @@ impl Widget {
         RECT { left: r.left - band.max(left), top: r.top - band.max(above), right: r.right + band.max(right), bottom: r.bottom + band.max(under) }
     }
 
+    /// A note's step of `seconds` on: lifted in hand, leaning as fast as the hand moves it across, and once put down,
+    /// coming to rest; pulled off the panel (see `Pulled`), turning between its card and a note as the pointer is over
+    /// the panel or not, going back to the panel on its way, and once put down a note at rest, an ordinary one. Whether
+    /// it is still moving.
+    fn carry(&mut self, seconds: f32) -> bool {
+        if self.content.stuck_note().is_none() {
+            return false;
+        }
+        let in_hand = !self.pinned && matches!(self.drag, Some(Drag::Move { moved: true, .. }));
+        let scale = self.contact.scale;
+        // How fast it goes across (DIPs a millisecond), as the hand moved it lately.
+        let across = match &self.drag {
+            Some(Drag::Move { trail, moved: true, .. }) => {
+                let recent: Vec<&(Instant, POINT)> = trail.iter().filter(|(at, _)| at.elapsed() <= LEAN_SPAN).collect();
+                match (recent.first(), recent.last()) {
+                    (Some(first), Some(last)) if last.0 > first.0 => (last.1.x - first.1.x) as f32 / scale / (last.0.duration_since(first.0).as_secs_f32() * 1000.0),
+                    _ => 0.0,
+                }
+            }
+            _ => 0.0,
+        };
+        let (most, per) = if self.pulled.is_some() { LEAN_PULLED } else { LEAN_MOVED };
+        self.lift.target = if in_hand { 1.0 } else { 0.0 };
+        self.lean.target = if in_hand { (across * per).clamp(-most, most) } else { 0.0 };
+        // Lifted and leaning about where it is held; at rest, about its middle (asked for, it is lifted there: see
+        // `Widgets::raise_note`). Pulled off the panel, held as `Pulled::grab_at` says (see `frame`).
+        if self.pulled.is_none() {
+            match &self.drag {
+                Some(Drag::Move { grab, .. }) if in_hand => {
+                    let px = scale * self.zoom;
+                    self.about = (grab.x as f32 / px, grab.y as f32 / px);
+                }
+                _ if self.lift.rests(0.002) && self.lean.rests(0.01) => self.about = (self.surface_size.0 / 2.0, self.surface_size.1 / 2.0),
+                _ => {}
+            }
+        }
+        self.lift.step(seconds);
+        self.lean.step(seconds);
+        let mut moving = !self.lift.rests(0.002) || !self.lean.rests(0.01);
+        let cursor = cursor_position();
+        if let Some(pulled) = &mut self.pulled {
+            if in_hand {
+                pulled.morph.target = pulled.wants(cursor);
+            }
+            pulled.morph.step(seconds);
+            if let Some((x, y)) = &mut pulled.back {
+                x.step(seconds);
+                y.step(seconds);
+            }
+            moving |= !pulled.morph.rests(0.002) || pulled.back.is_some();
+            if !in_hand && pulled.back.is_none() && !moving {
+                self.pulled = None;
+                self.unsaved = true;
+            }
+        }
+        moving || in_hand
+    }
+
     /// Lays it out, places its window and draws it.
     fn frame(&mut self, now: Instant, look: &Look, history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Frame {
         // (What it draws and takes from behind it is sized as it is: see `gfx::room`.)
@@ -4142,15 +4313,21 @@ impl Widget {
                 moving |= merged.busy();
             }
         }
-        // A note pulled off the panel: its card's size while over the panel, what it shows off it, settling from one to
-        // the other as the pointer crosses the panel's edge.
-        let fill = match &mut self.pulled {
+        // A note lifted and leaning in hand, a note pulled off the panel turning between its card and a note: each a step
+        // on (see `carry`).
+        moving |= self.carry(dt / 1000.0);
+        // Gone back all the way: its card on the panel again.
+        let home = self.pulled.as_ref().is_some_and(|pulled| pulled.morph.rests(0.002) && pulled.back.as_ref().is_some_and(|(x, y)| x.rests(0.5) && y.rests(0.5)));
+        if home && self.lift.rests(0.002) {
+            return Frame::Back;
+        }
+        // A note pulled off the panel: as large as it is between its card and a note.
+        let fill = match &self.pulled {
             Some(pulled) => {
-                let (size, crossed) = pulled.size(cursor_position(), self.shown);
-                if crossed {
-                    self.settle = Some((now, self.surface_size));
-                }
-                size
+                let px = self.contact.scale * self.zoom;
+                let card = ((pulled.card.right - pulled.card.left) as f32 / px, (pulled.card.bottom - pulled.card.top) as f32 / px);
+                let m = pulled.morph.value;
+                (card.0 + (self.shown.0 - card.0) * m, card.1 + (self.shown.1 - card.1) * m)
             }
             None => self.shown,
         };
@@ -4170,8 +4347,30 @@ impl Widget {
             }
             _ => fill,
         };
-        // Sized by its left or top edge, it grows and shrinks from the other.
+        // Carried: held where it is held as it turns (see `Pulled::grab_at`), in hand under the pointer, going back on its
+        // way, put down where it was let go.
         let px = self.contact.scale * self.zoom;
+        if let Some(pulled) = &self.pulled {
+            let held = pulled.grab_at(self.surface_size);
+            let grab = POINT { x: (held.0 * px).round() as i32, y: (held.1 * px).round() as i32 };
+            let was = POINT { x: (self.about.0 * px).round() as i32, y: (self.about.1 * px).round() as i32 };
+            match (&mut self.drag, &pulled.back) {
+                (_, Some((x, y))) => self.at = POINT { x: x.value.round() as i32, y: y.value.round() as i32 },
+                (Some(Drag::Move { grab: hand, .. }), None) => {
+                    *hand = grab;
+                    if let Some(cursor) = cursor_position() {
+                        self.at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
+                    }
+                }
+                _ => self.at = POINT { x: self.at.x + was.x - grab.x, y: self.at.y + was.y - grab.y },
+            }
+            self.about = held;
+        }
+        // Its room round it for its shadow and buttons, and for it lifted and leaning.
+        if self.lift.value.abs() > 0.001 || self.lean.value.abs() > 0.001 {
+            let reach = carried_reach(self.surface_size, self.about, 1.0 + LIFTED_BY * self.lift.value.max(0.0), self.lean.value, lifted_shadow(self.lift.value).reach());
+            self.margin = self.margin.max(reach.ceil());
+        }
         if let Some(Drag::Size { edges: (l, _, t, _), from: _, room, corner }) = &self.drag {
             let start = ((room.0 * self.contact.scale) as i32, (room.1 * self.contact.scale) as i32);
             let size = ((self.surface_size.0 * px) as i32, (self.surface_size.1 * px) as i32);
@@ -4446,7 +4645,15 @@ impl Widget {
         let drop_target = self.drop_target;
         let rough = matches!(self.drag, Some(Drag::Move { moved: true, .. })) || self.fling.is_some();
         let contact_scale = self.contact.scale;
-        let offered = self.offered();
+        // (None while a note is carried: it is in hand, or settling as it was let go.)
+        let carrying = self.pulled.is_some() || self.lift.value > 0.01;
+        let offered = if carrying { Vec::new() } else { self.offered() };
+        // A note lifted and leaning (see `carry`): drawn larger about where it is held and turned there, its shadow
+        // under it; pulled off the panel, its card under it as much as it is still its card.
+        let carried = self.content.stuck_note().is_some().then(|| {
+            let card = self.pulled.as_ref().map(|pulled| (pulled.morph.value.clamp(0.0, 1.0), pulled.number));
+            (card, self.lift.value, self.lean.value, self.about)
+        });
         let settings_lit = self.settings_lit();
         let frost = if self.content.skinned() { self.frost(now, theme) } else { 0.0 };
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
@@ -4470,7 +4677,14 @@ impl Widget {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            let local = Matrix3x2::translation(margin, margin);
+            let held = match carried {
+                Some((_, lift, lean, about)) if lift.abs() > 0.001 || lean.abs() > 0.001 => {
+                    let grown = 1.0 + LIFTED_BY * lift.max(0.0);
+                    Matrix3x2::translation(-about.0, -about.1) * Matrix3x2::scale(grown, grown) * Matrix3x2::rotation_around(lean, Vector2 { X: 0.0, Y: 0.0 }) * Matrix3x2::translation(about.0, about.1)
+                }
+                _ => Matrix3x2::identity(),
+            };
+            let local = held * Matrix3x2::translation(margin, margin);
             // A music widget's own ground's colour along its edges: its buttons in it.
             let mut button_ground = None;
             match content {
@@ -4492,9 +4706,32 @@ impl Widget {
                     });
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
-                    let (hits, drawn_whole) = paint_readings(frame, readings, scene, &picture, &placed, local, px, halo, Some(&[]), now);
-                    whole &= drawn_whole;
-                    pressed = hits.map(|hits| (hits, at)).or(pressed.take());
+                    // Carried: its shadow lifted with it, and pulled off the panel, its card turning into the note over it
+                    // (its card seen till it is half a note, the note from nothing to whole by then).
+                    let mut page = 1.0;
+                    if let Some((card, lift, ..)) = carried {
+                        frame.place(local);
+                        let turned = card.map_or(1.0, |(m, _)| m);
+                        let shadow = lifted_shadow(lift);
+                        if shadow.dark > 0.0 {
+                            let radius = view::note_radius(scene.theme, true) + (scene.theme.radius - view::note_radius(scene.theme, true)) * turned;
+                            frame.shadow(Color::hex(0, shadow.dark), 0.0, 0.0, size.0, size.1, radius, shadow.blur, shadow.drop);
+                        }
+                        if let Some((m, number)) = card {
+                            let seen = (2.0 * (1.0 - m)).min(1.0);
+                            if seen > 0.0 {
+                                faded(frame, seen, || view::paint_carried_card(frame, scene, number, (0.0, 0.0, size.0, size.1)));
+                            }
+                            page = (2.0 * m).min(1.0);
+                        }
+                    }
+                    if page > 0.0 {
+                        let mut painted = (None, true);
+                        faded(frame, page, || painted = paint_readings(frame, readings, scene, &picture, &placed, local, px, halo, Some(&[]), now));
+                        let (hits, drawn_whole) = painted;
+                        whole &= drawn_whole;
+                        pressed = hits.map(|hits| (hits, at)).or(pressed.take());
+                    }
                 }
                 // What plays, drawn anew in its layer (round it, the room for its shadow).
                 Content::Music(shown) => {
@@ -4803,20 +5040,38 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 mod tests {
     use super::*;
 
-    /// A note pulled off the panel keeps its card's size while the pointer is over the panel, takes a note's off it, and
-    /// its card's again back over it: settling afresh each time the pointer crosses the panel's edge, not otherwise.
+    /// A note pulled off the panel is its card while the pointer is over the panel, and a note off it (none to be had:
+    /// off it). Held where it was pressed on its card, across by share as it grows; down, as far as on its card while it
+    /// is one, drawn up into a note's head as it becomes one (pressed high on its card already, no further).
     #[test]
-    fn a_note_pulled_off_the_panel_grows_only_off_it() {
-        let (card, shown) = ((170.0, 104.0), (280.0, 320.0));
-        let mut pulled = Pulled { over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, on_panel: true };
-        let at = |x| Some(POINT { x, y: 400 });
-        assert_eq!(pulled.size(at(300), shown), (card, false));
-        assert_eq!(pulled.size(at(480), shown), (card, false));
-        assert_eq!(pulled.size(at(520), shown), (shown, true));
-        assert_eq!(pulled.size(at(700), shown), (shown, false));
-        assert_eq!(pulled.size(at(450), shown), (card, true));
-        // (The pointer not to be had: off the panel.)
-        assert_eq!(pulled.size(None, shown), (shown, true));
+    fn a_note_pulled_off_the_panel_is_a_note_only_off_it_held_by_its_head() {
+        let card = RECT { left: 120, top: 400, right: 290, bottom: 504 };
+        let mut pulled = Pulled { number: 1, over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None };
+        let at = |x| Some(POINT { x, y: 450 });
+        assert_eq!(pulled.wants(at(300)), 0.0);
+        assert_eq!(pulled.wants(at(499)), 0.0);
+        assert_eq!(pulled.wants(at(500)), 1.0);
+        assert_eq!(pulled.wants(None), 1.0);
+        assert_eq!(pulled.grab_at((170.0, 104.0)), (42.5, 80.0));
+        pulled.morph.value = 1.0;
+        assert_eq!(pulled.grab_at((360.0, 320.0)), (90.0, crate::ui::note::HEAD / 2.0));
+        pulled.morph.value = 0.5;
+        assert_eq!(pulled.grab_at((360.0, 320.0)).1, (80.0 + crate::ui::note::HEAD / 2.0) / 2.0);
+        pulled.grab.1 = 10.0;
+        pulled.morph.value = 1.0;
+        assert_eq!(pulled.grab_at((360.0, 320.0)).1, 10.0);
+    }
+
+    /// A note neither lifted nor leaning reaches no further than its shadow; lifted, as far as it grows about where it
+    /// is held (none on the side it is held at); leaning, as far as its farthest corner turns.
+    #[test]
+    fn a_note_carried_has_room_for_how_it_is_drawn() {
+        let size = (200.0, 100.0);
+        assert_eq!(carried_reach(size, (50.0, 20.0), 1.0, 0.0, 6.0), 6.0);
+        // Grown by a tenth about its top left corner: past its right edge by a tenth of its width, nothing elsewhere.
+        assert!((carried_reach(size, (0.0, 0.0), 1.1, 0.0, 0.0) - 20.0).abs() < 1e-3);
+        // Turned a quarter about its middle: its long sides stand up, half of its width less half its height past.
+        assert!((carried_reach(size, (100.0, 50.0), 1.0, 90.0, 0.0) - 50.0).abs() < 1e-3);
     }
 
     /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they

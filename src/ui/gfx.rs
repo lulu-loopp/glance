@@ -1169,6 +1169,10 @@ impl Canvas for Frame<'_> {
         }
     }
 
+    fn stroke_rounded_dashed(&self, color: Color, x: f32, y: f32, width: f32, height: f32, radius: f32, line: f32) {
+        Frame::stroke_rounded_dashed(self, color, x, y, width, height, radius, line);
+    }
+
     fn stroke_dashed(&self, points: &[Point], color: Color, width: f32) {
         if let Some(path) = self.path(points, false) {
             unsafe { self.dc.DrawGeometry(&path, self.brush(color), width, &self.gfx.dashed) };

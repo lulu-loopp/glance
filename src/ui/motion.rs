@@ -1,5 +1,7 @@
 //! Transitions as CSS times them: a value moving from where it is to a
-//! target over a duration, along a cubic Bézier easing curve.
+//! target over a duration, along a cubic Bézier easing curve. And springs: a
+//! value pulled toward its target, as fast as it is going kept as the target
+//! changes (a thing in hand, followed as the hand changes its mind).
 
 use std::time::{Duration, Instant};
 
@@ -94,9 +96,66 @@ impl Transition {
     }
 }
 
+/// A value on a spring: pulled toward its target as hard as `stiff` times how far off it is, held back as hard as
+/// `damp` times how fast it goes (per second). Damped less than critically (`damp` under 2√`stiff`), it goes a little
+/// past before it rests.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Spring {
+    pub value: f32,
+    pub speed: f32,
+    pub target: f32,
+    stiff: f32,
+    damp: f32,
+}
+
+impl Spring {
+    /// At rest at `value`.
+    pub const fn at(value: f32, stiff: f32, damp: f32) -> Spring {
+        Spring { value, speed: 0.0, target: value, stiff, damp }
+    }
+
+    /// `seconds` on: in steps short enough to hold it steady, however long since the last.
+    pub fn step(&mut self, seconds: f32) {
+        const STEP: f32 = 0.004;
+        let steps = (seconds / STEP).ceil().max(1.0) as usize;
+        let dt = seconds / steps as f32;
+        for _ in 0..steps {
+            self.speed += (self.stiff * (self.target - self.value) - self.damp * self.speed) * dt;
+            self.value += self.speed * dt;
+        }
+    }
+
+    /// Whether it is at rest: within `near` of its target, going slower than `near` a tenth of a second.
+    pub fn rests(&self, near: f32) -> bool {
+        (self.target - self.value).abs() <= near && self.speed.abs() * 0.1 <= near
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A spring let go reaches its target and rests there; damped under critically, it goes past it first, a little
+    /// (under a tenth of the way); critically or more, never. However finely or coarsely it is stepped, alike.
+    #[test]
+    fn a_spring_rests_at_its_target() {
+        for frame in [0.004, 1.0 / 60.0, 0.05] {
+            let mut under = Spring::at(0.0, 260.0, 26.0);
+            let mut critical = Spring::at(0.0, 400.0, 40.0);
+            under.target = 1.0;
+            critical.target = 1.0;
+            let (mut most_under, mut most_critical) = (0.0f32, 0.0f32);
+            for _ in 0..(1.5 / frame) as usize {
+                under.step(frame);
+                critical.step(frame);
+                most_under = most_under.max(under.value);
+                most_critical = most_critical.max(critical.value);
+            }
+            assert!(under.rests(0.001) && critical.rests(0.001), "{frame}: {under:?} {critical:?}");
+            assert!(most_under > 1.0 && most_under < 1.1, "{frame}: {most_under}");
+            assert!(most_critical <= 1.0 + 1e-4, "{frame}: {most_critical}");
+        }
+    }
 
     #[test]
     fn eases() {

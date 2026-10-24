@@ -677,6 +677,14 @@ impl Controller {
                             wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                         }
                     }
+                    // A note pressed on a panel to be pulled off it, notes carried off: drawn so on the panels at once.
+                    let pressed = panels.iter().find_map(|panel| panel.note_press.as_ref()).map(|(name, ..)| crate::notes::number_of(name));
+                    if crate::ui::view::press_note(pressed) | crate::ui::view::carry_notes(widgets.carried()) {
+                        for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
+                            panel.next_frame = now;
+                        }
+                        wait = Some(Duration::ZERO);
+                    }
                     // A widget come to the top over the open panel (giving way to the settings and back, shown, torn
                     // off): the panel over it again.
                     let on_top = crate::ui::window::on_top();
@@ -2983,9 +2991,7 @@ impl<'a> Panel<'a> {
             return None;
         }
         let (name, from, card) = self.note_press.take()?;
-        let grab = POINT { x: from.x - card.left, y: from.y - card.top };
-        let at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
-        Some(crate::widget::NotePulled { name, at, grab, card: (card.right - card.left, card.bottom - card.top), over: placement.panel })
+        Some(crate::widget::NotePulled { name, card, from, over: placement.panel })
     }
 
     /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
