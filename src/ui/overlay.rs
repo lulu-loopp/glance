@@ -994,6 +994,7 @@ mod tests {
             net_up: None,
             net_total_down: 0,
             net_total_up: 0,
+            ping_ms: None,
             network: None,
             disk_read: None,
             disk_write: None,

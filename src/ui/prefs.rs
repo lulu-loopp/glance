@@ -76,7 +76,8 @@ const GPU: [Item; 9] = [
     item("engines", false),
 ];
 const MEMORY: [Item; 5] = [item("chart", true), item("speed", true), item("dimms", true), item("committed", false), item("cached", false)];
-const NETWORK: [Item; 6] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false)];
+/// (Its latency off till asked for: it sends echoes out, see `latency`.)
+const NETWORK: [Item; 7] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false), item("latency", false)];
 const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.
@@ -175,9 +176,35 @@ struct DiskPrefs {
 #[serde(default)]
 pub struct NetworkPrefs {
     pub bits: bool,
+    /// Where its latency is measured to (see `latency`); none: as the language has it (see `ping_to`).
+    pub ping: Option<PingTarget>,
     /// Before 0.1.8: the adapter, address, link and totals together.
     #[serde(skip_serializing)]
     details: Option<bool>,
+}
+
+/// Where the network's latency is measured to: the router the way out goes through, or a public resolver (Alibaba's,
+/// Tencent's, Cloudflare's).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PingTarget {
+    Gateway,
+    Alibaba,
+    Tencent,
+    Cloudflare,
+}
+
+impl PingTarget {
+    /// As the settings list them.
+    pub const ALL: [PingTarget; 4] = [PingTarget::Gateway, PingTarget::Alibaba, PingTarget::Tencent, PingTarget::Cloudflare];
+}
+
+impl NetworkPrefs {
+    /// Where its latency is measured to: as chosen, else a resolver near those who read `lang` (Alibaba's for Chinese,
+    /// Cloudflare's otherwise).
+    pub fn ping_to(&self, lang: crate::ui::text::Lang) -> PingTarget {
+        self.ping.unwrap_or(if lang == crate::ui::text::Lang::Zh { PingTarget::Alibaba } else { PingTarget::Cloudflare })
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -435,6 +462,21 @@ impl Prefs {
 
 #[cfg(test)]
 mod tests {
+    /// The latency is measured, unless chosen otherwise, to a resolver near those who read the language shown, and
+    /// what is chosen is kept as it is named.
+    #[test]
+    fn the_latency_is_measured_to_where_it_was_chosen() {
+        use super::{NetworkPrefs, PingTarget};
+        use crate::ui::text::Lang;
+        let unchosen = NetworkPrefs::default();
+        assert_eq!((unchosen.ping_to(Lang::Zh), unchosen.ping_to(Lang::En)), (PingTarget::Alibaba, PingTarget::Cloudflare));
+        let chosen = NetworkPrefs { ping: Some(PingTarget::Gateway), ..Default::default() };
+        assert_eq!(chosen.ping_to(Lang::Zh), PingTarget::Gateway);
+        let kept = serde_json::to_value(&chosen).unwrap();
+        assert_eq!(kept["ping"], "gateway");
+        assert_eq!(serde_json::from_value::<NetworkPrefs>(kept).unwrap().ping, Some(PingTarget::Gateway));
+    }
+
     /// A module of what is not here now is kept as it was, where it was, through a change of another preference.
     #[test]
     fn a_gpu_away_keeps_its_module() {

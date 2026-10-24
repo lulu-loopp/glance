@@ -2369,6 +2369,9 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("link") && scene.seen.link {
                 facts.push((lang.pick("链路", "Link").into(), shown(link(s), text::link_speed), false));
             }
+            if on("latency") {
+                facts.push((lang.pick("延迟", "Latency").into(), shown(s.ping_ms, |ms| format!("{ms:.0} ms")), false));
+            }
             if on("totals") {
                 let (down, up) = (text::bytes(s.net_total_down as f64), text::bytes(s.net_total_up as f64));
                 let total = if lang == Lang::Zh { format!("下载 {down}，上传 {up}") } else { format!("{down} down, {up} up") };
@@ -5850,6 +5853,7 @@ otepad.exe", "Notepad"),
             net_up: Some(0.0),
             net_total_down: 0,
             net_total_up: 0,
+            ping_ms: None,
             network: None,
             disk_read: Some(0.0),
             disk_write: Some(0.0),

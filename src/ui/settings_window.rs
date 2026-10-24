@@ -939,7 +939,7 @@ impl Palette {
 /// The choices of module `id`'s own, shown in its card.
 fn module_fields(id: &str) -> &'static [Field] {
     match id {
-        "network" => &[Field::RateUnit],
+        "network" => &[Field::RateUnit, Field::PingTarget],
         "processes" => &[Field::ProcessCount],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
@@ -1072,6 +1072,8 @@ enum Field {
     Push,
     CloseDelay,
     RateUnit,
+    /// Where the network's latency is measured to (see `prefs::PingTarget`).
+    PingTarget,
     ProcessCount,
     Interval,
     Span,
@@ -3210,6 +3212,11 @@ impl Ui {
                 at(&[200, 500, 1000], settings.close_delay_ms),
             ),
             Field::RateUnit => (pick(lang, "网速单位", "Speed unit"), vec!["MB/s".into(), "Mbps".into()], Some(prefs.network.bits as usize)),
+            Field::PingTarget => (
+                pick(lang, "延迟测试地址", "Latency measured to"),
+                vec![s("网关", "Gateway"), s("阿里", "Alibaba"), s("腾讯", "Tencent"), "Cloudflare".into()],
+                prefs::PingTarget::ALL.iter().position(|&to| to == prefs.network.ping_to(lang)),
+            ),
             Field::ProcessCount => (
                 pick(lang, "显示进程数", "Processes shown"),
                 vec!["5".into(), "8".into(), "12".into()],
@@ -3263,6 +3270,7 @@ impl Ui {
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
+            Field::PingTarget => prefs.network.ping = Some(prefs::PingTarget::ALL[index]),
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
@@ -4051,6 +4059,7 @@ impl Ui {
             (_, "address") => (p("IP 地址", "IP address"), None),
             (_, "link") => (p("链路速度", "Link speed"), None),
             (_, "totals") => (p("开机以来的流量", "Traffic since boot"), None),
+            (_, "latency") => (p("网络延迟", "Latency"), Some(p("定时向下方所选地址发送 ping 并记录往返时间", "Pings the address chosen below at each refresh and shows the round trip"))),
             (_, "drives") => (p("各硬盘温度", "Drive temperatures"), None),
             (_, "active") => (p("活动时间", "Active time"), None),
             _ => (p("其他", "Other"), None),

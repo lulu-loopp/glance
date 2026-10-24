@@ -192,6 +192,7 @@ impl Sampler {
             // The totals as last read.
             net_total_down: net.or(self.previous.net.map(|(bytes, _)| bytes)).map_or(0, |bytes| bytes.0),
             net_total_up: net.or(self.previous.net.map(|(bytes, _)| bytes)).map_or(0, |bytes| bytes.1),
+            ping_ms: None,
             network: primary_interface(self.network.as_ref(), interfaces.as_ref()),
             disk_read: disk_rates.map(|rates| rates.0),
             disk_write: disk_rates.map(|rates| rates.1),

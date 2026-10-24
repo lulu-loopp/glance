@@ -80,6 +80,10 @@ pub struct Sample {
     pub net_total_down: u64,
     pub net_total_up: u64,
     pub network: Option<NetworkInfo>,
+    /// The network's latency (ms), while it is measured, as last answered (see `latency`); none where no echo came
+    /// back in time.
+    #[serde(default)]
+    pub ping_ms: Option<f32>,
     pub disk_read: Option<f64>,
     pub disk_write: Option<f64>,
     /// Percent of the time the disks were busy.

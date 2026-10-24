@@ -449,6 +449,7 @@ impl Sampler {
             net_up,
             net_total_down: down,
             net_total_up: up,
+            ping_ms: None,
             network: self.slow.network.clone(),
             disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
             disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),

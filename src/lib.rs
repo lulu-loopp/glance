@@ -119,6 +119,8 @@ mod widget;
 mod wsl;
 #[cfg(windows)]
 mod docker;
+#[cfg(windows)]
+mod latency;
 
 
 #[cfg(windows)]
@@ -555,6 +557,11 @@ pub fn run() {
         loop {
             let want = {
                 let settings = app().settings.lock().unwrap();
+                // The network's latency measured while its row is on (in this process: the sensors' has nothing to do
+                // with it), as often as samples are taken.
+                let ping = ui::prefs::module_on(&settings.view, "network") && ui::prefs::item_on_in(&settings.view, "modules", "network", "latency");
+                let to = serde_json::from_value::<ui::prefs::NetworkPrefs>(settings.view["network"].clone()).unwrap_or_default().ping_to(update::language());
+                latency::want(ping.then_some(to), settings.interval());
                 link::Want {
                     interval_ms: settings.interval().as_millis() as u32,
                     // (What changes slowly is read afresh while something shows it; else now and then.)
@@ -563,7 +570,8 @@ pub fn run() {
                     docker: ui::prefs::module_on(&settings.view, "docker"),
                 }
             };
-            if let Some(sample) = source.next(want, controller.edges()) {
+            if let Some(mut sample) = source.next(want, controller.edges()) {
+                sample.ping_ms = latency::latest();
                 watch.sample(&sample, Instant::now());
                 if let Some(told) = &mut told {
                     told.tell(&sample, &app().info);
