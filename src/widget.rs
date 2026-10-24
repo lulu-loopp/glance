@@ -542,6 +542,16 @@ fn lifted_shadow(lift: f32) -> Lifted {
     Lifted { blur: 4.0 + 10.0 * lift, drop: 2.0 + 8.0 * lift, dark: 0.28 * lift.min(1.0) }
 }
 
+/// What `draw` draws placed by `local`, the frame placed as it was after (what is drawn next is placed from there:
+/// the readings' layers place themselves by the frame's place, and `local` again, see `render::PanelLayers::draw_on`).
+fn drawn_in(frame: &gfx::Frame, local: Matrix3x2, draw: impl FnOnce()) {
+    let mut was = Matrix3x2::default();
+    unsafe { frame.dc.GetTransform(&mut was) };
+    unsafe { frame.dc.SetTransform(&(local * was)) };
+    draw();
+    unsafe { frame.dc.SetTransform(&was) };
+}
+
 /// What `draw` draws, seen through as much as `opacity` says (1: as it is).
 fn faded(frame: &gfx::Frame, opacity: f32, draw: impl FnOnce()) {
     if opacity >= 1.0 {
@@ -4710,18 +4720,21 @@ impl Widget {
                     // (its card seen till it is half a note, the note from nothing to whole by then).
                     let mut page = 1.0;
                     if let Some((card, lift, ..)) = carried {
-                        frame.place(local);
-                        let turned = card.map_or(1.0, |(m, _)| m);
-                        let shadow = lifted_shadow(lift);
-                        if shadow.dark > 0.0 {
-                            let radius = view::note_radius(scene.theme, true) + (scene.theme.radius - view::note_radius(scene.theme, true)) * turned;
-                            frame.shadow(Color::hex(0, shadow.dark), 0.0, 0.0, size.0, size.1, radius, shadow.blur, shadow.drop);
-                        }
-                        if let Some((m, number)) = card {
-                            let seen = (2.0 * (1.0 - m)).min(1.0);
-                            if seen > 0.0 {
-                                faded(frame, seen, || view::paint_carried_card(frame, scene, number, (0.0, 0.0, size.0, size.1)));
+                        drawn_in(frame, local, || {
+                            let turned = card.map_or(1.0, |(m, _)| m);
+                            let shadow = lifted_shadow(lift);
+                            if shadow.dark > 0.0 {
+                                let radius = view::note_radius(scene.theme, true) + (scene.theme.radius - view::note_radius(scene.theme, true)) * turned;
+                                frame.shadow(Color::hex(0, shadow.dark), 0.0, 0.0, size.0, size.1, radius, shadow.blur, shadow.drop);
                             }
+                            if let Some((m, number)) = card {
+                                let seen = (2.0 * (1.0 - m)).min(1.0);
+                                if seen > 0.0 {
+                                    faded(frame, seen, || view::paint_carried_card(frame, scene, number, (0.0, 0.0, size.0, size.1)));
+                                }
+                            }
+                        });
+                        if let Some((m, _)) = card {
                             page = (2.0 * m).min(1.0);
                         }
                     }
@@ -5060,6 +5073,26 @@ mod tests {
         pulled.grab.1 = 10.0;
         pulled.morph.value = 1.0;
         assert_eq!(pulled.grab_at((360.0, 320.0)).1, 10.0);
+    }
+
+    /// What is drawn under a carried note (its shadow, its card) is placed where the note is, and the frame left placed
+    /// as it was for the note drawn over it, which places itself from there: a note on the desktop was drawn its
+    /// window's margin too far right and down, away from its buttons.
+    #[test]
+    fn what_is_drawn_under_a_carried_note_leaves_the_frame_as_it_was() {
+        let _device = gfx::held().unwrap();
+        let gfx = Gfx::new().expect("graphics");
+        let (mut was, mut within, mut after) = (Matrix3x2::default(), Matrix3x2::default(), Matrix3x2::default());
+        gfx.draw_offscreen((64, 64), 1.0, |frame| {
+            frame.origin(0.0, 0.0);
+            unsafe { frame.dc.GetTransform(&mut was) };
+            drawn_in(frame, Matrix3x2::translation(12.0, 7.0), || unsafe { frame.dc.GetTransform(&mut within) });
+            unsafe { frame.dc.GetTransform(&mut after) };
+        })
+        .unwrap();
+        // (The device let go before anything is asserted: held by a test that fails, it holds the process.)
+        drop(gfx);
+        assert_eq!((within, after), (Matrix3x2::translation(12.0, 7.0) * was, was));
     }
 
     /// A note neither lifted nor leaning reaches no further than its shadow; lifted, as far as it grows about where it

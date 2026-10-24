@@ -932,11 +932,11 @@ impl Gfx {
     }
 }
 
-#[cfg(feature = "studio")]
+#[cfg(any(test, feature = "studio"))]
 impl Gfx {
     /// Draws `paint` into a picture `size` pixels large, at `scale` pixels
     /// per DIP, off screen; returns its pixels, rows top to bottom,
-    /// premultiplied BGRA. For the studio, which films the panel.
+    /// premultiplied BGRA. For the studio, which films the panel, and the tests.
     pub fn draw_offscreen(&self, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Vec<u8>> {
         use windows::Win32::Graphics::Direct2D::{
             D2D1_BITMAP_OPTIONS, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_CPU_READ,
