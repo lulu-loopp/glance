@@ -599,6 +599,7 @@ impl Controller {
         let mut pinned_at = self.config.lock().unwrap().panels_pinned.clone();
         // A menu up, and what it is for: run by this loop, as every other window of this thread is (see `menu::Menu`).
         let mut menu: Option<(crate::ui::menu::Menu, MenuFor)> = None;
+        let mut closing_press = ClosingPress::default();
         // The windows in front the panel and the widgets give way to: the settings, the page beside.
         let mut in_front: (Option<HWND>, Option<HWND>) = (None, None);
         let mut msg = MSG::default();
@@ -767,6 +768,9 @@ impl Controller {
             {
                 OURS.fetch_add(1, Ordering::Relaxed);
             }
+            if closing_press.takes(msg.message) {
+                continue;
+            }
             // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
             // panel stays), the rest are taken up as ever. (The panel's own shortcut comes as `TOGGLE`.)
             if let Some((open, _)) = menu.as_mut() {
@@ -780,6 +784,7 @@ impl Controller {
                 };
                 match handled {
                     Handled::Done(choice) => {
+                        closing_press.closed_by(msg.message);
                         self.end_menu(&mut menu, choice, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         // (A shortcut, the panel's too, does what it is for as well; Esc only leaves the menu.)
                         let shortcut = matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY);
@@ -1012,22 +1017,20 @@ impl Controller {
                     panel.forward = true;
                     panel.press(lparam_point(msg.lParam));
                 }
-                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].shelf_press.is_some()) => panels[owner.unwrap()].shelf_moved(),
-                // A note pressed and pulled off the panel: stuck on the desktop under the hand (the panel stays).
-                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].note_press.is_some()) => {
+                // A thing on its station, or a note, pressed: followed as the pointer moves over the panel, and wherever it
+                // goes as it is followed (see `Panel::follow_press`).
+                WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].pressed_to_pull()) => {
                     let panel = &mut panels[owner.unwrap()];
-                    if let (Some(cursor), Some(placement)) = (cursor_position(), panel.placement.as_ref()) {
-                        let off = !contains(&placement.panel, cursor);
-                        let pulled = panel.note_press.as_ref().is_some_and(|(_, from)| crate::station::run::drag_begins(*from, cursor));
-                        if off && pulled {
-                            let (name, _) = panel.note_press.take().unwrap();
-                            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-                            // (Held by its head, near its corner, as a note's card is taken.)
-                            let grab = POINT { x: (40.0 * placement.px) as i32, y: (20.0 * placement.px) as i32 };
-                            widgets.stick_note_held(&name, POINT { x: cursor.x - grab.x, y: cursor.y - grab.y }, grab);
-                        }
+                    if let Some((name, at, grab)) = panel.follow_press() {
+                        widgets.stick_note_held(&name, at, grab);
                     }
                     panel.hover_at(lparam_point(msg.lParam));
+                }
+                // (After a press ended otherwise, let go over the panel: no longer followed.)
+                WM_TIMER if msg.wParam.0 == crate::overlay::FOLLOW_TIMER && owner.is_some_and(|at| !panels[at].held()) => {
+                    if let Some((name, at, grab)) = panels[owner.unwrap()].follow_press() {
+                        widgets.stick_note_held(&name, at, grab);
+                    }
                 }
                 crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].note_press.is_some()) => panels[owner.unwrap()].note_press = None,
                 // A thing kept at hand pressed and moved: put elsewhere among them as it is let go, over another.
@@ -1178,7 +1181,7 @@ impl Controller {
                 WM_RBUTTONUP if owner.is_some() => {
                     let hit = panels[owner.unwrap()].hit_at(lparam_point(msg.lParam));
                     let look = panels[owner.unwrap()].menu_look();
-                    if matches!(hit, Some(Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_))) {
+                    if matches!(hit, Some(Hit::Shelf(_) | Hit::Copied(_) | Hit::App(_) | Hit::Recent(_) | Hit::Note(_))) {
                         // (Before `end_menu`, which forgets whose the menu up was.)
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu_of = owner;
@@ -1194,6 +1197,11 @@ impl Controller {
                         }
                         Some(Hit::Recent(file)) => {
                             menu = cursor_position().and_then(|at| crate::station::recent_menu(file, at, true, look)).map(|(open, choices)| (open, MenuFor::Recent(file, choices)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
+                        // A note's card: the note's menu, as its card on the desktop has it.
+                        Some(Hit::Note(number)) => {
+                            menu = widgets.menu_of_note(number, None, panels[0].lang, look, true).map(|(open, name, choices)| (open, MenuFor::Note(name, choices)));
                             keep_menu_above(&menu, &mut overlay);
                         }
                         _ => {}
@@ -1542,11 +1550,16 @@ impl Controller {
                     crate::station::app_chose(app, *choice);
                 }
             }
-            MenuFor::Note(name, choices) => {
-                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    widgets.note_chose(&name, *choice);
+            MenuFor::Note(name, choices) => match choice.and_then(|row| choices.get(row)) {
+                // (Offered where it is not stuck yet: its corner where its row was chosen.)
+                Some(crate::ui::note::Choice::Stick) => {
+                    if let Some(at) = place.map(|row| POINT { x: row.left, y: row.top }).or_else(cursor_position) {
+                        widgets.stick_note(&name, at, None);
+                    }
                 }
-            }
+                Some(choice) => widgets.note_chose(&name, *choice),
+                None => {}
+            },
             MenuFor::Recent(file, choices) => {
                 if let Some(choice) = choice.and_then(|row| choices.get(row)) {
                     crate::station::recent_chose(file, *choice);
@@ -2881,7 +2894,7 @@ impl<'a> Panel<'a> {
         if let (Some(Hit::Note(number)), Some(from)) = (self.hit_at(client), cursor_position()) {
             if let Some(name) = crate::notes::named(number) {
                 self.note_press = Some((name, from));
-                unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
+                self.follow_pointer();
             }
             return;
         }
@@ -2896,7 +2909,7 @@ impl<'a> Panel<'a> {
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
         if let (Some(hit), Some(from)) = (self.hit_at(client).filter(|hit| hit.drags()), cursor_position()) {
             self.shelf_press = Some((hit, from));
-            unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd) };
+            self.follow_pointer();
             return;
         }
         // On the sound's track: it is slid along till let go.
@@ -2921,6 +2934,58 @@ impl<'a> Panel<'a> {
             windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
             SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
         }
+    }
+
+    /// The pointer taken, and followed wherever it goes while it is: the panel is never in front, and a window not in
+    /// front is told of the pointer only over itself, its capture or not. (A note pressed could not be pulled off it:
+    /// the pointer, past the panel's edge, was no longer heard of, but where something of Glance's in front had
+    /// been clicked first.)
+    fn follow_pointer(&self) {
+        unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(self.window.hwnd);
+            SetTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER, FOLLOW_MS, None);
+        }
+    }
+
+    /// Whether a thing on its station or a note is pressed, to be pulled off as the pointer goes far enough.
+    fn pressed_to_pull(&self) -> bool {
+        self.shelf_press.is_some() || self.note_press.is_some()
+    }
+
+    /// The pointer followed with a thing on its station or a note pressed (see `follow_pointer`): let go where the
+    /// panel was not told (past its edge), nothing pressed; far enough, the thing dragged off, or the note pulled off
+    /// the panel: its name, where it is to be stuck on the desktop under the hand, and where the hand holds it.
+    fn follow_press(&mut self) -> Option<(String, POINT, POINT)> {
+        if !buttons_down() {
+            self.shelf_press = None;
+            self.note_press = None;
+        }
+        self.shelf_moved();
+        let pulled = self.note_pulled();
+        if !self.pressed_to_pull() && !self.held() {
+            unsafe {
+                let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
+                if windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() == self.window.hwnd {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                }
+            }
+        }
+        pulled
+    }
+
+    /// A note pressed and pulled off the panel, far enough: stuck on the desktop under the hand (the panel stays). Its
+    /// name, where it is put, where the hand holds it.
+    fn note_pulled(&mut self) -> Option<(String, POINT, POINT)> {
+        let (cursor, placement) = (cursor_position()?, self.placement.as_ref()?);
+        let off = !contains(&placement.panel, cursor);
+        let pulled = self.note_press.as_ref().is_some_and(|(_, from)| crate::station::run::drag_begins(*from, cursor));
+        if !(off && pulled) {
+            return None;
+        }
+        let (name, _) = self.note_press.take()?;
+        // (Held by its head, near its corner, as a note's card is taken.)
+        let grab = POINT { x: (40.0 * placement.px) as i32, y: (20.0 * placement.px) as i32 };
+        Some((name, POINT { x: cursor.x - grab.x, y: cursor.y - grab.y }, grab))
     }
 
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
@@ -4174,6 +4239,43 @@ pub(crate) fn reduced_motion() -> bool {
     read.is_ok() && !animate.as_bool()
 }
 
+/// A press away from a menu that closed it: all the menu's, its button's coming up too. (Else, let go on the button that
+/// had opened the menu, pressed again where it was, it opened it again: a menu could not be closed by its own button.)
+#[derive(Default)]
+struct ClosingPress {
+    /// The message its button comes up with, till it has.
+    up: Option<u32>,
+}
+
+impl ClosingPress {
+    /// The menu closed by `message`: by a press, that press is the menu's.
+    fn closed_by(&mut self, message: u32) {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_MBUTTONDOWN, WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP};
+        self.up = match message {
+            WM_LBUTTONDOWN => Some(WM_LBUTTONUP),
+            WM_RBUTTONDOWN => Some(WM_RBUTTONUP),
+            WM_MBUTTONDOWN => Some(WM_MBUTTONUP),
+            _ => None,
+        };
+    }
+
+    /// Whether `message` is its button coming up, nothing more. (Another press first: that one is not the menu's, nor
+    /// what comes up after it.)
+    fn takes(&mut self, message: u32) -> bool {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_MBUTTONDOWN, WM_RBUTTONDOWN};
+        let Some(up) = self.up else { return false };
+        if matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN) {
+            self.up = None;
+            return false;
+        }
+        if message == up {
+            self.up = None;
+            return true;
+        }
+        false
+    }
+}
+
 /// The work area of the monitor under the pointer, and its scale factor.
 pub fn work_area_at_cursor() -> Option<(RECT, f64)> {
     let contact = monitor_at(cursor_position()?)?;
@@ -4354,6 +4456,26 @@ fn let_go(message: &MSG) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A menu closed by a press away from it, on the button that opened it: that press is the menu's, its button let
+    /// go there too (not taken by the button, as a press of it, to open the menu again); the next press is not.
+    #[test]
+    fn a_press_that_closes_a_menu_is_the_menus_as_it_is_let_go() {
+        use windows::Win32::UI::WindowsAndMessaging::{WM_KEYDOWN, WM_RBUTTONDOWN, WM_RBUTTONUP};
+        let mut press = ClosingPress::default();
+        press.closed_by(WM_LBUTTONDOWN);
+        assert!(!press.takes(WM_MOUSEMOVE));
+        assert!(!press.takes(WM_RBUTTONUP));
+        assert!(press.takes(WM_LBUTTONUP));
+        assert!(!press.takes(WM_LBUTTONUP));
+        // Closed by a key: no press of it.
+        press.closed_by(WM_KEYDOWN);
+        assert!(!press.takes(WM_LBUTTONUP));
+        // Another press before it is let go: that press, and its letting go, are not the menu's.
+        press.closed_by(WM_RBUTTONDOWN);
+        assert!(!press.takes(WM_LBUTTONDOWN));
+        assert!(!press.takes(WM_RBUTTONUP));
+    }
 
     /// A press told by the sensors' process is one elsewhere only where no press on the panel or its menu accounts
     /// for it, whichever came first: the menu's press seen before it is told (the menu closed meanwhile), or told
