@@ -3,10 +3,7 @@
 //! getting. Nothing that names the user: no paths, no network addresses.
 
 use windows::core::w;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
-use windows::Win32::System::DataExchange::{EmptyClipboard, SetClipboardData};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::Foundation::HWND;
 
 use crate::metrics::reg_string;
 use crate::reading::{Sample, StaticInfo};
@@ -234,29 +231,7 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
 
 /// Puts `text` on the clipboard, as the window `owner` holds it.
 pub fn copy(owner: HWND, text: &str) -> bool {
-    let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
-    let bytes = units.len() * 2;
-    let Some(_opened) = crate::clipboard::open(owner) else { return false };
-    unsafe {
-        let placed = (|| {
-            EmptyClipboard().ok()?;
-            let memory = GlobalAlloc(GMEM_MOVEABLE, bytes).ok()?;
-            let target = GlobalLock(memory) as *mut u16;
-            if target.is_null() {
-                let _ = GlobalFree(Some(memory));
-                return None;
-            }
-            std::ptr::copy_nonoverlapping(units.as_ptr(), target, units.len());
-            let _ = GlobalUnlock(memory);
-            // The clipboard owns the memory once it takes it.
-            if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(memory.0))).is_err() {
-                let _ = GlobalFree(Some(HGLOBAL(memory.0)));
-                return None;
-            }
-            Some(())
-        })();
-        placed.is_some()
-    }
+    crate::clipboard::put(owner, &[(crate::clipboard::TEXT, crate::clipboard::utf16_z(text))])
 }
 
 #[cfg(test)]

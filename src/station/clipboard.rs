@@ -23,15 +23,14 @@ use windows::Win32::Graphics::Imaging::{
 use windows::Win32::System::Com::StructuredStorage::{CreateStreamOnHGlobal, GetHGlobalFromStream};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, STREAM_SEEK_END};
 use std::os::windows::ffi::OsStrExt;
-use windows::Win32::Foundation::{GlobalFree, HANDLE};
 use windows::Win32::Graphics::Imaging::WICDecodeMetadataCacheOnDemand;
-use windows::Win32::System::DataExchange::{EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, RegisterClipboardFormatW, SetClipboardData};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::DataExchange::{GetClipboardData, GetClipboardSequenceNumber, IsClipboardFormatAvailable, RegisterClipboardFormatW};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
 /// The clipboard's own formats: a picture, text, files.
 const BITMAP: u32 = 2;
-const TEXT: u32 = 13;
+const TEXT: u32 = crate::clipboard::TEXT;
 const FILES: u32 = 15;
 /// The most of a picture's or text's bytes read (more is not what the station is for: a file is).
 const BYTES_MOST: usize = 256 << 20;
@@ -224,16 +223,7 @@ unsafe fn png(image: &IWICBitmapSource) -> windows::core::Result<Vec<u8>> {
 pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
     // Made before the clipboard is opened (a picture decoded): it is held no longer than it takes to hand it over.
     let formats = formats_of(content, stays_here)?;
-    let opened = crate::clipboard::open(owner)?;
-    unsafe {
-        let _ = EmptyClipboard();
-        let mut all = true;
-        for (format, bytes) in &formats {
-            all &= hand_over(*format, bytes);
-        }
-        drop(opened);
-        all.then(|| GetClipboardSequenceNumber())
-    }
+    crate::clipboard::put(owner, &formats).then(|| unsafe { GetClipboardSequenceNumber() })
 }
 
 /// `content` in the formats it is given in, copied or dragged (see `put`), each format's number and bytes: none where
@@ -241,7 +231,7 @@ pub fn put(owner: HWND, content: &Content, stays_here: bool) -> Option<u32> {
 pub(super) fn formats_of(content: &Content, stays_here: bool) -> Option<Vec<(u32, Vec<u8>)>> {
     let registered = |name: PCWSTR| unsafe { RegisterClipboardFormatW(name) };
     let mut formats: Vec<(u32, Vec<u8>)> = match content {
-        Content::Text(text) => vec![(TEXT, utf16_z(text))],
+        Content::Text(text) => vec![(TEXT, crate::clipboard::utf16_z(text))],
         // (Copied where they are dropped: see `drop`, and moved only by hand.)
         Content::Files(paths) => vec![(FILES, dropped(paths)), (registered(w!("Preferred DropEffect")), 1u32.to_le_bytes().to_vec())],
         Content::Png(png) => {
@@ -260,31 +250,6 @@ pub(super) fn formats_of(content: &Content, stays_here: bool) -> Option<Vec<(u32
 /// The clipboard's device-independent bitmap format.
 const DIB: u32 = 8;
 
-/// `bytes` handed to the clipboard (open) as `format`: whether it took them (the clipboard owns them from then; not
-/// taken, they are let go of here).
-unsafe fn hand_over(format: u32, bytes: &[u8]) -> bool {
-    unsafe {
-        let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return false };
-        let at = GlobalLock(memory);
-        if at.is_null() {
-            let _ = GlobalFree(Some(memory));
-            return false;
-        }
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), at.cast::<u8>(), bytes.len());
-        let _ = GlobalUnlock(memory);
-        if SetClipboardData(format, Some(HANDLE(memory.0))).is_ok() {
-            true
-        } else {
-            let _ = GlobalFree(Some(memory));
-            false
-        }
-    }
-}
-
-/// `text` as the clipboard keeps text: UTF-16, ended by a zero.
-fn utf16_z(text: &str) -> Vec<u8> {
-    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
-}
 
 /// `paths` as files are put on the clipboard (`DROPFILES`, then each path in UTF-16 ended by a zero, and a zero more).
 pub(super) fn dropped(paths: &[PathBuf]) -> Vec<u8> {

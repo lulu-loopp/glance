@@ -2830,6 +2830,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// What is chosen in a note copied with Ctrl+C on the panel's thread (in the process's multithreaded apartment): its
+    /// words as they show, there still once the note is written in no longer (its box gone), and as rich text. Ctrl+X
+    /// takes them out as well, undo brings them back.
+    #[test]
+    #[ignore = "puts words on this session's clipboard"]
+    fn what_is_chosen_is_copied_and_stays_copied() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, SetKeyboardState, VIRTUAL_KEY, VK_C, VK_CONTROL, VK_X};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-copy-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("c.md"), "plain **bold** words").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 300, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("c.md".into()), &theme, super::WORDS).unwrap();
+        writing.focus(true);
+        let answer = writing.answer();
+        // (Ctrl held as the keys go: the thread's keyboard as read.)
+        let with_ctrl = |key: VIRTUAL_KEY, character: usize| {
+            let mut state = [0u8; 256];
+            unsafe {
+                let _ = GetKeyboardState(&mut state);
+                state[usize::from(VK_CONTROL.0)] = 0x80;
+                let _ = SetKeyboardState(&state);
+            }
+            let answered = [answer(hwnd, WM_KEYDOWN, WPARAM(usize::from(key.0)), LPARAM(1)), answer(hwnd, WM_CHAR, WPARAM(character), LPARAM(1)), answer(hwnd, WM_KEYUP, WPARAM(usize::from(key.0)), LPARAM(1))];
+            unsafe {
+                state[usize::from(VK_CONTROL.0)] = 0;
+                let _ = SetKeyboardState(&state);
+            }
+            answered
+        };
+        let written = writing.editor.words();
+        let every = written.encode_utf16().count() as i32;
+        writing.editor.select((0, every));
+        let copied = with_ctrl(VK_C, 0x03);
+        let after_copy = writing.editor.words();
+        // Ctrl+X on the last word: gone, on the clipboard, back with undo.
+        writing.editor.select((every - 5, every));
+        let _ = with_ctrl(VK_X, 0x18);
+        let after_cut = (writing.editor.words(), super::clipboard_text(hwnd));
+        // (EM_UNDO.)
+        writing.editor.send(0x00C7, WPARAM(0), LPARAM(0));
+        let undone = writing.editor.words();
+        writing.editor.select((0, every));
+        let _ = with_ctrl(VK_C, 0x03);
+        drop(answer);
+        drop(writing);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let owner = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 1, 1, None, None, None, None) }.unwrap();
+        let stays = super::clipboard_text(owner);
+        let rich = {
+            let _opened = crate::clipboard::open(owner);
+            unsafe { IsClipboardFormatAvailable(RegisterClipboardFormatW(w!("Rich Text Format"))) }.is_ok()
+        };
+        unsafe {
+            let _ = DestroyWindow(owner);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(copied.iter().all(|answered| answered.is_some()), "{copied:?}");
+        assert_eq!(after_copy, written);
+        assert_eq!(after_cut, ("plain **bold** ".into(), Some("words".into())));
+        assert_eq!(undone, written);
+        assert_eq!(stays.as_deref(), Some("plain bold words"));
+        assert!(rich);
+    }
+
     /// Keys given to a note's words' box as Windows gives them (the key down, the character it makes, the key up): Enter
     /// in a list carries it on, the caret on the new item, Tab moves that item in, its character eaten (no tab written
     /// after it), and one undo takes back each.

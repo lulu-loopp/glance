@@ -4,8 +4,12 @@
 //! let go: tried again and again for a while, else given up.
 
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+
+/// The clipboard's text format (UTF-16, ended by a zero).
+pub const TEXT: u32 = 13;
 
 /// How long the clipboard held by another is waited for, and how often it is tried meanwhile.
 const WAIT: Duration = Duration::from_millis(500);
@@ -39,6 +43,43 @@ pub fn open(owner: HWND) -> Option<Opened> {
 /// The clipboard opened for `owner` if no other holds it just now (for one who comes back for it later).
 pub fn try_open(owner: HWND) -> Option<Opened> {
     unsafe { OpenClipboard(Some(owner)) }.ok().map(|()| Opened(()))
+}
+
+/// What was on the clipboard replaced by `formats` (each a format's number and its bytes, handed over whole, there at
+/// once: none given only as it is asked for, by a window that may be gone by then), by window `owner`. Whether all of
+/// them went there (none, the clipboard held by another all the while it was waited for).
+pub fn put(owner: HWND, formats: &[(u32, Vec<u8>)]) -> bool {
+    let Some(_opened) = open(owner) else { return false };
+    unsafe {
+        let _ = EmptyClipboard();
+        formats.iter().fold(true, |all, (format, bytes)| hand_over(*format, bytes) && all)
+    }
+}
+
+/// `bytes` handed to the clipboard (open) as `format`: whether it took them (the clipboard owns them from then; not
+/// taken, they are let go of here).
+unsafe fn hand_over(format: u32, bytes: &[u8]) -> bool {
+    unsafe {
+        let Ok(memory) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return false };
+        let at = GlobalLock(memory);
+        if at.is_null() {
+            let _ = GlobalFree(Some(memory));
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), at.cast::<u8>(), bytes.len());
+        let _ = GlobalUnlock(memory);
+        if SetClipboardData(format, Some(HANDLE(memory.0))).is_ok() {
+            true
+        } else {
+            let _ = GlobalFree(Some(memory));
+            false
+        }
+    }
+}
+
+/// `text` as the clipboard keeps text (`TEXT`): UTF-16, ended by a zero.
+pub fn utf16_z(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
 }
 
 #[cfg(test)]

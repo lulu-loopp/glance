@@ -1,7 +1,7 @@
 //! A box words are written in, written as Windows writes them: its RichEdit text services, windowless.
-//! They take the keys, the input method's words, the selection, undo and
-//! the clipboard; Glance hosts them in a window it draws itself, and they draw their words with Direct2D into what
-//! Glance draws (`ITextServices2::TxDrawD2D`), the caret drawn by Glance where they say it is.
+//! They take the keys, the input method's words, the selection and undo; Glance hosts them in a window it draws itself,
+//! and they draw their words with Direct2D into what Glance draws (`ITextServices2::TxDrawD2D`), the caret drawn by
+//! Glance where they say it is. What is chosen is copied by Glance (see `Editor::copy`).
 //!
 //! Everything here is in the window's physical pixels, as the text services count; the window's thread is a
 //! single-threaded apartment.
@@ -23,6 +23,9 @@ use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetCursor, SetForegroun
 /// The edit control's message asking which character is at a point (winuser.h's `EM_CHARFROMPOS`; the bindings leave it
 /// out): a rich edit box answers with the character's place.
 const EM_CHARFROMPOS: u32 = 0x00D7;
+/// The edit control's message putting words in place of what is chosen (winuser.h's `EM_REPLACESEL`; the bindings leave
+/// it out): its WPARAM whether undo can take it back.
+const EM_REPLACESEL: u32 = 0x00C2;
 /// How far apart the text services set tabs, in the pixels they draw in (their default, half an inch: 720 twips at
 /// 96 pixels an inch, whatever the screen's scale; see `new`).
 pub const TAB_PIXELS: f32 = 48.0;
@@ -82,6 +85,25 @@ enum Typed {
     Nothing,
     Wrote,
     Erased,
+}
+
+/// Whether `message` copies what is chosen (`Some(false)`) or cuts it (`Some(true)`): asked for (`WM_COPY`, `WM_CUT`),
+/// or by its keys, Ctrl+C and Ctrl+Insert, Ctrl+X and Shift+Delete. (See `Editor::copy`.)
+fn copying(message: u32, wparam: WPARAM) -> Option<bool> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY, VK_C, VK_CONTROL, VK_DELETE, VK_INSERT, VK_MENU, VK_SHIFT, VK_X};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_COPY, WM_CUT, WM_KEYDOWN};
+    match message {
+        WM_COPY => return Some(false),
+        WM_CUT => return Some(true),
+        WM_KEYDOWN => {}
+        _ => return None,
+    }
+    let held = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+    match (VIRTUAL_KEY(wparam.0 as u16), held(VK_CONTROL), held(VK_SHIFT), held(VK_MENU)) {
+        (VK_C | VK_INSERT, true, false, false) => Some(false),
+        (VK_X, true, false, false) | (VK_DELETE, false, true, false) => Some(true),
+        _ => None,
+    }
 }
 
 /// The text services' maker, and the interface they are asked for, as msftedit.dll gives them.
@@ -242,6 +264,10 @@ impl Editor {
         use windows::Win32::UI::Input::Ime::GCS_RESULTSTR;
         use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_DELETE};
         use windows::Win32::UI::WindowsAndMessaging::{WM_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN};
+        if let Some(cut) = copying(message, wparam) {
+            self.copy(cut);
+            return Some(LRESULT(0));
+        }
         let now = match message {
             WM_KEYDOWN if wparam.0 == usize::from(VK_BACK.0) || wparam.0 == usize::from(VK_DELETE.0) => Some(Typed::Erased),
             WM_CHAR if wparam.0 >= 0x20 && wparam.0 != 0x7F => Some(Typed::Wrote),
@@ -267,6 +293,52 @@ impl Editor {
             _ => {}
         }
         answer
+    }
+
+    /// What is chosen put on the clipboard as the text services give it out (`EM_STREAMOUT`): its words as they show (what
+    /// is hidden left out), and as rich text (their look kept, for a program that reads it). Cut (`cut`): taken out of
+    /// it then, a step of its own for undo to take back. Nothing chosen, nothing done.
+    ///
+    /// (Not left to the text services: on a thread of the process's multithreaded apartment, as the panel's is (see
+    /// lib.rs), they put on the clipboard only a promise to give their words as they are asked for, kept by the box. Once
+    /// the box was gone (a note on the desktop written in no longer), nothing could be pasted.)
+    pub fn copy(&self, cut: bool) {
+        let (from, to) = self.selection();
+        if from == to {
+            return;
+        }
+        let words: Vec<u16> = self.streamed(SF_TEXT | SF_UNICODE).chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+        // (A line break as Windows' programs read one: a carriage return and a line feed.)
+        let words = String::from_utf16_lossy(&words).replace("\r\n", "\n").replace('\r', "\n").replace('\n', "\r\n");
+        let mut rich = self.streamed(SF_RTF);
+        rich.push(0);
+        let rich_format = unsafe { windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!("Rich Text Format")) };
+        crate::clipboard::put(self.kept.hwnd, &[(crate::clipboard::TEXT, crate::clipboard::utf16_z(&words)), (rich_format, rich)]);
+        if cut {
+            self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+            // (Undone as one: EM_REPLACESEL's WPARAM.)
+            let none = [0u16];
+            self.answer(EM_REPLACESEL, WPARAM(1), LPARAM(none.as_ptr() as isize));
+            self.answer(EM_STOPGROUPTYPING, WPARAM(0), LPARAM(0));
+            self.typed.set(Typed::Nothing);
+            self.kept.changed.set(true);
+        }
+    }
+
+    /// What is chosen as the text services give it out, as `format` says (`EM_STREAMOUT`'s, of what is chosen).
+    fn streamed(&self, format: u32) -> Vec<u8> {
+        unsafe extern "system" fn taken(cookie: usize, bytes: *mut u8, count: i32, done: *mut i32) -> u32 {
+            unsafe {
+                let into = &mut *(cookie as *mut Vec<u8>);
+                into.extend_from_slice(std::slice::from_raw_parts(bytes, count.max(0) as usize));
+                *done = count;
+            }
+            0
+        }
+        let mut out: Vec<u8> = Vec::new();
+        let mut stream = EDITSTREAM { dwCookie: &mut out as *mut Vec<u8> as usize, dwError: 0, pfnCallback: Some(taken) };
+        self.answer(EM_STREAMOUT, WPARAM((format | SFF_SELECTION) as usize), LPARAM(&mut stream as *mut EDITSTREAM as isize));
+        out
     }
 
     /// Whether the input method is composing in it.
