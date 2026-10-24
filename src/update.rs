@@ -527,8 +527,12 @@ fn program_data() -> Option<std::path::PathBuf> {
 
 /// The language the user reads Glance in.
 pub(crate) fn language() -> Lang {
-    let settings = crate::app().settings.lock().unwrap();
-    Lang::resolve(serde_json::from_value::<LanguagePref>(settings.view["language"].clone()).unwrap_or_default())
+    language_in(&crate::app().settings.lock().unwrap().view)
+}
+
+/// The language the user reads Glance in, as `view` (the settings' preferences, held already) says.
+pub(crate) fn language_in(view: &serde_json::Value) -> Lang {
+    Lang::resolve(serde_json::from_value::<LanguagePref>(view["language"].clone()).unwrap_or_default())
 }
 
 /// Where Glance's site is asked for the latest release, with what it is

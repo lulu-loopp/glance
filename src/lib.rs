@@ -560,7 +560,8 @@ pub fn run() {
                 // The network's latency measured while its row is on (in this process: the sensors' has nothing to do
                 // with it), as often as samples are taken.
                 let ping = ui::prefs::module_on(&settings.view, "network") && ui::prefs::item_on_in(&settings.view, "modules", "network", "latency");
-                let to = serde_json::from_value::<ui::prefs::NetworkPrefs>(settings.view["network"].clone()).unwrap_or_default().ping_to(update::language());
+                let to = serde_json::from_value::<ui::prefs::NetworkPrefs>(settings.view["network"].clone()).unwrap_or_default().ping_to(update::language_in(&settings.view));
+                // (Not `update::language`, which takes the settings held here: this thread, and all that wait on them, stopped.)
                 latency::want(ping.then_some(to), settings.interval());
                 link::Want {
                     interval_ms: settings.interval().as_millis() as u32,
