@@ -467,6 +467,16 @@ pub(crate) enum Ground {
 /// The desktop the panel had taken, lent to a widget torn off it: its
 /// capture (without its pixels), as a bitmap at the scale it was made for,
 /// and its tone.
+/// A note pulled off the panel (see `Widgets::stick_note_held`): its file's name, where it is put (its corner) and where
+/// the hand holds it, as large as its card was (physical px), and where the panel is (let go over it, it is not stuck).
+pub struct NotePulled {
+    pub name: String,
+    pub at: POINT,
+    pub grab: POINT,
+    pub card: (i32, i32),
+    pub over: RECT,
+}
+
 pub struct Lent {
     pub capture: Capture,
     pub bitmap: (ID2D1Bitmap1, f32),
@@ -551,6 +561,8 @@ struct Widget {
     /// Let go after it was sized or stuck: since when, and from what
     /// surface (DIPs), it settles onto what it shows.
     settle: Option<(Instant, (f32, f32))>,
+    /// A note pulled off the panel, in hand still: where the panel is (let go over it, it goes back: see `release`).
+    pulled_over: Option<RECT>,
     /// The sides of its surface what it shows keeps to (right, bottom).
     keeps_to: (bool, bool),
     drag: Option<Drag>,
@@ -1585,8 +1597,9 @@ impl Widgets {
     /// The note `name` pulled off the panel (or its page) onto the desktop: stuck there with its corner at `at`, in
     /// hand, the pointer `grab` from its corner, to be put down where it is let go. Where it is stuck already, that one
     /// raised instead (a note is never on the desktop twice); whether one was made.
-    pub fn stick_note_held(&mut self, name: &str, at: POINT, grab: POINT) -> bool {
-        if self.raise_note(name) {
+    pub fn stick_note_held(&mut self, pulled: NotePulled) -> bool {
+        let NotePulled { name, at, grab, card, over } = pulled;
+        if self.raise_note(&name) {
             return false;
         }
         let Some(contact) = monitor_at(at) else { return false };
@@ -1595,7 +1608,12 @@ impl Widgets {
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
+        // Lifted off its card: as large as that was, growing to a note's size in hand, over the panel.
+        let from = (card.0 as f32 / contact.scale, card.1 as f32 / contact.scale);
+        (widget.surface_size, widget.settle, widget.pulled_over) = (from, Some((Instant::now(), from)), Some(over));
         widget.window.yield_to(self.settings);
+        widget.window.lift(true);
+        widget.window.raise();
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
         self.save();
@@ -1961,6 +1979,12 @@ impl Widgets {
         widget.next_frame = now;
         match widget.release(now, cancelled) {
             Released::Closed => self.put_away_at(index),
+            Released::Back => {
+                let mut widget = self.list.remove(index);
+                note("widget: a note pulled off the panel let go over it, not stuck");
+                widget.gone();
+                widget.window.destroy();
+            }
             Released::Changed => {}
             Released::Settings(place) => {
                 // (What its button said goes with the settings coming.)
@@ -2549,6 +2573,8 @@ enum Released {
     Full,
     /// One of its station's head's buttons pressed: its menu asked for.
     Menu(view::Hit),
+    /// A note pulled off the panel let go over it: gone back to it, not stuck.
+    Back,
 }
 
 enum Frame {
@@ -2890,6 +2916,7 @@ impl Widget {
             at,
             room: None,
             settle: None,
+            pulled_over: None,
             keeps_to: (false, false),
             drag: None,
             fling: None,
@@ -3590,6 +3617,12 @@ impl Widget {
             Drag::Move { trail, torn, moved, .. } => {
                 if !moved && cancelled {
                     return Released::Nothing;
+                }
+                // A note pulled off the panel let go over it again: not stuck.
+                if let Some(over) = self.pulled_over.take() {
+                    if cursor_position().is_some_and(|cursor| crate::panel::contains(&over, cursor)) {
+                        return Released::Back;
+                    }
                 }
                 if !moved {
                     // A press let go where it was: a button, if it was on one.

@@ -1021,15 +1021,15 @@ impl Controller {
                 // goes as it is followed (see `Panel::follow_press`).
                 WM_MOUSEMOVE if owner.is_some_and(|at| panels[at].pressed_to_pull()) => {
                     let panel = &mut panels[owner.unwrap()];
-                    if let Some((name, at, grab)) = panel.follow_press() {
-                        widgets.stick_note_held(&name, at, grab);
+                    if let Some(pulled) = panel.follow_press() {
+                        widgets.stick_note_held(pulled);
                     }
                     panel.hover_at(lparam_point(msg.lParam));
                 }
                 // (After a press ended otherwise, let go over the panel: no longer followed.)
                 WM_TIMER if msg.wParam.0 == crate::overlay::FOLLOW_TIMER && owner.is_some_and(|at| !panels[at].held()) => {
-                    if let Some((name, at, grab)) = panels[owner.unwrap()].follow_press() {
-                        widgets.stick_note_held(&name, at, grab);
+                    if let Some(pulled) = panels[owner.unwrap()].follow_press() {
+                        widgets.stick_note_held(pulled);
                     }
                 }
                 crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].note_press.is_some()) => panels[owner.unwrap()].note_press = None,
@@ -2011,9 +2011,9 @@ struct Panel<'a> {
     pointer: Option<POINT>,
     /// Pressed since the settings last came in front: over them, in use (see the frame loop).
     forward: bool,
-    /// A note pressed (by its file's name), and where the pointer was: pulled off the panel, it is stuck on the
-    /// desktop under the hand; let go on it, it is opened beside.
-    note_press: Option<(String, POINT)>,
+    /// A note pressed (by its file's name), where the pointer was, and where its card is (physical px on the screen):
+    /// pulled, it is stuck on the desktop under the hand, lifted off its card; let go on it, it is opened beside.
+    note_press: Option<(String, POINT, RECT)>,
     /// One held so and moved: the place among them it would go to (the one the pointer was last over), and where
     /// the pointer has it (DIPs from the panel's corner).
     app_over: Option<u16>,
@@ -2892,8 +2892,8 @@ impl<'a> Panel<'a> {
         }
         // On a note: pulled off, stuck on the desktop; else opened as it is let go (see `note_press`).
         if let (Some(Hit::Note(number)), Some(from)) = (self.hit_at(client), cursor_position()) {
-            if let Some(name) = crate::notes::named(number) {
-                self.note_press = Some((name, from));
+            if let (Some(name), Some(card)) = (crate::notes::named(number), self.hit_on_screen(Hit::Note(number))) {
+                self.note_press = Some((name, from, card));
                 self.follow_pointer();
             }
             return;
@@ -2954,8 +2954,8 @@ impl<'a> Panel<'a> {
 
     /// The pointer followed with a thing on its station or a note pressed (see `follow_pointer`): let go where the
     /// panel was not told (past its edge), nothing pressed; far enough, the thing dragged off, or the note pulled off
-    /// the panel: its name, where it is to be stuck on the desktop under the hand, and where the hand holds it.
-    fn follow_press(&mut self) -> Option<(String, POINT, POINT)> {
+    /// the panel (see `note_pulled`).
+    fn follow_press(&mut self) -> Option<crate::widget::NotePulled> {
         if !buttons_down() {
             self.shelf_press = None;
             self.note_press = None;
@@ -2973,19 +2973,28 @@ impl<'a> Panel<'a> {
         pulled
     }
 
-    /// A note pressed and pulled off the panel, far enough: stuck on the desktop under the hand (the panel stays). Its
-    /// name, where it is put, where the hand holds it.
-    fn note_pulled(&mut self) -> Option<(String, POINT, POINT)> {
+    /// A note pressed and pulled, far enough (over the panel or past it): lifted off its card, to be stuck on the
+    /// desktop under the hand (the panel stays): from where its card is, held where the card was pressed, gone as far
+    /// as the hand went.
+    fn note_pulled(&mut self) -> Option<crate::widget::NotePulled> {
         let (cursor, placement) = (cursor_position()?, self.placement.as_ref()?);
-        let off = !contains(&placement.panel, cursor);
-        let pulled = self.note_press.as_ref().is_some_and(|(_, from)| crate::station::run::drag_begins(*from, cursor));
-        if !(off && pulled) {
+        let pulled = self.note_press.as_ref().is_some_and(|(_, from, _)| crate::station::run::drag_begins(*from, cursor));
+        if !pulled {
             return None;
         }
-        let (name, _) = self.note_press.take()?;
-        // (Held by its head, near its corner, as a note's card is taken.)
-        let grab = POINT { x: (40.0 * placement.px) as i32, y: (20.0 * placement.px) as i32 };
-        Some((name, POINT { x: cursor.x - grab.x, y: cursor.y - grab.y }, grab))
+        let (name, from, card) = self.note_press.take()?;
+        let grab = POINT { x: from.x - card.left, y: from.y - card.top };
+        let at = POINT { x: cursor.x - grab.x, y: cursor.y - grab.y };
+        Some(crate::widget::NotePulled { name, at, grab, card: (card.right - card.left, card.bottom - card.top), over: placement.panel })
+    }
+
+    /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
+    fn hit_on_screen(&self, hit: Hit) -> Option<RECT> {
+        let placement = self.placement.as_ref()?;
+        let (px, window) = (placement.px, placement.window);
+        let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
+        let (x, y, w, h, _) = self.hits.iter().find(|(.., at)| *at == hit)?;
+        Some(RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
     }
 
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
@@ -4282,7 +4291,7 @@ pub fn work_area_at_cursor() -> Option<(RECT, f64)> {
     Some((contact.work, contact.scale as f64))
 }
 
-fn contains(rect: &RECT, point: POINT) -> bool {
+pub(crate) fn contains(rect: &RECT, point: POINT) -> bool {
     (rect.left..rect.right).contains(&point.x) && (rect.top..rect.bottom).contains(&point.y)
 }
 
