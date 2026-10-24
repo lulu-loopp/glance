@@ -491,15 +491,15 @@ struct Pulled {
 /// How a note pulled off the panel turns between its card and a note, and how it goes back to the panel (stiffness,
 /// damping: see `Spring`; the first a little past, as it comes, about a quarter of a second).
 const CARD_TO_NOTE: (f32, f32) = (260.0, 26.0);
-const GOING_BACK: (f32, f32) = (220.0, 28.0);
+pub(crate) const GOING_BACK: (f32, f32) = (220.0, 28.0);
 /// How a note is lifted in hand and put down, and how it leans as it is moved across (degrees, the most; and per
 /// DIP a millisecond across), pulled off the panel or moved on the desktop.
-const LIFTING: (f32, f32) = (500.0, 40.0);
-const LEANING: (f32, f32) = (300.0, 22.0);
-const LEAN_PULLED: (f32, f32) = (4.0, 6.0);
+pub(crate) const LIFTING: (f32, f32) = (500.0, 40.0);
+pub(crate) const LEANING: (f32, f32) = (300.0, 22.0);
+pub(crate) const LEAN_PULLED: (f32, f32) = (4.0, 6.0);
 const LEAN_MOVED: (f32, f32) = (2.0, 3.0);
 /// How much larger a note lifted in hand is drawn.
-const LIFTED_BY: f32 = 0.04;
+pub(crate) const LIFTED_BY: f32 = 0.04;
 /// How fast a note asked for while it is on the desktop already is lifted for a moment (see `Widgets::raise_note`).
 const NUDGE: f32 = 36.0;
 
@@ -520,13 +520,13 @@ impl Pulled {
 }
 
 /// How long back the hand's moves tell how fast a note in hand goes across (see `Widget::carry`).
-const LEAN_SPAN: Duration = Duration::from_millis(60);
+pub(crate) const LEAN_SPAN: Duration = Duration::from_millis(60);
 
 /// The shadow under a note lifted (see `Widget::lift`): how blurred (a deviation, DIPs), how far it drops, how dark.
-struct Lifted {
-    blur: f32,
-    drop: f32,
-    dark: f32,
+pub(crate) struct Lifted {
+    pub blur: f32,
+    pub drop: f32,
+    pub dark: f32,
 }
 
 impl Lifted {
@@ -537,7 +537,7 @@ impl Lifted {
 }
 
 /// The shadow under a note lifted `lift` of the way: deeper and further down the higher it is.
-fn lifted_shadow(lift: f32) -> Lifted {
+pub(crate) fn lifted_shadow(lift: f32) -> Lifted {
     let lift = lift.clamp(0.0, 1.2);
     Lifted { blur: 4.0 + 10.0 * lift, drop: 2.0 + 8.0 * lift, dark: 0.28 * lift.min(1.0) }
 }
@@ -553,7 +553,7 @@ fn drawn_in(frame: &gfx::Frame, local: Matrix3x2, draw: impl FnOnce()) {
 }
 
 /// What `draw` draws, seen through as much as `opacity` says (1: as it is).
-fn faded(frame: &gfx::Frame, opacity: f32, draw: impl FnOnce()) {
+pub(crate) fn faded(frame: &gfx::Frame, opacity: f32, draw: impl FnOnce()) {
     if opacity >= 1.0 {
         draw();
         return;
@@ -768,6 +768,9 @@ struct Widget {
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough, else pressed
     /// as it is let go (see `Widgets::hover`, `Widgets::release`).
     shelf_press: Option<(view::Hit, POINT)>,
+    /// A thing on its station dragged off it, to be lifted off its room as it is next drawn (see `carry`): it, the
+    /// drag's number, and where it was pressed.
+    lifting: Option<(view::Hit, u64, POINT)>,
     /// The pages under a press (the list turned by them, how far it turns, a page's width) and when it was pressed:
     /// swiped across, the hand going across them first (see `begin_swipe`).
     swipes: Option<(view::List, f32, f32, Instant)>,
@@ -1107,8 +1110,11 @@ impl Merged {
 /// of the one dropped onto under all of it (the skin's, or what plays' own), each part in its place on it in that
 /// one's type and ink (moving there from where it was, merged or torn apart just now). Where a press does something
 /// in each, from its corner; whether all of it was drawn.
+///
+/// A thing on a station's lane in it lifted off its room (`lifting`: it, and where its room is, from its corner): what
+/// it draws recorded into `lifted` from its room's corner (see `carry`), its room left to be drawn empty.
 #[allow(clippy::too_many_arguments)]
-fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant) -> (Vec<view::HitBox>, bool) {
+fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(view::Hit, (f32, f32))>, lifted: &mut Option<Vec<Part>>) -> (Vec<view::HitBox>, bool) {
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
@@ -1172,6 +1178,12 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 // onto the frame each frame, alike.)
                 frame.place(Matrix3x2::scale(z, z) * Matrix3x2::translation(rx, ry) * shift * local);
                 let halo = (theme.skin == Skin::Glass && !host_plays).then_some(theme.legibility);
+                if let Some((hit, (hx, hy))) = lifting.filter(|_| lifted.is_none()) {
+                    *lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, z, (rx - hx, ry - hy), hit)).filter(|parts| !parts.is_empty());
+                    if lifted.is_some() {
+                        view::carry_tile(Some(hit));
+                    }
+                }
                 let keep = |old: &Shown| (old.zoom / z, (0.0, 0.0));
                 let (drawn, drawn_whole) = paint_readings(frame, readings, scene, &picture, &keep, Matrix3x2::identity(), px * z, halo, (!host_plays).then_some(&[][..]), now);
                 whole &= drawn_whole;
@@ -1229,6 +1241,13 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
 fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, picture: &render::Picture, placed: &dyn Fn(&Shown) -> (f32, (f32, f32)), local: Matrix3x2, px: f32, halo: Option<Color>, others: Option<&[view::Rect]>, now: Instant) -> (Option<Vec<view::HitBox>>, bool) {
     let Some(shown) = readings.last.clone() else { return (None, true) };
     let mut whole = true;
+    // A thing carried off its station put down and taken off it: turning from how they were drawn as it was carried
+    // (its room outlined) into how they are drawn now.
+    if let Some(from) = readings.away.follow(|| render::record(frame, scene, picture.lanes, &shown.layout, picture.small, 1.0, picture.at)) {
+        if readings.morph.is_none() {
+            readings.morph = Some((now, Before::Drawn(from)));
+        }
+    }
     let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
     let old = match &readings.morph {
         Some((_, Before::Shown(old))) => Some((view::lanes_at(scene, |_| old.detail), placed(old), old.clone())),
@@ -1288,6 +1307,8 @@ struct Readings {
     morph: Option<(Instant, Before)>,
     drawn: Vec<Part>,
     morph_layer: Layer,
+    /// What it drew as a thing was carried off its station (see `render::Away`).
+    away: render::Away,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
@@ -1307,7 +1328,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default() }
     }
 
     /// What it shows, as the settings keep it.
@@ -1931,7 +1952,10 @@ impl Widgets {
                     return;
                 }
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-                crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
+                if let Some(drag) = crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+                    widget.lifting = Some((hit, drag, from));
+                    widget.next_frame = Instant::now();
+                }
             }
             return;
         }
@@ -2383,6 +2407,11 @@ impl Widgets {
     }
 
     /// Follows the pointer, draws what is due, and says when next to.
+    /// The thing on a station pressed on any of them, to be dragged off it (see `Widget::shelf_press`).
+    pub fn shelf_pressed(&self) -> Option<view::Hit> {
+        self.list.iter().find_map(|widget| widget.shelf_press.map(|(hit, _)| hit))
+    }
+
     /// Each drawn at its next turn, not after its rest (what it shows has changed).
     pub fn draw_soon(&mut self) {
         let now = Instant::now();
@@ -3098,6 +3127,7 @@ impl Widget {
             hits: Vec::new(),
             hits_from: (0.0, 0.0),
             shelf_press: None,
+            lifting: None,
             swipes: None,
             drawn_look: (Skin::Paper, false),
             behind: None,
@@ -4595,7 +4625,14 @@ impl Widget {
         }
         // (The lyrics gliding to the next line are drawn every frame too, and the glass easing to how frosted it is.)
         let easing = self.frost_shown.is_some_and(|(shown, target, _)| shown != target);
-        if moving || easing || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
+        // (And its readings turning from as they were as a thing was carried off its station, begun as they are drawn:
+        // see `render::Away`.)
+        let turning = match &self.content {
+            Content::Readings(readings) => readings.morph.is_some(),
+            Content::Merged(merged) => merged.busy(),
+            _ => false,
+        };
+        if moving || easing || turning || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
     }
 
     /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it
@@ -4671,6 +4708,9 @@ impl Widget {
         let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
         // A note written in where it is: its card where it was last drawn, should none be drawn now.
         let was_card = self.in_place.as_ref().and_then(|in_place| card_in(&self.hits, self.hits_from, in_place.number, margin));
+        // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
+        let lifting = self.lifting.take().and_then(|(hit, drag, from)| self.hits.iter().find(|one| one.4 == hit).map(|&(hx, hy, ..)| (hit, drag, from, (hx, hy))));
+        let mut lifted = None;
         let in_place = self.in_place.as_mut();
         let mut card_gone = false;
         let behind = &mut self.behind;
@@ -4716,6 +4756,12 @@ impl Widget {
                     });
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
+                    if let Some((hit, _, _, (hx, hy))) = lifting {
+                        lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (-hx, -hy), hit)).filter(|parts| !parts.is_empty());
+                        if lifted.is_some() {
+                            view::carry_tile(Some(hit));
+                        }
+                    }
                     // Carried: its shadow lifted with it, and pulled off the panel, its card turning into the note over it
                     // (its card seen till it is half a note, the note from nothing to whole by then).
                     let mut page = 1.0;
@@ -4781,7 +4827,7 @@ impl Widget {
                         Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
                     });
                     let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
-                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now);
+                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.map(|(hit, _, _, at)| (hit, at)), &mut lifted);
                     whole &= drawn_whole;
                     pressed = Some((hits, (0.0, 0.0)));
                 }
@@ -4852,6 +4898,14 @@ impl Widget {
         if let Some((hits, from)) = pressed {
             (self.hits, self.hits_from) = (hits, from);
             self.show_stations();
+        }
+        if let (Some((hit, drag, from, _)), Some(parts)) = (lifting, lifted) {
+            if let Some(&(hx, hy, hw, hh, _)) = self.hits.iter().find(|one| one.4 == hit) {
+                // (Its surface's corner is at `at`; the window's margin is before it.)
+                let at = POINT { x: (self.at.x as f32 + (self.hits_from.0 + hx) * px).round() as i32, y: (self.at.y as f32 + (self.hits_from.1 + hy) * px).round() as i32 };
+                let lifted = crate::carry::Lifted { hit, drag, parts, size: (hw, hh), at, from, px, over: self.rect(), window: self.window.hwnd, look: self.menu_look() };
+                crate::carry::begin(&self.gfx, lifted);
+            }
         }
         // (Not drawn: drawn again on its surface; the device gone, on one made anew on the next.)
         if let Err(error) = &drawn {

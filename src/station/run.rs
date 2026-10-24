@@ -436,7 +436,10 @@ fn drag_off() {
             }
         })
     });
-    let Some((id, content, stays_here, held)) = given else { return };
+    let Some((id, content, stays_here, held)) = given else {
+        super::drag::ended(super::drag::Dragged::Not);
+        return;
+    };
     let dragged = super::drag::drag(&content, stays_here, thread);
     with_station(|station| {
         for name in &held {
@@ -448,6 +451,8 @@ fn drag_off() {
         }
         station.show();
     });
+    // (Said once it is shown as it is after: taken off it, it is gone as it is put down, see `carry`.)
+    super::drag::ended(dragged.unwrap_or(super::drag::Dragged::Not));
 }
 
 /// Where a drag off a station begun at `from` is at `now` (screen px): whether it has gone far enough to be one (the

@@ -117,18 +117,17 @@ pub fn chose(id: u64, choice: Choice) {
 
 /// What a thing pressed on a station's lane and moved far enough (see `run::drag_begins`) drags off: a thing on it, or
 /// copied lately, as the station gives it, or a file come lately (or files come together), where it is (pressed on a
-/// window of the thread numbered `thread`). Whether it was one dragged.
-pub fn drag_off(hit: crate::ui::view::Hit, thread: u32) -> bool {
+/// window of the thread numbered `thread`). The drag's number, as it is followed (see `drag::going`), where it is one.
+pub fn drag_off(hit: crate::ui::view::Hit, thread: u32) -> Option<u64> {
     use crate::ui::view::Hit;
-    match hit {
-        Hit::Shelf(id) | Hit::Copied(id) => run::ask(run::Ask::DragOut(id, thread)),
-        Hit::Recent(entry) => match recent::paths_of(entry) {
-            Some(paths) => run::ask(run::Ask::DragFiles(paths, thread)),
-            None => return false,
-        },
-        _ => return false,
-    }
-    true
+    let ask = match hit {
+        Hit::Shelf(id) | Hit::Copied(id) => run::Ask::DragOut(id, thread),
+        Hit::Recent(entry) => run::Ask::DragFiles(recent::paths_of(entry)?, thread),
+        _ => return None,
+    };
+    let drag = drag::announce();
+    run::ask(ask);
+    Some(drag)
 }
 
 /// What a file come lately's menu does: opens it, shows it in Explorer, puts it on the station, copies its path, lists

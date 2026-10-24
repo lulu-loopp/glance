@@ -33,23 +33,30 @@ pub enum Dragged {
 /// The most of a file with no path of its own read as it is dropped (bytes): more is not what the station is for.
 const NAMELESS_MOST: u64 = 256 << 20;
 
-/// A station window's drop target: tells `told` what happens to a drag over it.
+/// A station window's drop target: tells `told` what happens to a drag over it. One the station's own drags are
+/// dragged over (`own` false: the station's) takes none of them back: one put back where it was came on it twice.
 #[implement(IDropTarget)]
 pub struct Target {
     told: Box<dyn Fn(Dragged)>,
+    own: bool,
     /// What came over it is something it takes.
     takes: std::cell::Cell<bool>,
 }
 
 impl Target {
     pub fn new(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: true, takes: std::cell::Cell::new(false) }.into()
+    }
+
+    /// One that takes nothing dragged off the station (see `Target`).
+    pub fn not_own(told: impl Fn(Dragged) + 'static) -> IDropTarget {
+        Target { told: Box::new(told), own: false, takes: std::cell::Cell::new(false) }.into()
     }
 }
 
 impl IDropTarget_Impl for Target_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, at: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let takes = data.as_ref().is_some_and(takes);
+        let takes = data.as_ref().is_some_and(takes) && (self.own || !super::drag::under_way());
         self.takes.set(takes);
         self.answer(at, effect);
         Ok(())

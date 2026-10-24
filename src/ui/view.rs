@@ -739,6 +739,101 @@ fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, 
 /// How large a note's card pressed to be pulled off the panel is drawn, of its box.
 const PRESSED_IN: f32 = 0.97;
 
+/// A thing on a station's lane (a thing on it, copied lately, a file come lately) as it is held to be dragged off it:
+/// pressed; carried off it by Glance (see `carry`), its room outlined; put back in it, springing back to its size
+/// from a little smaller (since when). One at a time, as the pointer holds one.
+static PRESSED_TILE: std::sync::Mutex<Option<Hit>> = std::sync::Mutex::new(None);
+static AWAY_TILE: std::sync::Mutex<Option<Hit>> = std::sync::Mutex::new(None);
+static LANDED_TILE: std::sync::Mutex<Option<(Hit, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// How a thing put back in its room springs back to its size (stiffness, damping: see `Spring`; a little past it as
+/// it comes, about a third of a second), from how large, and how long it is drawn on for.
+const LANDING: (f32, f32) = (400.0, 16.0);
+const LANDED_FROM: f32 = 0.94;
+const LANDED_FOR: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// How many times how a thing on a station's lane is held has changed: what shows one is drawn again as it does.
+static TILE_CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times how a thing on a station's lane is held has changed (see `TILE_CHANGES`).
+pub fn tile_changes() -> u64 {
+    TILE_CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn tile_changed(changed: bool) -> bool {
+    if changed {
+        TILE_CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    changed
+}
+
+/// The thing on a station's lane pressed to be dragged off it, or none; whether that changed.
+pub fn press_tile(hit: Option<Hit>) -> bool {
+    tile_changed(std::mem::replace(&mut *PRESSED_TILE.lock().unwrap(), hit) != hit)
+}
+
+/// The thing carried off a station's lane, or none (put back as it is said so: see `land_tile`); whether that changed.
+pub fn carry_tile(hit: Option<Hit>) -> bool {
+    tile_changed(std::mem::replace(&mut *AWAY_TILE.lock().unwrap(), hit) != hit)
+}
+
+/// The thing carried off a station's lane put back in its room at `at`: no longer carried, springing back to its size.
+pub fn land_tile(hit: Hit, at: std::time::Instant) {
+    carry_tile(None);
+    *LANDED_TILE.lock().unwrap() = Some((hit, at));
+    tile_changed(true);
+}
+
+/// Whether a thing put back on a station's lane is springing back to its size still (what shows it is drawn on).
+pub fn tile_landing() -> bool {
+    LANDED_TILE.lock().unwrap().is_some_and(|(_, at)| at.elapsed() < LANDED_FOR)
+}
+
+/// How the things on a station's lane are held as they are drawn now: what was drawn of them serves again while it is
+/// the same (see `render::PanelLayers::draw_on`), drawn anew as one is held otherwise and as one springs back.
+pub fn tiles_drawn() -> (u64, Option<std::time::Duration>) {
+    let landed = *LANDED_TILE.lock().unwrap();
+    (tile_changes(), landed.map(|(_, at)| at.elapsed()).filter(|since| *since < LANDED_FOR))
+}
+
+/// Held by a test that holds a thing on a station's lane: one at a time, as the pointer holds one.
+#[cfg(test)]
+pub static HOLDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The thing carried off a station's lane, if one is.
+pub fn away_tile() -> Option<Hit> {
+    *AWAY_TILE.lock().unwrap()
+}
+
+/// How the thing on a station's lane pressed as `hit` is held to be dragged off it.
+fn tile_held(hit: Hit) -> Held {
+    if *AWAY_TILE.lock().unwrap() == Some(hit) {
+        Held::Away
+    } else if *PRESSED_TILE.lock().unwrap() == Some(hit) {
+        Held::Pressed
+    } else {
+        Held::Not
+    }
+}
+
+/// The box a thing on a station's lane (pressed as `hit`) draws its picture in, of `face`: pressed, drawn in a little;
+/// put back lately, as large as it has sprung back to by now, about its middle.
+fn tile_face(hit: Hit, face: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = face;
+    let k = match (tile_held(hit), *LANDED_TILE.lock().unwrap()) {
+        (Held::Pressed, _) => PRESSED_IN,
+        (_, Some((landed, at))) if landed == hit && at.elapsed() < LANDED_FOR => {
+            let mut spring = crate::ui::motion::Spring::at(LANDED_FROM, LANDING.0, LANDING.1);
+            spring.target = 1.0;
+            spring.step(at.elapsed().as_secs_f32());
+            spring.value
+        }
+        _ => 1.0,
+    };
+    let (dx, dy) = (w * (1.0 - k) / 2.0, h * (1.0 - k) / 2.0);
+    (x + dx, y + dy, w - 2.0 * dx, h - 2.0 * dy)
+}
+
 /// A note stuck on the desktop as its page shows it (see `ui::note::paint_stuck`): its number (as a press on it names
 /// it), its words, its colour, how long ago it was written, its file's name, and whether it is written in where it is
 /// (see `written_in_place`).
@@ -4245,18 +4340,35 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             continue;
         }
         let pressed = hit(tile, at);
-        // (Named, each, that it moves from where it was as they flow anew: see `morph`.)
+        // (Named, each, that it moves from where it was as they flow anew: see `morph`; and that what is carried off
+        // the lane is drawn as it is here, see `carry`.)
         frame.key(&format!("tile.{pressed:?}"));
-        let lit = scene.hover == Some(pressed);
+        let held = tile_held(pressed);
+        let lit = scene.hover == Some(pressed) && held != Held::Away;
         let words = if lit { theme.text } else { theme.text2 };
         let copied = scene.thumbs.copied(pressed);
+        // Carried off it: the room it left, outlined (its picture's, or as a row, the row's), nothing of it there.
+        if held == Held::Away {
+            let room = match shows {
+                Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
+                    let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
+                    (x, y, place.w, plate, face_round(theme, place.w.min(plate)))
+                }
+                Shows::Row => (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE, face_round(theme, TILE_PICTURE)),
+                Shows::View(ShelfView::List) => (x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0)),
+            };
+            held_room(frame, theme, Held::Away, (room.0, room.1, room.2, room.3), room.4);
+            hits.extend(shown_in((x, y, place.w, place.h, pressed), (left - 4.0, top, width + 8.0, tall)));
+            continue;
+        }
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, plate_round(theme, face_round(theme, place.w.min(plate)), 4.0));
                 }
-                paint_face(frame, theme, ink, tile, x, y, place.w, plate, pixels_for(view));
+                let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, pixels_for(view));
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
@@ -4268,8 +4380,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 if lit {
                     frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
                 }
-                let px = x + (TILE_W - TILE_PICTURE) / 2.0;
-                paint_face(frame, theme, ink, tile, px, y, TILE_PICTURE, TILE_PICTURE, TILE_PIXELS);
+                let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, TILE_PIXELS);
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
@@ -4279,8 +4391,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 if lit {
                     frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
                 }
-                let py = y + (LIST_ROW - LIST_PICTURE) / 2.0;
-                paint_face(frame, theme, ink, tile, x, py, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
+                let (fx, fy, fw, fh) = tile_face(pressed, (x, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, TILE_PIXELS);
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
                 let shown = fitted(frame, &tile.label, theme.body, room);
                 frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
@@ -4372,12 +4484,24 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         if y + LIST_ROW < list_top || y > list_top + list_tall {
             continue;
         }
-        let lit = scene.hover == Some(Hit::Recent(row.entry));
+        let pressed = Hit::Recent(row.entry);
+        // (Named, as a thing on the station is: see `paint_tiles`.)
+        frame.key(&format!("tile.{pressed:?}"));
+        let held = tile_held(pressed);
+        let round = plate_round(theme, face_round(theme, LIST_PICTURE), 4.0);
+        // Carried off it: the row it left, outlined.
+        if held == Held::Away {
+            held_room(frame, theme, Held::Away, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round);
+            hits.extend(shown_in((left, y, width, LIST_ROW, pressed), (left - 4.0, list_top, width + 8.0, list_tall)));
+            continue;
+        }
+        let lit = scene.hover == Some(pressed);
         if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
+            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, round);
         }
         let face = row.tile();
-        paint_face(frame, theme, ink, &face, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
+        let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
+        paint_face(frame, theme, ink, &face, fx, fy, fw, fh, TILE_PIXELS);
         let when_w = frame.measure(&row.when, theme.small);
         let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
         let shown = fitted(frame, &row.label, theme.body, room);
@@ -4388,6 +4512,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.entry)), (left - 4.0, list_top, width + 8.0, list_tall)));
         name_shown(hits, Hit::Recent(row.entry), &row.label, &shown);
     }
+    frame.key("");
     frame.unclip();
     // (After its rows: a press finds a row before the list it is on.)
     if most > 0.0 {
@@ -6935,6 +7060,60 @@ six".into()));
             let past = (10.0 - whole.0).max(20.0 - whole.1).max(whole.2 - 180.0).max(whole.3 - 124.0).max(0.0) + 0.01;
             assert!(pressed.0 >= 10.0 + dx - past && pressed.1 >= 20.0 + dy - past && pressed.2 <= 180.0 - dx + past && pressed.3 <= 124.0 - dy + past, "{what}: {pressed:?} in {whole:?}");
         }
+    }
+
+    /// A thing on the station held to be dragged off it: carried off, its room is outlined, nothing of it written, still
+    /// there to press; pressed, its picture is drawn in a little; put back, it springs back from smaller to its size. A
+    /// file come lately alike, carried off its row.
+    #[test]
+    fn a_thing_on_the_station_is_drawn_as_it_is_held() {
+        let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let theme = Theme::new(Skin::Paper, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let ink = theme.ink("station");
+        // (Its own number: none other drawn meanwhile is held so.)
+        let id = 0x5EED_0001;
+        let hit = Hit::Shelf(id);
+        let tiles = [Tile { id, label: "Held".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let drawn = || {
+            let (reach, mut hits) = (Reach::default(), Vec::new());
+            paint_shelf(&reach, &scene, ink, (0.0, 0.0, 324.0), &tiles, Shows::View(ShelfView::Cards), STATION_TALL, None, false, &mut hits);
+            (reach.reach.get().unwrap(), reach.said.take(), hits.iter().any(|one| one.4 == hit))
+        };
+        let (whole, said, pressed_there) = drawn();
+        assert!(said.contains(&"Held".to_string()) && pressed_there, "{said:?}");
+        carry_tile(Some(hit));
+        let (away, said, pressed_there) = drawn();
+        carry_tile(None);
+        assert!(!said.contains(&"Held".to_string()) && pressed_there, "{said:?}");
+        assert!((away.0 - whole.0).abs() < 1.0 && (away.1 - whole.1).abs() < 1.0, "{away:?} of {whole:?}");
+        press_tile(Some(hit));
+        let (pressed, ..) = drawn();
+        press_tile(None);
+        let plate = (324.0 - SHELF_GAP * 2.0) / 3.0 * PLATE;
+        assert!(pressed.1 > whole.1 + plate * (1.0 - PRESSED_IN) / 2.0 * 0.5 && pressed.0 > whole.0, "{pressed:?} of {whole:?}");
+        land_tile(hit, std::time::Instant::now());
+        let (landed, ..) = drawn();
+        assert!(landed.1 > whole.1 + plate * (1.0 - LANDED_FROM) / 2.0 * 0.5, "{landed:?} of {whole:?}");
+        land_tile(hit, std::time::Instant::now() - LANDED_FOR);
+        let (rested, ..) = drawn();
+        assert_eq!(rested, whole);
+        // A file come lately, carried off its row.
+        let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'Q', file: id as u128 });
+        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }];
+        let lately = || {
+            let (reach, mut hits) = (Reach::default(), Vec::new());
+            paint_recent(&reach, &scene, ink, (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut hits);
+            (reach.said.take(), hits.iter().any(|one| one.4 == Hit::Recent(entry)))
+        };
+        assert!(lately().0.contains(&"Lately".to_string()));
+        carry_tile(Some(Hit::Recent(entry)));
+        let (said, pressed_there) = lately();
+        carry_tile(None);
+        assert!(!said.contains(&"Lately".to_string()) && pressed_there, "{said:?}");
     }
 
     /// A lane given more room than its blocks take (its column taller): the notes' list at its foot goes down to the

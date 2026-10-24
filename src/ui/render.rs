@@ -152,6 +152,8 @@ impl PanelLayers {
         scene.prefs.hash_drawn(&mut key);
         // (What plays and how loud change between samples: as they are pressed.)
         crate::playing::stamp().hash(&mut key);
+        // (A thing on a station's lane pressed, carried off it, springing back as it is put back.)
+        view::tiles_drawn().hash(&mut key);
         if let Some((small, drawn)) = picture.small {
             (small, drawn.0.to_bits(), drawn.1.to_bits()).hash(&mut key);
         }
@@ -202,4 +204,70 @@ pub fn record(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout
         }
     }
     recorder.parts()
+}
+
+/// What shows a station's lane, as a thing is carried off it (see `carry`): what it drew meanwhile, kept, and the thing.
+#[derive(Default)]
+pub struct Away(Option<(view::Hit, Vec<Part>)>);
+
+impl Away {
+    /// What it draws now recorded by `record` (as it turns, see `morph`): kept while a thing is carried off the lane
+    /// in it; that thing put down and gone from it (taken off the station, as its settings may say), what it drew
+    /// while it was carried, for it to turn from into what it draws now (the room left closing, the rest moving up).
+    pub fn follow(&mut self, record: impl Fn() -> Vec<Part>) -> Option<Vec<Part>> {
+        let drawn = |parts: &[Part], hit: view::Hit| {
+            let key = format!("tile.{hit:?}");
+            parts.iter().any(|part| part.key.as_deref() == Some(key.as_str()))
+        };
+        match view::away_tile() {
+            Some(hit) => {
+                let parts = record();
+                self.0 = drawn(&parts, hit).then_some((hit, parts));
+                None
+            }
+            None => {
+                let (hit, parts) = self.0.take()?;
+                (!drawn(&record(), hit)).then_some(parts)
+            }
+        }
+    }
+}
+
+/// What a thing on a station's lane (pressed as `hit`) draws, at rest (not lit, nor pressed: as it is lifted off its
+/// room, see `carry`), recorded as `record` does; none where it is not drawn.
+#[allow(clippy::too_many_arguments)]
+pub fn record_tile(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), hit: view::Hit) -> Vec<Part> {
+    let at_rest = Scene { hover: None, thumbs: &view::RESTING, ..*scene };
+    let key = format!("tile.{hit:?}");
+    record(frame, &at_rest, lanes, layout, small, scale, at).into_iter().filter(|part| part.key.as_deref() == Some(key.as_str())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::morph::{Op, Part};
+    use super::super::view::{self, Hit};
+    use super::Away;
+
+    /// What shows a station's lane, a thing carried off it: put back, nothing turns; taken off the station, what was
+    /// drawn as it was carried is turned from, once; none of it drawn there, nothing kept.
+    #[test]
+    fn what_shows_a_thing_carried_off_turns_as_it_is_taken_off() {
+        let _holding = view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let part = |key: &str, x: f32| Part { key: Some(key.into()), ops: vec![Op::Fill { color: super::super::canvas::Color::hex(0, 1.0), x, y: 0.0, w: 10.0, h: 10.0 }] };
+        let (one, two) = (Hit::Shelf(0x5EED_0011), Hit::Shelf(0x5EED_0012));
+        let both = || vec![part(&format!("tile.{one:?}"), 0.0), part(&format!("tile.{two:?}"), 20.0)];
+        let (mut away, mut elsewhere) = (Away::default(), Away::default());
+        view::carry_tile(Some(one));
+        assert_eq!(away.follow(both), None);
+        assert_eq!(elsewhere.follow(|| vec![part("cpu", 0.0)]), None);
+        view::carry_tile(None);
+        assert_eq!(away.follow(both), None);
+        assert_eq!(elsewhere.follow(|| vec![part("cpu", 0.0)]), None);
+        view::carry_tile(Some(one));
+        assert_eq!(away.follow(both), None);
+        view::carry_tile(None);
+        let after = || vec![part(&format!("tile.{two:?}"), 0.0)];
+        assert_eq!(away.follow(after), Some(both()));
+        assert_eq!(away.follow(after), None);
+    }
 }

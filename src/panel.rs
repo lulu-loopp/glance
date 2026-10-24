@@ -594,6 +594,8 @@ impl Controller {
         let mut restore = false;
         // How many times a widget had come to the top, as last seen (see `window::on_top`).
         let mut widgets_on_top = crate::ui::window::on_top();
+        // How a thing on a station's lane was held, as the panels and widgets were last told to draw it.
+        let mut tiles_drawn = crate::ui::view::tile_changes();
         // Pinned open at their edges as Glance last ran: opened so again once
         // there are readings to show.
         let mut pinned_at = self.config.lock().unwrap().panels_pinned.clone();
@@ -683,6 +685,21 @@ impl Controller {
                         for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
                             panel.next_frame = now;
                         }
+                        wait = Some(Duration::ZERO);
+                    }
+                    // A thing dragged off a station's lane, carried (see `carry`); a thing on one pressed, carried off
+                    // it, put back: drawn so on the panels and widgets at once, and as it springs back to its size.
+                    if let Some(due) = crate::carry::tick(now) {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
+                    let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|(hit, _)| hit)).or_else(|| widgets.shelf_pressed());
+                    crate::ui::view::press_tile(pressed);
+                    let tiles = crate::ui::view::tile_changes();
+                    if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() {
+                        for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
+                            panel.next_frame = now;
+                        }
+                        widgets.draw_soon();
                         wait = Some(Duration::ZERO);
                     }
                     // A widget come to the top over the open panel (giving way to the settings and back, shown, torn
@@ -1971,6 +1988,8 @@ struct Panel<'a> {
     /// that turns again starts from); and the layer it is drawn in.
     turning: Option<(Instant, Before)>,
     turned: Vec<crate::ui::morph::Part>,
+    /// What it drew as a thing was carried off its station (see `render::Away`).
+    away: render::Away,
     turn_layer: gfx::Layer,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
@@ -2010,6 +2029,9 @@ struct Panel<'a> {
     /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough (see
     /// `shelf_moved`), else pressed as it is let go.
     shelf_press: Option<(Hit, POINT)>,
+    /// A thing on its station dragged off it, to be lifted off its room as the panel is next drawn (see `carry`): it,
+    /// the drag's number, and where it was pressed.
+    lifting: Option<(Hit, u64, POINT)>,
     /// A thing kept at hand pressed (its place), where the pointer was, and whether it has been moved far enough to
     /// be put elsewhere among them: let go on another, it goes there; else it is opened as it is let go.
     /// (By what opens it, as shown as it was pressed: what is kept may change meanwhile, and its place with it.)
@@ -2114,6 +2136,7 @@ impl<'a> Panel<'a> {
             last_layout: None,
             turning: None,
             turned: Vec::new(),
+            away: render::Away::default(),
             turn_layer: gfx::Layer::default(),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
@@ -2130,6 +2153,7 @@ impl<'a> Panel<'a> {
             sized_room: None,
             music_settle: None,
             shelf_press: None,
+            lifting: None,
             app_press: None,
             pointer: None,
             forward: false,
@@ -3010,7 +3034,10 @@ impl<'a> Panel<'a> {
         if crate::station::run::drag_begins(from, now) {
             self.shelf_press = None;
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-            crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
+            if let Some(drag) = crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+                self.lifting = Some((hit, drag, from));
+                self.next_frame = Instant::now();
+            }
         }
     }
 
@@ -3572,10 +3599,20 @@ impl<'a> Panel<'a> {
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
+        // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
+        let lifting = self.lifting.take().and_then(|(hit, drag, from)| self.hits.iter().find(|box_| box_.4 == hit).map(|&(hx, hy, hw, hh, _)| (hit, drag, from, (hx, hy, hw, hh))));
+        let mut lifted = None;
+        let (away, mut taken_off) = (&mut self.away, None);
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
+            if let Some((hit, _, _, (hx, hy, ..))) = lifting {
+                lifted = Some(render::record_tile(frame, &scene, &lanes, &layout, None, 1.0, (-hx, -hy), hit)).filter(|parts| !parts.is_empty());
+                if lifted.is_some() {
+                    crate::ui::view::carry_tile(Some(hit));
+                }
+            }
             if opacity < 1.0 {
                 let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
@@ -3606,6 +3643,13 @@ impl<'a> Panel<'a> {
             });
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
             let local = Matrix3x2::translation(x, y);
+            // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
+            // carried (its room outlined) into how it is drawn now.
+            let mut gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none()).map(Before::Drawn);
+            let (turn, before) = match gone_from.as_mut() {
+                Some(from) => (Some(0.0), Some(from)),
+                None => (turn, before),
+            };
             drawn = Some(match (turn, before) {
                 (Some(t), Some(before)) => (|| {
                     // Turning: the skin's ground as it is now, and over it each reading between where it was and
@@ -3633,6 +3677,7 @@ impl<'a> Panel<'a> {
                 })(),
                 _ => layers.draw(frame, &picture, local, px),
             });
+            taken_off = gone_from;
             // (Not shown, a frame part of which failed: see `Frame::fail`.)
             if let Some(Err(error)) = &drawn {
                 frame.fail(error.clone());
@@ -3657,6 +3702,13 @@ impl<'a> Panel<'a> {
             }
         };
         let (hits, grounded) = (drawn.hits, drawn.grounded);
+        if let Some(from) = taken_off {
+            self.turning = Some((now, from));
+        }
+        if let (Some((hit, drag, from, (_, _, hw, hh))), Some(parts), Some(at)) = (lifting, lifted, lifting.and_then(|(hit, ..)| self.hit_on_screen(hit))) {
+            let lifted = crate::carry::Lifted { hit, drag, parts, size: (hw, hh), at: POINT { x: at.left, y: at.top }, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
+            crate::carry::begin(&self.gfx, lifted);
+        }
         self.gfx.sweep();
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if by_hand {

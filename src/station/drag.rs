@@ -3,6 +3,11 @@
 //! moved away by a drag: moved, they would be gone from where it points to). Words are given as a text file too
 //! (named by their first line), for what takes files only (Explorer, the desktop): a program that takes words takes
 //! them as words.
+//!
+//! The station gives Windows no picture of what is dragged: Glance carries it on the screen itself (see `carry`), told
+//! as the drag goes whether the program under the pointer would take it there and what that program says a drop does
+//! ("复制到 下载": see `Going`). A program says so by setting a description on what is dragged (Explorer does, with no
+//! picture given too, run elevated or not alike).
 
 use super::clipboard::{self, Content};
 use windows::core::{implement, BOOL, HRESULT};
@@ -14,12 +19,53 @@ use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::UI::Shell::SHCreateDataObject;
 
 /// What came of a drag off the station.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dragged {
     /// Dropped on a program that took it.
     Taken,
     /// Let go where nothing took it, or given up (Esc).
     Not,
+}
+
+/// How the drag off the station asked for last goes: its number (see `announce`), what is under the pointer (see
+/// `Over`), and how it ended (none: under way).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Going {
+    pub drag: u64,
+    pub over: Over,
+    pub ended: Option<Dragged>,
+}
+
+/// What is under the pointer as something is dragged off the station: whether a drop there would be taken, and what the
+/// program there says it does (as it says it, in its own language).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Over {
+    pub takes: bool,
+    pub says: Option<String>,
+}
+
+static GOING: std::sync::Mutex<Going> = std::sync::Mutex::new(Going { drag: 0, over: Over { takes: false, says: None }, ended: Some(Dragged::Not) });
+
+/// A drag off the station asked for: its number, as it is followed (see `going`).
+pub fn announce() -> u64 {
+    let mut going = GOING.lock().unwrap();
+    *going = Going { drag: going.drag + 1, over: Over::default(), ended: None };
+    going.drag
+}
+
+/// How the drag off the station asked for last goes.
+pub fn going() -> Going {
+    GOING.lock().unwrap().clone()
+}
+
+/// Whether a drag off the station is under way: the station takes nothing of it back (see `drop::Target`).
+pub fn under_way() -> bool {
+    GOING.lock().unwrap().ended.is_none()
+}
+
+/// The drag off the station asked for last ended so.
+pub fn ended(dragged: Dragged) {
+    GOING.lock().unwrap().ended = Some(dragged);
 }
 
 /// Drags `content` off the station (`stays_here`: see `shelf::Item::stays_here`) till it is dropped or given up, on
@@ -60,7 +106,7 @@ fn drag_here(content: &Content, stays_here: bool) -> Option<Dragged> {
                 return None;
             }
         }
-        let source: IDropSource = Source.into();
+        let source: IDropSource = Source { data: data.clone(), said: Default::default() }.into();
         let mut effect = DROPEFFECT_NONE;
         let said = DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect);
         Some(if said == windows::Win32::Foundation::DRAGDROP_S_DROP && effect != DROPEFFECT_NONE { Dragged::Taken } else { Dragged::Not })
@@ -109,6 +155,42 @@ unsafe fn global(bytes: &[u8]) -> Option<HGLOBAL> {
 
 #[cfg(test)]
 mod tests {
+    /// What Explorer says a drop does, as it sets it: its words, the place named where it says `%1`; none where it took
+    /// it back (as it does by turns over one folder) or said nothing.
+    #[test]
+    fn says_what_a_drop_does_as_the_program_said_it() {
+        use windows::Win32::UI::Shell::{DROPDESCRIPTION, DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGETYPE};
+        let described = |kind: DROPIMAGETYPE, message: &str, insert: &str| {
+            let (mut words, mut place) = ([0u16; 260], [0u16; 260]);
+            for (to, unit) in words.iter_mut().zip(message.encode_utf16()) {
+                *to = unit;
+            }
+            for (to, unit) in place.iter_mut().zip(insert.encode_utf16()) {
+                *to = unit;
+            }
+            super::said_by(&DROPDESCRIPTION { r#type: kind, szMessage: words, szInsert: place })
+        };
+        assert_eq!(described(DROPIMAGE_COPY, "复制到 %1", "下载"), Some("复制到 下载".into()));
+        assert_eq!(described(DROPIMAGE_COPY, "Copy to %1", "dropdir"), Some("Copy to dropdir".into()));
+        assert_eq!(described(DROPIMAGE_COPY, "Copy", ""), Some("Copy".into()));
+        assert_eq!(described(DROPIMAGE_INVALID, "", ""), None);
+        assert_eq!(described(DROPIMAGE_INVALID, "Copy to %1", "dropdir"), None);
+        assert_eq!(described(DROPIMAGE_COPY, "", "dropdir"), None);
+    }
+
+    /// What a drop does is said on through the moments the program says nothing, over the same window taking it still;
+    /// over another window, or one not taking it, not.
+    #[test]
+    fn what_a_drop_does_is_kept_over_the_window_that_said_it() {
+        let copy = || Some("复制到 下载".to_string());
+        let was = (7, copy());
+        assert_eq!(super::kept_said(&was, 7, true, None), (7, copy()));
+        assert_eq!(super::kept_said(&was, 7, true, Some("复制到 桌面".into())), (7, Some("复制到 桌面".into())));
+        assert_eq!(super::kept_said(&was, 8, true, None), (8, None));
+        assert_eq!(super::kept_said(&was, 7, false, None), (7, None));
+        assert_eq!(super::kept_said(&(0, None), 7, true, copy()), (7, copy()));
+    }
+
     /// Words dragged as a file are named by their first line that has any, what a file's name may not hold left out.
     #[test]
     fn names_a_text_file_by_its_first_line() {
@@ -121,8 +203,12 @@ mod tests {
 }
 
 /// The station as the source of a drag: dropped as the left button is let go, given up by Esc; the system's cursors.
+/// What is dragged, and what the program under the pointer last said a drop does, and that window (see `kept_said`).
 #[implement(IDropSource)]
-struct Source;
+struct Source {
+    data: IDataObject,
+    said: std::cell::RefCell<(isize, Option<String>)>,
+}
 
 impl IDropSource_Impl for Source_Impl {
     fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
@@ -139,7 +225,57 @@ impl IDropSource_Impl for Source_Impl {
         }
     }
 
-    fn GiveFeedback(&self, _: DROPEFFECT) -> HRESULT {
+    /// Told as the pointer moves what the program under it would do with a drop there: told on (see `Going`).
+    fn GiveFeedback(&self, effect: DROPEFFECT) -> HRESULT {
+        use windows::Win32::System::Ole::{DROPEFFECT_LINK, DROPEFFECT_MOVE};
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetCursorPos, WindowFromPoint, GA_ROOT};
+        let takes = effect.0 & (DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0) != 0;
+        let mut cursor = windows::Win32::Foundation::POINT::default();
+        let window = match unsafe { GetCursorPos(&mut cursor) } {
+            Ok(()) => unsafe { GetAncestor(WindowFromPoint(cursor), GA_ROOT) }.0 as isize,
+            Err(_) => 0,
+        };
+        let mut said = self.said.borrow_mut();
+        *said = kept_said(&said, window, takes, description(&self.data));
+        GOING.lock().unwrap().over = Over { takes, says: said.1.clone().filter(|_| takes) };
         windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS
     }
+}
+
+/// What a drop does as the program under the pointer last said (with the window that was under it, as `was` has it),
+/// `window` under it now, taking a drop there (`takes`), and saying `said` now: what it says, else what it said, while
+/// it is the same window and takes it still (Explorer, over one folder, says it and says nothing by turns as the
+/// pointer moves; Windows' own picture of what is dragged said it throughout).
+fn kept_said(was: &(isize, Option<String>), window: isize, takes: bool, said: Option<String>) -> (isize, Option<String>) {
+    let kept = was.1.clone().filter(|_| was.0 == window && takes);
+    (window, said.or(kept))
+}
+
+/// What the program under the pointer says a drop does, as it set it on what is dragged (none, or one it took back).
+fn description(data: &IDataObject) -> Option<String> {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::Win32::System::Memory::GlobalSize;
+    use windows::Win32::System::Ole::ReleaseStgMedium;
+    use windows::Win32::UI::Shell::DROPDESCRIPTION;
+    let format = unsafe { RegisterClipboardFormatW(windows::core::w!("DropDescription")) } as u16;
+    let asked = FORMATETC { cfFormat: format, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+    let mut medium = unsafe { data.GetData(&asked) }.ok()?;
+    let read = unsafe {
+        let memory = medium.u.hGlobal;
+        let at = GlobalLock(memory);
+        let said = (!at.is_null() && GlobalSize(memory) >= std::mem::size_of::<DROPDESCRIPTION>()).then(|| std::ptr::read_unaligned(at.cast::<DROPDESCRIPTION>()));
+        let _ = GlobalUnlock(memory);
+        said
+    };
+    unsafe { ReleaseStgMedium(&mut medium) };
+    said_by(&read?)
+}
+
+/// What a drop description says: its words, `%1` in them the place it names (none where it is taken back, or empty).
+fn said_by(description: &windows::Win32::UI::Shell::DROPDESCRIPTION) -> Option<String> {
+    use windows::Win32::UI::Shell::DROPIMAGE_INVALID;
+    let words = |units: &[u16]| String::from_utf16_lossy(&units[..units.iter().position(|&unit| unit == 0).unwrap_or(units.len())]);
+    let (kind, message, insert) = (description.r#type, description.szMessage, description.szInsert);
+    let message = words(&message);
+    (kind != DROPIMAGE_INVALID && !message.is_empty()).then(|| message.replace("%1", &words(&insert)))
 }

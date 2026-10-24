@@ -220,7 +220,9 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands) -> Optio
         }
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-        let target = Target::new(move |dragged: Dragged| super::run::caught(dragged, edge, lands));
+        let told = move |dragged: Dragged| super::run::caught(dragged, edge, lands);
+        // (What is kept at hand may be given a file off the station; the station, none of its own again.)
+        let target = if lands == super::run::Lands::Station { Target::not_own(told) } else { Target::new(told) };
         if RegisterDragDrop(window, &target).is_err() {
             let _ = DestroyWindow(window);
             return None;

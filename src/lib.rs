@@ -114,6 +114,8 @@ mod notes;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
+mod carry;
+#[cfg(windows)]
 mod widget;
 #[cfg(windows)]
 mod wsl;
