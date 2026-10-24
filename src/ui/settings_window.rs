@@ -5829,10 +5829,10 @@ impl Ui {
         let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
         let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));
-        // Framed round what of the screen shows, as the panel's preview is (see `shown_of`): a screen drawn smaller
-        // than the room left no plain card round it, its corners square inside the card's rounded ones.
+        // In the preview's frame, as the panel's preview is (see `framed`): what of the screen shows in the middle of it.
+        let framed = area;
         let area = self.shown_of(area, k, ox - area.x, oy - area.y);
-        fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
+        self.framed(frame, framed);
         // (Inside the preview's rounded corners.)
         let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
         let layer = D2D1_LAYER_PARAMETERS1 {
@@ -5870,7 +5870,7 @@ impl Ui {
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-        stroke_inside(frame, area, 8.0, self.palette.card_stroke);
+        stroke_inside(frame, framed, 8.0, self.palette.card_stroke);
     }
 
     /// What plays, with the elements chosen, slid out from the edge that opens it on the screen the window opened on
@@ -5893,9 +5893,10 @@ impl Ui {
         };
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, false);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let framed = area;
         let area = self.shown_of(area, k, stage_x, stage_y);
         let palette = self.palette.clone();
-        fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
+        self.framed(frame, framed);
         self.stage_picture(frame, area, (ox, oy), k, zoom);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
@@ -5911,7 +5912,7 @@ impl Ui {
         };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };
-        stroke_inside(frame, area, 8.0, palette.card_stroke);
+        stroke_inside(frame, framed, 8.0, palette.card_stroke);
         (painted.busy || !super::music::heard()).then_some(MUSIC_PREVIEW_PACE)
     }
 
@@ -5968,26 +5969,33 @@ impl Ui {
 
     /// How the stage is shown in `area` with a panel `pw` wide (stage DIPs) slid out from `edge`: how large a stage
     /// DIP is drawn, and where the stage's corner is in the area. The whole screen (`whole`), else the whole height of
-    /// it with the whole panel and a strip of desktop beside it (along the top, either side of it).
+    /// it with the whole panel and a strip of desktop beside it (along the top, either side of it). In the middle of
+    /// the area, what of it is left plain (the preview's frame is the whole area: see `framed`).
     fn staged(&self, area: Rect, edge: Edge, pw: f32, whole: bool) -> (f32, f32, f32) {
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
+        let middle = |room: f32, length: f32| ((room - length) / 2.0).max(0.0);
         match (whole, edge) {
             (true, _) => (fit, (area.w - sw * fit) / 2.0, (area.h - sh * fit) / 2.0),
             (false, Edge::Left | Edge::Right) => {
                 let k = (area.h / sh).min(area.w / (pw + PREVIEW_MARGIN).min(sw)).min(1.0);
-                // A screen that fits whole, at the area's left; one that does not, its side the panel is on.
-                let x = if sw * k <= area.w || edge == Edge::Left { 0.0 } else { area.w - sw * k };
-                (k, x, 0.0)
+                // A screen that fits whole, in the middle; one that does not, its side the panel is on.
+                let x = if sw * k <= area.w { middle(area.w, sw * k) } else if edge == Edge::Left { 0.0 } else { area.w - sw * k };
+                (k, x, middle(area.h, sh * k))
             }
             // The panel in the middle of the top, with as much desktop either side of it as the sides' previews have
             // beside theirs, and the whole height of the screen under it. (Its whole width shown, a wide screen made
             // the panel small.)
             (false, Edge::Top) => {
                 let k = (area.h / sh).min(area.w / (pw + 2.0 * PREVIEW_MARGIN).min(sw)).min(1.0);
-                (k, if sw * k <= area.w { 0.0 } else { (area.w - sw * k) / 2.0 }, 0.0)
+                (k, (area.w - sw * k) / 2.0, middle(area.h, sh * k))
             }
         }
+    }
+
+    /// The preview's frame, the whole of `area`: plain where the screen drawn in it leaves room (see `staged`).
+    fn framed(&self, frame: &Frame, area: Rect) {
+        fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
     }
 
     /// Where the stage's whole screen is drawn in `area` (as `panel_on_stage` draws it whole).
@@ -5998,7 +6006,7 @@ impl Ui {
     }
 
     /// What of the stage shows in `area`, drawn `k` DIPs to one of its own with its corner at `(x, y)` in the area
-    /// (as `staged` places it): the preview's frame is drawn round that, with no empty room in it.
+    /// (as `staged` places it): what is drawn of it is clipped to that, in the preview's frame (see `framed`).
     fn shown_of(&self, area: Rect, k: f32, x: f32, y: f32) -> Rect {
         let (sw, sh) = self.stage.size;
         let (left, top) = (area.x + x.max(0.0), area.y + y.max(0.0));
@@ -6065,9 +6073,10 @@ impl Ui {
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let framed = area;
         let area = if whole { area } else { self.shown_of(area, k, stage_x, stage_y) };
         if !whole {
-            fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
+            self.framed(frame, framed);
         }
         let mask = unsafe {
             frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
@@ -6091,7 +6100,7 @@ impl Ui {
         unsafe { frame.dc.PopLayer() };
         drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
         if !whole {
-            stroke_inside(frame, area, 8.0, self.palette.card_stroke);
+            stroke_inside(frame, framed, 8.0, self.palette.card_stroke);
         }
         match drawn {
             Ok(drawn) if drawn.grounded => self.gfx.clear_caches(),
