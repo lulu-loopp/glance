@@ -60,8 +60,8 @@ pub struct Window {
     under_panel: Cell<bool>,
 }
 
-/// How many times a window kept under the panel has come to the top of the windows above all (see
-/// `Window::under_the_panel`): the panel, open, comes over it again as this changes (see `panel`).
+/// How many times a window kept under the panel has come to the top of the windows above all, or been let go from
+/// the hand there (see `Window::under_the_panel`): the panel, open, comes over it again as this changes (see `panel`).
 static ON_TOP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many times a window kept under the panel has come to the top (see `ON_TOP`).
@@ -199,9 +199,9 @@ impl Window {
         }
     }
 
-    /// Come to the top: told, where it is kept under the panel.
+    /// Come to the top: told, where it is kept under the panel (not while it is lifted, in hand: over the panel then).
     fn came_to_top(&self) {
-        if self.under_panel.get() {
+        if self.under_panel.get() && !self.lifted.get() {
             ON_TOP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -335,10 +335,13 @@ impl Window {
     }
 
     /// Above them all for now (`true`: while it is moved or sized by hand,
-    /// to be seen), or back where it is kept.
+    /// to be seen), the panel too, or back where it is kept (under the panel again, kept under it).
     pub fn lift(&self, lifted: bool) {
         if self.lifted.replace(lifted) != lifted {
             self.stand_as_kept();
+            if !lifted && !self.low() {
+                self.came_to_top();
+            }
         }
     }
 
@@ -521,5 +524,23 @@ mod tests {
         assert!(never());
         assert_eq!(clicked(), MA_NOACTIVATE);
         assert!(window.low());
+    }
+
+    /// A window kept under the panel, lifted into the hand and raised, is left over it (the panel is not told to come
+    /// over it); let go, it is (see `ON_TOP`).
+    #[test]
+    fn a_window_in_hand_stays_over_the_panel_till_it_is_let_go() {
+        let window = Window::new().unwrap();
+        window.under_the_panel();
+        let before = on_top();
+        window.lift(true);
+        window.raise();
+        window.show();
+        let held = on_top();
+        window.lift(false);
+        let let_go = on_top();
+        window.destroy();
+        assert_eq!(held, before);
+        assert_eq!(let_go, before + 1);
     }
 }

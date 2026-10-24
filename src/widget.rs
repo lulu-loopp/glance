@@ -464,9 +464,6 @@ pub(crate) enum Ground {
     Tint(Color),
 }
 
-/// The desktop the panel had taken, lent to a widget torn off it: its
-/// capture (without its pixels), as a bitmap at the scale it was made for,
-/// and its tone.
 /// A note pulled off the panel (see `Widgets::stick_note_held`): its file's name, where it is put (its corner) and where
 /// the hand holds it, as large as its card was (physical px), and where the panel is (let go over it, it is not stuck).
 pub struct NotePulled {
@@ -477,6 +474,28 @@ pub struct NotePulled {
     pub over: RECT,
 }
 
+/// A note pulled off the panel, in hand: where the panel is, how large its card there was (DIPs), and whether the
+/// pointer is over the panel. Over it, the note keeps its card's size (let go there, it goes back: see `release`); off
+/// it, it grows to a note's, and back over it, it shrinks to its card's again.
+struct Pulled {
+    over: RECT,
+    card: (f32, f32),
+    on_panel: bool,
+}
+
+impl Pulled {
+    /// The size it is to be (DIPs), the pointer at `cursor`, a note's `shown`: and whether the pointer has crossed the
+    /// panel's edge since it was last asked (it settles from where it is then).
+    fn size(&mut self, cursor: Option<POINT>, shown: (f32, f32)) -> ((f32, f32), bool) {
+        let on_panel = cursor.is_some_and(|cursor| crate::panel::contains(&self.over, cursor));
+        let crossed = std::mem::replace(&mut self.on_panel, on_panel) != on_panel;
+        (if on_panel { self.card } else { shown }, crossed)
+    }
+}
+
+/// The desktop the panel had taken, lent to a widget torn off it: its
+/// capture (without its pixels), as a bitmap at the scale it was made for,
+/// and its tone.
 pub struct Lent {
     pub capture: Capture,
     pub bitmap: (ID2D1Bitmap1, f32),
@@ -561,8 +580,8 @@ struct Widget {
     /// Let go after it was sized or stuck: since when, and from what
     /// surface (DIPs), it settles onto what it shows.
     settle: Option<(Instant, (f32, f32))>,
-    /// A note pulled off the panel, in hand still: where the panel is (let go over it, it goes back: see `release`).
-    pulled_over: Option<RECT>,
+    /// A note pulled off the panel, in hand still (see `Pulled`).
+    pulled: Option<Pulled>,
     /// The sides of its surface what it shows keeps to (right, bottom).
     keeps_to: (bool, bool),
     drag: Option<Drag>,
@@ -1526,6 +1545,7 @@ impl Widgets {
             widget.replace = Some(false);
         }
         widget.window.yield_to(self.settings);
+        widget.window.lift(true);
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
         true
@@ -1608,9 +1628,10 @@ impl Widgets {
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
-        // Lifted off its card: as large as that was, growing to a note's size in hand, over the panel.
-        let from = (card.0 as f32 / contact.scale, card.1 as f32 / contact.scale);
-        (widget.surface_size, widget.settle, widget.pulled_over) = (from, Some((Instant::now(), from)), Some(over));
+        // Lifted off its card: as large as that was while over the panel (see `Pulled`).
+        let card = (card.0 as f32 / contact.scale, card.1 as f32 / contact.scale);
+        widget.surface_size = card;
+        widget.pulled = Some(Pulled { over, card, on_panel: true });
         widget.window.yield_to(self.settings);
         widget.window.lift(true);
         widget.window.raise();
@@ -1629,6 +1650,8 @@ impl Widgets {
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: true, moved: true });
         widget.torn_from = Some((None, contact.monitor));
         widget.window.yield_to(self.settings);
+        // (In hand: over the panel, as one pressed is.)
+        widget.window.lift(true);
         unsafe { SetCapture(widget.window.hwnd) };
         self.list.push(widget);
         true
@@ -2522,6 +2545,7 @@ impl Widgets {
         torn.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: true, moved: true });
         torn.torn_from = Some((None, contact.monitor));
         torn.window.yield_to(self.settings);
+        torn.window.lift(true);
         unsafe { SetCapture(torn.window.hwnd) };
         self.list.push(torn);
         self.save();
@@ -2916,7 +2940,7 @@ impl Widget {
             at,
             room: None,
             settle: None,
-            pulled_over: None,
+            pulled: None,
             keeps_to: (false, false),
             drag: None,
             fling: None,
@@ -3619,8 +3643,8 @@ impl Widget {
                     return Released::Nothing;
                 }
                 // A note pulled off the panel let go over it again: not stuck.
-                if let Some(over) = self.pulled_over.take() {
-                    if cursor_position().is_some_and(|cursor| crate::panel::contains(&over, cursor)) {
+                if let Some(pulled) = self.pulled.take() {
+                    if cursor_position().is_some_and(|cursor| crate::panel::contains(&pulled.over, cursor)) {
                         return Released::Back;
                     }
                 }
@@ -4118,6 +4142,18 @@ impl Widget {
                 moving |= merged.busy();
             }
         }
+        // A note pulled off the panel: its card's size while over the panel, what it shows off it, settling from one to
+        // the other as the pointer crosses the panel's edge.
+        let fill = match &mut self.pulled {
+            Some(pulled) => {
+                let (size, crossed) = pulled.size(cursor_position(), self.shown);
+                if crossed {
+                    self.settle = Some((now, self.surface_size));
+                }
+                size
+            }
+            None => self.shown,
+        };
         // Its surface: the room the hand gives it, past what it shows only
         // part of the way; settling from that once let go; else what it shows.
         let give = |have: f32, fill: f32| if have <= fill { fill } else { fill + (have - fill) * GIVE };
@@ -4130,9 +4166,9 @@ impl Widget {
                     self.settle = None;
                     self.unsaved = true;
                 }
-                (from.0 + (self.shown.0 - from.0) * eased, from.1 + (self.shown.1 - from.1) * eased)
+                (from.0 + (fill.0 - from.0) * eased, from.1 + (fill.1 - from.1) * eased)
             }
-            _ => self.shown,
+            _ => fill,
         };
         // Sized by its left or top edge, it grows and shrinks from the other.
         let px = self.contact.scale * self.zoom;
@@ -4766,6 +4802,22 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A note pulled off the panel keeps its card's size while the pointer is over the panel, takes a note's off it, and
+    /// its card's again back over it: settling afresh each time the pointer crosses the panel's edge, not otherwise.
+    #[test]
+    fn a_note_pulled_off_the_panel_grows_only_off_it() {
+        let (card, shown) = ((170.0, 104.0), (280.0, 320.0));
+        let mut pulled = Pulled { over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, on_panel: true };
+        let at = |x| Some(POINT { x, y: 400 });
+        assert_eq!(pulled.size(at(300), shown), (card, false));
+        assert_eq!(pulled.size(at(480), shown), (card, false));
+        assert_eq!(pulled.size(at(520), shown), (shown, true));
+        assert_eq!(pulled.size(at(700), shown), (shown, false));
+        assert_eq!(pulled.size(at(450), shown), (card, true));
+        // (The pointer not to be had: off the panel.)
+        assert_eq!(pulled.size(None, shown), (shown, true));
+    }
 
     /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they
     /// pour back into it as they close, moved with it where the widget is moved meanwhile. Asked from elsewhere, or
