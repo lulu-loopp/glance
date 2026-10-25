@@ -188,6 +188,7 @@ impl FullMusic {
                 (None, _) => lang.pick("没有正在播放的音乐", "No music is playing"),
                 (Some(_), Some(Sung::Asking)) => lang.pick("正在查找歌词…", "Finding the lyrics…"),
                 (Some(_), Some(Sung::Untimed { .. })) => lang.pick("播放器未提供播放进度，无法同步歌词", "The player does not tell how far into the track it is, so the lyrics cannot follow it"),
+                (Some(_), Some(Sung::Instrumental)) => lang.pick("这首歌是纯音乐", "This track is instrumental"),
                 _ => lang.pick("没有找到歌词", "No lyrics were found"),
             };
             let (title, artist) = heard_now.as_ref().map_or_else(Default::default, |playing| (playing.title.clone(), playing.artist.clone()));

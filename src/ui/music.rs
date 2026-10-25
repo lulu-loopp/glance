@@ -465,6 +465,7 @@ fn moment() -> Moment {
         Some(Sung::Untimed { netease: false }) => moment.said = Some(lang.pick("此播放器没有提供播放进度", "This player does not say how far into the track it is").into()),
         Some(Sung::Asking) => moment.said = Some(lang.pick("正在查找歌词…", "Finding the lyrics…").into()),
         Some(Sung::Unknown) => moment.said = Some(lang.pick("没有找到这首歌的歌词", "No lyrics were found for this track").into()),
+        Some(Sung::Instrumental) => moment.said = Some(lang.pick("这首歌是纯音乐", "This track is instrumental").into()),
         None => moment.said = Some(unsaid(heard.as_ref(), lang)),
     }
     moment

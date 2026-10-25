@@ -63,6 +63,8 @@ pub enum Sung {
     Asking,
     /// None were found.
     Unknown,
+    /// It is played without words.
+    Instrumental,
     /// Its lyrics, the line sung now (none before the first), and since when it is the one (what is drawn of
     /// them glides to it for `GLIDE` after).
     Lines { lines: Lyrics, now: Option<usize>, since: std::time::Instant },
@@ -337,6 +339,7 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
     match crate::lyrics::of(&track) {
         crate::lyrics::Known::Asking => (Some(Sung::Asking), None),
         crate::lyrics::Known::Found(None) => (Some(Sung::Unknown), None),
+        crate::lyrics::Known::Instrumental => (Some(Sung::Instrumental), None),
         crate::lyrics::Known::Found(Some(lines)) => {
             let now = crate::lyrics::sung_at(&lines, position);
             let next = now.map_or(0, |now| now + 1);

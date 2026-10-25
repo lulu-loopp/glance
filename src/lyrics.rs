@@ -8,7 +8,9 @@
 //! through a CDN) and of NetEase itself; of Kugou (its lyrics timed word by
 //! word, by the track's title, artist and length); and of LRCLIB (an open
 //! collection of lyrics timed by line), by the track's title, artist, album
-//! and length. Lyrics timed word by word are taken first, wherever they are.
+//! and length. The track's own lyrics are taken first, as surely as it can be
+//! told which they are, timed word by word where another source's are of the
+//! same words; none where it is played without words (see `chosen`).
 //! The sources are asked all at once (see `find`): where one far away cannot
 //! be reached, as may be in mainland China, NetEase's still come at once.
 //! Each track's are asked for on a thread of their own, and kept on disk
@@ -62,11 +64,21 @@ pub struct Track {
     pub qq_music: bool,
 }
 
-/// What is known of a track's lyrics: still being asked for, or found (none, where no source has them).
+/// What is known of a track's lyrics: still being asked for, found (none, where no source has them), or that it is
+/// played without words.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Known {
     Asking,
     Found(Option<Lyrics>),
+    Instrumental,
+}
+
+/// What a source has of a track: its lyrics, or that it is played without words (NetEase's `pureMusic`, LRCLIB's
+/// `instrumental`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Has {
+    Sung(Vec<Line>),
+    Instrumental,
 }
 
 /// The tracks asked about, and what was found; the most kept.
@@ -79,6 +91,7 @@ const KEPT_MOST: usize = 200;
 enum Held {
     Asking,
     Found(Option<Lyrics>),
+    Instrumental,
     Unreached(Instant),
 }
 
@@ -91,6 +104,15 @@ fn found(lines: Option<Vec<Line>>) -> Held {
     Held::Found(lines.filter(|lines| !lines.is_empty()).map(Arc::new))
 }
 
+/// What a source has, as it is held (see `found`).
+fn held(has: Option<Has>) -> Held {
+    match has {
+        Some(Has::Instrumental) => Held::Instrumental,
+        Some(Has::Sung(lines)) => found(Some(lines)),
+        None => found(None),
+    }
+}
+
 /// What is known of `track`'s lyrics; asked for (on a thread of its own) the first time, and again a while after
 /// a source could not be reached.
 pub fn of(track: &Track) -> Known {
@@ -99,6 +121,7 @@ pub fn of(track: &Track) -> Known {
     match known.get(track) {
         Some(Held::Asking) => return Known::Asking,
         Some(Held::Found(found)) => return Known::Found(found.clone()),
+        Some(Held::Instrumental) => return Known::Instrumental,
         Some(Held::Unreached(since)) if since.elapsed() < UNREACHED_FOR => return Known::Found(None),
         _ => {}
     }
@@ -114,17 +137,17 @@ pub fn of(track: &Track) -> Known {
             return;
         }
         let held = match kept::read(&track) {
-            Some(kept) if kept.fresh() => found(kept.lines),
+            Some(kept) if kept.fresh() => held(kept.found),
             kept => {
                 let said = find(&track);
                 // (That none has them, only where each source said so.)
                 if said.sure || said.found.is_some() {
-                    kept::write(&track, said.found.as_deref(), said.sure);
+                    kept::write(&track, said.found.as_ref(), said.sure, said.doubted);
                 }
                 match (said.found, kept) {
-                    (Some(lines), _) => found(Some(lines)),
+                    (Some(has), _) => held(Some(has)),
                     // Not found now, a source unreached: what was found before, where there was.
-                    (None, Some(kept)) if !said.sure => found(kept.lines),
+                    (None, Some(kept)) if !said.sure => held(kept.found),
                     (None, _) if !said.sure => Held::Unreached(Instant::now()),
                     (None, _) => Held::Found(None),
                 }
@@ -141,28 +164,27 @@ pub(crate) struct Unreached;
 /// What a source has of what it was asked for (none, where it said it has none), where it answered.
 pub(crate) type Answer<T> = Result<Option<T>, Unreached>;
 
-/// What the sources asked had of a track's lyrics, and whether each answered (else they may yet have them).
+/// What the sources asked had of a track's lyrics, whether each answered (else they may yet have them), and whether
+/// what was found rests on Kugou's alone (see `chosen`).
 struct Said {
-    found: Option<Vec<Line>>,
+    found: Option<Has>,
     sure: bool,
+    doubted: bool,
 }
 
 /// Asks the sources, all at once (one far away, slow or not reached, keeps none waiting for the others, and none is
-/// waited for where what is found already is not to be bettered: NetEase's timed word by word): by the
-/// track's NetEase number, the word-timed collection and NetEase itself (the collection's, with NetEase's
-/// translation where it gives none; else NetEase's); by its name, Kugou, LRCLIB, QQ Music, and the same by the number
-/// NetEase finds it by. Lyrics timed word by word first, wherever they are: the collection's or NetEase's, then
-/// Kugou's (with a translation from the others where theirs have none). Else, by the NetEase number its player gave,
-/// NetEase's own (the lyrics it shows itself); played in QQ Music, its own; then LRCLIB's (found by title, artist,
-/// album and length, more surely the track's own than a search's), then NetEase's, then QQ Music's (a track QQ Music
-/// alone has the lyrics of, played there, showed none).
+/// waited for where what it has would not change what is taken): by the track's NetEase number, the word-timed
+/// collection and NetEase itself (the collection's, with NetEase's translation where it gives none; else NetEase's;
+/// none where NetEase says it is played without words); by its name, Kugou, LRCLIB, QQ Music (where its player gives
+/// no NetEase number), and the same by the number NetEase finds it by. Which are taken, see `chosen`.
 fn find(track: &Track) -> Said {
     use std::sync::atomic::{AtomicBool, Ordering};
     let sure = AtomicBool::new(true);
     // What a source has, none where it was not reached (and then what the sources have is not sure).
+    let unreached = || sure.store(false, Ordering::Relaxed);
     let answered = |answer: Answer<Vec<Line>>| {
         answer.unwrap_or_else(|Unreached| {
-            sure.store(false, Ordering::Relaxed);
+            unreached();
             None
         })
     };
@@ -172,72 +194,127 @@ fn find(track: &Track) -> Said {
             (answered(amll(id)), theirs.join().expect("NetEase asked"))
         });
         let (theirs, credits) = match theirs {
-            Ok((lines, credits)) => (lines, credits),
-            Err(Unreached) => (answered(Err(Unreached)), Vec::new()),
+            Ok((has, credits)) => (has, credits),
+            Err(Unreached) => (answered(Err(Unreached)).map(Has::Sung), Vec::new()),
         };
         match (worded, theirs) {
+            // Played without words, as NetEase says: none (the collection keeps what it is given by NetEase's number).
+            (_, Some(Has::Instrumental)) => Some(Has::Instrumental),
             // Timed word by word elsewhere: with NetEase's translation where they have none, and NetEase's lines of
             // who wrote and made the song (they have none: NetEase showed those lines, the lyrics nothing).
             (Some(mut lines), theirs) => {
-                if let Some(theirs) = theirs.filter(|_| lines.iter().all(|line| line.translation.is_none())) {
+                if let Some(Has::Sung(theirs)) = theirs.filter(|_| lines.iter().all(|line| line.translation.is_none())) {
                     translated(&mut lines, &theirs);
                 }
-                Some(with_credits(lines, &credits))
+                Some(Has::Sung(with_credits(lines, &credits)))
             }
             (None, theirs) => theirs,
         }
     };
     // (Each on a thread of its own, left to end on its own where its answer is not waited for.)
-    let asked = |source: fn(&Track) -> Answer<Vec<Line>>| {
+    fn asked<T: Send + 'static>(track: &Track, source: fn(&Track) -> Answer<T>) -> impl FnOnce() -> Answer<T> {
         let (told, answer) = std::sync::mpsc::channel();
         let track = track.clone();
         std::thread::spawn(move || {
             let _ = told.send(source(&track));
         });
         move || answer.recv().unwrap_or(Err(Unreached))
-    };
-    let by_kugou = asked(kugou);
-    // (Played by NetEase: its own, else lyrics timed word by word elsewhere; none asked of the others.)
-    let (by_qq, by_name) = match track.netease {
-        Some(_) => (None, None),
-        None => (Some(asked(qq_music)), Some(asked(lrclib))),
-    };
+    }
+    let by_kugou = asked(track, kugou);
+    let by_name = asked(track, lrclib);
+    // (Played by NetEase: its own first; QQ Music not asked.)
+    let by_qq = track.netease.is_none().then(|| asked(track, qq_music));
     let netease = match track.netease {
         Some(id) => by_number(id),
         None => match netease_search(track) {
             Ok(id) => id.and_then(by_number),
-            Err(Unreached) => answered(Err(Unreached)),
+            Err(Unreached) => answered(Err(Unreached)).map(Has::Sung),
         },
     };
-    let found = chosen(track, netease, || answered(by_kugou()), || by_qq.and_then(|by_qq| answered(by_qq())), || by_name.and_then(|by_name| answered(by_name())));
-    Said { found, sure: sure.into_inner() }
+    let (found, doubted) = chosen(track, netease, || answered(by_kugou()), || by_qq.and_then(|by_qq| answered(by_qq())), || {
+        by_name().unwrap_or_else(|Unreached| {
+            unreached();
+            None
+        })
+    });
+    Said { found, sure: sure.into_inner(), doubted }
 }
 
 /// Of what the sources had of `track`'s lyrics (NetEase's, the collection's among them; Kugou's; QQ Music's; LRCLIB's,
-/// each waited for as it is needed), those taken (see `find`): timed word by word first, wherever they are (Kugou's
-/// with a translation from the others where theirs have none); else as its player shows them, by its NetEase number or
-/// played in QQ Music; else LRCLIB's, NetEase's, QQ Music's.
-fn chosen(track: &Track, netease: Option<Vec<Line>>, kugou: impl FnOnce() -> Option<Vec<Line>>, qq: impl FnOnce() -> Option<Vec<Line>>, named: impl FnOnce() -> Option<Vec<Line>>) -> Option<Vec<Line>> {
+/// each waited for only once it is needed), what is taken, and whether it rests on Kugou's alone. The track's own
+/// first, as surely as it can be told which they are: by the NetEase number its player gave, NetEase's (that it is
+/// played without words, too); played in QQ Music, QQ Music's; then NetEase's timed word by word (of the track it
+/// finds of that title, artist and length); then LRCLIB's (of that title, artist and length, its album too where it
+/// has it), NetEase's, QQ Music's. Those timed line by line are timed word by word where Kugou's are of the same words
+/// (Kugou's are its users', any song's put to any track: taken for the lines they agree with alone). Where none of
+/// these has them, none where NetEase or LRCLIB says the track is played without words (where its player names its
+/// artist: else what they found by name may be any artist's song of that title); else Kugou's, doubted.
+fn chosen(track: &Track, netease: Option<Has>, kugou: impl FnOnce() -> Option<Vec<Line>>, qq: impl FnOnce() -> Option<Vec<Line>>, named: impl FnOnce() -> Option<Has>) -> (Option<Has>, bool) {
+    use std::cell::LazyCell;
+    let (kugou, qq, named) = (LazyCell::new(kugou), LazyCell::new(qq), LazyCell::new(named));
     let worded = |lines: &[Line]| lines.iter().any(|line| !line.words.is_empty());
-    if netease.as_deref().is_some_and(worded) {
-        return netease;
-    }
-    if let Some(mut lines) = kugou().filter(|lines| worded(lines)) {
-        if lines.iter().all(|line| line.translation.is_none()) {
-            for theirs in [&netease, &qq()].into_iter().flatten() {
-                translated(&mut lines, theirs);
+    let sung = |has: &Option<Has>| match has {
+        Some(Has::Sung(lines)) => Some(lines.clone()),
+        _ => None,
+    };
+    let own = 'own: {
+        if track.netease.is_some() {
+            match &netease {
+                Some(Has::Instrumental) => return (Some(Has::Instrumental), false),
+                Some(Has::Sung(lines)) => break 'own Some(lines.clone()),
+                None => {}
             }
         }
-        return Some(lines);
-    }
-    if track.netease.is_some() {
-        return netease;
-    }
-    match qq() {
-        Some(qq) if track.qq_music => Some(qq),
-        qq => named().or(netease).or(qq),
+        if let Some(lines) = track.qq_music.then(|| (*qq).clone()).flatten() {
+            break 'own Some(lines);
+        }
+        if let Some(lines) = sung(&netease).filter(|lines| worded(lines)) {
+            break 'own Some(lines);
+        }
+        sung(&named).or_else(|| sung(&netease)).or_else(|| track.netease.is_none().then(|| (*qq).clone()).flatten())
+    };
+    match own {
+        Some(lines) if worded(&lines) => (Some(Has::Sung(lines)), false),
+        Some(lines) => match (*kugou).clone().filter(|theirs| worded(theirs) && agree(theirs, &lines)) {
+            Some(mut theirs) => {
+                if theirs.iter().all(|line| line.translation.is_none()) {
+                    for other in std::iter::once(lines).chain(sung(&netease).filter(|other| agree(other, &theirs))) {
+                        translated(&mut theirs, &other);
+                    }
+                }
+                (Some(Has::Sung(theirs)), false)
+            }
+            None => (Some(Has::Sung(lines)), false),
+        },
+        None if !track.artist.trim().is_empty() && [&netease, &*named].iter().any(|has| matches!(has, Some(Has::Instrumental))) => (Some(Has::Instrumental), false),
+        None => match (*kugou).clone().filter(|lines| worded(lines)) {
+            Some(lines) => (Some(Has::Sung(lines)), true),
+            None => (None, false),
+        },
     }
 }
+
+/// Whether two lyrics are of the same words, so far as can be told: of the letters and characters each sings (case,
+/// spaces and signs left out), most of the pairs one after another are the other's too (Sørensen–Dice, of their
+/// bigrams; another song's, in the same language, shares few). Lines of who wrote and made it, one has and the other
+/// not, leave them agreeing.
+fn agree(a: &[Line], b: &[Line]) -> bool {
+    let pairs = |lines: &[Line]| {
+        let sung: Vec<char> = lines.iter().flat_map(|line| line.text.chars()).filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
+        let mut pairs: HashMap<(char, char), usize> = HashMap::new();
+        for pair in sung.windows(2) {
+            *pairs.entry((pair[0], pair[1])).or_default() += 1;
+        }
+        pairs
+    };
+    let (a, b) = (pairs(a), pairs(b));
+    let (count_a, count_b) = (a.values().sum::<usize>(), b.values().sum::<usize>());
+    let shared: usize = a.iter().map(|(pair, n)| (*n).min(b.get(pair).copied().unwrap_or(0))).sum();
+    count_a + count_b > 0 && 2 * shared * 10 >= AGREE_TENTHS * (count_a + count_b)
+}
+
+/// How much of two lyrics' pairs of characters must be shared for them to agree (tenths; see `agree`).
+const AGREE_TENTHS: usize = 6;
 
 /// `lines` with the translation of the line of `theirs` nearest in time to each, within a second.
 fn translated(lines: &mut [Line], theirs: &[Line]) {
@@ -397,26 +474,35 @@ fn clock(time: &str) -> Option<f64> {
 }
 
 /// NetEase Cloud Music's lyrics of its track `id`, with their translation: timed word by word where it has them
-/// (its `yrc`), else line by line; with its lines of who wrote and made the song either way (see `credit`).
+/// (its `yrc`), else line by line; with its lines of who wrote and made the song either way (see `credit`). Or that
+/// it is played without words, where NetEase says so (`pureMusic`: its lyrics then are none, or a line saying so).
 #[cfg(test)]
-fn netease(id: u64) -> Answer<Vec<Line>> {
-    netease_and_credits(id).map(|(lines, _)| lines)
+fn netease(id: u64) -> Answer<Has> {
+    netease_and_credits(id).map(|(has, _)| has)
 }
 
 /// As `netease`, and its lines of who wrote and made the song apart (for lyrics found elsewhere: see `find`).
-fn netease_and_credits(id: u64) -> Result<(Option<Vec<Line>>, Vec<Line>), Unreached> {
+fn netease_and_credits(id: u64) -> Result<(Option<Has>, Vec<Line>), Unreached> {
     let said = netease_said(&format!("https://music.163.com/api/song/lyric/v1?id={id}&lv=1&tv=-1&yv=1"))?;
+    Ok(netease_read(&said))
+}
+
+/// What NetEase says of a track's lyrics (see `netease`), read.
+fn netease_read(said: &serde_json::Value) -> (Option<Has>, Vec<Line>) {
+    if said["pureMusic"].as_bool() == Some(true) {
+        return (Some(Has::Instrumental), Vec::new());
+    }
     let translation = said["tlyric"]["lyric"].as_str();
     let credits = |text: Option<&str>| text.map(|text| text.lines().filter_map(|raw| credit(raw.trim())).collect::<Vec<_>>()).unwrap_or_default();
     if let Some(lines) = said["yrc"]["lyric"].as_str().map(|yrc| word_timed(yrc, translation)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())) {
-        return Ok((Some(lines), credits(said["yrc"]["lyric"].as_str())));
+        return (Some(Has::Sung(lines)), credits(said["yrc"]["lyric"].as_str()));
     }
     // Line by line: its lines of who wrote and made it are written among them as JSON (see `credit`), which the
     // LRC's times do not take (left out, the lyrics showed nothing while NetEase showed those lines).
     let lrc = said["lrc"]["lyric"].as_str();
     let credits = credits(lrc);
     let lines = lrc.map(|lrc| with_credits(merged(lrc, translation), &credits));
-    Ok((lines.filter(|lines| lines.iter().any(|line| !line.text.is_empty())), credits))
+    (lines.filter(|lines| lines.iter().any(|line| !line.text.is_empty())).map(Has::Sung), credits)
 }
 
 /// `lines` with `credits` (NetEase's lines of who wrote and made the song) among them by their times, each one they
@@ -565,8 +651,10 @@ fn qq_music(track: &Track) -> Answer<Vec<Line>> {
 
 /// Kugou's lyrics of `track`, timed word by word (its KRC), with their translation where they have one: of the songs
 /// it finds by title and artist, the first of that title (its highlighting left out), by that artist and of that
-/// length (to two seconds); of the lyrics it keeps for that song, the first of its length. None where they are not
-/// timed word by word (what is chosen from them, see `find`, are those).
+/// length (to two seconds); of the lyrics its users have given it for that song, the first of its length, its name and
+/// one of its artists (that song's or the track's), whose file names no other (see `krc_of`). None where they are not
+/// timed word by word (what is chosen from them, see `chosen`, are those). (Kugou gives lyrics of any song for a
+/// track, those of another first, where its users have put them to it; its scores of them tell nothing.)
 fn kugou(track: &Track) -> Answer<Vec<Line>> {
     // (Its mobile search: its web search answers from some of its servers with nothing found.)
     let searched = format!("https://mobiles.kugou.com/api/v3/search/song?format=json&keyword={}&page=1&pagesize=20&showtype=1", escaped(&format!("{} {}", track.title, track.artist)));
@@ -574,18 +662,41 @@ fn kugou(track: &Track) -> Answer<Vec<Line>> {
     let plain = |text: &str| text.replace("<em>", "").replace("</em>", "");
     let found = said["data"]["info"].as_array().into_iter().flatten().find_map(|song| {
         let singers = plain(song["singername"].as_str()?);
-        let artists = std::iter::once(singers.as_str()).chain(singers.split(['、', ','])).map(str::trim);
         let length = song["duration"].as_f64()?;
-        (same(&plain(song["songname"].as_str()?), &track.title) && by_artist(artists, &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["hash"].as_str().map(str::to_string)).flatten()
+        let ok = same(&plain(song["songname"].as_str()?), &track.title) && by_artist(artists_in(&singers), &track.artist) && (length - track.seconds as f64).abs() <= 2.0;
+        ok.then(|| Some((song["hash"].as_str()?.to_string(), singers)))?
     });
-    let Some(hash) = found else { return Ok(None) };
+    let Some((hash, singers)) = found else { return Ok(None) };
+    let artists: Vec<&str> = artists_in(&singers).into_iter().chain(Some(track.artist.as_str()).filter(|artist| !artist.trim().is_empty())).collect();
     let Some(kept) = fetched_json(&format!("https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash={}", escaped(&hash)))? else { return Ok(None) };
     let ms = f64::from(track.seconds) * 1000.0;
-    let chosen = kept["candidates"].as_array().into_iter().flatten().find(|one| one["duration"].as_f64().is_some_and(|length| (length - ms).abs() <= 2000.0));
-    let Some((id, key)) = chosen.and_then(|one| Some((one["id"].as_str()?, one["accesskey"].as_str()?))) else { return Ok(None) };
-    let Some(lyric) = fetched_json(&format!("https://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=krc&charset=utf8", escaped(id), escaped(key)))? else { return Ok(None) };
-    let Some(text) = lyric["content"].as_str().and_then(krc_opened) else { return Ok(None) };
-    Ok(Some(krc(&text)).filter(|lines| lines.iter().any(|line| !line.words.is_empty())))
+    for one in kept["candidates"].as_array().into_iter().flatten() {
+        let of_it = one["duration"].as_f64().is_some_and(|length| (length - ms).abs() <= 2000.0)
+            && one["song"].as_str().is_some_and(|song| same(song, &track.title))
+            && one["singer"].as_str().is_some_and(|singer| by_any(singer, &artists));
+        let Some((id, key)) = Some(one).filter(|_| of_it).and_then(|one| Some((one["id"].as_str()?, one["accesskey"].as_str()?))) else { continue };
+        let Some(lyric) = fetched_json(&format!("https://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=krc&charset=utf8", escaped(id), escaped(key)))? else { continue };
+        if let Some(lines) = lyric["content"].as_str().and_then(krc_opened).and_then(|text| krc_of(&text, &track.title, &artists)) {
+            return Ok(Some(lines));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether the artists `named` all in one (see `artists_in`) are, one of them, one of `artists`, but for case and
+/// spaces.
+fn by_any(named: &str, artists: &[&str]) -> bool {
+    artists_in(named).into_iter().any(|theirs| artists.iter().any(|artist| same(theirs, artist)))
+}
+
+/// The lines of a KRC file (see `krc`), where it is of the song `title` by one of `artists`, so far as it says (its
+/// `[ti:]` and `[ar:]`: Kugou's users have given it, under a song's name, files that name another) and they are timed
+/// word by word.
+fn krc_of(text: &str, title: &str, artists: &[&str]) -> Option<Vec<Line>> {
+    let tag = |name: &str| text.lines().find_map(|line| line.trim().strip_prefix(name)?.strip_suffix(']').map(str::trim)).filter(|said| !said.is_empty());
+    let titled = tag("[ti:").is_none_or(|said| same(said, title));
+    let by = tag("[ar:").is_none_or(|said| by_any(said, artists));
+    Some(krc(text)).filter(|lines| titled && by && lines.iter().any(|line| !line.words.is_empty()))
 }
 
 /// The words of a KRC file as Kugou gives it (`content`, in base64): past its mark ("krc1"), each byte joined
@@ -681,20 +792,19 @@ fn by_artist<'a>(artists: impl IntoIterator<Item = &'a str>, artist: &str) -> bo
     artist.trim().is_empty() || artists.into_iter().any(|theirs| same(theirs, artist))
 }
 
-/// The artists of a track as LRCLIB names them, all in one ("A, B & C feat. D"): the whole, and each between the
-/// signs that join them (the whole kept: "AC/DC" and "Simon & Garfunkel" are one each).
+/// The artists of a track as LRCLIB and Kugou name them, all in one ("A, B & C feat. D", "A、B"): the whole, and each
+/// between the signs that join them (the whole kept: "AC/DC" and "Simon & Garfunkel" are one each).
 fn artists_in(named: &str) -> Vec<&str> {
     let mut artists = vec![named];
-    for between in [",", "&", "/", ";", " feat. ", " ft. ", " x "] {
+    for between in [",", "、", "&", "/", ";", " feat. ", " ft. ", " x "] {
         artists = artists.into_iter().flat_map(|artist| artist.split(between)).collect();
     }
     std::iter::once(named).chain(artists).map(str::trim).filter(|artist| !artist.is_empty()).collect()
 }
 
-/// LRCLIB's timed lyrics of `track`: the one it has of that title, artist, album and length; else, of those
-/// it finds by title and artist, the first by that artist of that length (to two seconds) with timed lyrics.
-fn lrclib(track: &Track) -> Answer<Vec<Line>> {
-    let timed = |said: &serde_json::Value| said["syncedLyrics"].as_str().map(|lrc| merged(lrc, None)).filter(|lines| lines.iter().any(|line| !line.text.is_empty()));
+/// LRCLIB's timed lyrics of `track`, or that it is played without words: of the one it has of that title, artist,
+/// album and length, and of those it finds by title and artist (see `lrclib_chosen`).
+fn lrclib(track: &Track) -> Answer<Has> {
     let exact = format!(
         "https://lrclib.net/api/get?track_name={}&artist_name={}&album_name={}&duration={}",
         escaped(&track.title),
@@ -702,18 +812,33 @@ fn lrclib(track: &Track) -> Answer<Vec<Line>> {
         escaped(&track.album),
         track.seconds
     );
-    if let Some(found) = fetched_json(&exact)?.and_then(|said| timed(&said)) {
-        return Ok(Some(found));
+    let exact = fetched_json(&exact)?;
+    if let Some(Has::Sung(lines)) = lrclib_chosen(track, exact.iter()) {
+        return Ok(Some(Has::Sung(lines)));
     }
     let search = format!("https://lrclib.net/api/search?track_name={}&artist_name={}", escaped(&track.title), escaped(&track.artist));
     let said = fetched_json(&search)?.unwrap_or_default();
-    Ok(said
-        .as_array()
-        .into_iter()
-        .flatten()
+    Ok(lrclib_chosen(track, exact.iter().chain(said.as_array().into_iter().flatten())))
+}
+
+/// Of LRCLIB's `records`, those of `track` (its title, but for case and spaces: "Song (Live)" is another; by its artist;
+/// of its length, to two seconds; those of its album first): the first one's timed lyrics; else, where one says it is
+/// played without words and none has words even untimed, that. (Anyone may give LRCLIB a record: one of them alone
+/// is not taken over another of the track.)
+fn lrclib_chosen<'a>(track: &Track, records: impl Iterator<Item = &'a serde_json::Value>) -> Option<Has> {
+    let text = |one: &serde_json::Value, key: &str| one[key].as_str().unwrap_or_default().to_string();
+    let mut records: Vec<&serde_json::Value> = records
+        .filter(|one| same(&text(one, "trackName"), &track.title))
+        .filter(|one| by_artist(artists_in(&text(one, "artistName")), &track.artist))
         .filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0))
-        .filter(|one| by_artist(artists_in(one["artistName"].as_str().unwrap_or_default()), &track.artist))
-        .find_map(timed))
+        .collect();
+    records.sort_by_key(|one| !same(&text(one, "albumName"), &track.album));
+    let synced = |one: &&serde_json::Value| one["syncedLyrics"].as_str().map(|lrc| merged(lrc, None)).filter(|lines| lines.iter().any(|line| !line.text.is_empty()));
+    if let Some(lines) = records.iter().find_map(synced) {
+        return Some(Has::Sung(lines));
+    }
+    let worded = records.iter().any(|one| !text(one, "plainLyrics").trim().is_empty());
+    (!worded && records.iter().any(|one| one["instrumental"].as_bool() == Some(true))).then_some(Has::Instrumental)
 }
 
 /// Whether two titles are the same, but for case and spaces.
@@ -860,9 +985,9 @@ pub const EARLY: f64 = 0.2;
 
 /// The lyrics found of the tracks asked about, kept on disk (a file each, in `folder`), so that a track played again
 /// shows them at once without asking: lyrics timed word by word, for good; timed only line by line, for a month (a
-/// source may come to have them word by word); that none has them, for a week; and what was found while a source
-/// could not be reached (which may have had better), for a day. The most kept, the files written longest ago go
-/// first.
+/// source may come to have them word by word); that none has them, or that it is played without words, and Kugou's
+/// taken where none else had them (its users' to change), for a week; and what was found while a source could not
+/// be reached (which may have had better), for a day. The most kept, the files written longest ago go first.
 pub mod kept {
     use super::*;
 
@@ -874,13 +999,18 @@ pub mod kept {
     const FILE_MOST: u64 = 4 << 20;
 
     /// A file: the track (as the name it is kept under could be another's too), when its lyrics were asked for
-    /// (seconds since 1970), what was found, and whether each source asked answered.
+    /// (seconds since 1970), what was found (none, and whether that is as it is played without words), whether each
+    /// source asked answered, and whether what was found rests on Kugou's alone.
     #[derive(Serialize, Deserialize)]
     struct File {
         track: Track,
         asked: u64,
         lines: Option<Vec<Line>>,
+        #[serde(default)]
+        instrumental: bool,
         sure: bool,
+        #[serde(default)]
+        doubted: bool,
         /// How they were found and read (see `FOUND_BY`); none in what earlier versions kept.
         #[serde(default)]
         found_by: u32,
@@ -891,25 +1021,30 @@ pub mod kept {
     /// what was kept before had another artist's song's lyrics, or every line late or early, for good. 3: NetEase's
     /// lines of who wrote and made a song kept. 4: those lines kept from NetEase's lyrics timed line by line too, and
     /// with lyrics timed word by word found elsewhere. 5: Kugou's, timed word by word, asked too, and lyrics timed
-    /// word by word taken first wherever they are.)
-    const FOUND_BY: u32 = 5;
+    /// word by word taken first wherever they are. 6: the track's own taken first, Kugou's only of its words or where
+    /// none has them, and that a track is played without words kept; what was kept before had another song's
+    /// lyrics, Kugou's, for good.)
+    const FOUND_BY: u32 = 6;
 
-    /// A track's lyrics as kept (none: none had them), when they were asked for, and whether each source answered.
+    /// A track's lyrics as kept (none: none had them), when they were asked for, whether each source answered, and
+    /// whether they rest on Kugou's alone.
     pub struct Kept {
-        pub lines: Option<Vec<Line>>,
+        pub found: Option<Has>,
         asked: SystemTime,
         sure: bool,
+        doubted: bool,
     }
 
     impl Kept {
         /// Whether they are still as the sources would now give them, so far as can be told.
         pub fn fresh(&self) -> bool {
             let age = SystemTime::now().duration_since(self.asked).unwrap_or_default();
-            match &self.lines {
+            match &self.found {
                 _ if !self.sure => age < UNSURE_FOR,
-                Some(lines) if lines.iter().any(|line| !line.words.is_empty()) => true,
-                Some(_) => age < LINED_FOR,
-                None => age < NONE_FOR,
+                _ if self.doubted => age < NONE_FOR,
+                Some(Has::Sung(lines)) if lines.iter().any(|line| !line.words.is_empty()) => true,
+                Some(Has::Sung(_)) => age < LINED_FOR,
+                Some(Has::Instrumental) | None => age < NONE_FOR,
             }
         }
     }
@@ -935,23 +1070,31 @@ pub mod kept {
         let file: File = serde_json::from_str(&text).ok()?;
         // (Asked at a time no clock says: not kept.)
         let asked = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(file.asked))?;
-        (file.track == *track && file.found_by == FOUND_BY).then_some(Kept { lines: file.lines, asked, sure: file.sure })
+        let found = match file.lines {
+            _ if file.instrumental => Some(Has::Instrumental),
+            lines => lines.map(Has::Sung),
+        };
+        (file.track == *track && file.found_by == FOUND_BY).then_some(Kept { found, asked, sure: file.sure, doubted: file.doubted })
     }
 
-    /// Keeps what was found of `track`'s lyrics (none: none had them), asked for now, and whether each source
-    /// answered; and, kept the most, lets the files written longest ago go. (Not kept where it cannot be written:
-    /// they are asked for again.)
-    pub fn write(track: &Track, lines: Option<&[Line]>, sure: bool) {
-        write_in(&folder(), track, lines, sure);
+    /// Keeps what was found of `track`'s lyrics (none: none had them), asked for now, whether each source answered,
+    /// and whether it rests on Kugou's alone; and, kept the most, lets the files written longest ago go. (Not kept
+    /// where it cannot be written: they are asked for again.)
+    pub fn write(track: &Track, found: Option<&Has>, sure: bool, doubted: bool) {
+        write_in(&folder(), track, found, sure, doubted);
     }
 
     /// As `write`, into `folder`.
-    pub(super) fn write_in(folder: &std::path::Path, track: &Track, lines: Option<&[Line]>, sure: bool) {
+    pub(super) fn write_in(folder: &std::path::Path, track: &Track, found: Option<&Has>, sure: bool, doubted: bool) {
         if folder.parent().is_none_or(|own| crate::elevation::ensure_folder(own).is_err()) || crate::elevation::ensure_folder(folder).is_err() {
             return;
         }
         let asked = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-        let file = File { track: track.clone(), asked, lines: lines.map(<[Line]>::to_vec), sure, found_by: FOUND_BY };
+        let lines = match found {
+            Some(Has::Sung(lines)) => Some(lines.clone()),
+            _ => None,
+        };
+        let file = File { track: track.clone(), asked, lines, instrumental: found == Some(&Has::Instrumental), sure, doubted, found_by: FOUND_BY };
         let Ok(json) = serde_json::to_vec(&file) else { return };
         if crate::elevation::write_in_place(folder, &name(track), &json).is_ok() {
             trimmed(folder);
@@ -1106,24 +1249,150 @@ mod tests {
         assert!(lines.iter().all(|line| line.at <= LONGEST && line.end.is_some_and(|end| end <= LONGEST) && line.words.iter().all(|word| word.end <= LONGEST)));
     }
 
-    /// Lyrics timed word by word taken first, wherever they are: Kugou's over NetEase's timed by line (with NetEase's
-    /// translation), over QQ Music's own where it plays, over LRCLIB's; NetEase's timed word by word over Kugou's;
-    /// with none timed word by word, the player's own.
+    /// Lines of `text`, one a second, timed by line (with `translation` of each, where given) or word by word.
+    fn lines_of(text: &[&str], translation: Option<&str>, worded: bool) -> Vec<Line> {
+        let line = |at: usize, text: &str| {
+            let at = at as f64;
+            let words = if worded { vec![Word { at, end: at + 1.0, text: text.into() }] } else { Vec::new() };
+            Line { at, end: worded.then_some(at + 1.0), text: text.into(), words, backing: None, translation: translation.map(str::to_string) }
+        };
+        text.iter().enumerate().map(|(at, text)| line(at, text)).collect()
+    }
+
+    const STARS: &[&str] = &["Look at the stars", "Look how they shine for you", "And everything you do"];
+    const DRUGS: &[&str] = &["The drugs begin to take effect", "A smile of joy is on my face", "I cannot feel my hands"];
+
+    fn a_track(netease: Option<u64>, qq_music: bool, artist: &str) -> Track {
+        Track { netease, qq_music, title: "t".into(), artist: artist.into(), album: String::new(), seconds: 100 }
+    }
+
+    /// What `chosen` took: the first line's text and translation, whether it is timed word by word, and whether it was
+    /// doubted; or that it is played without words.
+    fn taken(chosen: (Option<Has>, bool)) -> Option<(String, Option<String>, bool, bool)> {
+        match chosen {
+            (Some(Has::Sung(lines)), doubted) => Some((lines[0].text.clone(), lines[0].translation.clone(), !lines[0].words.is_empty(), doubted)),
+            (Some(Has::Instrumental), _) => Some(("instrumental".into(), None, false, false)),
+            (None, _) => None,
+        }
+    }
+
+    fn given<T>(has: T) -> impl FnOnce() -> T {
+        move || has
+    }
+
+    fn waited<T>() -> T {
+        panic!("waited for")
+    }
+
+    /// That a track is played without words is taken where NetEase says so of the number its player gave, the
+    /// collection's and Kugou's lyrics not waited for; and where NetEase (found by name) or LRCLIB says so and none of
+    /// the track's own has words: not Kugou's. (Kugou gave another song's lyrics for a piano piece: shown, for good.)
     #[test]
-    fn takes_lyrics_timed_word_by_word_first() {
-        let lined = |text: &str, translation: Option<&str>| vec![Line { at: 1.0, end: None, text: text.into(), words: Vec::new(), backing: None, translation: translation.map(str::to_string) }];
-        let worded = |text: &str| vec![Line { at: 1.0, end: Some(2.0), text: text.into(), words: vec![Word { at: 1.0, end: 2.0, text: text.into() }], backing: None, translation: None }];
-        let track = |netease: Option<u64>, qq_music: bool| Track { netease, qq_music, title: "t".into(), artist: "a".into(), album: String::new(), seconds: 100 };
-        let text = |lines: Option<Vec<Line>>| lines.map(|lines| (lines[0].text.clone(), lines[0].translation.clone()));
-        let given = |lines: Option<Vec<Line>>| move || lines;
-        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", Some("译"))), given(Some(worded("kugou"))), given(None), given(None))), Some(("kugou".into(), Some("译".into()))));
-        assert_eq!(text(chosen(&track(None, true), None, given(Some(worded("kugou"))), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("kugou".into(), None)));
-        assert_eq!(text(chosen(&track(Some(1), false), Some(lined("netease", None)), given(Some(lined("kugou", None))), given(None), given(Some(lined("lrclib", None))))), Some(("netease".into(), None)));
-        assert_eq!(text(chosen(&track(None, true), Some(lined("netease", None)), given(None), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("qq".into(), None)));
-        assert_eq!(text(chosen(&track(None, false), Some(lined("netease", None)), given(None), given(Some(lined("qq", None))), given(Some(lined("lrclib", None))))), Some(("lrclib".into(), None)));
-        // NetEase's timed word by word: none of the others waited for (one slow, or not reached, holds nothing up).
-        let waited = || -> Option<Vec<Line>> { panic!("waited for") };
-        assert_eq!(text(chosen(&track(None, false), Some(worded("netease")), waited, waited, waited)), Some(("netease".into(), None)));
+    fn a_track_played_without_words_shows_none() {
+        let instrumental = Some(("instrumental".to_string(), None, false, false));
+        let artist = "Pianoboy高至豪";
+        assert_eq!(taken(chosen(&a_track(Some(139774), false, artist), Some(Has::Instrumental), waited, waited, waited)), instrumental);
+        let junk = || Some(lines_of(DRUGS, None, true));
+        assert_eq!(taken(chosen(&a_track(None, false, artist), Some(Has::Instrumental), junk, given(None), given(Some(Has::Instrumental)))), instrumental);
+        assert_eq!(taken(chosen(&a_track(None, false, artist), None, junk, given(None), given(Some(Has::Instrumental)))), instrumental);
+        assert_eq!(taken(chosen(&a_track(Some(1), false, artist), None, junk, waited, given(Some(Has::Instrumental)))), instrumental);
+        // Words found by name of the track elsewhere: those (one source's word against another's, the words shown).
+        let lrclib = Some(Has::Sung(lines_of(STARS, None, false)));
+        assert_eq!(taken(chosen(&a_track(None, false, artist), Some(Has::Instrumental), given(None), given(None), given(lrclib))).map(|taken| taken.0), Some("Look at the stars".into()));
+        // A player that names no artist: what was found by name may be any artist's song of that title.
+        assert_eq!(taken(chosen(&a_track(None, false, ""), None, junk, given(None), given(Some(Has::Instrumental)))), Some(("The drugs begin to take effect".into(), None, true, true)));
+    }
+
+    /// The track's own lyrics first, as surely as it can be told which they are: those timed only line by line are
+    /// timed word by word where Kugou's are of the same words (with their translation), and not otherwise.
+    #[test]
+    fn the_tracks_own_lyrics_come_first() {
+        let lined = |text: &'static [&'static str], translation: Option<&str>| Some(lines_of(text, translation, false));
+        let worded = |text: &'static [&'static str]| Some(lines_of(text, None, true));
+        let sung = |lines: Option<Vec<Line>>| lines.map(Has::Sung);
+        let stars = |translation: Option<&str>, worded: bool, doubted: bool| Some(("Look at the stars".to_string(), translation.map(str::to_string), worded, doubted));
+        // By the player's number: NetEase's, timed word by word with Kugou's where they agree.
+        assert_eq!(taken(chosen(&a_track(Some(1), false, "a"), sung(lined(STARS, Some("看星星"))), given(worded(STARS)), waited, given(None))), stars(Some("看星星"), true, false));
+        assert_eq!(taken(chosen(&a_track(Some(1), false, "a"), sung(lined(STARS, None)), given(worded(DRUGS)), waited, given(None))), stars(None, false, false));
+        // NetEase's timed word by word: the others not waited for.
+        assert_eq!(taken(chosen(&a_track(Some(1), false, "a"), sung(worded(STARS)), waited, waited, waited)), stars(None, true, false));
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), sung(worded(STARS)), waited, waited, waited)), stars(None, true, false));
+        // Played in QQ Music: its own, over another song's words from Kugou.
+        assert_eq!(taken(chosen(&a_track(None, true, "a"), None, given(worded(DRUGS)), given(lined(STARS, None)), given(None))), stars(None, false, false));
+        assert_eq!(taken(chosen(&a_track(None, true, "a"), sung(lined(DRUGS, None)), given(None), given(lined(STARS, None)), given(sung(lined(DRUGS, None))))), stars(None, false, false));
+        // LRCLIB's, over NetEase's found by name, over QQ Music's; Kugou's of other words not taken over them.
+        let drugs_lined = sung(lined(DRUGS, None));
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), drugs_lined.clone(), given(worded(DRUGS)), given(None), given(sung(lined(STARS, None))))), stars(None, false, false));
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), sung(lined(STARS, None)), given(None), given(lined(DRUGS, None)), given(None))), stars(None, false, false));
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), None, given(None), given(lined(STARS, None)), given(None))), stars(None, false, false));
+        // Kugou's taken by its words with the translation of a source of the same words alone.
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), sung(lined(DRUGS, Some("药"))), given(worded(STARS)), given(None), given(sung(lined(STARS, None))))), stars(None, true, false));
+        // None of the track's own: Kugou's, doubted.
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), None, given(worded(STARS)), given(None), given(None))), stars(None, true, true));
+        assert_eq!(taken(chosen(&a_track(None, false, "a"), None, given(None), given(None), given(None))), None);
+    }
+
+    /// Lyrics agree where they are of the same words: lines of who wrote it one has alone, case, spaces and signs
+    /// left aside; another song's words do not.
+    #[test]
+    fn lyrics_of_the_same_words_agree() {
+        let with_credits: Vec<&str> = ["作词: Chris Martin", "作曲: Coldplay"].into_iter().chain(STARS.iter().copied()).collect();
+        let shouted: Vec<String> = STARS.iter().map(|line| format!("{}!", line.to_uppercase().replace(' ', "  "))).collect();
+        let shouted: Vec<&str> = shouted.iter().map(String::as_str).collect();
+        assert!(agree(&lines_of(STARS, None, true), &lines_of(&with_credits, None, false)));
+        assert!(agree(&lines_of(&shouted, None, true), &lines_of(STARS, None, false)));
+        assert!(!agree(&lines_of(DRUGS, None, true), &lines_of(STARS, None, false)));
+        assert!(!agree(&lines_of(&["你从天上降落", "淹没我"], None, true), &lines_of(&["豆花之歌", "甜甜的豆花"], None, false)));
+        assert!(!agree(&[], &[]));
+    }
+
+    /// NetEase saying a track is played without words (its `pureMusic`, as it answers for 139774) is read as that,
+    /// whatever line it gives for lyrics.
+    #[test]
+    fn netease_says_a_track_is_played_without_words() {
+        let said = serde_json::json!({"pureMusic": true, "lrc": {"version": 1, "lyric": "[00:00.000] 纯音乐，请欣赏\n"}, "code": 200});
+        assert_eq!(netease_read(&said).0, Some(Has::Instrumental));
+        let sung = serde_json::json!({"lrc": {"lyric": "[00:01.00]Look at the stars"}, "code": 200});
+        assert!(matches!(netease_read(&sung).0, Some(Has::Sung(lines)) if lines[0].text == "Look at the stars"));
+    }
+
+    /// LRCLIB's records of the track alone, by its title (another version's is another's), its artist and its length:
+    /// the timed lyrics of one, those of its album first; that it is played without words only where none has words.
+    #[test]
+    fn lrclib_records_of_the_track_alone() {
+        let track = Track { netease: None, qq_music: false, title: "Song".into(), artist: "Band".into(), album: "Second".into(), seconds: 200 };
+        let record = |title: &str, artist: &str, album: &str, seconds: f64, synced: Option<&str>, plain: Option<&str>, instrumental: bool| {
+            serde_json::json!({"trackName": title, "artistName": artist, "albumName": album, "duration": seconds, "syncedLyrics": synced, "plainLyrics": plain, "instrumental": instrumental})
+        };
+        let first = |has: Option<Has>| match has {
+            Some(Has::Sung(lines)) => Some(lines[0].text.clone()),
+            Some(Has::Instrumental) => Some("instrumental".into()),
+            None => None,
+        };
+        let pick = |records: Vec<serde_json::Value>| first(lrclib_chosen(&track, records.iter()));
+        // Another version's, another artist's, another length's: none.
+        assert_eq!(pick(vec![record("Song (Instrumental)", "Band", "", 200.0, None, None, true)]), None);
+        assert_eq!(pick(vec![record("Song", "Other", "", 200.0, Some("[00:01.00]theirs"), None, false)]), None);
+        assert_eq!(pick(vec![record("Song", "Band", "", 140.0, Some("[00:01.00]short"), None, false)]), None);
+        // Timed lyrics over a record saying it is played without words; of its album first.
+        assert_eq!(pick(vec![record("Song", "Band", "", 200.0, None, None, true), record("song", "Band & Friend", "", 201.0, Some("[00:01.00]sung"), None, false)]), Some("sung".into()));
+        assert_eq!(pick(vec![record("Song", "Band", "First", 200.0, Some("[00:01.00]first"), None, false), record("Song", "Band", "Second", 200.0, Some("[00:01.00]second"), None, false)]), Some("second".into()));
+        // Played without words: only where none has words, even untimed.
+        assert_eq!(pick(vec![record("Song", "Band", "", 200.0, None, None, true)]), Some("instrumental".into()));
+        assert_eq!(pick(vec![record("Song", "Band", "", 200.0, None, None, true), record("Song", "Band", "", 200.0, None, Some("words"), false)]), None);
+    }
+
+    /// A KRC file is taken only where it names the song and one of its artists, where it names them (Kugou's users put
+    /// "豆花之歌" under "The Truth That You Leave").
+    #[test]
+    fn a_kugou_file_naming_another_song_is_not_taken() {
+        let body = "[1000,1000]<0,1000,0>sung\n";
+        let artists = ["Pianoboy高至豪", "Pianoboy"];
+        assert!(krc_of(&format!("[ti:The Truth That You Leave]\n[ar:pianoboy]\n{body}"), "The Truth That You Leave", &artists).is_some());
+        assert!(krc_of(body, "The Truth That You Leave", &artists).is_some());
+        assert!(krc_of(&format!("[ti:豆花之歌]\n[ar:锦零]\n{body}"), "The Truth That You Leave", &artists).is_none());
+        assert!(krc_of(&format!("[ti:The Truth That You Leave]\n[ar:arkady sevidov]\n{body}"), "The Truth That You Leave", &artists).is_none());
+        assert!(krc_of("[ti:The Truth That You Leave]\n[1000,1000]sung\n", "The Truth That You Leave", &artists).is_none());
     }
 
     /// Kugou's lyrics as it gives them, sealed: opened and read (an ignored test: it asks Kugou).
@@ -1135,6 +1404,9 @@ mod tests {
         let sung = lines.iter().find(|line| line.text.contains("你从天上降落")).expect("the line");
         assert!(sung.words.len() > 3, "{sung:?}");
         println!("{} lines, {:?}", lines.len(), sung);
+        // Found by name (its first artist, as its player names it): timed word by word, by Kugou's of the same words.
+        let Some(Has::Sung(found)) = find(&Track { artist: "胡期皓".into(), ..track }).found else { panic!("its lyrics") };
+        assert!(found.iter().any(|line| line.text.contains("你从天上降落") && line.words.len() > 3), "{:?}", &found[..3]);
     }
 
     #[test]
@@ -1163,12 +1435,29 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("glance-kept-lyrics-{}", std::process::id())).join("lyrics");
         let track = Track { netease: Some(7), title: "kept test".into(), artist: "nobody".into(), album: String::new(), seconds: 1, qq_music: false };
         let worded = word_timed("[1000,500](1000,500,0)la", None);
-        kept::write_in(&folder, &track, Some(&worded), true);
+        let worded = Has::Sung(worded);
+        kept::write_in(&folder, &track, Some(&worded), true, false);
         let read = kept::read_in(&folder, &track).expect("kept");
-        assert_eq!(read.lines.as_deref(), Some(&worded[..]));
+        assert_eq!(read.found.as_ref(), Some(&worded));
         assert!(read.fresh());
-        kept::write_in(&folder, &track, None, true);
-        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.lines.is_none() && kept.fresh()));
+        kept::write_in(&folder, &track, None, true, false);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.found.is_none() && kept.fresh()));
+        kept::write_in(&folder, &track, Some(&Has::Instrumental), true, false);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.found == Some(Has::Instrumental) && kept.fresh()));
+        // Kugou's alone, timed word by word: for a week, not for good.
+        let file = std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().path();
+        let asked_days_ago = |days: u64| {
+            let mut said: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            said["asked"] = serde_json::json!(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() - days * 24 * 3600);
+            std::fs::write(&file, serde_json::to_vec(&said).unwrap()).unwrap();
+        };
+        kept::write_in(&folder, &track, Some(&worded), true, true);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.found.as_ref() == Some(&worded) && kept.fresh()));
+        asked_days_ago(8);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| !kept.fresh()));
+        kept::write_in(&folder, &track, Some(&worded), true, false);
+        asked_days_ago(400);
+        assert!(kept::read_in(&folder, &track).is_some_and(|kept| kept.fresh()));
         let other = Track { seconds: 2, ..track.clone() };
         assert!(kept::read_in(&folder, &other).is_none());
         // Asked at a time no clock says: not kept (it was added to the clock's start, past what it holds).
@@ -1209,8 +1498,7 @@ mod tests {
     #[test]
     #[ignore = "asks NetEase over the network"]
     fn keeps_netease_credits() {
-        let Ok((lines, credits)) = netease_and_credits(1359818052) else { panic!("NetEase answers") };
-        let lines = lines.expect("its lyrics");
+        let Ok((Some(Has::Sung(lines)), credits)) = netease_and_credits(1359818052) else { panic!("NetEase answers, with its lyrics") };
         assert!(credits.len() >= 10, "{credits:?}");
         assert_eq!(credits[0].text, "作词: 2KM");
         assert!(lines.iter().take(3).all(|line| line.at < 3.0 && line.text.contains(':')), "{:?}", &lines[..3]);
@@ -1229,12 +1517,12 @@ mod tests {
     fn finds_lyrics() {
         let worded = amll(1901371647).ok().flatten().expect("the collection's, word by word");
         println!("AMLL: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, line.words.len(), &line.translation)));
-        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330, qq_music: false }).found.expect("NetEase's, by number");
+        let by_id = find(&Track { netease: Some(2124385847), title: String::new(), artist: String::new(), album: String::new(), seconds: 330, qq_music: false }).found.and_then(sung_lines).expect("NetEase's, by number");
         println!("NetEase by number: {} lines, {} timed word by word, the second {:?}", by_id.len(), by_id.iter().filter(|line| !line.words.is_empty()).count(), by_id.get(1));
-        let worded = netease(1974443814).ok().flatten().expect("NetEase's, word by word");
+        let worded = netease(1974443814).ok().flatten().and_then(sung_lines).expect("NetEase's, word by word");
         println!("NetEase word by word: {} lines; {:?}", worded.len(), worded.iter().find(|line| line.words.len() > 2).map(|line| (&line.text, &line.words, &line.translation)));
         assert!(worded.iter().any(|line| line.words.len() > 2));
-        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267, qq_music: false }).found.expect("LRCLIB's");
+        let by_name = find(&Track { netease: None, title: "Yellow".into(), artist: "Coldplay".into(), album: "Parachutes".into(), seconds: 267, qq_music: false }).found.and_then(sung_lines).expect("LRCLIB's");
         println!("by name: {} lines, the first sung {:?}", by_name.len(), by_name.iter().find(|line| !line.text.is_empty()));
         let searched = netease_search(&Track { netease: None, title: "我爱你中国 (live)".into(), artist: "孙楠".into(), album: String::new(), seconds: 330, qq_music: false });
         println!("NetEase by its title: {:?}", searched.as_ref().ok());
@@ -1247,9 +1535,31 @@ mod tests {
         let qq = qq_music(&qq_only).ok().flatten().expect("QQ Music's");
         println!("QQ Music: {} lines, {:?}", qq.len(), qq.iter().find(|line| line.text == "悬明月照屋庭"));
         assert!(qq.iter().any(|line| line.text == "悬明月照屋庭"));
-        assert!(find(&qq_only).found.is_some_and(|lines| lines.iter().any(|line| line.text == "悬明月照屋庭")));
+        assert!(find(&qq_only).found.and_then(sung_lines).is_some_and(|lines| lines.iter().any(|line| line.text == "悬明月照屋庭")));
         let none = find(&Track { netease: None, title: "zzqqxx no such song".into(), artist: "qqqww".into(), album: String::new(), seconds: 100, qq_music: false });
         assert!(none.sure && none.found.is_none(), "that no source has a track's lyrics is known");
         assert!(matches!(netease(1), Ok(None)), "NetEase says it has none");
+    }
+
+    fn sung_lines(has: Has) -> Option<Vec<Line>> {
+        match has {
+            Has::Sung(lines) => Some(lines),
+            Has::Instrumental => None,
+        }
+    }
+
+    /// A piano piece Kugou gave another song's lyrics for (network): that it is played without words, by NetEase's
+    /// number and by its name alike. `cargo test -- --ignored a_piano_piece --nocapture`.
+    #[test]
+    #[ignore = "asks the lyrics sources over the network"]
+    fn a_piano_piece_has_no_words() {
+        let by_name = Track { netease: None, qq_music: false, title: "The Truth That You Leave".into(), artist: "Pianoboy高至豪".into(), album: String::new(), seconds: 223 };
+        for track in [Track { netease: Some(139774), ..by_name.clone() }, by_name.clone(), Track { qq_music: true, ..by_name.clone() }] {
+            let said = find(&track);
+            println!("{:?}: {:?} sure {}", track.netease, said.found.as_ref().map(|has| matches!(has, Has::Instrumental)), said.sure);
+            assert_eq!(said.found, Some(Has::Instrumental));
+        }
+        // Kugou's of its name alone: none of the files given it under that name is of it.
+        println!("Kugou: {:?}", kugou(&by_name).ok().flatten().map(|lines| lines.into_iter().take(2).map(|line| line.text).collect::<Vec<_>>()));
     }
 }

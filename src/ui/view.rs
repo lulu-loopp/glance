@@ -121,6 +121,7 @@ fn sung_now(heard: Option<&crate::playing::Now>, lang: Lang, translated: bool) -
         Sung::Untimed { netease: false } => said(lang.pick("这个播放器没有提供播放进度", "This player does not say how far in it is"), lang.pick("无法跟着播放显示歌词", "so no line can be shown as it is sung")),
         Sung::Asking => said(lang.pick("正在查找歌词…", "Finding the lyrics…"), ""),
         Sung::Unknown => None,
+        Sung::Instrumental => said(lang.pick("纯音乐", "Instrumental"), ""),
         Sung::Lines { lines, now, .. } => {
             let line = now.map_or(String::new(), |now| sung_line(&lines[now].text));
             let translation = now.and_then(|now| lines[now].translation.clone()).filter(|_| translated);
