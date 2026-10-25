@@ -441,6 +441,16 @@ struct Shown {
     detail: view::Detail,
 }
 
+impl Shown {
+    /// Its lanes as they are drawn `size` large (DIPs): as they were laid out; a note pulled off the panel, turning
+    /// between its card and a note (`turning`), laid out again for that size, its page growing with its card (laid out
+    /// as the note it turns into, its page was as large as that note from the first, its head and foot reaching past
+    /// the card).
+    fn drawn_at(&self, size: (f32, f32), turning: bool) -> std::borrow::Cow<'_, view::Layout> {
+        if turning { std::borrow::Cow::Owned(self.layout.clone().fitted(size)) } else { std::borrow::Cow::Borrowed(&self.layout) }
+    }
+}
+
 /// What a layout turns from: what was shown, not yet recorded, or what was
 /// drawn, recorded.
 enum Before {
@@ -4755,7 +4765,8 @@ impl Widget {
                         Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
                     });
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
-                    let picture = render::Picture { scene, lanes: &lanes, layout: &shown.layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
+                    let layout = shown.drawn_at(size, carried.is_some_and(|(card, ..)| card.is_some()));
+                    let picture = render::Picture { scene, lanes: &lanes, layout: &layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
                     if let Some((hit, _, _, (hx, hy))) = lifting {
                         lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (-hx, -hy), hit)).filter(|parts| !parts.is_empty());
                         if lifted.is_some() {
@@ -5282,6 +5293,26 @@ mod tests {
         let note = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
             assert!(!note.dressed(Theme::new(skin, false)).ruled, "{skin:?}");
+        }
+    }
+
+    /// A note pulled off the panel is drawn as large as it is between its card and a note, in every skin: its page all
+    /// of it at each size it passes through (laid out as the note it turns into, its page was that note's size from the
+    /// first, its colour's band and its foot reaching past its card). Not turning, it is drawn as it was laid out.
+    #[test]
+    fn a_note_pulled_off_the_panel_is_laid_out_as_large_as_it_is() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let note = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            let theme = note.dressed(Theme::new(skin, false));
+            let layout = view::Layout::with_columns(vec![view::STUCK_NOTE.1], 1, &theme).fitted(view::STUCK_NOTE);
+            let shown = Shown { form: choice.form, zoom: 1.0, size: view::STUCK_NOTE, layout, small: None, detail: view::Detail::Full };
+            let page = |layout: &view::Layout| layout.lanes().iter().map(|lane| (lane.x, lane.y, lane.w, lane.h)).collect::<Vec<_>>();
+            assert_eq!(page(&shown.drawn_at(view::STUCK_NOTE, false)), vec![(0.0, 0.0, view::STUCK_NOTE.0, view::STUCK_NOTE.1)], "{skin:?}");
+            for size in [(148.0, 104.0), (204.0, 197.0), view::STUCK_NOTE, (372.0, 331.0)] {
+                assert_eq!(page(&shown.drawn_at(size, true)), vec![(0.0, 0.0, size.0, size.1)], "{skin:?} {size:?}");
+                assert_eq!(page(&shown.drawn_at(size, false)), page(&shown.layout), "{skin:?} {size:?}");
+            }
         }
     }
 
