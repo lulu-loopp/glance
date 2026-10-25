@@ -3799,6 +3799,7 @@ impl<'a> Panel<'a> {
         let at_buttons = at.filter(|at| pointer.is_some() || rack.is_some_and(|rack| within(*at, rack)));
         let settings_lit = self.settings_lit();
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
+        let family = self.theme.body.family;
         let music = &mut self.music;
         let layer = &mut self.music_layer;
         self.music_frames += 1;
@@ -3820,7 +3821,7 @@ impl<'a> Panel<'a> {
             // (Round it, the room for its shadow.)
             let area = (-24.0, -24.0, size.0 + 48.0, size.1 + 48.0);
             let drew = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, None, |frame| {
-                painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), px, pointer, now));
+                painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), family, px, pointer, now));
                 Ok(())
             });
             if drew.is_err() {

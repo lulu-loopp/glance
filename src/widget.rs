@@ -1214,12 +1214,12 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 // already inside its lane).
                 let inset = if apart { 0.0 } else { theme.pad_x };
                 // (The one dropped onto: its own look, its ground drawn under it all already.)
-                let ground = if index == 0 { music::Ground::Under } else { music::Ground::Host { dark: theme.dark, family: theme.body.family, inset } };
+                let ground = if index == 0 { music::Ground::Under } else { music::Ground::Host { dark: theme.dark, inset } };
                 let here = pointer.filter(|(x, y)| *x >= rx && *x < rx + rw && *y >= ry && *y < ry + rh).map(|(x, y)| (x - rx, y - ry));
                 let mut painted = None;
                 frame.origin(0.0, 0.0);
                 let drew = layer.draw(frame, *frames, Matrix3x2::translation(rx, ry) * shift * local, (-4.0, -4.0, rw + 8.0, rh + 8.0), px, None, |frame| {
-                    painted = Some(music.paint(frame, (rw, rh), shows, ground, px, here, now));
+                    painted = Some(music.paint(frame, (rw, rh), shows, ground, theme.body.family, px, here, now));
                     Ok(())
                 });
                 if let Err(error) = drew {
@@ -4811,7 +4811,7 @@ impl Widget {
                     let area = (-MUSIC_SHADOW, -MUSIC_SHADOW, size.0 + 2.0 * MUSIC_SHADOW, size.1 + 2.0 * MUSIC_SHADOW);
                     let mut painted = None;
                     let drew = layer.draw(frame, *frames, local, area, px, None, |frame| {
-                        painted = Some(music.paint(frame, size, &shows, music::Ground::of(&shows), px, pointer, now));
+                        painted = Some(music.paint(frame, size, &shows, music::Ground::of(&shows), theme.body.family, px, pointer, now));
                         Ok(())
                     });
                     if let Err(error) = drew {

@@ -5921,11 +5921,12 @@ impl Ui {
         self.follows_pointer.push(Rect { x: at.0, y: at.1, w: size.0 * scale, h: size.1 * scale });
         frame.place(Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1));
         let ground = super::music::Ground::of(&shows);
+        let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
         let now = Instant::now();
         let painted = if super::music::heard() {
-            self.music.paint(frame, size, &shows, ground, self.scale * scale, pointer, now)
+            self.music.paint(frame, size, &shows, ground, family, self.scale * scale, pointer, now)
         } else {
-            self.music.paint_example(frame, size, &shows, ground, self.scale * scale, pointer, now, self.example_from.elapsed().as_secs_f64())
+            self.music.paint_example(frame, size, &shows, ground, family, self.scale * scale, pointer, now, self.example_from.elapsed().as_secs_f64())
         };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };

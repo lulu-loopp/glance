@@ -145,10 +145,11 @@ impl Ui {
                     let (w, h) = (TILE_MUSIC.0 * k, TILE_MUSIC.1 * k);
                     frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(inside.x + (inside.w - w) / 2.0, inside.y + (inside.h - h) / 2.0));
                     let (ground, now) = (super::super::music::Ground::Own, Instant::now());
+                    let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
                     let _ = if super::super::music::heard() {
-                        self.library_music.paint(frame, TILE_MUSIC, &shows, ground, self.scale * k, None, now)
+                        self.library_music.paint(frame, TILE_MUSIC, &shows, ground, family, self.scale * k, None, now)
                     } else {
-                        self.library_music.paint_example(frame, TILE_MUSIC, &shows, ground, self.scale * k, None, now, self.example_from.elapsed().as_secs_f64())
+                        self.library_music.paint_example(frame, TILE_MUSIC, &shows, ground, family, self.scale * k, None, now, self.example_from.elapsed().as_secs_f64())
                     };
                     frame.origin(0.0, 0.0);
                 }
@@ -404,10 +405,11 @@ impl Ui {
         unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
         let (ground, scale, now) = (super::super::music::Ground::of(&shows), self.scale * k, Instant::now());
+        let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
         let painted = if super::super::music::heard() {
-            self.music.paint(frame, size, &shows, ground, scale, None, now)
+            self.music.paint(frame, size, &shows, ground, family, scale, None, now)
         } else {
-            self.music.paint_example(frame, size, &shows, ground, scale, None, now, self.example_from.elapsed().as_secs_f64())
+            self.music.paint_example(frame, size, &shows, ground, family, scale, None, now, self.example_from.elapsed().as_secs_f64())
         };
         frame.origin(0.0, 0.0);
         unsafe { frame.dc.PopAxisAlignedClip() };

@@ -253,7 +253,8 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
     let on = &music.shows;
     let shows = MusicShows { cover: on.cover, title: on.title, translation: on.translation, spectrum: on.spectrum, controls: on.controls, clear: on.clear, inset: None };
     // Sliding out of its edge as a panel does, where the shot says when (its look's entrance, out of the edge it is at).
-    let entrance = Theme::new(Skin::named(&shot.skin), true).entrance;
+    let look = Theme::new(Skin::named(&shot.skin), true);
+    let (entrance, family) = (look.entrance, look.body.family);
     let outward = if shot.edge.as_deref() == Some("left") { -1.0 } else { 1.0 };
     let mut widget = Music::default();
     let mut full = crate::fullscreen::Shown::new(std::time::Instant::now());
@@ -294,7 +295,7 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: key.opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
                 frame.place(Matrix3x2::translation(key.x, key.y));
-                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows), px, None, now, played());
+                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows), family, px, None, now, played());
                 frame.origin(0.0, 0.0);
                 unsafe { frame.dc.PopLayer() };
             })

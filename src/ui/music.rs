@@ -177,14 +177,15 @@ impl Shows {
 
 /// What it is drawn on: its own ground (the cover blurred), none (its words edged, to be read on whatever is behind),
 /// or the ground of the widget it is merged into (that one's look: its words in that ground's ink, dark or light).
+/// (Its words are in the skin's type on each: see `Music::paint`.)
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Ground {
     Own,
     /// Its own look, its ground drawn under it already (it is the one other widgets are merged into).
     Under,
     Clear,
-    /// Its words in the host's type (`family`), as far in from its edge as the host's are (`inset`).
-    Host { dark: bool, family: Family, inset: f32 },
+    /// As far in from its edge as the host's words are (`inset`).
+    Host { dark: bool, inset: f32 },
 }
 
 impl Ground {
@@ -194,7 +195,8 @@ impl Ground {
     }
 }
 
-/// The words: the line sung now in the card's lines, the others, the translation under it, what plays.
+/// The words: the line sung now in the card's lines, the others, the translation under it, what plays. (Their sizes
+/// and weights: each is drawn in the skin's type, see `Fonts`.)
 const NOW_FONT: Font = Font::new(Family::Segoe, 25.0, 700.0);
 const UNDER_FONT: Font = Font::new(Family::Segoe, 14.0, 500.0);
 const TITLE: Font = Font::new(Family::Segoe, 15.0, 700.0);
@@ -209,7 +211,8 @@ const STRIP_LINE: Font = Font::new(Family::Segoe, 16.0, 700.0);
 const STRIP_LEAST: f32 = 12.5;
 const FLOAT_LINE: Font = Font::new(Family::Segoe, 36.0, 800.0);
 const FLOAT_UNDER: f32 = 0.5;
-/// Its type, each font as it is drawn (in the host's family, merged into another widget).
+/// Its type, each font as it is drawn: in the skin's family (Chinese, in every skin, in the system's face it falls
+/// back to; what changes with the skin is its Latin letters and figures).
 #[derive(Clone, Copy)]
 struct Fonts {
     now: Font,
@@ -224,11 +227,8 @@ struct Fonts {
 }
 
 impl Fonts {
-    fn in_family(family: Option<Family>) -> Fonts {
-        let of = |font: Font| match family {
-            Some(family) => Font { family, ..font },
-            None => font,
-        };
+    fn in_family(family: Family) -> Fonts {
+        let of = |font: Font| Font { family, ..font };
         Fonts { now: of(NOW_FONT), under_font: of(UNDER_FONT), title: of(TITLE), about: of(ABOUT), line: of(PLAYER_LINE), under: of(PLAYER_UNDER), time: of(TIME), strip: of(STRIP_LINE), float: of(FLOAT_LINE) }
     }
 }
@@ -656,40 +656,41 @@ impl Music {
         self.fading = None;
     }
 
-    /// Draws it in `size` (DIPs, from the frame's origin), showing `shows`, at `scale` physical pixels a DIP, the
-    /// pointer at `pointer` (DIPs, from its corner) while it is over it.
+    /// Draws it in `size` (DIPs, from the frame's origin), showing `shows`, on `ground`, its words in the skin's type
+    /// (`family`), at `scale` physical pixels a DIP, the pointer at `pointer` (DIPs, from its corner) while it is over
+    /// it.
     #[allow(clippy::too_many_arguments)]
-    pub fn paint(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant) -> Painted {
-        self.paint_moment(frame, size, shows, ground, scale, pointer, now, moment())
+    pub fn paint(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, family: Family, scale: f32, pointer: Option<(f32, f32)>, now: Instant) -> Painted {
+        self.paint_moment(frame, size, shows, ground, family, scale, pointer, now, moment())
     }
 
     /// As `paint`, the example the settings show while no music plays, `t` seconds into it (see `EXAMPLE`).
     #[allow(clippy::too_many_arguments)]
-    pub fn paint_example(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, t: f64) -> Painted {
-        self.paint_moment(frame, size, shows, ground, scale, pointer, now, example(t, now))
+    pub fn paint_example(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, family: Family, scale: f32, pointer: Option<(f32, f32)>, now: Instant, t: f64) -> Painted {
+        self.paint_moment(frame, size, shows, ground, family, scale, pointer, now, example(t, now))
     }
 
     /// As `paint`, a track playing as `played` tells it (see `Played`).
     #[cfg(feature = "studio")]
     #[allow(clippy::too_many_arguments)]
-    pub fn paint_played(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, played: Played) -> Painted {
-        self.paint_moment(frame, size, shows, ground, scale, pointer, now, played.moment(now))
+    pub fn paint_played(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, family: Family, scale: f32, pointer: Option<(f32, f32)>, now: Instant, played: Played) -> Painted {
+        self.paint_moment(frame, size, shows, ground, family, scale, pointer, now, played.moment(now))
     }
 
     /// As `paint`, what plays as `moment` says.
     #[allow(clippy::too_many_arguments)]
-    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, moment: Moment) -> Painted {
+    fn paint_moment(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, family: Family, scale: f32, pointer: Option<(f32, f32)>, now: Instant, moment: Moment) -> Painted {
         // A player less tall than the least it is (sized toward the strip, not yet nearer it): that least, smaller as
         // a whole (see `player_zoom`).
         let zoom = zoom_at(Layout::for_room(size, shows, self.layout), size, shows);
         if zoom >= 1.0 {
-            return self.paint_laid(frame, size, shows, ground, scale, pointer, now, moment, 1.0);
+            return self.paint_laid(frame, size, shows, ground, family, scale, pointer, now, moment, 1.0);
         }
         let mut painted = Painted { hits: Vec::new(), busy: false };
         frame.turned(0.0, 0.0, 0.0, (zoom, zoom), |frame| {
             let _moving = frame.moving_while(true);
             let pointer = pointer.map(|(x, y)| (x / zoom, y / zoom));
-            painted = self.paint_laid(frame, (size.0 / zoom, size.1 / zoom), shows, ground, scale * zoom, pointer, now, moment, zoom);
+            painted = self.paint_laid(frame, (size.0 / zoom, size.1 / zoom), shows, ground, family, scale * zoom, pointer, now, moment, zoom);
         });
         for (x, y, w, h, _) in &mut painted.hits {
             (*x, *y, *w, *h) = (*x * zoom, *y * zoom, *w * zoom, *h * zoom);
@@ -699,7 +700,7 @@ impl Music {
 
     /// As `paint_moment`, in `size` as it is laid out there, drawn `zoom` as large (see `zoom_at`).
     #[allow(clippy::too_many_arguments)]
-    fn paint_laid(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment, zoom: f32) -> Painted {
+    fn paint_laid(&mut self, frame: &Frame, size: (f32, f32), shows: &Shows, ground: Ground, family: Family, scale: f32, pointer: Option<(f32, f32)>, now: Instant, mut moment: Moment, zoom: f32) -> Painted {
         let step = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
         self.step = step;
@@ -802,10 +803,6 @@ impl Music {
         }
         // On a light ground, its colours deepened to be read on it, and its words dark.
         let light = matches!(ground, Ground::Host { dark: false, .. });
-        let family = match ground {
-            Ground::Host { family, .. } => Some(family),
-            _ => None,
-        };
         let shows = &Shows { inset: match ground {
             Ground::Host { inset, .. } => Some(inset.round() as u32),
             _ => shows.inset,
@@ -3151,7 +3148,7 @@ mod pictures {
                     let area = (-24.0, -24.0, w + 48.0, h + 48.0);
                     layer
                         .draw(frame, 1, local, area, 1.5, None, |frame| {
-                            music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
+                            music.paint_moment(frame, (w, h), &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                             Ok(())
                         })
                         .unwrap();
@@ -3195,7 +3192,7 @@ mod pictures {
                 .draw_offscreen(size, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, room, &all, Ground::Own, 1.5, None, now, moment);
+                    music.paint_moment(frame, room, &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                 })
                 .unwrap();
             crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/{name}.png")), size.0, size.1, &pixels).unwrap();
@@ -3230,12 +3227,51 @@ mod pictures {
                     music.rail = 1.0;
                     music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
                     frame.origin(margin, y);
-                    music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
+                    music.paint_moment(frame, (w, h), &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                     y += h + margin;
                 }
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/sized-into-a-strip.png")), size.0, size.1, &pixels).unwrap();
+    }
+
+    /// A player in each skin's type, a line sung in Chinese and one in English (`cargo test --features studio --lib --
+    /// --ignored draws_each_skins_type` writes `target/music/skins.png`): its Latin letters and figures in the skin's,
+    /// its Chinese the same in all.
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn draws_each_skins_type() {
+        use crate::ui::theme::{Skin, Theme};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
+        let (w, h, margin) = (420.0f32, 230.0f32, 14.0f32);
+        let skins = [Skin::Fluent, Skin::Glass, Skin::Paper];
+        let size = (((2.0 * w + 3.0 * margin) * 1.5) as u32, (((h + margin) * skins.len() as f32 + margin) * 1.5) as u32);
+        let now = Instant::now();
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                for (row, skin) in skins.into_iter().enumerate() {
+                    for (column, english) in [false, true].into_iter().enumerate() {
+                        let mut music = Music { last_frame: now, ..Music::default() };
+                        let mut moment = playing(false);
+                        if english {
+                            moment.now = Some(0);
+                            moment.position = moment.lines.as_ref().unwrap()[0].words[2].at + 0.2;
+                        }
+                        music.bands = moment.sound.bands;
+                        music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                        frame.origin(margin + column as f32 * (w + margin), margin + row as f32 * (h + margin));
+                        music.paint_moment(frame, (w, h), &all, Ground::Own, Theme::new(skin, false).body.family, 1.5, None, now, moment);
+                    }
+                }
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/skins.png")), size.0, size.1, &pixels).unwrap();
     }
 
     /// The strip down at a few sizes, on its own ground and on none, a line sung in Chinese and one in English
@@ -3274,7 +3310,7 @@ mod pictures {
                         music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
                         frame.origin(x, margin + at as f32 * row);
                         let shows = Shows { clear: ground == Ground::Clear, ..all };
-                        music.paint_moment(frame, (w, h), &shows, ground, 1.5, None, now, moment);
+                        music.paint_moment(frame, (w, h), &shows, ground, Family::Segoe, 1.5, None, now, moment);
                         x += w + margin;
                     }
                 }
@@ -3298,8 +3334,8 @@ mod pictures {
         let half = strip_under(0.0);
         let (w, before, after) = (470.0, half + 1.0, half - HOLD - 1.0);
         gfx.draw_offscreen((800, 300), 1.5, |frame| {
-            music.paint_moment(frame, (w, before), &all, Ground::Own, 1.5, None, now, playing(false));
-            music.paint_moment(frame, (w, after), &all, Ground::Own, 1.5, None, now, playing(false));
+            music.paint_moment(frame, (w, before), &all, Ground::Own, Family::Segoe, 1.5, None, now, playing(false));
+            music.paint_moment(frame, (w, after), &all, Ground::Own, Family::Segoe, 1.5, None, now, playing(false));
         })
         .unwrap();
         // (Where the player is drawn as large as it now is: its layout's parts begin a turn where they are at the size
@@ -3332,7 +3368,7 @@ mod pictures {
         for (from, to) in turns {
             let mut music = Music { last_frame: now, ..Music::default() };
             let mut draw = |size: (f32, f32)| gfx.draw_offscreen((900, 495), 1.5, |frame| {
-                music.paint_moment(frame, size, &all, Ground::Own, 1.5, None, now, playing(false));
+                music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, now, playing(false));
             });
             seen.push((draw(from).unwrap(), draw(to).unwrap()));
         }
@@ -3401,7 +3437,7 @@ mod pictures {
                 .draw_offscreen(one, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, (w, h), &all, Ground::Own, 1.5, None, now, moment);
+                    music.paint_moment(frame, (w, h), &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                 })
                 .unwrap();
             sheet.extend(pixels);
@@ -3426,7 +3462,7 @@ mod pictures {
         let pixels = gfx
             .draw_offscreen(size, 1.5, |frame| {
                 frame.fill(Color::hex(0xF4F4F6, 1.0), 0.0, 0.0, w, h);
-                music.paint_moment(frame, (w, h), &all, Ground::Host { dark: false, family: Family::Inter, inset: 18.0 }, 1.5, None, Instant::now(), moment);
+                music.paint_moment(frame, (w, h), &all, Ground::Host { dark: false, inset: 18.0 }, Family::Inter, 1.5, None, Instant::now(), moment);
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/music/hosted.png", env!("CARGO_MANIFEST_DIR"))), size.0, size.1, &pixels).unwrap();
@@ -3459,7 +3495,7 @@ mod pictures {
                 }
                 moment.since = Some(now - Duration::from_secs(2));
                 gfx.draw_offscreen(((size.0 * 1.5) as u32, (size.1 * 1.5) as u32), 1.5, |frame| {
-                    music.paint_moment(frame, size, &all, Ground::Own, 1.5, None, now, moment);
+                    music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                 })
                 .unwrap();
                 let at = |index: usize| music.drawn_lines.iter().find(|(i, _)| *i == index).map(|(_, y)| *y);
@@ -3539,7 +3575,7 @@ mod pictures {
                     // (On a desktop of a mid grey.)
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), 1.5, pointer, Instant::now(), moment);
+                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, pointer, Instant::now(), moment);
                 })
                 .unwrap();
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));
@@ -3559,7 +3595,7 @@ mod pictures {
                     let began = Instant::now();
                     gfx.draw_offscreen(((w * 1.5) as u32 + 90, (h * 1.5) as u32 + 90), 1.5, |frame| {
                         frame.origin(30.0, 30.0);
-                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), 1.5, None, at, playing(false));
+                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
                     })
                     .unwrap();
                     times.push(began.elapsed().as_secs_f64() * 1000.0);
@@ -3585,7 +3621,7 @@ mod pictures {
                 gfx.draw_offscreen(size, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, room, &shows, Ground::of(&shows), 1.5, None, at, playing(false));
+                    music.paint_moment(frame, room, &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
                 })
                 .unwrap()
             };
