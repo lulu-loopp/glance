@@ -422,12 +422,13 @@ fn run(asks: Receiver<Ask>) {
 
 /// What was asked to be dragged off the station, dragged (outside `with_station`: the drag's own loop passes the
 /// station's messages on meanwhile, which find it free); its own files held meanwhile, and taken off after, where the
-/// settings say so.
+/// settings say so. Called after each of the station's messages (those the drag's own loop passes on among them):
+/// nothing asked, nothing done.
 fn drag_off() {
     let mut given = None;
     let mut thread = 0;
     with_station(|station| {
-        given = station.dragging.take().and_then(|(dragged, pressed_on)| {
+        given = station.dragging.take().map(|(dragged, pressed_on)| {
             thread = pressed_on;
             match dragged {
                 Leaving::Item(id) => station.drag_given(id).map(|(id, content, stays_here, held)| (Some(id), content, stays_here, held)),
@@ -436,6 +437,8 @@ fn drag_off() {
             }
         })
     });
+    // (Asked, and not given: the drag asked for is over, as given up; one under way, or none, is left as it is.)
+    let Some(given) = given else { return };
     let Some((id, content, stays_here, held)) = given else {
         super::drag::ended(super::drag::Dragged::Not);
         return;
@@ -681,5 +684,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "改过的");
         assert_eq!(super::text_file(text).unwrap(), again);
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    /// A drag off the station under way is left as it is by the station seeing to its messages meanwhile (the drag's
+    /// own loop passes them on), nothing asked to be dragged off it: it is not said over.
+    #[test]
+    fn a_drag_under_way_goes_on_through_the_stations_messages() {
+        let drag = crate::station::drag::announce();
+        super::drag_off();
+        let going = crate::station::drag::going();
+        assert_eq!((going.drag, going.ended), (drag, None));
+        crate::station::drag::ended(crate::station::drag::Dragged::Not);
     }
 }

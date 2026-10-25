@@ -15,7 +15,7 @@ use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{DoDragDrop, IDropSource, IDropSource_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE};
-use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
+use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::SHCreateDataObject;
 
 /// What came of a drag off the station.
@@ -211,14 +211,18 @@ struct Source {
 }
 
 impl IDropSource_Impl for Source_Impl {
-    fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
-        // (The button and Esc as they are, not only as the drag's messages say: pressed on another thread's window,
-        // those may never come, and the drag never ended.)
-        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON};
+    fn QueryContinueDrag(&self, escape: BOOL, _keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+        // (The button and Esc as they are, not as the drag's messages say: pressed on another thread's window, those
+        // may never come, and the drag never ended; or come late, the button said up as the drag began, and it ended
+        // at once.)
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE, VK_LBUTTON, VK_RBUTTON};
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
         let down = |key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY| unsafe { GetAsyncKeyState(i32::from(key.0)) } < 0;
+        // (The button the mouse's buttons swapped make the left: its state as it is is the one under the finger.)
+        let button = if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0 { VK_RBUTTON } else { VK_LBUTTON };
         if escape.as_bool() || down(VK_ESCAPE) {
             windows::Win32::Foundation::DRAGDROP_S_CANCEL
-        } else if keys.0 & MK_LBUTTON.0 == 0 || !down(VK_LBUTTON) {
+        } else if !down(button) {
             windows::Win32::Foundation::DRAGDROP_S_DROP
         } else {
             HRESULT(0)
