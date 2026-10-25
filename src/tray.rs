@@ -1,6 +1,8 @@
 //! The tray icon, on the main thread. A left click shows the readings; a
 //! right click, a short menu: the readings, the settings, a check for
-//! updates, and quitting.
+//! updates, and quitting. Hidden as the settings ask, it is kept, unseen
+//! (`NIS_HIDDEN`): the notifications it shows still show, and clicked open
+//! the settings, as starting Glance again does.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -9,8 +11,8 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
-    NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_STATE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIM_SETVERSION, NIN_BALLOONUSERCLICK, NIS_HIDDEN, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, ChangeWindowMessageFilterEx, CreateWindowExW, ASFW_ANY, DefWindowProcW, DestroyWindow, FindWindowW, MSGFLT_ALLOW, DispatchMessageW, GetMessageW, GetSystemMetrics, LoadImageW, PostMessageW,
@@ -57,6 +59,19 @@ fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
     data
 }
 
+/// Whether the settings hide the icon.
+fn hidden() -> bool {
+    crate::app().settings.lock().unwrap().tray_hidden
+}
+
+/// `data` saying the icon is hidden, or shown, as the settings have it.
+fn with_state(mut data: NOTIFYICONDATAW) -> NOTIFYICONDATAW {
+    data.uFlags |= NIF_STATE;
+    data.dwState = if hidden() { NIS_HIDDEN } else { Default::default() };
+    data.dwStateMask = NIS_HIDDEN;
+    data
+}
+
 fn add_icon(hwnd: HWND) {
     let mut data = icon_data(hwnd);
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
@@ -80,6 +95,7 @@ fn add_icon(hwnd: HWND) {
     };
     let tip = TIP.lock().unwrap();
     put(&mut data.szTip, if tip.is_empty() { "Glance" } else { &tip });
+    let data = with_state(data);
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
@@ -108,6 +124,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         FOLLOW_SETTINGS => {
             register_hotkey(hwnd);
+            let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &with_state(icon_data(hwnd))) };
             LRESULT(0)
         }
         WM_HOTKEY if wparam.0 == HOTKEY_ID as usize => {
@@ -262,7 +279,7 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     Some((menu, choices.into_iter().map(|(choice, ..)| choice).collect()))
 }
 
-/// Where the icon is on the screen (physical px), if it shows (in the tray's overflow, its chevron's).
+/// Where the icon is on the screen (physical px), if it shows (in the tray's overflow, its chevron's; hidden, none).
 pub(crate) fn icon_place() -> Option<RECT> {
     let hwnd = WINDOW.load(Ordering::Acquire);
     (hwnd != 0).then(|| icon_on_screen(HWND(hwnd as *mut _)))?
@@ -270,6 +287,9 @@ pub(crate) fn icon_place() -> Option<RECT> {
 
 fn icon_on_screen(hwnd: HWND) -> Option<RECT> {
     use windows::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
+    if hidden() {
+        return None;
+    }
     let icon = NOTIFYICONIDENTIFIER { cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32, hWnd: hwnd, uID: ICON_ID, ..Default::default() };
     unsafe { Shell_NotifyIconGetRect(&icon) }.ok()
 }
@@ -381,7 +401,7 @@ pub fn hotkey_taken() -> bool {
     HOTKEY_TAKEN.load(Ordering::Relaxed)
 }
 
-/// Has the shortcut follow the settings, from any thread.
+/// Has the shortcut, and whether the icon is hidden, follow the settings, from any thread.
 pub fn follow_settings() {
     let hwnd = WINDOW.load(Ordering::Acquire);
     if hwnd != 0 {

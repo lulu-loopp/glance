@@ -1231,6 +1231,8 @@ enum Switch {
     /// Whether pulling the panel off its edge tears it off as a widget.
     TearOff,
     Startup,
+    /// Whether the tray's icon is hidden (see `Settings::tray_hidden`).
+    TrayHidden,
     Updates,
     HeatAlert,
     /// The phone remote.
@@ -2403,7 +2405,7 @@ impl Ui {
                 rows.push(Row::Choice(Field::Language));
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
                 // The switches together, then the buttons.
-                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::Updates), Row::Version]);
+                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden), Row::Switch(Switch::Updates), Row::Version]);
                 if update::available().is_some() {
                     rows.push(Row::Update);
                 }
@@ -3439,6 +3441,11 @@ impl Ui {
                 }),
                 self.autostart,
             ),
+            Switch::TrayHidden => (
+                p("隐藏托盘图标", "Hide the tray icon"),
+                Some(p("隐藏后，再次启动 Glance 即可打开设置，通知仍会显示", "With it hidden, starting Glance again opens the settings. Notifications still show")),
+                self.settings.tray_hidden,
+            ),
             Switch::HeatAlert => (
                 p("过热提醒", "Heat alert"),
                 Some(p("CPU 或 GPU 温度持续 30 秒达到警示值时，通过托盘通知", "A tray notice once the CPU or a GPU has been at the alert for 30 seconds")),
@@ -3510,6 +3517,7 @@ impl Ui {
             Switch::TearOff => settings.tear_off ^= true,
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
+            Switch::TrayHidden => settings.tray_hidden ^= true,
             Switch::RecentOnly => settings.recent_only ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
