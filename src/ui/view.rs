@@ -2812,6 +2812,10 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         "docker" => {
             use crate::reading::DockerSample;
+            // Only while its engine runs (see `Seen::docker`).
+            if !scene.seen.docker {
+                return None;
+            }
             let (context, state, mut containers) = match &s.docker {
                 Some(DockerSample::Stopped { context }) => (context.clone(), lang.pick("未运行", "Not running").to_string(), Vec::new()),
                 Some(DockerSample::Unsupported { context, .. }) => (context.clone(), lang.pick("不支持这种连接", "Connection not supported").to_string(), Vec::new()),
@@ -2850,8 +2854,11 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         }
         "wsl" => {
             use crate::reading::WslSample;
-            // What it is doing at the top; a machine stopped or not there
-            // keeps its rows, unread, so the lane does not change size.
+            // Only while its machine runs (see `Seen::wsl`); stopped while the panel is up, it keeps its rows,
+            // unread, so the lane does not change size.
+            if !scene.seen.wsl {
+                return None;
+            }
             let (state, distros, cpu, used, total, gpu) = match &s.wsl {
                 Some(WslSample::Missing) => (lang.pick("未安装", "Not installed"), None, None, None, None, None),
                 Some(WslSample::Stopped) => (lang.pick("已停止", "Stopped"), None, None, None, None, None),
@@ -6166,6 +6173,43 @@ otepad.exe", "Notepad"),
     }
 
     /// The CPU's lane shows its fan, of the board's, once seen turning; others as switched, each by its name.
+    #[test]
+    fn wsl_and_docker_show_only_while_they_run() {
+        use crate::reading::{DockerSample, WslSample};
+        let (info, theme) = (info(), Theme::new(Skin::Paper, false));
+        let prefs = Prefs::resolve(&serde_json::json!({"modules": [{"id": "wsl", "on": true}, {"id": "docker", "on": true}]}), &["wsl".to_string(), "docker".to_string()]);
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let with = |wsl: WslSample, docker: DockerSample| {
+            let mut s = sample(None, None, None);
+            (s.wsl, s.docker) = (Some(wsl), Some(docker));
+            s
+        };
+        let running = || with(WslSample::Running { distros: Some(vec!["Ubuntu".into()]), cpu: Some(3.0), used: Some(1 << 30), total: Some(1 << 33), gpu: None }, DockerSample::Running { context: "default".into(), containers: Vec::new() });
+        let stopped = || with(WslSample::Stopped, DockerSample::Stopped { context: "default".into() });
+        let shown = |seen: &'static Seen, history: &'static [Sample]| {
+            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            lanes(&scene).into_iter().map(|lane| lane.id).filter(|id| id == "wsl" || id == "docker").collect::<Vec<_>>()
+        };
+        let seen_of = |history: &'static [Sample]| -> &'static Seen { Box::leak(Box::new(Seen::of(history))) };
+        // Not running, not there (nor installed): no lane.
+        let history = leak(vec![stopped()]);
+        assert!(shown(seen_of(history), history).is_empty());
+        let history = leak(vec![with(WslSample::Missing, DockerSample::Unsupported { context: "remote".into(), host: "ssh://x".into() })]);
+        assert!(shown(seen_of(history), history).is_empty());
+        // Running: their lanes.
+        let history = leak(vec![running()]);
+        assert_eq!(shown(seen_of(history), history), ["wsl", "docker"]);
+        // Stopped since, a panel up meanwhile keeping them as it was laid out; laid out afresh, none.
+        let history = leak(vec![running(), stopped()]);
+        let up = Box::leak(Box::new(Seen::of(&history[..1]).join(&Seen::of(history), &info)));
+        assert_eq!(shown(up, history), ["wsl", "docker"]);
+        assert!(shown(seen_of(history), history).is_empty());
+        // Come to run while a panel laid out without them is up: theirs are its news.
+        let up = Seen::of(&history[1..]);
+        let news: Vec<crate::ui::seen::Item> = ["wsl", "docker"].iter().flat_map(|id| up.news(&Seen::of(&history[..1]), id, &info)).collect();
+        assert_eq!(news, [crate::ui::seen::Item::Wsl, crate::ui::seen::Item::Docker]);
+    }
+
     #[test]
     fn the_cpu_shows_its_fan() {
         let (info, theme) = (info(), Theme::new(Skin::Paper, false));

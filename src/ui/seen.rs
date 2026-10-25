@@ -9,7 +9,8 @@
 //! reading once read keeps its place for as long as Glance runs, showing
 //! "—" while it is missing. The volumes are the exception: they are the
 //! ones mounted now, as a drive plugged in or out really changes them; and
-//! so is a game: one in front now, or none.
+//! so are a game (one in front now, or none), WSL and Docker (running now,
+//! or not: their lanes show only while they run).
 
 use crate::reading::{Sample, StaticInfo};
 
@@ -45,6 +46,10 @@ pub struct Seen {
     pub game_limit: bool,
     /// A microphone's mute.
     pub mic: bool,
+    /// WSL's machine running, now.
+    pub wsl: bool,
+    /// Docker's engine running, now.
+    pub docker: bool,
     /// Of what plays, beside the time: the sound's level, what plays, its track, and its line sung (see
     /// `note_playing`).
     pub sound: bool,
@@ -106,6 +111,8 @@ impl Seen {
         if let Some(crate::reading::DockerSample::Running { containers, .. }) = &s.docker {
             self.containers = self.containers.max(containers.len());
         }
+        self.wsl = matches!(s.wsl, Some(crate::reading::WslSample::Running { .. }));
+        self.docker = matches!(s.docker, Some(crate::reading::DockerSample::Running { .. }));
         self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
@@ -161,8 +168,12 @@ impl Seen {
             }
             // A module's temperature at a time.
             "memory" => news.extend((self.dimms + 1..=other.dimms).map(Item::Dimms)),
-            // A container's row at a time.
-            "docker" => news.extend((self.containers + 1..=other.containers).map(Item::Containers)),
+            // Its engine come to run, then a container's row at a time.
+            "docker" => {
+                flag(self.docker, other.docker, Item::Docker);
+                news.extend((self.containers + 1..=other.containers).map(Item::Containers));
+            }
+            "wsl" => flag(self.wsl, other.wsl, Item::Wsl),
             "network" => {
                 flag(self.address, other.address, Item::Address);
                 flag(self.wifi, other.wifi, Item::Wifi);
@@ -219,7 +230,7 @@ impl Seen {
     /// This and `other` together: everything either holds.
     pub fn join(&self, other: &Seen, info: &StaticInfo) -> Seen {
         let mut joined = self.clone();
-        let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker"].map(String::from).to_vec();
+        let mut lanes: Vec<String> = ["time", "game", "cpu", "memory", "network", "disk", "storage", "board", "battery", "docker", "wsl"].map(String::from).to_vec();
         lanes.extend(info.gpu_modules());
         for id in &lanes {
             for item in joined.news(other, id, info) {
@@ -271,6 +282,8 @@ impl Seen {
             Item::Game => seen.game = true,
             Item::GameLimit => seen.game_limit = true,
             Item::Mic => seen.mic = true,
+            Item::Wsl => seen.wsl = true,
+            Item::Docker => seen.docker = true,
             Item::Sound => seen.sound = true,
             Item::Media => seen.media = true,
             Item::Timeline => seen.timeline = true,
@@ -326,6 +339,9 @@ pub enum Item {
     Game,
     GameLimit,
     Mic,
+    /// WSL's machine, and Docker's engine, come to run.
+    Wsl,
+    Docker,
     /// Beside the time (see `Seen::note_playing`).
     Sound,
     Media,

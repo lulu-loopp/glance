@@ -3822,8 +3822,8 @@ impl Ui {
             "board" => (p("主板", "Motherboard"), (!info.board.is_empty()).then(|| info.board.clone())),
             "battery" => (p("电池", "Battery"), Some(p("电量、充放电功率与健康度", "Charge, power and health"))),
             "game" => (p("游戏", "Game"), Some(p("全屏游戏的帧率、帧时间与资源占用", "A fullscreen game's frame rate, frame times and use"))),
-            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用", "What each running container uses of the processor, memory, network and disk"))),
-            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，不会启动或唤醒发行版", "WSL 2's processor and memory use, without starting or waking a distribution"))),
+            "docker" => ("Docker".into(), Some(p("运行中容器的处理器、内存、网络与磁盘占用，仅在 Docker 运行时显示", "What each running container uses of the processor, memory, network and disk, shown only while Docker runs"))),
+            "wsl" => ("WSL".into(), Some(p("WSL 2 的处理器与内存占用，仅在其运行时显示，不会启动或唤醒发行版", "WSL 2's processor and memory use, shown only while it runs, without starting or waking a distribution"))),
             "time" => (p("时间与媒体", "Time and media"), Some(p("时间、日期、音量与正在播放的内容", "The time, the date, the volume and what is playing"))),
             "station" => (p("中转站", "Station"), Some(p("临时存放拖入的文件、图片、文字，以及最近复制的内容", "Files, pictures and text dropped in for a while, and what was copied lately"))),
             "lyrics" => (
