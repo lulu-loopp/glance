@@ -2292,12 +2292,15 @@ impl Drawing<'_> {
             } else if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
-                let bright = colour(if self.light { toward([0.0; 3], tint, 0.75) } else { toward([1.0; 3], tint, 0.35) }, alpha);
+                // (On a light ground, the cover's colour as it is deepened, no darker: see `deep`.)
+                let bright = colour(if self.light { tint } else { toward([1.0; 3], tint, 0.35) }, alpha);
                 let dim = Color::hex(self.ink, if clear { 0.55 } else { 0.34 } * alpha);
                 if text.trim().is_empty() {
                     let done = between(line, next, self.moment.position);
-                    // What has gone glows in the cover's colour.
-                    frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
+                    // What has gone glows in the cover's colour (on a dark ground: on a light one, a glow is a smudge).
+                    if !self.light {
+                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
+                    }
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
                     // (At its full size, drawn smaller as a whole: see `full`.)
@@ -2306,8 +2309,10 @@ impl Drawing<'_> {
                     let sung = sung_to(&parts, self.moment.position);
                     let soft = (font.size * 0.45).clamp(6.0, 16.0) / zoom(scale);
                     frame.scaled(x, y, zoom(scale), |frame| {
-                        // What is sung glows in the cover's colour.
-                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, room, sung, bright, soft));
+                        // What is sung glows in the cover's colour (on a dark ground, as above).
+                        if !self.light {
+                            frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, room, sung, bright, soft));
+                        }
                         self.filled(&layout, &text, full, x, y, room, sung, dim, bright, soft);
                     });
                 }
@@ -2345,11 +2350,13 @@ impl Drawing<'_> {
         1.0 - (1.0 - came).powi(3)
     }
 
-    /// The line sung now's colours: what is not sung yet, and what is (near white, the cover's colour in it).
+    /// The line sung now's colours: what is not sung yet, and what is (near white, the cover's colour in it; on a light
+    /// ground, the cover's colour deepened).
     fn line_colours(&self, eased: f32) -> (Color, Color) {
         let dim = if self.edged { 0.6 } else { 0.36 };
-        let toward_ink = if self.light { [0.0; 3] } else { [1.0; 3] };
-        (Color::hex(self.ink, dim * eased), colour(toward(self.tint, toward_ink, if self.light { 0.25 } else { 0.65 }), eased))
+        // (On a light ground, the cover's colour as it is deepened, no darker: see `deep`.)
+        let sung = if self.light { self.tint } else { toward(self.tint, [1.0; 3], 0.65) };
+        (Color::hex(self.ink, dim * eased), colour(sung, eased))
     }
 
     /// What is under the line sung now: its translation (where there is one and they are on), else the next line.
