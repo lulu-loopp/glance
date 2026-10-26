@@ -253,6 +253,11 @@ impl Reckoning {
         let newer = report.said.is_some_and(|said| was.is_none_or(|was| was.said.is_none_or(|taken| said > taken)));
         let (at, said) = match was {
             Some(was) if settling || !newer => (was.at(now).clamp(0.0, report.length), was.said),
+            // (While it plays on, a report slightly behind where it was reckoned to is jitter of its player's clock
+            // or coarse second updates, as Apple Music does: held to move forward, not drawn back.)
+            Some(was) if was.playing && report.playing && report.at < was.at(now) && was.at(now) - report.at < 1.0 => {
+                (was.at(now).clamp(0.0, report.length), report.said)
+            }
             _ => (report.at, report.said),
         };
         Reckoning { at, when: now, playing: report.playing, rate: report.rate, app_id: report.app_id.to_string(), title: report.title.to_string(), said }
@@ -879,6 +884,18 @@ mod tests {
         assert!(near(Reckoning::after(player.was.as_ref(), other, false, now).at, 40.0));
     }
 
+    /// Jitter from coarse updates (e.g. Apple Music reporting same integer second multiple times with fresh timestamps)
+    /// does not draw position backward while playing continuously.
+    #[test]
+    fn small_backward_jitter_while_playing_does_not_move_backward() {
+        let mut player = Player::new();
+        assert!(near(player.look(0.0, "A", true, 1.0, 0.0, 10.0), 10.0));
+        assert!(near(player.look(0.25, "A", true, 1.0, 0.0, 10.0), 10.25));
+        // Jitter report: new timestamp (0.25), but stale position (10.0).
+        assert!(near(player.look(0.25, "A", true, 1.0, 0.25, 10.0), 10.25));
+        assert!(near(player.look(0.5, "A", true, 1.0, 0.25, 10.0), 10.5));
+    }
+
     /// Pausing shows it paused at once, and returns (it once locked what plays twice, and Glance hung).
     #[test]
     #[cfg(windows)]
@@ -902,12 +919,11 @@ mod tests {
         let start = std::time::Instant::now();
         let mut last: Option<f64> = None;
         while start.elapsed() < std::time::Duration::from_secs(10) {
-            if let Some(playing) = crate::media::playing() {
-                if let Some((at, _)) = playing.timeline {
-                    let back = last.map_or(0.0, |last| last - at);
-                    println!("{:6.2} s  {} playing={}  at {at:8.3}  said {:5.2} s ago{}", start.elapsed().as_secs_f64(), playing.app, playing.playing, playing.said_ago.unwrap_or(-1.0), if back > 0.0 { format!("  BACK {back:.3}") } else { String::new() });
-                    last = Some(at);
-                }
+            super::look(super::Follow::Music);
+            if let Some(pos) = super::position(super::Follow::Music) {
+                let back = last.map_or(0.0, |last| last - pos);
+                println!("{:6.2} s  reckoned pos: {pos:8.3}{}", start.elapsed().as_secs_f64(), if back > 0.0 { format!("  BACK {back:.3}") } else { String::new() });
+                last = Some(pos);
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

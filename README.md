@@ -70,7 +70,8 @@ the cover's colours, moving with the beat. With a clear background it is a
 line of lyrics floating over the desktop, and each part (the cover, the title,
 the translation, the spectrum, the controls) can be switched off.
 
-Lyrics are looked up on NetEase Cloud Music, QQ Music, Kugou and LRCLIB at
+Lyrics are looked up on NetEase Cloud Music, QQ Music, Kugou, LRCLIB and
+Apple Music (through its service PaxSenix, nothing to sign in to) at
 once. A local file's own lyrics come first, and a translation is shown where
 there is one. Any player whose song shows in Windows' media flyout works.
 NetEase Cloud Music tells its position only through the InfLink-rs plug-in,

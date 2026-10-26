@@ -747,6 +747,9 @@ pub struct Settings {
     pub widgets: Vec<WidgetAt>,
     /// The player music is followed from, while it plays (see `media::choose_music`); none: as Glance picks.
     pub music_source: Option<MusicSource>,
+    /// The region of Apple Music's catalog searched for tracks and their metadata (none: as picked from the track's script).
+    #[serde(default)]
+    pub apple_storefront: Option<String>,
     /// The station's (see `station`).
     #[serde(default)]
     pub station: StationSettings,
@@ -898,6 +901,7 @@ impl Default for Settings {
             music_rooms: MusicRooms::default(),
             widgets: Vec::new(),
             music_source: None,
+            apple_storefront: None,
             station: StationSettings::default(),
             recent_hidden: Vec::new(),
             recent_hidden_drives: Vec::new(),

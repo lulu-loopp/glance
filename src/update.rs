@@ -652,19 +652,25 @@ pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
 /// What `url` answered to an HTTPS GET asked for as JSON (any other site's API), whatever its status: its status and body (none, where it
 /// was not reached, or its answer was cut short).
 pub fn answer_json(url: &str) -> Option<(u32, Vec<u8>)> {
-    answered(url, None, "application/json, */*", None)
+    answered(url, None, "application/json, */*", None, &[])
 }
 
 /// The same, asked as from the page `referer` (a site whose API answers only its own pages).
 pub fn answer_json_from(url: &str, referer: &str) -> Option<(u32, Vec<u8>)> {
-    answered(url, None, "application/json, */*", Some(referer))
+    answered(url, None, "application/json, */*", None, &[("Referer", referer)])
+}
+
+/// The same, asked as `agent` (a browser, where a site answers its pages but not who asks for an API by name), and with `headers` of its
+/// own beside (`("Authorization", "Bearer …")` and the like).
+pub fn answer_json_with(url: &str, agent: &str, headers: &[(&str, &str)]) -> Option<(u32, Vec<u8>)> {
+    answered(url, None, "application/json, */*", Some(agent), headers)
 }
 
 fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
-    answered(url, sent, accept, None).filter(|(status, _)| *status == 200).map(|(_, body)| body)
+    answered(url, sent, accept, None, &[]).filter(|(status, _)| *status == 200).map(|(_, body)| body)
 }
 
-fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>) -> Option<(u32, Vec<u8>)> {
+fn answered(url: &str, sent: Option<&[u8]>, accept: &str, agent: Option<&str>, headers: &[(&str, &str)]) -> Option<(u32, Vec<u8>)> {
     // Over HTTPS, or (a debug build only) over plain HTTP to a site run on this PC (see `own_site`).
     let (secure, rest) = match url.strip_prefix("https://") {
         Some(rest) => (true, rest),
@@ -675,9 +681,9 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>)
         Some((name, port)) if !secure => (name, port.parse().ok()?),
         _ => (host, INTERNET_DEFAULT_HTTPS_PORT),
     };
-    let agent = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
+    let glance = HSTRING::from(format!("Glance/{}", env!("CARGO_PKG_VERSION")));
     unsafe {
-        let session = Handle(WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
+        let session = Handle(WinHttpOpen(&glance, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0));
         if session.0.is_null() {
             return None;
         }
@@ -700,8 +706,10 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>)
         }
         match sent {
             None => {
-                let from = referer.map(|page| format!("Referer: {page}\r\n")).unwrap_or_default();
-                let headers: Vec<u16> = format!("Accept: {accept}\r\n{from}").encode_utf16().collect();
+                // (A request's own User-Agent is what the site sees, over the session's, Glance's.)
+                let who = agent.map(|who| format!("User-Agent: {who}\r\n")).unwrap_or_default();
+                let more = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect::<String>();
+                let headers: Vec<u16> = format!("Accept: {accept}\r\n{who}{more}").encode_utf16().collect();
                 WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
             }
             Some(body) => {

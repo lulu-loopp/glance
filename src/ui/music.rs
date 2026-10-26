@@ -1894,8 +1894,6 @@ impl Drawing<'_> {
                         let from = line_top + old_tall + 2.0;
                         let y = from + (line_top - from) * eased;
                         let size = self.fonts.under.size + (font.size - self.fonts.under.size) * eased;
-                        // As it was under the line before, going; as the line sung now, coming.
-                        words(frame, &text, Font { size, ..self.fonts.under }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
                         let grown = Font { size, ..font };
                         let layout = frame.gfx.wrapped(&text, grown, width);
                         let sung = sung_to(&parts, self.moment.position);
