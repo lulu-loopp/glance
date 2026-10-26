@@ -82,7 +82,7 @@ use crate::ui::icons::Icon;
 use crate::ui::morph::{self, Part};
 use crate::ui::motion::Spring;
 use crate::ui::music::{self, Music, Shows};
-use crate::ui::prefs::Prefs;
+use crate::ui::prefs::{MusicGround, Prefs};
 use crate::ui::life::Lives;
 use crate::ui::render::{self, PanelLayers};
 use crate::ui::seen::Seen;
@@ -610,6 +610,23 @@ struct Behind {
     taken: Instant,
 }
 
+impl Behind {
+    /// The capture as drawn (made once, at its screen's scale `scale`, its pixels then let go of: a screen's worth of
+    /// memory), placed so that the widget's corner, `margin` in from its window's (`window`, `px` physical pixels a
+    /// DIP), is where it is on screen; as `render::Picture::backdrop` takes it.
+    fn backdrop(&mut self, dc: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, scale: f32, window: RECT, px: f32, margin: f32) -> Option<(&ID2D1Bitmap1, Vector2, u64, f32)> {
+        if self.bitmap.is_none() {
+            if let Ok(bitmap) = self.capture.bitmap_into(dc, scale, self.former.take().as_ref()) {
+                self.bitmap = Some((bitmap, scale));
+                self.capture.forget_pixels();
+            }
+        }
+        let from = self.capture.rect;
+        let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
+        Some((&self.bitmap.as_ref()?.0, at, self.capture.digest, px))
+    }
+}
+
 impl crate::ui::life::Lives for Widget {
     fn device(&self) -> &Rc<Gfx> {
         &self.gfx
@@ -1128,19 +1145,30 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
+    // (What plays, the one dropped onto, drawn on the skin: the skin's ground under it all, as under readings dropped
+    // onto, what plays in the skin's ink on it.)
+    let on_skin = host_plays && shows.ground == MusicGround::Skin;
     let apart = merged.music_apart() && merged.in_lane;
     let rects = merged.rects.clone();
     let moving = merged.moving.as_ref().map(|(since, from)| (morph::ease((now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()).min(1.0)), from.clone()));
     let mut hits = Vec::new();
     let mut whole = true;
-    // What plays' own ground, under it all.
+    let mut backdrop = backdrop;
+    // What plays' own ground (or the skin's), under it all.
     if host_plays {
         if let Some(Content::Music(host)) = merged.parts.first_mut() {
-            frame.place(local);
-            host.music.paint_ground(frame, size);
+            if on_skin {
+                frame.origin(0.0, 0.0);
+                if let Err(error) = host.skin_ground.draw_whole(frame, theme, size, backdrop.take(), frost, rough, local, px) {
+                    note(format!("widget: its ground not drawn: {error}"));
+                    whole = false;
+                }
+            } else {
+                frame.place(local);
+                host.music.paint_ground(frame, size);
+            }
         }
     }
-    let mut backdrop = backdrop;
     for (index, part) in merged.parts.iter_mut().enumerate() {
         let Some(&(rx, ry, rw, rh)) = rects.get(index) else { continue };
         // Moving there: from where it was to its place, scaled from that size to its own; come in where it is, faded
@@ -1187,7 +1215,7 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 // (Drawn from its place, its own DIPs scaled to the screen's: its layers and its charts, drawn straight
                 // onto the frame each frame, alike.)
                 frame.place(Matrix3x2::scale(z, z) * Matrix3x2::translation(rx, ry) * shift * local);
-                let halo = (theme.skin == Skin::Glass && !host_plays).then_some(theme.legibility);
+                let halo = (theme.skin == Skin::Glass && (!host_plays || on_skin)).then_some(theme.legibility);
                 if let Some((hit, (hx, hy))) = lifting.filter(|_| lifted.is_none()) {
                     *lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, z, (rx - hx, ry - hy), hit)).filter(|parts| !parts.is_empty());
                     if lifted.is_some() {
@@ -1214,7 +1242,11 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 // already inside its lane).
                 let inset = if apart { 0.0 } else { theme.pad_x };
                 // (The one dropped onto: its own look, its ground drawn under it all already.)
-                let ground = if index == 0 { music::Ground::Under } else { music::Ground::Host { dark: theme.dark, inset } };
+                let ground = match index {
+                    0 if on_skin => music::Ground::Skin { dark: theme.dark },
+                    0 => music::Ground::Under,
+                    _ => music::Ground::Host { dark: theme.dark, inset },
+                };
                 let here = pointer.filter(|(x, y)| *x >= rx && *x < rx + rw && *y >= ry && *y < ry + rh).map(|(x, y)| (x - rx, y - ry));
                 let mut painted = None;
                 frame.origin(0.0, 0.0);
@@ -1360,11 +1392,13 @@ struct MusicShown {
     frames: u64,
     /// Whether it is to be drawn again soon (see `music::Painted`).
     busy: bool,
+    /// The skin's ground under it, where it is drawn on the skin (alone, or as the one others are merged into).
+    skin_ground: render::GroundLayers,
 }
 
 impl MusicShown {
     fn new(size: (f32, f32)) -> Self {
-        MusicShown { music: Music::default(), size: (size.0.max(music::LEAST.0), size.1.max(music::LEAST.1)), layer: Layer::default(), frames: 0, busy: false }
+        MusicShown { music: Music::default(), size: (size.0.max(music::LEAST.0), size.1.max(music::LEAST.1)), layer: Layer::default(), frames: 0, busy: false, skin_ground: render::GroundLayers::default() }
     }
 }
 
@@ -1418,8 +1452,10 @@ impl Content {
     /// Whether it is, or holds, the single lane `only` (see `Readings::only`): which of its parts, where merged.
     /// Its own colour, its hint drawn in it: what plays, its ground's, a note, its own (`written`: as it is being written
     /// in, else as it was last read).
-    fn ground(&self, written: Option<crate::notes::Colour>) -> Option<Ground> {
+    fn ground(&self, written: Option<crate::notes::Colour>, music: MusicGround) -> Option<Ground> {
         match self {
+            // (On the skin, the skin's.)
+            Content::Music(_) if music == MusicGround::Skin => None,
             Content::Music(shown) => Some(Ground::Own(shown.music.ground_colour(shown.size))),
             Content::Readings(Readings { only: Some(only), .. }) => only.strip_prefix(view::STUCK_NOTE_LANE).and_then(|name| {
                 written.or_else(|| crate::notes::shown().iter().find(|note| note.name == name).map(|note| note.colour)).map(|colour| Ground::Tint(view::note_colour(colour)))
@@ -1533,12 +1569,12 @@ impl Content {
         }
     }
 
-    /// Whether it is drawn on the skin (the readings, or what was merged into them).
-    fn skinned(&self) -> bool {
+    /// Whether it is drawn on the skin (the readings, or what was merged into them; what plays, as `music` says).
+    fn skinned(&self, music: MusicGround) -> bool {
         match self {
             Content::Readings(_) => true,
-            Content::Music(_) => false,
-            Content::Merged(merged) => !merged.host_plays(),
+            Content::Music(_) => music == MusicGround::Skin,
+            Content::Merged(merged) => !merged.host_plays() || music == MusicGround::Skin,
         }
     }
 
@@ -1588,6 +1624,8 @@ pub struct Widgets {
     areas: Vec<(isize, RECT)>,
     /// Live refraction, as the widgets were last drawn (see `Look::live`).
     live: bool,
+    /// What plays is drawn on, as the widgets were last drawn (see `prefs::MusicGround`).
+    music_ground: MusicGround,
     /// A widget in hand held over another, to be merged into it as it is let go (see `look_for_a_drop`).
     dropping: Option<Dropping>,
     /// The menu a press on a widget's station asked for (see `take_menu_asked`): the button, the page its station shows.
@@ -1846,7 +1884,7 @@ impl Widgets {
     pub fn captured(&mut self, hwnd: HWND) {
         let live = self.live;
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
-            let live = live && widget.content.skinned();
+            let live = live && widget.content.skinned(self.music_ground);
             if widget.look_behind(live) {
                 widget.next_frame = Instant::now();
             }
@@ -2451,6 +2489,7 @@ impl Widgets {
             self.watching = None;
             return None;
         }
+        self.music_ground = look.prefs.music.ground;
         let playing = crate::ui::view::game_shown(history);
         // Each shown (the other programs' windows looked at only while one is: see `WindowWatch`).
         let shown: Vec<&Widget> = self.list.iter().filter(|w| !w.game_only || playing).collect();
@@ -2510,7 +2549,7 @@ impl Widgets {
             let hidden = widget.game_only && !playing;
             // A skin that does not see the desktop (or what it shows is not in the skin): nothing of it kept, shown or
             // hidden.
-            if !(look.skin.sees_backdrop() && widget.content.skinned()) {
+            if !(look.skin.sees_backdrop() && widget.content.skinned(look.prefs.music.ground)) {
                 widget.unsee();
             }
             if hidden {
@@ -2524,7 +2563,7 @@ impl Widgets {
                 widget.next_frame = widget.next_frame.min(at);
             }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
-            let sees = look.skin.sees_backdrop() && widget.content.skinned();
+            let sees = look.skin.sees_backdrop() && widget.content.skinned(look.prefs.music.ground);
             if sees && widget.look_behind(self.live && sees) {
                 widget.next_frame = now;
             }
@@ -2564,7 +2603,7 @@ impl Widgets {
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
-                    let sees = look.skin.sees_backdrop() && widget.content.skinned();
+                    let sees = look.skin.sees_backdrop() && widget.content.skinned(look.prefs.music.ground);
                     if let Some(wait) = widget.backdrop_wait(self.live && sees) {
                         due = due.min(wait);
                     }
@@ -4017,9 +4056,9 @@ impl Widget {
         self.retake |= !fresh;
     }
 
-    /// Whether it is merged into what plays (drawn on its ground).
-    fn on_music(&self) -> bool {
-        matches!(&self.content, Content::Merged(merged) if merged.host_plays())
+    /// Whether it is merged into what plays, drawn on its own ground (as `music` says it is).
+    fn on_music(&self, music: MusicGround) -> bool {
+        music != MusicGround::Skin && matches!(&self.content, Content::Merged(merged) if merged.host_plays())
     }
 
     /// Whether it is kept under every other window.
@@ -4221,12 +4260,12 @@ impl Widget {
             moving = true;
         }
         // On what plays' own ground (merged into it), dark, as that ground is.
-        let on_music = self.on_music();
+        let on_music = self.on_music(look.prefs.music.ground);
         let dark = on_music || theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| look.skin.sees_backdrop()));
         let theme = self.content.dressed(Theme::new(look.skin, dark));
         self.drawn_look = (look.skin, dark);
         // Room round it for its shadow (the skin's; what plays, its own), and above it for its buttons.
-        let shadow = if matches!(self.content, Content::Music(_)) || on_music { MUSIC_SHADOW } else { theme.margin };
+        let shadow = if !self.content.skinned(look.prefs.music.ground) { MUSIC_SHADOW } else { theme.margin };
         self.margin = shadow.max(BUTTON + 2.0 * BUTTON_INSET);
         let scrolls = self.content.scrolls();
         let tab = self.content.tab();
@@ -4490,7 +4529,7 @@ impl Widget {
                 let firm = away < STICK;
                 // In steps: drawn again as it changes visibly, not each frame.
                 let strength = if firm { 1.0 } else { ((0.25 + 0.5 * (1.0 - (away - STICK) / (HINT_SEEN - STICK))) * 20.0).round() / 20.0 };
-                let ground = self.content.ground(self.in_place.as_ref().map(|in_place| in_place.writing.colour));
+                let ground = self.content.ground(self.in_place.as_ref().map(|in_place| in_place.writing.colour), look.prefs.music.ground);
                 self.show_hint(RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 }, firm, strength, &theme, ground);
             }
             None => self.hide_hint(),
@@ -4504,7 +4543,7 @@ impl Widget {
         // (On the device that draws now, before what is behind is awaited: one waited for on a device gone never
         // comes.)
         self.follow_device();
-        let sees = look.skin.sees_backdrop() && self.content.skinned();
+        let sees = look.skin.sees_backdrop() && self.content.skinned(look.prefs.music.ground);
         let live = look.live && sees;
         if !sees {
             self.unsee();
@@ -4617,7 +4656,7 @@ impl Widget {
         let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
         let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
-        self.draw(&theme, &scene, now);
+        self.draw(&theme, &scene, look.prefs.music.ground, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if sizing {
             self.was_sized = true;
@@ -4669,7 +4708,7 @@ impl Widget {
         self.surface.is_some()
     }
 
-    fn draw(&mut self, theme: &Theme, scene: &Scene, now: Instant) {
+    fn draw(&mut self, theme: &Theme, scene: &Scene, music_ground: MusicGround, now: Instant) {
         let _timed = crate::perf::Timed::start("widget frame", || format!("{:?}", self.surface_size));
         if matches!(&self.content, Content::Readings(Readings { last: None, .. })) {
             return;
@@ -4712,7 +4751,7 @@ impl Widget {
             (card, self.lift.value, self.lean.value, self.about)
         });
         let settings_lit = self.settings_lit();
-        let frost = if self.content.skinned() { self.frost(now, theme) } else { 0.0 };
+        let frost = if self.content.skinned(music_ground) { self.frost(now, theme) } else { 0.0 };
         // What plays: as its switches say, the pointer where it is over it (letting clicks through, it is not).
         let shows = (!matches!(self.content, Content::Readings(_))).then(|| Shows::from(&crate::app().settings.lock().unwrap().view));
         let pointer = cursor_position().filter(|_| self.hover && !self.click_through).map(|c| ((c.x - self.at.x) as f32 / px, (c.y - self.at.y) as f32 / px));
@@ -4751,19 +4790,7 @@ impl Widget {
                 Content::Readings(readings) => {
                     let Some(shown) = readings.last.clone() else { return };
                     let lanes = view::lanes_at(scene, |_| shown.detail);
-                    let backdrop = behind.as_mut().and_then(|behind| {
-                        // Made once, at its screen's scale; its pixels then let go of
-                        // (a screen's worth of memory).
-                        if behind.bitmap.is_none() {
-                            if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
-                                behind.bitmap = Some((bitmap, contact_scale));
-                                behind.capture.forget_pixels();
-                            }
-                        }
-                        let from = behind.capture.rect;
-                        let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
-                        Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
-                    });
+                    let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let layout = shown.drawn_at(size, carried.is_some_and(|(card, ..)| card.is_some()));
                     let picture = render::Picture { scene, lanes: &lanes, layout: &layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
@@ -4805,13 +4832,22 @@ impl Widget {
                 }
                 // What plays, drawn anew in its layer (round it, the room for its shadow).
                 Content::Music(shown) => {
-                    let MusicShown { music, layer, frames, busy, .. } = shown;
+                    let MusicShown { music, layer, frames, busy, skin_ground, .. } = shown;
                     *frames += 1;
                     let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
+                    let ground = music::Ground::of(&shows, theme.dark);
+                    // On the skin: its ground under it, as every widget's is (its buttons on it, as theirs are).
+                    if let music::Ground::Skin { .. } = ground {
+                        let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
+                        if let Err(error) = skin_ground.draw_whole(frame, theme, size, backdrop, frost, rough, local, px) {
+                            note(format!("widget: what plays' ground not drawn: {error}"));
+                            whole = false;
+                        }
+                    }
                     let area = (-MUSIC_SHADOW, -MUSIC_SHADOW, size.0 + 2.0 * MUSIC_SHADOW, size.1 + 2.0 * MUSIC_SHADOW);
                     let mut painted = None;
                     let drew = layer.draw(frame, *frames, local, area, px, None, |frame| {
-                        painted = Some(music.paint(frame, size, &shows, music::Ground::of(&shows), theme.body.family, px, pointer, now));
+                        painted = Some(music.paint(frame, size, &shows, ground, theme.body.family, px, pointer, now));
                         Ok(())
                     });
                     if let Err(error) = drew {
@@ -4823,20 +4859,10 @@ impl Widget {
                         *busy = painted.busy;
                         pressed = Some((painted.hits, (0.0, 0.0)));
                     }
-                    button_ground = Some(music.ground_colour(size));
+                    button_ground = (!matches!(ground, music::Ground::Skin { .. })).then(|| music.ground_colour(size));
                 }
                 Content::Merged(merged) => {
-                    let backdrop = behind.as_mut().and_then(|behind| {
-                        if behind.bitmap.is_none() {
-                            if let Ok(bitmap) = behind.capture.bitmap_into(&frame.dc, contact_scale, behind.former.take().as_ref()) {
-                                behind.bitmap = Some((bitmap, contact_scale));
-                                behind.capture.forget_pixels();
-                            }
-                        }
-                        let from = behind.capture.rect;
-                        let at = Vector2 { X: (window.left - from.left) as f32 / px + margin, Y: (window.top - from.top) as f32 / px + margin };
-                        Some((&behind.bitmap.as_ref()?.0, at, behind.capture.digest, px))
-                    });
+                    let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
                     let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
                     let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.map(|(hit, _, _, at)| (hit, at)), &mut lifted);
                     whole &= drawn_whole;
@@ -5229,7 +5255,8 @@ mod tests {
     }
 
     /// Where a widget would stick, it is drawn in its own colour: a note's in the note's (as it is being written in, the
-    /// colour chosen there), what plays in its ground's, readings in none of their own (the skin's).
+    /// colour chosen there), what plays in its ground's (on the skin, the skin's), readings in none of their own (the
+    /// skin's).
     #[test]
     #[cfg(feature = "studio")]
     fn its_hint_is_drawn_in_its_own_colour() {
@@ -5238,10 +5265,13 @@ mod tests {
         crate::notes::pretend(vec![Note { name: "a.md".into(), text: "a".into(), colour: Colour::Pink, stamp: Default::default() }]);
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
-        assert_eq!(note("a.md").ground(None), Some(Ground::Tint(view::note_colour(Colour::Pink))));
-        assert_eq!(note("a.md").ground(Some(Colour::Green)), Some(Ground::Tint(view::note_colour(Colour::Green))));
-        assert_eq!(Content::Readings(Readings::new(choice.clone())).ground(None), None);
-        assert!(matches!(Content::Music(MusicShown::new(music::LEAST)).ground(None), Some(Ground::Own(_))));
+        let cover = MusicGround::Cover;
+        assert_eq!(note("a.md").ground(None, cover), Some(Ground::Tint(view::note_colour(Colour::Pink))));
+        assert_eq!(note("a.md").ground(Some(Colour::Green), cover), Some(Ground::Tint(view::note_colour(Colour::Green))));
+        assert_eq!(Content::Readings(Readings::new(choice.clone())).ground(None, cover), None);
+        let music = Content::Music(MusicShown::new(music::LEAST));
+        assert!(matches!(music.ground(None, cover), Some(Ground::Own(_))) && matches!(music.ground(None, MusicGround::Clear), Some(Ground::Own(_))));
+        assert_eq!(music.ground(None, MusicGround::Skin), None);
     }
 
     /// A note stuck on the desktop (its card the whole widget, to its edges): sized by its edges and corners, the pointer

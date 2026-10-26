@@ -17,6 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::gfx::{rect, Frame, Layer};
 use super::icons::Icon;
+use super::prefs::MusicGround;
 use super::view::{Hit, HitBox};
 use crate::cover::Cover;
 use crate::lyrics::Line;
@@ -154,8 +155,8 @@ pub struct Shows {
     pub spectrum: bool,
     /// The controls kept showing, in a row of their own; off, they come over the spectrum as the pointer does.
     pub controls: bool,
-    /// No ground: its words edged, on whatever is behind it.
-    pub clear: bool,
+    /// What it is drawn on, standing alone: the cover blurred, the skin's ground, or none (its words edged).
+    pub ground: MusicGround,
     /// How far in from its edge what it shows begins (DIPs), where not its own (merged into another widget).
     pub inset: Option<u32>,
 }
@@ -169,14 +170,15 @@ impl Shows {
             translation: on("translation"),
             spectrum: on("spectrum"),
             controls: on("controls"),
-            clear: on("clear"),
+            ground: super::prefs::music_ground(view),
             inset: None,
         }
     }
 }
 
 /// What it is drawn on: its own ground (the cover blurred), none (its words edged, to be read on whatever is behind),
-/// or the ground of the widget it is merged into (that one's look: its words in that ground's ink, dark or light).
+/// the skin's (drawn under it already, as every widget's is: its words in that ground's ink, dark or light), or the
+/// ground of the widget it is merged into (that one's look, its ink as the skin's is).
 /// (Its words are in the skin's type on each: see `Music::paint`.)
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Ground {
@@ -184,14 +186,19 @@ pub enum Ground {
     /// Its own look, its ground drawn under it already (it is the one other widgets are merged into).
     Under,
     Clear,
+    Skin { dark: bool },
     /// As far in from its edge as the host's words are (`inset`).
     Host { dark: bool, inset: f32 },
 }
 
 impl Ground {
-    /// As a standalone music widget is drawn, its switches say.
-    pub fn of(shows: &Shows) -> Ground {
-        if shows.clear { Ground::Clear } else { Ground::Own }
+    /// As a standalone music widget is drawn, its switches say (on the skin, `dark` or light as the skin is drawn).
+    pub fn of(shows: &Shows, dark: bool) -> Ground {
+        match shows.ground {
+            MusicGround::Cover => Ground::Own,
+            MusicGround::Skin => Ground::Skin { dark },
+            MusicGround::Clear => Ground::Clear,
+        }
     }
 }
 
@@ -802,7 +809,7 @@ impl Music {
             self.turning = None;
         }
         // On a light ground, its colours deepened to be read on it, and its words dark.
-        let light = matches!(ground, Ground::Host { dark: false, .. });
+        let light = matches!(ground, Ground::Host { dark: false, .. } | Ground::Skin { dark: false });
         let shows = &Shows { inset: match ground {
             Ground::Host { inset, .. } => Some(inset.round() as u32),
             _ => shows.inset,
@@ -2969,7 +2976,7 @@ mod tests {
     #[test]
     fn a_strip_ends_inside_itself() {
         let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         for shows in [all, Shows { controls: true, ..all }, Shows { cover: false, ..all }, Shows { cover: false, controls: true, ..all }] {
             for centred in [false, true] {
                 let mut w = LEAST.0;
@@ -2997,7 +3004,7 @@ mod tests {
 
     #[test]
     fn the_room_chooses_the_layout() {
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         assert_eq!(Layout::for_room((420.0, 76.0), &all, None), Layout::Strip);
         assert_eq!(Layout::for_room((470.0, 178.0), &all, None), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 400.0), &all, None), Layout::Card);
@@ -3020,7 +3027,7 @@ mod tests {
 
     #[test]
     fn a_size_comes_to_rest_where_its_layout_is_right() {
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
         assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
         // Sized between the strip and the player, it is the one it is nearer, and comes to it.
@@ -3116,7 +3123,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let places = [1u32, 451, 902, 1350];
         let (w, h) = (470.0, 178.0);
@@ -3162,7 +3169,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3197,7 +3204,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3235,7 +3242,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3264,6 +3271,52 @@ mod pictures {
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/skins.png")), size.0, size.1, &pixels).unwrap();
     }
 
+    /// What plays drawn on each skin's ground, light and dark, a card and a strip (`cargo test --features studio --lib
+    /// -- --ignored draws_on_each_skin` writes `target/music/on-skins.png`): its words in the skin's ink, dark on a
+    /// light ground; its colours the cover's, deepened there.
+    #[test]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
+    fn draws_on_each_skin() {
+        use crate::ui::theme::{Skin, Theme};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Skin, inset: None };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
+        let (card, strip, margin) = ((420.0f32, 230.0f32), (420.0f32, 64.0f32), 40.0f32);
+        let skins = [Skin::Fluent, Skin::Glass, Skin::Paper];
+        let row = card.1 + strip.1 + 3.0 * margin;
+        let size = (((2.0 * card.0 + 3.0 * margin) * 1.5) as u32, ((row * skins.len() as f32 + margin) * 1.5) as u32);
+        let now = Instant::now();
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                // (A desktop of two tones under it, as a wallpaper might be.)
+                frame.fill(Color::hex(0x5A6B7D, 1.0), 0.0, 0.0, size.0 as f32 / 1.5, size.1 as f32 / 1.5);
+                frame.fill(Color::hex(0xC9C2B4, 1.0), 0.0, 0.0, size.0 as f32 / 1.5 / 2.0, size.1 as f32 / 1.5);
+                for (index, skin) in skins.into_iter().enumerate() {
+                    for (column, dark) in [false, true].into_iter().enumerate() {
+                        let theme = Theme::new(skin, dark);
+                        for (down, room) in [(0.0, card), (card.1 + margin, strip)] {
+                            let mut music = Music { last_frame: now, ..Music::default() };
+                            let moment = playing(false);
+                            music.bands = moment.sound.bands;
+                            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                            let at = (margin + column as f32 * (card.0 + margin), margin + index as f32 * row + down);
+                            let local = windows_numerics::Matrix3x2::translation(at.0, at.1);
+                            frame.origin(0.0, 0.0);
+                            crate::ui::render::GroundLayers::default().draw_whole(frame, &theme, room, None, 0.0, false, local, 1.5).unwrap();
+                            frame.place(local);
+                            music.paint_moment(frame, room, &all, Ground::of(&all, dark), theme.body.family, 1.5, None, now, moment);
+                        }
+                    }
+                }
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/on-skins.png")), size.0, size.1, &pixels).unwrap();
+    }
+
     /// The strip down at a few sizes, on its own ground and on none, a line sung in Chinese and one in English
     /// (`cargo test --features studio --lib -- --ignored draws_a_column` writes `target/music/column.png`): the line
     /// sung now written down, what is under it beside it where two go across, the key at the foot where it has room.
@@ -3273,7 +3326,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3299,7 +3352,7 @@ mod pictures {
                         music.bands = moment.sound.bands;
                         music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
                         frame.origin(x, margin + at as f32 * row);
-                        let shows = Shows { clear: ground == Ground::Clear, ..all };
+                        let shows = Shows { ground: if ground == Ground::Clear { MusicGround::Clear } else { MusicGround::Cover }, ..all };
                         music.paint_moment(frame, (w, h), &shows, ground, Family::Segoe, 1.5, None, now, moment);
                         x += w + margin;
                     }
@@ -3317,7 +3370,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let now = Instant::now();
         let mut music = Music { last_frame: now, ..Music::default() };
@@ -3344,7 +3397,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let now = Instant::now();
         // (The least height at which a player this wide shows the lines round the one sung now.)
@@ -3408,7 +3461,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3442,7 +3495,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let (w, h) = (780.0, 64.0);
         let size = ((w * 1.5) as u32, (h * 1.5) as u32);
@@ -3467,7 +3520,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         for size in [(470.0, 400.0), (520.0, 236.0)] {
             let start = Instant::now();
@@ -3516,8 +3569,8 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
-        let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
+        let floating = Shows { cover: false, title: false, spectrum: false, ground: MusicGround::Clear, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
         let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 24] = [
@@ -3542,7 +3595,7 @@ mod pictures {
             ("stage", (900.0, 470.0), all, false, 0, false, false),
             ("stage-narrow", (530.0, 330.0), all, false, 0, false, false),
             ("stage-off", (900.0, 470.0), all, false, 0, false, false),
-            ("clear-player", (470.0, 178.0), Shows { clear: true, ..all }, false, 0, false, false),
+            ("clear-player", (470.0, 178.0), Shows { ground: MusicGround::Clear, ..all }, false, 0, false, false),
             ("floating", (760.0, 110.0), floating, false, 0, false, false),
             ("floating-over", (760.0, 110.0), floating, true, 0, false, false),
         ];
@@ -3565,7 +3618,7 @@ mod pictures {
                     // (On a desktop of a mid grey.)
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, pointer, Instant::now(), moment);
+                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows, true), Family::Segoe, 1.5, pointer, Instant::now(), moment);
                 })
                 .unwrap();
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));
@@ -3585,7 +3638,7 @@ mod pictures {
                     let began = Instant::now();
                     gfx.draw_offscreen(((w * 1.5) as u32 + 90, (h * 1.5) as u32 + 90), 1.5, |frame| {
                         frame.origin(30.0, 30.0);
-                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
+                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows, true), Family::Segoe, 1.5, None, at, playing(false));
                     })
                     .unwrap();
                     times.push(began.elapsed().as_secs_f64() * 1000.0);
@@ -3611,7 +3664,7 @@ mod pictures {
                 gfx.draw_offscreen(size, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, room, &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
+                    music.paint_moment(frame, room, &shows, Ground::of(&shows, true), Family::Segoe, 1.5, None, at, playing(false));
                 })
                 .unwrap()
             };

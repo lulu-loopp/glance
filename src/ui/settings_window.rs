@@ -54,7 +54,7 @@ use super::gfx::{self, rect, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::motion::{Easing, Transition};
 use super::overlay::{Layout, ROWS};
-use super::prefs::{self, LanguagePref, Prefs, ThemePref};
+use super::prefs::{self, LanguagePref, MusicGround, Prefs, ThemePref};
 use super::arrange::{self, GAP};
 use super::life::Lives;
 use super::render::{self, PanelLayers};
@@ -940,6 +940,7 @@ impl Palette {
 fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit, Field::PingTarget],
+        "lyrics" => &[Field::MusicGround],
         "processes" => &[Field::ProcessCount],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
@@ -1074,6 +1075,8 @@ enum Field {
     RateUnit,
     /// Where the network's latency is measured to (see `prefs::PingTarget`).
     PingTarget,
+    /// What the music widgets are drawn on (see `prefs::MusicGround`).
+    MusicGround,
     ProcessCount,
     Interval,
     Span,
@@ -1451,12 +1454,12 @@ struct Stage {
 }
 
 /// How many areas' tones a stage keeps (see `Measured`).
-const TONES_KEPT: usize = 4;
+const TONES_KEPT: usize = 6;
 
 #[derive(Default)]
 struct Measured {
     /// How light it is behind the areas last asked of (see `Capture::luminance`), the latest first: the preview's
-    /// panel, and the layout's editor's pictures, each frame.
+    /// panel or what plays, and the layout's editor's pictures, each frame.
     tones: Vec<(RECT, (f32, f32))>,
     /// The glass of an overlay over it (its ring around, and the hole the overlay is: see `overlay::glass`).
     glass: Option<((RECT, RECT), super::overlay::Glass)>,
@@ -1478,6 +1481,33 @@ impl Stage {
         tones.insert(0, (area, tone));
         tones.truncate(TONES_KEPT);
         tone
+    }
+
+    /// Its middle, where the layout's editor's pictures of the components are taken to be over it.
+    fn middle(&self) -> RECT {
+        let (w, h) = self.size;
+        RECT { left: (w * 0.3) as i32, top: (h * 0.3) as i32, right: (w * 0.7) as i32, bottom: (h * 0.7) as i32 }
+    }
+
+    /// The theme `skin` is drawn in over `behind` on it (light or dark as the desktop is there, where the skin follows
+    /// it; else as `pref` says), and how frosted glass is there.
+    fn look(&mut self, skin: Skin, pref: ThemePref, behind: RECT) -> (Theme, f32) {
+        let tone = self.tone(behind);
+        let dark = theme::is_dark(pref, Some(tone.0).filter(|_| skin.sees_backdrop()));
+        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
+        (Theme::new(skin, dark), frost)
+    }
+
+    /// The skin's ground under what plays drawn on it (see `prefs::MusicGround`), `size` large, in `layers`, placed by
+    /// `local` at `scale` physical pixels a DIP of it; this desktop behind it from `at` on it (its DIPs as its bitmap
+    /// was made, `covers` of them a DIP of what plays), where given.
+    #[allow(clippy::too_many_arguments)]
+    fn music_ground(&self, frame: &Frame, layers: &mut render::GroundLayers, theme: &Theme, frost: f32, size: (f32, f32), at: Option<((f32, f32), f32)>, local: Matrix3x2, scale: f32) {
+        let digest = self.desktop.as_ref().map_or(0, |desktop| desktop.digest);
+        let backdrop = at.zip(self.bitmap.as_ref()).map(|(((x, y), covers), (_, bitmap))| (bitmap, Vector2 { X: x / covers, Y: y / covers }, digest, covers));
+        if let Err(error) = layers.draw_whole(frame, theme, size, backdrop, frost, false, local, scale) {
+            frame.fail(error);
+        }
     }
 
     /// The glass of an overlay at `hole`, tinted for the desktop in `ring` around it (as the overlay measures it,
@@ -1551,6 +1581,8 @@ struct Ui {
     /// What plays, as the music page's preview draws it; since when the example has played (see
     /// `music::paint_example`).
     music: super::music::Music,
+    /// The skin's ground under it, drawn on the skin (in the preview, and in the layout's editor).
+    music_ground: render::GroundLayers,
     example_from: Instant,
     lang: Lang,
     dark: bool,
@@ -1666,6 +1698,7 @@ struct Ui {
     /// What plays, as the layout's library shows it; the readings and the workbench, as it shows them (each drawn
     /// in layers of its own: see `render::PanelLayers`).
     library_music: super::music::Music,
+    library_music_ground: render::GroundLayers,
     library_layers: [PanelLayers; 2],
     map_art: Vec<MapArt>,
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
@@ -1856,6 +1889,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             tab: Tab::Shown,
             sources: Vec::new(),
             music: super::music::Music::default(),
+            music_ground: render::GroundLayers::default(),
             example_from: Instant::now(),
             autostart: switches_read.0,
             remote_there: crate::phone::helper().is_some(),
@@ -1916,6 +1950,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             carry: None,
             zones: Vec::new(),
             library_music: super::music::Music::default(),
+            library_music_ground: render::GroundLayers::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
             map_art: Vec::new(),
             kept_stages: Vec::new(),
@@ -3219,6 +3254,11 @@ impl Ui {
                 vec![s("网关", "Gateway"), s("阿里", "Alibaba"), s("腾讯", "Tencent"), "Cloudflare".into()],
                 prefs::PingTarget::ALL.iter().position(|&to| to == prefs.network.ping_to(lang)),
             ),
+            Field::MusicGround => (
+                pick(lang, "背景", "Background"),
+                vec![s("封面", "Cover"), s("跟随外观", "Skin"), s("无", "None")],
+                MusicGround::ALL.iter().position(|&ground| ground == prefs.music.ground),
+            ),
             Field::ProcessCount => (
                 pick(lang, "显示进程数", "Processes shown"),
                 vec!["5".into(), "8".into(), "12".into()],
@@ -3273,6 +3313,7 @@ impl Ui {
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
             Field::PingTarget => prefs.network.ping = Some(prefs::PingTarget::ALL[index]),
+            Field::MusicGround => prefs.music.ground = MusicGround::ALL[index],
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
@@ -4017,7 +4058,6 @@ impl Ui {
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
             ("lyrics", "spectrum") => (p("律动条", "Spectrum"), None),
             ("lyrics", "controls") => (p("常驻播放控件", "Controls always shown"), Some(p("关闭时，播放控件在鼠标移入后出现", "Off, they show as the pointer comes over it"))),
-            ("lyrics", "clear") => (p("透明背景", "Clear background"), Some(p("去掉底色，文字加描边", "No ground under it, its words edged"))),
             ("overlay", "low") => (p("1% low", "1% low"), Some(p("最近 10 秒内最慢 1% 的帧换算成的帧率", "The slowest 1% of frames of the last 10 seconds, as frames a second"))),
             ("overlay", "frametime") => (p("帧时间", "Frame time"), Some(p("最近 1 秒内最长一帧的耗时", "The longest frame of the last second"))),
             ("overlay", "cpu" | "gpu") => (p("占用", "Use"), None),
@@ -5919,9 +5959,18 @@ impl Ui {
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
         self.follows_pointer.push(Rect { x: at.0, y: at.1, w: size.0 * scale, h: size.1 * scale });
-        frame.place(Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1));
-        let ground = super::music::Ground::of(&shows);
-        let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
+        let local = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(at.0, at.1);
+        // In the theme the desktop under it gives, and on the skin, the skin's ground under it (the desktop behind it as
+        // the stage's bitmap was made: `zoom` of its DIPs a DIP of what plays).
+        let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
+        let (theme, frost) = self.stage.look(Skin::named(&self.settings.skin), self.prefs.theme, behind);
+        let ground = super::music::Ground::of(&shows, theme.dark);
+        if let super::music::Ground::Skin { .. } = ground {
+            frame.origin(0.0, 0.0);
+            self.stage.music_ground(frame, &mut self.music_ground, &theme, frost, size, Some((pos, zoom)), local, self.scale * scale);
+        }
+        frame.place(local);
+        let family = theme.body.family;
         let now = Instant::now();
         let painted = if super::music::heard() {
             self.music.paint(frame, size, &shows, ground, family, self.scale * scale, pointer, now)
@@ -6082,10 +6131,7 @@ impl Ui {
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
-        let tone = self.stage.tone(behind);
-        let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
-        let theme = Theme::new(skin, dark);
-        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
+        let (theme, frost) = self.stage.look(skin, prefs.theme, behind);
         let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 

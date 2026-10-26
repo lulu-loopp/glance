@@ -1851,6 +1851,28 @@ impl Behind {
         let tone = capture.luminance(placement.panel, placement.px);
         Behind { digest: capture.digest, tone, capture, bitmap: None, former, taken: now }
     }
+
+    /// The capture as drawn at `px` physical pixels a DIP (made again at another zoom, from the same pixels; else made
+    /// into what the capture before was), placed so that the panel's corner, `corner` from the corner of what it is
+    /// painted in (`window`), is where the panel rests on screen (the window may have moved or grown since the capture
+    /// was taken); as `render::Picture::backdrop` takes it.
+    fn backdrop(&mut self, dc: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, px: f32, window: RECT, corner: (f32, f32)) -> Option<(&ID2D1Bitmap1, Vector2, u64, f32)> {
+        if self.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
+            self.bitmap = match self.bitmap.take() {
+                Some((made, _)) => self.capture.at_scale(dc, &made, px),
+                None => self.capture.bitmap_into(dc, px, self.former.take().as_ref()),
+            }
+            .ok()
+            .map(|bitmap| (bitmap, px));
+            // (Copied: what it was taken in is the next capture's to be taken in.)
+            if self.bitmap.is_some() {
+                self.capture.forget_texture();
+            }
+        }
+        let from = self.capture.rect;
+        let at = Vector2 { X: (window.left - from.left) as f32 / px + corner.0, Y: (window.top - from.top) as f32 / px + corner.1 };
+        Some((&self.bitmap.as_ref()?.0, at, self.digest, px))
+    }
 }
 
 /// What a turn between layouts starts from: a layout shown (at its zoom), or what a turn under way drew last.
@@ -1887,6 +1909,7 @@ impl crate::ui::life::Lives for Panel<'_> {
         self.layers.release();
         self.music.release();
         self.music_layer.release();
+        self.music_ground.release();
         self.last_layout = None;
         self.turning = None;
         self.turned.clear();
@@ -1922,6 +1945,8 @@ struct Panel<'a> {
     /// pixels, as a widget's is.)
     music_layer: crate::ui::gfx::Layer,
     music_frames: u64,
+    /// The skin's ground under what plays, where it is drawn on the skin (see `prefs::MusicGround`).
+    music_ground: render::GroundLayers,
     phase: Phase,
     /// 0 at rest on screen, 1 slid out.
     shift: Transition,
@@ -2099,6 +2124,7 @@ impl<'a> Panel<'a> {
             layers: PanelLayers::default(),
             music: crate::ui::music::Music::default(),
             music_layer: crate::ui::gfx::Layer::default(),
+            music_ground: render::GroundLayers::default(),
             music_frames: 0,
             showing: None,
             phase: Phase::Hidden,
@@ -3618,29 +3644,7 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            let backdrop = behind.as_mut().and_then(|behind| {
-                if behind.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
-                    // At another zoom, the same pixels; else made into what the capture before was.
-                    behind.bitmap = match behind.bitmap.take() {
-                        Some((made, _)) => behind.capture.at_scale(&frame.dc, &made, px),
-                        None => behind.capture.bitmap_into(&frame.dc, px, behind.former.take().as_ref()),
-                    }
-                    .ok()
-                    .map(|bitmap| (bitmap, px));
-                    // (Copied: what it was taken in is the next capture's to be taken in.)
-                    if behind.bitmap.is_some() {
-                        behind.capture.forget_texture();
-                    }
-                }
-                // Aligned with the screen where the panel rests: the window
-                // may have moved or grown since the capture was taken.
-                let from = behind.capture.rect;
-                let at = Vector2 {
-                    X: (window.left - from.left) as f32 / px + rest.0,
-                    Y: (window.top - from.top) as f32 / px + rest.1,
-                };
-                Some((&behind.bitmap.as_ref()?.0, at, behind.digest, px))
-            });
+            let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, px, window, rest));
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
             let local = Matrix3x2::translation(x, y);
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
@@ -3800,6 +3804,8 @@ impl<'a> Panel<'a> {
         let settings_lit = self.settings_lit();
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let family = self.theme.body.family;
+        let ground = crate::ui::music::Ground::of(&shows, self.theme.dark);
+        let (theme, frost, behind, skin_ground) = (&self.theme, self.frost, &mut self.behind, &mut self.music_ground);
         let music = &mut self.music;
         let layer = &mut self.music_layer;
         self.music_frames += 1;
@@ -3817,11 +3823,19 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
+            // On the skin: its ground under it, as the readings' is under them.
+            if let crate::ui::music::Ground::Skin { .. } = ground {
+                frame.origin(0.0, 0.0);
+                let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, px, window, rest));
+                if let Err(error) = skin_ground.draw_whole(frame, theme, size, backdrop, frost, false, Matrix3x2::translation(x, y), px) {
+                    crate::journal::note(format!("panel: what plays' ground not drawn: {error}"));
+                }
+            }
             frame.origin(x, y);
             // (Round it, the room for its shadow.)
             let area = (-24.0, -24.0, size.0 + 48.0, size.1 + 48.0);
             let drew = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, None, |frame| {
-                painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), family, px, pointer, now));
+                painted = Some(music.paint(frame, size, &shows, ground, family, px, pointer, now));
                 Ok(())
             });
             if drew.is_err() {
@@ -3830,7 +3844,7 @@ impl<'a> Panel<'a> {
             if at_buttons.is_some() || settings_lit.is_some() {
                 // (The pointer away: over none of them.)
                 let (px_x, px_y) = at_buttons.unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
-                let ground = music.ground_colour(size);
+                let colour = music.ground_colour(size);
                 let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
                 // (In its corner, or in their row.)
                 let (top, right) = match rack {
@@ -3843,7 +3857,12 @@ impl<'a> Panel<'a> {
                     let settings = button == crate::ui::buttons::Button::Settings;
                     let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (settings && settings_lit.is_some()) || over;
                     let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
-                    crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground, grown);
+                    let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
+                    // (On the skin, as the readings' are; else in the colour of its own ground there.)
+                    match ground {
+                        crate::ui::music::Ground::Skin { .. } => crate::ui::buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown),
+                        _ => crate::ui::buttons::paint_on(frame, centre, button, lit, colour, grown),
+                    }
                     buttons.push((bx, by, side, side, hit));
                 }
             }

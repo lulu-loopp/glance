@@ -139,13 +139,24 @@ impl Ui {
                 Part::Workbench => self.component_picture(frame, Part::Workbench, inside, 1),
                 Part::Music => {
                     let mut shows = super::super::music::Shows::from(&self.settings.view);
-                    // As a strip: one line, the cover and what plays beside it, made smaller into the picture.
-                    shows.clear = false;
+                    // As a strip: one line, the cover and what plays beside it, made smaller into the picture (on a
+                    // ground: with none, its words would be lost on the picture's desktop).
+                    if shows.ground == MusicGround::Clear {
+                        shows.ground = MusicGround::Cover;
+                    }
                     let k = (inside.w / TILE_MUSIC.0).min(inside.h / TILE_MUSIC.1).min(1.0);
                     let (w, h) = (TILE_MUSIC.0 * k, TILE_MUSIC.1 * k);
-                    frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(inside.x + (inside.w - w) / 2.0, inside.y + (inside.h - h) / 2.0));
-                    let (ground, now) = (super::super::music::Ground::Own, Instant::now());
-                    let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
+                    let local = Matrix3x2::scale(k, k) * Matrix3x2::translation(inside.x + (inside.w - w) / 2.0, inside.y + (inside.h - h) / 2.0);
+                    // (Light or dark as the readings' pictures are, on the skin's ground as theirs: see `component_picture`.)
+                    let middle = self.stage.middle();
+                    let (theme, frost) = self.stage.look(Skin::named(&self.settings.skin), self.prefs.theme, middle);
+                    let ground = super::super::music::Ground::of(&shows, theme.dark);
+                    if let super::super::music::Ground::Skin { .. } = ground {
+                        frame.origin(0.0, 0.0);
+                        self.stage.music_ground(frame, &mut self.library_music_ground, &theme, frost, TILE_MUSIC, None, local, self.scale * k);
+                    }
+                    frame.place(local);
+                    let (family, now) = (theme.body.family, Instant::now());
                     let _ = if super::super::music::heard() {
                         self.library_music.paint(frame, TILE_MUSIC, &shows, ground, family, self.scale * k, None, now)
                     } else {
@@ -181,11 +192,8 @@ impl Ui {
         let (overlay, newer) = (app.controller.overlay_wanted(), update::available().is_some());
         // Light or dark as the desktop is under the picture (where the skin follows it).
         let (sw, sh) = self.stage.size;
-        let middle = RECT { left: (sw * 0.3) as i32, top: (sh * 0.3) as i32, right: (sw * 0.7) as i32, bottom: (sh * 0.7) as i32 };
-        let tone = self.stage.tone(middle);
-        let dark = theme::is_dark(prefs.theme, Some(tone.0).filter(|_| skin.sees_backdrop()));
-        let theme = Theme::new(skin, dark);
-        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
+        let middle = self.stage.middle();
+        let (theme, frost) = self.stage.look(skin, prefs.theme, middle);
         let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
         let heights = view::heights(&scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
@@ -403,9 +411,19 @@ impl Ui {
             Edge::Top => ((sw - w) / 2.0, inset),
         };
         unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        frame.place(Matrix3x2::scale(k, k) * Matrix3x2::translation(r.x + x * k, r.y + y * k));
-        let (ground, scale, now) = (super::super::music::Ground::of(&shows), self.scale * k, Instant::now());
-        let family = Theme::new(Skin::named(&self.settings.skin), false).body.family;
+        let local = Matrix3x2::scale(k, k) * Matrix3x2::translation(r.x + x * k, r.y + y * k);
+        let (scale, now) = (self.scale * k, Instant::now());
+        // In the theme the desktop under it gives, and on the skin, the skin's ground under it (the stage's desktop
+        // behind it, made a pixel a DIP: see `panel_on_stage`).
+        let behind = RECT { left: x as i32, top: y as i32, right: (x + w) as i32, bottom: (y + h) as i32 };
+        let (theme, frost) = self.stage.look(Skin::named(&self.settings.skin), self.prefs.theme, behind);
+        let ground = super::super::music::Ground::of(&shows, theme.dark);
+        if let super::super::music::Ground::Skin { .. } = ground {
+            frame.origin(0.0, 0.0);
+            self.stage.music_ground(frame, &mut self.music_ground, &theme, frost, size, Some(((x, y), 1.0)), local, scale);
+        }
+        frame.place(local);
+        let family = theme.body.family;
         let painted = if super::super::music::heard() {
             self.music.paint(frame, size, &shows, ground, family, scale, None, now)
         } else {
