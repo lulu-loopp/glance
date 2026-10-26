@@ -940,7 +940,6 @@ impl Palette {
 fn module_fields(id: &str) -> &'static [Field] {
     match id {
         "network" => &[Field::RateUnit, Field::PingTarget],
-        "lyrics" => &[Field::MusicGround],
         "processes" => &[Field::ProcessCount],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         _ => &[],
@@ -2417,6 +2416,7 @@ impl Ui {
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
                 rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
+                rows.push(Row::Choice(Field::MusicGround));
                 // (Only where NetEase is installed.)
                 if self.netease.is_some() {
                     rows.push(Row::NetEase);
@@ -3447,6 +3447,11 @@ impl Ui {
                 self.lang,
                 "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器。时间与媒体不受此项影响",
                 "Automatic follows music players only. For music in a web page, choose the browser. The time and media are not affected",
+            )),
+            Field::MusicGround => Some(pick(
+                self.lang,
+                "封面为模糊的专辑封面，跟随外观时与其他组件的底色、文字颜色一致，无背景时文字加描边",
+                "The cover blurred, the skin's ground and ink as every other widget has, or none with its words edged",
             )),
             Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
             Field::OverFullscreen => Some(pick(
