@@ -621,6 +621,19 @@ impl Gfx {
         (line[0].baseline, line[0].height - line[0].baseline)
     }
 
+    /// Where the first line's baseline of `text`, wrapped `width` wide in `font`, falls below its top (DIPs): its own,
+    /// as the faces that draw it set it (a line in Chinese, in a face apart from the font's own, sits lower than
+    /// `baseline` says).
+    pub fn wrapped_baseline(&self, text: &str, font: Font, width: f32) -> f32 {
+        let layout = self.wrapped(text, font, width);
+        // (Asked first how many lines it has: a list too short for them is not filled.)
+        let mut count = 0;
+        let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+        let _ = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
+        lines[0].baseline
+    }
+
     /// Lets go of what Direct2D keeps from earlier drawing, such as the
     /// intermediate images of effects.
     pub fn clear_caches(&self) {
@@ -1680,6 +1693,19 @@ impl<'a> Frame<'a> {
         let Some((t, device)) = self.grid() else { return line };
         let per = t.M11 * device;
         whole_pixel(line * per).max(1.0) / per
+    }
+
+    /// Where words drawn from `y` (DIPs, as drawn now), their baseline `baseline` below it, have that baseline on a whole
+    /// pixel of what is drawn on, moved the least to: whether or not what is drawn moves, for words that glide to rest
+    /// there drawn where they fall all along (put on whole pixels only once at rest, they stepped by up to a pixel as
+    /// they came to rest: see `set_moving`), crisp there.
+    pub fn baseline_on_pixel(&self, y: f32, baseline: f32) -> f32 {
+        let Some((t, device)) = self.axes() else { return y };
+        let at = ((y + baseline) * t.M22 + t.M32) * device;
+        if !at.is_finite() || at.abs() > 1.0e6 {
+            return y;
+        }
+        y + (whole_pixel(at) - at) / (t.M22 * device)
     }
 
     /// The rectangle `(x, y, width, height)` (DIPs) with its edges on whole pixels (see `on_pixel`), none shrunk away:

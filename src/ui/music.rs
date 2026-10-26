@@ -1588,8 +1588,9 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
-                // (Rising in, drawn where it falls: see `Frame::set_moving`.)
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls, resting with its baseline on a whole pixel: see
+                // `Frame::baseline_on_pixel`.)
+                let _moving = frame.moving_while(true);
                 let (dim, bright) = self.line_colours(eased);
                 if text.trim().is_empty() {
                     let y = h / 2.0 - self.fonts.strip.size * 0.7 + (1.0 - eased) * 8.0;
@@ -1618,7 +1619,8 @@ impl Drawing<'_> {
                         None => (font, fitted(frame, &text, font, width), 100_000.0, 1.0),
                     };
                     let tall = frame.gfx.wrapped_height(&text, font, wrap) * zoom;
-                    let y = (h - tall) / 2.0 + (1.0 - eased) * 8.0;
+                    let rest = frame.baseline_on_pixel((h - tall) / 2.0, frame.gfx.wrapped_baseline(&text, font, wrap) * zoom);
+                    let y = rest + (1.0 - eased) * 8.0;
                     let layout = frame.gfx.wrapped(&text, font, wrap);
                     let sung = sung_to(&parts, self.moment.position);
                     frame.scaled(left, y, zoom, |_| self.filled(&layout, &text, font, left, y, wrap, sung, dim, bright, 12.0 / zoom));
@@ -1668,7 +1670,8 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+                let _moving = frame.moving_while(true);
                 let (dim, bright) = self.line_colours(eased);
                 let under = self.under(lines, now);
                 if text.trim().is_empty() {
@@ -1686,7 +1689,8 @@ impl Drawing<'_> {
                 let wrap = down_wrap(&text, font, column, down);
                 // (Right to left, as words written down are read: the line sung now first.)
                 let x = if two { left + width - column + (column - wrap) / 2.0 } else { left + (width - wrap) / 2.0 };
-                let y = top + (1.0 - eased) * 8.0;
+                // (Written down, its top on a whole pixel; across, its baseline.)
+                let y = frame.baseline_on_pixel(top, if down { 0.0 } else { frame.gfx.wrapped_baseline(&text, font, wrap) }) + (1.0 - eased) * 8.0;
                 let row = row_of(frame, &text, font, wrap);
                 let tall = frame.gfx.wrapped_height(&text, font, wrap);
                 // (Cut where a row ends, as many whole rows as there is room for.)
@@ -1765,8 +1769,10 @@ impl Drawing<'_> {
         let next = lines.get(now + 1).map(|line| line.at);
         let (text, parts) = parts(line, next);
         let eased = self.came();
-        let _moving = self.frame.moving_while(eased < 1.0);
-        let y = top + (1.0 - eased) * 14.0;
+        // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+        let _moving = self.frame.moving_while(true);
+        let baseline = if text.trim().is_empty() { 0.0 } else { frame.gfx.wrapped_baseline(&text, font, frame.measure(&text, font).min(room) + 2.0) };
+        let y = frame.baseline_on_pixel(top, baseline) + (1.0 - eased) * 14.0;
         let (accent, tint) = (self.accent, self.tint);
         let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(tint, eased));
         if text.trim().is_empty() {
@@ -1864,7 +1870,8 @@ impl Drawing<'_> {
                 let next = lines.get(now + 1).map(|line| line.at);
                 let (text, parts) = parts(line, next);
                 let eased = self.came();
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+                let _moving = frame.moving_while(true);
                 let under = self.under(lines, now);
                 // A line's size: too long for a row, wrapped, at the largest size (down to that of what is under it) at
                 // which all its rows fit with what is under it; else all its rows alone; else one row at the least, cut
@@ -1896,8 +1903,9 @@ impl Drawing<'_> {
                         frame.text_wrapped(&shown(&lines[before].text, old_font, old_cut), old_font, sung_colour.alpha(1.0 - eased), left, line_top - eased * old_tall * 0.7, width);
                         let (font, tall, cut) = fit(&text, !under.is_empty());
                         let text = shown(&text, font, cut);
+                        let rest = frame.baseline_on_pixel(line_top, frame.gfx.wrapped_baseline(&text, font, width));
                         let from = line_top + old_tall + 2.0;
-                        let y = from + (line_top - from) * eased;
+                        let y = from + (rest - from) * eased;
                         let size = self.fonts.under.size + (font.size - self.fonts.under.size) * eased;
                         // As it was under the line before, going; as the line sung now, coming.
                         words(frame, &text, Font { size, ..self.fonts.under }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
@@ -1930,8 +1938,14 @@ impl Drawing<'_> {
                                 }
                             }
                         }
-                        let y = line_top + (1.0 - eased) * step;
                         let (dim, bright) = self.line_colours(eased);
+                        let rest = if text.trim().is_empty() {
+                            line_top
+                        } else {
+                            let (font, _, cut) = fit(&text, !under.is_empty());
+                            frame.baseline_on_pixel(line_top, frame.gfx.wrapped_baseline(&shown(&text, font, cut), font, width))
+                        };
+                        let y = rest + (1.0 - eased) * step;
                         if text.trim().is_empty() {
                             interlude(frame, left, y, self.fonts.line.size, between(line, next, self.moment.position), dim, bright);
                             (y, self.fonts.line.size * 1.4)
@@ -2253,6 +2267,19 @@ impl Drawing<'_> {
             let most = tall_at(aimed + 1, 1.0).map_or(f32::MAX, |tall| bottom + 12.0 - fade_bottom - aimed_half - gap - tall);
             if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 }
         };
+        // At rest, the first baseline of the line aimed at on a whole pixel: its lines are drawn where they fall, moving
+        // or not (put on whole pixels only once at rest, they all stepped down by up to a pixel a moment after a line
+        // came), and so the line rests crisp there.
+        let anchor = match turned.or(current).filter(|index| *index < lines.len()) {
+            Some(index) => {
+                let line = &lines[index];
+                let text = if turned == Some(index) { if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() } } else { parts(line, lines.get(index + 1).map(|line| line.at)).0 };
+                let rest = anchor - height_of(index, scale_at(0.0)) / 2.0;
+                let baseline = if text.trim().is_empty() { 0.0 } else { frame.gfx.wrapped_baseline(&text, full, at_rest) * zoom(scale_at(0.0)) };
+                anchor + frame.baseline_on_pixel(rest, baseline) - rest
+            }
+            None => anchor,
+        };
         // Moving there as the rail glides (from where it was; a rail come anew, there at once).
         let to = anchor - top;
         let aimed = turned.or(current).map_or(-1, |index| index as isize);
@@ -2268,9 +2295,10 @@ impl Drawing<'_> {
         self.music.anchor = Some(state);
         let anchor = top + state.shown;
         let (tint, clear) = (self.tint, self.edged);
-        // While the rail glides, its lines drawn where they fall (see `Frame::set_moving`): put on whole pixels, a line
-        // easing the last of the way stood still, then stepped a pixel.
-        let _moving = frame.moving_while(rail != rail.round() || self.music.anchoring);
+        // Its lines drawn where they fall (see `Frame::set_moving`), gliding and at rest alike: put on whole pixels as it
+        // glided, a line easing the last of the way stood still, then stepped a pixel, and only once at rest, they all
+        // stepped as it came to rest. (At rest, the line aimed at is on whole pixels already: see `anchor`.)
+        let _moving = frame.moving_while(true);
         self.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         #[cfg(test)]
         self.music.drawn_lines.clear();
@@ -2297,10 +2325,8 @@ impl Drawing<'_> {
                 let dim = Color::hex(self.ink, if clear { 0.55 } else { 0.34 } * alpha);
                 if text.trim().is_empty() {
                     let done = between(line, next, self.moment.position);
-                    // What has gone glows in the cover's colour (on a dark ground: on a light one, a glow is a smudge).
-                    if !self.light {
-                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
-                    }
+                    // What has gone glows in the cover's colour.
+                    frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| interlude(frame, x, y, font.size, done, Color::hex(0, 0.0), bright));
                     interlude(frame, x, y, font.size, done, dim, bright);
                 } else {
                     // (At its full size, drawn smaller as a whole: see `full`.)
@@ -2309,10 +2335,8 @@ impl Drawing<'_> {
                     let sung = sung_to(&parts, self.moment.position);
                     let soft = (font.size * 0.45).clamp(6.0, 16.0) / zoom(scale);
                     frame.scaled(x, y, zoom(scale), |frame| {
-                        // What is sung glows in the cover's colour (on a dark ground, as above).
-                        if !self.light {
-                            frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, room, sung, bright, soft));
-                        }
+                        // What is sung glows in the cover's colour.
+                        frame.glow(colour(tint, 0.5 * alpha), 6.0, |frame| sung_part(frame, &layout, &text, full, x, y, room, sung, bright, soft));
                         self.filled(&layout, &text, full, x, y, room, sung, dim, bright, soft);
                     });
                 }
@@ -3276,6 +3300,58 @@ mod pictures {
             })
             .unwrap();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/skins.png")), size.0, size.1, &pixels).unwrap();
+    }
+
+    /// The lines come to rest where they glided to: drawn a hair before the rail rests and as it rests, at a place a
+    /// third of a pixel off the grid, the words' ink stands as high in both, within the hair (put on whole pixels only
+    /// once at rest, they all stepped down by up to a pixel a moment after a line came).
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn the_lines_come_to_rest_where_they_glided() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Clear, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        let (w, h) = (420.0f32, 230.0f32);
+        let size = ((w * 1.5) as u32, (h * 1.5) as u32 + 2);
+        let now = Instant::now();
+        // Where what is drawn right of the cover is (on no ground: its pixels' cover), row by row, weighed: its middle, in
+        // pixels.
+        let ink_middle = |rail_off: f32, down: f32| -> f64 {
+            let pixels = gfx
+                .draw_offscreen(size, 1.5, |frame| {
+                    frame.origin(0.0, down);
+                    let moment = playing(false);
+                    let target = moment.now.unwrap() as f32;
+                    let mut music = Music { last_frame: now, ..Music::default() };
+                    music.bands = moment.sound.bands;
+                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    music.rail = target - rail_off;
+                    // (Settled already, but for the rail: one frame to place the anchor, then the one looked at.)
+                    music.paint_moment(frame, (w, h), &all, Ground::Clear, Family::Segoe, 1.5, None, now, Moment { lines: moment.lines.clone(), ..playing(false) });
+                    music.rail = target - rail_off;
+                    music.rail_speed = 0.0;
+                    unsafe { frame.dc.Clear(None) };
+                    music.paint_moment(frame, (w, h), &all, Ground::Clear, Family::Segoe, 1.5, None, now, moment);
+                })
+                .unwrap();
+            let (mut sum, mut weight) = (0.0f64, 0.0f64);
+            for y in (40 * 3 / 2)..(170 * 3 / 2) {
+                for x in (200 * 3 / 2)..(400 * 3 / 2) {
+                    let at = ((y * size.0 + x) * 4) as usize;
+                    let ink = pixels[at + 3] as f64;
+                    sum += ink * y as f64;
+                    weight += ink;
+                }
+            }
+            sum / weight.max(1.0)
+        };
+        for down in [0.0, 1.0 / 3.0 / 1.5, 2.0 / 3.0 / 1.5] {
+            let (gliding, resting) = (ink_middle(0.003, down), ink_middle(0.0, down));
+            println!("placed {down:.3} DIP down: gliding {gliding:.3}, resting {resting:.3}");
+            assert!((gliding - resting).abs() < 0.3, "{down:.3} DIP down, the lines rest {:.3} px from where they glided", resting - gliding);
+        }
     }
 
     /// What plays drawn on each skin's ground, light and dark, a card and a strip (`cargo test --features studio --lib
