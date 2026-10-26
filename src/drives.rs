@@ -1,18 +1,17 @@
-//! Drive temperatures, as the drives report them to Windows. Asking for a
-//! drive's properties needs no access to its data, so no administrator rights.
-//! A SATA drive that gives Windows none is asked for its SMART attributes
-//! itself (which does need them), now and then, and never out of standby.
+//! Drive temperatures, as the drives report them to Windows. Every drive is
+//! opened for its properties only (no access to its data, so no administrator
+//! rights), never to read or write: an NVMe drive whose driver gives none is
+//! asked for its health log, a SATA drive for the SMART attributes Windows
+//! reads of it for failure prediction, now and then, never while it sleeps.
 
 use crate::reading::DriveTemperature;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
+use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows::Win32::System::Ioctl::{
-    PropertyStandardQuery, StorageDeviceProperty, StorageDeviceTemperatureProperty, IOCTL_STORAGE_QUERY_PROPERTY,
-    STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_ID, STORAGE_PROPERTY_QUERY, STORAGE_TEMPERATURE_DATA_DESCRIPTOR,
-    STORAGE_TEMPERATURE_INFO,
+    PropertyStandardQuery, StorageDeviceProperty, StorageDeviceTemperatureProperty, IOCTL_STORAGE_PREDICT_FAILURE,
+    IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PREDICT_FAILURE, STORAGE_PROPERTY_ID,
+    STORAGE_PROPERTY_QUERY, STORAGE_TEMPERATURE_DATA_DESCRIPTOR, STORAGE_TEMPERATURE_INFO,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -28,7 +27,7 @@ pub fn models() -> Vec<(u32, String)> {
 pub fn temperatures() -> Vec<DriveTemperature> {
     let mut found = Vec::new();
     each_drive(|index, handle| {
-        if let Some(celsius) = temperature(handle).or_else(|| nvme_temperature(index, handle)).or_else(|| smart_temperature(index, handle)) {
+        if let Some(celsius) = temperature(handle).or_else(|| nvme_temperature(handle)).or_else(|| smart_temperature(index, handle)) {
             found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
     });
@@ -63,19 +62,13 @@ struct ProtocolData {
 
 /// An NVMe drive's temperature from its health log (its composite temperature, in kelvin, in bytes 1 and 2), for a
 /// drive whose driver gives Windows none as a property (some vendors' drivers, and RAID ones, do not). Asked as
-/// Windows documents for NVMe drives; through the handle opened for properties, else opened to read and write
-/// (which some drivers want for it; it touches none of the drive's data).
-fn nvme_temperature(index: u32, properties: HANDLE) -> Option<f32> {
+/// Windows documents for NVMe drives, through the handle opened for properties. (Opened to read and write besides,
+/// for drivers that might want it, it looked to virus scanners like a program writing to the drive's boot record.)
+fn nvme_temperature(properties: HANDLE) -> Option<f32> {
     if bus(properties)? != BUS_NVME {
         return None;
     }
-    health_celsius(properties).or_else(|| {
-        let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
-        let drive = unsafe { CreateFileW(PCWSTR(path.as_ptr()), 0xC000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }.ok()?;
-        let celsius = health_celsius(drive);
-        let _ = unsafe { CloseHandle(drive) };
-        celsius
-    })
+    health_celsius(properties)
 }
 
 /// The composite temperature in an NVMe drive's health log, read through `handle`.
@@ -115,13 +108,10 @@ pub fn describe() -> Vec<String> {
     each_drive(|index, handle| {
         let read = if temperature(handle).is_some() {
             "its property"
-        } else if nvme_temperature(index, handle).is_some() {
+        } else if nvme_temperature(handle).is_some() {
             "its NVMe health log"
         } else if smart_temperature(index, handle).is_some() {
-            "SMART"
-        } else if !crate::elevation::is_elevated() && bus(handle).is_some_and(|bus| matches!(bus, BUS_ATA | BUS_SATA)) {
-            // (Asked of the drive itself, which needs an administrator's rights: the sensors' program asks it.)
-            "SMART, if the sensors' program reads it"
+            "its SMART attributes"
         } else {
             "none"
         };
@@ -132,37 +122,15 @@ pub fn describe() -> Vec<String> {
 
 /// How often a SATA drive is asked for its SMART attributes.
 const SMART_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
-/// IOCTL_ATA_PASS_THROUGH, and its flags: the drive must be ready, and the
-/// command reads data in.
-const ATA_PASS_THROUGH: u32 = 0x0004_D02C;
-const ATA_DRDY_REQUIRED: u16 = 0x01;
-const ATA_DATA_IN: u16 = 0x02;
 /// The SATA and (parallel) ATA buses, as STORAGE_BUS_TYPE numbers them.
 const BUS_ATA: i32 = 3;
 const BUS_SATA: i32 = 11;
 
-/// ATA_PASS_THROUGH_EX, the data read following it in one buffer.
-#[repr(C)]
-#[derive(Default)]
-struct AtaCommand {
-    length: u16,
-    flags: u16,
-    path: u8,
-    target: u8,
-    lun: u8,
-    reserved: u8,
-    data_length: u32,
-    timeout_s: u32,
-    reserved2: u32,
-    data_offset: usize,
-    previous: [u8; 8],
-    /// Features, sector count, LBA low, mid and high, device, command, reserved.
-    task: [u8; 8],
-}
-
-/// A SATA drive's temperature from its SMART attributes, read at most every
-/// `SMART_EVERY` (what was read last stands between), and only while the
-/// drive is spinning: a drive in standby is left there, unread.
+/// A SATA drive's temperature from its SMART attributes, read at most every `SMART_EVERY` (what was read last
+/// stands between), and only while Windows has the drive powered: one it has put to sleep is left there, unread.
+/// The attributes as Windows' disk driver reads them for failure prediction, through the handle opened for
+/// properties. (Asked of the drive itself, opened to read and write as its commands need, it looked to virus
+/// scanners like a program writing to the drive's boot record.)
 fn smart_temperature(index: u32, properties: HANDLE) -> Option<f32> {
     static LAST: std::sync::Mutex<Vec<(u32, std::time::Instant, Option<f32>)>> = std::sync::Mutex::new(Vec::new());
     let mut last = LAST.lock().unwrap();
@@ -175,59 +143,19 @@ fn smart_temperature(index: u32, properties: HANDLE) -> Option<f32> {
         if !matches!(bus(properties)?, BUS_ATA | BUS_SATA) {
             return None;
         }
-        // Commands to the drive itself need it opened for reading and
-        // writing (they touch none of its data).
-        let path: Vec<u16> = format!("\\\\.\\PhysicalDrive{index}").encode_utf16().chain([0]).collect();
-        let drive = unsafe {
-            CreateFileW(PCWSTR(path.as_ptr()), 0xC000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+        let mut on = windows::core::BOOL(0);
+        if !unsafe { windows::Win32::System::Power::GetDevicePowerState(properties, &mut on) }.as_bool() || !on.as_bool() {
+            return None;
         }
-        .ok()?;
-        // CHECK POWER MODE: a sector count of zero is standby.
-        let awake = ata(drive, [0, 0, 0, 0, 0, 0xA0, 0xE5, 0], None).is_some_and(|task| task[1] != 0);
-        let mut data = [0u8; 512];
-        // SMART READ DATA.
-        let attributes = awake.then(|| ata(drive, [0xD0, 1, 0, 0x4F, 0xC2, 0xA0, 0xB0, 0], Some(&mut data))).flatten();
-        let _ = unsafe { CloseHandle(drive) };
-        attributes.and_then(|_| smart_celsius(&data))
+        let mut predicted = STORAGE_PREDICT_FAILURE::default();
+        let mut returned = 0u32;
+        let size = size_of::<STORAGE_PREDICT_FAILURE>() as u32;
+        unsafe { DeviceIoControl(properties, IOCTL_STORAGE_PREDICT_FAILURE, None, 0, Some(&mut predicted as *mut _ as *mut _), size, Some(&mut returned), None) }.ok()?;
+        smart_celsius(&predicted.VendorSpecific)
     })();
     last.retain(|(drive, ..)| *drive != index);
     last.push((index, std::time::Instant::now(), read));
     read
-}
-
-/// Sends the drive an ATA command (its task file), reading 512 bytes into
-/// `data` if given: the task file it answers with.
-fn ata(drive: HANDLE, task: [u8; 8], data: Option<&mut [u8; 512]>) -> Option<[u8; 8]> {
-    #[repr(C)]
-    struct Buffer {
-        command: AtaCommand,
-        data: [u8; 512],
-    }
-    let reads = data.is_some();
-    let mut buffer = Buffer {
-        command: AtaCommand {
-            length: size_of::<AtaCommand>() as u16,
-            flags: ATA_DRDY_REQUIRED | if reads { ATA_DATA_IN } else { 0 },
-            data_length: if reads { 512 } else { 0 },
-            timeout_s: 3,
-            data_offset: std::mem::offset_of!(Buffer, data),
-            task,
-            ..Default::default()
-        },
-        data: [0; 512],
-    };
-    let mut returned = 0u32;
-    let size = size_of::<Buffer>() as u32;
-    let pointer = &mut buffer as *mut Buffer as *mut core::ffi::c_void;
-    unsafe { DeviceIoControl(drive, ATA_PASS_THROUGH, Some(pointer), size, Some(pointer), size, Some(&mut returned), None) }.ok()?;
-    // An error bit in the status it answers with: not done.
-    if buffer.command.task[6] & 1 != 0 {
-        return None;
-    }
-    if let Some(data) = data {
-        *data = buffer.data;
-    }
-    Some(buffer.command.task)
 }
 
 /// The temperature among a drive's SMART attributes: attribute 194
@@ -416,3 +344,4 @@ mod nvme_tests {
         });
     }
 }
+
