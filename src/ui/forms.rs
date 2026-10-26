@@ -452,19 +452,9 @@ impl Painter<'_> {
         draw(&self.on(&nothing))
     }
 
-    /// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
+    /// `text`, or as much of its start as is no wider than `room` with an ellipsis after it (see `canvas::fitted`).
     fn fitted<'t>(&self, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
-        if self.frame.measure(text, font) <= room {
-            return text.into();
-        }
-        let mut kept: Vec<char> = text.chars().collect();
-        loop {
-            kept.pop();
-            let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
-            if kept.is_empty() || self.frame.measure(&cut, font) <= room {
-                return cut.into();
-            }
-        }
+        super::canvas::fitted(self.frame, text, font, room)
     }
 
     fn name(&self, reading: &Reading, part: &str) {

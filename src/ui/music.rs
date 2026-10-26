@@ -2830,17 +2830,7 @@ fn box_pass(from: &[f32], to: &mut [f32], side: usize, radius: usize, across: bo
 
 /// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
 fn fitted(frame: &Frame, text: &str, font: Font, room: f32) -> String {
-    if frame.measure(text, font) <= room {
-        return text.to_string();
-    }
-    let mut kept: Vec<char> = text.chars().collect();
-    loop {
-        kept.pop();
-        let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
-        if kept.is_empty() || frame.measure(&cut, font) <= room {
-            return cut;
-        }
-    }
+    super::canvas::fitted(frame, text, font, room).into_owned()
 }
 
 /// Words, edged where there is no ground (`clear`) to be read on whatever is behind.

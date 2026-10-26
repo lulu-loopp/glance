@@ -191,6 +191,35 @@ const CODE_TINT: f32 = 0.1;
 /// The fixed face code in a note is written in.
 pub const CODE_FACE: &str = "Cascadia Mono";
 
+/// `text`, or as much of its start as is no wider than `room` in `font` with an ellipsis after it: the most of its
+/// characters that fit. Each measure lays out what it measures, so no more of it is: its start, twice as long each
+/// time, till that alone is too wide, then halving between (one by one, and each time all of it, the station's texts
+/// copied took seconds to draw).
+pub fn fitted<'t>(frame: &(impl Canvas + ?Sized), text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
+    // (Where each character ends: its start so many of them long.)
+    let ends: Vec<usize> = text.char_indices().map(|(at, c)| at + c.len_utf8()).collect();
+    let start = |count: usize| &text[..count.checked_sub(1).map_or(0, |last| ends[last])];
+    let mut over = 1;
+    while over < ends.len() && frame.measure(start(over), font) <= room {
+        over *= 2;
+    }
+    if over >= ends.len() {
+        if frame.measure(text, font) <= room {
+            return text.into();
+        }
+        over = ends.len();
+    }
+    // (Cut longer, never narrower: its start too wide alone, or ending in spaces left off that a cut as long leaves
+    // off too. None of it, the ellipsis alone, however wide.)
+    let cut = |count: usize| format!("{}…", start(count).trim_end());
+    let mut fits = 0;
+    while over - fits > 1 {
+        let middle = (fits + over) / 2;
+        if frame.measure(&cut(middle), font) <= room { fits = middle } else { over = middle }
+    }
+    cut(fits).into()
+}
+
 /// What the panel's readings are painted with: each platform paints these
 /// with its own graphics (Direct2D and DirectWrite on Windows). Coordinates
 /// are in DIPs; text is placed by the top of its line box.

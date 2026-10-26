@@ -4670,20 +4670,7 @@ fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, x: f32, y: 
     frame.text(text, font, color, x + (width - wide).max(0.0) / 2.0, y, width, Align::Start);
 }
 
-/// `text`, or as much of its start as is no wider than `room` with an ellipsis after it.
-pub(crate) fn fitted<'t>(frame: &dyn Canvas, text: &'t str, font: Font, room: f32) -> std::borrow::Cow<'t, str> {
-    if frame.measure(text, font) <= room {
-        return text.into();
-    }
-    let mut kept: Vec<char> = text.chars().collect();
-    loop {
-        kept.pop();
-        let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
-        if kept.is_empty() || frame.measure(&cut, font) <= room {
-            return cut.into();
-        }
-    }
-}
+pub(crate) use super::canvas::fitted;
 
 /// What was copied lately (see `Block::Copies`) from (`left`, `top`), `width` across, in room `tall` high: the
 /// filter's choices in a row, and under them a row each of those it takes (what it is, its first words, and what and
@@ -5286,6 +5273,10 @@ fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) 
             _ => (row.clone(), String::new()),
         };
         rows.push(kept);
+        // (A row past the most: the rest is not laid out, row by row, to be left off.)
+        if rows.len() > most {
+            break;
+        }
         row = carried.trim_start().to_string();
         if !c.is_whitespace() {
             row.push(c);
@@ -6280,6 +6271,8 @@ six".into()));
             0.0
         }
         fn measure(&self, text: &str, font: Font) -> f32 {
+            MEASURED.with(|measured| measured.set(measured.get() + 1));
+            MEASURED_CHARACTERS.with(|measured| measured.set(measured.get() + text.chars().count()));
             text.chars().count() as f32 * font.size * 0.6
         }
         fn baseline(&self, font: Font) -> (f32, f32) {
@@ -6302,6 +6295,64 @@ six".into()));
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+    }
+
+    thread_local! {
+        /// How many texts `Nothing` was asked to measure.
+        static MEASURED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// How many characters they held in all.
+        static MEASURED_CHARACTERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// What `f` gives, and how many texts it had `Nothing` measure, and of how many characters in all.
+    fn measuring<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
+        MEASURED.with(|measured| measured.set(0));
+        MEASURED_CHARACTERS.with(|measured| measured.set(0));
+        let made = f();
+        (made, MEASURED.with(|measured| measured.get()), MEASURED_CHARACTERS.with(|measured| measured.get()))
+    }
+
+    /// A text cut short to fit, as it was cut one character at a time: the longest start, its spaces at the end left
+    /// off, that fits with the ellipsis after it.
+    fn fitted_one_by_one(frame: &dyn Canvas, text: &str, font: Font, room: f32) -> String {
+        if frame.measure(text, font) <= room {
+            return text.to_string();
+        }
+        let mut kept: Vec<char> = text.chars().collect();
+        loop {
+            kept.pop();
+            let cut = format!("{}…", kept.iter().collect::<String>().trim_end());
+            if kept.is_empty() || frame.measure(&cut, font) <= room {
+                return cut;
+            }
+        }
+    }
+
+    /// A long text copied is cut short to a row in a few measures, each of little more than the row holds (each
+    /// measure a layout of what it measures: one by one, 88 copied took 3.4 s to draw, and the station's pages as long
+    /// to show), as it was cut one by one.
+    #[test]
+    fn a_long_text_is_cut_short_in_a_few_measures() {
+        let font = Font::new(super::super::canvas::Family::Segoe, 12.0, 400.0);
+        let long = "电磁波 transmission line 的不同结构 Two-wire parallel plate ".repeat(120);
+        let (cut, measured, characters) = measuring(|| fitted(&Nothing, &long, font, 260.0).into_owned());
+        assert_eq!(cut, fitted_one_by_one(&Nothing, &long, font, 260.0));
+        assert!(measured <= 16, "{measured} measures for {} characters", long.chars().count());
+        assert!(characters <= 20 * cut.chars().count(), "{characters} characters measured for a row of {}", cut.chars().count());
+        for (text, room) in [("", 10.0), ("", -1.0), ("short", 260.0), ("short", 36.0), ("a b  c   d", 30.0), ("a b  c   d", 7.2), ("a b  c   d", 50.0), ("  lead", 25.0), ("字字字字字", 3.0), ("x", 0.0), ("abcdefgh  i", 70.0)] {
+            assert_eq!(fitted(&Nothing, text, font, room), fitted_one_by_one(&Nothing, text, font, room), "{text:?} in {room}");
+        }
+    }
+
+    /// A long text in rows, at most so many: laid out as far as those rows, not row by row to its end.
+    #[test]
+    fn rows_of_a_long_text_stop_at_the_most() {
+        let font = Font::new(super::super::canvas::Family::Segoe, 12.0, 400.0);
+        let long = "a note with a great many words in it ".repeat(200);
+        let (rows, measured, _) = measuring(|| rows_of(&Nothing, &long, font, 120.0, 2));
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].ends_with('…'), "{rows:?}");
+        assert!(measured < 200, "{measured} measures for {} characters", long.chars().count());
     }
 
     /// A canvas that draws nothing, keeping the box all it drew reaches (a shadow as far as its blur shows, what is
