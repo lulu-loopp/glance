@@ -31,7 +31,7 @@ pub enum Op {
     Frosted { x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, below: Vec<Op> },
     Arc { centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32 },
     Icon { icon: Icon, centre: Point, size: f32, color: Color },
-    Picture { picture: Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32 },
+    Picture { picture: Picture, at: Bounds, within: Bounds, radius: f32, opacity: f32 },
 }
 
 /// A part of a drawing: what was drawn under one name, or one thing drawn
@@ -44,7 +44,7 @@ pub struct Part {
 
 /// A box: left, top, width, height.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Bounds {
+pub(crate) struct Bounds {
     x: f32,
     y: f32,
     w: f32,
@@ -132,7 +132,7 @@ impl Op {
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
             Op::Icon { centre, size, .. } => Bounds { x: centre.x - size / 2.0, y: centre.y - size / 2.0, w: *size, h: *size },
-            Op::Picture { x, y, w, h, .. } => Bounds { x: *x, y: *y, w: *w, h: *h },
+            Op::Picture { at, .. } => *at,
             Op::Stroke { points, .. } | Op::Shape { points, .. } => of_points(points)?,
             Op::Unclip => return None,
         })
@@ -226,9 +226,12 @@ impl Op {
             Op::Circle { color, centre, radius } => Op::Circle { color, centre: map.point(centre), radius: map.length(radius) },
             Op::Arc { centre, radius, from, sweep, color, width } => Op::Arc { centre: map.point(centre), radius: map.length(radius), from, sweep, color, width: map.length(width) },
             Op::Icon { icon, centre, size, color } => Op::Icon { icon, centre: map.point(centre), size: map.length(size), color },
-            Op::Picture { picture, x, y, w, h, radius, opacity } => {
-                let at = map.point(Point { x, y });
-                Op::Picture { picture, x: at.x, y: at.y, w: map.length(w), h: map.length(h), radius: map.length(radius), opacity }
+            Op::Picture { picture, at, within, radius, opacity } => {
+                let bounds = |b: Bounds| {
+                    let corner = map.point(Point { x: b.x, y: b.y });
+                    Bounds { x: corner.x, y: corner.y, w: map.length(b.w), h: map.length(b.h) }
+                };
+                Op::Picture { picture, at: bounds(at), within: bounds(within), radius: map.length(radius), opacity }
             }
             Op::Stroke { points, color, width, dashed } => Op::Stroke { points: points.iter().map(|p| map.point(*p)).collect(), color, width: map.length(width), dashed },
             Op::Shape { points, fill } => {
@@ -306,8 +309,9 @@ impl Op {
             (Op::Icon { icon: ai, centre: ac, size: asz, color: acol }, Op::Icon { icon: bi, centre: bc, size: bsz, color: bcol }) if ai == bi => {
                 vec![Op::Icon { icon: *bi, centre: lerp_point(*ac, *bc, t), size: lerp(*asz, *bsz, t), color: lerp_color(*acol, *bcol, t) }]
             }
-            (Op::Picture { picture: ap, x: ax, y: ay, w: aw, h: ah, radius: ar, opacity: ao }, Op::Picture { picture: bp, x: bx, y: by, w: bw, h: bh, radius: br, opacity: bo }) if ap == bp => {
-                vec![Op::Picture { picture: bp.clone(), x: lerp(*ax, *bx, t), y: lerp(*ay, *by, t), w: lerp(*aw, *bw, t), h: lerp(*ah, *bh, t), radius: lerp(*ar, *br, t), opacity: lerp(*ao, *bo, t) }]
+            (Op::Picture { picture: ap, at: aa, within: aw, radius: ar, opacity: ao }, Op::Picture { picture: bp, at: ba, within: bw, radius: br, opacity: bo }) if ap == bp => {
+                let bounds = |a: &Bounds, b: &Bounds| Bounds { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), w: lerp(a.w, b.w, t), h: lerp(a.h, b.h, t) };
+                vec![Op::Picture { picture: bp.clone(), at: bounds(aa, ba), within: bounds(aw, bw), radius: lerp(*ar, *br, t), opacity: lerp(*ao, *bo, t) }]
             }
             (Op::Stroke { points: ap, color: ac, width: aw, dashed: ad }, Op::Stroke { points: bp, color: bc, width: bw, dashed: bd }) if ad == bd => {
                 let color = lerp_color(*ac, *bc, t);
@@ -371,7 +375,7 @@ impl Op {
             Op::Frosted { x, y, w, h, radius, blur, below } => canvas.frosted(*x, *y, *w, *h, *radius, *blur, &|canvas| below.iter().for_each(|op| op.draw(canvas))),
             Op::Arc { centre, radius, from, sweep, color, width } => canvas.arc(*centre, *radius, *from, *sweep, *color, *width),
             Op::Icon { icon, centre, size, color } => canvas.icon(*icon, *centre, *size, *color),
-            Op::Picture { picture, x, y, w, h, radius, opacity } => canvas.picture(picture, *x, *y, *w, *h, *radius, *opacity),
+            Op::Picture { picture, at, within, radius, opacity } => canvas.picture_within(picture, (at.x, at.y, at.w, at.h), (within.x, within.y, within.w, within.h, *radius), *opacity),
         }
     }
 }
@@ -594,8 +598,13 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Icon { icon, centre, size, color });
     }
 
-    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
-        self.push(Op::Picture { picture: picture.clone(), x, y, w, h, radius, opacity });
+    fn pixels_per_dip(&self) -> f32 {
+        self.measure.pixels_per_dip() * self.scale
+    }
+
+    fn picture_within(&self, picture: &Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
+        let at = Bounds { x: at.0, y: at.1, w: at.2, h: at.3 };
+        self.push(Op::Picture { picture: picture.clone(), at, within: Bounds { x: within.0, y: within.1, w: within.2, h: within.3 }, radius: within.4, opacity });
     }
 
     fn key(&self, key: &str) {
@@ -730,7 +739,7 @@ mod tests {
             fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
-            fn picture(&self, _: &Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn picture_within(&self, _: &Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
         }
         let recorder = Recorder::new(&Measure, 2.0, (5.0, 5.0));
         recorder.key("cpu.chart");

@@ -110,13 +110,24 @@ pub fn filled_part(whole: (f32, f32, f32, f32), fraction: f32, up: bool, on_pixe
     }
 }
 
-/// A picture to draw (a track's cover): its pixels, premultiplied BGRA rows, `side` square and opaque; known by
-/// `key` (the same pixels, the same key: what is made of them on the card is made once).
+/// A picture to draw (a track's cover, a file's thumbnail): its pixels, premultiplied BGRA rows, `size` (width,
+/// height); known by `key` (the same pixels, the same key: what is made of them on the card is made once).
 #[derive(Clone, Debug)]
 pub struct Picture {
     pub key: u64,
-    pub side: u32,
+    pub size: (u32, u32),
     pub pixels: std::sync::Arc<Vec<u8>>,
+}
+
+impl Picture {
+    /// The box of its shape as large as fits in the box `w` × `h` from (`x`, `y`), in its middle: where it is drawn
+    /// whole.
+    pub fn fitted_in(&self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32, f32) {
+        let (pw, ph) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
+        let k = (w / pw).min(h / ph);
+        let (fw, fh) = (pw * k, ph * k);
+        (x + (w - fw) / 2.0, y + (h - fh) / 2.0, fw, fh)
+    }
 }
 
 impl PartialEq for Picture {
@@ -326,10 +337,22 @@ pub trait Canvas {
     /// `icon` stroked in `color`, `size` DIPs square, centred on `centre`.
     fn icon(&self, icon: super::icons::Icon, centre: Point, size: f32, color: Color);
 
-    /// `picture` (square) drawn over the box `w` × `h` from (`x`, `y`), filling it (a box not square shows the
-    /// picture's middle, the rest cut off), its corners rounded by `radius`, `opacity` of it.
+    /// `picture` drawn over the box `w` × `h` from (`x`, `y`), filling it (a box not of its shape shows the picture's
+    /// middle, the rest cut off: see `Picture::fitted_in` for one drawn whole), its corners rounded by `radius`,
+    /// `opacity` of it.
     #[allow(clippy::too_many_arguments)]
-    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32);
+    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
+        self.picture_within(picture, (x, y, w, h), (x, y, w, h, radius), opacity);
+    }
+    /// `picture` drawn over the box `at` (x, y, width, height) as `picture` draws it, shown only where it is within
+    /// the box `within` (x, y, width, height) rounded by its fifth: a picture drawn whole on a plate, square-cornered
+    /// but where it meets the plate's round corners.
+    fn picture_within(&self, picture: &Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32);
+    /// How many of the target's pixels a DIP is, as drawn now: what a picture drawn so many DIPs wide is asked for at,
+    /// to be as sharp as the pixels it is drawn on. One where nothing is drawn on pixels.
+    fn pixels_per_dip(&self) -> f32 {
+        1.0
+    }
     /// Names what is drawn from here on (`""`: nothing), for a canvas that
     /// tells one drawing's parts from another's (see `morph`).
     fn key(&self, _key: &str) {}

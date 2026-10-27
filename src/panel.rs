@@ -569,9 +569,8 @@ impl Controller {
         let mut seam_rest: Option<(Instant, POINT)> = None;
         let mut seam_armed = true;
         // The screen the pointer was last on, and the one it last came
-        // across from, and when.
-        let mut on_screen: Option<RECT> = None;
-        let mut crossed: Option<(RECT, Instant)> = None;
+        // across from (see `Approach`).
+        let mut approach = Approach::default();
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         // What a frame in motion waits on: the screen's next refresh, or a
         // message, whichever comes first.
@@ -852,14 +851,14 @@ impl Controller {
             };
             // The pointer resting on the seam, where that edge's panel opens.
             let mut on_seam = |cursor: POINT, panels: &mut Vec<Panel<'s>>, last_place: &mut Option<(POINT, Edge)>| {
-                let here = monitor_at(cursor).map(|contact| contact.monitor);
-                if here != on_screen {
-                    crossed = on_screen.map(|from| (from, now));
-                    on_screen = here;
-                }
-                let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
+                let here = monitor_at(cursor);
+                approach.moved(cursor, here.map(|contact| (contact.monitor, contact.scale)), now);
+                let here = here.map(|contact| contact.monitor);
+                let came_from = approach.came_from(now);
                 // On a seam that is an edge that opens the panel, of the
-                // screen the pointer is on before the one it came from.
+                // screen it came from before the one it is on (it was
+                // making for that screen's edge and went past it), before
+                // the others.
                 // (No seam is looked for along an edge that opens the panel
                 // on no screen: this is asked at every move of the mouse.)
                 let sought = {
@@ -871,7 +870,7 @@ impl Controller {
                     .zip(sought)
                     .filter_map(|(edge, sought)| sought.then_some(edge))
                     .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).has(edge)).map(|contact| (contact, edge)))
-                    .min_by_key(|(contact, _)| Some(contact.monitor) != here);
+                    .min_by_key(|(contact, _)| (Some(contact.monitor) != came_from, Some(contact.monitor) != here));
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
                     seam_armed = true;
@@ -1851,6 +1850,28 @@ impl Behind {
         let tone = capture.luminance(placement.panel, placement.px);
         Behind { digest: capture.digest, tone, capture, bitmap: None, former, taken: now }
     }
+
+    /// The capture as drawn at `px` physical pixels a DIP (made again at another zoom, from the same pixels; else made
+    /// into what the capture before was), placed so that the panel's corner, `corner` from the corner of what it is
+    /// painted in (`window`), is where the panel rests on screen (the window may have moved or grown since the capture
+    /// was taken); as `render::Picture::backdrop` takes it.
+    fn backdrop(&mut self, dc: &windows::Win32::Graphics::Direct2D::ID2D1DeviceContext, px: f32, window: RECT, corner: (f32, f32)) -> Option<(&ID2D1Bitmap1, Vector2, u64, f32)> {
+        if self.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
+            self.bitmap = match self.bitmap.take() {
+                Some((made, _)) => self.capture.at_scale(dc, &made, px),
+                None => self.capture.bitmap_into(dc, px, self.former.take().as_ref()),
+            }
+            .ok()
+            .map(|bitmap| (bitmap, px));
+            // (Copied: what it was taken in is the next capture's to be taken in.)
+            if self.bitmap.is_some() {
+                self.capture.forget_texture();
+            }
+        }
+        let from = self.capture.rect;
+        let at = Vector2 { X: (window.left - from.left) as f32 / px + corner.0, Y: (window.top - from.top) as f32 / px + corner.1 };
+        Some((&self.bitmap.as_ref()?.0, at, self.digest, px))
+    }
 }
 
 /// What a turn between layouts starts from: a layout shown (at its zoom), or what a turn under way drew last.
@@ -1887,6 +1908,7 @@ impl crate::ui::life::Lives for Panel<'_> {
         self.layers.release();
         self.music.release();
         self.music_layer.release();
+        self.music_ground.release();
         self.last_layout = None;
         self.turning = None;
         self.turned.clear();
@@ -1922,6 +1944,8 @@ struct Panel<'a> {
     /// pixels, as a widget's is.)
     music_layer: crate::ui::gfx::Layer,
     music_frames: u64,
+    /// The skin's ground under what plays, where it is drawn on the skin (see `prefs::MusicGround`).
+    music_ground: render::GroundLayers,
     phase: Phase,
     /// 0 at rest on screen, 1 slid out.
     shift: Transition,
@@ -2099,6 +2123,7 @@ impl<'a> Panel<'a> {
             layers: PanelLayers::default(),
             music: crate::ui::music::Music::default(),
             music_layer: crate::ui::gfx::Layer::default(),
+            music_ground: render::GroundLayers::default(),
             music_frames: 0,
             showing: None,
             phase: Phase::Hidden,
@@ -3618,29 +3643,7 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
-            let backdrop = behind.as_mut().and_then(|behind| {
-                if behind.bitmap.as_ref().is_none_or(|(_, made_for)| *made_for != px) {
-                    // At another zoom, the same pixels; else made into what the capture before was.
-                    behind.bitmap = match behind.bitmap.take() {
-                        Some((made, _)) => behind.capture.at_scale(&frame.dc, &made, px),
-                        None => behind.capture.bitmap_into(&frame.dc, px, behind.former.take().as_ref()),
-                    }
-                    .ok()
-                    .map(|bitmap| (bitmap, px));
-                    // (Copied: what it was taken in is the next capture's to be taken in.)
-                    if behind.bitmap.is_some() {
-                        behind.capture.forget_texture();
-                    }
-                }
-                // Aligned with the screen where the panel rests: the window
-                // may have moved or grown since the capture was taken.
-                let from = behind.capture.rect;
-                let at = Vector2 {
-                    X: (window.left - from.left) as f32 / px + rest.0,
-                    Y: (window.top - from.top) as f32 / px + rest.1,
-                };
-                Some((&behind.bitmap.as_ref()?.0, at, behind.digest, px))
-            });
+            let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, px, window, rest));
             let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
             let local = Matrix3x2::translation(x, y);
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
@@ -3800,6 +3803,8 @@ impl<'a> Panel<'a> {
         let settings_lit = self.settings_lit();
         let shows = crate::ui::music::Shows::from(&self.controller.config.lock().unwrap().view);
         let family = self.theme.body.family;
+        let ground = crate::ui::music::Ground::of(&shows, self.theme.dark);
+        let (theme, frost, behind, skin_ground) = (&self.theme, self.frost, &mut self.behind, &mut self.music_ground);
         let music = &mut self.music;
         let layer = &mut self.music_layer;
         self.music_frames += 1;
@@ -3817,11 +3822,19 @@ impl<'a> Panel<'a> {
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
+            // On the skin: its ground under it, as the readings' is under them.
+            if let crate::ui::music::Ground::Skin { .. } = ground {
+                frame.origin(0.0, 0.0);
+                let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, px, window, rest));
+                if let Err(error) = skin_ground.draw_whole(frame, theme, size, backdrop, frost, false, Matrix3x2::translation(x, y), px) {
+                    crate::journal::note(format!("panel: what plays' ground not drawn: {error}"));
+                }
+            }
             frame.origin(x, y);
             // (Round it, the room for its shadow.)
             let area = (-24.0, -24.0, size.0 + 48.0, size.1 + 48.0);
             let drew = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, None, |frame| {
-                painted = Some(music.paint(frame, size, &shows, crate::ui::music::Ground::of(&shows), family, px, pointer, now));
+                painted = Some(music.paint(frame, size, &shows, ground, family, px, pointer, now));
                 Ok(())
             });
             if drew.is_err() {
@@ -3830,7 +3843,7 @@ impl<'a> Panel<'a> {
             if at_buttons.is_some() || settings_lit.is_some() {
                 // (The pointer away: over none of them.)
                 let (px_x, px_y) = at_buttons.unwrap_or((f32::NEG_INFINITY, f32::NEG_INFINITY));
-                let ground = music.ground_colour(size);
+                let colour = music.ground_colour(size);
                 let (side, gap) = (crate::ui::buttons::SIZE, crate::ui::buttons::GAP);
                 // (In its corner, or in their row.)
                 let (top, right) = match rack {
@@ -3843,7 +3856,12 @@ impl<'a> Panel<'a> {
                     let settings = button == crate::ui::buttons::Button::Settings;
                     let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (settings && settings_lit.is_some()) || over;
                     let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
-                    crate::ui::buttons::paint_on(frame, crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 }, button, lit, ground, grown);
+                    let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
+                    // (On the skin, as the readings' are; else in the colour of its own ground there.)
+                    match ground {
+                        crate::ui::music::Ground::Skin { .. } => crate::ui::buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown),
+                        _ => crate::ui::buttons::paint_on(frame, centre, button, lit, colour, grown),
+                    }
                     buttons.push((bx, by, side, side, hit));
                 }
             }
@@ -4471,6 +4489,46 @@ pub(crate) fn heard_buttons(down: bool, pressed: bool) {
     }
 }
 
+/// Where the pointer has come from: the screen it is on (and its scale), how far it has been from each of that
+/// screen's sides (left, top, right, bottom; physical px) since it came on, and the screen it last came across from,
+/// and when. A screen it was on only by its side, no further in than it may overshoot (`SEAM_OVERSHOOT`), it is not
+/// taken to have come across from: it was not making for that side from inside it, it had gone past the seam the
+/// other way and come back.
+#[derive(Default)]
+struct Approach {
+    on: Option<(RECT, f32)>,
+    reach: [i32; 4],
+    crossed: Option<(RECT, Instant)>,
+}
+
+impl Approach {
+    /// The pointer at `cursor`, on the screen `here` (and its scale), at `now`.
+    fn moved(&mut self, cursor: POINT, here: Option<(RECT, f32)>, now: Instant) {
+        let away = |m: RECT| [cursor.x - m.left, cursor.y - m.top, m.right - 1 - cursor.x, m.bottom - 1 - cursor.y];
+        if here.map(|(m, _)| m) == self.on.map(|(m, _)| m) {
+            if let Some((m, _)) = here {
+                self.reach = std::array::from_fn(|side| self.reach[side].max(away(m)[side]));
+            }
+            return;
+        }
+        if let Some((from, scale)) = self.on {
+            // The side of it the pointer has gone past, and whether it had been well in from that side.
+            let past = away(from);
+            let deep = (0..4).filter(|&side| past[side] < 0).any(|side| self.reach[side] > (SEAM_OVERSHOOT * scale).round() as i32);
+            if deep {
+                self.crossed = Some((from, now));
+            }
+        }
+        self.on = here;
+        self.reach = here.map_or([0; 4], |(m, _)| away(m));
+    }
+
+    /// The screen the pointer came across from lately (see `SEAM_CROSSED`).
+    fn came_from(&self, now: Instant) -> Option<RECT> {
+        self.crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from)
+    }
+}
+
 /// The screen to open on when the pointer is on the seam where a screen's
 /// `edge` meets another screen: within a few pixels of that line, on
 /// either side of it (further past it, on the other screen, when it has
@@ -4525,6 +4583,38 @@ fn let_go(message: &MSG) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pointer that went past the seam a little and came back has not come across from the screen it went
+    /// onto: it was making for its own screen's edge (the owner's portrait screen at 200 % left of the wide one at
+    /// 150 %, the panel of the portrait one's right edge opened with the pointer back on the wide one). Come across
+    /// from well inside a screen, it has, the other way as this.
+    #[test]
+    fn a_pointer_back_from_past_the_seam_has_not_come_from_there() {
+        let tall = (RECT { left: -2905, top: -1459, right: -745, bottom: 2381 }, 2.0);
+        let wide = (RECT { left: -745, top: -1440, right: 2695, bottom: 0 }, 1.5);
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let point = |x: i32| POINT { x, y: -700 };
+        // From the middle of the wide screen to its left side, 30 px onto the tall one, and back.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, 900, wide), (100, -600, wide), (200, -775, tall), (300, -740, wide)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_ne!(approach.came_from(at(400)), Some(tall.0));
+        // From well inside the wide screen onto the tall one: come across from the wide one, lately.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, 900, wide), (100, -760, tall)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_eq!(approach.came_from(at(200)), Some(wide.0));
+        assert_eq!(approach.came_from(at(100) + SEAM_CROSSED), None);
+        // From well inside the tall screen onto the wide one.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, -2000, tall), (100, -800, tall), (200, -730, wide)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_eq!(approach.came_from(at(300)), Some(tall.0));
+    }
 
     /// A menu closed by a press away from it, on the button that opened it: that press is the menu's, its button let
     /// go there too (not taken by the button, as a press of it, to open the menu again); the next press is not.

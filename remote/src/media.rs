@@ -42,15 +42,27 @@ pub struct Playing {
     /// When the program last said how far in it is, as Windows keeps it (tenths of a microsecond since 1601), where
     /// it says: the same each time it is looked at till it says again.
     pub said: Option<i64>,
+    /// How far in it said it was then (seconds), where it says.
+    pub said_at: Option<f64>,
+    /// When it said how far in it is the time before, where it was heard saying both (see `heed`).
+    pub said_before: Option<i64>,
+    /// Whether what it says of how far in it is is where it was when it said so the time before, not then (Apple
+    /// Music: its own window shows the whole second it says next).
+    pub said_late: bool,
+    /// How long before a line of the lyrics is sung the program's own window shows it (seconds), where it shows
+    /// lyrics and that is known (Apple Music: against its window, 0.13 s to 0.5 s before the times the lyrics found
+    /// give the same lines, 0.35 s as a rule).
+    pub lines_ahead: Option<f64>,
     /// How fast it plays: track seconds to a second (1 where the program does not say).
     pub rate: f64,
 }
 
 /// How far into its track `session` is now, and how long the track is
 /// (seconds): where it was when the program last said, and, while it
-/// plays, on by the time since at its `rate`; how long ago it said, and
-/// when (see `Playing::said`). None where the program does not say.
-fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f64, i64)> {
+/// plays, on by the time since at its `rate`; how long ago it said, when
+/// (see `Playing::said`), and how far in it said it was then. None where
+/// the program does not say.
+fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f64, i64, f64)> {
     let told = session.GetTimelineProperties().ok()?;
     let ticks = |span: windows::Foundation::TimeSpan| span.Duration as f64 / 1e7;
     let (position, end) = (ticks(told.Position().ok()?), ticks(told.EndTime().ok()?));
@@ -62,7 +74,7 @@ fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f6
     let said = ticks_said as f64 / 1e7;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64() + 11_644_473_600.0;
     let since = if playing { (now - said).max(0.0) * rate } else { 0.0 };
-    Some(((position + since).min(end), end, (now - said).max(0.0), ticks_said))
+    Some(((position + since).min(end), end, (now - said).max(0.0), ticks_said, position))
 }
 
 /// The one manager of the programs' media sessions, got the first time
@@ -232,6 +244,54 @@ fn shown_as(id: &str) -> Option<String> {
     }
 }
 
+/// How Windows identifies Apple Music (its package's family, before the app in it).
+const APPLE_MUSIC: &str = "AppleInc.AppleMusicWin_";
+
+/// How long before a line is sung Apple Music shows it (see `Playing::lines_ahead`).
+const APPLE_MUSIC_AHEAD: f64 = 0.35;
+
+/// Of each program (as Windows identifies it), when it said how far into its track it is, the latest of those heard
+/// as it said them (see `heed`).
+static SAID: Mutex<Vec<(String, Vec<i64>)>> = Mutex::new(Vec::new());
+const SAID_KEPT: usize = 4;
+
+/// The program `id` was heard saying how far in it is at `said` (as Windows keeps when: see `Playing::said`).
+fn heard_said(id: &str, said: i64) {
+    let mut kept = SAID.lock().unwrap();
+    let index = match kept.iter().position(|(of, _)| of == id) {
+        Some(index) => index,
+        None => {
+            kept.push((id.to_string(), Vec::new()));
+            kept.len() - 1
+        }
+    };
+    let times = &mut kept[index].1;
+    if !times.contains(&said) {
+        times.push(said);
+        times.sort_unstable();
+        if times.len() > SAID_KEPT {
+            times.remove(0);
+        }
+    }
+}
+
+/// When the program `id` said how far in it is the time before it said so at `said`, where it was heard saying both.
+fn said_before(id: &str, said: i64) -> Option<i64> {
+    let kept = SAID.lock().unwrap();
+    let times = &kept.iter().find(|(of, _)| of == id)?.1;
+    let at = times.iter().position(|time| *time == said)?;
+    Some(times[at.checked_sub(1)?])
+}
+
+/// Who it is by and the album it is on, as told by the program `app_id` identifies: Apple Music tells both as who it is
+/// by, "Artist — Album", and no album.
+fn by_and_on(app_id: &str, artist: String, album: String) -> (String, String) {
+    match artist.split_once(" — ") {
+        Some((by, on)) if album.is_empty() && app_id.starts_with(APPLE_MUSIC) => (by.to_string(), on.to_string()),
+        _ => (artist, album),
+    }
+}
+
 /// What a program has told Windows it plays, of those followed for `follow`.
 fn told(follow: Follow) -> Option<Playing> {
     let session = session_of(follow).ok()?;
@@ -246,19 +306,25 @@ fn told(follow: Follow) -> Option<Playing> {
     let seekable = info.and_then(|info| info.Controls().ok()).and_then(|controls| controls.IsPlaybackPositionEnabled().ok()).unwrap_or(false);
     let app_id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
     let timeline = timeline(&session, playing, rate);
+    let (said_before, said_late) = (timeline.and_then(|(_, _, _, said, _)| said_before(&app_id, said)), app_id.starts_with(APPLE_MUSIC));
+    let (artist, album) = by_and_on(&app_id, about.Artist().map(|artist| artist.to_string()).unwrap_or_default(), about.AlbumTitle().map(|album| album.to_string()).unwrap_or_default());
     Some(Playing {
         title,
-        artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
-        album: about.AlbumTitle().map(|album| album.to_string()).unwrap_or_default(),
+        artist,
+        album,
         genres: about.Genres().map(|genres| genres.into_iter().map(|genre| genre.to_string()).collect()).unwrap_or_default(),
         // (One with no name to show is not named: what plays is said
         // already, and a file's name adds nothing to it.)
         app: shown(&app_id).unwrap_or_default(),
         app_id,
         playing,
-        timeline: timeline.map(|(at, end, _, _)| (at, end)),
-        said_ago: timeline.map(|(_, _, ago, _)| ago),
-        said: timeline.map(|(_, _, _, said)| said),
+        timeline: timeline.map(|(at, end, ..)| (at, end)),
+        said_ago: timeline.map(|(_, _, ago, ..)| ago),
+        said: timeline.map(|(_, _, _, said, _)| said),
+        said_at: timeline.map(|(.., position)| position),
+        said_before,
+        said_late,
+        lines_ahead: said_late.then_some(APPLE_MUSIC_AHEAD),
         seekable,
         rate,
     })
@@ -400,7 +466,7 @@ fn heard(follow: Follow) -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, rate: 1.0 })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, said_at: None, said_before: None, said_late: false, lines_ahead: None, rate: 1.0 })
 }
 
 /// A program's session listened to (see `heed`), till this is dropped.
@@ -410,6 +476,7 @@ pub struct Heeding {
     id: String,
     playback: i64,
     properties: i64,
+    timeline: i64,
 }
 
 impl Heeding {
@@ -423,11 +490,13 @@ impl Drop for Heeding {
     fn drop(&mut self) {
         let _ = self.session.RemovePlaybackInfoChanged(self.playback);
         let _ = self.session.RemoveMediaPropertiesChanged(self.properties);
+        let _ = self.session.RemoveTimelinePropertiesChanged(self.timeline);
     }
 }
 
 /// Listens to the session followed for `follow`: `changed` is called as its program says it plays another track, or
-/// plays or pauses. None where none is followed.
+/// plays or pauses. When it says how far in it is is kept as it says it (see `Playing::said_before`). None where none
+/// is followed.
 pub fn heed(follow: Follow, changed: fn()) -> Option<Heeding> {
     use windows::Foundation::TypedEventHandler;
     let session = session_of(follow).ok()?;
@@ -442,10 +511,23 @@ pub fn heed(follow: Follow, changed: fn()) -> Option<Heeding> {
         changed();
         Ok(())
     }));
-    match properties {
-        Ok(properties) => Some(Heeding { session, id, playback, properties }),
-        Err(_) => {
+    let of = id.clone();
+    let timeline = session.TimelinePropertiesChanged(&TypedEventHandler::new(move |session: windows::core::Ref<Session>, _| {
+        if let Some(said) = session.ok().ok().and_then(|session| session.GetTimelineProperties().ok()).and_then(|told| told.LastUpdatedTime().ok()) {
+            heard_said(&of, said.UniversalTime);
+        }
+        Ok(())
+    }));
+    match (properties, timeline) {
+        (Ok(properties), Ok(timeline)) => Some(Heeding { session, id, playback, properties, timeline }),
+        (properties, timeline) => {
             let _ = session.RemovePlaybackInfoChanged(playback);
+            if let Ok(properties) = properties {
+                let _ = session.RemoveMediaPropertiesChanged(properties);
+            }
+            if let Ok(timeline) = timeline {
+                let _ = session.RemoveTimelinePropertiesChanged(timeline);
+            }
             None
         }
     }
@@ -543,6 +625,40 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
 
 #[cfg(test)]
 mod tests {
+    /// Apple Music's "Artist — Album" told as who it is by is who it is by and the album; another program's, or one
+    /// with an album told, as told.
+    #[test]
+    fn apple_music_tells_the_album_with_the_artist() {
+        let apple = "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App";
+        let told = |app_id: &str, artist: &str, album: &str| super::by_and_on(app_id, artist.into(), album.into());
+        assert_eq!(told(apple, "胡歌 — 仙剑奇侠传 (电视原声带)", ""), ("胡歌".into(), "仙剑奇侠传 (电视原声带)".into()));
+        assert_eq!(told(apple, "A — B — C", ""), ("A".into(), "B — C".into()));
+        assert_eq!(told(apple, "胡歌", ""), ("胡歌".into(), String::new()));
+        assert_eq!(told(apple, "A — B", "C"), ("A — B".into(), "C".into()));
+        assert_eq!(told("cloudmusic.exe", "A — B", ""), ("A — B".into(), String::new()));
+    }
+
+    /// When a program said how far in it is before it said so at a time is the one heard before it, where both were
+    /// heard; heard twice, once; none before the first heard, or where that was not heard, or the one before it is no
+    /// longer kept.
+    #[test]
+    fn a_report_before_is_the_one_heard_before() {
+        let id = "test.a_report_before";
+        for said in [100, 300, 200, 300] {
+            super::heard_said(id, said);
+        }
+        assert_eq!(super::said_before(id, 300), Some(200));
+        assert_eq!(super::said_before(id, 200), Some(100));
+        assert_eq!(super::said_before(id, 100), None);
+        assert_eq!(super::said_before(id, 250), None);
+        assert_eq!(super::said_before("test.other", 300), None);
+        for said in [400, 500] {
+            super::heard_said(id, said);
+        }
+        assert_eq!(super::said_before(id, 200), None);
+        assert_eq!(super::said_before(id, 500), Some(400));
+    }
+
     #[test]
     fn names_a_program_from_its_sound() {
         let named = super::named(r"{0.0.0.00000000}.{6f2a}|\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe%b{00000000-0000-0000-0000-000000000000}|1%b9044");

@@ -17,6 +17,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::gfx::{rect, Frame, Layer};
 use super::icons::Icon;
+use super::prefs::MusicGround;
 use super::view::{Hit, HitBox};
 use crate::cover::Cover;
 use crate::lyrics::Line;
@@ -154,8 +155,8 @@ pub struct Shows {
     pub spectrum: bool,
     /// The controls kept showing, in a row of their own; off, they come over the spectrum as the pointer does.
     pub controls: bool,
-    /// No ground: its words edged, on whatever is behind it.
-    pub clear: bool,
+    /// What it is drawn on, standing alone: the cover blurred, the skin's ground, or none (its words edged).
+    pub ground: MusicGround,
     /// How far in from its edge what it shows begins (DIPs), where not its own (merged into another widget).
     pub inset: Option<u32>,
 }
@@ -169,14 +170,15 @@ impl Shows {
             translation: on("translation"),
             spectrum: on("spectrum"),
             controls: on("controls"),
-            clear: on("clear"),
+            ground: super::prefs::music_ground(view),
             inset: None,
         }
     }
 }
 
 /// What it is drawn on: its own ground (the cover blurred), none (its words edged, to be read on whatever is behind),
-/// or the ground of the widget it is merged into (that one's look: its words in that ground's ink, dark or light).
+/// the skin's (drawn under it already, as every widget's is: its words in that ground's ink, dark or light), or the
+/// ground of the widget it is merged into (that one's look, its ink as the skin's is).
 /// (Its words are in the skin's type on each: see `Music::paint`.)
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Ground {
@@ -184,14 +186,19 @@ pub enum Ground {
     /// Its own look, its ground drawn under it already (it is the one other widgets are merged into).
     Under,
     Clear,
+    Skin { dark: bool },
     /// As far in from its edge as the host's words are (`inset`).
     Host { dark: bool, inset: f32 },
 }
 
 impl Ground {
-    /// As a standalone music widget is drawn, its switches say.
-    pub fn of(shows: &Shows) -> Ground {
-        if shows.clear { Ground::Clear } else { Ground::Own }
+    /// As a standalone music widget is drawn, its switches say (on the skin, `dark` or light as the skin is drawn).
+    pub fn of(shows: &Shows, dark: bool) -> Ground {
+        match shows.ground {
+            MusicGround::Cover => Ground::Own,
+            MusicGround::Skin => Ground::Skin { dark },
+            MusicGround::Clear => Ground::Clear,
+        }
     }
 }
 
@@ -329,9 +336,10 @@ pub struct Music {
     anchor: Option<Anchor>,
     step: f32,
     anchoring: bool,
-    /// (For the tests: where each line of the rail was drawn in the last frame, by its index.)
+    /// (For the tests: where each line of the rail was drawn in the last frame, by its index, and how far it was
+    /// shown through the fades at the rail's edges, 1 clear of them.)
     #[cfg(test)]
-    drawn_lines: Vec<(usize, f32)>,
+    drawn_lines: Vec<(usize, f32, f32)>,
     /// How far the record has turned (degrees), and how far its arm has swung onto it (0 off it, 1 on it: on as
     /// something plays).
     turned_by: f32,
@@ -566,7 +574,7 @@ pub struct Played {
 impl Played {
     /// As it is drawn at `now`: the line sung at its position, come when that line began.
     fn moment(self, now: Instant) -> Moment {
-        let sung = crate::lyrics::sung_at(&self.lines, self.position);
+        let sung = crate::lyrics::sung_at(&self.lines, self.position, crate::lyrics::EARLY);
         let since = sung.map(|index| now.checked_sub(Duration::from_secs_f64((self.position - self.lines[index].at).max(0.0))).unwrap_or(now));
         Moment {
             lines: Some(self.lines),
@@ -802,7 +810,7 @@ impl Music {
             self.turning = None;
         }
         // On a light ground, its colours deepened to be read on it, and its words dark.
-        let light = matches!(ground, Ground::Host { dark: false, .. });
+        let light = matches!(ground, Ground::Host { dark: false, .. } | Ground::Skin { dark: false });
         let shows = &Shows { inset: match ground {
             Ground::Host { inset, .. } => Some(inset.round() as u32),
             _ => shows.inset,
@@ -851,7 +859,7 @@ struct Kept {
     sound: (bool, f32, f32, Option<Instant>, Option<(u8, bool)>),
     track_lit: f32,
     #[cfg(test)]
-    drawn_lines: Vec<(usize, f32)>,
+    drawn_lines: Vec<(usize, f32, f32)>,
 }
 
 impl Music {
@@ -1239,7 +1247,7 @@ impl Drawing<'_> {
                     }
                     match &cover {
                         Some(cover) => {
-                            let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                            let picture = super::canvas::Picture { key: cover.key, size: (crate::cover::SIDE, crate::cover::SIDE), pixels: cover.pixels.clone() };
                             frame.picture(&picture, x, y, side, side, corner, 1.0);
                         }
                         // None (its player gives none, or it is being read): a plate with a note on it.
@@ -1579,10 +1587,11 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
-                // (Rising in, drawn where it falls: see `Frame::set_moving`.)
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls, resting with its baseline on a whole pixel: see
+                // `Frame::baseline_on_pixel`.)
+                let _moving = frame.moving_while(true);
                 let (dim, bright) = self.line_colours(eased);
                 if text.trim().is_empty() {
                     let y = h / 2.0 - self.fonts.strip.size * 0.7 + (1.0 - eased) * 8.0;
@@ -1611,7 +1620,8 @@ impl Drawing<'_> {
                         None => (font, fitted(frame, &text, font, width), 100_000.0, 1.0),
                     };
                     let tall = frame.gfx.wrapped_height(&text, font, wrap) * zoom;
-                    let y = (h - tall) / 2.0 + (1.0 - eased) * 8.0;
+                    let rest = frame.baseline_on_pixel((h - tall) / 2.0, frame.gfx.wrapped_baseline(&text, font, wrap) * zoom);
+                    let y = rest + (1.0 - eased) * 8.0;
                     let layout = frame.gfx.wrapped(&text, font, wrap);
                     let sung = sung_to(&parts, self.moment.position);
                     frame.scaled(left, y, zoom, |_| self.filled(&layout, &text, font, left, y, wrap, sung, dim, bright, 12.0 / zoom));
@@ -1659,9 +1669,10 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+                let _moving = frame.moving_while(true);
                 let (dim, bright) = self.line_colours(eased);
                 let under = self.under(lines, now);
                 if text.trim().is_empty() {
@@ -1679,7 +1690,8 @@ impl Drawing<'_> {
                 let wrap = down_wrap(&text, font, column, down);
                 // (Right to left, as words written down are read: the line sung now first.)
                 let x = if two { left + width - column + (column - wrap) / 2.0 } else { left + (width - wrap) / 2.0 };
-                let y = top + (1.0 - eased) * 8.0;
+                // (Written down, its top on a whole pixel; across, its baseline.)
+                let y = frame.baseline_on_pixel(top, if down { 0.0 } else { frame.gfx.wrapped_baseline(&text, font, wrap) }) + (1.0 - eased) * 8.0;
                 let row = row_of(frame, &text, font, wrap);
                 let tall = frame.gfx.wrapped_height(&text, font, wrap);
                 // (Cut where a row ends, as many whole rows as there is room for.)
@@ -1756,10 +1768,12 @@ impl Drawing<'_> {
         let Some(now) = self.moment.now else { return };
         let line = &lines[now];
         let next = lines.get(now + 1).map(|line| line.at);
-        let (text, parts) = parts(line, next);
+        let (text, parts) = parts(&lines, now);
         let eased = self.came();
-        let _moving = self.frame.moving_while(eased < 1.0);
-        let y = top + (1.0 - eased) * 14.0;
+        // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+        let _moving = self.frame.moving_while(true);
+        let baseline = if text.trim().is_empty() { 0.0 } else { frame.gfx.wrapped_baseline(&text, font, frame.measure(&text, font).min(room) + 2.0) };
+        let y = frame.baseline_on_pixel(top, baseline) + (1.0 - eased) * 14.0;
         let (accent, tint) = (self.accent, self.tint);
         let (dim, bright) = (Color::hex(0xFFFFFF, 0.6 * eased), colour(tint, eased));
         if text.trim().is_empty() {
@@ -1855,9 +1869,10 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
-                let _moving = frame.moving_while(eased < 1.0);
+                // (Rising in and at rest alike, drawn where it falls: see `strip`.)
+                let _moving = frame.moving_while(true);
                 let under = self.under(lines, now);
                 // A line's size: too long for a row, wrapped, at the largest size (down to that of what is under it) at
                 // which all its rows fit with what is under it; else all its rows alone; else one row at the least, cut
@@ -1889,8 +1904,9 @@ impl Drawing<'_> {
                         frame.text_wrapped(&shown(&lines[before].text, old_font, old_cut), old_font, sung_colour.alpha(1.0 - eased), left, line_top - eased * old_tall * 0.7, width);
                         let (font, tall, cut) = fit(&text, !under.is_empty());
                         let text = shown(&text, font, cut);
+                        let rest = frame.baseline_on_pixel(line_top, frame.gfx.wrapped_baseline(&text, font, width));
                         let from = line_top + old_tall + 2.0;
-                        let y = from + (line_top - from) * eased;
+                        let y = from + (rest - from) * eased;
                         let size = self.fonts.under.size + (font.size - self.fonts.under.size) * eased;
                         // As it was under the line before, going; as the line sung now, coming.
                         words(frame, &text, Font { size, ..self.fonts.under }, Color::hex(self.ink, 0.5 * (1.0 - eased)), left, y, width + 2.0, Align::Start, self.edged);
@@ -1923,8 +1939,14 @@ impl Drawing<'_> {
                                 }
                             }
                         }
-                        let y = line_top + (1.0 - eased) * step;
                         let (dim, bright) = self.line_colours(eased);
+                        let rest = if text.trim().is_empty() {
+                            line_top
+                        } else {
+                            let (font, _, cut) = fit(&text, !under.is_empty());
+                            frame.baseline_on_pixel(line_top, frame.gfx.wrapped_baseline(&shown(&text, font, cut), font, width))
+                        };
+                        let y = rest + (1.0 - eased) * step;
                         if text.trim().is_empty() {
                             interlude(frame, left, y, self.fonts.line.size, between(line, next, self.moment.position), dim, bright);
                             (y, self.fonts.line.size * 1.4)
@@ -2043,7 +2065,7 @@ impl Drawing<'_> {
         let (ink, edged) = (self.ink, self.edged);
         frame.turned(cx, cy, angle, (1.0, 1.0), |frame| match &self.moment.cover {
             Some(cover) => {
-                let picture = super::canvas::Picture { key: cover.key, side: crate::cover::SIDE, pixels: cover.pixels.clone() };
+                let picture = super::canvas::Picture { key: cover.key, size: (crate::cover::SIDE, crate::cover::SIDE), pixels: cover.pixels.clone() };
                 frame.picture(&picture, x, y, side, side, corner, 1.0);
             }
             None => {
@@ -2233,7 +2255,9 @@ impl Drawing<'_> {
             let t = rail - rail.floor();
             if rail < first as f32 { below } else { above + (below - above) * t }
         };
-        // Where it is asked for, as far as the lines next to the one aimed at stay within it: one before, one after.
+        // Where it is asked for, as far as the line aimed at is clear of the fades at the rail's edges, and then as far
+        // as the lines next to it are too: one before, one after. (The first line, with none before it, was put up
+        // into the fade for the one after it to be clear, and was drawn all but gone.)
         let anchor = {
             // (The line it glides to: not the one it is nearest on its way, which would change half way there.)
             let aimed = turned.or(current).map_or(rail.round() as isize, |index| index as isize);
@@ -2242,9 +2266,24 @@ impl Drawing<'_> {
             // the way, which would move it as they glide.)
             let tall_at = |index: isize, d: f32| (index >= 0 && (index as usize) < lines.len()).then(|| height_of(index as usize, scale_at(d)));
             let aimed_half = tall_at(aimed, 0.0).unwrap_or(0.0) / 2.0;
-            let least = tall_at(aimed - 1, -1.0).map_or(f32::MIN, |tall| top + fade_top + aimed_half + gap + tall);
-            let most = tall_at(aimed + 1, 1.0).map_or(f32::MAX, |tall| bottom + 12.0 - fade_bottom - aimed_half - gap - tall);
-            if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 }
+            let (own_least, own_most) = (top + fade_top + aimed_half, bottom + 12.0 - fade_bottom - aimed_half);
+            let least = tall_at(aimed - 1, -1.0).map_or(own_least, |tall| own_least + gap + tall);
+            let most = tall_at(aimed + 1, 1.0).map_or(own_most, |tall| own_most - gap - tall);
+            let anchor = if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 };
+            if own_least <= own_most { anchor.clamp(own_least, own_most) } else { (own_least + own_most) / 2.0 }
+        };
+        // At rest, the first baseline of the line aimed at on a whole pixel: its lines are drawn where they fall, moving
+        // or not (put on whole pixels only once at rest, they all stepped down by up to a pixel a moment after a line
+        // came), and so the line rests crisp there.
+        let anchor = match turned.or(current).filter(|index| *index < lines.len()) {
+            Some(index) => {
+                let line = &lines[index];
+                let text = if turned == Some(index) { if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() } } else { parts(lines, index).0 };
+                let rest = anchor - height_of(index, scale_at(0.0)) / 2.0;
+                let baseline = if text.trim().is_empty() { 0.0 } else { frame.gfx.wrapped_baseline(&text, full, at_rest) * zoom(scale_at(0.0)) };
+                anchor + frame.baseline_on_pixel(rest, baseline) - rest
+            }
+            None => anchor,
         };
         // Moving there as the rail glides (from where it was; a rail come anew, there at once).
         let to = anchor - top;
@@ -2261,22 +2300,23 @@ impl Drawing<'_> {
         self.music.anchor = Some(state);
         let anchor = top + state.shown;
         let (tint, clear) = (self.tint, self.edged);
-        // While the rail glides, its lines drawn where they fall (see `Frame::set_moving`): put on whole pixels, a line
-        // easing the last of the way stood still, then stepped a pixel.
-        let _moving = frame.moving_while(rail != rail.round() || self.music.anchoring);
+        // Its lines drawn where they fall (see `Frame::set_moving`), gliding and at rest alike: put on whole pixels as it
+        // glided, a line easing the last of the way stood still, then stepped a pixel, and only once at rest, they all
+        // stepped as it came to rest. (At rest, the line aimed at is on whole pixels already: see `anchor`.)
+        let _moving = frame.moving_while(true);
         self.clip(x - 8.0, top, width + 16.0, bottom - top + 12.0);
         #[cfg(test)]
         self.music.drawn_lines.clear();
         for (index, middle, scale, tall) in middles {
             let d = index as f32 - rail;
             let y = anchor + middle - at_rail - tall / 2.0;
+            // Faded toward the rail's edges.
+            let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             #[cfg(test)]
-            self.music.drawn_lines.push((index, y));
+            self.music.drawn_lines.push((index, y, edge));
             if y + tall < top - 4.0 || y > bottom + 12.0 {
                 continue;
             }
-            // Faded toward the rail's edges.
-            let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             let alpha = opacity_at(d) * edge;
             let line = &lines[index];
             let font = Font { size: size * scale, ..self.fonts.now };
@@ -2284,8 +2324,9 @@ impl Drawing<'_> {
                 self.turned_wrapped(lines, index, x, y, width, full, zoom(scale), zoom(scale_at(0.0)));
             } else if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
-                let bright = colour(if self.light { toward([0.0; 3], tint, 0.75) } else { toward([1.0; 3], tint, 0.35) }, alpha);
+                let (text, parts) = parts(lines, index);
+                // (On a light ground, the cover's colour as it is deepened, no darker: see `deep`.)
+                let bright = colour(if self.light { tint } else { toward([1.0; 3], tint, 0.35) }, alpha);
                 let dim = Color::hex(self.ink, if clear { 0.55 } else { 0.34 } * alpha);
                 if text.trim().is_empty() {
                     let done = between(line, next, self.moment.position);
@@ -2338,11 +2379,13 @@ impl Drawing<'_> {
         1.0 - (1.0 - came).powi(3)
     }
 
-    /// The line sung now's colours: what is not sung yet, and what is (near white, the cover's colour in it).
+    /// The line sung now's colours: what is not sung yet, and what is (near white, the cover's colour in it; on a light
+    /// ground, the cover's colour deepened).
     fn line_colours(&self, eased: f32) -> (Color, Color) {
         let dim = if self.edged { 0.6 } else { 0.36 };
-        let toward_ink = if self.light { [0.0; 3] } else { [1.0; 3] };
-        (Color::hex(self.ink, dim * eased), colour(toward(self.tint, toward_ink, if self.light { 0.25 } else { 0.65 }), eased))
+        // (On a light ground, the cover's colour as it is deepened, no darker: see `deep`.)
+        let sung = if self.light { self.tint } else { toward(self.tint, [1.0; 3], 0.65) };
+        (Color::hex(self.ink, dim * eased), colour(sung, eased))
     }
 
     /// What is under the line sung now: its translation (where there is one and they are on), else the next line.
@@ -2475,7 +2518,13 @@ fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, settled
 /// The room a turned line's chip takes under it, where its last row has none for it (see `chip_at`).
 const CHIP_ROW: f32 = 22.0;
 
-fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64)>) {
+/// What line `index` of `lines` is sung in, part by part (UTF-16 from, to, and from when till when): as its words say
+/// where they are timed; else shared out over its time (to its end, or the next line's beginning), a character of the
+/// scripts written without spaces each a part, a run of anything else up to a space a part, sung no slower than the
+/// slowest pace the song's lines are sung at (see `slowest_pace`): a line before a long interlude was spread over all
+/// of it, a character in eight seconds, as if the lyrics had stuck.
+fn parts(lines: &[Line], index: usize) -> (String, Vec<(usize, usize, f64, f64)>) {
+    let line = &lines[index];
     if !line.words.is_empty() {
         let mut text = String::new();
         let mut parts = Vec::new();
@@ -2487,9 +2536,28 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
         return (text, parts);
     }
     let text = line.text.clone();
+    let next = lines.get(index + 1).map(|line| line.at);
     let end = line.end.or(next).unwrap_or(line.at + 4.0).max(line.at + 0.3);
-    let span = (end - line.at) * 0.9;
-    // The pieces: a character of the scripts written without spaces, a run of anything else up to a space.
+    let pieces = pieces(&text);
+    let weight: f64 = pieces.iter().map(|p| p.2).sum::<f64>().max(1e-6);
+    let span = ((end - line.at) * 0.9).min(weight * slowest_pace(lines));
+    let mut t = line.at;
+    let parts = pieces
+        .into_iter()
+        .map(|(from, to, w)| {
+            let took = span * w / weight;
+            let part = (from, to, t, t + took);
+            t += took;
+            part
+        })
+        .collect();
+    (text, parts)
+}
+
+/// The pieces a line without timed words is sung in (UTF-16 from, to, and its weight): a character of the scripts
+/// written without spaces, a run of anything else up to a space (weighed by its length), each on to where the next
+/// begins.
+fn pieces(text: &str) -> Vec<(usize, usize, f64)> {
     let mut pieces: Vec<(usize, usize, f64)> = Vec::new();
     let mut at = 0;
     let mut run: Option<usize> = None;
@@ -2518,18 +2586,31 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
     for (piece, end) in pieces.iter_mut().zip(ends) {
         piece.1 = end;
     }
-    let weight: f64 = pieces.iter().map(|p| p.2).sum::<f64>().max(1e-6);
-    let mut t = line.at;
-    let parts = pieces
-        .into_iter()
-        .map(|(from, to, w)| {
-            let took = span * w / weight;
-            let part = (from, to, t, t + took);
-            t += took;
-            part
-        })
+    pieces
+}
+
+/// The slowest a line without timed words is sung in `lines` (seconds a piece of it: see `pieces`), as the song's
+/// own lines say: each such line's time to the next over its weight, and of those the slowest not an outlier (Tukey's
+/// fence, the upper quartile and half as much again as the quartiles are apart). A line given longer than that is
+/// sung at it and held till the next: the rest is music between. Unbounded where too few lines say.
+fn slowest_pace(lines: &[Line]) -> f64 {
+    let mut paces: Vec<f64> = lines
+        .windows(2)
+        .filter(|pair| pair[0].words.is_empty() && pair[0].end.is_none() && !pair[0].text.trim().is_empty())
+        .map(|pair| (pair[1].at - pair[0].at) / pieces(&pair[0].text).iter().map(|p| p.2).sum::<f64>().max(1e-6))
+        .filter(|pace| *pace > 0.0)
         .collect();
-    (text, parts)
+    if paces.len() < 4 {
+        return f64::INFINITY;
+    }
+    paces.sort_by(f64::total_cmp);
+    let quartile = |q: f64| {
+        let at = q * (paces.len() - 1) as f64;
+        let (low, high) = (at.floor() as usize, at.ceil() as usize);
+        paces[low] + (paces[high] - paces[low]) * (at - low as f64)
+    };
+    let (q1, q3) = (quartile(0.25), quartile(0.75));
+    q3 + 1.5 * (q3 - q1)
 }
 
 /// How far a line is sung: all of it before `from` (UTF-16), and `part` (0 to 1) of the way across what runs from
@@ -2883,6 +2964,11 @@ mod tests {
         Line { at: 10.0, end: None, text: text.into(), words, backing: None, translation: None }
     }
 
+    /// The line after, at `at`.
+    fn next(at: f64) -> Line {
+        Line { at, end: None, text: "next".into(), words: Vec::new(), backing: None, translation: None }
+    }
+
     /// How far it is sung, in UTF-16 units (fractional across the part being sung).
     fn units(sung: Filling) -> f32 {
         sung.from as f32 + (sung.to - sung.from) as f32 * sung.part
@@ -2946,21 +3032,84 @@ mod tests {
     fn a_line_sung_part_by_part() {
         // Word by word: as the words say.
         let worded = line("ab cd", vec![Word { at: 10.0, end: 11.0, text: "ab ".into() }, Word { at: 11.0, end: 12.0, text: "cd".into() }]);
-        let (text, worded) = parts(&worded, None);
+        let (text, worded) = parts(&[worded], 0);
         assert_eq!(text, "ab cd");
         assert_eq!(units(sung_to(&worded, 10.5)), 1.5);
         assert_eq!(units(sung_to(&worded, 11.5)), 4.0);
         assert_eq!(units(sung_to(&worded, 20.0)), 5.0);
         assert_eq!(units(sung_to(&worded, 9.0)), 0.0);
         // By line: each Chinese character a part, the time shared.
-        let (_, shared) = parts(&line("你好 hi", Vec::new()), Some(14.0));
+        let (_, shared) = parts(&[line("你好 hi", Vec::new()), next(14.0)], 0);
         assert_eq!(shared.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 1), (1, 3), (3, 5)]);
         // The spaces between characters filled with the one before them: no jump over them.
-        let (_, spaced) = parts(&line("微 微 微 微", Vec::new()), Some(14.0));
+        let (_, spaced) = parts(&[line("微 微 微 微", Vec::new()), next(14.0)], 0);
         assert_eq!(spaced.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 2), (2, 4), (4, 6), (6, 7)]);
         let between = |t: f64| units(sung_to(&spaced, t));
         assert!((between(10.0 + 0.9 * 0.75) - 1.5).abs() < 1e-6, "three quarters through the first part, the fill is half across its space");
         assert!((shared.last().unwrap().3 - (10.0 + 4.0 * 0.9)).abs() < 1e-9);
+    }
+
+    /// A line timed only by its start, before a long interlude, is sung at the pace the song's lines are, not spread over
+    /// the interlude (逍遥叹: 当泪干血盈眶涌 at 234.33 s, the next line at 290.52 s, its first character took eight
+    /// seconds, as if the lyrics had stuck); the song's other lines are sung over their time as they were.
+    #[test]
+    fn a_line_before_an_interlude_is_sung_at_the_song_s_pace() {
+        let at = |at: f64, text: &str| Line { at, end: None, text: text.into(), words: Vec::new(), backing: None, translation: None };
+        let lines = [
+            at(26.37, "岁月难得沉默"),
+            at(29.64, "秋风厌倦漂泊"),
+            at(32.91, "夕阳赖着不走挂在墙头舍不得我"),
+            at(39.60, "昔日伊人耳边话"),
+            at(43.02, "已和潮声向东流"),
+            at(46.05, "再回首"),
+            at(48.00, "往事也随枫叶一片片落"),
+            at(53.70, "爱已走到尽头"),
+            at(56.34, "恨也放弃承诺"),
+            at(59.73, "命运自认幽默想法太多由不得我"),
+            at(66.30, "壮志凌云几分酬"),
+            at(69.66, "知己难逢几人留"),
+            at(72.69, "再回首"),
+            at(74.61, "却闻笑传醉梦中"),
+            at(80.85, "笑叹词穷古痴今狂终成空"),
+            at(87.63, "刀钝刃乏恩断义绝梦方破"),
+            at(94.26, "路荒遗叹饱览足迹没人懂"),
+            at(100.98, "多年望眼欲穿过"),
+            at(103.83, "红尘滚滚我没看透"),
+            at(107.58, "自嘲墨尽千情万怨英杰愁"),
+            at(114.21, "曲终人散发华鬓白红颜殁"),
+            at(120.93, "烛残未觉与日争辉徒消瘦"),
+            at(127.68, "当泪干血盈眶涌"),
+            at(130.56, "白雪纷飞都成红"),
+            at(159.78, "爱已走到尽头"),
+            at(163.02, "恨也放弃承诺"),
+            at(166.35, "命运自认幽默想法太多由不得我"),
+            at(173.01, "壮志凌云几分酬"),
+            at(176.31, "知己难逢几人留"),
+            at(179.37, "再回首"),
+            at(181.29, "却闻笑传醉梦中"),
+            at(187.59, "笑叹词穷古痴今狂终成空"),
+            at(194.31, "刀钝刃乏恩断义绝梦方破"),
+            at(200.91, "路荒遗叹饱览足迹没人懂"),
+            at(207.63, "多年望眼欲穿过"),
+            at(210.51, "红尘滚滚我没看透"),
+            at(214.26, "自嘲墨尽千情万怨英杰愁"),
+            at(220.89, "曲终人散发华鬓白红颜殁"),
+            at(227.58, "烛残未觉与日争辉徒消瘦"),
+            at(234.33, "当泪干血盈眶涌"),
+            at(290.52, "白雪纷飞都成红"),
+        ];
+        let sung = |index: usize| {
+            let (_, parts) = parts(&lines, index);
+            parts.last().unwrap().3 - parts[0].2
+        };
+        // (Sung in 2.6 s the first time.)
+        assert!(sung(39) < 8.0, "sung over {:.1} s before the interlude", sung(39));
+        assert!((sung(22) - (130.56 - 127.68) * 0.9).abs() < 1e-9, "sung over {:.2} s as its time had it", sung(22));
+        assert!((sung(19) - (114.21 - 107.58) * 0.9).abs() < 1e-9);
+        // Too few lines to say a pace: over its time.
+        let few = [at(10.0, "当泪干"), at(60.0, "白雪")];
+        let (_, parts) = parts(&few, 0);
+        assert!((parts.last().unwrap().3 - 10.0 - 45.0).abs() < 1e-9);
     }
 
     /// Whatever a strip's size, what ends its row (its keys, its spectrum) lies in it after where its words begin, never
@@ -2969,7 +3118,7 @@ mod tests {
     #[test]
     fn a_strip_ends_inside_itself() {
         let keys_wide = 3.0 * CONTROL + 2.0 * KEY_GAP;
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         for shows in [all, Shows { controls: true, ..all }, Shows { cover: false, ..all }, Shows { cover: false, controls: true, ..all }] {
             for centred in [false, true] {
                 let mut w = LEAST.0;
@@ -2997,7 +3146,7 @@ mod tests {
 
     #[test]
     fn the_room_chooses_the_layout() {
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         assert_eq!(Layout::for_room((420.0, 76.0), &all, None), Layout::Strip);
         assert_eq!(Layout::for_room((470.0, 178.0), &all, None), Layout::Player);
         assert_eq!(Layout::for_room((470.0, 400.0), &all, None), Layout::Card);
@@ -3020,7 +3169,7 @@ mod tests {
 
     #[test]
     fn a_size_comes_to_rest_where_its_layout_is_right() {
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         // A strip pulled taller, short of a player: back to the strip's tallest; a player short of a card: its.
         assert_eq!(rests_at((420.0, 110.0), &all), (420.0, STRIP_MOST));
         // Sized between the strip and the player, it is the one it is nearer, and comes to it.
@@ -3116,7 +3265,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let places = [1u32, 451, 902, 1350];
         let (w, h) = (470.0, 178.0);
@@ -3162,7 +3311,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3197,7 +3346,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3235,7 +3384,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3264,6 +3413,104 @@ mod pictures {
         crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/skins.png")), size.0, size.1, &pixels).unwrap();
     }
 
+    /// The lines come to rest where they glided to: drawn a hair before the rail rests and as it rests, at a place a
+    /// third of a pixel off the grid, the words' ink stands as high in both, within the hair (put on whole pixels only
+    /// once at rest, they all stepped down by up to a pixel a moment after a line came).
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn the_lines_come_to_rest_where_they_glided() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Clear, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        let (w, h) = (420.0f32, 230.0f32);
+        let size = ((w * 1.5) as u32, (h * 1.5) as u32 + 2);
+        let now = Instant::now();
+        // Where what is drawn right of the cover is (on no ground: its pixels' cover), row by row, weighed: its middle, in
+        // pixels.
+        let ink_middle = |rail_off: f32, down: f32| -> f64 {
+            let pixels = gfx
+                .draw_offscreen(size, 1.5, |frame| {
+                    frame.origin(0.0, down);
+                    let moment = playing(false);
+                    let target = moment.now.unwrap() as f32;
+                    let mut music = Music { last_frame: now, ..Music::default() };
+                    music.bands = moment.sound.bands;
+                    music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                    music.rail = target - rail_off;
+                    // (Settled already, but for the rail: one frame to place the anchor, then the one looked at.)
+                    music.paint_moment(frame, (w, h), &all, Ground::Clear, Family::Segoe, 1.5, None, now, Moment { lines: moment.lines.clone(), ..playing(false) });
+                    music.rail = target - rail_off;
+                    music.rail_speed = 0.0;
+                    unsafe { frame.dc.Clear(None) };
+                    music.paint_moment(frame, (w, h), &all, Ground::Clear, Family::Segoe, 1.5, None, now, moment);
+                })
+                .unwrap();
+            let (mut sum, mut weight) = (0.0f64, 0.0f64);
+            for y in (40 * 3 / 2)..(170 * 3 / 2) {
+                for x in (200 * 3 / 2)..(400 * 3 / 2) {
+                    let at = ((y * size.0 + x) * 4) as usize;
+                    let ink = pixels[at + 3] as f64;
+                    sum += ink * y as f64;
+                    weight += ink;
+                }
+            }
+            sum / weight.max(1.0)
+        };
+        for down in [0.0, 1.0 / 3.0 / 1.5, 2.0 / 3.0 / 1.5] {
+            let (gliding, resting) = (ink_middle(0.003, down), ink_middle(0.0, down));
+            println!("placed {down:.3} DIP down: gliding {gliding:.3}, resting {resting:.3}");
+            assert!((gliding - resting).abs() < 0.3, "{down:.3} DIP down, the lines rest {:.3} px from where they glided", resting - gliding);
+        }
+    }
+
+    /// What plays drawn on each skin's ground, light and dark, a card and a strip (`cargo test --features studio --lib
+    /// -- --ignored draws_on_each_skin` writes `target/music/on-skins.png`): its words in the skin's ink, dark on a
+    /// light ground; its colours the cover's, deepened there.
+    #[test]
+    #[ignore = "draws on this PC's graphics card, to a picture to be looked at"]
+    fn draws_on_each_skin() {
+        use crate::ui::theme::{Skin, Theme};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Skin, inset: None };
+        let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&out).unwrap();
+        let gfx = crate::ui::gfx::held().unwrap();
+        let (card, strip, margin) = ((420.0f32, 230.0f32), (420.0f32, 64.0f32), 40.0f32);
+        let skins = [Skin::Fluent, Skin::Glass, Skin::Paper];
+        let row = card.1 + strip.1 + 3.0 * margin;
+        let size = (((2.0 * card.0 + 3.0 * margin) * 1.5) as u32, ((row * skins.len() as f32 + margin) * 1.5) as u32);
+        let now = Instant::now();
+        let pixels = gfx
+            .draw_offscreen(size, 1.5, |frame| {
+                // (A desktop of two tones under it, as a wallpaper might be.)
+                frame.fill(Color::hex(0x5A6B7D, 1.0), 0.0, 0.0, size.0 as f32 / 1.5, size.1 as f32 / 1.5);
+                frame.fill(Color::hex(0xC9C2B4, 1.0), 0.0, 0.0, size.0 as f32 / 1.5 / 2.0, size.1 as f32 / 1.5);
+                for (index, skin) in skins.into_iter().enumerate() {
+                    for (column, dark) in [false, true].into_iter().enumerate() {
+                        let theme = Theme::new(skin, dark);
+                        for (down, room) in [(0.0, card), (card.1 + margin, strip)] {
+                            let mut music = Music { last_frame: now, ..Music::default() };
+                            let moment = playing(false);
+                            music.bands = moment.sound.bands;
+                            music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
+                            let at = (margin + column as f32 * (card.0 + margin), margin + index as f32 * row + down);
+                            let local = windows_numerics::Matrix3x2::translation(at.0, at.1);
+                            frame.origin(0.0, 0.0);
+                            crate::ui::render::GroundLayers::default().draw_whole(frame, &theme, room, None, 0.0, false, local, 1.5).unwrap();
+                            frame.place(local);
+                            music.paint_moment(frame, room, &all, Ground::of(&all, dark), theme.body.family, 1.5, None, now, moment);
+                        }
+                    }
+                }
+            })
+            .unwrap();
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{out}/on-skins.png")), size.0, size.1, &pixels).unwrap();
+    }
+
     /// The strip down at a few sizes, on its own ground and on none, a line sung in Chinese and one in English
     /// (`cargo test --features studio --lib -- --ignored draws_a_column` writes `target/music/column.png`): the line
     /// sung now written down, what is under it beside it where two go across, the key at the foot where it has room.
@@ -3273,7 +3520,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: true, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3299,7 +3546,7 @@ mod pictures {
                         music.bands = moment.sound.bands;
                         music.lyrics = moment.lines.as_ref().map(|lines| Arc::as_ptr(lines) as usize);
                         frame.origin(x, margin + at as f32 * row);
-                        let shows = Shows { clear: ground == Ground::Clear, ..all };
+                        let shows = Shows { ground: if ground == Ground::Clear { MusicGround::Clear } else { MusicGround::Cover }, ..all };
                         music.paint_moment(frame, (w, h), &shows, ground, Family::Segoe, 1.5, None, now, moment);
                         x += w + margin;
                     }
@@ -3317,7 +3564,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let now = Instant::now();
         let mut music = Music { last_frame: now, ..Music::default() };
@@ -3344,7 +3591,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let now = Instant::now();
         // (The least height at which a player this wide shows the lines round the one sung now.)
@@ -3382,7 +3629,7 @@ mod pictures {
         }
         let gfx = crate::ui::gfx::held().unwrap();
         let line = Line { at: 43.06, end: None, text: "微 微 微 微".into(), words: Vec::new(), backing: None, translation: None };
-        let (text, parts) = parts(&line, Some(48.09));
+        let (text, parts) = parts(&[line, Line { at: 48.09, end: None, text: "next".into(), words: Vec::new(), backing: None, translation: None }], 0);
         let layout = gfx.wrapped(&text, PLAYER_LINE, 1000.0);
         let place = |unit: usize| {
             let (mut px, mut py, mut metrics) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
@@ -3408,7 +3655,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let out = format!("{}/target/music", env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&out).unwrap();
         let gfx = crate::ui::gfx::held().unwrap();
@@ -3442,7 +3689,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         let (w, h) = (780.0, 64.0);
         let size = ((w * 1.5) as u32, (h * 1.5) as u32);
@@ -3467,7 +3714,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
         let gfx = crate::ui::gfx::held().unwrap();
         for size in [(470.0, 400.0), (520.0, 236.0)] {
             let start = Instant::now();
@@ -3488,7 +3735,7 @@ mod pictures {
                     music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                 })
                 .unwrap();
-                let at = |index: usize| music.drawn_lines.iter().find(|(i, _)| *i == index).map(|(_, y)| *y);
+                let at = |index: usize| music.drawn_lines.iter().find(|(i, ..)| *i == index).map(|(_, y, _)| *y);
                 tracks.push((0..4).map(|index| at(index).unwrap_or(f32::NAN)).collect());
             }
             println!("{size:?}:");
@@ -3508,6 +3755,37 @@ mod pictures {
         }
     }
 
+    /// The line sung is clear of the fades at the rail's edges, whichever it is: the first too, with none before it
+    /// (it was put up into the fade for the one after it to be clear, and drawn all but gone), and the last. (Nearly
+    /// clear, in a rail too short for a line and both fades.)
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn the_line_sung_is_clear_of_the_rails_fades() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        for size in [(650.0, 200.0), (520.0, 236.0), (470.0, 400.0)] {
+            for now in [0, 1, 5] {
+                let start = Instant::now();
+                let mut music = Music { last_frame: start, ..Music::default() };
+                let mut moment = playing(false);
+                let at = moment.lines.as_ref().unwrap()[now].at + 0.5;
+                (moment.now, moment.position, moment.since) = (Some(now), at, Some(start - Duration::from_secs(2)));
+                for frame_index in 0..60u64 {
+                    let when = start + Duration::from_millis(16 * frame_index);
+                    gfx.draw_offscreen(((size.0 * 1.5) as u32, (size.1 * 1.5) as u32), 1.5, |frame| {
+                        music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, when, moment.clone());
+                    })
+                    .unwrap();
+                }
+                let shown = music.drawn_lines.iter().find(|(index, ..)| *index == now).map(|(.., edge)| *edge);
+                assert!(shown.is_some_and(|shown| shown >= 0.95), "{size:?}: line {now} {:?}", music.drawn_lines);
+            }
+        }
+    }
+
     /// What plays in each layout, at each size, with its switches as each case says, drawn to PNGs in the target
     /// folder: `cargo test --features studio -- --ignored draws_what_plays --nocapture`.
     #[test]
@@ -3516,8 +3794,8 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, clear: false, inset: None };
-        let floating = Shows { cover: false, title: false, spectrum: false, clear: true, ..all };
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
+        let floating = Shows { cover: false, title: false, spectrum: false, ground: MusicGround::Clear, ..all };
         // Name, size, switches, the pointer over it (the controls come), lines turned by the wheel, the track dragged,
         // the music between lines.
         let cases: [(&str, (f32, f32), Shows, bool, i32, bool, bool); 24] = [
@@ -3542,7 +3820,7 @@ mod pictures {
             ("stage", (900.0, 470.0), all, false, 0, false, false),
             ("stage-narrow", (530.0, 330.0), all, false, 0, false, false),
             ("stage-off", (900.0, 470.0), all, false, 0, false, false),
-            ("clear-player", (470.0, 178.0), Shows { clear: true, ..all }, false, 0, false, false),
+            ("clear-player", (470.0, 178.0), Shows { ground: MusicGround::Clear, ..all }, false, 0, false, false),
             ("floating", (760.0, 110.0), floating, false, 0, false, false),
             ("floating-over", (760.0, 110.0), floating, true, 0, false, false),
         ];
@@ -3565,7 +3843,7 @@ mod pictures {
                     // (On a desktop of a mid grey.)
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, pointer, Instant::now(), moment);
+                    music.paint_moment(frame, (w, h), &shows, Ground::of(&shows, true), Family::Segoe, 1.5, pointer, Instant::now(), moment);
                 })
                 .unwrap();
             let path = std::path::PathBuf::from(format!("{out}/{name}.png"));
@@ -3585,7 +3863,7 @@ mod pictures {
                     let began = Instant::now();
                     gfx.draw_offscreen(((w * 1.5) as u32 + 90, (h * 1.5) as u32 + 90), 1.5, |frame| {
                         frame.origin(30.0, 30.0);
-                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
+                        music.paint_moment(frame, (w, h), &shows, Ground::of(&shows, true), Family::Segoe, 1.5, None, at, playing(false));
                     })
                     .unwrap();
                     times.push(began.elapsed().as_secs_f64() * 1000.0);
@@ -3611,7 +3889,7 @@ mod pictures {
                 gfx.draw_offscreen(size, 1.5, |frame| {
                     frame.fill(Color::hex(0x5A6470, 1.0), 0.0, 0.0, w + 2.0 * margin, h + 2.0 * margin);
                     frame.origin(margin, margin);
-                    music.paint_moment(frame, room, &shows, Ground::of(&shows), Family::Segoe, 1.5, None, at, playing(false));
+                    music.paint_moment(frame, room, &shows, Ground::of(&shows, true), Family::Segoe, 1.5, None, at, playing(false));
                 })
                 .unwrap()
             };

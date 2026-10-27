@@ -632,6 +632,19 @@ impl Gfx {
         (line[0].baseline, line[0].height - line[0].baseline)
     }
 
+    /// Where the first line's baseline of `text`, wrapped `width` wide in `font`, falls below its top (DIPs): its own,
+    /// as the faces that draw it set it (a line in Chinese, in a face apart from the font's own, sits lower than
+    /// `baseline` says).
+    pub fn wrapped_baseline(&self, text: &str, font: Font, width: f32) -> f32 {
+        let layout = self.wrapped(text, font, width);
+        // (Asked first how many lines it has: a list too short for them is not filled.)
+        let mut count = 0;
+        let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
+        let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+        let _ = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
+        lines[0].baseline
+    }
+
     /// Lets go of what Direct2D keeps from earlier drawing, such as the
     /// intermediate images of effects.
     pub fn clear_caches(&self) {
@@ -811,7 +824,7 @@ impl Gfx {
             *used = Instant::now();
             return Some(bitmap.clone());
         }
-        if picture.pixels.len() < (picture.side * picture.side * 4) as usize {
+        if picture.pixels.len() < (picture.size.0 * picture.size.1 * 4) as usize {
             return None;
         }
         let properties = D2D1_BITMAP_PROPERTIES1 {
@@ -820,8 +833,8 @@ impl Gfx {
             dpiY: 96.0,
             ..Default::default()
         };
-        let size = D2D_SIZE_U { width: picture.side, height: picture.side };
-        let bitmap = unsafe { dc.CreateBitmap(size, Some(picture.pixels.as_ptr().cast()), picture.side * 4, &properties) }.ok()?;
+        let size = D2D_SIZE_U { width: picture.size.0, height: picture.size.1 };
+        let bitmap = unsafe { dc.CreateBitmap(size, Some(picture.pixels.as_ptr().cast()), picture.size.0 * 4, &properties) }.ok()?;
         self.pictures.borrow_mut().insert(picture.key, (bitmap.clone(), Instant::now()));
         Some(bitmap)
     }
@@ -1258,14 +1271,26 @@ impl Canvas for Frame<'_> {
         }
     }
 
-    fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
+    fn pixels_per_dip(&self) -> f32 {
+        let mut t = Matrix3x2::default();
+        let mut dpi = (0.0f32, 0.0f32);
+        unsafe {
+            self.dc.GetTransform(&mut t);
+            self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
+        }
+        // (How much the transform grows a box, turned or not, by the target's DIPs to its pixels.)
+        (t.M11 * t.M22 - t.M12 * t.M21).abs().sqrt() * dpi.0 / 96.0
+    }
+
+    fn picture_within(&self, picture: &super::canvas::Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
-        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
-        let (x, y, w, h) = self.on_pixels(x, y, w, h);
+        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four. So the box it is within.)
+        let (x, y, w, h) = self.on_pixels(at.0, at.1, at.2, at.3);
+        let (wx, wy, ww, wh) = self.on_pixels(within.0, within.1, within.2, within.3);
         // (As large as covers the box, its middle on the box's.)
-        let size = w.max(h);
-        let scale = size / picture.side.max(1) as f32;
-        let (from_x, from_y) = (x - (size - w) / 2.0, y - (size - h) / 2.0);
+        let (pw, ph) = (picture.size.0.max(1) as f32, picture.size.1.max(1) as f32);
+        let scale = (w / pw).max(h / ph);
+        let (from_x, from_y) = (x - (pw * scale - w) / 2.0, y - (ph * scale - h) / 2.0);
         unsafe {
             let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
                 extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
@@ -1274,8 +1299,16 @@ impl Canvas for Frame<'_> {
             };
             let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(from_x, from_y) };
             let Ok(brush) = self.dc.CreateBitmapBrush(&bitmap, Some(&properties), Some(&placed)) else { return };
-            let radius = radius.max(0.0).min(w.min(h) / 2.0);
-            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius }, &brush);
+            let radius = within.4.max(0.0).min(ww.min(wh) / 2.0);
+            // (Within its own box too, where the box it is within is larger: the brush goes on past its edges.)
+            let own = (x, y, w, h) != (wx, wy, ww, wh);
+            if own {
+                self.dc.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            }
+            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(wx, wy, ww, wh), radiusX: radius, radiusY: radius }, &brush);
+            if own {
+                self.dc.PopAxisAlignedClip();
+            }
         }
     }
 
@@ -1691,6 +1724,19 @@ impl<'a> Frame<'a> {
         let Some((t, device)) = self.grid() else { return line };
         let per = t.M11 * device;
         whole_pixel(line * per).max(1.0) / per
+    }
+
+    /// Where words drawn from `y` (DIPs, as drawn now), their baseline `baseline` below it, have that baseline on a whole
+    /// pixel of what is drawn on, moved the least to: whether or not what is drawn moves, for words that glide to rest
+    /// there drawn where they fall all along (put on whole pixels only once at rest, they stepped by up to a pixel as
+    /// they came to rest: see `set_moving`), crisp there.
+    pub fn baseline_on_pixel(&self, y: f32, baseline: f32) -> f32 {
+        let Some((t, device)) = self.axes() else { return y };
+        let at = ((y + baseline) * t.M22 + t.M32) * device;
+        if !at.is_finite() || at.abs() > 1.0e6 {
+            return y;
+        }
+        y + (whole_pixel(at) - at) / (t.M22 * device)
     }
 
     /// The rectangle `(x, y, width, height)` (DIPs) with its edges on whole pixels (see `on_pixel`), none shrunk away:

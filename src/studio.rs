@@ -251,7 +251,7 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
     let px = script.scale;
     let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
     let on = &music.shows;
-    let shows = MusicShows { cover: on.cover, title: on.title, translation: on.translation, spectrum: on.spectrum, controls: on.controls, clear: on.clear, inset: None };
+    let shows = MusicShows { cover: on.cover, title: on.title, translation: on.translation, spectrum: on.spectrum, controls: on.controls, ground: if on.clear { crate::ui::prefs::MusicGround::Clear } else { crate::ui::prefs::MusicGround::Cover }, inset: None };
     // Sliding out of its edge as a panel does, where the shot says when (its look's entrance, out of the edge it is at).
     let look = Theme::new(Skin::named(&shot.skin), true);
     let (entrance, family) = (look.entrance, look.body.family);
@@ -269,7 +269,7 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
         let sound = heard.at(music.from + t as f64);
         let played = || Played { lines: lines.clone(), position, length: music.length, title: music.title.clone(), artist: music.artist.clone(), cover: cover.clone(), sound };
         let pixels = if let Some(smoke) = smoke.as_mut() {
-            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position));
+            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position, crate::lyrics::EARLY));
             full.render_smoke(smoke, (script.width, script.height)).map_err(|e| e.to_string())?;
             let smoke = &*smoke;
             gfx.draw_offscreen((script.width, script.height), px, |frame| full.paint(frame, (sw, sh), Some(smoke), position, now))
@@ -295,7 +295,7 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
                 let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: key.opacity, ..Default::default() };
                 unsafe { frame.dc.PushLayer(&layer, None) };
                 frame.place(Matrix3x2::translation(key.x, key.y));
-                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows), family, px, None, now, played());
+                widget.paint_played(frame, (key.w, key.h), &shows, Ground::of(&shows, true), family, px, None, now, played());
                 frame.origin(0.0, 0.0);
                 unsafe { frame.dc.PopLayer() };
             })

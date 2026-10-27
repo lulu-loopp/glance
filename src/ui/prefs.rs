@@ -25,6 +25,7 @@ pub struct Prefs {
     disk: Option<DiskPrefs>,
     pub network: NetworkPrefs,
     pub processes: ProcessPrefs,
+    pub music: MusicPrefs,
     #[serde(rename = "chartSeconds")]
     pub chart_seconds: f64,
     #[serde(rename = "hotTemp")]
@@ -86,16 +87,9 @@ const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("heal
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
 const TIME: [Item; 3] = [item("sound", true), item("media", true), item("lyrics", false)];
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
-/// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing, no
-/// ground.
-const LYRICS: [Item; 6] = [
-    item("translation", true),
-    item("cover", true),
-    item("title", true),
-    item("spectrum", true),
-    item("controls", false),
-    item("clear", false),
-];
+/// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing. (What
+/// they are drawn on is a choice of its own: see `MusicGround`.)
+const LYRICS: [Item; 5] = [item("translation", true), item("cover", true), item("title", true), item("spectrum", true), item("controls", false)];
 /// The station: what was copied lately under what is on it.
 const STATION: [Item; 0] = [];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
@@ -207,6 +201,38 @@ impl NetworkPrefs {
     }
 }
 
+/// What the music widgets, and the panel showing what plays, are drawn on: the cover blurred (their own look), the
+/// skin's ground (as every other widget is), or none (their words edged, on whatever is behind).
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MusicGround {
+    #[default]
+    Cover,
+    Skin,
+    Clear,
+}
+
+impl MusicGround {
+    /// As the settings list them.
+    pub const ALL: [MusicGround; 3] = [MusicGround::Cover, MusicGround::Skin, MusicGround::Clear];
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MusicPrefs {
+    pub ground: MusicGround,
+}
+
+/// What the music widgets are drawn on, as the stored settings say: as chosen; never chosen, none where the lyrics'
+/// switch for no ground (up to 0.4.2) was on, else the cover.
+pub fn music_ground(stored: &serde_json::Value) -> MusicGround {
+    match serde_json::from_value(stored["music"]["ground"].clone()) {
+        Ok(ground) => ground,
+        Err(_) if item_on(stored, "lyrics", "clear") => MusicGround::Clear,
+        Err(_) => MusicGround::Cover,
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProcessPrefs {
@@ -254,6 +280,7 @@ impl Default for Prefs {
             disk: None,
             network: NetworkPrefs::default(),
             processes: ProcessPrefs::default(),
+            music: MusicPrefs::default(),
             chart_seconds: 60.0,
             hot_temp: 85.0,
             theme: ThemePref::System,
@@ -401,6 +428,7 @@ impl Prefs {
         prefs.chart_seconds = prefs.chart_seconds.clamp(10.0, 300.0);
         prefs.hot_temp = prefs.hot_temp.clamp(1.0, 150.0);
         prefs.processes.count = prefs.processes.count.clamp(1, 30);
+        prefs.music.ground = music_ground(stored);
         fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));
         fit(&mut prefs.workbench, &WORKBENCH.map(String::from), |_| true);
         prefs.carry_over();
@@ -568,5 +596,24 @@ mod tests {
         assert!(saved.get("cpu").is_none() && saved["network"].get("details").is_none());
         let again = Prefs::resolve(&saved, &known());
         assert!(!again.shows("cpu", "threads") && again.shows("network", "address") && again.shows("gpu:0", "engines"));
+    }
+
+    /// What the music widgets are drawn on: the cover, unless chosen otherwise; none, where the lyrics' switch for no
+    /// ground was on before it was a choice of its own; and the choice kept as it is saved.
+    #[test]
+    fn the_music_ground_carries_the_clear_switch_over() {
+        use super::{music_ground, MusicGround};
+        assert_eq!(music_ground(&serde_json::json!({})), MusicGround::Cover);
+        let clear = serde_json::json!({ "modules": [{ "id": "lyrics", "on": true, "items": { "clear": true } }] });
+        assert_eq!(music_ground(&clear), MusicGround::Clear);
+        let prefs = Prefs::resolve(&clear, &known());
+        assert_eq!(prefs.music.ground, MusicGround::Clear);
+        // Chosen since, the choice stands, the old switch still in the file or not.
+        let mut chosen = serde_json::to_value(&prefs).unwrap();
+        chosen["music"]["ground"] = "skin".into();
+        assert_eq!(music_ground(&chosen), MusicGround::Skin);
+        assert_eq!(Prefs::resolve(&chosen, &known()).music.ground, MusicGround::Skin);
+        chosen["music"]["ground"] = "cover".into();
+        assert_eq!(Prefs::resolve(&chosen, &known()).music.ground, MusicGround::Cover);
     }
 }

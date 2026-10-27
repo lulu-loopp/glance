@@ -54,8 +54,71 @@ pub struct Drawn {
 /// charts, which alone move between samples.
 #[derive(Default)]
 pub struct PanelLayers {
-    ground: [Layer; 3],
+    ground: GroundLayers,
     content: Layer,
+}
+
+/// What the skin puts behind something, in the parts it has (see `skins::Part`), each drawn again only as what it
+/// shows changes: under the panel's readings, or under what plays drawn on the skin (one piece, as large as all of it).
+#[derive(Default)]
+pub struct GroundLayers([Layer; 3]);
+
+impl GroundLayers {
+    /// Draws `below` with its corner placed by `local`, at `scale` physical pixels a DIP (`rough`, moving: the desktop
+    /// at half of that), `digest` telling the desktop behind from another; whether any of it was drawn afresh.
+    fn draw(&mut self, frame: &Frame, below: &skins::Ground, digest: Option<u64>, local: Matrix3x2, scale: f32, rough: bool) -> Result<bool> {
+        let theme = below.theme;
+        let (width, height) = below.size;
+        // What every part of it shows: its shape, as the theme has it.
+        let mut shape = DefaultHasher::new();
+        (theme.skin, theme.dark, below.edge, width.to_bits(), height.to_bits()).hash(&mut shape);
+        below.lanes.iter().chain([&below.bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut shape));
+        let mut grounded = false;
+        let margin = theme.margin;
+        for (layer, part) in self.0.iter_mut().zip(skins::parts(theme.skin)) {
+            // When none of what a part shows changed, the one drawn for
+            // an earlier frame serves again: the desktop, and how frosted it
+            // is, for the part that shows it; how tinted, for what is over
+            // it; under it, nothing more.
+            let mut key = shape.clone();
+            let scale = match part {
+                skins::Part::Desktop if rough => scale / 2.0,
+                _ => scale,
+            };
+            (part, scale.to_bits()).hash(&mut key);
+            match part {
+                skins::Part::Under => {}
+                skins::Part::Desktop => (below.frost.to_bits(), below.backdrop.zip(digest).map(|((_, at, covers), digest)| (digest, at.X.to_bits(), at.Y.to_bits(), covers.to_bits()))).hash(&mut key),
+                skins::Part::Over => below.frost.to_bits().hash(&mut key),
+            }
+            layer.draw(frame, key.finish(), local, (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin), scale, None, |frame| {
+                grounded = true;
+                skins::draw(frame, below, *part)
+            })?;
+        }
+        Ok(grounded)
+    }
+
+    /// Draws what the skin puts behind something drawn whole on it (what plays, as the skin draws it): one piece, as
+    /// large as `size`, away from any edge; the desktop behind as `Picture::backdrop` gives it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_whole(&mut self, frame: &Frame, theme: &super::theme::Theme, size: (f32, f32), backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, local: Matrix3x2, scale: f32) -> Result<bool> {
+        let whole = [Rect { x: 0.0, y: 0.0, w: size.0, h: size.1 }];
+        let below = skins::Ground {
+            theme,
+            edge: None,
+            size,
+            lanes: &whole,
+            bar: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            backdrop: backdrop.map(|(bitmap, at, _, covers)| (bitmap, at, covers)),
+            frost,
+        };
+        self.draw(frame, &below, backdrop.map(|(_, _, digest, _)| digest), local, scale, rough)
+    }
+
+    pub fn release(&mut self) {
+        self.0.iter_mut().for_each(Layer::release);
+    }
 }
 
 impl PanelLayers {
@@ -73,12 +136,6 @@ impl PanelLayers {
         };
         // (And the parts of what is merged with it, grounded as its lanes are.)
         let boxes: Vec<Rect> = boxes.into_iter().chain(others.iter().copied()).collect();
-        // What every part of it shows: its shape, as the theme has it.
-        let mut shape = DefaultHasher::new();
-        (theme.skin, theme.dark, picture.edge, width.to_bits(), height.to_bits()).hash(&mut shape);
-        boxes.iter().chain([&bar]).for_each(|r| [r.x, r.y, r.w, r.h].map(f32::to_bits).hash(&mut shape));
-        let mut grounded = false;
-        let margin = theme.margin;
         let below = skins::Ground {
             theme,
             edge: picture.edge,
@@ -88,28 +145,7 @@ impl PanelLayers {
             backdrop: picture.backdrop.map(|(bitmap, at, _, covers)| (bitmap, at, covers)),
             frost: picture.frost,
         };
-        for (layer, part) in self.ground.iter_mut().zip(skins::parts(theme.skin)) {
-            // When none of what a part shows changed, the one drawn for an
-            // earlier frame serves again: the desktop, and how frosted it
-            // is, for the part that shows it; how tinted, for what is over
-            // it; under it, nothing more.
-            let mut key = shape.clone();
-            let scale = match part {
-                skins::Part::Desktop if picture.rough => scale / 2.0,
-                _ => scale,
-            };
-            (part, scale.to_bits()).hash(&mut key);
-            match part {
-                skins::Part::Under => {}
-                skins::Part::Desktop => (picture.frost.to_bits(), picture.backdrop.map(|(_, at, digest, covers)| (digest, at.X.to_bits(), at.Y.to_bits(), covers.to_bits()))).hash(&mut key),
-                skins::Part::Over => picture.frost.to_bits().hash(&mut key),
-            }
-            layer.draw(frame, key.finish(), local, (-margin, -margin, width + 2.0 * margin, height + 2.0 * margin), scale, None, |frame| {
-                grounded = true;
-                skins::draw(frame, &below, *part)
-            })?;
-        }
-        Ok(grounded)
+        self.ground.draw(frame, &below, picture.backdrop.map(|(_, _, digest, _)| digest), local, scale, picture.rough)
     }
 
     /// Draws only what the skin puts behind the readings, for readings
@@ -186,7 +222,7 @@ impl PanelLayers {
     }
 
     pub fn release(&mut self) {
-        self.ground.iter_mut().for_each(Layer::release);
+        self.ground.release();
         self.content.release();
     }
 }

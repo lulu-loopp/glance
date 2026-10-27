@@ -31,13 +31,11 @@ struct Key {
     made: Made,
 }
 
-/// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), its shape kept in the square;
-/// filling the square (a picture's middle, as much as the square holds: for a box it is to fill); its icon alone, as
-/// Explorer shows a file of its kind (not what it holds).
+/// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), of its own shape, as large as
+/// fits the square; its icon alone, as Explorer shows a file of its kind (not what it holds), in the square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Made {
     Fit,
-    Fill,
     Icon,
 }
 
@@ -207,15 +205,10 @@ fn look(looks: Receiver<PathBuf>) {
     }
 }
 
-/// The picture of the file at `path`, `side` physical px square (its own shape in its middle): as made; none yet
+/// The picture of the file at `path`, of its own shape, as large as fits `side` physical px square: as made; none yet
 /// (asked for, and told when it is), or none to be had.
 pub fn of(path: &Path, side: u32) -> Option<Picture> {
     asked(path, side, Made::Fit)
-}
-
-/// The picture of the picture at `path`, `side` physical px square, filling it (its middle).
-pub fn filling(path: &Path, side: u32) -> Option<Picture> {
-    asked(path, side, Made::Fill)
 }
 
 /// The icon of the file or folder at `path`, `side` physical px square: Windows' own for it (its program's for a
@@ -316,9 +309,9 @@ fn make_one(key: Key) {
         key.hash(&mut hasher);
         hasher.finish()
     };
-    let made = picture(&key.path, key.side, key.made == Made::Icon).map(|thumb| match key.made {
-        Made::Fill => squared(&middle(&thumb), key.side, number),
-        Made::Fit | Made::Icon => squared(&thumb, key.side, number),
+    let made = picture(&key.path, key.side, key.made).map(|thumb| match key.made {
+        Made::Fit => shaped(&thumb, key.side, number),
+        Made::Icon => squared(&thumb, key.side, number),
     });
     {
         let mut kept = KEPT.lock().unwrap();
@@ -436,25 +429,20 @@ fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
         let to = (((top + row) * side + left) * 4) as usize;
         pixels[to..to + (w * 4) as usize].copy_from_slice(&thumb.pixels[from..from + (w * 4) as usize]);
     }
-    Picture { key, side, pixels: Arc::new(pixels) }
+    Picture { key, size: (side, side), pixels: Arc::new(pixels) }
 }
 
-/// The square in the middle of `thumb`, as large as it holds (what fills a square of its picture).
-fn middle(thumb: &Thumb) -> Thumb {
-    let (w, h) = thumb.size;
-    let side = w.min(h);
-    let (left, top) = ((w - side) / 2, (h - side) / 2);
-    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
-    for row in top..top + side {
-        let from = ((row * w + left) * 4) as usize;
-        pixels.extend_from_slice(&thumb.pixels[from..from + (side * 4) as usize]);
-    }
-    Thumb { pixels, size: (side, side) }
+/// `thumb` as large as fits a square `side` across (made smaller where it is larger), of its own shape, as a picture
+/// known by `key`: drawn whole where it is shown (see `Picture::fitted_in`).
+fn shaped(thumb: &Thumb, side: u32, key: u64) -> Picture {
+    let thumb = trimmed(thumb);
+    let thumb = fitted(&thumb, side);
+    Picture { key, size: thumb.size, pixels: Arc::new(thumb.pixels.clone()) }
 }
 
-/// The picture of the file at `path`, as large as fits `side` square (its shape kept), as Explorer shows it (`icon`:
-/// its icon alone); else what went wrong.
-fn picture(path: &Path, side: u32, icon: bool) -> Result<Thumb, String> {
+/// The picture of the file at `path` as Explorer shows it, `made` so: as large as fits `side` square, its shape kept
+/// (`Fit`), or its icon alone so (`Icon`); else what went wrong.
+fn picture(path: &Path, side: u32, made: Made) -> Result<Thumb, String> {
     unsafe {
         // (A program the Start menu names by its file's path, "shell:AppsFolder\D:\App\a.exe", which the shell
         // does not read by that name: by the file itself.)
@@ -466,7 +454,10 @@ fn picture(path: &Path, side: u32, icon: bool) -> Result<Thumb, String> {
         };
         let factory: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).map_err(|error| format!("the shell found no item: {error}"))?;
         let side = side.max(16) as i32;
-        let how = if icon { SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK } else { SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK };
+        let how = match made {
+            Made::Fit => SIIGBF_RESIZETOFIT,
+            Made::Icon => SIIGBF_ICONONLY,
+        } | SIIGBF_BIGGERSIZEOK;
         let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).map_err(|error| format!("the shell gave no picture: {error}"))?;
         let thumb = pixels_of(bitmap);
         let _ = DeleteObject(HGDIOBJ(bitmap.0));
@@ -587,6 +578,16 @@ mod made {
         assert_eq!(at(120, 120), [0, 0, 0, 0]);
     }
 
+    /// A picture to be drawn whole keeps its shape: made smaller to fit, with no clear room round it.
+    #[test]
+    fn a_picture_keeps_its_shape() {
+        let pixels = (0..128).flat_map(|_| (0..256).flat_map(|x| if x < 128 { [0, 0, 255, 255] } else { [255, 0, 0, 255] })).collect();
+        let picture = shaped(&Thumb { pixels, size: (256, 128) }, 128, 7);
+        assert_eq!(picture.size, (128, 64));
+        assert_eq!(&picture.pixels[..4], [0, 0, 255, 255]);
+        assert_eq!(&picture.pixels[(127 * 4) as usize..(128 * 4) as usize], [255, 0, 0, 255]);
+    }
+
     /// An icon drawn small in much clear room is made as large as the tile: the clear room taken off first.
     #[test]
     fn an_icon_in_much_room_fills_the_tile() {
@@ -618,11 +619,45 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png")), 96, false).expect("a picture's");
+        let picture = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/icons/128x128@2x.png")), 96, super::Made::Fit).expect("a picture's");
         assert!(picture.size.0 <= 96 && picture.size.1 <= 96 && picture.size.0.max(picture.size.1) >= 48, "{:?}", picture.size);
-        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48, false).expect("an icon");
+        let icon = super::picture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")), 48, super::Made::Fit).expect("an icon");
         assert!(icon.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
         println!("picture {:?}, icon {:?}", picture.size, icon.size);
+    }
+
+    /// A wide picture is as many pixels across as it is asked for, of its own shape: drawn whole, as sharp as its face.
+    #[test]
+    #[ignore = "asks this PC's shell"]
+    fn a_wide_picture_is_made_whole_at_the_pixels_asked_for() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        // (A picture three times as wide as tall, as a screenshot of a wide window is, written as a plain bitmap.)
+        let (w, h) = (1200u32, 400u32);
+        let mut file = Vec::new();
+        let size = 54 + w * h * 3;
+        file.extend_from_slice(b"BM");
+        for value in [size, 0, 54, 40, w, h] {
+            file.extend_from_slice(&value.to_le_bytes());
+        }
+        file.extend_from_slice(&1u16.to_le_bytes());
+        file.extend_from_slice(&24u16.to_le_bytes());
+        for value in [0u32, w * h * 3, 2835, 2835, 0, 0] {
+            file.extend_from_slice(&value.to_le_bytes());
+        }
+        for y in 0..h {
+            for x in 0..w {
+                file.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, ((x / 7 + y / 5) % 256) as u8]);
+            }
+        }
+        let path = std::env::temp_dir().join(format!("glance-wide-{}.bmp", std::process::id()));
+        std::fs::write(&path, file).unwrap();
+        let side = 320;
+        let picture = super::picture(&path, side, super::Made::Fit);
+        let _ = std::fs::remove_file(&path);
+        let picture = super::shaped(&picture.expect("a picture's"), side, 7);
+        assert_eq!(picture.size, (side, (side as f32 / 3.0).round() as u32));
     }
 
     /// A program's icon, its edges soft, as it is drawn: premultiplied, no colour past its alpha (where one was, it was
@@ -634,7 +669,7 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
         let windows = std::env::var("SystemRoot").unwrap();
-        let icon = super::picture(&std::path::Path::new(&windows).join("explorer.exe"), 96, true).expect("its icon");
+        let icon = super::picture(&std::path::Path::new(&windows).join("explorer.exe"), 96, super::Made::Icon).expect("its icon");
         let soft = icon.pixels.chunks_exact(4).filter(|pixel| pixel[3] > 0 && pixel[3] < 255).count();
         let past = icon.pixels.chunks_exact(4).filter(|pixel| pixel[..3].iter().any(|colour| *colour > pixel[3])).count();
         assert!(soft > 0, "no soft edge to look at");

@@ -1008,7 +1008,7 @@ impl Tile {
             What::Text { text } => (
                 text.split_whitespace().collect::<Vec<_>>().join(" "),
                 format!("{} {}", text.chars().filter(|c| !c.is_whitespace()).count(), lang.pick("字", "characters")),
-                Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(6).collect::<Vec<_>>().join("\n")),
+                Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(FACE_LINES).collect::<Vec<_>>().join("\n")),
             ),
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
@@ -1018,6 +1018,10 @@ impl Tile {
         Tile { id: item.id, label, about, face, pinned: item.pinned }
     }
 }
+
+/// How many of a text's lines its tile keeps to show (more than the largest face holds rows, that one left off is
+/// known of by the ellipsis on the last).
+const FACE_LINES: usize = 16;
 
 /// What a note stuck on the desktop is shown as: a lane of this name and its file's (see `stuck_note_lane`).
 pub const STUCK_NOTE_LANE: &str = "note:";
@@ -1911,21 +1915,21 @@ const CARDS_LEAD: f32 = 4.0;
 /// A tab's height, and the room round its name.
 const TAB_H: f32 = 24.0;
 const TAB_PAD: f32 = 8.0;
-/// The side of a picture as it is asked for (physical px: as large as it is drawn up to 225%): a tile's, and a large
-/// card's.
-const TILE_PIXELS: u32 = 128;
+/// How many physical px the side a picture is asked for at is rounded up to a whole number of: a face sized a little
+/// (the panel's width dragged) asks for no new one at each pixel.
+const PICTURE_STEP: u32 = 32;
 /// The side a thing kept at hand's icon is asked for (physical px): the largest every program has (Windows' extra
 /// large icon). Asked larger, a program with only small icons is given one small in the middle of a white box.
 pub(crate) const APP_PIXELS: u32 = 48;
-const LARGE_PIXELS: u32 = 256;
 
 /// A card's plate as tall as so much of its width, and the room under it for its name and what it is.
 const PLATE: f32 = 0.74;
 const CARD_WORDS: f32 = 5.0 + 2.0 * LINE;
 
-/// The side a page's pictures are asked for at, shown `view`'s way.
-fn pixels_for(view: ShelfView) -> u32 {
-    if view == ShelfView::Large { LARGE_PIXELS } else { TILE_PIXELS }
+/// The side a picture drawn `side` DIPs square on `frame` is asked for at (physical px): as many as it is drawn on,
+/// rounded up to `PICTURE_STEP`.
+pub(super) fn picture_pixels(frame: &dyn Canvas, side: f32) -> u32 {
+    ((side * frame.pixels_per_dip()).ceil().max(1.0) as u32).div_ceil(PICTURE_STEP) * PICTURE_STEP
 }
 
 /// How many cards go across `width`: three in a column (as many as fit in a wider one), each at least a tile wide.
@@ -4174,11 +4178,11 @@ fn face_round(theme: &Theme, small: f32) -> f32 {
 }
 
 /// A tile's face (see `Face`) in the box `w` × `h` at (`x`, `y`), on a plate as its skin draws one (glass's round,
-/// Windows 11's and chart paper's square-cornered and ruled round): a picture filling it (`pixels`: the side it is
-/// asked for), another file's or a folder's icon in its middle, a text's first lines, or a web address's mark; how
+/// Windows 11's and chart paper's square-cornered and ruled round): a picture filling it (asked for at as many pixels
+/// as it covers), another file's or a folder's icon in its middle, a text's first lines, or a web address's mark; how
 /// many more files are with it, and a pin where it is pinned.
 #[allow(clippy::too_many_arguments)]
-fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32, pixels: u32) {
+fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32) {
     let small = w.min(h);
     let radius = face_round(theme, small);
     // (A plate under what fills it: a picture, words, a link's mark. A file or folder stands on the card itself, by
@@ -4191,19 +4195,21 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     };
     match &tile.face {
         Face::Picture { path, more } => {
-            // A picture fills its plate; a folder, or another file, is shown by Windows' own icon for it.
+            // A picture is shown whole on its plate, as large as fits; a folder, or another file, by Windows' own icon
+            // for it.
             let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
             // (What the count goes with: the picture, its plate's corner; an icon, its own corner.)
             let corner = if shows_itself(path) {
                 plate();
-                match crate::station::thumbs::filling(path, pixels) {
-                    Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
+                match crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))) {
+                    // (Square-cornered on its plate, cut round only where it meets the plate's corners.)
+                    Some(picture) => frame.picture_within(&picture, picture.fitted_in(x, y, w, h), (x, y, w, h, radius), 1.0),
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
                 (x + w - 5.0, y + h - 5.0)
             } else {
                 let side = (small * 0.62).min(96.0);
-                paint_shell_icon(frame, theme, path, centre, side, pixels);
+                paint_shell_icon(frame, theme, path, centre, side);
                 (centre.x + side / 2.0 + 4.0, centre.y + side / 2.0)
             };
             // Files put on it together: how many more, on the icon's corner, in the sheet's ink (a mark of the lane's
@@ -4219,14 +4225,15 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             if small < 40.0 {
                 frame.icon(Icon::Clipboard, Point { x: x + w / 2.0, y: y + h / 2.0 }, small / 2.0, theme.text3);
             } else {
-                // Its first lines, each cut short where it is longer than the tile is wide.
+                // Its first lines, broken into rows as wide as the tile, as many as it holds (the last cut short where
+                // more is left off).
                 let font = Font { size: if small > 80.0 { 12.0 } else { 11.0 }, ..theme.small };
                 let line = font.size * 1.28;
-                let lines = ((h - 10.0) / line) as usize;
-                for (at, words) in text.lines().take(lines).enumerate() {
-                    // (The first short of a pin in the corner.)
-                    let room = w - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
-                    frame.text(&fitted(frame, words.trim(), font, room), font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
+                let room = w - 10.0;
+                // (The first row short of a pin in the corner.)
+                let first = room - if tile.pinned { 14.0 } else { 0.0 };
+                for (at, row) in face_rows(frame, text, font, first, room, ((h - 10.0) / line) as usize).iter().enumerate() {
+                    frame.text(row, font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
                 }
             }
         }
@@ -4243,10 +4250,11 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     }
 }
 
-/// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at `pixels`); till
+/// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at as many pixels as
+/// it covers); till
 /// it is had, or where there is none (gone), its mark (see `paint_file_mark`), faint where it is gone.
-fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, centre: Point, side: f32, pixels: u32) {
-    match crate::station::thumbs::icon(path, pixels) {
+fn paint_shell_icon(frame: &dyn Canvas, theme: &Theme, path: &std::path::Path, centre: Point, side: f32) {
+    match crate::station::thumbs::icon(path, picture_pixels(frame, side)) {
         Some(icon) => frame.picture(&icon, centre.x - side / 2.0, centre.y - side / 2.0, side, side, 0.0, 1.0),
         None => {
             let looked = crate::station::thumbs::looked(path);
@@ -4387,7 +4395,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, plate_round(theme, face_round(theme, place.w.min(plate)), 4.0));
                 }
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, pixels_for(view));
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
@@ -4400,7 +4408,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
                 }
                 let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, TILE_PIXELS);
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
@@ -4411,7 +4419,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
                 }
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, TILE_PIXELS);
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
                 let shown = fitted(frame, &tile.label, theme.body, room);
                 frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
@@ -4520,7 +4528,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         }
         let face = row.tile();
         let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-        paint_face(frame, theme, ink, &face, fx, fy, fw, fh, TILE_PIXELS);
+        paint_face(frame, theme, ink, &face, fx, fy, fw, fh);
         let when_w = frame.measure(&row.when, theme.small);
         let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
         let shown = fitted(frame, &row.label, theme.body, room);
@@ -4732,7 +4740,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         if lit {
             frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
         }
-        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE, TILE_PIXELS);
+        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE);
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
@@ -5270,12 +5278,18 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
 /// `text` in rows `width` wide in `font`, at most `most` of them (the last cut short with an ellipsis where it runs
 /// on): broken between words, or between characters where a word is too long for a row (and in Chinese).
 fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) -> Vec<String> {
+    rows_within(frame, text, font, width, width, most)
+}
+
+/// `text` in rows as `rows_of` lays it out, its first row `first` wide (short of something in its corner), the rest
+/// `width`.
+fn rows_within(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     let mut row = String::new();
     for c in text.chars() {
         let mut longer = row.clone();
         longer.push(c);
-        if frame.measure(&longer, font) <= width || row.is_empty() {
+        if frame.measure(&longer, font) <= if rows.is_empty() { first } else { width } || row.is_empty() {
             row = longer;
             continue;
         }
@@ -5299,8 +5313,32 @@ fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) 
     }
     if rows.len() > most {
         rows.truncate(most);
+        let room = if rows.len() == 1 { first } else { width };
         if let Some(last) = rows.last_mut() {
-            *last = fitted(frame, &format!("{last}…"), font, width).to_string();
+            *last = fitted(frame, &format!("{last}…"), font, room).to_string();
+        }
+    }
+    rows
+}
+
+/// A text's lines (see `Face::Text`) in at most `most` rows `width` wide, the first `first` wide: each line broken
+/// into rows as `rows_of` breaks it, a new line on a new row, the last row cut short with an ellipsis where more of
+/// it is left off.
+fn face_rows(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).peekable();
+    while let Some(line) = lines.next() {
+        let left = most - rows.len();
+        let mut laid = rows_within(frame, line, font, if rows.is_empty() { first } else { width }, width, left);
+        let full = rows.len() + laid.len() == most;
+        if full && lines.peek().is_some() && laid.last().is_some_and(|last| !last.ends_with('…')) {
+            let room = if rows.is_empty() && laid.len() == 1 { first } else { width };
+            let last = laid.last_mut().unwrap();
+            *last = fitted(frame, &format!("{last}…"), font, room).to_string();
+        }
+        rows.append(&mut laid);
+        if full {
+            break;
         }
     }
     rows
@@ -5351,7 +5389,6 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 Tab::Copies(_) => List::Copies,
                 Tab::Recent(_) => List::Recent,
             };
-            let pixels = pixels_for(ShelfView::Cards);
             let (named, footed) = (grid.named, grid.foot > 0.0);
             let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
                 let (tile, hit) = &tiles[at];
@@ -5361,7 +5398,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                         frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
                     }
                 }
-                paint_face(frame, theme, ink, tile, cx, cy, side, side, pixels);
+                paint_face(frame, theme, ink, tile, cx, cy, side, side);
                 // (Copied by a press: marked so on its picture, as on the station's pages.)
                 if current {
                     copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(*hit), Mark::Centre(cx + side / 2.0, cy + side / 2.0, side));
@@ -5379,7 +5416,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     }
                 }
             };
-            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_face(frame, theme, ink, &tiles[at].0, cx, cy, side, side, pixels);
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_face(frame, theme, ink, &tiles[at].0, cx, cy, side, side);
             let hovered = tiles.iter().find(|(_, hit)| lit(*hit)).map(|(tile, _)| tile.label.as_str()).filter(|_| !named);
             paint_grid(frame, scene, hits, room, &grid, tiles.len(), list, &draw, &small, hovered);
         }
@@ -6319,7 +6356,67 @@ seven".into() }), &folder, Lang::Zh, now);
 three
 four
 five
-six".into()));
+six
+seven".into()));
+    }
+
+    /// A picture is asked for at as many pixels as it covers where it is drawn, rounded up to a step: never fewer (a
+    /// card's face, 140 DIPs at 150%, was asked for at 128 px and drawn blurred over 210).
+    #[test]
+    fn a_picture_is_asked_for_at_the_pixels_it_covers() {
+        struct At(f32);
+        impl Canvas for At {
+            fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
+            fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+                0.0
+            }
+            fn measure(&self, _: &str, _: Font) -> f32 {
+                0.0
+            }
+            fn baseline(&self, font: Font) -> (f32, f32) {
+                (font.size, 0.0)
+            }
+            fn ink(&self, _: &str, _: Font) -> (f32, f32) {
+                (0.0, 0.0)
+            }
+            fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+            fn unclip(&self) {}
+            fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
+            fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn fill_circle(&self, _: Color, _: Point, _: f32) {}
+            fn stroke(&self, _: &[Point], _: Color, _: f32) {}
+            fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
+            fn fill_shape(&self, _: &[Point], _: Fill) {}
+            fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
+            fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+            fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+            fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+            fn pixels_per_dip(&self) -> f32 {
+                self.0
+            }
+        }
+        for (scale, side) in [(1.0, 56.0), (1.5, 140.0), (2.0, 140.0), (2.25, 333.0), (3.0, 1.0)] {
+            let asked = picture_pixels(&At(scale), side);
+            assert!((asked as f32) >= side * scale && (asked as f32) < side * scale + PICTURE_STEP as f32 && asked % PICTURE_STEP == 0, "{side} DIPs at {scale}: {asked}");
+        }
+    }
+
+    /// A text's face: a line longer than the tile is wide goes on in the rows under it, not cut short where it holds
+    /// more rows; the last row the tile holds ends in an ellipsis where more is left off, whether of a line or after it.
+    #[test]
+    fn a_text_face_is_broken_into_rows() {
+        let font = Font::new(super::super::canvas::Family::Segoe, 10.0, 400.0);
+        // (Six DIPs a character: ten to a row 61 wide.)
+        assert_eq!(face_rows(&Nothing, "把起点钉放开 4/4 都解得出", font, 61.0, 61.0, 4), ["把起点钉放开 4/4", "都解得出"]);
+        assert_eq!(face_rows(&Nothing, "abc\n\n  def  \nghi", font, 61.0, 61.0, 4), ["abc", "def", "ghi"]);
+        assert_eq!(face_rows(&Nothing, "abc\ndef\nghi", font, 61.0, 61.0, 2), ["abc", "def…"]);
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbbcccccccccc", font, 61.0, 61.0, 2), ["aaaaaaaaaa", "bbbbbbbbb…"]);
+        // (Short of a pin, the first row only.)
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbb", font, 37.0, 61.0, 3), ["aaaaaa", "aaaabbbbbb", "bbbb"]);
+        assert!(face_rows(&Nothing, "abc", font, 61.0, 61.0, 0).is_empty());
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.
@@ -6355,7 +6452,7 @@ six".into()));
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
-        fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
     }
 
     thread_local! {
@@ -6519,8 +6616,8 @@ six".into()));
         fn icon(&self, _: super::super::icons::Icon, centre: Point, size: f32, _: Color) {
             self.drew_box(centre.x - size / 2.0, centre.y - size / 2.0, size, size);
         }
-        fn picture(&self, _: &super::super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, _: f32, _: f32) {
-            self.drew_box(x, y, w, h);
+        fn picture_within(&self, _: &super::super::canvas::Picture, at: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {
+            self.drew_box(at.0, at.1, at.2, at.3);
         }
     }
 
@@ -6561,7 +6658,7 @@ six".into()));
             fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, color: Color) {
                 self.0.borrow_mut().push(color);
             }
-            fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
         }
         let theme = Theme::new(Skin::Fluent, true);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
