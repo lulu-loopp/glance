@@ -1,6 +1,6 @@
 [package]
 name = "glance-remote"
-version = "0.4.2"
+version = "0.4.3"
 license = "MIT"
 edition = "2021"
 description = "Glance's remote control helper: what a paired phone may ask of this PC. Runs as the user, never elevated."

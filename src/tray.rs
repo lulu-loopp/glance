@@ -31,6 +31,8 @@ const SHOW_SETTINGS: u32 = WM_APP + 2;
 const FOLLOW_SETTINGS: u32 = WM_APP + 3;
 const ICON_ID: u32 = 1;
 const HOTKEY_ID: i32 = 1;
+/// The shortcut that opens global search.
+const SEARCH_HOTKEY_ID: i32 = 2;
 
 /// The tooltip: the readings in brief, kept for when the icon is added again.
 static TIP: Mutex<String> = Mutex::new(String::new());
@@ -40,6 +42,10 @@ static MENU_UP: AtomicBool = AtomicBool::new(false);
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
 /// The shortcut is let go while the settings take a new one.
 static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
+/// Global search's shortcut: wanted but another program has it, or let go
+/// while the settings take a new one.
+static SEARCH_HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
+static SEARCH_HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 /// Sent to every top-level window when the taskbar is created again (after
@@ -112,6 +118,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_HOTKEY if wparam.0 == HOTKEY_ID as usize => {
             crate::app().controller.toggle();
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 == SEARCH_HOTKEY_ID as usize => {
+            crate::ui::search::toggle();
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -310,15 +320,25 @@ fn show_tip(show: bool) {
     let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
 }
 
-/// Registers the shortcut if there is one (and it is not held back while a
-/// new one is being chosen), or lets it go.
+/// Registers the shortcuts if there are any (and they are not held back
+/// while new ones are being chosen), or lets them go.
 fn register_hotkey(hwnd: HWND) {
+    let (shortcut, search) = {
+        let settings = crate::app().settings.lock().unwrap();
+        (settings.shortcut, settings.search_shortcut)
+    };
+    register_one(hwnd, HOTKEY_ID, shortcut.filter(|_| !HOTKEY_HELD.load(Ordering::Relaxed)), &HOTKEY_TAKEN, "");
+    register_one(hwnd, SEARCH_HOTKEY_ID, search.filter(|_| !SEARCH_HOTKEY_HELD.load(Ordering::Relaxed)), &SEARCH_HOTKEY_TAKEN, "search ");
+}
+
+/// Registers `shortcut` for `id`, or lets it go; whether another program
+/// has it is kept in `taken` and noted once.
+fn register_one(hwnd: HWND, id: i32, shortcut: Option<Shortcut>, taken: &AtomicBool, what: &str) {
     unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+        let _ = UnregisterHotKey(Some(hwnd), id);
     }
-    let shortcut = crate::app().settings.lock().unwrap().shortcut.filter(|_| !HOTKEY_HELD.load(Ordering::Relaxed));
     let Some(shortcut) = shortcut else {
-        HOTKEY_TAKEN.store(false, Ordering::Relaxed);
+        taken.store(false, Ordering::Relaxed);
         return;
     };
     let mut modifiers = MOD_NOREPEAT;
@@ -327,17 +347,23 @@ fn register_hotkey(hwnd: HWND) {
             modifiers |= flag;
         }
     }
-    let taken = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
-    if taken && !HOTKEY_TAKEN.load(Ordering::Relaxed) {
-        crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
+    let is_taken = unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
+    if is_taken && !taken.load(Ordering::Relaxed) {
+        crate::journal::note(format!("{what}{} is taken by another program", shortcut_name(shortcut)));
     }
-    HOTKEY_TAKEN.store(taken, Ordering::Relaxed);
+    taken.store(is_taken, Ordering::Relaxed);
 }
 
 /// Lets the shortcut go while a new one is being chosen (its keys would
 /// otherwise never reach the settings), or takes it up again.
 pub fn hold_hotkey(held: bool) {
     HOTKEY_HELD.store(held, Ordering::Relaxed);
+    follow_settings();
+}
+
+/// The same for global search's shortcut.
+pub fn hold_search_hotkey(held: bool) {
+    SEARCH_HOTKEY_HELD.store(held, Ordering::Relaxed);
     follow_settings();
 }
 
@@ -379,6 +405,11 @@ fn key_name(key: u16) -> String {
 /// Whether the shortcut is wanted but another program already has it.
 pub fn hotkey_taken() -> bool {
     HOTKEY_TAKEN.load(Ordering::Relaxed)
+}
+
+/// Whether global search's shortcut is wanted but another program already has it.
+pub fn search_hotkey_taken() -> bool {
+    SEARCH_HOTKEY_TAKEN.load(Ordering::Relaxed)
 }
 
 /// Has the shortcut follow the settings, from any thread.

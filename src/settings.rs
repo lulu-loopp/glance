@@ -472,6 +472,11 @@ impl Default for Shortcut {
 }
 
 impl Shortcut {
+    /// Alt+Space, as PowerToys Run opens with.
+    pub fn search() -> Self {
+        Shortcut { ctrl: false, alt: true, shift: false, win: false, key: u16::from(b' ') }
+    }
+
     /// Whether it can be a shortcut: a key that is not itself a modifier,
     /// with Ctrl, Alt or Win held (Shift alone would take a key from typing).
     pub fn usable(&self) -> bool {
@@ -659,6 +664,11 @@ impl MusicRooms {
     }
 }
 
+/// Global search's shortcut as settings from before this had one read it: Alt+Space.
+fn search_shortcut() -> Option<Shortcut> {
+    Some(Shortcut::search())
+}
+
 /// Everything the backend acts on, plus the page's own preferences, which it
 /// stores without looking inside.
 #[derive(Clone, Serialize, Deserialize)]
@@ -699,6 +709,10 @@ pub struct Settings {
     /// The shortcut that opens and closes the panel (Ctrl+Alt+G unless
     /// another is chosen); none, when it is cleared.
     pub shortcut: Option<Shortcut>,
+    /// The shortcut that opens global search (Alt+Space unless another is
+    /// chosen); none, when it is cleared.
+    #[serde(default = "search_shortcut")]
+    pub search_shortcut: Option<Shortcut>,
     /// Up to 0.1.8, the shortcut's own switch: off, it reads as cleared.
     /// Read once, not written again.
     #[serde(skip_serializing)]
@@ -882,6 +896,7 @@ impl Default for Settings {
             tear_off: true,
             check_updates: true,
             shortcut: Some(Shortcut::default()),
+            search_shortcut: Some(Shortcut::search()),
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
@@ -1029,6 +1044,9 @@ impl Settings {
         }
         if self.shortcut.is_some_and(|shortcut| !shortcut.usable()) {
             self.shortcut = Some(Shortcut::default());
+        }
+        if self.search_shortcut.is_some_and(|shortcut| !shortcut.usable()) {
+            self.search_shortcut = Some(Shortcut::search());
         }
         for widget in &mut self.widgets {
             if let Some(before) = widget.before.take() {
@@ -1419,6 +1437,7 @@ mod tests {
         let mut settings: Settings = serde_json::from_str(r#"{"edge":"right","hotkey":true}"#).unwrap();
         settings.carry_over();
         assert_eq!(settings.shortcut, Some(Shortcut::default()));
+        assert_eq!(settings.search_shortcut, Some(Shortcut::search()));
         assert!(settings.over_fullscreen == OverFullscreen::Shortcut);
         assert_eq!(settings.columns, None);
         // The shortcut switched off before is cleared; one cleared stays so,
@@ -1436,5 +1455,19 @@ mod tests {
         settings.carry_over();
         assert_eq!(settings.overlay.chosen(), ["gpu", "down", "up"]);
         assert!(!serde_json::to_string(&settings).unwrap().contains("\"items\":[\""));
+    }
+
+    #[test]
+    fn global_search_keeps_its_shortcut_or_none() {
+        // Settings from before it had one open with Alt+Space.
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.search_shortcut, Some(Shortcut::search()));
+        // Cleared, it stays cleared; one that cannot be a shortcut is Alt+Space again.
+        let mut settings: Settings = serde_json::from_str(r#"{"search_shortcut":null}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.search_shortcut, None);
+        let mut settings: Settings = serde_json::from_str(r#"{"search_shortcut":{"ctrl":false,"alt":false,"shift":true,"win":false,"key":65}}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.search_shortcut, Some(Shortcut::search()));
     }
 }

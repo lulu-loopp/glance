@@ -1254,6 +1254,9 @@ enum Target {
     Shortcut,
     /// Clears the shortcut.
     ClearShortcut,
+    /// Global search's shortcut, and clearing it.
+    SearchShortcut,
+    ClearSearchShortcut,
     /// A slider's track.
     Slider(Field),
     /// A component in the layout's library, to be dragged onto an edge.
@@ -1355,6 +1358,8 @@ enum Row {
     /// A value set by sliding.
     Slider(Field),
     Shortcut,
+    /// Global search's shortcut.
+    SearchShortcut,
     /// This Glance's version, how the last asking went, and asking now.
     Version,
     Diagnostics,
@@ -1622,8 +1627,10 @@ struct Ui {
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
     /// Taking a new shortcut: the next key combination pressed, and whether
-    /// the last one lacked Ctrl, Alt or Win.
+    /// the last one lacked Ctrl, Alt or Win. `recording_search`: global
+    /// search's shortcut rather than the panel's.
     recording: bool,
+    recording_search: bool,
     needs_modifier: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
@@ -1871,6 +1878,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             by_hand: false,
             was_sized: false,
             recording: false,
+            recording_search: false,
             needs_modifier: false,
             pointer: None,
             pressed: None,
@@ -2168,6 +2176,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // in front still, above all with it, which stays over it (else the widgets above all come over the question).
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| ui.record(false));
+            with_ui(|ui| ui.record_search(false));
             if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
                 leave_the_front(hwnd);
             }
@@ -2195,8 +2204,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             POURING.store(0, Ordering::Release);
             *ASKED_FROM.lock().unwrap() = None;
             crate::app().controller.settings_front(None);
-            // The shortcut, if let go while a new one was taken, is taken up again.
+            // The shortcuts, if let go while new ones were taken, are taken up again.
             crate::tray::hold_hotkey(false);
+            crate::tray::hold_search_hotkey(false);
             // Its surfaces and bitmaps go first; then the device gives back
             // what they held (unless desktop widgets still draw with it).
             // Closed mid-drag: what was dragged is kept.
@@ -2313,6 +2323,7 @@ impl Ui {
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
                 Row::Shortcut,
+                Row::SearchShortcut,
                 Row::Choice(Field::OverFullscreen),
                 Row::Switch(Switch::TearOff),
             ]),
@@ -2951,6 +2962,26 @@ impl Ui {
                 buttons.push(keys);
                 (p("快捷键", "Shortcut"), detail, buttons)
             }
+            Row::SearchShortcut => {
+                let detail = match (self.recording_search, self.needs_modifier, self.settings.search_shortcut) {
+                    (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Include Ctrl, Alt or Win"),
+                    (true, false, _) => p("请按下组合键，按 Esc 取消", "Press the keys. Esc cancels"),
+                    (false, _, None) => p("打开全局搜索", "Opens global search"),
+                    (false, _, Some(_)) if crate::tray::search_hotkey_taken() => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
+                    (false, _, Some(_)) => p("打开全局搜索", "Opens global search"),
+                };
+                let keys = match (self.recording_search, self.settings.search_shortcut) {
+                    (true, _) => (p("请按键", "Press keys"), Target::SearchShortcut, Button::Taking),
+                    (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Target::SearchShortcut, Button::Plain),
+                    (false, None) => (p("未设置", "None"), Target::SearchShortcut, Button::Plain),
+                };
+                let mut buttons = Vec::new();
+                if self.settings.search_shortcut.is_some() {
+                    buttons.push((p("清除", "Clear"), Target::ClearSearchShortcut, Button::Plain));
+                }
+                buttons.push(keys);
+                (p("全局搜索", "Global search"), detail, buttons)
+            }
             Row::Diagnostics => {
                 // "Copied" for a moment after the press.
                 let copied = self.copied_at.is_some_and(|at| now.duration_since(at) < COPIED_FOR);
@@ -3255,9 +3286,28 @@ impl Ui {
         if on == self.recording {
             return;
         }
+        if on && self.recording_search {
+            self.recording_search = false;
+            crate::tray::hold_search_hotkey(false);
+        }
         self.recording = on;
         self.needs_modifier = false;
         crate::tray::hold_hotkey(on);
+        self.next_frame = Instant::now();
+    }
+
+    /// Starts or stops taking a new shortcut for global search.
+    fn record_search(&mut self, on: bool) {
+        if on == self.recording_search {
+            return;
+        }
+        if on && self.recording {
+            self.recording = false;
+            crate::tray::hold_hotkey(false);
+        }
+        self.recording_search = on;
+        self.needs_modifier = false;
+        crate::tray::hold_search_hotkey(on);
         self.next_frame = Instant::now();
     }
 
@@ -3268,19 +3318,35 @@ impl Ui {
         self.record(false);
     }
 
+    /// No shortcut: nothing opens global search by keys.
+    fn clear_search_shortcut(&mut self) {
+        self.settings.search_shortcut = None;
+        self.save();
+        self.record_search(false);
+    }
+
     /// A key pressed while taking a new shortcut: Escape gives up, Backspace
     /// or Delete clears the shortcut, a modifier alone waits for the key it
     /// goes with, and a key with Ctrl, Alt or Win held becomes the shortcut.
     fn take_shortcut(&mut self, key: VIRTUAL_KEY) {
         self.next_frame = Instant::now();
+        let search = self.recording_search;
         let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(key.0 as i32) } < 0;
         let modifiers = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN];
         if key == VK_ESCAPE {
-            self.record(false);
+            if search {
+                self.record_search(false);
+            } else {
+                self.record(false);
+            }
             return;
         }
         if key == VK_BACK || key == VK_DELETE {
-            self.clear_shortcut();
+            if search {
+                self.clear_search_shortcut();
+            } else {
+                self.clear_shortcut();
+            }
             return;
         }
         if modifiers.contains(&key) {
@@ -3293,9 +3359,15 @@ impl Ui {
             self.needs_modifier = true;
             return;
         }
-        self.settings.shortcut = Some(shortcut);
-        self.save();
-        self.record(false);
+        if search {
+            self.settings.search_shortcut = Some(shortcut);
+            self.save();
+            self.record_search(false);
+        } else {
+            self.settings.shortcut = Some(shortcut);
+            self.save();
+            self.record(false);
+        }
     }
 
     /// A slider's name, its least and most values, its step, and its value.
@@ -4068,6 +4140,9 @@ impl Ui {
         if self.recording && !matches!(self.pressed, Some(Target::Shortcut | Target::ClearShortcut)) {
             self.record(false);
         }
+        if self.recording_search && !matches!(self.pressed, Some(Target::SearchShortcut | Target::ClearSearchShortcut)) {
+            self.record_search(false);
+        }
         // A press moves the focus there too, without showing it.
         if let Some(target) = &self.pressed {
             self.keyboard = false;
@@ -4200,6 +4275,8 @@ impl Ui {
             Target::Switch(switch) => self.flip(switch),
             Target::Shortcut => self.record(!self.recording),
             Target::ClearShortcut => self.clear_shortcut(),
+            Target::SearchShortcut => self.record_search(!self.recording_search),
+            Target::ClearSearchShortcut => self.clear_search_shortcut(),
             Target::Nav(page) => self.turn_to(page),
             Target::Tab(tab) => self.turn_tab(tab),
             Target::Element(name) => {
@@ -4334,6 +4411,8 @@ impl Ui {
                 // A switch's own button comes first.
                 Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
                 Row::Shortcut => vec![Target::Shortcut],
+                Row::SearchShortcut if self.settings.search_shortcut.is_some() => vec![Target::SearchShortcut, Target::ClearSearchShortcut],
+                Row::SearchShortcut => vec![Target::SearchShortcut],
                 Row::Version if update::check() == update::Check::Checking => vec![],
                 Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
@@ -4382,7 +4461,7 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
-        if self.recording {
+        if self.recording || self.recording_search {
             self.take_shortcut(key);
             return true;
         }
@@ -4501,7 +4580,7 @@ impl Ui {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
-            (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
+            (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) | (Row::SearchShortcut, Target::SearchShortcut | Target::ClearSearchShortcut) => true,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
@@ -5272,7 +5351,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
+                Row::Update | Row::Version | Row::Shortcut | Row::SearchShortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;

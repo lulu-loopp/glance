@@ -32,6 +32,8 @@ pub mod seen;
 pub mod render;
 pub mod scene;
 #[cfg(windows)]
+pub mod search;
+#[cfg(windows)]
 pub(crate) mod ask;
 pub(crate) mod picture;
 #[cfg(windows)]
