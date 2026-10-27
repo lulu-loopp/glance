@@ -275,7 +275,27 @@ struct Report<'a> {
     said: Option<i64>,
     /// How far in it said it was when it said (seconds).
     said_at: Option<f64>,
+    /// How far behind where it was when it said that is, at least and at most (track seconds: see `behind`).
+    behind: (f64, f64),
 }
+
+/// How far behind where it was when it said so what a player says is (track seconds, at least and at most): where it
+/// says where it was when it said so the time before (`late`, see `media::Playing::said_late`), the time between
+/// (both at `said` and `before`, as reports say when), else at most `LATE_MOST`. Nothing, where it says where it is.
+fn behind(late: bool, said: Option<i64>, before: Option<i64>, rate: f64) -> (f64, f64) {
+    match (late, said, before) {
+        (false, ..) => (0.0, 0.0),
+        (true, Some(said), Some(before)) => {
+            let between = (said - before) as f64 / 1e7 * rate;
+            (between, between)
+        }
+        (true, ..) => (0.0, LATE_MOST * rate),
+    }
+}
+
+/// The longest a player saying where it was the time before (see `behind`) is taken to go without saying while it
+/// plays, where that time is not known (seconds: Apple Music says every half second or so).
+const LATE_MOST: f64 = 1.0;
 
 impl Reckoning {
     /// How far in it is at least at `now` (seconds).
@@ -293,15 +313,19 @@ impl Reckoning {
     fn after(was: Option<&Reckoning>, report: Report, whole: bool, settling: bool, now: std::time::Instant) -> Reckoning {
         let was = was.filter(|was| was.app_id == report.app_id && was.title == report.title);
         let newer = report.said.is_some_and(|said| was.is_none_or(|was| was.said.is_none_or(|taken| said > taken)));
+        // Where it may be by what it says now: from where it says, behind as it may be, to as far past that as a
+        // whole second and how far behind it may be more.
+        let (behind_least, behind_most) = report.behind;
+        let (said_from, said_spread) = (report.at + behind_least, if whole { 1.0 } else { 0.0 } + behind_most - behind_least);
         let (at, spread, said) = match was {
             Some(was) if settling || !newer => (was.from(now).clamp(0.0, report.length), was.spread, was.said),
             // In whole seconds: where it may be by what was reckoned and by what it says now, both; where the two
             // disagree (moved along), as it says now.
             Some(was) if whole && was.whole => {
-                let (from, till) = (was.from(now).max(report.at), (was.from(now) + was.spread).min(report.at + 1.0));
-                if from <= till { (from, till - from, report.said) } else { (report.at, 1.0, report.said) }
+                let (from, till) = (was.from(now).max(said_from), (was.from(now) + was.spread).min(said_from + said_spread));
+                if from <= till { (from, till - from, report.said) } else { (said_from, said_spread, report.said) }
             }
-            _ => (report.at, if whole { 1.0 } else { 0.0 }, report.said),
+            _ => (said_from, said_spread, report.said),
         };
         Reckoning { at, spread, when: now, playing: report.playing, rate: report.rate, app_id: report.app_id.to_string(), title: report.title.to_string(), said, whole }
     }
@@ -338,7 +362,8 @@ fn look(follow: Follow) -> Option<std::time::Duration> {
         let mut reckoning = RECKONING[f].lock().unwrap();
         *reckoning = playing.as_ref().and_then(|playing| {
             let (at, length) = playing.timeline?;
-            let report = Report { app_id: &playing.app_id, title: &playing.title, playing: playing.playing, rate: playing.rate, at, length, said: playing.said, said_at: playing.said_at };
+            let behind = behind(playing.said_late, playing.said, playing.said_before, playing.rate);
+            let report = Report { app_id: &playing.app_id, title: &playing.title, playing: playing.playing, rate: playing.rate, at, length, said: playing.said, said_at: playing.said_at, behind };
             let whole = in_whole_seconds(WHOLE_SAID.lock().unwrap().get_or_insert_with(Default::default), &report);
             Some(Reckoning::after(reckoning.as_ref(), report, whole, settling, now))
         });
@@ -806,6 +831,9 @@ mod tests {
         start: std::time::Instant,
         was: Option<Reckoning>,
         said: std::collections::HashMap<String, (u32, i64)>,
+        /// Whether it says where it was the time before it says (see `behind`), and when that was, where heard.
+        late: bool,
+        before: Option<f64>,
     }
 
     /// Tenths of a microsecond, as reports say when: `seconds` after the first look.
@@ -815,7 +843,7 @@ mod tests {
 
     impl Player {
         fn new() -> Player {
-            Player { start: std::time::Instant::now(), was: None, said: Default::default() }
+            Player { start: std::time::Instant::now(), was: None, said: Default::default(), late: false, before: None }
         }
 
         /// Looked at `seconds` in: `playing` at `rate`, its last report said at `said` (seconds in) that it was `at`
@@ -829,7 +857,8 @@ mod tests {
             let now = self.start + std::time::Duration::from_secs_f64(seconds);
             let said_at = at;
             let at = if playing { at + (seconds - said) * rate } else { at };
-            let report = Report { app_id: "player", title, playing, rate, at, length: 600.0, said: Some(ticks(said)), said_at: Some(said_at) };
+            let behind = behind(self.late, Some(ticks(said)), self.before.map(ticks), rate);
+            let report = Report { app_id: "player", title, playing, rate, at, length: 600.0, said: Some(ticks(said)), said_at: Some(said_at), behind };
             let whole = in_whole_seconds(&mut self.said, &report);
             let reckoning = Reckoning::after(self.was.as_ref(), report, whole, settling, now);
             let at = reckoning.at(now);
@@ -928,7 +957,7 @@ mod tests {
         player.sought(1.0, 100.0);
         assert!(near(player.look(2.0, "B", false, 1.0, 0.0, 30.0), 30.0));
         let now = player.start + std::time::Duration::from_secs(3);
-        let other = Report { app_id: "other", title: "B", playing: false, rate: 1.0, at: 40.0, length: 600.0, said: Some(ticks(0.0)), said_at: Some(40.0) };
+        let other = Report { app_id: "other", title: "B", playing: false, rate: 1.0, at: 40.0, length: 600.0, said: Some(ticks(0.0)), said_at: Some(40.0), behind: (0.0, 0.0) };
         assert!(near(Reckoning::after(player.was.as_ref(), other, false, false, now).at, 40.0));
     }
 
@@ -979,6 +1008,48 @@ mod tests {
         assert!(near(other.look(0.0, "A", false, 1.0, 0.0, 144.0), 144.0));
     }
 
+    /// Apple Music: every half second or so (0.27 s to 0.55 s apart), the whole second it was in when it said the time
+    /// before: never more than a quarter of a second from where it is, where taken as where it was when it said, it was
+    /// half a second behind, its lines with it. Paused, where it said last, as far as it played since it said before.
+    /// Looked at again with neither heard (Glance just started), from its whole second to two past it.
+    #[test]
+    fn a_player_saying_where_it_was_the_time_before_is_reckoned_on_from_then() {
+        let mut player = Player::new();
+        player.late = true;
+        // When it says, from 0, as Apple Music did, and where it is: 161.4 at the first.
+        let gaps = [0.53, 0.55, 0.27, 0.53, 0.53, 0.55, 0.53, 0.28, 0.53, 0.54];
+        let mut times = vec![0.0];
+        while *times.last().unwrap() < 12.0 {
+            times.push(times.last().unwrap() + gaps[times.len() % gaps.len()]);
+        }
+        let truth = |seconds: f64| 161.4 + seconds;
+        let mut worst = 0.0f64;
+        for tenth in 1..110 {
+            let seconds = tenth as f64 / 10.0;
+            let k = times.iter().rposition(|time| *time <= seconds).unwrap();
+            if k == 0 {
+                continue;
+            }
+            player.before = Some(times[k - 1]);
+            let at = player.look(seconds, "A", true, 1.0, times[k], truth(times[k - 1]).floor());
+            if seconds >= 4.0 {
+                worst = worst.max((at - truth(seconds)).abs());
+            }
+        }
+        assert!(worst < 0.25, "{worst}");
+        // Paused at 172.95 (11.55 s in), said so then: the second it was in 0.27 s before.
+        let k = times.iter().rposition(|time| *time <= 11.6).unwrap();
+        player.before = Some(times[k - 1]);
+        let paused = truth(times[k]);
+        let at = player.look(60.0, "A", false, 1.0, times[k], truth(times[k - 1]).floor());
+        assert!((at - paused).abs() < 0.25, "{at} {paused}");
+        // Glance started again, the paused report all there is: from 160 to 162 (its window showed 161), not 160.
+        let mut started = Player::new();
+        started.late = true;
+        started.said.insert("player".into(), (3, 0));
+        assert!(near(started.look(70.0, "A", false, 1.0, 50.0, 160.0), 161.0));
+    }
+
     /// Pausing shows it paused at once, and returns (it once locked what plays twice, and Glance hung).
     #[test]
     #[cfg(windows)]
@@ -995,10 +1066,13 @@ mod tests {
     }
 
     /// On a desktop, something playing: where its player says it is (reckoned on to now from when it said so) and where
-    /// it is reckoned to be, ten times a second for ten seconds, and each step back.
+    /// it is reckoned to be, at what time of day, ten times a second for ten seconds, and each step back.
     #[test]
     #[ignore = "needs something playing on this PC"]
     fn follows_what_plays() {
+        // (Heard as it says where it is, as the watcher hears it: see `media::Playing::said_before`.)
+        fn heard() {}
+        let _heeding = crate::media::heed(Follow::Any, heard);
         let start = std::time::Instant::now();
         let mut last: Option<f64> = None;
         while start.elapsed() < std::time::Duration::from_secs(10) {
@@ -1007,7 +1081,9 @@ mod tests {
                     look(Follow::Any);
                     let reckoned = position(Follow::Any).unwrap_or(-1.0);
                     let back = last.map_or(0.0, |last| last - reckoned);
-                    println!("{:6.2} s  {} playing={}  said {at:8.3}  reckoned {reckoned:8.3}  said {:5.2} s ago{}", start.elapsed().as_secs_f64(), playing.app, playing.playing, playing.said_ago.unwrap_or(-1.0), if back > 0.0 { format!("  BACK {back:.3}") } else { String::new() });
+                    // (The time of day, UTC, to set beside what is seen elsewhere.)
+                    let day = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64() % 86_400.0;
+                    println!("{day:9.3}  {:6.2} s  {} playing={}  said {at:8.3}  reckoned {reckoned:8.3}  said {:5.2} s ago{}", start.elapsed().as_secs_f64(), playing.app, playing.playing, playing.said_ago.unwrap_or(-1.0), if back > 0.0 { format!("  BACK {back:.3}") } else { String::new() });
                     last = Some(reckoned);
                 }
             }
