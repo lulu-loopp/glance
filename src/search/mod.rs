@@ -14,7 +14,7 @@ mod watch;
 
 use drive::Drive;
 use index::{flag, Index, ROOT};
-pub use query::{Hit, Query};
+pub use query::{Hit, Only, Query};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Once, RwLock};
 use std::time::{Duration, Instant};
@@ -52,8 +52,9 @@ pub struct Standing {
 /// What was found.
 #[derive(Clone, Debug, Default)]
 pub struct Found {
-    /// How many names meet what was typed (the best of them in `hits`).
+    /// How many names meet what was typed, and how many of them are folders' (the best of them in `hits`).
     pub total: usize,
+    pub folders: usize,
     pub hits: Vec<Hit>,
 }
 
@@ -222,9 +223,9 @@ pub fn standing() -> Vec<Standing> {
     volumes.iter().map(|volume| Standing { root: volume.drive.path.clone(), ready: volume.ready.load(Ordering::Relaxed), names: volume.index.read().unwrap().names() }).collect()
 }
 
-/// The names meeting `typed` on every drive: how many there are, and the best `most`, best first.
-pub fn find(typed: &str, most: usize) -> Found {
-    let query = Query::read(typed);
+/// The names meeting `query` on every drive: how many there are, how many are folders', and the best `most` folders
+/// and the best `most` files, best first.
+pub fn find(query: &Query, most: usize) -> Found {
     if query.is_empty() {
         return Found::default();
     }
@@ -232,11 +233,17 @@ pub fn find(typed: &str, most: usize) -> Found {
     let mut found = Found::default();
     for volume in &volumes {
         let index = volume.index.read().unwrap();
-        let (total, hits) = query.find(&index, &volume.drive.path, most);
+        let (total, folders, hits) = query.find(&index, &volume.drive.path, most);
         found.total += total;
+        found.folders += folders;
         found.hits.extend(hits);
     }
-    found.hits.sort_by(|a, b| b.rank.total_cmp(&a.rank).then_with(|| a.path.as_os_str().len().cmp(&b.path.as_os_str().len())));
-    found.hits.truncate(most);
+    query::sort(&mut found.hits);
+    let (mut folders, mut files) = (0, 0);
+    found.hits.retain(|hit| {
+        let shown = if hit.folder { &mut folders } else { &mut files };
+        *shown += 1;
+        *shown <= most
+    });
     found
 }

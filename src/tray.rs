@@ -33,14 +33,17 @@ const SHOW_SETTINGS: u32 = WM_APP + 2;
 const FOLLOW_SETTINGS: u32 = WM_APP + 3;
 const ICON_ID: u32 = 1;
 const HOTKEY_ID: i32 = 1;
+/// Search's shortcut.
+const SEARCH_HOTKEY_ID: i32 = 2;
 
 /// The tooltip: the readings in brief, kept for when the icon is added again.
 static TIP: Mutex<String> = Mutex::new(String::new());
 /// The icon's menu is up (see `open_menu`).
 static MENU_UP: AtomicBool = AtomicBool::new(false);
-/// The shortcut is wanted but another program has it.
+/// The shortcut is wanted but another program has it; search's.
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
-/// The shortcut is let go while the settings take a new one.
+static SEARCH_HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
+/// The shortcuts are let go while the settings take a new one.
 static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
@@ -129,6 +132,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_HOTKEY if wparam.0 == HOTKEY_ID as usize => {
             crate::app().controller.toggle();
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 == SEARCH_HOTKEY_ID as usize => {
+            crate::ui::find::toggle();
             LRESULT(0)
         }
         WM_CLOSE => {
@@ -330,15 +337,25 @@ fn show_tip(show: bool) {
     let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
 }
 
-/// Registers the shortcut if there is one (and it is not held back while a
-/// new one is being chosen), or lets it go.
+/// Registers the shortcuts there are (the panel's, search's), unless they are held back while a new one is being
+/// chosen, or lets them go.
 fn register_hotkey(hwnd: HWND) {
+    let (panel, search) = {
+        let settings = crate::app().settings.lock().unwrap();
+        (settings.shortcut, settings.search_shortcut)
+    };
+    register(hwnd, HOTKEY_ID, panel, &HOTKEY_TAKEN);
+    register(hwnd, SEARCH_HOTKEY_ID, search, &SEARCH_HOTKEY_TAKEN);
+}
+
+/// Registers `shortcut` as the hotkey `id`, if there is one (and it is not held back); whether another program has
+/// it kept in `taken`.
+fn register(hwnd: HWND, id: i32, shortcut: Option<Shortcut>, taken: &AtomicBool) {
     unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+        let _ = UnregisterHotKey(Some(hwnd), id);
     }
-    let shortcut = crate::app().settings.lock().unwrap().shortcut.filter(|_| !HOTKEY_HELD.load(Ordering::Relaxed));
-    let Some(shortcut) = shortcut else {
-        HOTKEY_TAKEN.store(false, Ordering::Relaxed);
+    let Some(shortcut) = shortcut.filter(|_| !HOTKEY_HELD.load(Ordering::Relaxed)) else {
+        taken.store(false, Ordering::Relaxed);
         return;
     };
     let mut modifiers = MOD_NOREPEAT;
@@ -347,11 +364,11 @@ fn register_hotkey(hwnd: HWND) {
             modifiers |= flag;
         }
     }
-    let taken = unsafe { RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
-    if taken && !HOTKEY_TAKEN.load(Ordering::Relaxed) {
+    let refused = unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
+    if refused && !taken.load(Ordering::Relaxed) {
         crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
     }
-    HOTKEY_TAKEN.store(taken, Ordering::Relaxed);
+    taken.store(refused, Ordering::Relaxed);
 }
 
 /// Lets the shortcut go while a new one is being chosen (its keys would
@@ -399,6 +416,11 @@ fn key_name(key: u16) -> String {
 /// Whether the shortcut is wanted but another program already has it.
 pub fn hotkey_taken() -> bool {
     HOTKEY_TAKEN.load(Ordering::Relaxed)
+}
+
+/// Whether search's shortcut is wanted but another program already has it.
+pub fn search_hotkey_taken() -> bool {
+    SEARCH_HOTKEY_TAKEN.load(Ordering::Relaxed)
 }
 
 /// Has the shortcut, and whether the icon is hidden, follow the settings, from any thread.

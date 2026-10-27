@@ -289,25 +289,37 @@ pub fn kind_of(path: &Path, places: &Places) -> Option<(Kind, bool)> {
     let inside = |folder: &Option<PathBuf>| folder.as_ref().is_some_and(|folder| path.starts_with(folder));
     let downloaded = inside(&places.downloads);
     let anything = downloaded || inside(&places.desktop);
-    let kind = match extension.as_str() {
-        "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf" | "txt" | "md" | "csv" | "epub" | "pages" | "key" | "numbers" | "wps" | "et" | "dps" => Kind::Document,
-        picture if is_picture(picture) => {
+    let kind = match kind_of_extension(&extension) {
+        Kind::Picture => {
             let shot = inside(&places.screenshots) || ["屏幕截图", "screenshot", "截图", "snipaste"].iter().any(|start| name.starts_with(start));
             if shot { Kind::Screenshot } else { Kind::Picture }
         }
-        "mp4" | "mkv" | "mov" | "avi" | "webm" | "wmv" | "flv" | "m4v" => Kind::Video,
-        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "wma" => Kind::Audio,
-        "zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" => Kind::Archive,
-        "exe" | "msi" | "msix" | "msixbundle" | "appx" if anything => Kind::Program,
-        _ if anything => Kind::Other,
-        _ => return None,
+        Kind::Program | Kind::Other if !anything => return None,
+        kind => kind,
     };
     Some((kind, downloaded))
 }
 
+/// The extensions (lower case, no dot) of the kinds of file a person keeps.
+pub const DOCUMENTS: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt", "md", "csv", "epub", "pages", "key", "numbers", "wps", "et", "dps"];
+pub const PICTURES: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "svg", "psd", "ai", "avif", "dng", "cr2", "cr3", "nef", "arw"];
+pub const VIDEOS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "wmv", "flv", "m4v"];
+pub const AUDIO: &[&str] = &["mp3", "flac", "wav", "m4a", "aac", "ogg", "opus", "wma"];
+pub const ARCHIVES: &[&str] = &["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "iso"];
+pub const PROGRAMS: &[&str] = &["exe", "msi", "msix", "msixbundle", "appx"];
+
+/// What a file of this extension (lower case, no dot) is, by its extension alone (never a screenshot: that is told by
+/// its name and its folder).
+pub fn kind_of_extension(extension: &str) -> Kind {
+    [(DOCUMENTS, Kind::Document), (PICTURES, Kind::Picture), (VIDEOS, Kind::Video), (AUDIO, Kind::Audio), (ARCHIVES, Kind::Archive), (PROGRAMS, Kind::Program)]
+        .into_iter()
+        .find(|(extensions, _)| extensions.contains(&extension))
+        .map_or(Kind::Other, |(_, kind)| kind)
+}
+
 /// Whether a file of this extension (lower case, no dot) is a picture.
 pub fn is_picture(extension: &str) -> bool {
-    ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "svg", "psd", "ai", "avif", "dng", "cr2", "cr3", "nef", "arw"].contains(&extension)
+    PICTURES.contains(&extension)
 }
 
 /// The site a download came from, as its `Zone.Identifier` says (`text`): the page it was taken from (`ReferrerUrl`),

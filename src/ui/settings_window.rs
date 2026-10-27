@@ -1258,6 +1258,13 @@ enum CodeFor {
     WebPage,
 }
 
+/// Which shortcut: the panel's, or search's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Keys {
+    Panel,
+    Search,
+}
+
 /// What a press lands on.
 #[derive(Clone, PartialEq, Debug)]
 enum Target {
@@ -1271,10 +1278,10 @@ enum Target {
     /// One of a module's items.
     Item(String, String),
     Grip(String),
-    /// The shortcut's keys: pressed, the next combination becomes them.
-    Shortcut,
+    /// A shortcut's keys: pressed, the next combination becomes them.
+    Shortcut(Keys),
     /// Clears the shortcut.
-    ClearShortcut,
+    ClearShortcut(Keys),
     /// A slider's track.
     Slider(Field),
     /// A component in the layout's library, to be dragged onto an edge.
@@ -1375,7 +1382,7 @@ enum Row {
     ModuleChoice(String, Field),
     /// A value set by sliding.
     Slider(Field),
-    Shortcut,
+    Shortcut(Keys),
     /// This Glance's version, how the last asking went, and asking now.
     Version,
     Diagnostics,
@@ -1642,9 +1649,9 @@ struct Ui {
     by_hand: bool,
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
-    /// Taking a new shortcut: the next key combination pressed, and whether
+    /// Taking a new shortcut (which one): the next key combination pressed, and whether
     /// the last one lacked Ctrl, Alt or Win.
-    recording: bool,
+    recording: Option<Keys>,
     needs_modifier: bool,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
@@ -1904,7 +1911,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             settle_thumbs: true,
             by_hand: false,
             was_sized: false,
-            recording: false,
+            recording: None,
             needs_modifier: false,
             pointer: None,
             pressed: None,
@@ -2206,7 +2213,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // no longer above all, gone from the front (see `WM_ACTIVATE`, below). One of its own (a question it asks):
         // in front still, above all with it, which stays over it (else the widgets above all come over the question).
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
-            with_ui(|ui| ui.record(false));
+            with_ui(|ui| ui.record(None));
             if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
                 leave_the_front(hwnd);
             }
@@ -2351,7 +2358,8 @@ impl Ui {
                 Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
-                Row::Shortcut,
+                Row::Shortcut(Keys::Panel),
+                Row::Shortcut(Keys::Search),
                 Row::Choice(Field::OverFullscreen),
                 Row::Switch(Switch::TearOff),
             ]),
@@ -2969,26 +2977,31 @@ impl Ui {
                 };
                 (name, detail, vec![button])
             }
-            Row::Shortcut => {
-                let detail = match (self.recording, self.needs_modifier, self.settings.shortcut) {
+            &Row::Shortcut(which) => {
+                let (name, what, taken) = match which {
+                    Keys::Panel => (p("快捷键", "Shortcut"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
+                    Keys::Search => (p("搜索快捷键", "Search shortcut"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
+                };
+                let recording = self.recording == Some(which);
+                let shortcut = self.shortcut(which);
+                let detail = match (recording, self.needs_modifier, shortcut) {
                     (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Include Ctrl, Alt or Win"),
                     (true, false, _) => p("请按下组合键，按 Esc 取消", "Press the keys. Esc cancels"),
-                    (false, _, None) => p("打开或收起面板", "Opens and closes the panel"),
-                    (false, _, Some(_)) if crate::tray::hotkey_taken() => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
-                    (false, _, Some(_)) => p("打开或收起面板", "Opens and closes the panel"),
+                    (false, _, Some(_)) if taken => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
+                    (false, _, _) => what,
                 };
-                let keys = match (self.recording, self.settings.shortcut) {
-                    (true, _) => (p("请按键…", "Press keys…"), Target::Shortcut, Button::Taking),
-                    (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Target::Shortcut, Button::Plain),
-                    (false, None) => (p("未设置", "None"), Target::Shortcut, Button::Plain),
+                let keys = match (recording, shortcut) {
+                    (true, _) => (p("请按键…", "Press keys…"), Target::Shortcut(which), Button::Taking),
+                    (false, Some(shortcut)) => (crate::tray::shortcut_name(shortcut), Target::Shortcut(which), Button::Plain),
+                    (false, None) => (p("未设置", "None"), Target::Shortcut(which), Button::Plain),
                 };
                 // With a shortcut set, a button to clear it, right of its keys.
                 let mut buttons = Vec::new();
-                if self.settings.shortcut.is_some() {
-                    buttons.push((p("清除", "Clear"), Target::ClearShortcut, Button::Plain));
+                if shortcut.is_some() {
+                    buttons.push((p("清除", "Clear"), Target::ClearShortcut(which), Button::Plain));
                 }
                 buttons.push(keys);
-                (p("快捷键", "Shortcut"), detail, buttons)
+                (name, detail, buttons)
             }
             Row::Diagnostics => {
                 // "Copied" for a moment after the press.
@@ -3296,36 +3309,47 @@ impl Ui {
 
     /// Starts or stops taking a new shortcut. Meanwhile the old one is let
     /// go, or its keys would never come here.
-    fn record(&mut self, on: bool) {
-        if on == self.recording {
+    fn record(&mut self, which: Option<Keys>) {
+        if which == self.recording {
             return;
         }
-        self.recording = on;
+        self.recording = which;
         self.needs_modifier = false;
-        crate::tray::hold_hotkey(on);
+        crate::tray::hold_hotkey(which.is_some());
         self.next_frame = Instant::now();
     }
 
-    /// No shortcut: nothing opens the panel by keys.
-    fn clear_shortcut(&mut self) {
-        self.settings.shortcut = None;
+    /// The shortcut `which` as it is set.
+    fn shortcut(&self, which: Keys) -> Option<Shortcut> {
+        match which {
+            Keys::Panel => self.settings.shortcut,
+            Keys::Search => self.settings.search_shortcut,
+        }
+    }
+
+    /// The shortcut `which` set to `to` (none: nothing opens what it opened by keys).
+    fn set_shortcut(&mut self, which: Keys, to: Option<Shortcut>) {
+        match which {
+            Keys::Panel => self.settings.shortcut = to,
+            Keys::Search => self.settings.search_shortcut = to,
+        }
         self.save();
-        self.record(false);
+        self.record(None);
     }
 
     /// A key pressed while taking a new shortcut: Escape gives up, Backspace
     /// or Delete clears the shortcut, a modifier alone waits for the key it
     /// goes with, and a key with Ctrl, Alt or Win held becomes the shortcut.
-    fn take_shortcut(&mut self, key: VIRTUAL_KEY) {
+    fn take_shortcut(&mut self, which: Keys, key: VIRTUAL_KEY) {
         self.next_frame = Instant::now();
         let down = |key: VIRTUAL_KEY| unsafe { GetKeyState(key.0 as i32) } < 0;
         let modifiers = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LSHIFT, VK_RSHIFT, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN];
         if key == VK_ESCAPE {
-            self.record(false);
+            self.record(None);
             return;
         }
         if key == VK_BACK || key == VK_DELETE {
-            self.clear_shortcut();
+            self.set_shortcut(which, None);
             return;
         }
         if modifiers.contains(&key) {
@@ -3338,9 +3362,7 @@ impl Ui {
             self.needs_modifier = true;
             return;
         }
-        self.settings.shortcut = Some(shortcut);
-        self.save();
-        self.record(false);
+        self.set_shortcut(which, Some(shortcut));
     }
 
     /// A slider's name, its least and most values, its step, and its value.
@@ -4117,8 +4139,8 @@ impl Ui {
         }
         self.pressed = self.hovered();
         // A press anywhere else gives up taking a new shortcut.
-        if self.recording && !matches!(self.pressed, Some(Target::Shortcut | Target::ClearShortcut)) {
-            self.record(false);
+        if self.recording.is_some() && !matches!(self.pressed, Some(Target::Shortcut(_) | Target::ClearShortcut(_))) {
+            self.record(None);
         }
         // A press moves the focus there too, without showing it.
         if let Some(target) = &self.pressed {
@@ -4250,8 +4272,8 @@ impl Ui {
                 self.press_editor(&target);
             }
             Target::Switch(switch) => self.flip(switch),
-            Target::Shortcut => self.record(!self.recording),
-            Target::ClearShortcut => self.clear_shortcut(),
+            Target::Shortcut(which) => self.record(if self.recording == Some(which) { None } else { Some(which) }),
+            Target::ClearShortcut(which) => self.set_shortcut(which, None),
             Target::Nav(page) => self.turn_to(page),
             Target::Tab(tab) => self.turn_tab(tab),
             Target::Element(name) => {
@@ -4384,8 +4406,8 @@ impl Ui {
                 Row::Library => vec![],
                 Row::Choice(field) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 // A switch's own button comes first.
-                Row::Shortcut if self.settings.shortcut.is_some() => vec![Target::Shortcut, Target::ClearShortcut],
-                Row::Shortcut => vec![Target::Shortcut],
+                Row::Shortcut(which) if self.shortcut(which).is_some() => vec![Target::Shortcut(which), Target::ClearShortcut(which)],
+                Row::Shortcut(which) => vec![Target::Shortcut(which)],
                 Row::Version if update::check() == update::Check::Checking => vec![],
                 Row::Version => vec![Target::CheckNow],
                 Row::Switch(switch) => vec![Target::Switch(switch)],
@@ -4434,8 +4456,8 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
-        if self.recording {
-            self.take_shortcut(key);
+        if let Some(which) = self.recording {
+            self.take_shortcut(which, key);
             return true;
         }
         let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_) | Target::Expand(_)));
@@ -4553,7 +4575,8 @@ impl Ui {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
-            (Row::Version, Target::CheckNow) | (Row::Shortcut, Target::Shortcut | Target::ClearShortcut) => true,
+            (Row::Version, Target::CheckNow) => true,
+            (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::Phone(a, _), Target::Unpair(b)) => a == b,
@@ -5324,7 +5347,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;

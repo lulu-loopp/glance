@@ -94,7 +94,7 @@ const FONT: Font = Font::new(Family::Segoe, 14.0, 400.0);
 impl Look {
     /// What its choices are written in: Windows' own face (Windows 11's look, the system's), or the skin's (glass's
     /// Inter, chart paper's Archivo), its size.
-    fn font(self) -> Font {
+    pub(super) fn font(self) -> Font {
         match self.skin {
             Some(skin @ (super::theme::Skin::Glass | super::theme::Skin::Paper)) => Font { size: FONT.size, weight: FONT.weight, ..super::theme::Theme::new(skin, self.dark).body },
             _ => FONT,
@@ -488,20 +488,20 @@ pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height
     Plate { icon: colours.icon, highlight: colours.highlight, radius }
 }
 
-struct Colours {
-    sheet: Color,
-    stroke: Color,
-    rim: Option<Color>,
-    shadow: Color,
-    text: Color,
-    icon: Color,
-    highlight: Color,
-    rule: Color,
-    radius: f32,
+pub(super) struct Colours {
+    pub(super) sheet: Color,
+    pub(super) stroke: Color,
+    pub(super) rim: Option<Color>,
+    pub(super) shadow: Color,
+    pub(super) text: Color,
+    pub(super) icon: Color,
+    pub(super) highlight: Color,
+    pub(super) rule: Color,
+    pub(super) radius: f32,
 }
 
 impl Colours {
-    fn new(look: Look, frosted: bool) -> Self {
+    pub(super) fn new(look: Look, frosted: bool) -> Self {
         use super::theme::Skin;
         let dark = look.dark;
         let theme = look.skin.map(|skin| super::theme::Theme::new(skin, dark));

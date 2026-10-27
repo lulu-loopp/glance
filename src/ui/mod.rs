@@ -16,6 +16,8 @@ pub mod gfx;
 pub mod life;
 pub mod forms;
 #[cfg(windows)]
+pub mod find;
+#[cfg(windows)]
 pub mod glass;
 pub mod icons;
 #[cfg(windows)]

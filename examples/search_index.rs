@@ -24,7 +24,7 @@ fn main() {
     writeln!(said, "all ready in {:?}", began.elapsed()).unwrap();
     for typed in ["a", "readme", "glance", ".rs", "季度", "jidu", "ext:png", "*.md", "developer\\ rs", "zzqqxx"] {
         let began = Instant::now();
-        let found = search::find(typed, 50);
+        let found = search::find(&search::Query::read(typed), 50);
         let took = began.elapsed();
         writeln!(said, "{typed:?}: {} found in {took:?}", found.total).unwrap();
         for hit in found.hits.iter().take(3) {

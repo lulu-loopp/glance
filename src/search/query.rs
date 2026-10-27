@@ -25,6 +25,17 @@ pub struct Query {
     kinds: Vec<String>,
     /// Folders the name must be within (each part of one of the folders it is in, folded).
     within: Vec<String>,
+    /// The kinds of file a view of them allows (none: any), besides those typed; and whether only folders, or only
+    /// files, are found.
+    allowed: Option<Vec<String>>,
+    only: Option<Only>,
+}
+
+/// Which names alone are found: folders', or files'.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Only {
+    Folders,
+    Files,
 }
 
 /// A name found.
@@ -65,18 +76,29 @@ impl Query {
         query
     }
 
+    /// Whether nothing was typed to be looked for (what a view allows is not looked for alone).
     pub fn is_empty(&self) -> bool {
         self.words.is_empty() && self.kinds.is_empty() && self.within.is_empty()
     }
 
-    /// The names in `index` (of the drive whose root is `root`) meeting it: how many there are, and the best
-    /// `most` of them, best first.
-    pub fn find(&self, index: &Index, root: &str, most: usize) -> (usize, Vec<Hit>) {
+    /// The same, only files of `kinds` (extensions, folded, without their dot) found, of those typed too.
+    pub fn allowing(self, kinds: &[&str]) -> Query {
+        Query { allowed: Some(kinds.iter().map(|kind| kind.to_string()).collect()), only: Some(Only::Files), ..self }
+    }
+
+    /// The same, only folders', or files', names found.
+    pub fn only(self, only: Only) -> Query {
+        Query { only: Some(only), ..self }
+    }
+
+    /// The names in `index` (of the drive whose root is `root`) meeting it: how many there are, how many of them are
+    /// folders', and the best `most` folders and the best `most` files, best first.
+    pub fn find(&self, index: &Index, root: &str, most: usize) -> (usize, usize, Vec<Hit>) {
         let threads = index.entries().len().div_ceil(1 << 20).clamp(1, 4);
         let candidates = self.candidates(index, threads);
         // (Many, they are met on several threads at once.)
         let meet = |places: &[u32]| places.iter().filter_map(|&place| self.meets(index, place).map(|score| (score, place))).collect::<Vec<_>>();
-        let mut met: Vec<(f32, u32)> = if candidates.len() < 1 << 16 {
+        let met: Vec<(f32, u32)> = if candidates.len() < 1 << 16 {
             meet(&candidates)
         } else {
             let share = candidates.len().div_ceil(threads);
@@ -86,28 +108,36 @@ impl Query {
             })
         };
         let total = met.len();
-        // The best by their names, then those ranked by where they are too.
-        let ranked = RANKED.min(met.len());
-        if ranked < met.len() {
-            met.select_nth_unstable_by(ranked, |a, b| b.0.total_cmp(&a.0));
-            met.truncate(ranked);
-        }
-        let mut hits: Vec<Hit> = met
-            .into_iter()
-            .filter_map(|(score, place)| {
-                let entry = index.entries()[place as usize];
-                let path = index.path(place, root)?;
-                let rank = score - away(index, place) - if entry.flags & (flag::HIDDEN | flag::SYSTEM) != 0 { 2.0 } else { 0.0 };
-                Some(Hit { name: index.name(place).to_string_lossy().into_owned(), path, folder: entry.folder(), marks: Vec::new(), rank })
-            })
-            .collect();
-        hits.sort_by(|a, b| b.rank.total_cmp(&a.rank).then_with(|| a.path.as_os_str().len().cmp(&b.path.as_os_str().len())));
-        hits.truncate(most);
+        // The best by their names, folders and files apart, then those ranked by where they are too.
+        let (folders, files): (Vec<_>, Vec<_>) = met.into_iter().partition(|&(_, place)| index.entries()[place as usize].folder());
+        let folders_total = folders.len();
+        let rank = |mut met: Vec<(f32, u32)>| -> Vec<Hit> {
+            let ranked = RANKED.min(met.len());
+            if ranked < met.len() {
+                met.select_nth_unstable_by(ranked, |a, b| b.0.total_cmp(&a.0));
+                met.truncate(ranked);
+            }
+            let mut hits: Vec<Hit> = met
+                .into_iter()
+                .filter_map(|(score, place)| {
+                    let entry = index.entries()[place as usize];
+                    let path = index.path(place, root)?;
+                    let rank = score - away(index, place) - if entry.flags & (flag::HIDDEN | flag::SYSTEM) != 0 { 2.0 } else { 0.0 };
+                    Some(Hit { name: index.name(place).to_string_lossy().into_owned(), path, folder: entry.folder(), marks: Vec::new(), rank })
+                })
+                .collect();
+            sort(&mut hits);
+            hits.truncate(most);
+            hits
+        };
+        let mut hits = rank(folders);
+        hits.extend(rank(files));
+        sort(&mut hits);
         // (Where the words met is found for those shown alone.)
         for hit in &mut hits {
             hit.marks = self.marks(&hit.name);
         }
-        (total, hits)
+        (total, folders_total, hits)
     }
 
     /// The live entries that may meet it: those holding its longest word (or spelling it in pinyin), else a part of
@@ -128,8 +158,13 @@ impl Query {
         if !self.words.is_empty() {
             return live(index);
         }
-        if !self.kinds.is_empty() {
-            return self.kinds.iter().flat_map(|kind| index.holding(&format!(".{kind}"), threads)).collect();
+        let kinds = if self.kinds.is_empty() { self.allowed.as_deref().unwrap_or_default() } else { &self.kinds };
+        if !kinds.is_empty() {
+            // (A name may end in one kind and hold another: each found once.)
+            let mut found: Vec<u32> = kinds.iter().flat_map(|kind| index.holding(&format!(".{kind}"), threads)).collect();
+            found.sort_unstable();
+            found.dedup();
+            return found;
         }
         if let Some(last) = self.within.last() {
             // Whatever is in the folders named so.
@@ -147,12 +182,28 @@ impl Query {
             return None;
         }
         let folded = index.folded_name(place);
-        if !self.kinds.is_empty() {
+        match self.only {
+            Some(Only::Folders) if !entry.folder() => return None,
+            Some(Only::Files) if entry.folder() => return None,
+            _ => {}
+        }
+        for kinds in [Some(&self.kinds).filter(|kinds| !kinds.is_empty()), self.allowed.as_ref()].into_iter().flatten() {
             let kind = folded.rsplit_once('.').map(|(_, kind)| kind)?;
-            if entry.folder() || !self.kinds.iter().any(|asked| asked == kind) {
+            if entry.folder() || !kinds.iter().any(|asked| asked == kind) {
                 return None;
             }
         }
+        let score = self.words_meet(folded, entry.flags & flag::CHINESE != 0)?;
+        if !self.within.iter().all(|part| ancestors_hold(index, entry.parent, part)) {
+            return None;
+        }
+        // (Its words' score counts most.)
+        Some(score * 2.0 + if entry.folder() { 0.5 } else { 0.0 })
+    }
+
+    /// How well its words meet `folded` (a name, case folded; `chinese`, holding Chinese characters, spelt in pinyin
+    /// too): each 4 for the whole name, 3 its start, 2 a word's start in it, 1 within it. None where one does not.
+    fn words_meet(&self, folded: &str, chinese: bool) -> Option<f32> {
         let mut score = 0.0;
         let mut chars: Option<Vec<char>> = None;
         for word in &self.words {
@@ -168,7 +219,7 @@ impl Query {
                         } else {
                             1.0
                         };
-                    } else if entry.flags & flag::CHINESE != 0 && spellable(word) {
+                    } else if chinese && spellable(word) {
                         let chars = chars.get_or_insert_with(|| folded.chars().collect());
                         let (from, to) = readings::spelt(chars, word.as_bytes())?;
                         score += if from == 0 && to == chars.len() {
@@ -193,11 +244,34 @@ impl Query {
                 }
             }
         }
-        if !self.within.iter().all(|part| ancestors_hold(index, entry.parent, part)) {
+        Some(score)
+    }
+
+    /// How well a name that is not a file's (a program's, a settings page's, a note's) meets it, as a file's name would
+    /// (its words' score doubled, as `find` ranks), and where its words met it; none where it does not, or it asks for
+    /// what only files have (kinds, folders).
+    pub fn meets_name(&self, name: &str) -> Option<(f32, Vec<(usize, usize)>)> {
+        if self.words.is_empty() || !self.kinds.is_empty() || !self.within.is_empty() {
             return None;
         }
-        // (Its words' score counts most.)
-        Some(score * 2.0 + if entry.folder() { 0.5 } else { 0.0 })
+        let folded: String = name.chars().flat_map(char::to_lowercase).collect();
+        let score = self.words_meet(&folded, name.chars().any(readings::read))?;
+        Some((score * 2.0, self.marks(name)))
+    }
+
+    /// Whether it asks for what only files have: kinds of file, or folders they are within.
+    pub fn of_files(&self) -> bool {
+        !self.kinds.is_empty() || !self.within.is_empty()
+    }
+
+    /// Whether `text` (a note's, something copied) holds each of its words, in any case: met within what is written,
+    /// not by a name. (A pattern is a name's: it meets no text.)
+    pub fn in_text(&self, text: &str) -> bool {
+        if self.words.is_empty() || self.of_files() {
+            return false;
+        }
+        let folded = text.to_lowercase();
+        self.words.iter().all(|word| matches!(word, Word::Plain(word) if folded.contains(word.as_str())))
     }
 
     /// Where its words meet `name`, as its characters (from, to) in order: as they are written in any case, or spelt
@@ -221,6 +295,11 @@ impl Query {
         marks.sort_unstable();
         marks
     }
+}
+
+/// Hits best first, the shorter path first of two as good.
+pub fn sort(hits: &mut [Hit]) {
+    hits.sort_by(|a, b| b.rank.total_cmp(&a.rank).then_with(|| a.path.as_os_str().len().cmp(&b.path.as_os_str().len())));
 }
 
 /// Every live entry but the root.
@@ -357,7 +436,11 @@ mod tests {
     type Shown = (String, Vec<(usize, usize)>);
 
     fn found(typed: &str) -> (usize, Vec<Shown>) {
-        let (total, hits) = Query::read(typed).find(&drive(), "C:\\", 10);
+        found_as(Query::read(typed))
+    }
+
+    fn found_as(query: Query) -> (usize, Vec<Shown>) {
+        let (total, _, hits) = query.find(&drive(), "C:\\", 10);
         (total, hits.into_iter().map(|hit| (hit.path.display().to_string(), hit.marks)).collect())
     }
 
@@ -382,5 +465,38 @@ mod tests {
         assert_eq!(found("docs\\").0, 3);
         assert_eq!(found("read*.md"), (1, vec![("C:\\Docs\\Readme.md".into(), vec![])]));
         assert_eq!(found("readme zz").0, 0);
+    }
+
+    #[test]
+    fn a_view_allows_what_it_shows() {
+        assert_eq!(found_as(Query::read("readme").only(Only::Folders)).1, [("C:\\readme".into(), vec![(0, 6)])]);
+        assert_eq!(found_as(Query::read("readme").only(Only::Files)).0, 3);
+        assert_eq!(found_as(Query::read("readme").allowing(&["md", "pdf"])).1, [("C:\\Docs\\Readme.md".into(), vec![(0, 6)])]);
+        // (What is typed and what the view allows, both.)
+        assert_eq!(found_as(Query::read("ext:txt").allowing(&["md"])).0, 0);
+        assert_eq!(found_as(Query::read("ext:txt,md").allowing(&["md", "docx"])).0, 1);
+        // (Nothing typed, nothing is looked for, whatever the view.)
+        assert!(Query::read("  ").allowing(&["md"]).is_empty());
+        // A name holding two kinds is found once.
+        let (total, folders, _) = Query::read("ext:txt,md").find(&drive(), "C:\\", 10);
+        assert_eq!((total, folders), (3, 0));
+        let (total, folders, hits) = Query::read("readme").find(&drive(), "C:\\", 1);
+        assert_eq!((total, folders, hits.len()), (4, 1, 2), "the best folder and the best file");
+    }
+
+    #[test]
+    fn other_names_are_met_as_files_are() {
+        let meets = |typed: &str, name: &str| Query::read(typed).meets_name(name);
+        assert_eq!(meets("wyy", "网易云音乐"), Some((6.0, vec![(0, 3)])));
+        assert_eq!(meets("yinyue", "网易云音乐"), Some((4.0, vec![(3, 5)])));
+        assert_eq!(meets("code", "Visual Studio Code"), Some((4.0, vec![(14, 18)])));
+        assert_eq!(meets("STEAM", "Steam"), Some((8.0, vec![(0, 5)])));
+        assert_eq!(meets("qq", "QQ音乐"), Some((6.0, vec![(0, 2)])));
+        assert_eq!(meets("lanya", "蓝牙和其他设备"), Some((6.0, vec![(0, 2)])));
+        assert_eq!(meets("note*", "Notepad"), Some((6.0, vec![])));
+        assert!(meets("zz", "Steam").is_none());
+        // (Asking for what only files have, no other name meets it.)
+        assert!(meets("steam ext:exe", "Steam").is_none());
+        assert!(meets("app\\ steam", "Steam").is_none());
     }
 }

@@ -57,10 +57,10 @@ pub enum Ask {
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
-/// lately of the entry, to be marked copied), opened, shown in Explorer.
+/// lately of the entry, to be marked copied there, where they were), opened, shown in Explorer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FilesAct {
-    Copy(super::recent::Entry),
+    Copy(Option<super::recent::Entry>),
     Open,
     Show,
 }
@@ -549,7 +549,7 @@ impl Station {
                 Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
                 Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
                 Ask::Files(paths, act) => match act {
-                    FilesAct::Copy(entry) => self.copy(&Content::Files(paths), false, Some(Copied::Recent(entry))),
+                    FilesAct::Copy(entry) => self.copy(&Content::Files(paths), false, entry.map(Copied::Recent)),
                     FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
                     FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
                 },

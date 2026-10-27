@@ -597,6 +597,8 @@ pub fn run() {
     // (What was changed last is on the disk before Glance goes, a note written in too, and what was noted last.)
     ui::beside::keep_as_glance_goes();
     app().controller.keep_writing();
+    // (The drives' names kept as they are now: read again as search is next called up, not found again.)
+    search::keep_all();
     saved_all();
     presents::stop_started();
     journal::written();

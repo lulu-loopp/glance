@@ -472,6 +472,11 @@ impl Default for Shortcut {
 }
 
 impl Shortcut {
+    /// Win+Alt+Space, search's.
+    pub fn search() -> Self {
+        Shortcut { ctrl: false, alt: true, shift: false, win: true, key: 0x20 }
+    }
+
     /// Whether it can be a shortcut: a key that is not itself a modifier,
     /// with Ctrl, Alt or Win held (Shift alone would take a key from typing).
     pub fn usable(&self) -> bool {
@@ -699,6 +704,8 @@ pub struct Settings {
     /// The shortcut that opens and closes the panel (Ctrl+Alt+G unless
     /// another is chosen); none, when it is cleared.
     pub shortcut: Option<Shortcut>,
+    /// The shortcut that calls up search (Win+Alt+Space unless another is chosen); none, when it is cleared.
+    pub search_shortcut: Option<Shortcut>,
     /// Up to 0.1.8, the shortcut's own switch: off, it reads as cleared.
     /// Read once, not written again.
     #[serde(skip_serializing)]
@@ -885,6 +892,7 @@ impl Default for Settings {
             tear_off: true,
             check_updates: true,
             shortcut: Some(Shortcut::default()),
+            search_shortcut: Some(Shortcut::search()),
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
@@ -1033,6 +1041,9 @@ impl Settings {
         }
         if self.shortcut.is_some_and(|shortcut| !shortcut.usable()) {
             self.shortcut = Some(Shortcut::default());
+        }
+        if self.search_shortcut.is_some_and(|shortcut| !shortcut.usable()) {
+            self.search_shortcut = Some(Shortcut::search());
         }
         for widget in &mut self.widgets {
             if let Some(before) = widget.before.take() {
@@ -1311,6 +1322,21 @@ mod tests {
         // The same setting changed in both: the window's, made last, stands.
         mine.overlay.at = (1.0, 0.0);
         assert_eq!(super::merged(&held, &base, &mine).overlay.at, (1.0, 0.0));
+    }
+
+    /// Search's shortcut is Win+Alt+Space in settings from before it was one; cleared, it stays so; one that cannot be
+    /// a shortcut is Win+Alt+Space again.
+    #[test]
+    fn search_has_its_own_shortcut() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        settings.carry_over();
+        assert_eq!(settings.search_shortcut, Some(Shortcut { ctrl: false, alt: true, shift: false, win: true, key: 0x20 }));
+        let mut settings: Settings = serde_json::from_str(r#"{"search_shortcut":null}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.search_shortcut, None);
+        let mut settings: Settings = serde_json::from_str(r#"{"search_shortcut":{"ctrl":false,"alt":false,"shift":true,"win":false,"key":32}}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.search_shortcut, Some(Shortcut::search()));
     }
 
     #[test]
