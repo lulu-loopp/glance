@@ -1002,7 +1002,7 @@ impl Tile {
             What::Text { text } => (
                 text.split_whitespace().collect::<Vec<_>>().join(" "),
                 format!("{} {}", text.chars().filter(|c| !c.is_whitespace()).count(), lang.pick("字", "characters")),
-                Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(6).collect::<Vec<_>>().join("\n")),
+                Face::Text(text.lines().filter(|line| !line.trim().is_empty()).take(FACE_LINES).collect::<Vec<_>>().join("\n")),
             ),
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
@@ -1012,6 +1012,10 @@ impl Tile {
         Tile { id: item.id, label, about, face, pinned: item.pinned }
     }
 }
+
+/// How many of a text's lines its tile keeps to show (more than the largest face holds rows, that one left off is
+/// known of by the ellipsis on the last).
+const FACE_LINES: usize = 16;
 
 /// What a note stuck on the desktop is shown as: a lane of this name and its file's (see `stuck_note_lane`).
 pub const STUCK_NOTE_LANE: &str = "note:";
@@ -4208,14 +4212,15 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             if small < 40.0 {
                 frame.icon(Icon::Clipboard, Point { x: x + w / 2.0, y: y + h / 2.0 }, small / 2.0, theme.text3);
             } else {
-                // Its first lines, each cut short where it is longer than the tile is wide.
+                // Its first lines, broken into rows as wide as the tile, as many as it holds (the last cut short where
+                // more is left off).
                 let font = Font { size: if small > 80.0 { 12.0 } else { 11.0 }, ..theme.small };
                 let line = font.size * 1.28;
-                let lines = ((h - 10.0) / line) as usize;
-                for (at, words) in text.lines().take(lines).enumerate() {
-                    // (The first short of a pin in the corner.)
-                    let room = w - 10.0 - if at == 0 && tile.pinned { 14.0 } else { 0.0 };
-                    frame.text(&fitted(frame, words.trim(), font, room), font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
+                let room = w - 10.0;
+                // (The first row short of a pin in the corner.)
+                let first = room - if tile.pinned { 14.0 } else { 0.0 };
+                for (at, row) in face_rows(frame, text, font, first, room, ((h - 10.0) / line) as usize).iter().enumerate() {
+                    frame.text(row, font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
                 }
             }
         }
@@ -5258,12 +5263,18 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
 /// `text` in rows `width` wide in `font`, at most `most` of them (the last cut short with an ellipsis where it runs
 /// on): broken between words, or between characters where a word is too long for a row (and in Chinese).
 fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) -> Vec<String> {
+    rows_within(frame, text, font, width, width, most)
+}
+
+/// `text` in rows as `rows_of` lays it out, its first row `first` wide (short of something in its corner), the rest
+/// `width`.
+fn rows_within(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     let mut row = String::new();
     for c in text.chars() {
         let mut longer = row.clone();
         longer.push(c);
-        if frame.measure(&longer, font) <= width || row.is_empty() {
+        if frame.measure(&longer, font) <= if rows.is_empty() { first } else { width } || row.is_empty() {
             row = longer;
             continue;
         }
@@ -5287,8 +5298,32 @@ fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) 
     }
     if rows.len() > most {
         rows.truncate(most);
+        let room = if rows.len() == 1 { first } else { width };
         if let Some(last) = rows.last_mut() {
-            *last = fitted(frame, &format!("{last}…"), font, width).to_string();
+            *last = fitted(frame, &format!("{last}…"), font, room).to_string();
+        }
+    }
+    rows
+}
+
+/// A text's lines (see `Face::Text`) in at most `most` rows `width` wide, the first `first` wide: each line broken
+/// into rows as `rows_of` breaks it, a new line on a new row, the last row cut short with an ellipsis where more of
+/// it is left off.
+fn face_rows(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).peekable();
+    while let Some(line) = lines.next() {
+        let left = most - rows.len();
+        let mut laid = rows_within(frame, line, font, if rows.is_empty() { first } else { width }, width, left);
+        let full = rows.len() + laid.len() == most;
+        if full && lines.peek().is_some() && laid.last().is_some_and(|last| !last.ends_with('…')) {
+            let room = if rows.is_empty() && laid.len() == 1 { first } else { width };
+            let last = laid.last_mut().unwrap();
+            *last = fitted(frame, &format!("{last}…"), font, room).to_string();
+        }
+        rows.append(&mut laid);
+        if full {
+            break;
         }
     }
     rows
@@ -6258,7 +6293,23 @@ seven".into() }), &folder, Lang::Zh, now);
 three
 four
 five
-six".into()));
+six
+seven".into()));
+    }
+
+    /// A text's face: a line longer than the tile is wide goes on in the rows under it, not cut short where it holds
+    /// more rows; the last row the tile holds ends in an ellipsis where more is left off, whether of a line or after it.
+    #[test]
+    fn a_text_face_is_broken_into_rows() {
+        let font = Font::new(super::super::canvas::Family::Segoe, 10.0, 400.0);
+        // (Six DIPs a character: ten to a row 61 wide.)
+        assert_eq!(face_rows(&Nothing, "把起点钉放开 4/4 都解得出", font, 61.0, 61.0, 4), ["把起点钉放开 4/4", "都解得出"]);
+        assert_eq!(face_rows(&Nothing, "abc\n\n  def  \nghi", font, 61.0, 61.0, 4), ["abc", "def", "ghi"]);
+        assert_eq!(face_rows(&Nothing, "abc\ndef\nghi", font, 61.0, 61.0, 2), ["abc", "def…"]);
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbbcccccccccc", font, 61.0, 61.0, 2), ["aaaaaaaaaa", "bbbbbbbbb…"]);
+        // (Short of a pin, the first row only.)
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbb", font, 37.0, 61.0, 3), ["aaaaaa", "aaaabbbbbb", "bbbb"]);
+        assert!(face_rows(&Nothing, "abc", font, 61.0, 61.0, 0).is_empty());
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.
