@@ -330,6 +330,11 @@ pub trait Canvas {
     /// picture's middle, the rest cut off), its corners rounded by `radius`, `opacity` of it.
     #[allow(clippy::too_many_arguments)]
     fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32);
+    /// How many of the target's pixels a DIP is, as drawn now: what a picture drawn so many DIPs wide is asked for at,
+    /// to be as sharp as the pixels it is drawn on. One where nothing is drawn on pixels.
+    fn pixels_per_dip(&self) -> f32 {
+        1.0
+    }
     /// Names what is drawn from here on (`""`: nothing), for a canvas that
     /// tells one drawing's parts from another's (see `morph`).
     fn key(&self, _key: &str) {}

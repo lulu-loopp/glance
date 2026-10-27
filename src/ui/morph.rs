@@ -594,6 +594,10 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Icon { icon, centre, size, color });
     }
 
+    fn pixels_per_dip(&self) -> f32 {
+        self.measure.pixels_per_dip() * self.scale
+    }
+
     fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
         self.push(Op::Picture { picture: picture.clone(), x, y, w, h, radius, opacity });
     }

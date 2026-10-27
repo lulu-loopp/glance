@@ -1260,6 +1260,17 @@ impl Canvas for Frame<'_> {
         }
     }
 
+    fn pixels_per_dip(&self) -> f32 {
+        let mut t = Matrix3x2::default();
+        let mut dpi = (0.0f32, 0.0f32);
+        unsafe {
+            self.dc.GetTransform(&mut t);
+            self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
+        }
+        // (How much the transform grows a box, turned or not, by the target's DIPs to its pixels.)
+        (t.M11 * t.M22 - t.M12 * t.M21).abs().sqrt() * dpi.0 / 96.0
+    }
+
     fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
         // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
