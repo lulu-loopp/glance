@@ -1271,10 +1271,11 @@ impl Canvas for Frame<'_> {
         (t.M11 * t.M22 - t.M12 * t.M21).abs().sqrt() * dpi.0 / 96.0
     }
 
-    fn picture(&self, picture: &super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
+    fn picture_within(&self, picture: &super::canvas::Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
         let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
-        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
-        let (x, y, w, h) = self.on_pixels(x, y, w, h);
+        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four. So the box it is within.)
+        let (x, y, w, h) = self.on_pixels(at.0, at.1, at.2, at.3);
+        let (wx, wy, ww, wh) = self.on_pixels(within.0, within.1, within.2, within.3);
         // (As large as covers the box, its middle on the box's.)
         let (pw, ph) = (picture.size.0.max(1) as f32, picture.size.1.max(1) as f32);
         let scale = (w / pw).max(h / ph);
@@ -1287,8 +1288,16 @@ impl Canvas for Frame<'_> {
             };
             let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(from_x, from_y) };
             let Ok(brush) = self.dc.CreateBitmapBrush(&bitmap, Some(&properties), Some(&placed)) else { return };
-            let radius = radius.max(0.0).min(w.min(h) / 2.0);
-            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(x, y, w, h), radiusX: radius, radiusY: radius }, &brush);
+            let radius = within.4.max(0.0).min(ww.min(wh) / 2.0);
+            // (Within its own box too, where the box it is within is larger: the brush goes on past its edges.)
+            let own = (x, y, w, h) != (wx, wy, ww, wh);
+            if own {
+                self.dc.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            }
+            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(wx, wy, ww, wh), radiusX: radius, radiusY: radius }, &brush);
+            if own {
+                self.dc.PopAxisAlignedClip();
+            }
         }
     }
 

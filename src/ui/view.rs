@@ -4191,10 +4191,8 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             let corner = if shows_itself(path) {
                 plate();
                 match crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))) {
-                    Some(picture) => {
-                        let (px, py, pw, ph) = picture.fitted_in(x, y, w, h);
-                        frame.picture(&picture, px, py, pw, ph, radius.min(pw.min(ph) / 2.0), 1.0);
-                    }
+                    // (Square-cornered on its plate, cut round only where it meets the plate's corners.)
+                    Some(picture) => frame.picture_within(&picture, picture.fitted_in(x, y, w, h), (x, y, w, h, radius), 1.0),
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
                 (x + w - 5.0, y + h - 5.0)
@@ -6334,7 +6332,7 @@ seven".into()));
             fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
-            fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
             fn pixels_per_dip(&self) -> f32 {
                 self.0
             }
@@ -6393,7 +6391,7 @@ seven".into()));
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
-        fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
     }
 
     thread_local! {
@@ -6557,8 +6555,8 @@ seven".into()));
         fn icon(&self, _: super::super::icons::Icon, centre: Point, size: f32, _: Color) {
             self.drew_box(centre.x - size / 2.0, centre.y - size / 2.0, size, size);
         }
-        fn picture(&self, _: &super::super::canvas::Picture, x: f32, y: f32, w: f32, h: f32, _: f32, _: f32) {
-            self.drew_box(x, y, w, h);
+        fn picture_within(&self, _: &super::super::canvas::Picture, at: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {
+            self.drew_box(at.0, at.1, at.2, at.3);
         }
     }
 
@@ -6599,7 +6597,7 @@ seven".into()));
             fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, color: Color) {
                 self.0.borrow_mut().push(color);
             }
-            fn picture(&self, _: &super::super::canvas::Picture, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+            fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
         }
         let theme = Theme::new(Skin::Fluent, true);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));

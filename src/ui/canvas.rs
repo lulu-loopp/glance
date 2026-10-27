@@ -341,7 +341,13 @@ pub trait Canvas {
     /// middle, the rest cut off: see `Picture::fitted_in` for one drawn whole), its corners rounded by `radius`,
     /// `opacity` of it.
     #[allow(clippy::too_many_arguments)]
-    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32);
+    fn picture(&self, picture: &Picture, x: f32, y: f32, w: f32, h: f32, radius: f32, opacity: f32) {
+        self.picture_within(picture, (x, y, w, h), (x, y, w, h, radius), opacity);
+    }
+    /// `picture` drawn over the box `at` (x, y, width, height) as `picture` draws it, shown only where it is within
+    /// the box `within` (x, y, width, height) rounded by its fifth: a picture drawn whole on a plate, square-cornered
+    /// but where it meets the plate's round corners.
+    fn picture_within(&self, picture: &Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32);
     /// How many of the target's pixels a DIP is, as drawn now: what a picture drawn so many DIPs wide is asked for at,
     /// to be as sharp as the pixels it is drawn on. One where nothing is drawn on pixels.
     fn pixels_per_dip(&self) -> f32 {

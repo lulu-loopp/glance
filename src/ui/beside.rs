@@ -1554,7 +1554,7 @@ impl Beside {
             let under = match crate::station::thumbs::of(&path, super::view::picture_pixels(frame, inner.max(room))) {
                 Some(shown) => {
                     let (x, _, w, h) = shown.fitted_in(PAD, top, inner, room);
-                    frame.picture(&shown, x, top, w, h, 8.0f32.min(w.min(h) / 2.0), 1.0);
+                    frame.picture(&shown, x, top, w, h, 8.0, 1.0);
                     top + h
                 }
                 None => {
