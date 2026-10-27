@@ -1922,7 +1922,7 @@ const CARD_WORDS: f32 = 5.0 + 2.0 * LINE;
 
 /// The side a picture drawn `side` DIPs square on `frame` is asked for at (physical px): as many as it is drawn on,
 /// rounded up to `PICTURE_STEP`.
-fn picture_pixels(frame: &dyn Canvas, side: f32) -> u32 {
+pub(super) fn picture_pixels(frame: &dyn Canvas, side: f32) -> u32 {
     ((side * frame.pixels_per_dip()).ceil().max(1.0) as u32).div_ceil(PICTURE_STEP) * PICTURE_STEP
 }
 
@@ -4184,14 +4184,17 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
     };
     match &tile.face {
         Face::Picture { path, more } => {
-            // A picture fills its plate; a folder, or another file, is shown by Windows' own icon for it.
+            // A picture is shown whole on its plate, as large as fits; a folder, or another file, by Windows' own icon
+            // for it.
             let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
             // (What the count goes with: the picture, its plate's corner; an icon, its own corner.)
             let corner = if shows_itself(path) {
                 plate();
-                // (A square as wide as the face's longer side: what covers it, see `Canvas::picture`.)
-                match crate::station::thumbs::filling(path, picture_pixels(frame, w.max(h))) {
-                    Some(picture) => frame.picture(&picture, x, y, w, h, radius, 1.0),
+                match crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))) {
+                    Some(picture) => {
+                        let (px, py, pw, ph) = picture.fitted_in(x, y, w, h);
+                        frame.picture(&picture, px, py, pw, ph, radius.min(pw.min(ph) / 2.0), 1.0);
+                    }
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
                 (x + w - 5.0, y + h - 5.0)

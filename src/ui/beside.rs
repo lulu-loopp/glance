@@ -1548,15 +1548,22 @@ impl Beside {
         let (top, bottom) = (HEAD + 12.0, height - FOOT);
         let mut waiting = false;
         if let Some(path) = picture.filter(|_| words.is_none()) {
-            let side = inner.min(bottom - top);
-            match crate::station::thumbs::of(&path, 512) {
-                Some(shown) => frame.picture(&shown, PAD + (inner - side) / 2.0, top, side, side, 8.0, 1.0),
+            // (Whole, as large as fits over the path's line, at the pixels it covers.)
+            let room = bottom - top - 8.0 - 2.0 * theme.small.size;
+            let side = inner.min(room);
+            let under = match crate::station::thumbs::of(&path, super::view::picture_pixels(frame, inner.max(room))) {
+                Some(shown) => {
+                    let (x, _, w, h) = shown.fitted_in(PAD, top, inner, room);
+                    frame.picture(&shown, x, top, w, h, 8.0f32.min(w.min(h) / 2.0), 1.0);
+                    top + h
+                }
                 None => {
                     waiting = true;
                     frame.fill_rounded(theme.track, PAD + (inner - side) / 2.0, top, side, side, 8.0);
+                    top + side
                 }
-            }
-            frame.text(&path.display().to_string(), theme.small, theme.text3, PAD, top + side + 8.0, inner, Align::Start);
+            };
+            frame.text(&path.display().to_string(), theme.small, theme.text3, PAD, under + 8.0, inner, Align::Start);
         } else if let Some(words) = words {
             let tall = frame.gfx.wrapped_height(&words, theme.body, inner);
             self.scroll_most = (tall - (bottom - top)).max(0.0);

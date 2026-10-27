@@ -813,7 +813,7 @@ impl Gfx {
             *used = Instant::now();
             return Some(bitmap.clone());
         }
-        if picture.pixels.len() < (picture.side * picture.side * 4) as usize {
+        if picture.pixels.len() < (picture.size.0 * picture.size.1 * 4) as usize {
             return None;
         }
         let properties = D2D1_BITMAP_PROPERTIES1 {
@@ -822,8 +822,8 @@ impl Gfx {
             dpiY: 96.0,
             ..Default::default()
         };
-        let size = D2D_SIZE_U { width: picture.side, height: picture.side };
-        let bitmap = unsafe { dc.CreateBitmap(size, Some(picture.pixels.as_ptr().cast()), picture.side * 4, &properties) }.ok()?;
+        let size = D2D_SIZE_U { width: picture.size.0, height: picture.size.1 };
+        let bitmap = unsafe { dc.CreateBitmap(size, Some(picture.pixels.as_ptr().cast()), picture.size.0 * 4, &properties) }.ok()?;
         self.pictures.borrow_mut().insert(picture.key, (bitmap.clone(), Instant::now()));
         Some(bitmap)
     }
@@ -1276,9 +1276,9 @@ impl Canvas for Frame<'_> {
         // (Its box on whole pixels, as a rectangle's: its edges sharp, all four.)
         let (x, y, w, h) = self.on_pixels(x, y, w, h);
         // (As large as covers the box, its middle on the box's.)
-        let size = w.max(h);
-        let scale = size / picture.side.max(1) as f32;
-        let (from_x, from_y) = (x - (size - w) / 2.0, y - (size - h) / 2.0);
+        let (pw, ph) = (picture.size.0.max(1) as f32, picture.size.1.max(1) as f32);
+        let scale = (w / pw).max(h / ph);
+        let (from_x, from_y) = (x - (pw * scale - w) / 2.0, y - (ph * scale - h) / 2.0);
         unsafe {
             let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
                 extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,

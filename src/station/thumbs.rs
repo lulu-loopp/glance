@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::core::HSTRING;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_CROPTOSQUARE, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
+use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
 #[derive(Clone, Debug)]
@@ -31,13 +31,11 @@ struct Key {
     made: Made,
 }
 
-/// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), its shape kept in the square;
-/// filling the square (a picture's middle, as much as the square holds: for a box it is to fill); its icon alone, as
-/// Explorer shows a file of its kind (not what it holds).
+/// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), of its own shape, as large as
+/// fits the square; its icon alone, as Explorer shows a file of its kind (not what it holds), in the square.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Made {
     Fit,
-    Fill,
     Icon,
 }
 
@@ -207,15 +205,10 @@ fn look(looks: Receiver<PathBuf>) {
     }
 }
 
-/// The picture of the file at `path`, `side` physical px square (its own shape in its middle): as made; none yet
+/// The picture of the file at `path`, of its own shape, as large as fits `side` physical px square: as made; none yet
 /// (asked for, and told when it is), or none to be had.
 pub fn of(path: &Path, side: u32) -> Option<Picture> {
     asked(path, side, Made::Fit)
-}
-
-/// The picture of the picture at `path`, `side` physical px square, filling it (its middle).
-pub fn filling(path: &Path, side: u32) -> Option<Picture> {
-    asked(path, side, Made::Fill)
 }
 
 /// The icon of the file or folder at `path`, `side` physical px square: Windows' own for it (its program's for a
@@ -317,8 +310,8 @@ fn make_one(key: Key) {
         hasher.finish()
     };
     let made = picture(&key.path, key.side, key.made).map(|thumb| match key.made {
-        Made::Fill => squared(&middle(&thumb), key.side, number),
-        Made::Fit | Made::Icon => squared(&thumb, key.side, number),
+        Made::Fit => shaped(&thumb, key.side, number),
+        Made::Icon => squared(&thumb, key.side, number),
     });
     {
         let mut kept = KEPT.lock().unwrap();
@@ -436,26 +429,19 @@ fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
         let to = (((top + row) * side + left) * 4) as usize;
         pixels[to..to + (w * 4) as usize].copy_from_slice(&thumb.pixels[from..from + (w * 4) as usize]);
     }
-    Picture { key, side, pixels: Arc::new(pixels) }
+    Picture { key, size: (side, side), pixels: Arc::new(pixels) }
 }
 
-/// The square in the middle of `thumb`, as large as it holds (what fills a square of its picture).
-fn middle(thumb: &Thumb) -> Thumb {
-    let (w, h) = thumb.size;
-    let side = w.min(h);
-    let (left, top) = ((w - side) / 2, (h - side) / 2);
-    let mut pixels = Vec::with_capacity((side * side * 4) as usize);
-    for row in top..top + side {
-        let from = ((row * w + left) * 4) as usize;
-        pixels.extend_from_slice(&thumb.pixels[from..from + (side * 4) as usize]);
-    }
-    Thumb { pixels, size: (side, side) }
+/// `thumb` as large as fits a square `side` across (made smaller where it is larger), of its own shape, as a picture
+/// known by `key`: drawn whole where it is shown (see `Picture::fitted_in`).
+fn shaped(thumb: &Thumb, side: u32, key: u64) -> Picture {
+    let thumb = trimmed(thumb);
+    let thumb = fitted(&thumb, side);
+    Picture { key, size: thumb.size, pixels: Arc::new(thumb.pixels.clone()) }
 }
 
 /// The picture of the file at `path` as Explorer shows it, `made` so: as large as fits `side` square, its shape kept
-/// (`Fit`), its icon alone so (`Icon`), or its middle square as large as `side` (`Fill`: asked for whole, fitted, a
-/// wide picture's middle was as many pixels as its height came to, a third of the side or less, blurred drawn over
-/// it); else what went wrong.
+/// (`Fit`), or its icon alone so (`Icon`); else what went wrong.
 fn picture(path: &Path, side: u32, made: Made) -> Result<Thumb, String> {
     unsafe {
         // (A program the Start menu names by its file's path, "shell:AppsFolder\D:\App\a.exe", which the shell
@@ -470,7 +456,6 @@ fn picture(path: &Path, side: u32, made: Made) -> Result<Thumb, String> {
         let side = side.max(16) as i32;
         let how = match made {
             Made::Fit => SIIGBF_RESIZETOFIT,
-            Made::Fill => SIIGBF_CROPTOSQUARE,
             Made::Icon => SIIGBF_ICONONLY,
         } | SIIGBF_BIGGERSIZEOK;
         let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).map_err(|error| format!("the shell gave no picture: {error}"))?;
@@ -593,6 +578,16 @@ mod made {
         assert_eq!(at(120, 120), [0, 0, 0, 0]);
     }
 
+    /// A picture to be drawn whole keeps its shape: made smaller to fit, with no clear room round it.
+    #[test]
+    fn a_picture_keeps_its_shape() {
+        let pixels = (0..128).flat_map(|_| (0..256).flat_map(|x| if x < 128 { [0, 0, 255, 255] } else { [255, 0, 0, 255] })).collect();
+        let picture = shaped(&Thumb { pixels, size: (256, 128) }, 128, 7);
+        assert_eq!(picture.size, (128, 64));
+        assert_eq!(&picture.pixels[..4], [0, 0, 255, 255]);
+        assert_eq!(&picture.pixels[(127 * 4) as usize..(128 * 4) as usize], [255, 0, 0, 255]);
+    }
+
     /// An icon drawn small in much clear room is made as large as the tile: the clear room taken off first.
     #[test]
     fn an_icon_in_much_room_fills_the_tile() {
@@ -631,11 +626,10 @@ mod tests {
         println!("picture {:?}, icon {:?}", picture.size, icon.size);
     }
 
-    /// A wide picture filling a square is as many pixels across that square as it is asked for: its middle, cut from
-    /// it as large as its height allows, not from the whole of it fitted in the square.
+    /// A wide picture is as many pixels across as it is asked for, of its own shape: drawn whole, as sharp as its face.
     #[test]
     #[ignore = "asks this PC's shell"]
-    fn a_wide_picture_fills_its_square_at_the_pixels_asked_for() {
+    fn a_wide_picture_is_made_whole_at_the_pixels_asked_for() {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
@@ -660,10 +654,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("glance-wide-{}.bmp", std::process::id()));
         std::fs::write(&path, file).unwrap();
         let side = 320;
-        let picture = super::picture(&path, side, super::Made::Fill);
+        let picture = super::picture(&path, side, super::Made::Fit);
         let _ = std::fs::remove_file(&path);
-        let picture = super::middle(&picture.expect("a picture's"));
-        assert!(picture.size.0 >= side, "its middle {:?}, for {side} asked", picture.size);
+        let picture = super::shaped(&picture.expect("a picture's"), side, 7);
+        assert_eq!(picture.size, (side, (side as f32 / 3.0).round() as u32));
     }
 
     /// A program's icon, its edges soft, as it is drawn: premultiplied, no colour past its alpha (where one was, it was
