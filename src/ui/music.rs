@@ -336,9 +336,10 @@ pub struct Music {
     anchor: Option<Anchor>,
     step: f32,
     anchoring: bool,
-    /// (For the tests: where each line of the rail was drawn in the last frame, by its index.)
+    /// (For the tests: where each line of the rail was drawn in the last frame, by its index, and how far it was
+    /// shown through the fades at the rail's edges, 1 clear of them.)
     #[cfg(test)]
-    drawn_lines: Vec<(usize, f32)>,
+    drawn_lines: Vec<(usize, f32, f32)>,
     /// How far the record has turned (degrees), and how far its arm has swung onto it (0 off it, 1 on it: on as
     /// something plays).
     turned_by: f32,
@@ -858,7 +859,7 @@ struct Kept {
     sound: (bool, f32, f32, Option<Instant>, Option<(u8, bool)>),
     track_lit: f32,
     #[cfg(test)]
-    drawn_lines: Vec<(usize, f32)>,
+    drawn_lines: Vec<(usize, f32, f32)>,
 }
 
 impl Music {
@@ -2254,7 +2255,9 @@ impl Drawing<'_> {
             let t = rail - rail.floor();
             if rail < first as f32 { below } else { above + (below - above) * t }
         };
-        // Where it is asked for, as far as the lines next to the one aimed at stay within it: one before, one after.
+        // Where it is asked for, as far as the line aimed at is clear of the fades at the rail's edges, and then as far
+        // as the lines next to it are too: one before, one after. (The first line, with none before it, was put up
+        // into the fade for the one after it to be clear, and was drawn all but gone.)
         let anchor = {
             // (The line it glides to: not the one it is nearest on its way, which would change half way there.)
             let aimed = turned.or(current).map_or(rail.round() as isize, |index| index as isize);
@@ -2263,9 +2266,11 @@ impl Drawing<'_> {
             // the way, which would move it as they glide.)
             let tall_at = |index: isize, d: f32| (index >= 0 && (index as usize) < lines.len()).then(|| height_of(index as usize, scale_at(d)));
             let aimed_half = tall_at(aimed, 0.0).unwrap_or(0.0) / 2.0;
-            let least = tall_at(aimed - 1, -1.0).map_or(f32::MIN, |tall| top + fade_top + aimed_half + gap + tall);
-            let most = tall_at(aimed + 1, 1.0).map_or(f32::MAX, |tall| bottom + 12.0 - fade_bottom - aimed_half - gap - tall);
-            if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 }
+            let (own_least, own_most) = (top + fade_top + aimed_half, bottom + 12.0 - fade_bottom - aimed_half);
+            let least = tall_at(aimed - 1, -1.0).map_or(own_least, |tall| own_least + gap + tall);
+            let most = tall_at(aimed + 1, 1.0).map_or(own_most, |tall| own_most - gap - tall);
+            let anchor = if least <= most { anchor.clamp(least, most) } else { (least + most) / 2.0 };
+            if own_least <= own_most { anchor.clamp(own_least, own_most) } else { (own_least + own_most) / 2.0 }
         };
         // At rest, the first baseline of the line aimed at on a whole pixel: its lines are drawn where they fall, moving
         // or not (put on whole pixels only once at rest, they all stepped down by up to a pixel a moment after a line
@@ -2305,13 +2310,13 @@ impl Drawing<'_> {
         for (index, middle, scale, tall) in middles {
             let d = index as f32 - rail;
             let y = anchor + middle - at_rail - tall / 2.0;
+            // Faded toward the rail's edges.
+            let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             #[cfg(test)]
-            self.music.drawn_lines.push((index, y));
+            self.music.drawn_lines.push((index, y, edge));
             if y + tall < top - 4.0 || y > bottom + 12.0 {
                 continue;
             }
-            // Faded toward the rail's edges.
-            let edge = ((y - top) / fade_top).clamp(0.0, 1.0).min(((bottom + 12.0 - (y + tall)) / fade_bottom).clamp(0.0, 1.0));
             let alpha = opacity_at(d) * edge;
             let line = &lines[index];
             let font = Font { size: size * scale, ..self.fonts.now };
@@ -3730,7 +3735,7 @@ mod pictures {
                     music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, now, moment);
                 })
                 .unwrap();
-                let at = |index: usize| music.drawn_lines.iter().find(|(i, _)| *i == index).map(|(_, y)| *y);
+                let at = |index: usize| music.drawn_lines.iter().find(|(i, ..)| *i == index).map(|(_, y, _)| *y);
                 tracks.push((0..4).map(|index| at(index).unwrap_or(f32::NAN)).collect());
             }
             println!("{size:?}:");
@@ -3746,6 +3751,37 @@ mod pictures {
                     // One way all along: never back the way it came.
                     assert!(!(a.abs() > 0.3 && b.abs() > 0.3 && a.signum() != b.signum()), "{size:?}: line {line} turned back: moved {a:.1}, then {b:.1}");
                 }
+            }
+        }
+    }
+
+    /// The line sung is clear of the fades at the rail's edges, whichever it is: the first too, with none before it
+    /// (it was put up into the fade for the one after it to be clear, and drawn all but gone), and the last. (Nearly
+    /// clear, in a rail too short for a line and both fades.)
+    #[test]
+    #[ignore = "draws on this PC's graphics card"]
+    fn the_line_sung_is_clear_of_the_rails_fades() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let all = Shows { cover: true, title: true, translation: true, spectrum: true, controls: false, ground: MusicGround::Cover, inset: None };
+        let gfx = crate::ui::gfx::held().unwrap();
+        for size in [(650.0, 200.0), (520.0, 236.0), (470.0, 400.0)] {
+            for now in [0, 1, 5] {
+                let start = Instant::now();
+                let mut music = Music { last_frame: start, ..Music::default() };
+                let mut moment = playing(false);
+                let at = moment.lines.as_ref().unwrap()[now].at + 0.5;
+                (moment.now, moment.position, moment.since) = (Some(now), at, Some(start - Duration::from_secs(2)));
+                for frame_index in 0..60u64 {
+                    let when = start + Duration::from_millis(16 * frame_index);
+                    gfx.draw_offscreen(((size.0 * 1.5) as u32, (size.1 * 1.5) as u32), 1.5, |frame| {
+                        music.paint_moment(frame, size, &all, Ground::Own, Family::Segoe, 1.5, None, when, moment.clone());
+                    })
+                    .unwrap();
+                }
+                let shown = music.drawn_lines.iter().find(|(index, ..)| *index == now).map(|(.., edge)| *edge);
+                assert!(shown.is_some_and(|shown| shown >= 0.95), "{size:?}: line {now} {:?}", music.drawn_lines);
             }
         }
     }
