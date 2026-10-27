@@ -52,11 +52,12 @@ Glass Card (the coloured glass of the notes' cards: its swatches' tints and
   Licence: MIT (glass-card-MIT.txt). Its colours and the way it is drawn are
   reworked in glance.exe's own code.
 
-Unicode Character Database (Unihan, the first letters of Chinese characters'
-  Mandarin readings, for searching programs by pinyin)
+Unicode Character Database (Unihan, Chinese characters' Mandarin readings, for
+  searching programs and files by pinyin)
   Copyright (c) 1991-2026 Unicode, Inc.
-  Licence: Unicode License v3 (Unicode-License-v3.txt). A table derived from
-  Unihan_Readings.txt (scripts/pinyin.py) is built into glance.exe.
+  Licence: Unicode License v3 (Unicode-License-v3.txt). Two tables derived from
+  Unihan_Readings.txt (scripts/pinyin.py, scripts/readings.py) are built into
+  glance.exe.
 
 OpenRGB, version 1.0 (not shipped with Glance)
   OpenRGB - open source RGB lighting control. Copyright (C) Adam Honse and
