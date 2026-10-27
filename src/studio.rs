@@ -831,7 +831,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     let measure = Theme::new(skin, false);
     let first = &history[..=backlog as usize];
     let first_seen = Seen::of(first);
-    let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, scrolls: crate::ui::view::Scrolls::default(), tab, hover: None, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+    let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info, prefs: &prefs, theme: &measure, lang, history: first, seen: &first_seen, pen_ms: 0.0, scrolls: crate::ui::view::Scrolls::default(), tab, hover: None, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
     let (layout, zoom, rest, _) = place(&probe, &measure);
     let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
     let behind = RECT {
@@ -880,7 +880,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         let now_ms = start_ms + t as f64 * 1000.0;
         let read = history.iter().take_while(|sample| sample.t as f64 <= now_ms).count().max(1);
         let seen = Seen::of(&history[..read]);
-        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING,
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING,
             info,
             prefs: &prefs,
             theme: &theme,
@@ -1351,7 +1351,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
                     }
                     let read = if case == "sample" || paced { 200 + round } else { 200 };
                     let seen = Seen::of(&history[..read]);
-                    let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history[..read], seen: &seen, pen_ms: history[read - 1].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history[..read], seen: &seen, pen_ms: history[read - 1].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
                     let shown = filming.lay_out(0.0, &scene, &theme, &seen, work, None);
                     let zoom = shown.zoom;
                     let at = if case == "moved" || case == "rough" { (40.0 + round as f32 * 2.0, 40.0 + round as f32) } else { (40.0, 40.0) };
@@ -1615,7 +1615,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     let form = Form::Lanes { detail: view::Detail::Compact, columns: 2 };
     let mut filming = Filming::new(Choice { form, scale: 1.0, extra: (0.0, 0.0) }, (40.0, 40.0));
     let seen = Seen::of(&history);
-    let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: history[399].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+    let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: history[399].t as f64 - 1000.0 - PEN_LAG_MS, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
     let mut bitmap = None;
     let mut frame_at = |zoom: f32, surface: &mut crate::ui::gfx::Surface, filming: &mut Filming| -> Result<(), String> {
         filming.choice.scale = zoom;

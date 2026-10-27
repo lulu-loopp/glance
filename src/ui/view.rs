@@ -275,6 +275,20 @@ impl Hit {
         matches!(self, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))
     }
 
+    /// Whether it may be looked at larger (see `looked_at`): a thing on the station, one copied lately, a file come
+    /// lately.
+    pub fn looks(self) -> bool {
+        matches!(self, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))
+    }
+
+    /// What it is known by to the look at it (see `ui::look::Item::key`): the same thing, the same key.
+    pub fn key(self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// Whether a press on it opens a menu (the station's head's buttons: see `station::head_menu`).
     pub fn opens_menu(self) -> bool {
         matches!(self, Hit::StationView | Hit::StationPages)
@@ -525,6 +539,9 @@ pub struct Scene<'a> {
     pub tab: Tab,
     /// What the pointer is over.
     pub hover: Option<Hit>,
+    /// The preview's shortcut said on what the pointer has rested on a moment that may be looked at larger (see
+    /// `Hint`): that thing, how shown it is (0–1), and what is said.
+    pub hint: Option<(Hit, f32, &'a str)>,
     /// Its sliders' knobs' dots, as they ease (see `thumb::Dots`).
     pub thumbs: &'a super::thumb::Dots<Hit>,
     /// The panel is pinned open.
@@ -950,6 +967,59 @@ pub fn named(hits: &[HitBox], hit: Hit, lang: Lang) -> Option<String> {
         Hit::Recent(crate::station::recent::Entry::File(key)) => crate::station::recent::shown().iter().find(|came| came.key == key).map(|came| Lately::of(came, lang, 0).label),
         Hit::Recent(entry @ crate::station::recent::Entry::Burst(filter, _)) => Lately::rows(&crate::station::recent::shown(), filter, lang, 0).into_iter().find(|row| row.entry == entry).map(|row| row.label),
         Hit::App(number) => crate::station::apps::numbered(number).map(|app| app.name),
+        _ => None,
+    }
+}
+
+/// What `hit` (a thing on the station, one copied lately, a file come lately) is looked at as (see `ui::look`), its
+/// tile at `from` on the screen (physical px): named, and said to be what, as its tile says, and what its buttons do.
+/// None for anything else, or for one no longer there.
+#[cfg(windows)]
+pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang: Lang) -> Option<crate::ui::look::Item> {
+    use crate::station::run::{Ask, FilesAct};
+    use crate::station::shelf::What;
+    use crate::ui::look::{Item, Shows};
+    let now = crate::station::now_ms();
+    let shows_files = |paths: Vec<std::path::PathBuf>| match paths.as_slice() {
+        [one] => Shows::File(one.clone()),
+        _ => Shows::Files(paths),
+    };
+    match hit {
+        Hit::Shelf(id) | Hit::Copied(id) => {
+            let shown = crate::station::run::shown();
+            let item = shown.items.iter().find(|item| item.id == id)?;
+            let folder = crate::station::folder::Folder::own();
+            let tile = Tile::of(item, &folder, lang, now);
+            let (title, shows, pastes) = match &item.what {
+                // (A file gone from where it was, by the copy kept of it, where one is.)
+                What::Files { paths, kept } => {
+                    let paths = paths
+                        .iter()
+                        .enumerate()
+                        .map(|(at, path)| match kept.get(at).filter(|name| !name.is_empty() && !path.exists()) {
+                            Some(name) => folder.path(name),
+                            None => path.clone(),
+                        })
+                        .collect();
+                    (tile.label, shows_files(paths), false)
+                }
+                What::Text { text } => (lang.pick("文字", "Text").to_string(), Shows::Words(text.clone()), true),
+                What::Link { url } => (tile.label, Shows::Words(url.clone()), false),
+                What::Picture { file } => (lang.pick("图片", "Picture").to_string(), Shows::File(folder.path(file)), false),
+                What::Saved { file, name, words } => (if *words { lang.pick("文字", "Text").to_string() } else { name.clone() }, Shows::File(folder.path(file)), *words),
+            };
+            Some(Item { key: hit.key(), title, about: tile.about, shows, from, open: Some(if pastes { Ask::PasteOut(id) } else { Ask::Open(id) }), copy: Some(Ask::Copy(id)), pastes })
+        }
+        Hit::Recent(entry) => {
+            let paths = crate::station::recent::paths_of(entry)?;
+            let recent = crate::station::recent::shown();
+            let row = match entry {
+                crate::station::recent::Entry::File(key) => Lately::of(recent.iter().find(|came| came.key == key)?, lang, now),
+                crate::station::recent::Entry::Burst(filter, _) => Lately::rows(&recent, filter, lang, now).into_iter().find(|row| row.entry == entry)?,
+            };
+            let (title, about) = (row.label, row.about);
+            Some(Item { key: hit.key(), title, about, shows: shows_files(paths.clone()), from, open: Some(Ask::Files(paths.clone(), FilesAct::Open)), copy: Some(Ask::Files(paths, FilesAct::Copy(Some(entry)))), pastes: false })
+        }
         _ => None,
     }
 }
@@ -4401,6 +4471,9 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
                 frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + place.w / 2.0, y + plate / 2.0, place.w - 8.0));
+                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, fy, fw));
+                }
                 shown
             }
             Shows::Row => {
@@ -4412,6 +4485,9 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
+                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, y, TILE_W));
+                }
                 shown
             }
             Shows::View(ShelfView::List) => {
@@ -4428,6 +4504,9 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
                 }
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(x + width, y + LIST_ROW / 2.0));
+                if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+                    hint_mark(frame, theme, says, said, Mark::Right(x + width, y + LIST_ROW / 2.0));
+                }
                 shown
             }
         };
@@ -4535,7 +4614,11 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         frame.text(&shown, theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
         frame.text(&row.when, theme.small, theme.text3, left + width - when_w, y + (LIST_ROW - LINE) / 2.0, when_w + 1.0, Align::Start);
-        copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(Hit::Recent(row.entry)), Mark::Right(left + width, y + LIST_ROW / 2.0));
+        let copied = scene.thumbs.copied(pressed);
+        copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(left + width, y + LIST_ROW / 2.0));
+        if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
+            hint_mark(frame, theme, says, said, Mark::Right(left + width, y + LIST_ROW / 2.0));
+        }
         hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Recent(row.entry)), (left - 4.0, list_top, width + 8.0, list_tall)));
         name_shown(hits, Hit::Recent(row.entry), &row.label, &shown);
     }
@@ -4609,6 +4692,62 @@ fn paint_filter(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32
 enum Mark {
     Centre(f32, f32, f32),
     Right(f32, f32),
+}
+
+/// How long the pointer rests on a thing that may be looked at larger before the preview's shortcut is said on it, and
+/// how long that takes to come in.
+const HINT_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+const HINT_IN: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// The preview's shortcut said on a thing that may be looked at larger (see `ui::look`), once the pointer has rested on
+/// it a moment: what it rests on, and since when.
+#[derive(Clone, Copy, Default)]
+pub struct Hint {
+    on: Option<(Hit, std::time::Instant)>,
+}
+
+impl Hint {
+    /// Followed to `now`, the pointer on `over` (none where nothing it is on may be looked at, or the shortcut is not
+    /// to be said there): what it is said on, and how shown (0–1).
+    pub fn step(&mut self, over: Option<Hit>, now: std::time::Instant) -> Option<(Hit, f32)> {
+        let over = over.filter(|hit| hit.looks());
+        if self.on.map(|(hit, _)| hit) != over {
+            self.on = over.map(|hit| (hit, now));
+        }
+        let (hit, since) = self.on?;
+        let shown = now.saturating_duration_since(since).saturating_sub(HINT_AFTER).as_secs_f32() / HINT_IN.as_secs_f32();
+        (shown > 0.0).then_some((hit, shown.min(1.0)))
+    }
+
+    /// When it is to be drawn again, as it comes in (none once it is in, or with nothing to say).
+    pub fn due(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let (_, since) = self.on?;
+        (now < since + HINT_AFTER + HINT_IN).then(|| (since + HINT_AFTER).max(now))
+    }
+}
+
+/// The preview's shortcut said on a thing (`says`), as shown as `shown`: a small plate in the skin's sheet, as its
+/// menus' are, at the top right corner of its picture (`Mark::Centre`'s x and y taken as that corner, its room as the
+/// picture's width) or at the end of its row; settling down into place as it comes in.
+fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark) {
+    const TALL: f32 = 20.0;
+    const PAD: f32 = 7.0;
+    const INSET: f32 = 6.0;
+    let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
+    let font = Font { weight: 600.0, ..theme.small };
+    let wide = PAD + frame.measure(says, font) + PAD;
+    let drop = (1.0 - shown) * 2.0;
+    let (left, top) = match at {
+        // (Where the picture is narrower than what is said, over its middle.)
+        Mark::Centre(right, top, room) if wide + 2.0 * INSET <= room => (right - INSET - wide, top + INSET - drop),
+        Mark::Centre(right, top, room) => (right - room / 2.0 - wide / 2.0, top + INSET - drop),
+        Mark::Right(right, middle) => (right - wide, middle - TALL / 2.0 - drop),
+    };
+    let radius = colours.radius.min(TALL / 2.0).min(theme.control_radius.max(4.0));
+    let faded = |color: Color| color.alpha(color.a * shown);
+    frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
+    frame.stroke_rounded(Fill::Solid(faded(colours.stroke)), left, top, wide, TALL, radius, 1.0);
+    frame.text(says, font, faded(colours.text), left + PAD, top + (TALL - LINE) / 2.0, wide, Align::Start);
 }
 
 /// The mark on a thing just copied (see `copied`), as clear as `clear` (none at 0): a pill of the lane's `ink`, a tick
@@ -5695,6 +5834,32 @@ mod tests {
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/glass-sliders.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
     }
 
+    /// The preview's shortcut is said on a thing that may be looked at larger only once the pointer has rested on it a
+    /// moment, comes in after that, and starts again on another; never on what may not be looked at.
+    #[test]
+    fn the_preview_is_hinted_after_a_rest() {
+        use std::time::{Duration, Instant};
+        let ms = |n: u64| Duration::from_millis(n);
+        let start = Instant::now();
+        let mut hint = Hint::default();
+        assert_eq!(hint.step(Some(Hit::Shelf(1)), start), None);
+        assert_eq!(hint.due(start), Some(start + HINT_AFTER));
+        assert_eq!(hint.step(Some(Hit::Shelf(1)), start + ms(200)), None);
+        let (on, shown) = hint.step(Some(Hit::Shelf(1)), start + HINT_AFTER + HINT_IN / 2).unwrap();
+        assert_eq!(on, Hit::Shelf(1));
+        assert!((shown - 0.5).abs() < 0.01, "{shown}");
+        assert_eq!(hint.due(start + HINT_AFTER + HINT_IN / 2), Some(start + HINT_AFTER + HINT_IN / 2));
+        assert_eq!(hint.step(Some(Hit::Shelf(1)), start + ms(2000)), Some((Hit::Shelf(1), 1.0)));
+        assert_eq!(hint.due(start + ms(2000)), None);
+        // (Onto another: from the start again.)
+        assert_eq!(hint.step(Some(Hit::Copied(3)), start + ms(2010)), None);
+        assert_eq!(hint.due(start + ms(2010)), Some(start + ms(2010) + HINT_AFTER));
+        // (Onto what may not be looked at, or nothing: none, nothing due.)
+        assert_eq!(hint.step(Some(Hit::Settings), start + ms(3000)), None);
+        assert_eq!(hint.due(start + ms(3000)), None);
+        assert_eq!(hint.step(None, start + ms(4000)), None);
+    }
+
     /// The workbench's panel with quick launch as its rail, at the left, right and top edges (the columns), in each
     /// skin, light and dark (the rows): `cargo test --features studio --lib -- --ignored workbench_rails` writes
     /// `target/rails/<row>-<column>.png`.
@@ -5730,7 +5895,7 @@ otepad.exe", "Notepad"),
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
                 let seen = Seen::of(history);
-                let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes = vec![
                     Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
                     Lane { id: "apps".into(), blocks: apps_lane(true, &theme, Lang::Zh), ink: theme.ink("apps") },
@@ -5786,7 +5951,7 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let made = |ids: &[&str]| -> Vec<Lane> { ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect() };
                     let bench = made(&["search", "time", "station", "notes", "apps"]);
                     let readings = made(&["cpu", "memory"]);
@@ -5851,7 +6016,7 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     // Each widget: its lanes, its shape, its size, where it is, and how far its notes are turned (pages).
                     type Widget<'a> = (Vec<&'a str>, Shape, (f32, f32), (f32, f32), f32);
                     let mut widgets: Vec<Widget> = Vec::new();
@@ -5949,7 +6114,7 @@ otepad.exe", "Notepad"),
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::Note(crate::notes::number_of("c.md"))), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::Note(crate::notes::number_of("c.md"))), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for (column, view) in views.iter().enumerate() {
                 let mut blocks = notes_lane(true, Lang::Zh);
                 if let Some(Block::Notes { view: shown, .. }) = blocks.last_mut() {
@@ -5973,7 +6138,8 @@ otepad.exe", "Notepad"),
 
     /// The station's lane in each skin, light and dark (the rows), as cards, a list, pictures, what was copied lately,
     /// and Recent files as pictures and as a list, files come together a row (the columns), holding files of this
-    /// repository as Explorer pictures them, text and links:
+    /// repository as Explorer pictures them, text and links (one under the pointer in each, the preview's shortcut said
+    /// on it):
     /// `cargo test --features studio --lib -- --ignored station_pages` writes `target/station-pages.png`.
     #[test]
     #[ignore = "writes a picture to look at"]
@@ -6050,11 +6216,16 @@ otepad.exe", "Notepad"),
                     let seen = Seen::of(history);
                     let hover = match column {
                         0 => Some(Hit::Shelf(3)),
+                        1 => Some(Hit::Shelf(4)),
+                        2 => Some(Hit::Shelf(1)),
+                        3 => Some(Hit::Copied(11)),
                         4 => Some(Hit::Recent(crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file: 2 }))),
                         5 => Some(Hit::Recent(crate::station::recent::Entry::Burst(Default::default(), crate::station::recent::Key { drive: 'C', file: 25 }))),
                         _ => None,
                     };
-                    let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    // (What is under the pointer with the preview's shortcut said on it, as after a rest there.)
+                    let hint = hover.map(|hit| (hit, 1.0, "Ctrl+Q 预览"));
+                    let scene = Scene { music_apart: false, hint, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
                     paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
@@ -6186,7 +6357,7 @@ otepad.exe", "Notepad"),
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
         let seen = Box::leak(Box::new(Seen::of(history)));
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let cpu = lane(&scene, "cpu", Detail::Full).unwrap();
         let tags: Vec<&String> = cpu.iter().filter_map(|block| if let Block::Threads(cells) = block { Some(cells.iter().map(|(_, _, tag)| tag)) } else { None }).flatten().collect();
         assert_eq!(tags[2], "Thread 3 · 5.40 GHz · 10%");
@@ -6196,7 +6367,7 @@ otepad.exe", "Notepad"),
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -6209,7 +6380,7 @@ otepad.exe", "Notepad"),
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
@@ -6233,7 +6404,7 @@ otepad.exe", "Notepad"),
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
@@ -6251,7 +6422,7 @@ otepad.exe", "Notepad"),
         two.drives = vec!["NVMe".into(), "SATA".into()];
         two.drive_ids = vec![0, 1];
         let history = leak(vec![with(Vec::new(), vec![(0, 35.0)])]);
-        let scene_two = Scene { music_apart: false, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene_two = Scene { music_apart: false, hint: None, info: &two, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let disk = facts(&lane(&scene_two, "disk", Detail::Full).unwrap());
         assert_eq!(&disk[..2], [("NVMe".to_string(), "35 °C".to_string()), ("SATA".to_string(), UNREAD.to_string())]);
         // The first chiplet missed this time: the second's reading stays its own.
@@ -6276,7 +6447,7 @@ otepad.exe", "Notepad"),
         let running = || with(WslSample::Running { distros: Some(vec!["Ubuntu".into()]), cpu: Some(3.0), used: Some(1 << 30), total: Some(1 << 33), gpu: None }, DockerSample::Running { context: "default".into(), containers: Vec::new() });
         let stopped = || with(WslSample::Stopped, DockerSample::Stopped { context: "default".into() });
         let shown = |seen: &'static Seen, history: &'static [Sample]| {
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             lanes(&scene).into_iter().map(|lane| lane.id).filter(|id| id == "wsl" || id == "docker").collect::<Vec<_>>()
         };
         let seen_of = |history: &'static [Sample]| -> &'static Seen { Box::leak(Box::new(Seen::of(history))) };
@@ -6309,7 +6480,7 @@ otepad.exe", "Notepad"),
             s
         };
         let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
-            let scene = Scene { music_apart: false, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
         };
         let prefs = Prefs::default();
@@ -6666,7 +6837,7 @@ seven".into()));
         let seen = Seen::of(history);
         let drawn = |settings_open: bool| {
             let settings_lit = settings_open.then_some(1.0);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit };
             let icons = Icons(Default::default(), Default::default());
             panel_button(&icons, &scene, Hit::Settings, 0.0, 0.0);
             (icons.0.into_inner(), icons.1.get())
@@ -6685,7 +6856,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let drawn = |done: f32| {
             let glide = Glide { done, was: "the line before".into() };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Lyric { line: "the line sung".into(), under: String::new(), said: false, glide }], ink: theme.ink("time") };
@@ -6709,7 +6880,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
         let saved = |id: u64, name: &str| crate::station::shelf::Item {
             id,
@@ -6763,7 +6934,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         for view in [ShelfView::List, ShelfView::Cards] {
             let mut hits = Vec::new();
             paint_recent(&Nothing, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, Filter::All, view, STATION_TALL, false, &mut hits);
@@ -6781,7 +6952,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
         let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
         let first = |hits: &[HitBox], x: f32, y: f32| hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4);
@@ -6817,7 +6988,7 @@ seven".into()));
         for _ in 0..200 {
             scrolls.ease(1.0, 0.1);
         }
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
         let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
         let many: Vec<Tile> = (1..=40).map(tile).collect();
@@ -6860,7 +7031,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let (mut wide, mut narrow) = (Vec::new(), Vec::new());
             paint_tabs(&Nothing, &scene, (0.0, 0.0, COLUMN_WIDTH - 2.0 * theme.pad_x), Tab::Copies(Default::default()), 3, true, true, ShelfView::List, &mut wide);
             // (Measured here as so many DIPs a character, narrower than Chinese is: narrower than the least, for that.)
@@ -6879,7 +7050,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let heights: Vec<f32> = heights(&scene).iter().map(|(_, h)| h[0]).collect();
         let designed = Layout::with_columns(heights.clone(), 1, &theme).giving(gives(&scene));
         assert!(designed.least_height() < designed.height());
@@ -6999,7 +7170,7 @@ seven".into()));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
         let theme = Theme::new(Skin::Glass, false);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let apps: Vec<(String, String)> = ["C:/pressed-a.exe", "C:/pressed-b.exe"].iter().map(|target| (target.to_string(), target.to_string())).collect();
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene, (0.0, 0.0, 300.0), &apps, APP_ROWS, true, false, &mut hits);
@@ -7097,7 +7268,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..4], &ids[4..], &ids[..]] {
                 for w in [40.0, 56.0, 80.0, 130.0, 200.0, 420.0] {
                     for h in [40.0, 56.0, 80.0, 130.0, 260.0, 500.0] {
@@ -7132,7 +7303,7 @@ seven".into()));
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                 let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
                 let seen = Seen::of(history);
-                let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes: Vec<Lane> = ["station"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
                 let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
                 let layout = Layout::with_columns(heights, 1, &theme);
@@ -7161,7 +7332,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
         let layout = Layout::with_columns(vec![heights[0].max(600.0)], 1, &theme).with_rail(1, RailSide::Start, RAIL_LEAST);
@@ -7187,7 +7358,7 @@ seven".into()));
         let apps: Vec<(String, String)> = (0..4).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let order: Vec<String> = apps.iter().map(|(_, target)| target.clone()).collect();
         let still: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(super::super::thumb::Dots::new()));
-        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let mut hits = Vec::new();
         paint_apps(&Nothing, &scene(still), (0.0, 0.0, 300.0), &apps, APP_ROWS, true, false, &mut hits);
         let at_rest: Vec<(f32, f32)> = (0..4).map(|at| hits.iter().find(|hit| hit.4 == Hit::App(crate::station::apps::number_of(&format!("C:/{at}.exe")))).map(|hit| (hit.0, hit.1)).unwrap()).collect();
@@ -7216,7 +7387,7 @@ seven".into()));
         let seen = Seen::of(history);
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let pressed = |scrolls: Scrolls| {
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let mut hits = Vec::new();
             paint_notes(&Nothing, &scene, (0.0, 0.0, 320.0), &notes, crate::settings::NotesView::Deck, NOTES_TALL, &mut hits);
             hits.iter().filter_map(|hit| if let Hit::Note(at) = hit.4 { Some(at) } else { None }).collect::<Vec<_>>()
@@ -7249,7 +7420,7 @@ seven".into()));
             // (Dressed as a widget dresses it: no room round its lane, its page all of it.)
             let mut theme = Theme::new(skin, false);
             (theme.pad_x, theme.pad_top, theme.pad_bottom, theme.outer) = (0.0, 0.0, 0.0, (0.0, 0.0, 0.0));
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for (w, h) in [STUCK_NOTE, (300.0, 520.0), STUCK_NOTE_LEAST] {
                 let lane = Lane { id: format!("{STUCK_NOTE_LANE}a.md"), blocks: vec![stuck_note(&note, Lang::Zh, 60_000)], ink: theme.ink("notes") };
                 let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
@@ -7294,7 +7465,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let card = |held| NoteCard { number: 1, title: "Title".into(), lines: vec!["line".into()], when: "now".into(), colour: Default::default(), held };
         let room = (10.0, 20.0, 170.0, 104.0);
         type Paint = fn(&dyn Canvas, &Scene, &NoteCard, (f32, f32, f32, f32), bool);
@@ -7326,7 +7497,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
         // (Its own number: none other drawn meanwhile is held so.)
         let id = 0x5EED_0001;
@@ -7378,7 +7549,7 @@ seven".into()));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
         let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
         let seen = Seen::of(history);
-        let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let lane = Lane { id: "notes".into(), blocks: vec![head("Notes", String::from("15"), "", false), Block::Notes { notes, view: crate::settings::NotesView::List, tall: NOTES_TALL }], ink: theme.ink("notes") };
         let area = Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 700.0 };
@@ -7416,7 +7587,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let mut hits = Vec::new();
             paint_tabs(&Nothing, &scene, (0.0, 0.0, width), Tab::Shelf, 128, true, true, ShelfView::Cards, &mut hits);
@@ -7508,7 +7679,7 @@ seven".into()));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
-            let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
             let across = ((width / APP_CELL_W) as usize).max(1);
             // As many as fill the first row but the place to add more: it on the same row; one more: on a second.

@@ -32,11 +32,13 @@ struct Key {
 }
 
 /// How a picture is made: as Explorer shows the file (its thumbnail, else its icon), of its own shape, as large as
-/// fits the square; its icon alone, as Explorer shows a file of its kind (not what it holds), in the square.
+/// fits the square; its icon alone, as Explorer shows a file of its kind (not what it holds), in the square; its
+/// thumbnail alone (none where it has none, not its icon), as `Fit`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Made {
+pub enum Made {
     Fit,
     Icon,
+    Thumbnail,
 }
 
 /// The most pictures kept (those asked for longest ago go first: never one drawn now, as a list turned through many
@@ -309,10 +311,7 @@ fn make_one(key: Key) {
         key.hash(&mut hasher);
         hasher.finish()
     };
-    let made = picture(&key.path, key.side, key.made).map(|thumb| match key.made {
-        Made::Fit => shaped(&thumb, key.side, number),
-        Made::Icon => squared(&thumb, key.side, number),
-    });
+    let made = picture(&key.path, key.side, key.made).map(|thumb| framed(&thumb, key.side, key.made, number));
     {
         let mut kept = KEPT.lock().unwrap();
         let Some(kept) = kept.as_mut() else { return };
@@ -432,6 +431,22 @@ fn squared(thumb: &Thumb, side: u32, key: u64) -> Picture {
     Picture { key, size: (side, side), pixels: Arc::new(pixels) }
 }
 
+/// `thumb` as a picture known by `key`, made `made` for a square `side` across: of its own shape (see `shaped`), or in
+/// the square (`squared`).
+fn framed(thumb: &Thumb, side: u32, made: Made, key: u64) -> Picture {
+    match made {
+        Made::Fit | Made::Thumbnail => shaped(thumb, side, key),
+        Made::Icon => squared(thumb, side, key),
+    }
+}
+
+/// The picture of the file at `path`, made `made` for a square `side` physical px across, made now on this thread (a
+/// single-threaded apartment: the shell's makers expect one), known by `key`, and not kept: one looked at larger than
+/// any card shows it (see `ui::look`), on a thread of its own that may wait for it.
+pub fn made_now(path: &Path, side: u32, made: Made, key: u64) -> Option<Picture> {
+    picture(path, side, made).ok().map(|thumb| framed(&thumb, side, made, key))
+}
+
 /// `thumb` as large as fits a square `side` across (made smaller where it is larger), of its own shape, as a picture
 /// known by `key`: drawn whole where it is shown (see `Picture::fitted_in`).
 fn shaped(thumb: &Thumb, side: u32, key: u64) -> Picture {
@@ -457,6 +472,7 @@ fn picture(path: &Path, side: u32, made: Made) -> Result<Thumb, String> {
         let how = match made {
             Made::Fit => SIIGBF_RESIZETOFIT,
             Made::Icon => SIIGBF_ICONONLY,
+            Made::Thumbnail => SIIGBF_RESIZETOFIT | windows::Win32::UI::Shell::SIIGBF_THUMBNAILONLY,
         } | SIIGBF_BIGGERSIZEOK;
         let bitmap = factory.GetImage(SIZE { cx: side, cy: side }, how).map_err(|error| format!("the shell gave no picture: {error}"))?;
         let thumb = pixels_of(bitmap);

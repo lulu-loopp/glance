@@ -20,14 +20,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
-    VK_TAB, VK_UP, VK_V, VK_X,
+    VK_LWIN, VK_MENU, VK_RWIN, VK_TAB, VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCaretBlinkTime, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW,
-    RegisterClassW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, ASFW_ANY, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
+    AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCaretBlinkTime, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, PeekMessageW, PostMessageW,
+    RegisterClassW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, ASFW_ANY, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
     SW_SHOWNORMAL, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::pages::{Opens, PAGES};
@@ -37,6 +37,7 @@ use crate::station::run::{self, Ask, FilesAct};
 use crate::ui::canvas::{Align, Canvas, Color, Family, Font, Point};
 use crate::ui::gfx::{self, Frame, Gfx, Surface};
 use crate::ui::icons::Icon;
+use crate::ui::look;
 use crate::ui::menu::{self, Colours, Item, Look, Mark, Menu};
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Skin, Theme};
@@ -49,6 +50,8 @@ const TOGGLE: u32 = WM_APP + 1;
 const FOUND: u32 = WM_APP + 2;
 const LISTED: u32 = WM_APP + 3;
 const LEFT: u32 = WM_APP + 4;
+/// The look at the name picked (see `ui::look`) shows another of those it may (WPARAM its place among them), or went.
+const LOOKED: u32 = WM_APP + 5;
 
 /// Its timers: the caret's blinking; a look at what may have changed while it shows (the drives' indexing, the
 /// pictures made for its rows); a frame of the mark of the kind chosen sliding to it.
@@ -102,6 +105,11 @@ pub fn toggle() {
     if let Some(hwnd) = *made {
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), TOGGLE, WPARAM(0), LPARAM(0)) };
     }
+}
+
+/// Whether it is in front (the keyboard's): its keys its own, the preview's shortcut among them.
+pub fn in_front() -> bool {
+    WINDOW.get().copied().flatten().is_some_and(|hwnd| unsafe { GetForegroundWindow() }.0 as isize == hwnd)
 }
 
 /// What is asked of the finding thread: what is typed, in which view, the files all or not, in which language; its
@@ -276,6 +284,8 @@ struct Finder {
     told: Option<(String, Instant)>,
     /// How tall the sheet is now (DIPs).
     height: f32,
+    /// Each name looked at larger may be, by its place among those shown, in the look's order (see `preview`).
+    looked: Vec<usize>,
 }
 
 impl Finder {
@@ -317,6 +327,7 @@ impl Finder {
             waiting: false,
             told: None,
             height: 0.0,
+            looked: Vec::new(),
         }
     }
 
@@ -429,6 +440,9 @@ impl Finder {
         if let Some((menu, ..)) = self.menu.take() {
             menu.close();
         }
+        if self.looking() {
+            look::close();
+        }
         let held = unsafe { GetForegroundWindow() } == self.hwnd;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), CARET);
@@ -467,6 +481,10 @@ impl Finder {
             return;
         }
         let picked = self.picked().map(|row| row.what.clone());
+        // (What is looked at larger is of the list as it was: a list found afresh, it goes.)
+        if fresh && self.looking() {
+            look::close();
+        }
         self.shown = shown;
         // (Found again as it was, the same name stays picked.)
         let again = (!fresh).then(|| picked.and_then(|what| self.shown.rows().position(|row| row.what == what))).flatten();
@@ -578,6 +596,8 @@ impl Finder {
             _ => self.drawn = Some(drawn),
         }
         self.place_ime();
+        // (Where each name shows now, told to the look at one: it goes back into its row where that is.)
+        look::tiles(self.hwnd, self.rows_on_screen().into_iter().filter_map(|(at, rect)| Some((key_of(&self.shown.rows().nth(at)?.what), rect))).collect());
     }
 
     /// How tall the sheet is for what it shows (DIPs).
@@ -1025,7 +1045,8 @@ impl Finder {
             }
         }
         let hovered = self.hovered();
-        if moved {
+        // (Looked at larger, the name picked is had by the arrows or a click only: the pointer crosses others on its way.)
+        if moved && !self.looking() {
             if let Some(Hit::Row(row)) = hovered {
                 if row != self.pick {
                     self.pick = row;
@@ -1042,6 +1063,15 @@ impl Finder {
     fn press(&mut self, at: POINT, shift: bool) {
         let (x, y) = self.on_sheet(at);
         let hit = self.hit_at(x, y);
+        // Looked at larger: a press on a name looks at that one, and does nothing more. One elsewhere ends the look, and
+        // is a press as ever.
+        if self.looking() {
+            if let Some(Hit::Row(row)) = hit {
+                self.pressed = None;
+                return self.look_to(row);
+            }
+            look::close();
+        }
         self.pressed = hit.map(|hit| (hit, at));
         match hit {
             // Outside the sheet: away.
@@ -1164,6 +1194,18 @@ impl Finder {
     // ----- The keyboard -----
 
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, ctrl: bool) {
+        // Looked at larger: Esc ends the look (and nothing more), the arrows go through what may be looked at; Enter and
+        // Ctrl+C do as ever with the name picked; another key ends it, and is a key as ever.
+        if self.looking() {
+            match key {
+                VK_ESCAPE => return look::close(),
+                VK_UP | VK_LEFT => return self.look_step(false),
+                VK_DOWN | VK_RIGHT => return self.look_step(true),
+                VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN | VK_RETURN => {}
+                VK_C if ctrl => {}
+                _ => look::close(),
+            }
+        }
         let rows = self.rows();
         let page = ((LIST_MOST / ROW) as usize).max(1);
         match key {
@@ -1246,11 +1288,87 @@ impl Finder {
         if unit < 0x20 || unit == 0x7F {
             return;
         }
+        if self.looking() {
+            look::close();
+        }
         self.typing.put(&[unit]);
         self.caret_on = true;
         self.expanded = false;
         self.ask(true);
         self.draw();
+    }
+
+    // ----- Looked at larger -----
+
+    /// Whether the name picked is looked at larger (see `ui::look`).
+    fn looking(&self) -> bool {
+        look::up_for(self.hwnd)
+    }
+
+    /// The name picked looked at larger beside the sheet, the others that may be had by the arrows; looked at, gone back
+    /// into its row. (A program, a page of Settings: nothing more to show, nothing done.)
+    fn preview(&mut self) {
+        if self.looking() {
+            return look::close();
+        }
+        let lang = self.lang;
+        let on_screen = self.rows_on_screen();
+        let mut looked = Vec::new();
+        let mut items = Vec::new();
+        for (at, row) in self.shown.rows().enumerate() {
+            if let Some(mut item) = looked_at(row, lang) {
+                item.from = on_screen.iter().find(|(shown, _)| *shown == at).map(|(_, rect)| *rect);
+                looked.push(at);
+                items.push(item);
+            }
+        }
+        let Some(at) = looked.iter().position(|row| *row == self.pick) else { return };
+        self.looked = looked;
+        look::open(look::Opening { items, at, owner: self.hwnd.0 as isize, beside: Some(self.sheet_on_screen()), skin: self.skin, dark: self.dark, frost: self.frost, tell: Some(LOOKED) });
+    }
+
+    /// The name at `row` among those shown picked, and looked at larger where it may be (else the look goes).
+    fn look_to(&mut self, row: usize) {
+        self.pick = row;
+        self.follow = true;
+        match self.looked.contains(&row).then(|| self.shown.rows().nth(row)).flatten() {
+            Some(picked) => look::show(key_of(&picked.what)),
+            None => look::close(),
+        }
+        self.draw();
+    }
+
+    /// The next name that may be looked at larger (`forward`), or the one before, looked at.
+    fn look_step(&mut self, forward: bool) {
+        let Some(at) = self.looked.iter().position(|row| *row == self.pick) else { return };
+        let to = if forward { at + 1 } else { at.wrapping_sub(1) };
+        if let Some(&row) = self.looked.get(to) {
+            self.look_to(row);
+        }
+    }
+
+    /// The look told which name it shows now (`at`, in its order), or that it went (`usize::MAX`).
+    fn looked_told(&mut self, at: usize) {
+        if let Some(&row) = self.looked.get(at) {
+            if row != self.pick {
+                self.pick = row;
+                self.follow = true;
+            }
+        }
+        self.draw();
+    }
+
+    /// Each name as much as it shows of the list, by its place among those shown, and where that is on the screen (px).
+    fn rows_on_screen(&self) -> Vec<(usize, RECT)> {
+        let px = |dips: f32| (dips * self.scale).round() as i32;
+        let (left, top) = (self.rect.left + px(self.room), self.rect.top + px(self.room));
+        self.hits
+            .iter()
+            .filter_map(|(r, hit)| match hit {
+                Hit::Row(at) => Some((*at, RECT { left: left + px(r.x), top: top + px(r.y), right: left + px(r.x + r.w), bottom: top + px(r.y + r.h) })),
+                _ => None,
+            })
+            .collect()
     }
 
     // ----- What is done -----
@@ -1502,6 +1620,57 @@ fn days(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + of_era_days - 719_468
 }
 
+/// Whether `key`, with the modifiers held as `held` tells, is the preview's shortcut (see `settings::Shortcut::preview`).
+fn preview_key(key: VIRTUAL_KEY, held: impl Fn(VIRTUAL_KEY) -> bool) -> bool {
+    let Some(shortcut) = crate::app().settings.lock().unwrap().preview_shortcut else { return false };
+    shortcut.key == key.0 && shortcut.ctrl == held(VK_CONTROL) && shortcut.alt == held(VK_MENU) && shortcut.shift == held(VK_SHIFT) && shortcut.win == (held(VK_LWIN) || held(VK_RWIN))
+}
+
+/// What a name found is known by to the look at it (see `ui::look::Item::key`).
+fn key_of(what: &What) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    what.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// What `row` is looked at larger as (see `ui::look`): a file or folder, a thing on the station or copied lately, a note.
+/// None: a program, a page of Settings (nothing more to show of them).
+fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
+    let key = key_of(&row.what);
+    match &row.what {
+        What::Path(path) => Some(look::Item {
+            key,
+            title: row.name.clone(),
+            about: row.detail.clone(),
+            shows: look::Shows::File(path.clone()),
+            from: None,
+            open: Some(Ask::Files(vec![path.clone()], FilesAct::Open)),
+            copy: Some(if row.kind == Kind::Folder { Ask::CopyText(path.display().to_string(), None) } else { Ask::Files(vec![path.clone()], FilesAct::Copy(None)) }),
+            pastes: false,
+        }),
+        What::Item(id) => {
+            let hit = if row.kind == Kind::Copied { crate::ui::view::Hit::Copied(*id) } else { crate::ui::view::Hit::Shelf(*id) };
+            crate::ui::view::looked_at(hit, None, lang).map(|item| look::Item { key, ..item })
+        }
+        What::Note(name) => {
+            let notes = crate::notes::shown();
+            let note = notes.iter().find(|note| note.name == *name)?;
+            Some(look::Item {
+                key,
+                title: row.name.clone(),
+                about: row.detail.clone(),
+                shows: look::Shows::Words(note.text.clone()),
+                from: None,
+                open: None,
+                copy: Some(Ask::CopyText(note.text.clone(), None)),
+                pastes: false,
+            })
+        }
+        What::Program(_) | What::Page(_) => None,
+    }
+}
+
 fn point(lparam: LPARAM) -> (i32, i32) {
     ((lparam.0 & 0xFFFF) as u16 as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32)
 }
@@ -1524,6 +1693,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         FOUND => {
             with(Finder::found);
+            LRESULT(0)
+        }
+        LOOKED => {
+            with(|finder| finder.looked_told(wparam.0));
+            LRESULT(0)
+        }
+        // The preview's shortcut (see `ui::look`): the name picked looked at larger, or the look gone. (What it would
+        // type taken with it: its Ctrl's character, its Alt's beep.)
+        WM_KEYDOWN | WM_SYSKEYDOWN if preview_key(VIRTUAL_KEY(wparam.0 as u16), held) => {
+            let mut typed = MSG::default();
+            let _ = unsafe { PeekMessageW(&mut typed, Some(hwnd), WM_CHAR, WM_SYSCHAR, PM_REMOVE) };
+            with(Finder::preview);
             LRESULT(0)
         }
         LISTED => {

@@ -273,7 +273,7 @@ impl Away {
 /// room, see `carry`), recorded as `record` does; none where it is not drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn record_tile(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), hit: view::Hit) -> Vec<Part> {
-    let at_rest = Scene { hover: None, thumbs: &view::RESTING, ..*scene };
+    let at_rest = Scene { hover: None, hint: None, thumbs: &view::RESTING, ..*scene };
     let key = format!("tile.{hit:?}");
     record(frame, &at_rest, lanes, layout, small, scale, at).into_iter().filter(|part| part.key.as_deref() == Some(key.as_str())).collect()
 }

@@ -791,6 +791,8 @@ struct Widget {
     hover: bool,
     /// What a press would do something with under the pointer (see `view::Hit::takes_press`): lit as it is drawn.
     hit_hover: Option<view::Hit>,
+    /// The preview's shortcut said on what the pointer rests on (see `view::Hint`).
+    preview_hint: view::Hint,
     /// What is under the pointer said under it (see `hover`): taken away as the pointer leaves it, the widget goes, or
     /// what is under the pointer changes without it (pages turned).
     saying: bool,
@@ -1755,13 +1757,6 @@ impl Widgets {
         }
     }
 
-    /// `page` opened beside the widget at `hwnd` (from its menu: a thing on its station previewed).
-    pub fn open_beside(&self, hwnd: HWND, page: crate::ui::beside::Page) {
-        if let Some(widget) = self.list.iter().find(|widget| widget.window.hwnd == hwnd) {
-            widget.open_beside(page);
-        }
-    }
-
     /// The note `name` stuck on the desktop taken away (the note deleted): its widget not put away to be brought back,
     /// gone; merged with another, the other left as it was.
     pub fn unstick_note(&mut self, name: &str) {
@@ -2438,6 +2433,17 @@ impl Widgets {
         widget.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
     }
 
+    /// What may be looked at larger on the widget at `hwnd`, as it was just drawn (see `ui::look`): each such thing, and
+    /// where its tile is on the screen (physical px).
+    pub fn looks(&self, hwnd: HWND) -> Vec<(view::Hit, RECT)> {
+        self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(Vec::new, |widget| crate::panel::looks_in(&widget.hits_on_screen()))
+    }
+
+    /// Where the widget at `hwnd` is on the screen (physical px): its surface.
+    pub fn rect_of(&self, hwnd: HWND) -> Option<RECT> {
+        self.list.iter().find(|w| w.window.hwnd == hwnd).map(Widget::rect)
+    }
+
     /// How a menu opened on the widget at `hwnd` looks: in its skin, light or dark and as frosted as it is drawn.
     pub fn look_of(&self, hwnd: HWND) -> crate::ui::menu::Look {
         self.list.iter().find(|w| w.window.hwnd == hwnd).map_or_else(crate::ui::menu::Look::system, Widget::menu_look)
@@ -2620,6 +2626,8 @@ impl Widgets {
                     let rest = if widget.lingered.is_some() || widget.shadowed { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
                     // (Sooner, a note written in where it is due: its caret's blink, its keeping.)
                     let rest = widget.in_place.as_ref().and_then(|in_place| in_place.due(now)).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
+                    // (And the preview's shortcut due to be said, or coming in.)
+                    let rest = widget.preview_hint.due(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     widget.next_frame = now + rest;
                     due = due.min(rest);
                     // (What is behind looked at sooner, a frame of it having come: drawn only if it changed.)
@@ -3186,6 +3194,7 @@ impl Widget {
             split: None,
             hover: false,
             hit_hover: None,
+            preview_hint: view::Hint::default(),
             saying: false,
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
@@ -3268,26 +3277,39 @@ impl Widget {
         }
     }
 
-    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`).
-    fn show_stations(&self) {
+    /// Where each thing drawn is on the screen (physical px), as it was just drawn.
+    fn hits_on_screen(&self) -> Vec<(RECT, view::Hit)> {
         let mut window = RECT::default();
         if unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowRect(self.window.hwnd, &mut window) }.is_err() {
-            return;
+            return Vec::new();
         }
         let px = self.contact.scale * self.zoom;
         let margin = self.margin_px();
         let screen = |at: f32, from: f32, origin: i32| origin + margin + ((at + from) * px).round() as i32;
-        let areas = self
-            .hits
+        self.hits
             .iter()
-            .filter_map(|(x, y, w, h, hit)| Some((RECT {
-                left: screen(*x, self.hits_from.0, window.left),
-                top: screen(*y, self.hits_from.1, window.top),
-                right: screen(x + w, self.hits_from.0, window.left),
-                bottom: screen(y + h, self.hits_from.1, window.top),
-            }, hit.lands()?)))
-            .collect();
-        crate::station::run::shows_at(self.window.hwnd, areas);
+            .map(|(x, y, w, h, hit)| {
+                let rect = RECT { left: screen(*x, self.hits_from.0, window.left), top: screen(*y, self.hits_from.1, window.top), right: screen(x + w, self.hits_from.0, window.left), bottom: screen(y + h, self.hits_from.1, window.top) };
+                (rect, *hit)
+            })
+            .collect()
+    }
+
+    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`); where what
+    /// may be looked at larger is, told to the look at one of them up (see `ui::look::tiles`).
+    fn show_stations(&self) {
+        let on_screen = self.hits_on_screen();
+        crate::station::run::shows_at(self.window.hwnd, on_screen.iter().filter_map(|(rect, hit)| Some((*rect, hit.lands()?))).collect());
+        crate::ui::look::tiles(self.window.hwnd, crate::panel::looks_in(&on_screen).into_iter().map(|(hit, rect)| (hit.key(), rect)).collect());
+    }
+
+    /// What the pointer is taken to be over: while a look at a thing on it is up, that thing (another is had by the
+    /// arrows or a click, never by the pointer passing over it).
+    fn hover_shown(&self) -> Option<view::Hit> {
+        match crate::ui::look::shown_for(self.window.hwnd) {
+            Some(key) => self.hits.iter().map(|hit| hit.4).find(|hit| hit.looks() && hit.key() == key),
+            None => self.hit_hover,
+        }
     }
 
     /// The desktop taken behind it, from `taken` on (`moved`: elsewhere
@@ -4220,6 +4242,11 @@ impl Widget {
             moving |= self.thumbs.apps(now, &order, None);
         }
         let thumbs = self.thumbs.clone();
+        // The preview's shortcut said on what the pointer rests on that may be looked at larger: not while a look is up
+        // from it, or it is written in where it is (its keys are its own then).
+        let says = crate::ui::look::hint_says(look.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd) && self.in_place.is_none());
+        let hint = self.preview_hint.step(self.hit_hover.filter(|_| says.is_some()), now);
+        let hint = hint.zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
         // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.
         let note_pages = shows(|hit| matches!(hit, view::Hit::Pages(view::List::Notes, _)));
         let writing = if note_pages { crate::ui::beside::writing_for(self.window.hwnd) } else { None };
@@ -4297,7 +4324,7 @@ impl Widget {
         // Merged with what plays, the readings without the music lane (what plays shows itself).
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -4678,7 +4705,7 @@ impl Widget {
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
-        let scene = view::Scene { hover: self.hit_hover, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).

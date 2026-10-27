@@ -1260,11 +1260,12 @@ enum CodeFor {
     WebPage,
 }
 
-/// Which shortcut: the panel's, or search's.
+/// Which shortcut: the panel's, search's, or the preview's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Keys {
     Panel,
     Search,
+    Preview,
 }
 
 /// What a press lands on.
@@ -2394,6 +2395,7 @@ impl Ui {
                 Row::Choice(Field::CloseDelay),
                 Row::Shortcut(Keys::Panel),
                 Row::Shortcut(Keys::Search),
+                Row::Shortcut(Keys::Preview),
                 Row::Choice(Field::OverFullscreen),
                 Row::Switch(Switch::TearOff),
             ]),
@@ -3016,10 +3018,12 @@ impl Ui {
                 let (name, what, taken) = match which {
                     Keys::Panel => (p("快捷键", "Shortcut"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
                     Keys::Search => (p("搜索快捷键", "Search shortcut"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
+                    Keys::Preview => (p("预览快捷键", "Preview shortcut"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
                 };
                 let recording = self.recording == Some(which);
                 let shortcut = self.shortcut(which);
                 let detail = match (recording, self.needs_modifier, shortcut) {
+                    (true, true, _) if which == Keys::Preview => p("组合键须包含 Ctrl 或 Alt", "Include Ctrl or Alt"),
                     (true, true, _) => p("组合键须包含 Ctrl、Alt 或 Win", "Include Ctrl, Alt or Win"),
                     (true, false, _) => p("请按下组合键，按 Esc 取消", "Press the keys. Esc cancels"),
                     (false, _, Some(_)) if taken => p("该组合键已被其他程序占用，请重新设置", "Another program uses these keys. Choose others"),
@@ -3365,6 +3369,7 @@ impl Ui {
         match which {
             Keys::Panel => self.settings.shortcut,
             Keys::Search => self.settings.search_shortcut,
+            Keys::Preview => self.settings.preview_shortcut,
         }
     }
 
@@ -3373,6 +3378,7 @@ impl Ui {
         match which {
             Keys::Panel => self.settings.shortcut = to,
             Keys::Search => self.settings.search_shortcut = to,
+            Keys::Preview => self.settings.preview_shortcut = to,
         }
         self.save();
         self.record(None);
@@ -3397,9 +3403,10 @@ impl Ui {
             return;
         }
         let shortcut = Shortcut { ctrl: down(VK_CONTROL), alt: down(VK_MENU), shift: down(VK_SHIFT), win: down(VK_LWIN) || down(VK_RWIN), key: key.0 };
-        if !shortcut.usable() {
+        // (The preview's is pressed as words are typed in search's field: Win alone would leave a key that types.)
+        if if which == Keys::Preview { !shortcut.previews() } else { !shortcut.usable() } {
             // Noted, for a report of a shortcut that would not take.
-            crate::journal::note(format!("shortcut: key 0x{:02X} without Ctrl, Alt or Win", key.0));
+            crate::journal::note(format!("shortcut: key 0x{:02X} without the modifiers it needs", key.0));
             self.needs_modifier = true;
             return;
         }
@@ -6141,7 +6148,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&probe);
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
@@ -6161,7 +6168,7 @@ impl Ui {
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
         let (theme, frost) = self.stage.look(skin, prefs.theme, behind);
-        let scene = Scene { music_apart: false, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);

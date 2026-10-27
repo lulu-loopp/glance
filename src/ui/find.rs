@@ -6,4 +6,4 @@ pub mod pages;
 pub mod results;
 mod window;
 
-pub use window::toggle;
+pub use window::{in_front, toggle};

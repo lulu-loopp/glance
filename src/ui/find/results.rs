@@ -86,7 +86,7 @@ pub enum Kind {
 }
 
 /// What opens it.
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum What {
     /// A program, as the shell opens it (`shell:AppsFolder\…`).
     Program(String),

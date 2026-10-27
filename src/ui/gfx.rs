@@ -462,6 +462,23 @@ impl Gfx {
         format
     }
 
+    /// Whether the system has the face named `name` (asked once: faces are not put in while Glance runs, as far as it
+    /// minds).
+    fn has_face(&self, name: &str) -> bool {
+        static HAS: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+        if let Some((_, has)) = HAS.lock().unwrap().iter().find(|(named, _)| named == name) {
+            return *has;
+        }
+        let mut system: Option<IDWriteFontCollection> = None;
+        let has = unsafe { self.write.cast::<windows::Win32::Graphics::DirectWrite::IDWriteFactory>().and_then(|factory| factory.GetSystemFontCollection(&mut system, false)) }.is_ok()
+            && system.is_some_and(|system| {
+                let (mut at, mut found) = (0u32, windows::core::BOOL::from(false));
+                unsafe { system.FindFamilyName(&HSTRING::from(name), &mut at, &mut found) }.is_ok() && found.as_bool()
+            });
+        HAS.lock().unwrap().push((name.to_string(), has));
+        has
+    }
+
     /// `family`'s name, and the collection it is in (none: the system's).
     fn face(&self, family: Family) -> (PCWSTR, Option<&IDWriteFontCollection>) {
         match family {
@@ -470,6 +487,7 @@ impl Gfx {
             Family::Segoe => (w!("Segoe UI Variable Text"), None),
             Family::SegoeDisplay => (w!("Segoe UI Variable Display"), None),
             Family::YaHei => (w!("Microsoft YaHei UI"), None),
+            Family::Mono => (if self.has_face(super::canvas::CODE_FACE) { w!("Cascadia Mono") } else { w!("Consolas") }, None),
             // (Asked for only once it is had: see `serif::family`.)
             Family::Serif => match self.serif.get_or_init(|| crate::serif::face().and_then(|face| face_of(&self.write, &self.loader, face).ok())) {
                 Some((collection, name)) => (PCWSTR(name.as_ptr()), Some(collection)),

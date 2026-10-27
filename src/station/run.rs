@@ -35,6 +35,8 @@ pub enum Ask {
     Clear(bool),
     /// What `id` holds put on the clipboard.
     Copy(u64),
+    /// What `id` holds put on the clipboard, and pasted where the keyboard is (Ctrl+V sent to the program in front).
+    PasteOut(u64),
     /// What `id` holds opened as Explorer opens it (a web address in the browser); shown in Explorer, selected there.
     Open(u64),
     Show(u64),
@@ -267,6 +269,14 @@ fn open(given: &Content) {
         }
         Content::Png(_) | Content::Saved { .. } => {}
     }
+}
+
+/// Ctrl+V pressed for the program in front, where the keyboard is: what was just put on the clipboard pasted there.
+fn paste_in_front() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_V};
+    let key = |key: VIRTUAL_KEY, up: bool| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: key, dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } } };
+    let keys = [key(VK_CONTROL, false), key(VK_V, false), key(VK_V, true), key(VK_CONTROL, true)];
+    unsafe { SendInput(&keys, std::mem::size_of::<INPUT>() as i32) };
 }
 
 /// `text` written as a text file to be opened (UTF-8, marked so; named by its first line, see `drag::text_name`), in a
@@ -527,10 +537,12 @@ impl Station {
                 Ask::Pin(id, pinned) => self.keep.pin(id, pinned),
                 Ask::Remove(id) => self.keep.remove(id),
                 Ask::Clear(copied) => self.keep.clear(copied),
-                Ask::Copy(id) => {
+                Ask::Copy(id) | Ask::PasteOut(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
-                        self.copy(&content, stays_here, Some(Copied::Item(id)));
+                        if self.copy(&content, stays_here, Some(Copied::Item(id))) && matches!(ask, Ask::PasteOut(_)) {
+                            paste_in_front();
+                        }
                     }
                 }
                 Ask::Open(id) => {
@@ -549,7 +561,9 @@ impl Station {
                 Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
                 Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
                 Ask::Files(paths, act) => match act {
-                    FilesAct::Copy(entry) => self.copy(&Content::Files(paths), false, entry.map(Copied::Recent)),
+                    FilesAct::Copy(entry) => {
+                        self.copy(&Content::Files(paths), false, entry.map(Copied::Recent));
+                    }
                     FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
                     FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
                 },
@@ -564,7 +578,9 @@ impl Station {
                         windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
                     }
                 }),
-                Ask::CopyText(text, from) => self.copy(&Content::Text(text), false, from),
+                Ask::CopyText(text, from) => {
+                    self.copy(&Content::Text(text), false, from);
+                }
             }
         }
         self.show();
@@ -646,11 +662,13 @@ impl Station {
     /// What it shows now, for the other threads, who are told.
     /// `content` put on the clipboard (not to leave this PC where `stays_here`): once it took it, what it was copied
     /// from marked copied.
-    fn copy(&mut self, content: &Content, stays_here: bool, from: Option<Copied>) {
-        if let Some(sequence) = clipboard::put(self.window, content, stays_here) {
-            self.ours = sequence;
-            self.copied = from.map(|from| (from, std::time::Instant::now()));
-        }
+    /// `content` put on the clipboard (`from` what was copied, marked so): whether it was (another program may hold the
+    /// clipboard).
+    fn copy(&mut self, content: &Content, stays_here: bool, from: Option<Copied>) -> bool {
+        let Some(sequence) = clipboard::put(self.window, content, stays_here) else { return false };
+        self.ours = sequence;
+        self.copied = from.map(|from| (from, std::time::Instant::now()));
+        true
     }
 
     fn show(&self) {

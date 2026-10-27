@@ -14,6 +14,8 @@ pub mod note;
 pub mod genie;
 pub mod gfx;
 pub mod life;
+#[cfg(windows)]
+pub mod look;
 pub mod forms;
 #[cfg(windows)]
 pub mod find;

@@ -40,6 +40,8 @@ pub enum Family {
     /// Noto Serif SC Black: the music full screen's lines, once taken from Glance's site (see `serif`). Asked for
     /// only once it is had.
     Serif,
+    /// A fixed face, code's: `CODE_FACE`, else (Windows 10 has none of it) Consolas.
+    Mono,
 }
 
 /// A text style: face, size in DIPs, weight (100–900), width (% of normal)

@@ -42,8 +42,6 @@ pub enum Page {
     Picker,
     /// A note, by its file's name in the notes' folder (none: a new one, named by its title as it is first kept).
     Note(Option<String>),
-    /// A thing on the station, by its number, shown whole: a picture as large as the page, words all of them.
-    Preview(u64),
 }
 
 /// Where the page goes: beside `by` (screen px: the panel or the widget it opens from), on the side `side` (away from
@@ -77,7 +75,6 @@ const HEAD: f32 = 52.0;
 const SEARCH: f32 = 34.0;
 const ROW: f32 = 40.0;
 const LETTER: f32 = 26.0;
-const FOOT: f32 = 48.0;
 const PAD: f32 = 16.0;
 /// The gap between it and what it opens from (DIPs).
 const GAP: f32 = 8.0;
@@ -342,9 +339,6 @@ enum Hit {
     Choose,
     /// A note's menu.
     NoteMenu,
-    /// A thing previewed: copied, opened.
-    PreviewCopy,
-    PreviewOpen,
     /// A thing listed, by what opens it and its name: added, or taken off where it is kept already.
     Pick(String, String),
 }
@@ -1258,11 +1252,6 @@ impl Beside {
                 }
             }
             Hit::Choose => self.choosing = true,
-            Hit::PreviewCopy | Hit::PreviewOpen => {
-                if let Page::Preview(id) = self.page {
-                    crate::station::run::ask(if hit == Hit::PreviewCopy { crate::station::run::Ask::Copy(id) } else { crate::station::run::Ask::Open(id) });
-                }
-            }
             Hit::NoteMenu => {
                 let mut at = POINT { x: ((x - 120.0) * self.scale) as i32, y: ((y + 14.0) * self.scale) as i32 };
                 unsafe {
@@ -1508,88 +1497,7 @@ impl Beside {
         match self.page {
             Page::Picker => self.paint_picker(frame, (width, height)),
             Page::Note(_) => self.paint_note(frame, (width, height)),
-            Page::Preview(id) => self.paint_preview(frame, (width, height), id),
         }
-    }
-
-    /// A thing on the station shown whole: its name, what it is and when it came; under them its picture as large as
-    /// the page holds (a file's, as Explorer pictures it), or its words wrapped, scrolled by the wheel; at its foot what
-    /// copies it and what opens it.
-    fn paint_preview(&mut self, frame: &Frame, (width, height): (f32, f32), id: u64) {
-        use crate::station::shelf::What;
-        let theme = self.theme.clone();
-        let lang = self.lang;
-        let mut hits = Vec::new();
-        let lit = |at: (f32, f32, f32, f32), pointer: Option<(f32, f32)>| pointer.is_some_and(|(x, y)| x >= at.0 && x < at.0 + at.2 && y >= at.1 && y < at.1 + at.3);
-        self.paint_ground(frame, (width, height));
-        let close = (width - PAD - 28.0, 12.0, 28.0, 28.0);
-        if lit(close, self.pointer) {
-            frame.fill_rounded(theme.hover, close.0, close.1, close.2, close.3, theme.control_radius.min(14.0));
-        }
-        frame.icon(Icon::Close, Point { x: close.0 + 14.0, y: close.1 + 14.0 }, 16.0, theme.text2);
-        hits.push((close.0, close.1, close.2, close.3, Hit::Close));
-        let shown = crate::station::run::shown();
-        let Some(item) = shown.items.iter().find(|item| item.id == id) else {
-            frame.text(lang.pick("这一项已不在中转站上", "No longer on the station"), theme.body, theme.text2, PAD, 18.0, width - 2.0 * PAD - 40.0, Align::Start);
-            self.hits = hits;
-            return;
-        };
-        let folder = crate::station::folder::Folder::own();
-        let (name, picture, words): (String, Option<std::path::PathBuf>, Option<String>) = match &item.what {
-            What::Files { paths, .. } => (paths.first().and_then(|path| path.file_name()).map_or_else(String::new, |name| name.to_string_lossy().into_owned()), paths.first().cloned(), (paths.len() > 1).then(|| paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n"))),
-            What::Picture { file } => (lang.pick("图片", "Picture").into(), Some(folder.path(file)), None),
-            What::Saved { file, name, .. } => (name.clone(), Some(folder.path(file)), None),
-            What::Text { text } => (lang.pick("文字", "Text").into(), None, Some(text.clone())),
-            What::Link { url } => (lang.pick("链接", "Link").into(), None, Some(url.clone())),
-        };
-        let inner = width - 2.0 * PAD;
-        frame.text(&name, theme.title, theme.text, PAD, 16.0, inner - 40.0, Align::Start);
-        frame.text(&super::text::since(item.added_ms, crate::station::now_ms(), lang), theme.small, theme.text3, PAD, 38.0, inner - 40.0, Align::Start);
-        let (top, bottom) = (HEAD + 12.0, height - FOOT);
-        let mut waiting = false;
-        if let Some(path) = picture.filter(|_| words.is_none()) {
-            // (Whole, as large as fits over the path's line, at the pixels it covers.)
-            let room = bottom - top - 8.0 - 2.0 * theme.small.size;
-            let side = inner.min(room);
-            let under = match crate::station::thumbs::of(&path, super::view::picture_pixels(frame, inner.max(room))) {
-                Some(shown) => {
-                    let (x, _, w, h) = shown.fitted_in(PAD, top, inner, room);
-                    frame.picture(&shown, x, top, w, h, 8.0, 1.0);
-                    top + h
-                }
-                None => {
-                    waiting = true;
-                    frame.fill_rounded(theme.track, PAD + (inner - side) / 2.0, top, side, side, 8.0);
-                    top + side
-                }
-            };
-            frame.text(&path.display().to_string(), theme.small, theme.text3, PAD, under + 8.0, inner, Align::Start);
-        } else if let Some(words) = words {
-            let tall = frame.gfx.wrapped_height(&words, theme.body, inner);
-            self.scroll_most = (tall - (bottom - top)).max(0.0);
-            self.scroll = self.scroll.clamp(0.0, self.scroll_most);
-            frame.clip(0.0, top, width, bottom - top);
-            frame.text_wrapped(&words, theme.body, theme.text, PAD, top - self.scroll, inner);
-            frame.unclip();
-        }
-        // Its foot: copied, opened (what opens).
-        frame.fill(theme.rule, PAD, bottom, inner, 1.0);
-        let opens = !matches!(item.what, What::Text { .. });
-        let mut x = PAD + inner;
-        for (hit, label, shown) in [(Hit::PreviewOpen, lang.pick("打开", "Open"), opens), (Hit::PreviewCopy, lang.pick("复制", "Copy"), true)] {
-            if !shown {
-                continue;
-            }
-            let wide = frame.measure(label, theme.small) + 24.0;
-            x -= wide;
-            let button = (x, bottom + (FOOT - 28.0) / 2.0, wide, 28.0);
-            frame.fill_rounded(if lit(button, self.pointer) { theme.hover } else { theme.track }, button.0, button.1, button.2, button.3, theme.control_radius.max(4.0));
-            frame.text(label, theme.small, theme.text, button.0 + 12.0, button.1 + 6.0, wide, Align::Start);
-            hits.push((button.0, button.1, button.2, button.3, hit));
-            x -= 8.0;
-        }
-        self.waiting = waiting;
-        self.hits = hits;
     }
 
     /// A note's page: as `note::Writing::paint` draws it, its close and its menu in its head.

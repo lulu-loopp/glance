@@ -137,6 +137,19 @@ const WAKE: u32 = WM_APP + 16;
 const ESCAPE_HOTKEY: i32 = 1;
 /// Ctrl+V, while the pointer is over a station: what is on the clipboard put on it.
 const PASTE_HOTKEY: i32 = 2;
+/// The preview's shortcut, while the pointer is over what may be looked at larger, or a look is up from here (see
+/// `ui::look`).
+const PREVIEW_HOTKEY: i32 = 3;
+/// The look's own keys, while it is up from here: the arrows, Enter, Ctrl+C (Esc is the panel's own, as ever). Each with
+/// whether it is held with Ctrl, and its virtual key.
+const LOOK_KEYS: [(i32, crate::ui::look::Key, bool, u16); 6] = [
+    (4, crate::ui::look::Key::Left, false, 0x25),
+    (5, crate::ui::look::Key::Up, false, 0x26),
+    (6, crate::ui::look::Key::Right, false, 0x27),
+    (7, crate::ui::look::Key::Down, false, 0x28),
+    (8, crate::ui::look::Key::Open, false, 0x0D),
+    (9, crate::ui::look::Key::Copy, true, 0x43),
+];
 
 struct Config {
     /// Which edges of which screens open the panel, to a push (and how hard)
@@ -564,6 +577,11 @@ impl Controller {
         let mut escape = false;
         // Ctrl+V taken (see `PASTE_HOTKEY`).
         let mut paste = false;
+        // The preview's shortcut taken, as it was (see `PREVIEW_HOTKEY`), and the look's keys (see `LOOK_KEYS`); what a
+        // look up from here shows, and from what, as that was last drawn.
+        let mut preview: Option<crate::settings::Shortcut> = None;
+        let mut look_keys = false;
+        let mut look_shown: Option<(isize, u64)> = None;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
         let mut seam_rest: Option<(Instant, POINT)> = None;
@@ -918,10 +936,27 @@ impl Controller {
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PASTE_HOTKEY as usize => crate::station::run::ask(crate::station::run::Ask::Paste),
+                // The preview's shortcut: the look up from here gone back into its tile, else what is under the pointer
+                // looked at larger.
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == PREVIEW_HOTKEY as usize => {
+                    if looking_here(&panels, &widgets) {
+                        crate::ui::look::key(crate::ui::look::Key::Close);
+                    } else if let Some((window, hit)) = looked_under(&panels, &widgets) {
+                        look_at(&panels, &widgets, window, hit);
+                    }
+                }
+                WM_HOTKEY if msg.hwnd.is_invalid() && LOOK_KEYS.iter().any(|(id, ..)| msg.wParam.0 == *id as usize) => {
+                    if let Some((_, key, ..)) = LOOK_KEYS.iter().find(|(id, ..)| msg.wParam.0 == *id as usize) {
+                        crate::ui::look::key(*key);
+                    }
+                }
                 // Esc: the music full screen left, over all else (and nothing more); a thing kept at hand dragged put
                 // back where it was (and nothing more); else the panels that go, gone.
+                // (A look up from here: back into its tile, and nothing more.)
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
-                    if widgets.full().is_some() {
+                    if looking_here(&panels, &widgets) {
+                        crate::ui::look::key(crate::ui::look::Key::Close);
+                    } else if widgets.full().is_some() {
                         widgets.leave_full();
                     } else if panels.iter().any(Panel::dragging_app) {
                         for panel in panels.iter_mut().filter(|panel| panel.dragging_app()) {
@@ -1036,8 +1071,19 @@ impl Controller {
                 // The pinned panel dragged by its bar.
                 // (Pressed with the settings in front, it comes over them: in use, it was under them till a page it opened
                 // took the front.)
+                // (A look up from it: a press on another thing that may be looked at shows that one, and does nothing
+                // more. One elsewhere on it closes the look, and is a press as ever.)
                 WM_LBUTTONDOWN if owner.is_some() => {
                     let panel = &mut panels[owner.unwrap()];
+                    if crate::ui::look::up_for(panel.window.hwnd) {
+                        match panel.hit_at(lparam_point(msg.lParam)).filter(|hit| hit.looks()) {
+                            Some(hit) => {
+                                crate::ui::look::show(hit.key());
+                                continue;
+                            }
+                            None => crate::ui::look::close(),
+                        }
+                    }
                     panel.forward = true;
                     panel.press(lparam_point(msg.lParam));
                 }
@@ -1159,6 +1205,13 @@ impl Controller {
                 WM_MOUSEWHEEL if widgets.full_owns(msg.hwnd) => {
                     if let Some(full) = widgets.full() {
                         full.wheel((msg.wParam.0 >> 16) as u16 as i16);
+                    }
+                }
+                // A look up from a widget: a press on another thing on it that may be looked at shows that one, and does
+                // nothing more. One elsewhere on it closes the look, and goes on as a press (below).
+                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) && crate::ui::look::up_for(msg.hwnd) && widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).is_some_and(|hit| hit.looks()) => {
+                    if let Some(hit) = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
+                        crate::ui::look::show(hit.key());
                     }
                 }
                 // A note stuck on the desktop written in where it is, or to be: the pointer's on its words, and on its
@@ -1413,7 +1466,9 @@ impl Controller {
                 _ => {}
             }
 
-            let wanted = panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app());
+            // (A look up from here takes Esc too: see `ui::look`.)
+            let looking = looking_here(&panels, &widgets);
+            let wanted = looking || panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app());
             if wanted != escape {
                 escape = wanted;
                 unsafe {
@@ -1441,6 +1496,45 @@ impl Controller {
                         let _ = UnregisterHotKey(None, PASTE_HOTKEY);
                     }
                 }
+            }
+            // The preview's shortcut taken while the pointer is over what may be looked at larger (not while a note is
+            // written in where it is: its keys are its own), or a look is up from here: else it is every program's. The
+            // look's own keys taken while it is up.
+            let shortcut = crate::app().settings.lock().unwrap().preview_shortcut;
+            // (Nor while search is in front: the shortcut there is its own, for what is picked in it.)
+            let wanted = shortcut.filter(|_| looking || (!widgets.writing() && !crate::ui::find::in_front() && looked_under(&panels, &widgets).is_some()));
+            if wanted != preview {
+                preview = wanted;
+                unsafe {
+                    let _ = UnregisterHotKey(None, PREVIEW_HOTKEY);
+                    if let Some(shortcut) = wanted {
+                        crate::ui::look::key_was_taken(RegisterHotKey(None, PREVIEW_HOTKEY, crate::tray::modifiers_of(shortcut), u32::from(shortcut.key)).is_err());
+                    }
+                }
+            }
+            if looking != look_keys {
+                look_keys = looking;
+                for (id, _, ctrl, key) in LOOK_KEYS {
+                    unsafe {
+                        if looking {
+                            let ctrl = if ctrl { windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL } else { Default::default() };
+                            let _ = RegisterHotKey(None, id, ctrl | MOD_NOREPEAT, u32::from(key));
+                        } else {
+                            let _ = UnregisterHotKey(None, id);
+                        }
+                    }
+                }
+            }
+            // What the look shows lit on what it was called up from, and no longer on what it showed before: drawn at once.
+            let shown = crate::ui::look::owner().and_then(|owner| Some((owner.0 as isize, crate::ui::look::shown_for(owner)?)));
+            if shown != look_shown {
+                for (owner, _) in [look_shown, shown].into_iter().flatten() {
+                    match panels.iter_mut().find(|panel| panel.window.hwnd.0 as isize == owner) {
+                        Some(panel) => panel.next_frame = now,
+                        None => widgets.draw_soon(),
+                    }
+                }
+                look_shown = shown;
             }
             let needed = pusher.resting() || seam_rest.is_some();
             if needed != ticking {
@@ -1560,10 +1654,17 @@ impl Controller {
                 }
             }
             MenuFor::Station(id, choices, on) => match (choice.and_then(|row| choices.get(row)), on) {
-                (Some(crate::station::Choice::Preview), Some(widget)) => widgets.open_beside(widget, crate::ui::beside::Page::Preview(id)),
-                (Some(crate::station::Choice::Preview), None) => {
-                    if let Some(panel) = menu_panel.and_then(|at| panels.get(at)) {
-                        panel.open_beside(crate::ui::beside::Page::Preview(id));
+                // Looked at larger where it was chosen: on the widget, or on the panel.
+                (Some(crate::station::Choice::Preview), on) => {
+                    let window = on.or_else(|| menu_panel.and_then(|at| panels.get(at)).map(|panel| panel.window.hwnd));
+                    if let Some(window) = window {
+                        let looks = match panels.iter().find(|panel| panel.window.hwnd == window) {
+                            Some(panel) => panel.looks(),
+                            None => widgets.looks(window),
+                        };
+                        if let Some(&(hit, _)) = looks.iter().find(|(hit, _)| matches!(hit, Hit::Shelf(of) | Hit::Copied(of) if *of == id)) {
+                            look_at(panels, widgets, window, hit);
+                        }
                     }
                 }
                 (Some(choice), _) => crate::station::chose(id, *choice),
@@ -1680,6 +1781,41 @@ fn pushed_from(wparam: WPARAM, lparam: LPARAM) -> (Edge, POINT) {
 fn hear_mouse(sink: HWND) -> bool {
     let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: sink };
     unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.is_ok()
+}
+
+/// Whether a look is up from the panel or a widget (see `ui::look`), not one from search.
+fn looking_here(panels: &[Panel], widgets: &crate::widget::Widgets) -> bool {
+    crate::ui::look::owner().is_some_and(|owner| panels.iter().any(|panel| panel.window.hwnd == owner) || widgets.owns(owner))
+}
+
+/// What may be looked at larger under the pointer, where it is that (see `ui::look`): the window it is on (the panel's,
+/// a widget's), and what it is there.
+fn looked_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(HWND, Hit)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    let at = cursor_position()?;
+    let under = unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) };
+    let mut client = at;
+    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(under, &mut client) };
+    let hit = match panels.iter().find(|panel| panel.window.hwnd == under) {
+        Some(panel) => panel.is_shown().then(|| panel.hit_at(client)).flatten(),
+        None if widgets.owns(under) => widgets.hit_at(under, client),
+        None => None,
+    }?;
+    hit.looks().then_some((under, hit))
+}
+
+/// `hit` on the window `window` (the panel's, a widget's) looked at larger (see `ui::look`), beside it and in its skin,
+/// with the others there that may be, had by the arrows.
+fn look_at(panels: &[Panel], widgets: &crate::widget::Widgets, window: HWND, hit: Hit) {
+    let (looks, beside, look) = match panels.iter().find(|panel| panel.window.hwnd == window) {
+        Some(panel) => (panel.looks(), panel.placement.as_ref().map(|placement| placement.panel), panel.menu_look()),
+        None => (widgets.looks(window), widgets.rect_of(window), widgets.look_of(window)),
+    };
+    let lang = panels[0].lang;
+    let items: Vec<crate::ui::look::Item> = looks.iter().filter_map(|&(hit, rect)| view::looked_at(hit, Some(rect), lang)).collect();
+    let Some(at) = items.iter().position(|item| item.key == hit.key()) else { return };
+    let skin = look.skin.unwrap_or(crate::ui::theme::Skin::Fluent);
+    crate::ui::look::open(crate::ui::look::Opening { items, at, owner: window.0 as isize, beside, skin, dark: look.dark, frost: look.frost, tell: None });
 }
 
 fn lparam_point(lparam: LPARAM) -> POINT {
@@ -1976,6 +2112,8 @@ struct Panel<'a> {
     /// Its station's page shown (see `view::Tab`).
     tab: view::Tab,
     hover: Option<Hit>,
+    /// The preview's shortcut said on what the pointer rests on (see `view::Hint`).
+    hint: view::Hint,
     /// What is under the pointer said under it (see `hover_at`): taken away as the pointer leaves it, the panel goes,
     /// or what is under the pointer changes without it moving (see `hover_again`).
     saying: bool,
@@ -2146,6 +2284,7 @@ impl<'a> Panel<'a> {
             scrolls: view::Scrolls::default(),
             tab: view::Tab::default(),
             hover: None,
+            hint: view::Hint::default(),
             saying: false,
             pinned: false,
             full_asked: None,
@@ -2824,7 +2963,22 @@ impl<'a> Panel<'a> {
         // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
         // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
         // closes the menu first.)
-        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || self.menu_up
+        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up
+    }
+
+    /// What may be looked at larger on it, as it was just drawn (see `ui::look`): each such thing, and where its tile is
+    /// on the screen (physical px).
+    fn looks(&self) -> Vec<(Hit, RECT)> {
+        looks_in(&self.hits_on_screen())
+    }
+
+    /// What the pointer is taken to be over: while a look at a thing on it is up, that thing (another is had by the
+    /// arrows or a click, never by the pointer passing over it).
+    fn hover_shown(&self) -> Option<Hit> {
+        match crate::ui::look::shown_for(self.window.hwnd) {
+            Some(key) => self.hits.iter().map(|hit| hit.4).find(|hit| hit.looks() && hit.key() == key),
+            None => self.hover,
+        }
     }
 
     /// `page` opened beside it on its inner side (under it at the top edge): quick launch's choosing, a note.
@@ -3611,7 +3765,11 @@ impl<'a> Panel<'a> {
             _ => None,
         };
         let thumbs_moving = self.thumbs.apps(now, &order, hold) | thumbs_moving;
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, crate::panel::contiguous(&history), seen) };
+        // (The preview's shortcut said on what the pointer rests on that may be looked at larger: not while a look is
+        // up from it.)
+        let says = crate::ui::look::hint_says(self.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd));
+        let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -3743,6 +3901,10 @@ impl<'a> Panel<'a> {
             let speed = layout.plot_width(&self.theme, &lanes).map(|width| width * px / self.prefs.chart_seconds as f32);
             now + settings_window::creeping(speed)
         };
+        // (Sooner, the preview's shortcut due to be said, or coming in.)
+        if let Some(due) = self.hint.due(now) {
+            self.next_frame = self.next_frame.min(due);
+        }
     }
 
     /// Draws what plays as it is at `now`, slid out by as much of the way as it has come (its frame's start is
@@ -3930,17 +4092,23 @@ impl<'a> Panel<'a> {
         self.hits_at(client).next()
     }
 
-    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`).
-    fn show_stations(&self) {
-        let Some(placement) = &self.placement else { return };
+    /// Where each thing drawn is on the screen (physical px), as it was just drawn.
+    fn hits_on_screen(&self) -> Vec<(RECT, Hit)> {
+        let Some(placement) = &self.placement else { return Vec::new() };
         let (px, window) = (placement.px, placement.window);
         let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
-        let areas = self
-            .hits
+        self.hits
             .iter()
-            .filter_map(|(x, y, w, h, hit)| Some((RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) }, hit.lands()?)))
-            .collect();
-        crate::station::run::shows_at(self.window.hwnd, areas);
+            .map(|(x, y, w, h, hit)| (RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) }, *hit))
+            .collect()
+    }
+
+    /// Where it shows a station, as it was just drawn, told to the station (see `station::run::shows_at`); where what
+    /// may be looked at larger is, told to the look at one of them up (see `ui::look::tiles`).
+    fn show_stations(&self) {
+        let on_screen = self.hits_on_screen();
+        crate::station::run::shows_at(self.window.hwnd, on_screen.iter().filter_map(|(rect, hit)| Some((*rect, hit.lands()?))).collect());
+        crate::ui::look::tiles(self.window.hwnd, looks_in(&on_screen).into_iter().map(|(hit, rect)| (hit.key(), rect)).collect());
     }
 
     /// Each hit region a point in the window's client area (physical px) is in, in the order they were drawn.
@@ -4160,6 +4328,7 @@ fn scene<'s>(
         newer: crate::update::available().is_some(),
         settings_lit: None,
         music_apart: false,
+        hint: None,
     }
 }
 
@@ -4426,6 +4595,18 @@ pub(crate) fn opens_drive(name: &str, lang: Lang) -> String {
         Lang::Zh => format!("打开 {name}"),
         Lang::En => format!("Open {name}"),
     }
+}
+
+/// Of what is drawn where (`on_screen`, as it was just drawn), what may be looked at larger (see `ui::look`), each once,
+/// in the order it is drawn, and where its tile is.
+pub(crate) fn looks_in(on_screen: &[(RECT, Hit)]) -> Vec<(Hit, RECT)> {
+    let mut looks: Vec<(Hit, RECT)> = Vec::new();
+    for &(rect, hit) in on_screen {
+        if hit.looks() && !looks.iter().any(|(seen, _)| *seen == hit) {
+            looks.push((hit, rect));
+        }
+    }
+    looks
 }
 
 /// What is said under `hit` as the pointer comes over it (`hits` as last drawn): what a press on it does, for what

@@ -364,17 +364,22 @@ fn register(hwnd: HWND, id: i32, shortcut: Option<Shortcut>, taken: &AtomicBool)
         taken.store(false, Ordering::Relaxed);
         return;
     };
+    let refused = unsafe { RegisterHotKey(Some(hwnd), id, modifiers_of(shortcut), u32::from(shortcut.key)) }.is_err();
+    if refused && !taken.load(Ordering::Relaxed) {
+        crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
+    }
+    taken.store(refused, Ordering::Relaxed);
+}
+
+/// The modifiers `shortcut` holds, as a hotkey is registered with them (not repeated as its key is held).
+pub fn modifiers_of(shortcut: Shortcut) -> HOT_KEY_MODIFIERS {
     let mut modifiers = MOD_NOREPEAT;
     for (held, flag) in [(shortcut.ctrl, MOD_CONTROL), (shortcut.alt, MOD_ALT), (shortcut.shift, MOD_SHIFT), (shortcut.win, MOD_WIN)] {
         if held {
             modifiers |= flag;
         }
     }
-    let refused = unsafe { RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(modifiers.0), u32::from(shortcut.key)) }.is_err();
-    if refused && !taken.load(Ordering::Relaxed) {
-        crate::journal::note(format!("{} is taken by another program", shortcut_name(shortcut)));
-    }
-    taken.store(refused, Ordering::Relaxed);
+    modifiers
 }
 
 /// Lets the shortcut go while a new one is being chosen (its keys would

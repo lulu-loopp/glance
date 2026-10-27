@@ -477,6 +477,17 @@ impl Shortcut {
         Shortcut { ctrl: false, alt: true, shift: false, win: true, key: 0x20 }
     }
 
+    /// Ctrl+Q, the preview's: one hand reaches it.
+    pub fn preview() -> Self {
+        Shortcut { ctrl: true, alt: false, shift: false, win: false, key: u16::from(b'Q') }
+    }
+
+    /// Whether it can be the preview's: usable, with Ctrl or Alt held (pressed in the search window as words are
+    /// typed in its field, Win alone would leave a key that types).
+    pub fn previews(&self) -> bool {
+        self.usable() && (self.ctrl || self.alt)
+    }
+
     /// Whether it can be a shortcut: a key that is not itself a modifier,
     /// with Ctrl, Alt or Win held (Shift alone would take a key from typing).
     pub fn usable(&self) -> bool {
@@ -706,6 +717,9 @@ pub struct Settings {
     pub shortcut: Option<Shortcut>,
     /// The shortcut that calls up search (Win+Alt+Space unless another is chosen); none, when it is cleared.
     pub search_shortcut: Option<Shortcut>,
+    /// The shortcut that previews what is under the pointer on a station, or picked in search (Ctrl+Q unless another
+    /// is chosen); none, when it is cleared.
+    pub preview_shortcut: Option<Shortcut>,
     /// Up to 0.1.8, the shortcut's own switch: off, it reads as cleared.
     /// Read once, not written again.
     #[serde(skip_serializing)]
@@ -893,6 +907,7 @@ impl Default for Settings {
             check_updates: true,
             shortcut: Some(Shortcut::default()),
             search_shortcut: Some(Shortcut::search()),
+            preview_shortcut: Some(Shortcut::preview()),
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
@@ -1044,6 +1059,9 @@ impl Settings {
         }
         if self.search_shortcut.is_some_and(|shortcut| !shortcut.usable()) {
             self.search_shortcut = Some(Shortcut::search());
+        }
+        if self.preview_shortcut.is_some_and(|shortcut| !shortcut.previews()) {
+            self.preview_shortcut = Some(Shortcut::preview());
         }
         for widget in &mut self.widgets {
             if let Some(before) = widget.before.take() {
@@ -1337,6 +1355,22 @@ mod tests {
         let mut settings: Settings = serde_json::from_str(r#"{"search_shortcut":{"ctrl":false,"alt":false,"shift":true,"win":false,"key":32}}"#).unwrap();
         settings.carry_over();
         assert_eq!(settings.search_shortcut, Some(Shortcut::search()));
+    }
+
+    /// The preview's shortcut is Ctrl+Q in settings from before it was one; cleared, it stays so; one without Ctrl or
+    /// Alt is Ctrl+Q again.
+    #[test]
+    fn preview_has_its_own_shortcut() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        settings.carry_over();
+        assert_eq!(settings.preview_shortcut, Some(Shortcut { ctrl: true, alt: false, shift: false, win: false, key: u16::from(b'Q') }));
+        let mut settings: Settings = serde_json::from_str(r#"{"preview_shortcut":null}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.preview_shortcut, None);
+        let mut settings: Settings = serde_json::from_str(r#"{"preview_shortcut":{"ctrl":false,"alt":false,"shift":false,"win":true,"key":81}}"#).unwrap();
+        settings.carry_over();
+        assert_eq!(settings.preview_shortcut, Some(Shortcut::preview()));
+        assert!(Shortcut { ctrl: false, alt: true, shift: true, win: false, key: 0x20 }.previews());
     }
 
     #[test]
