@@ -569,9 +569,8 @@ impl Controller {
         let mut seam_rest: Option<(Instant, POINT)> = None;
         let mut seam_armed = true;
         // The screen the pointer was last on, and the one it last came
-        // across from, and when.
-        let mut on_screen: Option<RECT> = None;
-        let mut crossed: Option<(RECT, Instant)> = None;
+        // across from (see `Approach`).
+        let mut approach = Approach::default();
         unsafe { SetTimer(Some(sink), WATCH_TIMER, WATCH_MS, None) };
         // What a frame in motion waits on: the screen's next refresh, or a
         // message, whichever comes first.
@@ -852,14 +851,14 @@ impl Controller {
             };
             // The pointer resting on the seam, where that edge's panel opens.
             let mut on_seam = |cursor: POINT, panels: &mut Vec<Panel<'s>>, last_place: &mut Option<(POINT, Edge)>| {
-                let here = monitor_at(cursor).map(|contact| contact.monitor);
-                if here != on_screen {
-                    crossed = on_screen.map(|from| (from, now));
-                    on_screen = here;
-                }
-                let came_from = crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from);
+                let here = monitor_at(cursor);
+                approach.moved(cursor, here.map(|contact| (contact.monitor, contact.scale)), now);
+                let here = here.map(|contact| contact.monitor);
+                let came_from = approach.came_from(now);
                 // On a seam that is an edge that opens the panel, of the
-                // screen the pointer is on before the one it came from.
+                // screen it came from before the one it is on (it was
+                // making for that screen's edge and went past it), before
+                // the others.
                 // (No seam is looked for along an edge that opens the panel
                 // on no screen: this is asked at every move of the mouse.)
                 let sought = {
@@ -871,7 +870,7 @@ impl Controller {
                     .zip(sought)
                     .filter_map(|(edge, sought)| sought.then_some(edge))
                     .filter_map(|edge| seam_contact(cursor, edge, came_from).filter(|contact| lit(contact.monitor).has(edge)).map(|contact| (contact, edge)))
-                    .min_by_key(|(contact, _)| Some(contact.monitor) != here);
+                    .min_by_key(|(contact, _)| (Some(contact.monitor) != came_from, Some(contact.monitor) != here));
                 let Some((contact, edge)) = found else {
                     seam_rest = None;
                     seam_armed = true;
@@ -4489,6 +4488,46 @@ pub(crate) fn heard_buttons(down: bool, pressed: bool) {
     }
 }
 
+/// Where the pointer has come from: the screen it is on (and its scale), how far it has been from each of that
+/// screen's sides (left, top, right, bottom; physical px) since it came on, and the screen it last came across from,
+/// and when. A screen it was on only by its side, no further in than it may overshoot (`SEAM_OVERSHOOT`), it is not
+/// taken to have come across from: it was not making for that side from inside it, it had gone past the seam the
+/// other way and come back.
+#[derive(Default)]
+struct Approach {
+    on: Option<(RECT, f32)>,
+    reach: [i32; 4],
+    crossed: Option<(RECT, Instant)>,
+}
+
+impl Approach {
+    /// The pointer at `cursor`, on the screen `here` (and its scale), at `now`.
+    fn moved(&mut self, cursor: POINT, here: Option<(RECT, f32)>, now: Instant) {
+        let away = |m: RECT| [cursor.x - m.left, cursor.y - m.top, m.right - 1 - cursor.x, m.bottom - 1 - cursor.y];
+        if here.map(|(m, _)| m) == self.on.map(|(m, _)| m) {
+            if let Some((m, _)) = here {
+                self.reach = std::array::from_fn(|side| self.reach[side].max(away(m)[side]));
+            }
+            return;
+        }
+        if let Some((from, scale)) = self.on {
+            // The side of it the pointer has gone past, and whether it had been well in from that side.
+            let past = away(from);
+            let deep = (0..4).filter(|&side| past[side] < 0).any(|side| self.reach[side] > (SEAM_OVERSHOOT * scale).round() as i32);
+            if deep {
+                self.crossed = Some((from, now));
+            }
+        }
+        self.on = here;
+        self.reach = here.map_or([0; 4], |(m, _)| away(m));
+    }
+
+    /// The screen the pointer came across from lately (see `SEAM_CROSSED`).
+    fn came_from(&self, now: Instant) -> Option<RECT> {
+        self.crossed.filter(|(_, at)| now.duration_since(*at) < SEAM_CROSSED).map(|(from, _)| from)
+    }
+}
+
 /// The screen to open on when the pointer is on the seam where a screen's
 /// `edge` meets another screen: within a few pixels of that line, on
 /// either side of it (further past it, on the other screen, when it has
@@ -4543,6 +4582,38 @@ fn let_go(message: &MSG) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pointer that went past the seam a little and came back has not come across from the screen it went
+    /// onto: it was making for its own screen's edge (the owner's portrait screen at 200 % left of the wide one at
+    /// 150 %, the panel of the portrait one's right edge opened with the pointer back on the wide one). Come across
+    /// from well inside a screen, it has, the other way as this.
+    #[test]
+    fn a_pointer_back_from_past_the_seam_has_not_come_from_there() {
+        let tall = (RECT { left: -2905, top: -1459, right: -745, bottom: 2381 }, 2.0);
+        let wide = (RECT { left: -745, top: -1440, right: 2695, bottom: 0 }, 1.5);
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let point = |x: i32| POINT { x, y: -700 };
+        // From the middle of the wide screen to its left side, 30 px onto the tall one, and back.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, 900, wide), (100, -600, wide), (200, -775, tall), (300, -740, wide)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_ne!(approach.came_from(at(400)), Some(tall.0));
+        // From well inside the wide screen onto the tall one: come across from the wide one, lately.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, 900, wide), (100, -760, tall)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_eq!(approach.came_from(at(200)), Some(wide.0));
+        assert_eq!(approach.came_from(at(100) + SEAM_CROSSED), None);
+        // From well inside the tall screen onto the wide one.
+        let mut approach = Approach::default();
+        for (ms, x, on) in [(0, -2000, tall), (100, -800, tall), (200, -730, wide)] {
+            approach.moved(point(x), Some(on), at(ms));
+        }
+        assert_eq!(approach.came_from(at(300)), Some(tall.0));
+    }
 
     /// A menu closed by a press away from it, on the button that opened it: that press is the menu's, its button let
     /// go there too (not taken by the button, as a press of it, to open the menu again); the next press is not.
