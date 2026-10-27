@@ -598,18 +598,20 @@ fn credit(raw: &str) -> Option<Line> {
     (!text.is_empty()).then(|| Line { at, end: None, text, words: Vec::new(), backing: None, translation: None })
 }
 
-/// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, the first of its
-/// title, by its artist, and of its length (to two seconds).
+/// The track on NetEase Cloud Music that is `track`: of those found by its title and artist, by its artist and of its
+/// length (to two seconds), the first of its title (see `titled`).
 fn netease_search(track: &Track) -> Answer<u64> {
     let asked = format!("{} {}", track.title, track.artist);
     let said = netease_said(&format!("https://music.163.com/api/search/get?s={}&type=1&limit=10", escaped(&asked)))?;
     let found = |artist: &str| {
-        said["result"]["songs"].as_array().into_iter().flatten().find_map(|song| {
+        let songs = said["result"]["songs"].as_array().into_iter().flatten().filter_map(|song| {
             let length = song["duration"].as_f64()? / 1000.0;
             let artists = song["artists"].as_array().into_iter().flatten().filter_map(|artist| artist["name"].as_str());
             let by = by_artist(artists, artist);
-            (same(song["name"].as_str()?, &track.title) && by && (length - track.seconds as f64).abs() <= 2.0).then(|| song["id"].as_u64()).flatten()
-        })
+            (by && (length - track.seconds as f64).abs() <= 2.0).then_some(())?;
+            Some((titled(song["name"].as_str()?, &track.title)?, song["id"].as_u64()?))
+        });
+        songs.min_by_key(|(title, _)| *title).map(|(_, id)| id)
     };
     if let Some(id) = found(&track.artist) {
         return Ok(Some(id));
@@ -624,8 +626,9 @@ fn netease_search(track: &Track) -> Answer<u64> {
     Ok(known["result"]["artists"].as_array().into_iter().flatten().filter(|artist| named(artist)).filter_map(|artist| artist["name"].as_str()).find_map(found))
 }
 
-/// QQ Music's timed lyrics of `track`, with their translation: of the tracks it finds by title and artist, the first
-/// of its title, by its artist, and of its length (to two seconds). (Its API answers only as from its own site.)
+/// QQ Music's timed lyrics of `track`, with their translation: of the tracks it finds by title and artist, by its
+/// artist and of its length (to two seconds), the first of its title (see `titled`). (Its API answers only as from
+/// its own site.)
 fn qq_music(track: &Track) -> Answer<Vec<Line>> {
     const SITE: &str = "https://y.qq.com/";
     let asked = |url: &str, ok: &str| -> Answer<serde_json::Value> {
@@ -637,11 +640,13 @@ fn qq_music(track: &Track) -> Answer<Vec<Line>> {
     };
     let searched = format!("https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={}&p=1&n=10&format=json", escaped(&format!("{} {}", track.title, track.artist)));
     let Some(said) = asked(&searched, "code")? else { return Ok(None) };
-    let found = said["data"]["song"]["list"].as_array().into_iter().flatten().find_map(|song| {
+    let songs = said["data"]["song"]["list"].as_array().into_iter().flatten().filter_map(|song| {
         let artists = song["singer"].as_array().into_iter().flatten().filter_map(|singer| singer["name"].as_str());
         let length = song["interval"].as_f64()?;
-        (same(song["songname"].as_str()?, &track.title) && by_artist(artists, &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then(|| song["songmid"].as_str()).flatten()
+        (by_artist(artists, &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then_some(())?;
+        Some((titled(song["songname"].as_str()?, &track.title)?, song["songmid"].as_str()?))
     });
+    let found = songs.min_by_key(|(title, _)| *title).map(|(_, mid)| mid);
     let Some(mid) = found else { return Ok(None) };
     let lyric = format!("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json&nobase64=1&g_tk=5381", escaped(mid));
     let Some(said) = asked(&lyric, "retcode")? else { return Ok(None) };
@@ -650,8 +655,8 @@ fn qq_music(track: &Track) -> Answer<Vec<Line>> {
 }
 
 /// Kugou's lyrics of `track`, timed word by word (its KRC), with their translation where they have one: of the songs
-/// it finds by title and artist, the first of that title (its highlighting left out), by that artist and of that
-/// length (to two seconds); of the lyrics its users have given it for that song, the first of its length, its name and
+/// it finds by title and artist, by that artist and of that length (to two seconds), the first of that title (its
+/// highlighting left out, see `titled`); of the lyrics its users have given it for that song, the first of its length, its name and
 /// one of its artists (that song's or the track's), whose file names no other (see `krc_of`). None where they are not
 /// timed word by word (what is chosen from them, see `chosen`, are those). (Kugou gives lyrics of any song for a
 /// track, those of another first, where its users have put them to it; its scores of them tell nothing.)
@@ -660,19 +665,19 @@ fn kugou(track: &Track) -> Answer<Vec<Line>> {
     let searched = format!("https://mobiles.kugou.com/api/v3/search/song?format=json&keyword={}&page=1&pagesize=20&showtype=1", escaped(&format!("{} {}", track.title, track.artist)));
     let Some(said) = fetched_json(&searched)? else { return Ok(None) };
     let plain = |text: &str| text.replace("<em>", "").replace("</em>", "");
-    let found = said["data"]["info"].as_array().into_iter().flatten().find_map(|song| {
+    let songs = said["data"]["info"].as_array().into_iter().flatten().filter_map(|song| {
         let singers = plain(song["singername"].as_str()?);
         let length = song["duration"].as_f64()?;
-        let ok = same(&plain(song["songname"].as_str()?), &track.title) && by_artist(artists_in(&singers), &track.artist) && (length - track.seconds as f64).abs() <= 2.0;
-        ok.then(|| Some((song["hash"].as_str()?.to_string(), singers)))?
+        (by_artist(artists_in(&singers), &track.artist) && (length - track.seconds as f64).abs() <= 2.0).then_some(())?;
+        Some((titled(&plain(song["songname"].as_str()?), &track.title)?, song["hash"].as_str()?.to_string(), singers))
     });
-    let Some((hash, singers)) = found else { return Ok(None) };
+    let Some((_, hash, singers)) = songs.min_by_key(|(title, ..)| *title) else { return Ok(None) };
     let artists: Vec<&str> = artists_in(&singers).into_iter().chain(Some(track.artist.as_str()).filter(|artist| !artist.trim().is_empty())).collect();
     let Some(kept) = fetched_json(&format!("https://krcs.kugou.com/search?ver=1&man=yes&client=mobi&keyword=&duration=&hash={}", escaped(&hash)))? else { return Ok(None) };
     let ms = f64::from(track.seconds) * 1000.0;
     for one in kept["candidates"].as_array().into_iter().flatten() {
         let of_it = one["duration"].as_f64().is_some_and(|length| (length - ms).abs() <= 2000.0)
-            && one["song"].as_str().is_some_and(|song| same(song, &track.title))
+            && one["song"].as_str().is_some_and(|song| titled(song, &track.title).is_some())
             && one["singer"].as_str().is_some_and(|singer| by_any(singer, &artists));
         let Some((id, key)) = Some(one).filter(|_| of_it).and_then(|one| Some((one["id"].as_str()?, one["accesskey"].as_str()?))) else { continue };
         let Some(lyric) = fetched_json(&format!("https://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=krc&charset=utf8", escaped(id), escaped(key)))? else { continue };
@@ -694,7 +699,7 @@ fn by_any(named: &str, artists: &[&str]) -> bool {
 /// word by word.
 fn krc_of(text: &str, title: &str, artists: &[&str]) -> Option<Vec<Line>> {
     let tag = |name: &str| text.lines().find_map(|line| line.trim().strip_prefix(name)?.strip_suffix(']').map(str::trim)).filter(|said| !said.is_empty());
-    let titled = tag("[ti:").is_none_or(|said| same(said, title));
+    let titled = tag("[ti:").is_none_or(|said| titled(said, title).is_some());
     let by = tag("[ar:").is_none_or(|said| by_any(said, artists));
     Some(krc(text)).filter(|lines| titled && by && lines.iter().any(|line| !line.words.is_empty()))
 }
@@ -821,24 +826,68 @@ fn lrclib(track: &Track) -> Answer<Has> {
     Ok(lrclib_chosen(track, exact.iter().chain(said.as_array().into_iter().flatten())))
 }
 
-/// Of LRCLIB's `records`, those of `track` (its title, but for case and spaces: "Song (Live)" is another; by its artist;
-/// of its length, to two seconds; those of its album first): the first one's timed lyrics; else, where one says it is
+/// Of LRCLIB's `records`, those of `track` (of its title, see `titled`; by its artist; of its length, to two seconds;
+/// those of its whole title first, then those of its album): the first one's timed lyrics; else, where one says it is
 /// played without words and none has words even untimed, that. (Anyone may give LRCLIB a record: one of them alone
 /// is not taken over another of the track.)
 fn lrclib_chosen<'a>(track: &Track, records: impl Iterator<Item = &'a serde_json::Value>) -> Option<Has> {
     let text = |one: &serde_json::Value, key: &str| one[key].as_str().unwrap_or_default().to_string();
-    let mut records: Vec<&serde_json::Value> = records
-        .filter(|one| same(&text(one, "trackName"), &track.title))
+    let mut records: Vec<(Titled, &serde_json::Value)> = records
         .filter(|one| by_artist(artists_in(&text(one, "artistName")), &track.artist))
         .filter(|one| one["duration"].as_f64().is_some_and(|length| (length - track.seconds as f64).abs() <= 2.0))
+        .filter_map(|one| Some((titled(&text(one, "trackName"), &track.title)?, one)))
         .collect();
-    records.sort_by_key(|one| !same(&text(one, "albumName"), &track.album));
+    records.sort_by_key(|(title, one)| (*title, !same(&text(one, "albumName"), &track.album)));
+    let records: Vec<&serde_json::Value> = records.into_iter().map(|(_, one)| one).collect();
     let synced = |one: &&serde_json::Value| one["syncedLyrics"].as_str().map(|lrc| merged(lrc, None)).filter(|lines| lines.iter().any(|line| !line.text.is_empty()));
     if let Some(lines) = records.iter().find_map(synced) {
         return Some(Has::Sung(lines));
     }
     let worded = records.iter().any(|one| !text(one, "plainLyrics").trim().is_empty());
     (!worded && records.iter().any(|one| one["instrumental"].as_bool() == Some(true))).then_some(Has::Instrumental)
+}
+
+/// How a song a source names `theirs` is of the title `ours`: the same title, but for case and spaces; or the same as
+/// `ours` without what it has in brackets at its end (a player's "后来的雨天(Always)" and "岁岁 (广播剧《…》主题曲)" are a
+/// source's "后来的雨天" and "岁岁"); none, of another title. The first is taken over the second ("Song (Live)" is
+/// another recording than "Song", told apart by its length where both are found). What the source's has in brackets
+/// is kept: its "岁岁 (伴奏)", as long as the song, is the song without its words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Titled {
+    Whole,
+    Bare,
+}
+
+fn titled(theirs: &str, ours: &str) -> Option<Titled> {
+    if same(theirs, ours) {
+        Some(Titled::Whole)
+    } else if same(theirs, bare_title(ours)) {
+        Some(Titled::Bare)
+    } else {
+        None
+    }
+}
+
+/// `title` without what it has in brackets at its end, each pair of brackets with all inside it (pairs in pairs too):
+/// "A (B (C)) [D]" is "A". The whole, where nothing is left without them.
+fn bare_title(title: &str) -> &str {
+    const PAIRS: [(char, char); 4] = [('(', ')'), ('（', '）'), ('[', ']'), ('【', '】')];
+    let mut bare = title.trim_end();
+    while let Some((open, close)) = bare.chars().next_back().and_then(|last| PAIRS.into_iter().find(|(_, close)| *close == last)) {
+        let mut depth = 0;
+        let Some(start) = bare.char_indices().rev().find_map(|(at, c)| {
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                depth -= 1;
+            }
+            (depth == 0).then_some(at)
+        }) else {
+            break;
+        };
+        bare = bare[..start].trim_end();
+    }
+    if bare.is_empty() { title } else { bare }
 }
 
 /// Whether two titles are the same, but for case and spaces.
@@ -1023,8 +1072,9 @@ pub mod kept {
     /// with lyrics timed word by word found elsewhere. 5: Kugou's, timed word by word, asked too, and lyrics timed
     /// word by word taken first wherever they are. 6: the track's own taken first, Kugou's only of its words or where
     /// none has them, and that a track is played without words kept; what was kept before had another song's
-    /// lyrics, Kugou's, for good.)
-    const FOUND_BY: u32 = 6;
+    /// lyrics, Kugou's, for good. 7: a track's title found without what it has in brackets at its end, where no
+    /// song has it whole; what was kept before had none for it, for a while.)
+    const FOUND_BY: u32 = 7;
 
     /// A track's lyrics as kept (none: none had them), when they were asked for, whether each source answered, and
     /// whether they rest on Kugou's alone.
@@ -1509,6 +1559,35 @@ mod tests {
     fn escapes_a_query() {
         assert_eq!(escaped("我爱你 A&B"), "%E6%88%91%E7%88%B1%E4%BD%A0%20A%26B");
         assert!(same("Yellow ", "yel low"));
+    }
+
+    /// A player's title with a name or note in brackets at its end is a source's of the title before them; one the
+    /// same whole is taken first.
+    #[test]
+    fn a_title_is_known_without_its_brackets() {
+        assert_eq!(bare_title("后来的雨天(Always)"), "后来的雨天");
+        assert_eq!(bare_title("岁岁 (广播剧《在古代上学的日子》主题曲)"), "岁岁");
+        assert_eq!(bare_title("A (B (C)) [D]"), "A");
+        assert_eq!(bare_title("A（B）【C】"), "A");
+        assert_eq!(bare_title("(Intro)"), "(Intro)");
+        assert_eq!(bare_title("A) B"), "A) B");
+        assert_eq!(bare_title("Mr. (B"), "Mr. (B");
+        assert_eq!(titled("后来的雨天", "后来的雨天(Always)"), Some(Titled::Bare));
+        assert_eq!(titled("岁岁", "岁岁 (广播剧《在古代上学的日子》主题曲)"), Some(Titled::Bare));
+        assert_eq!(titled("我爱你中国 (Live)", "我爱你中国 (live)"), Some(Titled::Whole));
+        assert_eq!(titled("岁岁 (伴奏)", "岁岁 (广播剧《在古代上学的日子》主题曲)"), None);
+        assert_eq!(titled("岁岁 (伴奏)", "岁岁"), None);
+        assert_eq!(titled("Yellow", "Yellow"), Some(Titled::Whole));
+        assert_eq!(titled("Yellow Submarine", "Yellow"), None);
+        assert!(Titled::Whole < Titled::Bare);
+        // Of LRCLIB's records of the length: the whole title's first, though another's album is the track's.
+        let track = Track { netease: None, title: "Song (Live)".into(), artist: "A".into(), album: "Album".into(), seconds: 200, qq_music: false };
+        let record = |name: &str, album: &str, line: &str| serde_json::json!({ "trackName": name, "artistName": "A", "albumName": album, "duration": 200.0, "syncedLyrics": format!("[00:01.00]{line}") });
+        let records = [record("Song", "Album", "bare"), record("Song (Live)", "Other", "whole")];
+        let Some(Has::Sung(lines)) = lrclib_chosen(&track, records.iter()) else { panic!("none chosen") };
+        assert_eq!(lines[0].text, "whole");
+        let Some(Has::Sung(lines)) = lrclib_chosen(&Track { title: "Song (Remastered)".into(), ..track }, records[..1].iter()) else { panic!("none chosen") };
+        assert_eq!(lines[0].text, "bare");
     }
 
     /// Asks the sources for two tracks (network): `cargo test -- --ignored finds_lyrics --nocapture`.
