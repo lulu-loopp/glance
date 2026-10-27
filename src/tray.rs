@@ -388,7 +388,8 @@ pub fn hold_hotkey(held: bool) {
 /// keyboard's layout gives it.
 pub fn shortcut_name(shortcut: Shortcut) -> String {
     let mut parts: Vec<String> = Vec::new();
-    for (held, name) in [(shortcut.ctrl, "Ctrl"), (shortcut.alt, "Alt"), (shortcut.shift, "Shift"), (shortcut.win, "Win")] {
+    // (The Windows key first, as Windows writes its own: Win+Shift+S.)
+    for (held, name) in [(shortcut.win, "Win"), (shortcut.ctrl, "Ctrl"), (shortcut.alt, "Alt"), (shortcut.shift, "Shift")] {
         if held {
             parts.push(name.to_string());
         }
@@ -446,4 +447,18 @@ pub fn follow_settings() {
 pub fn quit() {
     let hwnd = WINDOW.load(Ordering::Acquire);
     let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shortcut is written as Windows writes its own: the Windows key first, then Ctrl, Alt and Shift.
+    #[test]
+    fn shortcuts_are_written_as_windows_writes_them() {
+        let keys = |win, ctrl, alt, shift, key: u8| shortcut_name(Shortcut { ctrl, alt, shift, win, key: u16::from(key) });
+        assert_eq!(keys(true, false, false, true, b'S'), "Win+Shift+S");
+        assert_eq!(keys(true, true, true, true, b'K'), "Win+Ctrl+Alt+Shift+K");
+        assert_eq!(keys(false, true, true, false, b'G'), "Ctrl+Alt+G");
+    }
 }
