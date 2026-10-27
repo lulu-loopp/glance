@@ -1586,7 +1586,7 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
                 // (Rising in and at rest alike, drawn where it falls, resting with its baseline on a whole pixel: see
                 // `Frame::baseline_on_pixel`.)
@@ -1668,7 +1668,7 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
                 // (Rising in and at rest alike, drawn where it falls: see `strip`.)
                 let _moving = frame.moving_while(true);
@@ -1767,7 +1767,7 @@ impl Drawing<'_> {
         let Some(now) = self.moment.now else { return };
         let line = &lines[now];
         let next = lines.get(now + 1).map(|line| line.at);
-        let (text, parts) = parts(line, next);
+        let (text, parts) = parts(&lines, now);
         let eased = self.came();
         // (Rising in and at rest alike, drawn where it falls: see `strip`.)
         let _moving = self.frame.moving_while(true);
@@ -1868,7 +1868,7 @@ impl Drawing<'_> {
             (Some(lines), Some(now)) => {
                 let line = &lines[now];
                 let next = lines.get(now + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, now);
                 let eased = self.came();
                 // (Rising in and at rest alike, drawn where it falls: see `strip`.)
                 let _moving = frame.moving_while(true);
@@ -2273,7 +2273,7 @@ impl Drawing<'_> {
         let anchor = match turned.or(current).filter(|index| *index < lines.len()) {
             Some(index) => {
                 let line = &lines[index];
-                let text = if turned == Some(index) { if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() } } else { parts(line, lines.get(index + 1).map(|line| line.at)).0 };
+                let text = if turned == Some(index) { if line.text.trim().is_empty() { "…".to_string() } else { line.text.clone() } } else { parts(lines, index).0 };
                 let rest = anchor - height_of(index, scale_at(0.0)) / 2.0;
                 let baseline = if text.trim().is_empty() { 0.0 } else { frame.gfx.wrapped_baseline(&text, full, at_rest) * zoom(scale_at(0.0)) };
                 anchor + frame.baseline_on_pixel(rest, baseline) - rest
@@ -2319,7 +2319,7 @@ impl Drawing<'_> {
                 self.turned_wrapped(lines, index, x, y, width, full, zoom(scale), zoom(scale_at(0.0)));
             } else if Some(index) == current {
                 let next = lines.get(index + 1).map(|line| line.at);
-                let (text, parts) = parts(line, next);
+                let (text, parts) = parts(lines, index);
                 // (On a light ground, the cover's colour as it is deepened, no darker: see `deep`.)
                 let bright = colour(if self.light { tint } else { toward([1.0; 3], tint, 0.35) }, alpha);
                 let dim = Color::hex(self.ink, if clear { 0.55 } else { 0.34 } * alpha);
@@ -2513,7 +2513,13 @@ fn chip_at(frame: &Frame, text: &str, full: Font, width: f32, zoom: f32, settled
 /// The room a turned line's chip takes under it, where its last row has none for it (see `chip_at`).
 const CHIP_ROW: f32 = 22.0;
 
-fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64)>) {
+/// What line `index` of `lines` is sung in, part by part (UTF-16 from, to, and from when till when): as its words say
+/// where they are timed; else shared out over its time (to its end, or the next line's beginning), a character of the
+/// scripts written without spaces each a part, a run of anything else up to a space a part, sung no slower than the
+/// slowest pace the song's lines are sung at (see `slowest_pace`): a line before a long interlude was spread over all
+/// of it, a character in eight seconds, as if the lyrics had stuck.
+fn parts(lines: &[Line], index: usize) -> (String, Vec<(usize, usize, f64, f64)>) {
+    let line = &lines[index];
     if !line.words.is_empty() {
         let mut text = String::new();
         let mut parts = Vec::new();
@@ -2525,9 +2531,28 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
         return (text, parts);
     }
     let text = line.text.clone();
+    let next = lines.get(index + 1).map(|line| line.at);
     let end = line.end.or(next).unwrap_or(line.at + 4.0).max(line.at + 0.3);
-    let span = (end - line.at) * 0.9;
-    // The pieces: a character of the scripts written without spaces, a run of anything else up to a space.
+    let pieces = pieces(&text);
+    let weight: f64 = pieces.iter().map(|p| p.2).sum::<f64>().max(1e-6);
+    let span = ((end - line.at) * 0.9).min(weight * slowest_pace(lines));
+    let mut t = line.at;
+    let parts = pieces
+        .into_iter()
+        .map(|(from, to, w)| {
+            let took = span * w / weight;
+            let part = (from, to, t, t + took);
+            t += took;
+            part
+        })
+        .collect();
+    (text, parts)
+}
+
+/// The pieces a line without timed words is sung in (UTF-16 from, to, and its weight): a character of the scripts
+/// written without spaces, a run of anything else up to a space (weighed by its length), each on to where the next
+/// begins.
+fn pieces(text: &str) -> Vec<(usize, usize, f64)> {
     let mut pieces: Vec<(usize, usize, f64)> = Vec::new();
     let mut at = 0;
     let mut run: Option<usize> = None;
@@ -2556,18 +2581,31 @@ fn parts(line: &Line, next: Option<f64>) -> (String, Vec<(usize, usize, f64, f64
     for (piece, end) in pieces.iter_mut().zip(ends) {
         piece.1 = end;
     }
-    let weight: f64 = pieces.iter().map(|p| p.2).sum::<f64>().max(1e-6);
-    let mut t = line.at;
-    let parts = pieces
-        .into_iter()
-        .map(|(from, to, w)| {
-            let took = span * w / weight;
-            let part = (from, to, t, t + took);
-            t += took;
-            part
-        })
+    pieces
+}
+
+/// The slowest a line without timed words is sung in `lines` (seconds a piece of it: see `pieces`), as the song's
+/// own lines say: each such line's time to the next over its weight, and of those the slowest not an outlier (Tukey's
+/// fence, the upper quartile and half as much again as the quartiles are apart). A line given longer than that is
+/// sung at it and held till the next: the rest is music between. Unbounded where too few lines say.
+fn slowest_pace(lines: &[Line]) -> f64 {
+    let mut paces: Vec<f64> = lines
+        .windows(2)
+        .filter(|pair| pair[0].words.is_empty() && pair[0].end.is_none() && !pair[0].text.trim().is_empty())
+        .map(|pair| (pair[1].at - pair[0].at) / pieces(&pair[0].text).iter().map(|p| p.2).sum::<f64>().max(1e-6))
+        .filter(|pace| *pace > 0.0)
         .collect();
-    (text, parts)
+    if paces.len() < 4 {
+        return f64::INFINITY;
+    }
+    paces.sort_by(f64::total_cmp);
+    let quartile = |q: f64| {
+        let at = q * (paces.len() - 1) as f64;
+        let (low, high) = (at.floor() as usize, at.ceil() as usize);
+        paces[low] + (paces[high] - paces[low]) * (at - low as f64)
+    };
+    let (q1, q3) = (quartile(0.25), quartile(0.75));
+    q3 + 1.5 * (q3 - q1)
 }
 
 /// How far a line is sung: all of it before `from` (UTF-16), and `part` (0 to 1) of the way across what runs from
@@ -2921,6 +2959,11 @@ mod tests {
         Line { at: 10.0, end: None, text: text.into(), words, backing: None, translation: None }
     }
 
+    /// The line after, at `at`.
+    fn next(at: f64) -> Line {
+        Line { at, end: None, text: "next".into(), words: Vec::new(), backing: None, translation: None }
+    }
+
     /// How far it is sung, in UTF-16 units (fractional across the part being sung).
     fn units(sung: Filling) -> f32 {
         sung.from as f32 + (sung.to - sung.from) as f32 * sung.part
@@ -2984,21 +3027,84 @@ mod tests {
     fn a_line_sung_part_by_part() {
         // Word by word: as the words say.
         let worded = line("ab cd", vec![Word { at: 10.0, end: 11.0, text: "ab ".into() }, Word { at: 11.0, end: 12.0, text: "cd".into() }]);
-        let (text, worded) = parts(&worded, None);
+        let (text, worded) = parts(&[worded], 0);
         assert_eq!(text, "ab cd");
         assert_eq!(units(sung_to(&worded, 10.5)), 1.5);
         assert_eq!(units(sung_to(&worded, 11.5)), 4.0);
         assert_eq!(units(sung_to(&worded, 20.0)), 5.0);
         assert_eq!(units(sung_to(&worded, 9.0)), 0.0);
         // By line: each Chinese character a part, the time shared.
-        let (_, shared) = parts(&line("你好 hi", Vec::new()), Some(14.0));
+        let (_, shared) = parts(&[line("你好 hi", Vec::new()), next(14.0)], 0);
         assert_eq!(shared.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 1), (1, 3), (3, 5)]);
         // The spaces between characters filled with the one before them: no jump over them.
-        let (_, spaced) = parts(&line("微 微 微 微", Vec::new()), Some(14.0));
+        let (_, spaced) = parts(&[line("微 微 微 微", Vec::new()), next(14.0)], 0);
         assert_eq!(spaced.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>(), [(0, 2), (2, 4), (4, 6), (6, 7)]);
         let between = |t: f64| units(sung_to(&spaced, t));
         assert!((between(10.0 + 0.9 * 0.75) - 1.5).abs() < 1e-6, "three quarters through the first part, the fill is half across its space");
         assert!((shared.last().unwrap().3 - (10.0 + 4.0 * 0.9)).abs() < 1e-9);
+    }
+
+    /// A line timed only by its start, before a long interlude, is sung at the pace the song's lines are, not spread over
+    /// the interlude (逍遥叹: 当泪干血盈眶涌 at 234.33 s, the next line at 290.52 s, its first character took eight
+    /// seconds, as if the lyrics had stuck); the song's other lines are sung over their time as they were.
+    #[test]
+    fn a_line_before_an_interlude_is_sung_at_the_song_s_pace() {
+        let at = |at: f64, text: &str| Line { at, end: None, text: text.into(), words: Vec::new(), backing: None, translation: None };
+        let lines = [
+            at(26.37, "岁月难得沉默"),
+            at(29.64, "秋风厌倦漂泊"),
+            at(32.91, "夕阳赖着不走挂在墙头舍不得我"),
+            at(39.60, "昔日伊人耳边话"),
+            at(43.02, "已和潮声向东流"),
+            at(46.05, "再回首"),
+            at(48.00, "往事也随枫叶一片片落"),
+            at(53.70, "爱已走到尽头"),
+            at(56.34, "恨也放弃承诺"),
+            at(59.73, "命运自认幽默想法太多由不得我"),
+            at(66.30, "壮志凌云几分酬"),
+            at(69.66, "知己难逢几人留"),
+            at(72.69, "再回首"),
+            at(74.61, "却闻笑传醉梦中"),
+            at(80.85, "笑叹词穷古痴今狂终成空"),
+            at(87.63, "刀钝刃乏恩断义绝梦方破"),
+            at(94.26, "路荒遗叹饱览足迹没人懂"),
+            at(100.98, "多年望眼欲穿过"),
+            at(103.83, "红尘滚滚我没看透"),
+            at(107.58, "自嘲墨尽千情万怨英杰愁"),
+            at(114.21, "曲终人散发华鬓白红颜殁"),
+            at(120.93, "烛残未觉与日争辉徒消瘦"),
+            at(127.68, "当泪干血盈眶涌"),
+            at(130.56, "白雪纷飞都成红"),
+            at(159.78, "爱已走到尽头"),
+            at(163.02, "恨也放弃承诺"),
+            at(166.35, "命运自认幽默想法太多由不得我"),
+            at(173.01, "壮志凌云几分酬"),
+            at(176.31, "知己难逢几人留"),
+            at(179.37, "再回首"),
+            at(181.29, "却闻笑传醉梦中"),
+            at(187.59, "笑叹词穷古痴今狂终成空"),
+            at(194.31, "刀钝刃乏恩断义绝梦方破"),
+            at(200.91, "路荒遗叹饱览足迹没人懂"),
+            at(207.63, "多年望眼欲穿过"),
+            at(210.51, "红尘滚滚我没看透"),
+            at(214.26, "自嘲墨尽千情万怨英杰愁"),
+            at(220.89, "曲终人散发华鬓白红颜殁"),
+            at(227.58, "烛残未觉与日争辉徒消瘦"),
+            at(234.33, "当泪干血盈眶涌"),
+            at(290.52, "白雪纷飞都成红"),
+        ];
+        let sung = |index: usize| {
+            let (_, parts) = parts(&lines, index);
+            parts.last().unwrap().3 - parts[0].2
+        };
+        // (Sung in 2.6 s the first time.)
+        assert!(sung(39) < 8.0, "sung over {:.1} s before the interlude", sung(39));
+        assert!((sung(22) - (130.56 - 127.68) * 0.9).abs() < 1e-9, "sung over {:.2} s as its time had it", sung(22));
+        assert!((sung(19) - (114.21 - 107.58) * 0.9).abs() < 1e-9);
+        // Too few lines to say a pace: over its time.
+        let few = [at(10.0, "当泪干"), at(60.0, "白雪")];
+        let (_, parts) = parts(&few, 0);
+        assert!((parts.last().unwrap().3 - 10.0 - 45.0).abs() < 1e-9);
     }
 
     /// Whatever a strip's size, what ends its row (its keys, its spectrum) lies in it after where its words begin, never
@@ -3518,7 +3624,7 @@ mod pictures {
         }
         let gfx = crate::ui::gfx::held().unwrap();
         let line = Line { at: 43.06, end: None, text: "微 微 微 微".into(), words: Vec::new(), backing: None, translation: None };
-        let (text, parts) = parts(&line, Some(48.09));
+        let (text, parts) = parts(&[line, Line { at: 48.09, end: None, text: "next".into(), words: Vec::new(), backing: None, translation: None }], 0);
         let layout = gfx.wrapped(&text, PLAYER_LINE, 1000.0);
         let place = |unit: usize| {
             let (mut px, mut py, mut metrics) = (0.0, 0.0, DWRITE_HIT_TEST_METRICS::default());
