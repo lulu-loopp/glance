@@ -94,7 +94,7 @@ impl Query {
     /// The names in `index` (of the drive whose root is `root`) meeting it: how many there are, how many of them are
     /// folders', and the best `most` folders and the best `most` files, best first.
     pub fn find(&self, index: &Index, root: &str, most: usize) -> (usize, usize, Vec<Hit>) {
-        let threads = index.entries().len().div_ceil(1 << 20).clamp(1, 4);
+        let threads = (index.len() as usize).div_ceil(1 << 20).clamp(1, 4);
         let candidates = self.candidates(index, threads);
         // (Many, they are met on several threads at once.)
         let meet = |places: &[u32]| places.iter().filter_map(|&place| self.meets(index, place).map(|score| (score, place))).collect::<Vec<_>>();
@@ -109,7 +109,7 @@ impl Query {
         };
         let total = met.len();
         // The best by their names, folders and files apart, then those ranked by where they are too.
-        let (folders, files): (Vec<_>, Vec<_>) = met.into_iter().partition(|&(_, place)| index.entries()[place as usize].folder());
+        let (folders, files): (Vec<_>, Vec<_>) = met.into_iter().partition(|&(_, place)| index.entry(place).folder());
         let folders_total = folders.len();
         let rank = |mut met: Vec<(f32, u32)>| -> Vec<Hit> {
             let ranked = RANKED.min(met.len());
@@ -120,7 +120,7 @@ impl Query {
             let mut hits: Vec<Hit> = met
                 .into_iter()
                 .filter_map(|(score, place)| {
-                    let entry = index.entries()[place as usize];
+                    let entry = index.entry(place);
                     let path = index.path(place, root)?;
                     let rank = score - away(index, place) - if entry.flags & (flag::HIDDEN | flag::SYSTEM) != 0 { 2.0 } else { 0.0 };
                     Some(Hit { name: index.name(place).to_string_lossy().into_owned(), path, folder: entry.folder(), marks: Vec::new(), rank })
@@ -168,16 +168,16 @@ impl Query {
         }
         if let Some(last) = self.within.last() {
             // Whatever is in the folders named so.
-            let folders: std::collections::HashSet<u32> = index.holding(last, threads).into_iter().filter(|&place| index.entries()[place as usize].folder()).collect();
+            let folders: std::collections::HashSet<u32> = index.holding(last, threads).into_iter().filter(|&place| index.entry(place).folder()).collect();
             let mut under: HashMap<u32, bool> = folders.iter().map(|&folder| (folder, true)).collect();
-            return live(index).into_iter().filter(|&place| place != ROOT && within(index, index.entries()[place as usize].parent, &mut under, &|folder| folders.contains(&folder))).collect();
+            return live(index).into_iter().filter(|&place| place != ROOT && within(index, index.entry(place).parent, &mut under, &|folder| folders.contains(&folder))).collect();
         }
         Vec::new()
     }
 
     /// How well the entry at `place` meets it; none where it does not.
     fn meets(&self, index: &Index, place: u32) -> Option<f32> {
-        let entry = index.entries()[place as usize];
+        let entry = index.entry(place);
         if place == ROOT || !entry.alive() {
             return None;
         }
@@ -304,7 +304,7 @@ pub fn sort(hits: &mut [Hit]) {
 
 /// Every live entry but the root.
 fn live(index: &Index) -> Vec<u32> {
-    (1..index.entries().len() as u32).filter(|&place| index.entries()[place as usize].alive()).collect()
+    (1..index.len()).filter(|&place| index.entry(place).alive()).collect()
 }
 
 /// Whether a word can be a name spelt in pinyin: letters and figures alone.
@@ -352,7 +352,7 @@ fn ancestors_hold(index: &Index, folder: u32, part: &str) -> bool {
         if index.folded_name(at).contains(part) {
             return true;
         }
-        at = index.entries()[at as usize].parent;
+        at = index.entry(at).parent;
         steps += 1;
     }
     false
@@ -373,7 +373,7 @@ fn within(index: &Index, folder: u32, known: &mut HashMap<u32, bool>, is: &dyn F
             break false;
         }
         path.push(at);
-        at = index.entries()[at as usize].parent;
+        at = index.entry(at).parent;
     };
     for folder in path {
         known.insert(folder, found);
@@ -385,13 +385,13 @@ fn within(index: &Index, folder: u32, known: &mut HashMap<u32, bool>, is: &dyn F
 fn away(index: &Index, place: u32) -> f32 {
     let mut away = 0.0;
     let mut depth = 0;
-    let mut at = index.entries()[place as usize].parent;
+    let mut at = index.entry(place).parent;
     while at != ROOT && depth < 4096 {
         if AWAY.contains(&index.folded_name(at)) {
             away = 3.0;
         }
         depth += 1;
-        at = index.entries()[at as usize].parent;
+        at = index.entry(at).parent;
     }
     away + depth as f32 * 0.05
 }

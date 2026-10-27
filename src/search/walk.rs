@@ -9,12 +9,13 @@ use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, RwLock};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
 
-/// What a round of listing did.
-#[derive(Default, Debug, Clone, Copy)]
+/// What a round of listing did: how many folders it listed, how many the user may not, and those that could not be
+/// listed (by their ids).
+#[derive(Default, Debug, Clone)]
 pub struct Listed {
     pub folders: usize,
     pub denied: usize,
-    pub failed: usize,
+    pub failed: Vec<u64>,
 }
 
 /// The folders to list (by their ids, and their paths where the drive keeps no ids), and whether the round is over.
@@ -40,7 +41,7 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], threads: usi
     // What each folder held before, by its id (a folder moved meanwhile is found by it where it went).
     let (ids, mut before) = {
         let index = index.read().unwrap();
-        let ids: Vec<(u32, u64)> = folders.iter().filter_map(|&place| index.id(place).map(|id| (place, id))).filter(|&(place, _)| index.entries()[place as usize].alive()).collect();
+        let ids: Vec<(u32, u64)> = folders.iter().filter_map(|&place| index.id(place).map(|id| (place, id))).filter(|&(place, _)| index.entry(place).alive()).collect();
         let children = index.children(&ids.iter().map(|&(place, _)| place).collect::<HashSet<_>>());
         let before: HashMap<u64, Vec<u32>> = ids.iter().map(|&(place, id)| (id, children.get(&place).cloned().unwrap_or_default())).collect();
         (ids.into_iter().map(|(place, id)| job(&index, drive, place, id)).collect::<Vec<_>>(), before)
@@ -103,7 +104,7 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], threads: usi
                     index.denied(place, &before);
                 }
                 Listing::Failed(_) => {
-                    listed.failed += 1;
+                    listed.failed.push(id);
                     index.set_flag(place, flag::UNREAD, true);
                 }
                 Listing::Gone => {}
@@ -119,10 +120,6 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], threads: usi
         jobs.lock().unwrap().over = true;
         more.notify_all();
     });
-    let mut index = index.write().unwrap();
-    index.finish(changes);
-    if index.untidy() {
-        index.tidy();
-    }
+    index.write().unwrap().finish(changes);
     listed
 }

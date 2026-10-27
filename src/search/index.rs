@@ -1,14 +1,22 @@
 //! A drive's files and folders, every name in each folder the user can list: one entry for each name (a file with
 //! several names, hard links, has an entry for each), each knowing its folder. Their names case folded lie in one run,
 //! each ended by a 0 (which no name holds), searched whole at once; a name is kept as written apart only where it is
-//! not as folded. Entries are only ever added: one gone, or renamed, is marked dead (a renamed one added again) and the
-//! dead are cleared out now and then.
+//! not as folded.
+//!
+//! What was last kept on disk is read where it lies (see `store`: its file mapped into memory, which is not Glance's
+//! own: Windows reads in what a search goes through, and lets it go again as other programs want the memory), and
+//! what changed since is kept in memory over it: the entries added since, after its own, their names in runs of their
+//! own, and its own entries as they are now where they changed. Entries are only ever added: one gone, or renamed, is
+//! marked dead (a renamed one added again), and the dead are left out as it is kept anew (see `write`).
 
 use super::readings;
+use super::store::Bytes;
 use memchr::memmem::Finder;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::os::windows::ffi::OsStringExt;
+use std::io::{self, Write};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 
 /// The drive's root folder's place.
@@ -17,8 +25,11 @@ pub const ROOT: u32 = 0;
 /// No place: the root's folder.
 pub const NONE: u32 = u32::MAX;
 
-/// Where an entry's name is as written in `Index::folded` (case folded, it is the same).
+/// Where an entry's name is as written, where it is as folded.
 const AS_FOLDED: u32 = u32::MAX;
+
+/// How deep in folders a name is kept (a path deeper is none Windows' own programs open).
+const DEEPEST: u16 = 4096;
 
 /// What an entry is.
 pub mod flag {
@@ -34,17 +45,20 @@ pub mod flag {
     pub const CHINESE: u16 = 16;
     pub const HIDDEN: u16 = 32;
     pub const SYSTEM: u16 = 64;
+    /// All there are.
+    pub const ALL: u16 = 127;
 }
 
-/// A file or folder (16 bytes).
-#[derive(Clone, Copy, Debug)]
+/// A file or folder (16 bytes, as it is kept on disk too).
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct Entry {
     /// Its folder's place.
     pub parent: u32,
-    /// Where its name, case folded, starts in `Index::folded`.
+    /// Where its name, case folded, starts in its run of names.
     at: u32,
-    /// Where its name as written is in `Index::written`, and how long it is, where it is not as folded.
+    /// Where its name as written (UTF-16, little-endian) starts in its run of them, and how many bytes long it is,
+    /// where it is not as folded.
     written: u32,
     written_len: u16,
     pub flags: u16,
@@ -117,15 +131,83 @@ pub struct Changes {
     pub to_list: Vec<(u32, u64)>,
 }
 
+/// The index as it was last kept, where it lies (see `store`): read in place, never copied. Each part's place in it
+/// (in bytes from its start), and how many it holds.
+struct Base {
+    bytes: Bytes,
+    entries: (usize, usize),
+    folded: (usize, usize),
+    written: (usize, usize),
+    /// The folders' places (in order), their ids (in the same order), and the order of those by id.
+    places: (usize, usize),
+    ids: usize,
+    by_id: usize,
+    chinese: (usize, usize),
+}
+
+/// The bytes at `at` as `count` of `T`, where they lie (none where they are not where a `T` may be).
+fn cast<T: Copy>(bytes: &[u8], at: usize, count: usize) -> Option<&[T]> {
+    let part = bytes.get(at..at.checked_add(count.checked_mul(size_of::<T>())?)?)?;
+    // (Little-endian as it is kept, as Windows' processors are.)
+    (part.as_ptr() as usize).is_multiple_of(align_of::<T>()).then(|| unsafe { std::slice::from_raw_parts(part.as_ptr().cast::<T>(), count) })
+}
+
+impl Base {
+    fn entries(&self) -> &[Entry] {
+        cast(self.bytes.slice(), self.entries.0, self.entries.1).unwrap()
+    }
+
+    fn folded(&self) -> &[u8] {
+        &self.bytes.slice()[self.folded.0..][..self.folded.1]
+    }
+
+    fn written(&self) -> &[u8] {
+        &self.bytes.slice()[self.written.0..][..self.written.1]
+    }
+
+    fn places(&self) -> &[u32] {
+        cast(self.bytes.slice(), self.places.0, self.places.1).unwrap()
+    }
+
+    fn ids(&self) -> &[u64] {
+        cast(self.bytes.slice(), self.ids, self.places.1).unwrap()
+    }
+
+    fn by_id(&self) -> &[u32] {
+        cast(self.bytes.slice(), self.by_id, self.places.1).unwrap()
+    }
+
+    fn chinese(&self) -> &[u32] {
+        cast(self.bytes.slice(), self.chinese.0, self.chinese.1).unwrap()
+    }
+
+    /// The place of the folder whose id is `id`.
+    fn folder(&self, id: u64) -> Option<u32> {
+        let (ids, by_id) = (self.ids(), self.by_id());
+        let at = by_id.binary_search_by_key(&id, |&k| ids[k as usize]).ok()?;
+        Some(self.places()[by_id[at] as usize])
+    }
+
+    /// The id of the folder at `place`.
+    fn id(&self, place: u32) -> Option<u64> {
+        let at = self.places().binary_search(&place).ok()?;
+        Some(self.ids()[at])
+    }
+}
+
 pub struct Index {
+    base: Option<Base>,
+    /// The base's entries as they are now, where they changed (gone, moved, marked).
+    changed: HashMap<u32, Entry>,
+    /// The entries added since, placed after the base's, and their runs of names.
     entries: Vec<Entry>,
     folded: Vec<u8>,
     written: Vec<u8>,
-    /// The folders' places by their file ids, and their ids by their places (in the order of the places; entries
-    /// only being added, an id is added after those before).
-    folders: HashMap<u64, u32>,
+    /// The folders' places by their ids, where that changed since the base (none: no folder has the id any more);
+    /// and the ids of the folders added since, by their places (in order).
+    folders: HashMap<u64, Option<u32>>,
     ids: Vec<(u32, u64)>,
-    /// The entries whose names hold Chinese characters.
+    /// The entries added since whose names hold Chinese characters.
     chinese: Vec<u32>,
     dead: usize,
     /// Whether its folders are known by their file ids (an NTFS drive's), or else by their names alone, each
@@ -137,9 +219,50 @@ pub struct Index {
 /// The first id given a folder by `Index` (where the drive's are not kept).
 const MADE: u64 = 1 << 63;
 
+/// The entries of a run of names (`entries`, the first of them at `first`) whose names (`run`) hold what `finder`
+/// looks for, and are `alive`: looked for by `threads` threads at once, each through its share of the names.
+fn look_through(finder: &Finder, run: &[u8], entries: &[Entry], first: u32, threads: usize, alive: &(dyn Fn(u32) -> bool + Sync)) -> Vec<u32> {
+    let mut bounds = vec![0usize];
+    for share in 1..threads.max(1) {
+        let from = run.len() * share / threads;
+        let start = run[from..].iter().position(|&b| b == 0).map_or(run.len(), |end| from + end + 1);
+        if start > *bounds.last().unwrap() {
+            bounds.push(start);
+        }
+    }
+    bounds.push(run.len());
+    let look = |from: usize, to: usize| {
+        let mut found = Vec::new();
+        let mut at = from;
+        while let Some(hit) = finder.find(&run[at..to]) {
+            let place = entries.partition_point(|entry| entry.at as usize <= at + hit) - 1;
+            if alive(first + place as u32) {
+                found.push(first + place as u32);
+            }
+            at = entries.get(place + 1).map_or(to, |next| next.at as usize);
+        }
+        found
+    };
+    if bounds.len() == 2 {
+        return look(0, run.len());
+    }
+    std::thread::scope(|scope| {
+        let looks: Vec<_> = bounds.windows(2).map(|share| scope.spawn(move || look(share[0], share[1]))).collect();
+        looks.into_iter().flat_map(|looked| looked.join().unwrap()).collect()
+    })
+}
+
+/// The name of the entry at `place` of `entries` in its run of names `run`, case folded.
+fn folded_in<'a>(entries: &[Entry], run: &'a [u8], place: usize) -> &'a str {
+    let at = entries[place].at as usize;
+    let end = entries.get(place + 1).map_or(run.len(), |next| next.at as usize) - 1;
+    // (Folded from a str, or checked to be UTF-8 as it was read.)
+    unsafe { std::str::from_utf8_unchecked(&run[at..end]) }
+}
+
 impl Index {
     fn empty(by_id: bool) -> Self {
-        Index { entries: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), dead: 0, by_id, made: MADE }
+        Index { base: None, changed: HashMap::new(), entries: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), dead: 0, by_id, made: MADE }
     }
 
     /// An index of a drive whose root folder has `root_id` (a drive whose folders are known `by_id`, else by their
@@ -151,29 +274,56 @@ impl Index {
         index
     }
 
-    pub fn entries(&self) -> &[Entry] {
-        &self.entries
+    fn base_len(&self) -> u32 {
+        self.base.as_ref().map_or(0, |base| base.entries.1 as u32)
+    }
+
+    /// How many entries it has (the dead too). (Never none: its root is one.)
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> u32 {
+        self.base_len() + self.entries.len() as u32
+    }
+
+    /// The entry at `place`, as it is now.
+    pub fn entry(&self, place: u32) -> Entry {
+        let base_len = self.base_len();
+        match &self.base {
+            Some(base) if place < base_len => match self.changed.is_empty() {
+                true => base.entries()[place as usize],
+                false => self.changed.get(&place).copied().unwrap_or_else(|| base.entries()[place as usize]),
+            },
+            _ => self.entries[(place - base_len) as usize],
+        }
+    }
+
+    fn set_entry(&mut self, place: u32, entry: Entry) {
+        let base_len = self.base_len();
+        if place < base_len {
+            self.changed.insert(place, entry);
+        } else {
+            self.entries[(place - base_len) as usize] = entry;
+        }
     }
 
     /// How many names it holds (the live entries but the root).
     pub fn names(&self) -> usize {
-        self.entries.len() - self.dead - 1
+        self.len() as usize - self.dead - 1
     }
 
     fn add(&mut self, parent: u32, name: &[u16], flags: u16) -> u32 {
-        let place = self.entries.len() as u32;
+        let place = self.len();
         let name = OsString::from_wide(name);
         let lossy = name.to_string_lossy();
         let at = self.folded.len();
         for c in lossy.chars().flat_map(char::to_lowercase) {
             self.folded.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
         }
-        let as_written = name.as_encoded_bytes();
-        let (written, written_len) = if self.folded[at..] == *as_written {
+        let (written, written_len) = if name.to_str().is_some_and(|name| self.folded[at..] == *name.as_bytes()) {
             (AS_FOLDED, 0)
         } else {
-            self.written.extend_from_slice(as_written);
-            ((self.written.len() - as_written.len()) as u32, as_written.len() as u16)
+            let from = self.written.len();
+            self.written.extend(name.encode_wide().flat_map(u16::to_le_bytes));
+            (from as u32, (self.written.len() - from) as u16)
         };
         self.folded.push(0);
         let mut flags = flags;
@@ -194,39 +344,59 @@ impl Index {
         self.by_id
     }
 
+    /// The folder added at `place` known by `id`.
     fn set_id(&mut self, place: u32, id: u64) {
-        self.folders.insert(id, place);
+        self.folders.insert(id, Some(place));
         self.ids.push((place, id));
     }
 
     /// A folder's file id.
     pub fn id(&self, place: u32) -> Option<u64> {
-        self.ids.binary_search_by_key(&place, |&(place, _)| place).ok().map(|at| self.ids[at].1)
+        match &self.base {
+            Some(base) if place < self.base_len() => base.id(place),
+            _ => self.ids.binary_search_by_key(&place, |&(place, _)| place).ok().map(|at| self.ids[at].1),
+        }
+    }
+
+    /// The folder this file id is the id of, live or dead.
+    fn known(&self, id: u64) -> Option<u32> {
+        match self.folders.get(&id) {
+            Some(&place) => place,
+            None => self.base.as_ref()?.folder(id),
+        }
     }
 
     /// The live folder of this file id.
     pub fn folder(&self, id: u64) -> Option<u32> {
-        self.folders.get(&id).copied().filter(|&place| self.entries[place as usize].alive())
+        self.known(id).filter(|&place| self.entry(place).alive())
+    }
+
+    /// The entry at `place` in its run of entries, the run of its names as folded and as written, and its place in it.
+    fn run(&self, place: u32) -> (&[Entry], &[u8], &[u8], usize) {
+        let base_len = self.base_len();
+        match &self.base {
+            Some(base) if place < base_len => (base.entries(), base.folded(), base.written(), place as usize),
+            _ => (&self.entries, &self.folded, &self.written, (place - base_len) as usize),
+        }
     }
 
     /// An entry's name as written.
-    pub fn name(&self, place: u32) -> &OsStr {
-        let entry = &self.entries[place as usize];
+    pub fn name(&self, place: u32) -> Cow<'_, OsStr> {
+        let (entries, folded, written, at) = self.run(place);
+        let entry = &entries[at];
         if entry.written == AS_FOLDED {
-            OsStr::new(self.folded_name(place))
+            Cow::Borrowed(OsStr::new(folded_in(entries, folded, at)))
         } else {
-            let bytes = &self.written[entry.written as usize..][..entry.written_len as usize];
-            // (Bytes as `as_encoded_bytes` gave them.)
-            unsafe { OsStr::from_encoded_bytes_unchecked(bytes) }
+            let bytes = &written[entry.written as usize..][..entry.written_len as usize];
+            let wide: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
+            Cow::Owned(OsString::from_wide(&wide))
         }
     }
 
     /// An entry's name case folded.
     pub fn folded_name(&self, place: u32) -> &str {
-        let at = self.entries[place as usize].at as usize;
-        let end = self.entries.get(place as usize + 1).map_or(self.folded.len(), |next| next.at as usize) - 1;
-        // (Folded from a str.)
-        std::str::from_utf8(&self.folded[at..end]).unwrap()
+        let (entries, folded, _, at) = self.run(place);
+        folded_in(entries, folded, at)
     }
 
     /// An entry's whole path, from `root` (the drive's, "C:\"); none where a folder on the way is unknown or gone.
@@ -234,8 +404,11 @@ impl Index {
         let mut parts = Vec::new();
         let mut at = place;
         while at != ROOT {
-            let entry = self.entries.get(at as usize)?;
-            if !entry.alive() || parts.len() > 4096 {
+            if at >= self.len() {
+                return None;
+            }
+            let entry = self.entry(at);
+            if !entry.alive() || parts.len() > DEEPEST as usize {
                 return None;
             }
             parts.push(self.name(at));
@@ -251,9 +424,12 @@ impl Index {
     pub fn folder_at(&self, path: &std::path::Path) -> u32 {
         let mut folder = ROOT;
         for part in path.components() {
-            let found = self.entries.iter().enumerate().find(|(place, entry)| entry.alive() && entry.folder() && entry.parent == folder && self.name(*place as u32) == part.as_os_str());
+            let found = (0..self.len()).find(|&place| {
+                let entry = self.entry(place);
+                entry.alive() && entry.folder() && entry.parent == folder && self.name(place) == part.as_os_str()
+            });
             match found {
-                Some((place, _)) => folder = place as u32,
+                Some(place) => folder = place,
                 None => break,
             }
         }
@@ -261,21 +437,27 @@ impl Index {
     }
 
     pub fn set_flag(&mut self, place: u32, flag: u16, on: bool) {
-        let flags = &mut self.entries[place as usize].flags;
-        *flags = if on { *flags | flag } else { *flags & !flag };
+        let mut entry = self.entry(place);
+        let flags = if on { entry.flags | flag } else { entry.flags & !flag };
+        if flags != entry.flags {
+            entry.flags = flags;
+            self.set_entry(place, entry);
+        }
     }
 
     fn kill(&mut self, place: u32) {
-        let entry = &mut self.entries[place as usize];
+        let mut entry = self.entry(place);
         if !entry.alive() {
             return;
         }
         entry.flags |= flag::DEAD;
+        self.set_entry(place, entry);
         self.dead += 1;
+        // (Its id no folder's any more, unless it is another's now: moved, it was given to where it went first.)
         if entry.folder() {
             if let Some(id) = self.id(place) {
-                if self.folders.get(&id) == Some(&place) {
-                    self.folders.remove(&id);
+                if self.known(id) == Some(place) {
+                    self.folders.insert(id, None);
                 }
             }
         }
@@ -284,9 +466,10 @@ impl Index {
     /// The live entries in each of `folders`.
     pub fn children(&self, folders: &HashSet<u32>) -> HashMap<u32, Vec<u32>> {
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for (place, entry) in self.entries.iter().enumerate() {
+        for place in 0..self.len() {
+            let entry = self.entry(place);
             if entry.alive() && folders.contains(&entry.parent) {
-                children.entry(entry.parent).or_default().push(place as u32);
+                children.entry(entry.parent).or_default().push(place);
             }
         }
         children
@@ -296,14 +479,14 @@ impl Index {
     /// (a folder only once the round is finished, as it may have moved), new ones added, folders found that are to
     /// be listed noted in `changes`.
     pub fn list(&mut self, folder: u32, items: &[Item], before: &[u32], changes: &mut Changes) {
-        let mut by_name: HashMap<OsString, u32> = before.iter().filter(|&&place| self.entries[place as usize].alive()).map(|&place| (self.name(place).to_owned(), place)).collect();
+        let mut by_name: HashMap<OsString, u32> = before.iter().filter(|&&place| self.entry(place).alive()).map(|&place| (self.name(place).into_owned(), place)).collect();
         for item in items {
             let name = OsString::from_wide(&item.name);
             let flags = item.flags();
             // (Where the drive keeps no ids, a folder is the one of its name.)
             let id = if self.by_id { item.id } else { by_name.get(&name).and_then(|&child| self.id(child)).unwrap_or_else(|| self.make_id()) };
             if let Some(child) = by_name.remove(&name) {
-                let was = self.entries[child as usize];
+                let was = self.entry(child);
                 let same = match (was.folder(), item.folder()) {
                     (true, true) => self.id(child) == Some(id),
                     (false, false) => true,
@@ -311,7 +494,9 @@ impl Index {
                 };
                 if same {
                     let kept = was.flags & (flag::FOLDER | flag::CHINESE | flag::UNREAD);
-                    self.entries[child as usize].flags = kept | flags;
+                    if kept | flags != was.flags {
+                        self.set_entry(child, Entry { flags: kept | flags, ..was });
+                    }
                     // (A link before, its names are listed now.)
                     if was.flags & flag::LINK != 0 && item.followed() {
                         changes.to_list.push((child, id));
@@ -327,7 +512,7 @@ impl Index {
             if item.folder() && self.by_id {
                 if let Some(old) = self.folder(id) {
                     // Moved here, or renamed: its entries go with it.
-                    let place = self.add(folder, &item.name, flags | (self.entries[old as usize].flags & flag::UNREAD));
+                    let place = self.add(folder, &item.name, flags | (self.entry(old).flags & flag::UNREAD));
                     self.set_id(place, id);
                     self.kill(old);
                     changes.moved.insert(old, place);
@@ -343,7 +528,7 @@ impl Index {
             }
         }
         for (_, place) in by_name {
-            if self.entries[place as usize].folder() {
+            if self.entry(place).folder() {
                 changes.missing.push(place);
             } else {
                 self.kill(place);
@@ -361,15 +546,16 @@ impl Index {
                 }
                 place
             };
-            for entry in &mut self.entries {
+            for place in 0..self.len() {
+                let entry = self.entry(place);
                 if entry.alive() && changes.moved.contains_key(&entry.parent) {
-                    entry.parent = moved(entry.parent);
+                    self.set_entry(place, Entry { parent: moved(entry.parent), ..entry });
                 }
             }
         }
         let mut gone: HashSet<u32> = HashSet::new();
         for place in changes.missing {
-            if self.entries[place as usize].alive() {
+            if self.entry(place).alive() {
                 self.kill(place);
                 gone.insert(place);
             }
@@ -381,8 +567,8 @@ impl Index {
     pub fn kill_within(&mut self, mut folders: HashSet<u32>) {
         while !folders.is_empty() {
             let mut within = HashSet::new();
-            for place in 0..self.entries.len() as u32 {
-                let entry = self.entries[place as usize];
+            for place in 0..self.len() {
+                let entry = self.entry(place);
                 if entry.alive() && folders.contains(&entry.parent) {
                     self.kill(place);
                     if entry.folder() {
@@ -398,9 +584,9 @@ impl Index {
     pub fn denied(&mut self, folder: u32, before: &[u32]) {
         let mut gone = HashSet::new();
         for &place in before {
-            if self.entries[place as usize].alive() {
+            if self.entry(place).alive() {
                 self.kill(place);
-                if self.entries[place as usize].folder() {
+                if self.entry(place).folder() {
                     gone.insert(place);
                 }
             }
@@ -409,185 +595,309 @@ impl Index {
         self.set_flag(folder, flag::UNREAD, true);
     }
 
-    /// Whether enough is dead to clear it out.
+    /// Whether enough is dead to be left out (see `write`).
     pub fn untidy(&self) -> bool {
-        self.dead > 65_536 && self.dead * 4 > self.entries.len()
-    }
-
-    /// The dead cleared out, the live ones' places changed (none is kept across this).
-    pub fn tidy(&mut self) {
-        // (Whatever a dead folder held is dead too: the live are all reached from the root.)
-        let mut placed = vec![NONE; self.entries.len()];
-        let mut kept = 0u32;
-        for (place, entry) in self.entries.iter().enumerate() {
-            if entry.alive() {
-                placed[place] = kept;
-                kept += 1;
-            }
-        }
-        let old = std::mem::replace(self, Index::empty(self.by_id));
-        self.made = old.made;
-        self.entries.reserve(kept as usize);
-        for (place, entry) in old.entries.iter().enumerate() {
-            if placed[place] == NONE {
-                continue;
-            }
-            let new = self.entries.len() as u32;
-            let at = self.folded.len() as u32;
-            self.folded.extend_from_slice(old.folded_name(place as u32).as_bytes());
-            self.folded.push(0);
-            let written = if entry.written == AS_FOLDED {
-                AS_FOLDED
-            } else {
-                self.written.extend_from_slice(&old.written[entry.written as usize..][..entry.written_len as usize]);
-                (self.written.len() - entry.written_len as usize) as u32
-            };
-            // (A folder may be placed after what it holds, moved: each entry's folder is found by its old place.)
-            let parent = if entry.parent == NONE { NONE } else { placed[entry.parent as usize] };
-            self.entries.push(Entry { parent, at, written, written_len: entry.written_len, flags: entry.flags });
-            if entry.flags & flag::CHINESE != 0 {
-                self.chinese.push(new);
-            }
-            if entry.folder() {
-                if let Some(id) = old.id(place as u32) {
-                    self.set_id(new, id);
-                }
-            }
-        }
-        self.entries.shrink_to_fit();
-        self.folded.shrink_to_fit();
-        self.written.shrink_to_fit();
+        self.dead > 65_536 && self.dead * 4 > self.len() as usize
     }
 
     /// The places of the live entries whose folded names hold `words` (folded), in order, looked for by `threads`
     /// threads at once, each through its share of the names.
     pub fn holding(&self, words: &str, threads: usize) -> Vec<u32> {
         let finder = Finder::new(words.as_bytes());
-        let mut bounds = vec![0usize];
-        for share in 1..threads.max(1) {
-            let from = self.folded.len() * share / threads;
-            let start = self.folded[from..].iter().position(|&b| b == 0).map_or(self.folded.len(), |end| from + end + 1);
-            if start > *bounds.last().unwrap() {
-                bounds.push(start);
-            }
-        }
-        bounds.push(self.folded.len());
-        let look = |from: usize, to: usize| {
-            let mut found = Vec::new();
-            let mut at = from;
-            while let Some(hit) = finder.find(&self.folded[at..to]) {
-                let place = self.entries.partition_point(|entry| entry.at as usize <= at + hit) - 1;
-                if self.entries[place].alive() {
-                    found.push(place as u32);
-                }
-                at = self.entries.get(place + 1).map_or(to, |next| next.at as usize);
-            }
-            found
+        let alive = |place: u32| self.entry(place).alive();
+        let mut found = match &self.base {
+            Some(base) => look_through(&finder, base.folded(), base.entries(), 0, threads, &alive),
+            None => Vec::new(),
         };
-        if bounds.len() == 2 {
-            return look(0, self.folded.len());
-        }
-        std::thread::scope(|scope| {
-            let looks: Vec<_> = bounds.windows(2).map(|share| scope.spawn(move || look(share[0], share[1]))).collect();
-            looks.into_iter().flat_map(|looked| looked.join().unwrap()).collect()
-        })
+        found.extend(look_through(&finder, &self.folded, &self.entries, self.base_len(), threads, &alive));
+        found
     }
 
     /// The places of the live entries whose names hold Chinese characters.
     pub fn chinese(&self) -> impl Iterator<Item = u32> + '_ {
-        self.chinese.iter().copied().filter(|&place| self.entries[place as usize].alive())
+        let base = self.base.as_ref().map_or(&[][..], Base::chinese);
+        base.iter().chain(&self.chinese).copied().filter(|&place| self.entry(place).alive())
     }
 
-    /// It as kept on disk: how many of each it holds, then each (all little-endian).
-    pub fn to_bytes(&self, out: &mut Vec<u8>) {
-        for count in [self.entries.len(), self.folded.len(), self.written.len(), self.ids.len()] {
-            out.extend_from_slice(&(count as u64).to_le_bytes());
-        }
-        out.reserve(self.entries.len() * 16 + self.folded.len() + self.written.len() + self.ids.len() * 12);
-        for entry in &self.entries {
-            out.extend_from_slice(&entry.parent.to_le_bytes());
-            out.extend_from_slice(&entry.at.to_le_bytes());
-            out.extend_from_slice(&entry.written.to_le_bytes());
-            out.extend_from_slice(&entry.written_len.to_le_bytes());
-            out.extend_from_slice(&entry.flags.to_le_bytes());
-        }
-        out.extend_from_slice(&self.folded);
-        out.extend_from_slice(&self.written);
-        for &(place, id) in &self.ids {
-            out.extend_from_slice(&place.to_le_bytes());
-            out.extend_from_slice(&id.to_le_bytes());
-        }
-    }
-
-    /// It as `to_bytes` kept it, each part checked to be what it can be (none where one is not).
-    pub fn from_bytes(bytes: &[u8]) -> Option<Index> {
-        let mut at = 0usize;
-        let mut take = |len: usize| {
-            let part = bytes.get(at..at.checked_add(len)?)?;
-            at += len;
-            Some(part)
-        };
-        let mut counts = [0usize; 4];
-        for count in &mut counts {
-            *count = usize::try_from(u64::from_le_bytes(take(8)?.try_into().ok()?)).ok()?;
-        }
-        let [entries, folded, written, ids] = counts;
-        let u32_at = |part: &[u8], at: usize| u32::from_le_bytes(part[at..at + 4].try_into().unwrap());
-        let u16_at = |part: &[u8], at: usize| u16::from_le_bytes(part[at..at + 2].try_into().unwrap());
-        let entries: Vec<Entry> = take(entries.checked_mul(16)?)?
-            .chunks_exact(16)
-            .map(|part| Entry { parent: u32_at(part, 0), at: u32_at(part, 4), written: u32_at(part, 8), written_len: u16_at(part, 12), flags: u16_at(part, 14) })
-            .collect();
-        let folded = take(folded)?.to_vec();
-        let written = take(written)?.to_vec();
-        let ids: Vec<(u32, u64)> = take(ids.checked_mul(12)?)?.chunks_exact(12).map(|part| (u32_at(part, 0), u64::from_le_bytes(part[4..12].try_into().unwrap()))).collect();
-        if at != bytes.len() || entries.is_empty() || entries[ROOT as usize].parent != NONE {
-            return None;
-        }
-        // Names: each where the one before ended, ended by a 0 and nowhere else, as UTF-8; as written within what
-        // is kept; folders within the entries.
-        std::str::from_utf8(&folded).ok()?;
-        let mut next = 0usize;
-        for (place, entry) in entries.iter().enumerate() {
-            let end = entries.get(place + 1).map_or(folded.len(), |after| after.at as usize);
-            if entry.at as usize != next || end <= next || end > folded.len() || folded[end - 1] != 0 || folded[next..end - 1].contains(&0) {
-                return None;
-            }
-            next = end;
-            if entry.written != AS_FOLDED && (entry.written as usize).checked_add(entry.written_len as usize)? > written.len() {
-                return None;
-            }
-            if place != ROOT as usize && entry.parent as usize >= entries.len() {
-                return None;
-            }
-        }
-        if next != folded.len() || ids.windows(2).any(|two| two[0].0 >= two[1].0) || ids.iter().any(|&(place, _)| place as usize >= entries.len()) {
-            return None;
-        }
-        let mut index = Index { entries, folded, written, ids, ..Index::empty(true) };
-        for (place, entry) in index.entries.iter().enumerate() {
-            if !entry.alive() {
-                index.dead += 1;
-            } else if entry.flags & flag::CHINESE != 0 {
-                index.chinese.push(place as u32);
-            }
-        }
-        for &(place, id) in &index.ids {
-            if index.entries[place as usize].alive() {
-                index.folders.insert(id, place);
-            }
-        }
-        Some(index)
-    }
-
-    /// About how much memory it holds.
-    pub fn bytes(&self) -> usize {
+    /// About how much memory it holds of its own (what is mapped in of the base is not its own: see the top).
+    pub fn held(&self) -> usize {
         self.entries.capacity() * size_of::<Entry>()
             + self.folded.capacity()
             + self.written.capacity()
-            + self.folders.capacity() * (size_of::<(u64, u32)>() + 1)
+            + self.changed.capacity() * (size_of::<(u32, Entry)>() + 1)
+            + self.folders.capacity() * (size_of::<(u64, Option<u32>)>() + 1)
             + self.ids.capacity() * size_of::<(u32, u64)>()
             + self.chinese.capacity() * 4
+    }
+
+    /// How deep each entry is (the root 0, what is in it 1, ...), `LEFT` for those left out as it is kept: the dead,
+    /// what is in a dead folder (or one unknown), and what lies deeper than `DEEPEST`.
+    fn depths(&self) -> Vec<u16> {
+        const UNKNOWN: u16 = u16::MAX;
+        let len = self.len();
+        let mut depth = vec![UNKNOWN; len as usize];
+        let mut chain = Vec::new();
+        for place in 0..len {
+            let mut at = place;
+            let top = loop {
+                if depth[at as usize] != UNKNOWN {
+                    break depth[at as usize];
+                }
+                let entry = self.entry(at);
+                if at == ROOT {
+                    depth[0] = 0;
+                    break 0;
+                }
+                // (A folder that is in itself, at last, is that deep too.)
+                if !entry.alive() || entry.parent >= len || chain.len() >= DEEPEST as usize {
+                    depth[at as usize] = LEFT;
+                    break LEFT;
+                }
+                chain.push(at);
+                at = entry.parent;
+            };
+            let mut deep = top;
+            for &place in chain.iter().rev() {
+                deep = if deep >= DEEPEST { LEFT } else { deep + 1 };
+                depth[place as usize] = deep;
+            }
+            chain.clear();
+        }
+        depth
+    }
+
+    /// It as kept on disk (see `read`): the dead left out, and the rest placed anew, each after its folder (by how
+    /// deep it is, then as it was). How many entries, bytes of names folded, bytes of names as written, folders with
+    /// ids and names holding Chinese there are, then the entries, the names folded, the names as written, the
+    /// folders' places, their ids, their order by id, and the places of those holding Chinese: each part from a
+    /// multiple of 8 bytes, all little-endian, written as it is made (never all of it at once in memory).
+    pub fn write(&self, out: &mut impl Write) -> io::Result<()> {
+        let depth = self.depths();
+        // The places anew: the old places in their new order, and the new place of each old one.
+        let mut order = Vec::new();
+        {
+            let mut starts = vec![0u32; DEEPEST as usize + 2];
+            for &deep in &depth {
+                if deep != LEFT {
+                    starts[deep as usize + 1] += 1;
+                }
+            }
+            for at in 1..starts.len() {
+                starts[at] += starts[at - 1];
+            }
+            order.resize(starts[DEEPEST as usize + 1] as usize, 0u32);
+            for (place, &deep) in depth.iter().enumerate() {
+                if deep != LEFT {
+                    order[starts[deep as usize] as usize] = place as u32;
+                    starts[deep as usize] += 1;
+                }
+            }
+        }
+        drop(depth);
+        let mut placed = vec![NONE; self.len() as usize];
+        for (new, &old) in order.iter().enumerate() {
+            placed[old as usize] = new as u32;
+        }
+        // The folders kept with their ids (each id one folder's: the one it is known for), and those holding Chinese.
+        let mut ids: Vec<(u32, u64)> = Vec::new();
+        let mut chinese = 0usize;
+        let (mut folded, mut written) = (0usize, 0usize);
+        for &old in &order {
+            let entry = self.entry(old);
+            let (entries, _, _, at) = self.run(old);
+            folded += self.folded_name(old).len() + 1;
+            if entries[at].written != AS_FOLDED {
+                written += entries[at].written_len as usize;
+            }
+            if entry.flags & flag::CHINESE != 0 {
+                chinese += 1;
+            }
+            if entry.folder() {
+                if let Some(id) = self.id(old).filter(|&id| self.known(id) == Some(old)) {
+                    ids.push((placed[old as usize], id));
+                }
+            }
+        }
+        if folded > u32::MAX as usize || written > u32::MAX as usize {
+            return Err(io::Error::other("too many names to keep"));
+        }
+        let mut out = Counted { out, wrote: 0 };
+        for count in [order.len(), folded, written, ids.len(), chinese] {
+            out.write_all(&(count as u64).to_le_bytes())?;
+        }
+        // The entries.
+        let (mut name_at, mut written_at) = (0u32, 0u32);
+        for &old in &order {
+            let entry = self.entry(old);
+            let (entries, _, _, at) = self.run(old);
+            let parent = if old == ROOT { NONE } else { placed[entry.parent as usize] };
+            let (written_from, written_len) = match entries[at].written {
+                AS_FOLDED => (AS_FOLDED, 0),
+                _ => (written_at, entries[at].written_len),
+            };
+            written_at += u32::from(written_len);
+            for part in [parent, name_at, written_from] {
+                out.write_all(&part.to_le_bytes())?;
+            }
+            out.write_all(&written_len.to_le_bytes())?;
+            out.write_all(&(entry.flags & !flag::DEAD).to_le_bytes())?;
+            name_at += self.folded_name(old).len() as u32 + 1;
+        }
+        // The names, folded, then as written.
+        for &old in &order {
+            out.write_all(self.folded_name(old).as_bytes())?;
+            out.write_all(&[0])?;
+        }
+        out.pad()?;
+        for &old in &order {
+            let (entries, _, run, at) = self.run(old);
+            let entry = entries[at];
+            if entry.written != AS_FOLDED {
+                out.write_all(&run[entry.written as usize..][..entry.written_len as usize])?;
+            }
+        }
+        out.pad()?;
+        // The folders: their places, their ids, their order by id.
+        for &(place, _) in &ids {
+            out.write_all(&place.to_le_bytes())?;
+        }
+        out.pad()?;
+        for &(_, id) in &ids {
+            out.write_all(&id.to_le_bytes())?;
+        }
+        let mut by_id: Vec<u32> = (0..ids.len() as u32).collect();
+        by_id.sort_unstable_by_key(|&at| ids[at as usize].1);
+        for at in by_id {
+            out.write_all(&at.to_le_bytes())?;
+        }
+        out.pad()?;
+        // Those holding Chinese.
+        for (new, &old) in order.iter().enumerate() {
+            if self.entry(old).flags & flag::CHINESE != 0 {
+                out.write_all(&(new as u32).to_le_bytes())?;
+            }
+        }
+        out.pad()?;
+        Ok(())
+    }
+
+    /// It as `write` kept it in `bytes`, from `at` to `end` (where its parts are, a multiple of 8 bytes from where
+    /// `bytes` start), of a drive whose folders are known `by_id`, given ids up to `made`: each part checked to be
+    /// what it can be, and all of them to agree (none where one is not).
+    pub fn read(bytes: Bytes, at: usize, end: usize, by_id: bool, made: u64) -> Option<Index> {
+        let slice = bytes.slice();
+        let mut counts = [0usize; 5];
+        for (n, count) in counts.iter_mut().enumerate() {
+            *count = usize::try_from(u64::from_le_bytes(slice.get(at + n * 8..at + n * 8 + 8)?.try_into().ok()?)).ok()?;
+        }
+        let [entries, folded, written, folders, chinese] = counts;
+        if entries == 0 || entries >= NONE as usize || folded > u32::MAX as usize || written > u32::MAX as usize || folders > entries || chinese > entries {
+            return None;
+        }
+        // Where each part is.
+        let mut next = at + 40;
+        let mut part = |len: usize| -> Option<usize> {
+            let from = next;
+            next = from.checked_add(len)?.next_multiple_of(8);
+            Some(from)
+        };
+        let base = Base {
+            entries: (part(entries.checked_mul(16)?)?, entries),
+            folded: (part(folded)?, folded),
+            written: (part(written)?, written),
+            places: (part(folders * 4)?, folders),
+            ids: part(folders * 8)?,
+            by_id: part(folders * 4)?,
+            chinese: (part(chinese * 4)?, chinese),
+            bytes,
+        };
+        if next != end || end > base.bytes.slice().len() {
+            return None;
+        }
+        let (all, names, run) = (cast::<Entry>(base.bytes.slice(), base.entries.0, entries)?, base.folded(), base.written());
+        let (places, ids, order, held) = (cast::<u32>(base.bytes.slice(), base.places.0, folders)?, cast::<u64>(base.bytes.slice(), base.ids, folders)?, cast::<u32>(base.bytes.slice(), base.by_id, folders)?, cast::<u32>(base.bytes.slice(), base.chinese.0, chinese)?);
+        // Names: each where the one before ended, ended by a 0 and nowhere else, as UTF-8; as written within what is
+        // kept, whole UTF-16 units. Each entry after its folder, which is a folder; none dead, the root first.
+        std::str::from_utf8(names).ok()?;
+        let root = all[ROOT as usize];
+        if root.parent != NONE || !root.folder() || root.flags & flag::LINK != 0 {
+            return None;
+        }
+        let mut name_at = 0usize;
+        let mut holding = 0usize;
+        for (place, entry) in all.iter().enumerate() {
+            let name_end = all.get(place + 1).map_or(names.len(), |after| after.at as usize);
+            if entry.at as usize != name_at || name_end <= name_at || name_end > names.len() || names[name_end - 1] != 0 || names[name_at..name_end - 1].contains(&0) {
+                return None;
+            }
+            name_at = name_end;
+            if entry.written != AS_FOLDED && (entry.written_len == 0 || entry.written_len % 2 != 0 || (entry.written as usize).checked_add(entry.written_len as usize)? > run.len()) {
+                return None;
+            }
+            if entry.written == AS_FOLDED && entry.written_len != 0 {
+                return None;
+            }
+            if entry.flags & !flag::ALL != 0 || !entry.alive() {
+                return None;
+            }
+            if place != ROOT as usize && (entry.parent as usize >= place || !all[entry.parent as usize].folder()) {
+                return None;
+            }
+            if entry.flags & flag::CHINESE != 0 {
+                holding += 1;
+            }
+        }
+        if name_at != names.len() || holding != chinese {
+            return None;
+        }
+        // Folders: in order of their places, each a folder; by id, in order of their ids, each id one folder's.
+        if places.windows(2).any(|two| two[0] >= two[1]) || places.iter().any(|&place| place as usize >= entries || !all[place as usize].folder()) {
+            return None;
+        }
+        if order.iter().any(|&at| at as usize >= folders) || order.windows(2).any(|two| ids[two[0] as usize] >= ids[two[1] as usize]) {
+            return None;
+        }
+        if !by_id && ids.iter().any(|&id| id > made) {
+            return None;
+        }
+        if held.windows(2).any(|two| two[0] >= two[1]) || held.iter().any(|&place| place as usize >= entries || all[place as usize].flags & flag::CHINESE == 0) {
+            return None;
+        }
+        Some(Index { base: Some(base), made, ..Index::empty(by_id) })
+    }
+
+    /// The ids given folders so far (where the drive keeps none).
+    pub fn made(&self) -> u64 {
+        self.made
+    }
+}
+
+/// How deep an entry left out as it is kept is (see `Index::depths`).
+const LEFT: u16 = u16::MAX - 1;
+
+/// What is written, and how much of it.
+struct Counted<'a, W: Write> {
+    out: &'a mut W,
+    wrote: usize,
+}
+
+impl<W: Write> Counted<'_, W> {
+    /// Zeros up to the next multiple of 8 bytes.
+    fn pad(&mut self) -> io::Result<()> {
+        let more = self.wrote.next_multiple_of(8) - self.wrote;
+        self.write_all(&[0; 8][..more])
+    }
+}
+
+impl<W: Write> Write for Counted<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let wrote = self.out.write(bytes)?;
+        self.wrote += wrote;
+        Ok(wrote)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
     }
 }
 
@@ -615,13 +925,21 @@ mod tests {
     }
 
     fn paths(index: &Index) -> Vec<String> {
-        let mut paths: Vec<String> = (1..index.entries().len() as u32).filter(|&place| index.entries()[place as usize].alive()).filter_map(|place| index.path(place, "C:\\")).map(|path| path.display().to_string()).collect();
+        let mut paths: Vec<String> = (1..index.len()).filter(|&place| index.entry(place).alive()).filter_map(|place| index.path(place, "C:\\")).map(|path| path.display().to_string()).collect();
         paths.sort();
         paths
     }
 
     fn place_of(index: &Index, path: &str) -> u32 {
-        (0..index.entries().len() as u32).find(|&place| index.entries()[place as usize].alive() && index.path(place, "C:\\").is_some_and(|at| at.display().to_string() == path)).unwrap()
+        (0..index.len()).find(|&place| index.entry(place).alive() && index.path(place, "C:\\").is_some_and(|at| at.display().to_string() == path)).unwrap()
+    }
+
+    /// `index` as kept, and read again.
+    fn kept(index: &Index) -> Index {
+        let mut bytes = Vec::new();
+        index.write(&mut bytes).unwrap();
+        let end = bytes.len();
+        Index::read(Bytes::owned(&bytes), 0, end, index.by_id, index.made).unwrap()
     }
 
     /// C:\Docs\Plan.txt, C:\Docs\Old\a.txt, C:\Music\歌.mp3.
@@ -637,12 +955,11 @@ mod tests {
         index
     }
 
-    #[test]
-    fn folders_listed_again_change_as_the_drive_did() {
-        let mut index = drive();
+    /// The drive's folders changed as each round says, on `index` (as built, or as kept and read again: the same).
+    fn folders_listed_again_change_as_the_drive_did(mut index: Index) {
         assert_eq!(paths(&index), ["C:\\Docs", "C:\\Docs\\Old", "C:\\Docs\\Old\\a.txt", "C:\\Docs\\Plan.txt", "C:\\Music", "C:\\Music\\歌.mp3", "C:\\boot.ini"]);
-        assert!(index.entries()[place_of(&index, "C:\\boot.ini") as usize].flags & flag::HIDDEN != 0);
-        assert!(index.entries()[place_of(&index, "C:\\Music\\歌.mp3") as usize].flags & flag::CHINESE != 0);
+        assert!(index.entry(place_of(&index, "C:\\boot.ini")).flags & flag::HIDDEN != 0);
+        assert!(index.entry(place_of(&index, "C:\\Music\\歌.mp3")).flags & flag::CHINESE != 0);
 
         // Old moved into Music as Older, Plan.txt renamed, Music's song deleted: Old's file goes with it.
         let (docs, music) = (place_of(&index, "C:\\Docs"), place_of(&index, "C:\\Music"));
@@ -667,6 +984,21 @@ mod tests {
         round(&mut index, &[(ROOT, vec![item("Music", 11, FOLDER), item("boot.ini", 12, FILE)])]);
         assert_eq!(paths(&index), ["C:\\Music", "C:\\boot.ini"]);
         assert_eq!(index.names(), 2);
+        assert_eq!(index.folder(10), None);
+        assert_eq!(index.folder(11), Some(place_of(&index, "C:\\Music")));
+    }
+
+    #[test]
+    fn folders_listed_again_change_as_the_drive_did_in_memory() {
+        folders_listed_again_change_as_the_drive_did(drive());
+    }
+
+    /// What changes since it was kept is kept over it, and found as the rest is.
+    #[test]
+    fn folders_listed_again_change_as_the_drive_did_over_what_was_kept() {
+        let index = kept(&drive());
+        assert!(index.entries.is_empty(), "all of it read where it lies");
+        folders_listed_again_change_as_the_drive_did(index);
     }
 
     #[test]
@@ -680,6 +1012,12 @@ mod tests {
         assert_eq!(paths(&index), ["C:\\Docs", "C:\\Docs\\a.txt", "C:\\New"]);
         assert_eq!(index.folder_at(std::path::Path::new("Docs")), docs);
         assert_ne!(index.id(docs), index.id(place_of(&index, "C:\\New")));
+        // Kept and read again, the ids given before are not given again.
+        let mut index = kept(&index);
+        let docs = place_of(&index, "C:\\Docs");
+        round(&mut index, &[(docs, vec![item("a.txt", 0, FILE), item("Sub", 0, FOLDER)])]);
+        let ids: HashSet<u64> = ["C:\\Docs", "C:\\New", "C:\\Docs\\Sub"].iter().filter_map(|path| index.id(place_of(&index, path))).collect();
+        assert_eq!(ids.len(), 3);
     }
 
     #[test]
@@ -689,32 +1027,55 @@ mod tests {
         let before = index.children(&HashSet::from([docs]));
         index.denied(docs, &before[&docs]);
         assert_eq!(paths(&index), ["C:\\Docs", "C:\\Music", "C:\\Music\\歌.mp3", "C:\\boot.ini"]);
-        assert!(index.entries()[docs as usize].flags & flag::UNREAD != 0);
+        assert!(index.entry(docs).flags & flag::UNREAD != 0);
     }
 
+    /// Kept, the dead are left out, each entry is placed after its folder (one moved was placed after what it holds),
+    /// names are as written, and what was read is the same as what was kept, but where its parts do not agree.
     #[test]
-    fn tidied_and_kept_it_is_the_same() {
+    fn kept_and_read_it_is_the_same() {
         let mut index = drive();
-        // (Older is placed after what it holds.)
         let (docs, music) = (place_of(&index, "C:\\Docs"), place_of(&index, "C:\\Music"));
         round(&mut index, &[(docs, vec![item("Plan.txt", 20, FILE)]), (music, vec![item("歌.mp3", 22, FILE), item("Older", 21, FOLDER)])]);
         let was = paths(&index);
-        index.tidy();
-        assert_eq!(paths(&index), was);
-        assert_eq!(index.entries().len(), index.names() + 1);
-        assert_eq!(index.folder(21), Some(place_of(&index, "C:\\Music\\Older")));
-        assert_eq!(index.chinese().count(), 1);
+        assert!(index.entry(place_of(&index, "C:\\Music\\Older\\a.txt")).parent > place_of(&index, "C:\\Music\\Older\\a.txt"));
+        let read = kept(&index);
+        assert_eq!(paths(&read), was);
+        assert_eq!(read.len() as usize, read.names() + 1);
+        assert!((1..read.len()).all(|place| read.entry(place).parent < place));
+        assert_eq!(read.folder(21), Some(place_of(&read, "C:\\Music\\Older")));
+        assert_eq!(read.name(place_of(&read, "C:\\Music\\Older")), OsStr::new("Older"));
+        assert_eq!(read.name(place_of(&read, "C:\\Docs\\Plan.txt")), OsStr::new("Plan.txt"));
+        assert_eq!(read.chinese().count(), 1);
+        // Kept again (read where it lies, and changed over it), the same again.
+        assert_eq!(paths(&kept(&read)), was);
 
         let mut bytes = Vec::new();
-        index.to_bytes(&mut bytes);
-        let read = Index::from_bytes(&bytes).unwrap();
-        assert_eq!(paths(&read), was);
-        assert_eq!(read.folder(21), index.folder(21));
-        assert_eq!(read.name(place_of(&read, "C:\\Music\\Older")), "Older");
-        assert!(Index::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+        index.write(&mut bytes).unwrap();
+        let end = bytes.len();
+        assert!(Index::read(Bytes::owned(&bytes), 0, end - 8, true, 0).is_none(), "cut short");
         // (A name's end moved: the names are not where they were.)
-        bytes[32 + 16 + 4] ^= 1;
-        assert!(Index::from_bytes(&bytes).is_none());
+        let mut moved = bytes.clone();
+        moved[40 + 16 + 4] ^= 1;
+        assert!(Index::read(Bytes::owned(&moved), 0, end, true, 0).is_none());
+        // (An entry placed before its folder.)
+        let mut before = bytes.clone();
+        before[40 + 16..40 + 20].copy_from_slice(&3u32.to_le_bytes());
+        assert!(Index::read(Bytes::owned(&before), 0, end, true, 0).is_none());
+    }
+
+    /// A name that is not whole Unicode (an unpaired surrogate, as NTFS allows) is kept as it is written.
+    #[test]
+    fn names_are_kept_as_written() {
+        let mut index = Index::new(5, true);
+        let odd = Item { name: vec![0x41, 0xD800, 0x62], id: 9, attributes: FILE, tag: 0 };
+        let mut changes = Changes::default();
+        index.list(ROOT, &[odd, item("ÄBC.txt", 10, FILE)], &[], &mut changes);
+        index.finish(changes);
+        let read = kept(&index);
+        let names: Vec<Vec<u16>> = (1..read.len()).map(|place| read.name(place).encode_wide().collect()).collect();
+        assert!(names.contains(&vec![0x41, 0xD800, 0x62]));
+        assert!(names.contains(&"ÄBC.txt".encode_utf16().collect()));
     }
 
     #[test]
@@ -728,6 +1089,11 @@ mod tests {
             assert_eq!(index.holding("12", threads), one);
         }
         assert_eq!(index.holding("file 4999.txt", 4).len(), 1);
-        assert_eq!(index.name(index.holding("file 4999.txt", 4)[0]), "File 4999.TXT");
+        assert_eq!(index.name(index.holding("file 4999.txt", 4)[0]), OsStr::new("File 4999.TXT"));
+        // Kept, and more added over it: found in both.
+        let mut index = kept(&index);
+        let more: Vec<Item> = (0..5000).map(|n| item(&format!("File {n}.TXT"), n, FILE)).chain((5000..5100).map(|n| item(&format!("File {n}.TXT"), n, FILE))).collect();
+        round(&mut index, &[(ROOT, more)]);
+        assert_eq!(index.holding("file 50", 4).len(), (0..5100).filter(|n| n.to_string().starts_with("50")).count());
     }
 }
