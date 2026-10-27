@@ -43,6 +43,8 @@ static MENU_UP: AtomicBool = AtomicBool::new(false);
 /// The shortcut is wanted but another program has it; search's.
 static HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
 static SEARCH_HOTKEY_TAKEN: AtomicBool = AtomicBool::new(false);
+/// The keys that open search, as they are named, while they are its (none while it has none).
+static SEARCH_KEYS: Mutex<String> = Mutex::new(String::new());
 /// The shortcuts are let go while the settings take a new one.
 static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 
@@ -346,6 +348,10 @@ fn register_hotkey(hwnd: HWND) {
     };
     register(hwnd, HOTKEY_ID, panel, &HOTKEY_TAKEN);
     register(hwnd, SEARCH_HOTKEY_ID, search, &SEARCH_HOTKEY_TAKEN);
+    // (Held back a moment while one is chosen, they are said as they were.)
+    if !HOTKEY_HELD.load(Ordering::Relaxed) {
+        *SEARCH_KEYS.lock().unwrap() = search.filter(|_| !SEARCH_HOTKEY_TAKEN.load(Ordering::Relaxed)).map(shortcut_name).unwrap_or_default();
+    }
 }
 
 /// Registers `shortcut` as the hotkey `id`, if there is one (and it is not held back); whether another program has
@@ -421,6 +427,11 @@ pub fn hotkey_taken() -> bool {
 /// Whether search's shortcut is wanted but another program already has it.
 pub fn search_hotkey_taken() -> bool {
     SEARCH_HOTKEY_TAKEN.load(Ordering::Relaxed)
+}
+
+/// The keys that open search from anywhere, as they are named: none where none are set, or another program has them.
+pub fn search_keys() -> String {
+    SEARCH_KEYS.lock().unwrap().clone()
 }
 
 /// Has the shortcut, and whether the icon is hidden, follow the settings, from any thread.

@@ -234,6 +234,8 @@ pub enum Hit {
     Station,
     /// The thing whose box was put just before it, its name shown shortened there (see `named`).
     Shortened,
+    /// The search box: search opened (see `ui::find`).
+    Search,
 }
 
 impl Hit {
@@ -635,6 +637,8 @@ enum Block {
     /// A workbench lane in a shape of its own: what it holds, drawn in all the room it is given, in the shape that room
     /// is (see `bench_shape`).
     Bench(Bench),
+    /// The search box, and the keys that open search from anywhere (none where none are set).
+    Search { keys: String },
 }
 
 /// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
@@ -648,6 +652,8 @@ pub enum Bench {
     Apps(Vec<(String, String)>),
     /// The time, and the day.
     Time { figure: String, unit: String, date: String },
+    /// The search box (see `Block::Search`).
+    Search { keys: String },
 }
 
 /// The most of a note's lines under its title a workbench lane in a shape shows (as many as its room takes).
@@ -2014,6 +2020,7 @@ impl Block {
             Block::Tabs { .. } => HEAD + HEAD_GAP,
             Block::StuckNote(_) => STUCK_NOTE.1,
             Block::Bench(_) => BENCH,
+            Block::Search { .. } => SEARCH_BOX,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
@@ -2044,6 +2051,7 @@ impl Hash for Block {
             }
             Block::Tabs { tab, count, copies, recent, view } => (tab, count, copies, recent, view).hash(state),
             Block::Bench(what) => what.hash(state),
+            Block::Search { keys } => keys.hash(state),
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
@@ -2961,6 +2969,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "station" => station_lane(full, scene.tab, lang),
         "apps" => apps_lane(full, scene.theme, lang),
         "notes" => notes_lane(full, lang),
+        "search" => vec![Block::Search { keys: crate::tray::search_keys() }],
         id if id.starts_with(STUCK_NOTE_LANE) => return stuck_note_lane(&id[STUCK_NOTE_LANE.len()..], lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
         // room under it (a player's, full; a strip's, compact).
@@ -3454,6 +3463,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Notes { .. } => "notes",
             Block::StuckNote(_) => "stuck",
             Block::Bench(_) => "bench",
+            Block::Search { .. } => "search",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -3788,6 +3798,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let room = (left, y, width, (area.y + area.h - pad_bottom - y).max(0.0));
                 paint_bench(frame, scene, ink, room, area, what, Shape::of((room.2, room.3)), hits);
             }
+            (Block::Search { keys }, Pass::Content) => paint_search(frame, scene, (left, y, width, height), keys, hits),
             (Block::Notes { notes, view, tall }, Pass::Content) => {
                 paint_notes(frame, scene, (left, y + SHELF_GAP, width), notes, *view, *tall + spare, hits);
             }
@@ -5053,6 +5064,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             let (figure, unit) = now.time(text::twelve_hours(), lang);
             Bench::Time { figure, unit: unit.to_string(), date: now.date(lang) }
         }
+        "search" => Bench::Search { keys: crate::tray::search_keys() },
         _ => return None,
     })
 }
@@ -5570,7 +5582,52 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 }
             }
         }
+        Bench::Search { keys } => {
+            // A box across where one fits (as tall as a whole lane's at most, in the middle of the room); else its mark
+            // alone, a button.
+            let tall = SEARCH_BOX.min(h);
+            if tall >= SEARCH_BOX * 0.75 && w >= SEARCH_BOX * 4.0 {
+                paint_search(frame, scene, (x, y + (h - tall) / 2.0, w, tall), keys, hits);
+            } else {
+                let side = (MEDIA_ROW + 8.0).min(w).min(h);
+                let (left, top) = (x + (w - side) / 2.0, y + (h - side) / 2.0);
+                if lit(Hit::Search) {
+                    frame.fill_rounded(theme.hover, left, top, side, side, theme.control_radius.min(side / 2.0));
+                }
+                frame.icon(Icon::Search, Point { x: left + side / 2.0, y: top + side / 2.0 }, (side * 0.62).min(16.0), theme.text2);
+                hits.push((lane.x, lane.y, lane.w, lane.h, Hit::Search));
+            }
+        }
     }
+}
+
+/// How tall the search box is (DIPs).
+const SEARCH_BOX: f32 = 36.0;
+
+/// The search box in the room `(x, y, w, h)`: what it searches, and the keys that open it from anywhere, at its end as
+/// far as there is room. Pressed, search opens (a box to type in that opens a window to type in: the panel is gone as
+/// it takes the keys, and search is the same wherever it is opened from).
+fn paint_search(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), keys: &str, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let round = theme.control_radius.min(h / 2.0);
+    frame.fill_rounded(theme.track, x, y, w, h, round);
+    if scene.hover == Some(Hit::Search) {
+        frame.fill_rounded(theme.hover, x, y, w, h, round);
+    }
+    let icon = 16.0;
+    frame.icon(Icon::Search, Point { x: x + 12.0 + icon / 2.0, y: y + h / 2.0 }, icon, theme.text2);
+    let left = x + 12.0 + icon + 10.0;
+    let keys_w = if keys.is_empty() { 0.0 } else { frame.measure(keys, theme.small) };
+    let said = scene.lang.pick("搜索应用、设置、文件和便签", "Search apps, settings, files and notes");
+    let said_w = frame.measure(said, theme.body);
+    // The keys where both fit whole; else what it searches alone, shortened as far as it must be.
+    let with_keys = keys_w > 0.0 && left + said_w + 16.0 + keys_w + 12.0 <= x + w;
+    let room = x + w - left - if with_keys { keys_w + 12.0 + 16.0 } else { 12.0 };
+    frame.text(&fitted(frame, said, theme.body, room), theme.body, theme.text3, left, y + (h - LINE) / 2.0, room.max(0.0) + 1.0, Align::Start);
+    if with_keys {
+        frame.text(keys, theme.small, theme.text3, x + w - 12.0 - keys_w, y + (h - theme.small.size * 1.3) / 2.0, keys_w + 1.0, Align::Start);
+    }
+    hits.push((x, y, w, h, Hit::Search));
 }
 
 #[cfg(test)]
@@ -5694,7 +5751,7 @@ otepad.exe", "Notepad"),
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let made = |ids: &[&str]| -> Vec<Lane> { ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect() };
-                    let bench = made(&["time", "station", "notes", "apps"]);
+                    let bench = made(&["search", "time", "station", "notes", "apps"]);
                     let readings = made(&["cpu", "memory"]);
                     let heights = |lanes: &[Lane]| -> Vec<f32> { lanes.iter().map(|lane| lane.height(&theme)).collect() };
                     let bench_layout = Layout::with_columns(heights(&bench)[..3].to_vec(), 1, &theme).with_rail(3, RailSide::Start, RAIL_LEAST);
@@ -5778,6 +5835,10 @@ otepad.exe", "Notepad"),
                     widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1440.0, 30.0), 0.5));
                     widgets.push((vec!["notes"], Shape::Down, (70.0, 300.0), (1530.0, 30.0), 0.0));
                     widgets.push((vec!["notes"], Shape::Across, (330.0, 64.0), (1100.0, 380.0), 0.5));
+                    // Search: a box across where one fits, else its mark.
+                    widgets.push((vec!["search"], Shape::Across, (330.0, 64.0), (1100.0, 460.0), 0.0));
+                    widgets.push((vec!["search"], Shape::Least, (70.0, 70.0), (1450.0, 460.0), 0.0));
+                    widgets.push((vec!["search"], Shape::Least, (44.0, 44.0), (1540.0, 470.0), 0.0));
                     // Squares, as a phone's large folders: two by two, three by three.
                     for (at, id) in ids[..3].iter().enumerate() {
                         widgets.push((vec![id], Shape::Least, (150.0, 150.0), (30.0 + at as f32 * 170.0, 540.0), 0.0));
@@ -6932,7 +6993,7 @@ six".into()));
     fn a_workbench_in_a_shape_keeps_within_it() {
         let _pretending = crate::pretending();
         pretend_workbench();
-        let ids = ["station", "notes", "apps", "time"];
+        let ids = ["station", "notes", "apps", "time", "search"];
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
             let mut theme = Theme::new(skin, false);
             (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
@@ -6940,7 +7001,7 @@ six".into()));
             let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-            for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..], &ids[..]] {
+            for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..4], &ids[4..], &ids[..]] {
                 for w in [40.0, 56.0, 80.0, 130.0, 200.0, 420.0] {
                     for h in [40.0, 56.0, 80.0, 130.0, 260.0, 500.0] {
                         let shape = Shape::of((w, h));

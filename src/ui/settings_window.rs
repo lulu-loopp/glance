@@ -3865,6 +3865,7 @@ impl Ui {
             ),
             "notes" => (p("便签", "Notes"), Some(p("想法与待办，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and to-dos, each kept as a Markdown file, which can be put on the desktop"))),
             "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Programs, files, folders and web addresses used often"))),
+            "search" => (p("搜索", "Search"), Some(p("搜索应用、设置、文件和便签", "Search apps, settings, files and notes"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程数、线程数与句柄数", "Uptime, processes, threads and handles"))),
         }
     }

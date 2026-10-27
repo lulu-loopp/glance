@@ -3859,6 +3859,7 @@ impl Widget {
                                 Some(view::Hit::Note(number)) if card_in(&self.hits, self.hits_from, number, 0.0).is_some() => {
                                     self.write_note(number, true);
                                 }
+                                Some(view::Hit::Search) => crate::ui::find::toggle(),
                                 // Quick launch's choosing of programs, a note: beside it on the side with more room.
                                 Some(hit @ (view::Hit::AddApp | view::Hit::NewNote | view::Hit::Note(_))) => {
                                     use crate::ui::beside::Page;

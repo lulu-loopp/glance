@@ -4063,6 +4063,7 @@ impl<'a> Panel<'a> {
             Some(Hit::Tab(tab)) => self.tab = tab,
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
+            Some(Hit::Search) => crate::ui::find::toggle(),
             Some(Hit::Note(number)) => {
                 if let Some(name) = crate::notes::named(number) {
                     self.open_beside(crate::ui::beside::Page::Note(Some(name)));
