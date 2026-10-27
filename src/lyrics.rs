@@ -1023,13 +1023,14 @@ fn time(tag: &str) -> Option<f64> {
     (0.0..60.0).contains(&seconds).then(|| self::seconds(minutes as f64 * 60.0 + seconds)).flatten()
 }
 
-/// The line sung at `position` (seconds), sung a little early (a line shows as it is about to be sung, not
-/// after): its place among `lines`; none before the first.
-pub fn sung_at(lines: &[Line], position: f64) -> Option<usize> {
-    lines.iter().rposition(|line| line.at <= position + EARLY)
+/// The line sung at `position` (seconds), shown `early` (a line shows as it is about to be sung, not after: see
+/// `EARLY`): its place among `lines`; none before the first.
+pub fn sung_at(lines: &[Line], position: f64, early: f64) -> Option<usize> {
+    lines.iter().rposition(|line| line.at <= position + early)
 }
 
-/// How early a line is shown (seconds).
+/// How early a line is shown (seconds), but where its player shows lyrics itself, as early as it shows them (see
+/// `media::Playing::lines_ahead`): beside them, a line shown after the player's was late.
 pub const EARLY: f64 = 0.2;
 
 /// The lyrics found of the tracks asked about, kept on disk (a file each, in `folder`), so that a track played again
@@ -1183,10 +1184,13 @@ mod tests {
         let lines = merged(lrc, Some("[00:36.09]Whenever I hurt\n[03:00.00]//"));
         let said: Vec<(f64, &str, Option<&str>)> = lines.iter().map(|l| (l.at, l.text.as_str(), l.translation.as_deref())).collect();
         assert_eq!(said, vec![(0.0, "作词 : 汪峰", None), (36.09, "每当我感到疼痛 就想让你抱紧我", Some("Whenever I hurt")), (62.5, "Again", None), (130.5, "Again", None), (180.0, "", None)]);
-        assert_eq!(sung_at(&lines, 35.0), Some(0));
-        assert_eq!(sung_at(&lines, 35.95), Some(1));
-        assert_eq!(sung_at(&lines, 500.0), Some(4));
-        assert_eq!(sung_at(&merged("[00:10.00]a", None), 1.0), None);
+        assert_eq!(sung_at(&lines, 35.0, EARLY), Some(0));
+        assert_eq!(sung_at(&lines, 35.95, EARLY), Some(1));
+        // (Shown as early as its player shows it, where that is earlier: Apple Music's, 0.35 s.)
+        assert_eq!(sung_at(&lines, 35.8, EARLY), Some(0));
+        assert_eq!(sung_at(&lines, 35.8, 0.35), Some(1));
+        assert_eq!(sung_at(&lines, 500.0, EARLY), Some(4));
+        assert_eq!(sung_at(&merged("[00:10.00]a", None), 1.0, EARLY), None);
     }
 
     #[test]

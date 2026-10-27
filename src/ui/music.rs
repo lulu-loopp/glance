@@ -573,7 +573,7 @@ pub struct Played {
 impl Played {
     /// As it is drawn at `now`: the line sung at its position, come when that line began.
     fn moment(self, now: Instant) -> Moment {
-        let sung = crate::lyrics::sung_at(&self.lines, self.position);
+        let sung = crate::lyrics::sung_at(&self.lines, self.position, crate::lyrics::EARLY);
         let since = sung.map(|index| now.checked_sub(Duration::from_secs_f64((self.position - self.lines[index].at).max(0.0))).unwrap_or(now));
         Moment {
             lines: Some(self.lines),

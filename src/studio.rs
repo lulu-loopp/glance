@@ -269,7 +269,7 @@ fn film_music(gfx: &Gfx, script: &Script, shot: &Shot, music: &MusicShot, deskto
         let sound = heard.at(music.from + t as f64);
         let played = || Played { lines: lines.clone(), position, length: music.length, title: music.title.clone(), artist: music.artist.clone(), cover: cover.clone(), sound };
         let pixels = if let Some(smoke) = smoke.as_mut() {
-            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position));
+            full.follow(now, sound, Some(Some(&cover)), Some(lines.clone()), crate::lyrics::sung_at(&lines, position, crate::lyrics::EARLY));
             full.render_smoke(smoke, (script.width, script.height)).map_err(|e| e.to_string())?;
             let smoke = &*smoke;
             gfx.draw_offscreen((script.width, script.height), px, |frame| full.paint(frame, (sw, sh), Some(smoke), position, now))

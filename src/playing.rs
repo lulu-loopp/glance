@@ -413,10 +413,11 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
         crate::lyrics::Known::Found(None) => (Some(Sung::Unknown), None),
         crate::lyrics::Known::Instrumental => (Some(Sung::Instrumental), None),
         crate::lyrics::Known::Found(Some(lines)) => {
-            let now = crate::lyrics::sung_at(&lines, position);
+            let early = playing.lines_ahead.unwrap_or(crate::lyrics::EARLY);
+            let now = crate::lyrics::sung_at(&lines, position, early);
             let next = now.map_or(0, |now| now + 1);
             // (Track seconds, at the rate it plays.)
-            let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64(((line.at - crate::lyrics::EARLY - position) / playing.rate).max(0.0)));
+            let due = lines.get(next).filter(|_| playing.playing).map(|line| std::time::Duration::from_secs_f64(((line.at - early - position) / playing.rate).max(0.0)));
             // The same line as before keeps its time; another is the one from when it became due (from now, if
             // that was longer ago than a glide: come to by a jump in the track, it glides all the same).
             let before = NOW[Follow::Music as usize].lock().unwrap().as_ref().and_then(|kept| match &kept.sung {
@@ -424,7 +425,7 @@ fn sung(playing: &crate::media::Playing) -> (Option<Sung>, Option<std::time::Dur
                 _ => None,
             });
             let since = before.unwrap_or_else(|| {
-                let late = now.map_or(0.0, |now| ((position + crate::lyrics::EARLY - lines[now].at) / playing.rate).clamp(0.0, GLIDE.as_secs_f64()));
+                let late = now.map_or(0.0, |now| ((position + early - lines[now].at) / playing.rate).clamp(0.0, GLIDE.as_secs_f64()));
                 // (So far back only where the PC has been up that long: just started, from now.)
                 std::time::Instant::now().checked_sub(std::time::Duration::from_secs_f64(late)).unwrap_or_else(std::time::Instant::now)
             });

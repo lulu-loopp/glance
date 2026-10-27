@@ -49,6 +49,10 @@ pub struct Playing {
     /// Whether what it says of how far in it is is where it was when it said so the time before, not then (Apple
     /// Music: its own window shows the whole second it says next).
     pub said_late: bool,
+    /// How long before a line of the lyrics is sung the program's own window shows it (seconds), where it shows
+    /// lyrics and that is known (Apple Music: against its window, 0.13 s to 0.5 s before the times the lyrics found
+    /// give the same lines, 0.35 s as a rule).
+    pub lines_ahead: Option<f64>,
     /// How fast it plays: track seconds to a second (1 where the program does not say).
     pub rate: f64,
 }
@@ -243,6 +247,9 @@ fn shown_as(id: &str) -> Option<String> {
 /// How Windows identifies Apple Music (its package's family, before the app in it).
 const APPLE_MUSIC: &str = "AppleInc.AppleMusicWin_";
 
+/// How long before a line is sung Apple Music shows it (see `Playing::lines_ahead`).
+const APPLE_MUSIC_AHEAD: f64 = 0.35;
+
 /// Of each program (as Windows identifies it), when it said how far into its track it is, the latest of those heard
 /// as it said them (see `heed`).
 static SAID: Mutex<Vec<(String, Vec<i64>)>> = Mutex::new(Vec::new());
@@ -317,6 +324,7 @@ fn told(follow: Follow) -> Option<Playing> {
         said_at: timeline.map(|(.., position)| position),
         said_before,
         said_late,
+        lines_ahead: said_late.then_some(APPLE_MUSIC_AHEAD),
         seekable,
         rate,
     })
@@ -458,7 +466,7 @@ fn heard(follow: Follow) -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, said_at: None, said_before: None, said_late: false, rate: 1.0 })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, said_at: None, said_before: None, said_late: false, lines_ahead: None, rate: 1.0 })
 }
 
 /// A program's session listened to (see `heed`), till this is dropped.
