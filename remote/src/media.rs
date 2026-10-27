@@ -42,15 +42,18 @@ pub struct Playing {
     /// When the program last said how far in it is, as Windows keeps it (tenths of a microsecond since 1601), where
     /// it says: the same each time it is looked at till it says again.
     pub said: Option<i64>,
+    /// How far in it said it was then (seconds), where it says.
+    pub said_at: Option<f64>,
     /// How fast it plays: track seconds to a second (1 where the program does not say).
     pub rate: f64,
 }
 
 /// How far into its track `session` is now, and how long the track is
 /// (seconds): where it was when the program last said, and, while it
-/// plays, on by the time since at its `rate`; how long ago it said, and
-/// when (see `Playing::said`). None where the program does not say.
-fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f64, i64)> {
+/// plays, on by the time since at its `rate`; how long ago it said, when
+/// (see `Playing::said`), and how far in it said it was then. None where
+/// the program does not say.
+fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f64, i64, f64)> {
     let told = session.GetTimelineProperties().ok()?;
     let ticks = |span: windows::Foundation::TimeSpan| span.Duration as f64 / 1e7;
     let (position, end) = (ticks(told.Position().ok()?), ticks(told.EndTime().ok()?));
@@ -62,7 +65,7 @@ fn timeline(session: &Session, playing: bool, rate: f64) -> Option<(f64, f64, f6
     let said = ticks_said as f64 / 1e7;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs_f64() + 11_644_473_600.0;
     let since = if playing { (now - said).max(0.0) * rate } else { 0.0 };
-    Some(((position + since).min(end), end, (now - said).max(0.0), ticks_said))
+    Some(((position + since).min(end), end, (now - said).max(0.0), ticks_said, position))
 }
 
 /// The one manager of the programs' media sessions, got the first time
@@ -232,6 +235,15 @@ fn shown_as(id: &str) -> Option<String> {
     }
 }
 
+/// Who it is by and the album it is on, as told by the program `app_id` identifies: Apple Music tells both as who it is
+/// by, "Artist — Album", and no album.
+fn by_and_on(app_id: &str, artist: String, album: String) -> (String, String) {
+    match artist.split_once(" — ") {
+        Some((by, on)) if album.is_empty() && app_id.starts_with("AppleInc.AppleMusicWin_") => (by.to_string(), on.to_string()),
+        _ => (artist, album),
+    }
+}
+
 /// What a program has told Windows it plays, of those followed for `follow`.
 fn told(follow: Follow) -> Option<Playing> {
     let session = session_of(follow).ok()?;
@@ -246,19 +258,21 @@ fn told(follow: Follow) -> Option<Playing> {
     let seekable = info.and_then(|info| info.Controls().ok()).and_then(|controls| controls.IsPlaybackPositionEnabled().ok()).unwrap_or(false);
     let app_id = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
     let timeline = timeline(&session, playing, rate);
+    let (artist, album) = by_and_on(&app_id, about.Artist().map(|artist| artist.to_string()).unwrap_or_default(), about.AlbumTitle().map(|album| album.to_string()).unwrap_or_default());
     Some(Playing {
         title,
-        artist: about.Artist().map(|artist| artist.to_string()).unwrap_or_default(),
-        album: about.AlbumTitle().map(|album| album.to_string()).unwrap_or_default(),
+        artist,
+        album,
         genres: about.Genres().map(|genres| genres.into_iter().map(|genre| genre.to_string()).collect()).unwrap_or_default(),
         // (One with no name to show is not named: what plays is said
         // already, and a file's name adds nothing to it.)
         app: shown(&app_id).unwrap_or_default(),
         app_id,
         playing,
-        timeline: timeline.map(|(at, end, _, _)| (at, end)),
-        said_ago: timeline.map(|(_, _, ago, _)| ago),
-        said: timeline.map(|(_, _, _, said)| said),
+        timeline: timeline.map(|(at, end, ..)| (at, end)),
+        said_ago: timeline.map(|(_, _, ago, ..)| ago),
+        said: timeline.map(|(_, _, _, said, _)| said),
+        said_at: timeline.map(|(.., position)| position),
         seekable,
         rate,
     })
@@ -400,7 +414,7 @@ fn heard(follow: Follow) -> Option<Playing> {
     *heard = Some(name.clone());
     // As its file describes it; one that does not say, by its file's name.
     let app = programs.iter().find(|(program, _, _)| *program == name).and_then(|(_, path, _)| described(path)).unwrap_or(name);
-    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, rate: 1.0 })
+    Some(Playing { title: String::new(), artist: String::new(), album: String::new(), genres: Vec::new(), app, app_id: String::new(), playing, timeline: None, seekable: false, said_ago: None, said: None, said_at: None, rate: 1.0 })
 }
 
 /// A program's session listened to (see `heed`), till this is dropped.
@@ -543,6 +557,19 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
 
 #[cfg(test)]
 mod tests {
+    /// Apple Music's "Artist — Album" told as who it is by is who it is by and the album; another program's, or one
+    /// with an album told, as told.
+    #[test]
+    fn apple_music_tells_the_album_with_the_artist() {
+        let apple = "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App";
+        let told = |app_id: &str, artist: &str, album: &str| super::by_and_on(app_id, artist.into(), album.into());
+        assert_eq!(told(apple, "胡歌 — 仙剑奇侠传 (电视原声带)", ""), ("胡歌".into(), "仙剑奇侠传 (电视原声带)".into()));
+        assert_eq!(told(apple, "A — B — C", ""), ("A".into(), "B — C".into()));
+        assert_eq!(told(apple, "胡歌", ""), ("胡歌".into(), String::new()));
+        assert_eq!(told(apple, "A — B", "C"), ("A — B".into(), "C".into()));
+        assert_eq!(told("cloudmusic.exe", "A — B", ""), ("A — B".into(), String::new()));
+    }
+
     #[test]
     fn names_a_program_from_its_sound() {
         let named = super::named(r"{0.0.0.00000000}.{6f2a}|\Device\HarddiskVolume3\App\CloudMusic\cloudmusic.exe%b{00000000-0000-0000-0000-000000000000}|1%b9044");
