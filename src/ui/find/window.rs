@@ -228,7 +228,9 @@ struct Finder {
     drawn: Option<Drawn>,
     showing: Option<crate::ui::life::Showing>,
     skin: Skin,
+    /// Dark or light, and how frosted its glass is (0–1), as the panel's would be over what is behind it (see `dress`).
     dark: bool,
+    frost: f32,
     lang: Lang,
     scale: f32,
     /// The room round the sheet for its shadow (DIPs), and where the window is on the screen.
@@ -281,6 +283,7 @@ impl Finder {
             showing: None,
             skin: Skin::Fluent,
             dark: false,
+            frost: 1.0,
             lang: Lang::Zh,
             scale: 1.0,
             room: SHADOW,
@@ -327,19 +330,33 @@ impl Finder {
     }
 
     /// The skin, light or dark, and the language, as the panel has them now.
-    fn look() -> (Skin, bool, Lang) {
+    fn look() -> (Skin, crate::ui::prefs::ThemePref, Lang) {
         let settings = crate::app().settings.lock().unwrap();
         let skin = Skin::named(&settings.skin);
         let pref = serde_json::from_value::<crate::ui::prefs::ThemePref>(settings.view["theme"].clone()).unwrap_or_default();
-        (skin, theme::is_dark(pref, None), crate::update::language_in(&settings.view))
+        (skin, pref, crate::update::language_in(&settings.view))
+    }
+
+    /// Dark or light, and how frosted, as the panel is dressed (see `panel::dress`): by the theme chosen, and where it
+    /// follows the screen, by how light what is behind the sheet (`sheet`, physical px) is; frosted as much as that is
+    /// busy, or clashes with the theme. (Glass always as frosted as it could be, it showed nothing of what was behind
+    /// it, a sheet of white.) What is behind not to be read, as frosted as it may be.
+    fn dress(&mut self, pref: crate::ui::prefs::ThemePref, sheet: RECT) {
+        let behind = crate::ui::backdrop::Capture::take(sheet).map(|capture| capture.luminance(sheet, self.scale));
+        let dark = theme::is_dark(pref, behind.map(|(mean, _)| mean));
+        let frost = behind.map_or(1.0, |(mean, spread)| crate::ui::skins::frost(mean, spread, dark));
+        if dark != self.dark {
+            self.drawn = None;
+        }
+        (self.dark, self.frost) = (dark, frost);
     }
 
     fn show(&mut self) {
-        let (skin, dark, lang) = Finder::look();
-        if (skin, dark) != (self.skin, self.dark) {
+        let (skin, pref, lang) = Finder::look();
+        if skin != self.skin {
             self.drawn = None;
         }
-        (self.skin, self.dark, self.lang) = (skin, dark, lang);
+        (self.skin, self.lang) = (skin, lang);
         // The drives indexed (once), and the Start menu read again (as programs come and go).
         crate::search::start();
         let hwnd = self.hwnd.0 as isize;
@@ -353,16 +370,20 @@ impl Finder {
         // (A name the sheet comes up under the pointer on is not picked by that: only by the pointer moving.)
         self.pointer = cursor;
         self.scale = contact.scale;
+        let scale = self.scale;
+        let px = |dips: f32| (dips * scale).round() as i32;
+        let work = contact.work;
+        // The sheet (at its tallest), and round it the room for its shadow.
+        let (sheet_w, sheet_h) = (px(WIDTH), px(Finder::tallest()));
+        let sheet_left = (work.left + work.right - sheet_w) / 2;
+        let sheet_top = (work.top + ((work.bottom - work.top) as f32 * DOWN) as i32).min(work.bottom - sheet_h).max(work.top);
+        self.dress(pref, RECT { left: sheet_left, top: sheet_top, right: sheet_left + sheet_w, bottom: sheet_top + sheet_h });
         self.room = match skin {
-            Skin::Glass => theme::room(&Theme::new(Skin::Glass, dark).shadows).max(SHADOW),
+            Skin::Glass => theme::room(&Theme::new(Skin::Glass, self.dark).shadows).max(SHADOW),
             _ => SHADOW,
         };
-        let px = |dips: f32| (dips * self.scale).round() as i32;
-        let work = contact.work;
-        let (w, h) = (px(WIDTH + 2.0 * self.room), px(Finder::tallest() + 2.0 * self.room));
-        let left = (work.left + work.right - w) / 2;
-        let top = (work.top + ((work.bottom - work.top) as f32 * DOWN) as i32 - px(self.room)).min(work.bottom - h + px(self.room)).max(work.top - px(self.room));
-        self.rect = RECT { left, top, right: left + w, bottom: top + h };
+        let (left, top) = (sheet_left - px(self.room), sheet_top - px(self.room));
+        self.rect = RECT { left, top, right: sheet_left + sheet_w + px(self.room), bottom: sheet_top + sheet_h + px(self.room) };
         // What was typed kept, all of it selected: typed over, or looked for again.
         self.typing.anchor = 0;
         self.typing.caret = self.typing.text.len();
@@ -372,7 +393,7 @@ impl Finder {
         self.ask(true);
         self.before = unsafe { GetForegroundWindow() };
         unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), left, top, w, h, SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), left, top, self.rect.right - left, self.rect.bottom - top, SWP_NOACTIVATE);
         }
         self.draw();
         unsafe {
@@ -473,7 +494,7 @@ impl Finder {
 
     /// Its menus' colours, its corners as round as the panel's (a sheet as large as a panel, not a menu).
     fn colours(&self, frosted: bool) -> Colours {
-        Colours { radius: Theme::new(self.skin, self.dark).radius, ..Colours::new(Look::of(self.skin, self.dark), frosted) }
+        Colours { radius: Theme::new(self.skin, self.dark).radius, ..Colours::new(Look::of(self.skin, self.dark).frosted(self.frost, true), frosted) }
     }
 
     /// The faces it is written in: the skin's (Windows' own for Windows 11's).
@@ -522,10 +543,7 @@ impl Finder {
                 Skin::Paper => None,
             };
             self.drawn = match frosting.and_then(|frosting| crate::ui::glass::Frosted::new(&self.gfx, self.hwnd, frosting).ok()) {
-                Some(mut frosted) => {
-                    frosted.set_frost(1.0);
-                    Some(Drawn::Frosted(frosted))
-                }
+                Some(frosted) => Some(Drawn::Frosted(frosted)),
                 None => Surface::new(&self.gfx, self.hwnd).ok().map(Drawn::Plain),
             };
         }
@@ -541,6 +559,8 @@ impl Finder {
                 self.paint(frame, false, (room, room));
             }),
             Drawn::Frosted(frosted) => {
+                // (Glass as frosted as the panel's would be there, Windows 11's acrylic always: as their menus are.)
+                frosted.set_frost(if self.skin == Skin::Glass { self.frost } else { 1.0 });
                 let radius = self.colours(true).radius;
                 let pane = (room * scale, room * scale, WIDTH * scale, self.height * scale, radius * scale);
                 frosted.draw(&gfx, size, scale, pane, |frame| self.paint(frame, true, (room, room)))
@@ -570,7 +590,7 @@ impl Finder {
         // The sheet: glass's a piece of the glass, lit along its edge; the others' as their menus' are.
         if self.skin == Skin::Glass && frosted {
             let theme = Theme::new(Skin::Glass, self.dark);
-            if let Err(error) = crate::ui::skins::glass_sheet(frame, &theme, Rect { x: 0.0, y: 0.0, w: WIDTH, h: height }, c.radius, 1.0) {
+            if let Err(error) = crate::ui::skins::glass_sheet(frame, &theme, Rect { x: 0.0, y: 0.0, w: WIDTH, h: height }, c.radius, self.frost) {
                 gfx::failed("search", Some(&error));
             }
             frame.origin(x, y);
@@ -653,33 +673,38 @@ impl Finder {
     }
 
     fn paint_chips(&mut self, frame: &Frame, ink: &Inks, top: f32) {
+        // Marked as the panel's tabs are in each skin (see `view::paint_tabs`): glass's chosen on a pill of its glass,
+        // Windows 11's with a short bar of its accent under it, chart paper's underlined in its ink, its name no further
+        // out than its line (no room round it).
+        let theme = Theme::new(self.skin, self.dark);
         let font = self.font(12.5, 400.0);
-        let (tall, pad, gap) = (26.0, 12.0, 4.0);
+        let paper = self.skin == Skin::Paper;
+        let (tall, pad, gap) = if paper { (26.0, 0.0, 20.0) } else { (26.0, 12.0, 4.0) };
         let y = top + (CHIPS - tall) / 2.0;
         let (ascent, descent) = frame.gfx.baseline(font);
-        let mut x = 14.0;
         let hovered = self.hovered();
+        let mut boxes = Vec::new();
+        let mut x = 26.0 - pad;
         for view in View::EVERY {
-            let name = view.name(self.lang);
-            let w = frame.gfx.measure(name, font) + 2.0 * pad;
-            let r = Rect { x, y, w, h: tall };
-            let chosen = view == self.view;
-            let paper = self.skin == Skin::Paper;
-            let radius = if paper { Theme::new(Skin::Paper, self.dark).control_radius } else { tall / 2.0 };
-            let top = r.y + (tall - ascent - descent) / 2.0;
-            // (Chart paper's chosen underlined in its ink, as its panel's tabs are; the others' filled in the accent.)
-            if chosen && paper {
-                let theme = Theme::new(Skin::Paper, self.dark);
-                crate::ui::view::choice_mark(frame, &theme, &[(r.x + pad, w - 2.0 * pad)], 0, None, r.y + tall - 2.0, 0.0, 4.0);
-            } else if chosen {
-                frame.fill_rounded(ink.chosen, r.x, r.y, r.w, r.h, radius);
-            } else if hovered == Some(Hit::Chip(view)) {
-                frame.fill_rounded(ink.hover, r.x, r.y, r.w, r.h, radius);
-            }
-            let colour = if chosen { ink.on_chosen } else { ink.text2 };
-            frame.text(name, font, colour, r.x + pad, top, w, Align::Start);
-            self.hits.push((r, Hit::Chip(view)));
+            let w = frame.gfx.measure(view.name(self.lang), font) + 2.0 * pad;
+            boxes.push((x, w));
             x += w + gap;
+        }
+        let chosen = View::EVERY.iter().position(|&view| view == self.view).unwrap_or(0);
+        let hovered_at = View::EVERY.iter().position(|&view| hovered == Some(Hit::Chip(view)));
+        if self.skin == Skin::Glass {
+            crate::ui::view::glass_choice(frame, &theme, (y, tall), &boxes, chosen, None, hovered_at);
+        } else {
+            if let Some(&(x, w)) = hovered_at.filter(|&at| at != chosen).and_then(|at| boxes.get(at)) {
+                frame.fill_rounded(theme.hover, x, y, w, tall, theme.control_radius.min(tall / 2.0));
+            }
+            let under = if paper { y + tall - 2.0 } else { y + tall - 3.0 };
+            crate::ui::view::choice_mark(frame, &theme, &boxes, chosen, None, under, 14.0, 4.0);
+        }
+        for (at, (&view, &(x, w))) in View::EVERY.iter().zip(&boxes).enumerate() {
+            let colour = if at == chosen || hovered_at == Some(at) { ink.text } else { ink.text2 };
+            frame.text(view.name(self.lang), font, colour, x + pad, y + (tall - ascent - descent) / 2.0, w, Align::Start);
+            self.hits.push((Rect { x, y, w, h: tall }, Hit::Chip(view)));
         }
     }
 
@@ -1298,8 +1323,6 @@ struct Inks {
     mark: Color,
     accent: Color,
     link: Color,
-    chosen: Color,
-    on_chosen: Color,
     selection: Color,
 }
 
@@ -1309,7 +1332,7 @@ impl Inks {
         let dark = finder.dark;
         let accent = theme::accent(dark);
         match finder.skin {
-            // Chart paper's in its own ink: what is chosen and what was met underlined.
+            // Chart paper's in its own ink: what was met underlined.
             Skin::Paper => Inks {
                 text: c.text,
                 text2: theme.text2,
@@ -1319,8 +1342,6 @@ impl Inks {
                 mark: c.text,
                 accent: c.text,
                 link: c.text,
-                chosen: c.text,
-                on_chosen: c.text,
                 selection: c.text.alpha(0.2),
             },
             _ => Inks {
@@ -1332,8 +1353,6 @@ impl Inks {
                 mark: accent.alpha(if dark { 0.3 } else { 0.22 }),
                 accent,
                 link: accent,
-                chosen: accent,
-                on_chosen: if dark { Color::hex(0x000000, 0.9) } else { Color::hex(0xFFFFFF, 1.0) },
                 selection: accent.alpha(0.35),
             },
         }
