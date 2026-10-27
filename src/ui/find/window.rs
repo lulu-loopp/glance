@@ -51,10 +51,12 @@ const LISTED: u32 = WM_APP + 3;
 const LEFT: u32 = WM_APP + 4;
 
 /// Its timers: the caret's blinking; a look at what may have changed while it shows (the drives' indexing, the
-/// pictures made for its rows).
+/// pictures made for its rows); a frame of the mark of the kind chosen sliding to it.
 const CARET: usize = 1;
 const WATCH: usize = 2;
 const WATCH_EVERY: u32 = 250;
+const SLIDING: usize = 3;
+const SLIDING_EVERY: u32 = 10;
 
 /// Its measures (DIPs): how wide its sheet is; the field written in, the row of kinds, a heading, a name, the best
 /// name, the line saying how many more there are, the foot; how tall the list grows before it scrolls; the room round
@@ -262,6 +264,8 @@ struct Finder {
     /// Where the pointer was last moved to (screen px): a name comes under a pointer that stays where it is as the
     /// list scrolls, and is not picked by that.
     pointer: POINT,
+    /// The mark of the kind chosen, sliding to it from the one chosen before, as the panel's tabs' do.
+    marks: crate::ui::thumb::Dots<View>,
     menu: Option<(Menu, Vec<Act>, usize)>,
     /// What was in front before it was shown, given the front back as it is closed by its key.
     before: HWND,
@@ -306,6 +310,7 @@ impl Finder {
             pressed: None,
             selecting: false,
             pointer: POINT::default(),
+            marks: crate::ui::thumb::Dots::new(),
             menu: None,
             before: HWND::default(),
             pictures: 0,
@@ -428,6 +433,7 @@ impl Finder {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), CARET);
             let _ = KillTimer(Some(self.hwnd), WATCH);
+            let _ = KillTimer(Some(self.hwnd), SLIDING);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         crate::widget::own_window_changed(self.rect);
@@ -692,14 +698,24 @@ impl Finder {
         }
         let chosen = View::EVERY.iter().position(|&view| view == self.view).unwrap_or(0);
         let hovered_at = View::EVERY.iter().position(|&view| hovered == Some(Hit::Chip(view)));
+        // (Its frames drawn as it slides, till it is there.)
+        let sliding = self.marks.choose(std::time::Instant::now(), &[(0, self.view)]);
+        unsafe {
+            if sliding {
+                SetTimer(Some(self.hwnd), SLIDING, SLIDING_EVERY, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), SLIDING);
+            }
+        }
+        let slid = crate::ui::view::slid_at(self.marks.slid(0, self.view), |from| View::EVERY.iter().position(|&view| view == from));
         if self.skin == Skin::Glass {
-            crate::ui::view::glass_choice(frame, &theme, (y, tall), &boxes, chosen, None, hovered_at);
+            crate::ui::view::glass_choice(frame, &theme, (y, tall), &boxes, chosen, slid, hovered_at);
         } else {
             if let Some(&(x, w)) = hovered_at.filter(|&at| at != chosen).and_then(|at| boxes.get(at)) {
                 frame.fill_rounded(theme.hover, x, y, w, tall, theme.control_radius.min(tall / 2.0));
             }
             let under = if paper { y + tall - 2.0 } else { y + tall - 3.0 };
-            crate::ui::view::choice_mark(frame, &theme, &boxes, chosen, None, under, 14.0, 4.0);
+            crate::ui::view::choice_mark(frame, &theme, &boxes, chosen, slid, under, 14.0, 4.0);
         }
         for (at, (&view, &(x, w))) in View::EVERY.iter().zip(&boxes).enumerate() {
             let colour = if at == chosen || hovered_at == Some(at) { ink.text } else { ink.text2 };
@@ -1585,6 +1601,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     finder.caret_on = !finder.caret_on;
                     finder.draw();
                 }),
+                SLIDING => with(Finder::draw),
                 _ => with(Finder::watch),
             };
             LRESULT(0)
