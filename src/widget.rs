@@ -476,12 +476,14 @@ pub(crate) enum Ground {
 }
 
 /// A note pulled off the panel (see `Widgets::stick_note_held`): its file's name, its card's box on the screen and
-/// where the hand pressed it (physical px), and where the panel is (let go over it, it goes back).
+/// where the hand pressed it (physical px), where the panel is (let go over it, it goes back), and how many physical
+/// px a DIP is on the panel.
 pub struct NotePulled {
     pub name: String,
     pub card: RECT,
     pub from: POINT,
     pub over: RECT,
+    pub px: f32,
 }
 
 /// A note pulled off the panel, carried (in hand, put down and settling, or going back to the panel): its number, where
@@ -489,11 +491,14 @@ pub struct NotePulled {
 /// from its top it was on its card, DIPs), between its card and a note (see `CARD_TO_NOTE`), and going back to the
 /// panel, its corner on its way there (physical px). Over the panel it is its card (let go there, it goes back: see
 /// `release`); off it, a note, its title drawn up under the pointer (see `grab_at`), and back over it, its card again.
-/// Gone back all the way, it has landed: its card drawn on the panel again before it goes (see `land`).
+/// Gone back all the way, it has landed: its card drawn on the panel again before it goes (see `land`). Its card is
+/// drawn at the panel's px a DIP (`card_px`), as the panel draws it: drawn at the widget's, its words were larger
+/// than on the panel (a panel made smaller), and changed as it landed.
 struct Pulled {
     number: u64,
     over: RECT,
     card: RECT,
+    card_px: f32,
     grab: (f32, f32),
     morph: Spring,
     back: Option<(Spring, Spring)>,
@@ -1794,7 +1799,7 @@ impl Widgets {
     /// hand, the pointer `grab` from its corner, to be put down where it is let go. Where it is stuck already, that one
     /// raised instead (a note is never on the desktop twice); whether one was made.
     pub fn stick_note_held(&mut self, pulled: NotePulled) -> bool {
-        let NotePulled { name, card, from, over } = pulled;
+        let NotePulled { name, card, from, over, px } = pulled;
         if self.raise_note(&name) {
             return false;
         }
@@ -1809,7 +1814,7 @@ impl Widgets {
         // Lifted off its card, as large and where it was (see `Pulled`).
         widget.surface_size = ((card.right - card.left) as f32 / contact.scale, (card.bottom - card.top) as f32 / contact.scale);
         let held = ((from.x - card.left) as f32 / (card.right - card.left).max(1) as f32, (from.y - card.top) as f32 / contact.scale);
-        widget.pulled = Some(Pulled { number: crate::notes::number_of(&name), over, card, grab: held, morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false });
+        widget.pulled = Some(Pulled { number: crate::notes::number_of(&name), over, card, card_px: px, grab: held, morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false });
         widget.about = (grab.x as f32 / contact.scale, grab.y as f32 / contact.scale);
         widget.window.yield_to(self.settings);
         widget.window.lift(true);
@@ -4766,7 +4771,7 @@ impl Widget {
         // A note lifted and leaning (see `carry`): drawn larger about where it is held and turned there, its shadow
         // under it; pulled off the panel, its card under it as much as it is still its card.
         let carried = self.content.stuck_note().is_some().then(|| {
-            let card = self.pulled.as_ref().map(|pulled| (pulled.morph.value.clamp(0.0, 1.0), pulled.number));
+            let card = self.pulled.as_ref().map(|pulled| (pulled.morph.value.clamp(0.0, 1.0), pulled.number, pulled.card_px / px));
             (card, self.lift.value, self.lean.value, self.about)
         });
         let settings_lit = self.settings_lit();
@@ -4824,20 +4829,21 @@ impl Widget {
                     let mut page = 1.0;
                     if let Some((card, lift, ..)) = carried {
                         drawn_in(frame, local, || {
-                            let turned = card.map_or(1.0, |(m, _)| m);
+                            let turned = card.map_or(1.0, |(m, ..)| m);
                             let shadow = lifted_shadow(lift);
                             if shadow.dark > 0.0 {
                                 let radius = view::note_radius(scene.theme, true) + (scene.theme.radius - view::note_radius(scene.theme, true)) * turned;
                                 frame.shadow(Color::hex(0, shadow.dark), 0.0, 0.0, size.0, size.1, radius, shadow.blur, shadow.drop);
                             }
-                            if let Some((m, number)) = card {
+                            if let Some((m, number, k)) = card {
                                 let seen = (2.0 * (1.0 - m)).min(1.0);
                                 if seen > 0.0 {
-                                    faded(frame, seen, || view::paint_carried_card(frame, scene, number, (0.0, 0.0, size.0, size.1)));
+                                    // (In the panel's DIPs, as large as it is.)
+                                    drawn_in(frame, Matrix3x2::scale(k, k), || faded(frame, seen, || view::paint_carried_card(frame, scene, number, (0.0, 0.0, size.0 / k, size.1 / k))));
                                 }
                             }
                         });
-                        if let Some((m, _)) = card {
+                        if let Some((m, ..)) = card {
                             page = (2.0 * m).min(1.0);
                         }
                     }
@@ -5173,7 +5179,7 @@ mod tests {
     #[test]
     fn a_note_pulled_off_the_panel_is_a_note_only_off_it_held_by_its_head() {
         let card = RECT { left: 120, top: 400, right: 290, bottom: 504 };
-        let mut pulled = Pulled { number: 1, over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false };
+        let mut pulled = Pulled { number: 1, over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, card_px: 1.5, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false };
         let at = |x| Some(POINT { x, y: 450 });
         assert_eq!(pulled.wants(at(300)), 0.0);
         assert_eq!(pulled.wants(at(499)), 0.0);
@@ -5266,7 +5272,7 @@ mod tests {
     #[test]
     fn a_note_gone_back_lands_before_it_goes() {
         let card = RECT { left: 120, top: 400, right: 290, bottom: 504 };
-        let mut pulled = Pulled { number: 1, over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false };
+        let mut pulled = Pulled { number: 1, over: RECT { left: 100, top: 100, right: 500, bottom: 900 }, card, card_px: 1.5, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false };
         assert!(pulled.carried(true) && !pulled.carried(false));
         pulled.back = Some((Spring::at(0.0, GOING_BACK.0, GOING_BACK.1), Spring::at(0.0, GOING_BACK.0, GOING_BACK.1)));
         assert!(pulled.carried(false));
@@ -5288,7 +5294,7 @@ mod tests {
         // (The panel over everywhere the pointer may be: let go, it is over the panel.)
         let everywhere = RECT { left: -100_000, top: -100_000, right: 100_000, bottom: 100_000 };
         let card = RECT { left: 120, top: 400, right: 290, bottom: 504 };
-        widget.pulled = Some(Pulled { number: 1, over: everywhere, card, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false });
+        widget.pulled = Some(Pulled { number: 1, over: everywhere, card, card_px: 1.5, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None, landed: false });
         widget.drag = Some(Drag::Move { grab: POINT::default(), trail: Vec::new(), torn: false, moved: true });
         widget.window.lift(true);
         let panel = Window::new().unwrap();

@@ -3040,7 +3040,7 @@ impl<'a> Panel<'a> {
             return None;
         }
         let (name, from, card) = self.note_press.take()?;
-        Some(crate::widget::NotePulled { name, card, from, over: placement.panel })
+        Some(crate::widget::NotePulled { name, card, from, over: placement.panel, px: placement.px })
     }
 
     /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
