@@ -3783,8 +3783,10 @@ impl Widget {
         if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.window.hwnd {
             let _ = unsafe { ReleaseCapture() };
         }
-        // Back where it is kept, let go.
-        self.window.lift(false);
+        // Back where it is kept, let go: but a note pulled off the panel going back to it, over the panel still on its
+        // way, as in hand (kept under it, it went back behind it; the capture's end after it let go comes here too).
+        let going_back = self.pulled.as_ref().is_some_and(|pulled| pulled.back.is_some());
+        self.window.lift(going_back);
         self.hide_hint();
         self.splitting = None;
         // (The capture's end after a release comes here too, with nothing.)
@@ -3843,7 +3845,6 @@ impl Widget {
                         };
                         pulled.back = Some((to(self.at.x, pulled.card.left), to(self.at.y, pulled.card.top)));
                         pulled.morph.target = 0.0;
-                        // (Over the panel still on its way, as in hand: kept under it, it went back behind it.)
                         self.window.lift(true);
                         return Released::Nothing;
                     }
@@ -5265,6 +5266,8 @@ mod tests {
         let place = RECT { left: 0, top: 0, right: 600, bottom: 900 };
         panel.place(place);
         widget.release(Instant::now(), false);
+        // (Its capture's end, after it let go, as Windows tells it.)
+        widget.release(Instant::now(), true);
         let going_back = widget.pulled.as_ref().is_some_and(|pulled| pulled.back.is_some());
         panel.place(place);
         // Over the panel: the panel found under it.
