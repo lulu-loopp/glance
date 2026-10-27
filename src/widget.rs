@@ -3843,6 +3843,8 @@ impl Widget {
                         };
                         pulled.back = Some((to(self.at.x, pulled.card.left), to(self.at.y, pulled.card.top)));
                         pulled.morph.target = 0.0;
+                        // (Over the panel still on its way, as in hand: kept under it, it went back behind it.)
+                        self.window.lift(true);
                         return Released::Nothing;
                     }
                     pulled.morph.target = 1.0;
@@ -5240,6 +5242,46 @@ mod tests {
         assert_ne!(moved_gear, gear);
         assert_eq!(moved, (true, Some(moved_gear), true));
         assert!(!asked_elsewhere && !closed_again);
+    }
+
+    /// A note pulled off the panel and let go over it again goes back to its card over the panel, the panel come to
+    /// the top meanwhile (as it does while it is open): kept under it as a widget is, it went back behind it, seen
+    /// through the panel's glass.
+    #[test]
+    fn a_note_let_go_over_the_panel_goes_back_over_it() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
+        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, content).unwrap();
+        // (The panel over everywhere the pointer may be: let go, it is over the panel.)
+        let everywhere = RECT { left: -100_000, top: -100_000, right: 100_000, bottom: 100_000 };
+        let card = RECT { left: 120, top: 400, right: 290, bottom: 504 };
+        widget.pulled = Some(Pulled { number: 1, over: everywhere, card, grab: (0.25, 80.0), morph: Spring::at(0.0, CARD_TO_NOTE.0, CARD_TO_NOTE.1), back: None });
+        widget.drag = Some(Drag::Move { grab: POINT::default(), trail: Vec::new(), torn: false, moved: true });
+        widget.window.lift(true);
+        let panel = Window::new().unwrap();
+        let place = RECT { left: 0, top: 0, right: 600, bottom: 900 };
+        panel.place(place);
+        widget.release(Instant::now(), false);
+        let going_back = widget.pulled.as_ref().is_some_and(|pulled| pulled.back.is_some());
+        panel.place(place);
+        // Over the panel: the panel found under it.
+        let mut under = unsafe { GetWindow(widget.window.hwnd, GW_HWNDNEXT) }.ok();
+        let mut over_it = false;
+        while let Some(window) = under {
+            if window == panel.hwnd {
+                over_it = true;
+                break;
+            }
+            under = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
+        }
+        // (Its window and device let go of before anything is asserted: a thread ending with them held hangs.)
+        drop(panel);
+        drop(widget);
+        gfx::let_go();
+        assert!(going_back);
+        assert!(over_it);
     }
 
     /// A note stuck on the desktop found where it is alone, and where it was merged with what plays (which part); one
