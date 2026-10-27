@@ -51,6 +51,8 @@ mod numbered;
 mod reading;
 #[cfg(windows)]
 mod remote;
+#[cfg(windows)]
+pub mod search;
 // (What a touch of the PC said: read the same way by Glance and by its remote, of which this file is a part too.)
 #[cfg(windows)]
 #[path = "../remote/src/touch.rs"]

@@ -91,6 +91,7 @@ dependencies = [
  "libc",
  "mach2",
  "markup5ever_rcdom",
+ "memchr",
  "miniz_oxide",
  "objc2-core-foundation",
  "objc2-io-kit",

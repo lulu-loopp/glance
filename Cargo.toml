@@ -28,6 +28,8 @@ html5ever = "0.39"
 markup5ever_rcdom = "=0.39.0+unofficial"
 # Inflating what is deflated (zlib): Kugou's lyrics come so.
 miniz_oxide = "0.9"
+# Finding words among every file name on a drive at once (searched as Everything does).
+memchr = "2"
 
 # macOS's own APIs: the kernel's counters, and IOKit for drives, graphics,
 # sensors and power.
