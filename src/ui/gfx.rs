@@ -37,7 +37,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_FAMILY_MODEL_TYPOGRAPHIC, DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_LEADING,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_NO_WRAP, DWRITE_WORD_WRAPPING_WRAP, DWRITE_HIT_TEST_METRICS, IDWriteInlineObject, IDWriteInlineObject_Impl,
-    DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_LINE_SPACING_METHOD_DEFAULT, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
@@ -447,6 +447,16 @@ impl Gfx {
             let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, ..Default::default() };
             let sign = self.write.CreateEllipsisTrimmingSign(&format).unwrap();
             format.SetTrimming(&trimming, &sign).unwrap();
+            // A line as tall as the face's own, its baseline where the face's own is, whatever face draws what is in it:
+            // else a line in Chinese (drawn in Windows' Chinese face, taller) sat lower than one in the face's own
+            // letters, set at the face's baseline (see `baseline`), and was not in the middle of what it was put in.
+            // (Lines broken between words are as tall as what is in them: see `laid_out`.)
+            let own = self.write.CreateTextLayout(&[u16::from(b'0')], &format, 10_000.0, font.size * 2.0).expect("text layout");
+            let mut line = [DWRITE_LINE_METRICS::default()];
+            let mut count = 0;
+            own.GetLineMetrics(Some(&mut line), &mut count).unwrap();
+            let plain: IDWriteTextFormat = format.cast().unwrap();
+            plain.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line[0].height, line[0].baseline).unwrap();
         }
         self.formats.borrow_mut().insert(font.key(), (format.clone(), Instant::now()));
         format
@@ -599,6 +609,7 @@ impl Gfx {
             unsafe {
                 layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP).unwrap();
                 layout.SetTrimming(&DWRITE_TRIMMING::default(), None).unwrap();
+                layout.SetLineSpacing(DWRITE_LINE_SPACING_METHOD_DEFAULT, 0.0, 0.0).unwrap();
             }
         }
         if font.tracking != 0.0 {

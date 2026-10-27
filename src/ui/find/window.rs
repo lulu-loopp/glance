@@ -471,8 +471,9 @@ impl Finder {
 
     // ----- Drawing -----
 
+    /// Its menus' colours, its corners as round as the panel's (a sheet as large as a panel, not a menu).
     fn colours(&self, frosted: bool) -> Colours {
-        Colours::new(Look::of(self.skin, self.dark), frosted)
+        Colours { radius: Theme::new(self.skin, self.dark).radius, ..Colours::new(Look::of(self.skin, self.dark), frosted) }
     }
 
     /// The faces it is written in: the skin's (Windows' own for Windows 11's).
@@ -562,6 +563,7 @@ impl Finder {
     /// The sheet drawn, its corner at `origin` (over the screen frosted behind it, `frosted`).
     fn paint(&mut self, frame: &Frame, frosted: bool, (x, y): (f32, f32)) {
         frame.origin(x, y);
+        frame.crisp_text();
         self.hits.clear();
         let c = self.colours(frosted);
         let height = self.height;
@@ -662,14 +664,20 @@ impl Finder {
             let w = frame.gfx.measure(name, font) + 2.0 * pad;
             let r = Rect { x, y, w, h: tall };
             let chosen = view == self.view;
-            let radius = if self.skin == Skin::Paper { 3.0 } else { tall / 2.0 };
-            if chosen {
+            let paper = self.skin == Skin::Paper;
+            let radius = if paper { Theme::new(Skin::Paper, self.dark).control_radius } else { tall / 2.0 };
+            let top = r.y + (tall - ascent - descent) / 2.0;
+            // (Chart paper's chosen underlined in its ink, as its panel's tabs are; the others' filled in the accent.)
+            if chosen && paper {
+                let theme = Theme::new(Skin::Paper, self.dark);
+                crate::ui::view::choice_mark(frame, &theme, &[(r.x + pad, w - 2.0 * pad)], 0, None, r.y + tall - 2.0, 0.0, 4.0);
+            } else if chosen {
                 frame.fill_rounded(ink.chosen, r.x, r.y, r.w, r.h, radius);
             } else if hovered == Some(Hit::Chip(view)) {
                 frame.fill_rounded(ink.hover, r.x, r.y, r.w, r.h, radius);
             }
             let colour = if chosen { ink.on_chosen } else { ink.text2 };
-            frame.text(name, font, colour, r.x + pad, r.y + (tall - ascent - descent) / 2.0, w, Align::Start);
+            frame.text(name, font, colour, r.x + pad, top, w, Align::Start);
             self.hits.push((r, Hit::Chip(view)));
             x += w + gap;
         }
@@ -782,7 +790,7 @@ impl Finder {
     fn paint_row(&mut self, frame: &Frame, ink: &Inks, y: f32, row: &Row, best: bool, at: usize, list: Rect) {
         let tall = if best { BEST } else { ROW };
         let r = Rect { x: INSET, y, w: WIDTH - 2.0 * INSET, h: tall };
-        let radius = if self.skin == Skin::Paper { 3.0 } else { 6.0 };
+        let radius = if self.skin == Skin::Paper { Theme::new(Skin::Paper, self.dark).control_radius } else { 6.0 };
         if at == self.pick {
             frame.fill_rounded(ink.pick, r.x, r.y, r.w, r.h, radius);
             frame.fill_rounded(ink.accent, r.x, r.y + (tall - 16.0) / 2.0, 3.0, 16.0, 1.5);
@@ -1301,7 +1309,7 @@ impl Inks {
         let dark = finder.dark;
         let accent = theme::accent(dark);
         match finder.skin {
-            // Chart paper's in its own ink: what is chosen inked in, what was met underlined.
+            // Chart paper's in its own ink: what is chosen and what was met underlined.
             Skin::Paper => Inks {
                 text: c.text,
                 text2: theme.text2,
@@ -1312,7 +1320,7 @@ impl Inks {
                 accent: c.text,
                 link: c.text,
                 chosen: c.text,
-                on_chosen: Color { a: 1.0, ..theme.paper },
+                on_chosen: c.text,
                 selection: c.text.alpha(0.2),
             },
             _ => Inks {
