@@ -142,15 +142,18 @@ const CLOSE_FOR: Duration = Duration::from_millis(200);
 const CLOSE_EASE: Easing = Easing(0.4, 0.0, 0.7, 1.0);
 const CLOSE_STILL: (f32, f32) = (0.7, 0.85);
 
-/// Its parts (DIPs): its bar, the room round its body, its buttons; its least width for a picture; its sizes for
+/// Its parts (DIPs): its buttons (the bar, and the room round its parts: see `bar`, `inset`); its least width for a picture; its sizes for
 /// words, and for what has no picture; how much of the screen it takes at most, and how far from the screen's edges and
 /// what it was called up from it keeps.
-const BAR: f32 = 56.0;
-const PAD: f32 = 20.0;
+/// (Its bar: its name's two lines, `NAME` tall, and `UNDER_NAME` under them; the room round its parts is its corners'
+/// radius at least, see `inset`.)
+const NAME: f32 = 36.0;
+const UNDER_NAME: f32 = 12.0;
+const INSET_LEAST: f32 = 20.0;
 const BUTTON: f32 = 30.0;
 const PICTURE_LEAST: f32 = 320.0;
 const WORDS: (f32, f32) = (560.0, 340.0);
-const OTHER: (f32, f32) = (340.0, 260.0);
+const OTHER: (f32, f32) = (400.0, 290.0);
 const MOST: (f32, f32) = (0.6, 0.82);
 const GAP: f32 = 24.0;
 /// A page's shape (A4: its height to its width), and the room beside it.
@@ -964,25 +967,38 @@ impl Looker {
         Rect { x: (room.x + (room.w - w) / 2.0).round(), y: (room.y + (room.h - h) / 2.0).round(), w: w.round(), h: h.round() }
     }
 
-    /// How far down its body begins (DIPs): under its bar, past a rule and some room on chart paper.
+    /// How far in from its edges its parts are, all round (DIPs): as far as the centres of its corners' arcs, so that
+    /// what is at a corner is concentric with it (glass's round ones), and no less than `INSET_LEAST`.
+    fn inset(&self) -> f32 {
+        Theme::new(self.skin, self.dark).radius.max(INSET_LEAST)
+    }
+
+    /// How tall its bar is (DIPs): its name `inset` down from its top, and room under it. (Windows 11's bar drawn so
+    /// deep, chart paper's ruled off there.)
+    fn bar(&self) -> f32 {
+        self.inset() + NAME + UNDER_NAME
+    }
+
+    /// How far down its body begins (DIPs): under its bar; past Windows 11's bar and chart paper's rule, the room under
+    /// a name again.
     fn body_top(&self) -> f32 {
-        if self.skin == Skin::Paper { BAR + 1.0 + PAD } else { BAR }
+        if self.skin == Skin::Glass { self.bar() } else { self.bar() + UNDER_NAME + 2.0 }
     }
 
     /// How large the sheet wants to be for the thing shown, `most` at most (DIPs): a picture whole, as large as fits, no
     /// larger than its own pixels; a page as tall as it may be; words, and what has no picture, at their sizes.
     fn wanted(&self, most: (f32, f32)) -> (f32, f32) {
-        let top = self.body_top();
+        let (top, pad) = (self.body_top(), self.inset());
         // A picture `(pw, ph)` px large, as large as fits, no larger than its own pixels where they are known (`own`).
         let pictured = |(pw, ph): (u32, u32), own: bool| {
             let (pw, ph) = (pw.max(1) as f32 / self.scale, ph.max(1) as f32 / self.scale);
-            let k = ((most.0 - 2.0 * PAD) / pw).min((most.1 - top - PAD) / ph).max(0.0);
+            let k = ((most.0 - 2.0 * pad) / pw).min((most.1 - top - pad) / ph).max(0.0);
             let k = if own { k.min(1.0) } else { k };
-            ((pw * k + 2.0 * PAD).max(PICTURE_LEAST), ph * k + top + PAD)
+            ((pw * k + 2.0 * pad).max(PICTURE_LEAST), ph * k + top + pad)
         };
         let page = || {
             let h = most.1;
-            (((h - top - PAD) / PAGE + 2.0 * PAD + PAGE_ROOM).min(most.0).max(PICTURE_LEAST), h)
+            (((h - top - pad) / PAGE + 2.0 * pad + PAGE_ROOM).min(most.0).max(PICTURE_LEAST), h)
         };
         let item = &self.items[self.at];
         match self.body() {
@@ -1166,7 +1182,7 @@ impl Looker {
             // (Windows 11's bar a little deeper than its sheet, as its footer strip is.)
             if self.skin == Skin::Fluent {
                 let theme = Theme::new(Skin::Fluent, self.dark);
-                frame.clip(0.0, 0.0, w, BAR);
+                frame.clip(0.0, 0.0, w, self.bar());
                 frame.fill_rounded(theme.footer, 0.0, 0.0, w, h, c.radius);
                 frame.unclip();
             }
@@ -1176,7 +1192,7 @@ impl Looker {
             }
         }
         if self.skin == Skin::Paper {
-            frame.fill(c.rule, 0.0, BAR, w, 1.0);
+            frame.fill(c.rule, 0.0, self.bar(), w, 1.0);
         }
     }
 
@@ -1189,7 +1205,8 @@ impl Looker {
         let (title_text, open_label, pastes, opens, copies) = (item.title.clone(), if item.pastes { lang.pick("粘贴", "Paste") } else { lang.pick("打开", "Open") }, item.pastes, item.open.is_some(), item.copy.is_some());
         // Its buttons, from the right, as far in from its edge as its body is.
         let font = self.font(12.5, 600.0);
-        let mut right = w - PAD;
+        let pad = self.inset();
+        let mut right = w - pad;
         let told = self.told.filter(|(_, at)| at.elapsed() < TOLD_FOR).map(|(hit, _)| hit);
         let accent = match self.skin {
             Skin::Paper => theme.text,
@@ -1212,7 +1229,7 @@ impl Looker {
         for (hit, label, icon, main) in buttons {
             let wide = (frame.measure(label, font) + 14.0 + 6.0 + 22.0).ceil();
             right -= wide;
-            let at = Rect { x: right, y: (BAR - BUTTON) / 2.0, w: wide, h: BUTTON };
+            let at = Rect { x: right, y: pad + (NAME - BUTTON) / 2.0, w: wide, h: BUTTON };
             let lit = self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == hit);
             // (Glass's each a pill of its glass, as its buttons on the panel are; Windows 11's main one in its accent and the
             // other plain, as its own are; chart paper's main one in its ink.)
@@ -1243,20 +1260,20 @@ impl Looker {
             let wide = frame.measure(&said, font);
             let (ascent, descent) = frame.gfx.baseline(font);
             right -= 4.0 + wide;
-            frame.text(&said, font, theme.text3, right, (BAR - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+            frame.text(&said, font, theme.text3, right, pad + (NAME - ascent - descent) / 2.0, wide + 1.0, Align::Start);
             right -= 12.0;
         }
-        // What it is called, and what it is, under that: the two in the middle of its height.
-        let room = (right - PAD - 8.0).max(0.0);
-        let top = (BAR - 36.0) / 2.0;
-        frame.text(&title_text, title, theme.text, PAD, top, room, Align::Start);
-        frame.text(&about, small, theme.text3, PAD, top + 18.0, room, Align::Start);
+        // What it is called, and what it is, under that, as far down from its top as from its side.
+        let room = (right - pad - 8.0).max(0.0);
+        let top = pad;
+        frame.text(&title_text, title, theme.text, pad, top, room, Align::Start);
+        frame.text(&about, small, theme.text3, pad, top + 18.0, room, Align::Start);
     }
 
     /// Its body: what the thing shows.
     fn paint_body(&mut self, frame: &Frame, theme: &Theme, (w, h): (f32, f32)) {
-        let top = self.body_top();
-        let body = Rect { x: PAD, y: top, w: (w - 2.0 * PAD).max(0.0), h: (h - top - PAD).max(0.0) };
+        let (top, pad) = (self.body_top(), self.inset());
+        let body = Rect { x: pad, y: top, w: (w - 2.0 * pad).max(0.0), h: (h - top - pad).max(0.0) };
         self.hits.push((body, Hit::Body));
         let radius = match self.skin {
             Skin::Paper => 0.0,
@@ -1297,12 +1314,12 @@ impl Looker {
                 } else {
                     (body.w, body.x)
                 };
-                let pad = if *fixed { 10.0 } else { 0.0 };
-                let tall = frame.gfx.wrapped_height(&words, font, inner) + 2.0 * pad;
+                let margin = if *fixed { 10.0 } else { 0.0 };
+                let tall = frame.gfx.wrapped_height(&words, font, inner) + 2.0 * margin;
                 self.scroll_most = (tall - body.h).max(0.0);
                 self.scroll = self.scroll.clamp(0.0, self.scroll_most);
                 frame.clip(body.x, body.y, body.w, body.h);
-                frame.text_wrapped(&words, font, theme.text, x, body.y + pad - self.scroll, inner);
+                frame.text_wrapped(&words, font, theme.text, x, body.y + margin - self.scroll, inner);
                 frame.unclip();
             }
             Body::Files(rows) => {
@@ -1427,13 +1444,13 @@ impl Looker {
     /// The picture shown as fitted in the body (DIPs on the sheet), and its own size (px).
     fn fitted(&self) -> Option<((f32, f32, f32, f32), (u32, u32))> {
         let (w, h) = self.shape(Instant::now()).size;
-        let top = self.body_top();
+        let (top, pad) = (self.body_top(), self.inset());
         let (picture, own) = match self.body()? {
             Body::Picture(picture, own) => (picture, *own),
             Body::Pictured(picture) => (picture, picture.size),
             _ => return None,
         };
-        Some((picture.fitted_in(PAD, top, (w - 2.0 * PAD).max(0.0), (h - top - PAD).max(0.0)), own))
+        Some((picture.fitted_in(pad, top, (w - 2.0 * pad).max(0.0), (h - top - pad).max(0.0)), own))
     }
 
     /// The picture zoomed to `zoom`, the point `on` (DIPs on the sheet) staying where it is.
@@ -1455,11 +1472,11 @@ impl Looker {
             return;
         }
         let (w, h) = self.shape(Instant::now()).size;
-        let top = self.body_top();
-        let body = ((w - 2.0 * PAD).max(0.0), (h - top - PAD).max(0.0));
+        let (top, pad) = (self.body_top(), self.inset());
+        let body = ((w - 2.0 * pad).max(0.0), (h - top - pad).max(0.0));
         let reach = |zoomed: f32, room: f32, middle_off: f32| ((zoomed - room) / 2.0).max(0.0) + middle_off.abs();
         // (How far its middle may go from the body's: as far as its edges reach past the body's, where it is larger.)
-        let off = (fitted.0 + fitted.2 / 2.0 - (PAD + body.0 / 2.0), fitted.1 + fitted.3 / 2.0 - (top + body.1 / 2.0));
+        let off = (fitted.0 + fitted.2 / 2.0 - (pad + body.0 / 2.0), fitted.1 + fitted.3 / 2.0 - (top + body.1 / 2.0));
         let most = (reach(fitted.2 * self.zoom, body.0, 0.0), reach(fitted.3 * self.zoom, body.1, 0.0));
         self.pan = ((self.pan.0 + off.0).clamp(-most.0, most.0) - off.0, (self.pan.1 + off.1).clamp(-most.1, most.1) - off.1);
     }
