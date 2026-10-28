@@ -1006,7 +1006,8 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
                 What::Text { text } => (lang.pick("文字", "Text").to_string(), Shows::Words(text.clone()), true),
                 What::Link { url } => (tile.label, Shows::Words(url.clone()), false),
                 What::Picture { file } => (lang.pick("图片", "Picture").to_string(), Shows::File(folder.path(file)), false),
-                What::Saved { file, name, words } => (if *words { lang.pick("文字", "Text").to_string() } else { name.clone() }, Shows::File(folder.path(file)), *words),
+                What::Saved { file, words: true, .. } => (lang.pick("文字", "Text").to_string(), Shows::Kept(folder.path(file)), true),
+                What::Saved { file, name, words: false } => (name.clone(), Shows::File(folder.path(file)), false),
             };
             Some(Item { key: hit.key(), title, about: tile.about, shows, from, open: Some(if pastes { Ask::PasteOut(id) } else { Ask::Open(id) }), copy: Some(Ask::Copy(id)), pastes })
         }

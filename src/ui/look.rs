@@ -62,11 +62,13 @@ pub struct Item {
     pub pastes: bool,
 }
 
-/// What is looked at: words as they are (text on the station, a web address, a note); a file (or a picture the
-/// station keeps); files together.
+/// What is looked at: words as they are (text on the station, a web address, a note); words kept in a file (text on
+/// the station too long to keep in its list, in a file named by its number, of no kind its name tells); a file (or a
+/// picture the station keeps); files together.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shows {
     Words(String),
+    Kept(PathBuf),
     File(PathBuf),
     Files(Vec<PathBuf>),
 }
@@ -143,9 +145,9 @@ const CLOSE_STILL: (f32, f32) = (0.7, 0.85);
 /// Its parts (DIPs): its bar, the room round its body, its buttons; its least width for a picture; its sizes for
 /// words, and for what has no picture; how much of the screen it takes at most, and how far from the screen's edges and
 /// what it was called up from it keeps.
-const BAR: f32 = 44.0;
-const PAD: f32 = 14.0;
-const BUTTON: f32 = 28.0;
+const BAR: f32 = 56.0;
+const PAD: f32 = 20.0;
+const BUTTON: f32 = 30.0;
 const PICTURE_LEAST: f32 = 320.0;
 const WORDS: (f32, f32) = (560.0, 340.0);
 const OTHER: (f32, f32) = (340.0, 260.0);
@@ -328,7 +330,7 @@ fn kind_of(path: &Path) -> Kind {
 /// What a thing is before it is read.
 fn kind_shown(shows: &Shows) -> Kind {
     match shows {
-        Shows::Words(_) => Kind::Words,
+        Shows::Words(_) | Shows::Kept(_) => Kind::Words,
         Shows::File(path) => kind_of(path),
         Shows::Files(_) => Kind::Files,
     }
@@ -397,6 +399,11 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
 fn read(shows: &Shows, lang: Lang, scale: f32, key: u64) -> Read {
     match shows {
         Shows::Words(text) => Read { body: Body::Words { text: text.clone(), fixed: false, cut: false }, about: None },
+        // (Words, whatever the file's name: plain text, as they were copied.)
+        Shows::Kept(path) => match words_of(path) {
+            Some((text, cut)) => Read { body: Body::Words { text, fixed: false, cut }, about: None },
+            None => Read { body: Body::Other(None), about: Some(lang.pick("文件已不存在", "File no longer exists").into()) },
+        },
         Shows::Files(paths) => {
             let rows = paths
                 .iter()
@@ -1143,7 +1150,6 @@ impl Looker {
             let theme = Theme::new(self.skin, self.dark);
             self.paint_bar(frame, &theme, w);
             faded(frame, shape.body, || self.paint_body(frame, &theme, (w, h)));
-            self.paint_count(frame, &theme, (w, h));
         });
     }
 
@@ -1181,9 +1187,9 @@ impl Looker {
         let about = self.read.get(self.at).and_then(|read| read.as_ref()?.about.clone()).unwrap_or_else(|| item.about.clone());
         let (title, small) = (self.font(13.0, 650.0), self.font(11.5, 400.0));
         let (title_text, open_label, pastes, opens, copies) = (item.title.clone(), if item.pastes { lang.pick("粘贴", "Paste") } else { lang.pick("打开", "Open") }, item.pastes, item.open.is_some(), item.copy.is_some());
-        // Its buttons, from the right.
+        // Its buttons, from the right, as far in from its edge as its body is.
         let font = self.font(12.5, 600.0);
-        let mut right = w - 10.0;
+        let mut right = w - PAD;
         let told = self.told.filter(|(_, at)| at.elapsed() < TOLD_FOR).map(|(hit, _)| hit);
         let accent = match self.skin {
             Skin::Paper => theme.text,
@@ -1208,24 +1214,43 @@ impl Looker {
             right -= wide;
             let at = Rect { x: right, y: (BAR - BUTTON) / 2.0, w: wide, h: BUTTON };
             let lit = self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == hit);
-            let (fill, ink) = if main { (accent, on_accent) } else { (theme.track, theme.text) };
-            frame.fill_rounded(fill, at.x, at.y, at.w, at.h, radius);
-            if lit {
-                frame.fill_rounded(if main { Color::hex(0xFFFFFF, if self.dark { 0.12 } else { 0.16 }) } else { theme.hover }, at.x, at.y, at.w, at.h, radius);
-            }
-            if !main {
-                frame.stroke_rounded(Fill::Solid(theme.rule), at.x, at.y, at.w, at.h, radius, 1.0);
-            }
+            // (Glass's each a pill of its glass, as its buttons on the panel are; Windows 11's main one in its accent and the
+            // other plain, as its own are; chart paper's main one in its ink.)
+            let ink = if self.skin == Skin::Glass {
+                super::view::glass_pill(frame, theme, (at.x, at.y, at.w, at.h), radius, lit);
+                theme.text
+            } else {
+                let (fill, ink) = if main { (accent, on_accent) } else { (theme.track, theme.text) };
+                frame.fill_rounded(fill, at.x, at.y, at.w, at.h, radius);
+                if lit {
+                    frame.fill_rounded(if main { Color::hex(0xFFFFFF, if self.dark { 0.12 } else { 0.16 }) } else { theme.hover }, at.x, at.y, at.w, at.h, radius);
+                }
+                if !main {
+                    frame.stroke_rounded(Fill::Solid(theme.rule), at.x, at.y, at.w, at.h, radius, 1.0);
+                }
+                ink
+            };
             frame.icon(icon, Point { x: at.x + 11.0 + 7.0, y: at.y + BUTTON / 2.0 }, 14.0, ink);
             let (ascent, descent) = frame.gfx.baseline(font);
             frame.text(label, font, ink, at.x + 11.0 + 14.0 + 6.0, at.y + (BUTTON - ascent - descent) / 2.0, wide, Align::Start);
             self.hits.push((at, hit));
             right -= 8.0;
         }
-        // What it is called, and what it is, under that.
-        let room = (right - 16.0 - 8.0).max(0.0);
-        frame.text(&title_text, title, theme.text, 16.0, 7.0, room, Align::Start);
-        frame.text(&about, small, theme.text3, 16.0, 25.0, room, Align::Start);
+        // Which of how many it is, before them.
+        if self.items.len() > 1 {
+            let said = format!("{} / {}", self.at + 1, self.items.len());
+            let font = self.font(11.5, 400.0);
+            let wide = frame.measure(&said, font);
+            let (ascent, descent) = frame.gfx.baseline(font);
+            right -= 4.0 + wide;
+            frame.text(&said, font, theme.text3, right, (BAR - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+            right -= 12.0;
+        }
+        // What it is called, and what it is, under that: the two in the middle of its height.
+        let room = (right - PAD - 8.0).max(0.0);
+        let top = (BAR - 36.0) / 2.0;
+        frame.text(&title_text, title, theme.text, PAD, top, room, Align::Start);
+        frame.text(&about, small, theme.text3, PAD, top + 18.0, room, Align::Start);
     }
 
     /// Its body: what the thing shows.
@@ -1270,9 +1295,9 @@ impl Looker {
                     frame.fill_rounded(theme.track, body.x, body.y, body.w, body.h, if self.skin == Skin::Paper { 3.0 } else { radius });
                     (body.w - 24.0, body.x + 12.0)
                 } else {
-                    (body.w - 12.0, body.x + 6.0)
+                    (body.w, body.x)
                 };
-                let pad = if *fixed { 10.0 } else { 4.0 };
+                let pad = if *fixed { 10.0 } else { 0.0 };
                 let tall = frame.gfx.wrapped_height(&words, font, inner) + 2.0 * pad;
                 self.scroll_most = (tall - body.h).max(0.0);
                 self.scroll = self.scroll.clamp(0.0, self.scroll_most);
@@ -1326,17 +1351,6 @@ impl Looker {
                 }
             }
         }
-    }
-
-    /// Which of how many it is, at its bottom right corner.
-    fn paint_count(&self, frame: &Frame, theme: &Theme, (w, h): (f32, f32)) {
-        if self.items.len() < 2 {
-            return;
-        }
-        let said = format!("{} / {}", self.at + 1, self.items.len());
-        let font = self.font(11.0, 400.0);
-        let wide = frame.measure(&said, font);
-        frame.text(&said, font, theme.text3, w - 12.0 - wide, h - 6.0 - 14.0, wide + 1.0, Align::Start);
     }
 
     // ----- The pointer -----
@@ -1660,6 +1674,60 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 mod tests {
     use super::*;
 
+    /// The look in each skin, light and dark (the rows), at words, a picture and what has no picture (the columns), as
+    /// it rests (`cargo test --profile fast --features studio --lib -- --ignored look_looks` writes
+    /// `target/looks/look.png`).
+    #[cfg(feature = "studio")]
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    fn look_looks() {
+        let _device = crate::ui::gfx::held().unwrap();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let file = |name: &str| PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<PathBuf>();
+        let words = "40分钟精讲：为什么说宋仁宗时代，是中国文人的黄金时代？ #历史#宋仁宗 #狸猫换太子 #人文创作焕新计划
+@历史摆渡人
+· 9月19日
+【纯享合集】P9 织造局灯笼高高挂，杨金水暗回查真相 #大明王朝1566 #电视剧解说 #历史";
+        let picture = file("icons/128x128@2x.png");
+        let (shown, own) = decode(&picture, 7).expect("decoded");
+        let item = |key: u64, title: &str, about: &str, shows: Shows, pastes: bool| Item { key, title: title.into(), about: about.into(), shows, from: None, open: Some(Ask::Open(key)), copy: Some(Ask::Copy(key)), pastes };
+        let things = [
+            (item(1, "文字", "129 字 · 40 分钟前", Shows::Words(words.into()), true), Read { body: Body::Words { text: words.into(), fixed: false, cut: false }, about: None }, WORDS),
+            (item(2, "128x128@2x.png", "256 × 256 · PNG 图像 · 31 KB", Shows::File(picture.clone()), false), Read { body: Body::Picture(shown, own), about: None }, (420.0, 400.0)),
+            (item(3, "Cargo.toml", "TOML 文件 · 6 KB · 20 分钟前", Shows::File(file("Cargo.toml")), false), Read { body: Body::Other(Some(file("Cargo.toml"))), about: Some("TOML 文件 · 6 KB".into()) }, OTHER),
+        ];
+        let looks = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
+        let cell = (WORDS.0 + 2.0 * SHADOW + 20.0, WORDS.1.max(400.0) + 2.0 * SHADOW + 20.0);
+        let px = 1.5f32;
+        let (w, h) = ((3.0 * cell.0 * px) as u32, (looks.len() as f32 * cell.1 * px) as u32);
+        let pixels = gfx
+            .draw_offscreen((w, h), px, |frame| {
+                frame.fill(Color::hex(0x7C93B4, 1.0), 0.0, 0.0, 3.0 * cell.0, looks.len() as f32 * cell.1);
+                for (row, &(skin, dark)) in looks.iter().enumerate() {
+                    if dark {
+                        frame.fill(Color::hex(0x1B2433, 1.0), 0.0, row as f32 * cell.1, 3.0 * cell.0, cell.1);
+                    }
+                    for (column, (item, read, size)) in things.iter().enumerate() {
+                        let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+                        (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
+                        looker.items = vec![item.clone(), item.clone(), item.clone(), item.clone()];
+                        looker.read = vec![Some(read.clone()), None, None, None];
+                        let at = Rect { x: column as f32 * cell.0 + SHADOW + 10.0, y: row as f32 * cell.1 + SHADOW + 10.0, w: size.0, h: size.1 };
+                        looker.paint(frame, skin != Skin::Paper, Shape { at, size: *size, opacity: 1.0, body: 1.0 });
+                        frame.place(Matrix3x2::identity());
+                    }
+                }
+            })
+            .expect("drawn");
+        let out = PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        crate::studio::save_png(&out.join("look.png"), w, h, &pixels).unwrap();
+    }
+
     /// A file's words are read as they are marked (UTF-16 either way, UTF-8), else as UTF-8, else in the system's own
     /// code page; a file with a nought among its bytes holds no words.
     #[test]
@@ -1672,6 +1740,25 @@ mod tests {
         // (Cut off in the middle of a character: the words before it.)
         let cut = "中文".as_bytes();
         assert_eq!(words_in(&cut[..4], true).as_deref(), Some("中"));
+    }
+
+    /// Words the station keeps in a file (named by its number, no kind in its name) are read as the plain words they
+    /// were copied as, as the same words on the station's list are, not as code in a fixed face.
+    #[test]
+    fn words_kept_in_a_file_are_plain_words() {
+        let folder = std::env::temp_dir().join(format!("glance-look-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let kept = folder.join("18e12bb87ce65488-0");
+        std::fs::write(&kept, "40分钟精讲 #历史
+@历史摆渡人").unwrap();
+        let read = read(&Shows::Kept(kept.clone()), Lang::Zh, 1.0, 1);
+        assert!(matches!(&read.body, Body::Words { text, fixed: false, cut: false } if text == "40分钟精讲 #历史
+@历史摆渡人"));
+        // (Gone from the folder: said so, not shown as some file.)
+        std::fs::remove_file(&kept).unwrap();
+        let gone = super::read(&Shows::Kept(kept), Lang::Zh, 1.0, 1);
+        assert!(matches!(gone.body, Body::Other(None)));
+        let _ = std::fs::remove_dir(&folder);
     }
 
     /// What a file's name says it is.
