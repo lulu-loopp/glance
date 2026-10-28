@@ -108,6 +108,9 @@ enum Asked {
     Key(Key),
     /// The thing known by this key shown (its tile clicked).
     Show(u64),
+    /// The thing known by this key shown, among these as they show now (its tile clicked: one scrolled to since, of
+    /// another list, as well as one there was).
+    Among(Vec<Item>, u64),
     /// Where the tiles are now (physical px), by their keys: those of the window `owner`.
     Tiles(isize, Vec<(u64, RECT)>),
 }
@@ -195,6 +198,14 @@ pub fn key(key: Key) {
 pub fn show(key: u64) {
     if is_up() {
         ask(Asked::Show(key));
+    }
+}
+
+/// The thing known by `key` shown, the others had by the arrows now `items` (the things that may be looked at as they
+/// show now where it was called up from: its tile clicked while it is up).
+pub fn show_among(items: Vec<Item>, key: u64) {
+    if is_up() {
+        ask(Asked::Among(items, key));
     }
 }
 
@@ -395,6 +406,11 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
         READ.lock().unwrap().push((asked.number, asked.at, read));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
     }
+}
+
+/// What was read of the things `before` (by their places there) at their places among `items`: none for those new.
+fn carried(before: &[Item], mut read: Vec<Option<Read>>, items: &[Item]) -> Vec<Option<Read>> {
+    items.iter().map(|item| before.iter().position(|had| had.key == item.key).and_then(|at| read.get_mut(at)?.take())).collect()
 }
 
 /// `shows` read: a picture's pixels, a file's words, a page's or a video's picture as Explorer makes it, else what it
@@ -737,6 +753,7 @@ impl Looker {
                         self.go_to(at);
                     }
                 }
+                Asked::Among(items, key) => self.among(items, key),
                 Asked::Tiles(owner, tiles) if owner == self.owner => {
                     for item in &mut self.items {
                         item.from = tiles.iter().find(|(key, _)| *key == item.key).map(|(_, rect)| *rect);
@@ -852,9 +869,37 @@ impl Looker {
         if !self.up() || at >= self.items.len() || at == self.at || matches!(self.motion, Motion::Closing { .. }) {
             return;
         }
-        let now = Instant::now();
-        let was = self.shape(now).at;
+        let was = self.shape(Instant::now()).at;
         self.at = at;
+        self.moved_from(was);
+    }
+
+    /// The thing known by `key` shown, `items` those had by the arrows from now on (what was read of those that were
+    /// before kept). One not among them: nothing done.
+    fn among(&mut self, items: Vec<Item>, key: u64) {
+        let Some(at) = items.iter().position(|item| item.key == key) else { return };
+        if !self.up() || matches!(self.motion, Motion::Closing { .. }) {
+            return;
+        }
+        let was = self.shape(Instant::now()).at;
+        let shown = self.items[self.at].key;
+        let read = carried(&self.items, std::mem::take(&mut self.read), &items);
+        // (What is being read is for the places as they were: asked again, where it is wanted, at theirs now.)
+        self.number += 1;
+        self.asked = read.iter().map(Option::is_some).collect();
+        self.read = read;
+        self.items = items;
+        self.at = at;
+        if key == shown {
+            self.read_around();
+            return self.draw();
+        }
+        self.moved_from(was);
+    }
+
+    /// The thing now at `at` shown, moving from where the sheet was (`was`).
+    fn moved_from(&mut self, was: Rect) {
+        let (at, now) = (self.at, Instant::now());
         self.reset_view();
         self.read_around();
         self.motion = Motion::Moving { was, start: now, fade: true };
@@ -1743,6 +1788,20 @@ mod tests {
         let out = PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         crate::studio::save_png(&out.join("look.png"), w, h, &pixels).unwrap();
+    }
+
+    /// Its things had anew as they show now (a tile clicked of another list, or scrolled to): what was read of those
+    /// still among them kept at their places now, none for those new.
+    #[test]
+    fn what_was_read_is_carried_to_the_things_had_anew() {
+        let item = |key: u64| Item { key, title: String::new(), about: String::new(), shows: Shows::Words(String::new()), from: None, open: None, copy: None, pastes: false };
+        let read = |text: &str| Some(Read { body: Body::Words { text: text.into(), fixed: false, cut: false }, about: None });
+        let words = |read: &Option<Read>| match read {
+            Some(Read { body: Body::Words { text, .. }, .. }) => Some(text.clone()),
+            _ => None,
+        };
+        let carried = carried(&[item(1), item(2), item(3)], vec![read("one"), None, read("three")], &[item(3), item(4), item(1), item(2)]);
+        assert_eq!(carried.iter().map(words).collect::<Vec<_>>(), [Some("three".into()), None, Some("one".into()), None]);
     }
 
     /// A file's words are read as they are marked (UTF-16 either way, UTF-8), else as UTF-8, else in the system's own

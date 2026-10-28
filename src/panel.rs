@@ -1071,19 +1071,24 @@ impl Controller {
                 // The pinned panel dragged by its bar.
                 // (Pressed with the settings in front, it comes over them: in use, it was under them till a page it opened
                 // took the front.)
-                // (A look up from it: a press on another thing that may be looked at shows that one, and does nothing
-                // more. One elsewhere on it closes the look, and is a press as ever.)
+                // (A look up from it, or a widget: a press on a thing on it that may be looked at shows that one, and does
+                // nothing more, its button's coming up too. One elsewhere on it closes the look up from it, and is a press
+                // as ever.)
                 WM_LBUTTONDOWN if owner.is_some() => {
-                    let panel = &mut panels[owner.unwrap()];
-                    if crate::ui::look::up_for(panel.window.hwnd) {
+                    let panel = &panels[owner.unwrap()];
+                    let window = panel.window.hwnd;
+                    if looking_here(&panels, &widgets) {
                         match panel.hit_at(lparam_point(msg.lParam)).filter(|hit| hit.looks()) {
                             Some(hit) => {
-                                crate::ui::look::show(hit.key());
+                                look_at(&panels, &widgets, window, hit);
+                                closing_press.closed_by(msg.message);
                                 continue;
                             }
-                            None => crate::ui::look::close(),
+                            None if crate::ui::look::up_for(window) => crate::ui::look::close(),
+                            None => {}
                         }
                     }
+                    let panel = &mut panels[owner.unwrap()];
                     panel.forward = true;
                     panel.press(lparam_point(msg.lParam));
                 }
@@ -1207,11 +1212,13 @@ impl Controller {
                         full.wheel((msg.wParam.0 >> 16) as u16 as i16);
                     }
                 }
-                // A look up from a widget: a press on another thing on it that may be looked at shows that one, and does
-                // nothing more. One elsewhere on it closes the look, and goes on as a press (below).
-                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) && crate::ui::look::up_for(msg.hwnd) && widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).is_some_and(|hit| hit.looks()) => {
+                // A look up from a widget, or the panel: a press on a thing on a widget that may be looked at shows that
+                // one, and does nothing more, its button's coming up too. One elsewhere on it goes on as a press (below),
+                // the look up from it closed.
+                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) && looking_here(&panels, &widgets) && widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).is_some_and(|hit| hit.looks()) => {
                     if let Some(hit) = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        crate::ui::look::show(hit.key());
+                        look_at(&panels, &widgets, msg.hwnd, hit);
+                        closing_press.closed_by(msg.message);
                     }
                 }
                 // A note stuck on the desktop written in where it is, or to be: the pointer's on its words, and on its
@@ -1805,7 +1812,8 @@ fn looked_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(H
 }
 
 /// `hit` on the window `window` (the panel's, a widget's) looked at larger (see `ui::look`), beside it and in its skin,
-/// with the others there that may be, had by the arrows.
+/// with the others there that may be, had by the arrows: a look up from it shows it, those others had by the arrows as
+/// they show now (scrolled to, of another list).
 fn look_at(panels: &[Panel], widgets: &crate::widget::Widgets, window: HWND, hit: Hit) {
     let (looks, beside, look) = match panels.iter().find(|panel| panel.window.hwnd == window) {
         Some(panel) => (panel.looks(), panel.placement.as_ref().map(|placement| placement.panel), panel.menu_look()),
@@ -1814,6 +1822,9 @@ fn look_at(panels: &[Panel], widgets: &crate::widget::Widgets, window: HWND, hit
     let lang = panels[0].lang;
     let items: Vec<crate::ui::look::Item> = looks.iter().filter_map(|&(hit, rect)| view::looked_at(hit, Some(rect), lang)).collect();
     let Some(at) = items.iter().position(|item| item.key == hit.key()) else { return };
+    if crate::ui::look::up_for(window) {
+        return crate::ui::look::show_among(items, hit.key());
+    }
     let skin = look.skin.unwrap_or(crate::ui::theme::Skin::Fluent);
     crate::ui::look::open(crate::ui::look::Opening { items, at, owner: window.0 as isize, beside, skin, dark: look.dark, frost: look.frost, tell: None });
 }
@@ -4497,6 +4508,8 @@ pub(crate) fn reduced_motion() -> bool {
 
 /// A press away from a menu that closed it: all the menu's, its button's coming up too. (Else, let go on the button that
 /// had opened the menu, pressed again where it was, it opened it again: a menu could not be closed by its own button.)
+/// So too a press on a thing that a look shows (see `ui::look`): the look's, not a click on that thing (which, let go,
+/// copied it or opened it).
 #[derive(Default)]
 struct ClosingPress {
     /// The message its button comes up with, till it has.
