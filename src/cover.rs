@@ -205,22 +205,33 @@ fn squared(factory: &IWICImagingFactory, frame: &IWICBitmapSource) -> Option<Cov
     }
 }
 
-/// The colours of a cover's pixels (BGRA): the most telling of its main colours (vivid, neither near black nor
-/// near white), and a second of another hue that goes with it (else the first turned round the wheel).
+/// The least colour (see `chroma`) one of a cover's colours shows to be taken for a colour it has.
+const SEEN: f32 = 0.2;
+
+/// The colours of a cover's pixels (BGRA): the most telling of its main colours (the one that shows the most colour),
+/// and a second of another hue that goes with it, where the cover shows one (else the first again: a colour it does
+/// not show, made from a near black's or near white's hue or turned round the wheel, is none of its).
 pub fn colours(pixels: &[u8]) -> ([f32; 3], [f32; 3]) {
     let main = median_cut(pixels, 8);
-    let telling = |rgb: [f32; 3]| {
-        let (_, saturation, lightness) = hsl(rgb);
-        saturation * (1.0 - (lightness - 0.5).abs() * 1.2)
-    };
-    let base = main.iter().map(|(rgb, _)| *rgb).max_by(|a, b| telling(*a).total_cmp(&telling(*b))).unwrap_or([0.5, 0.5, 0.5]);
-    let (hue, saturation, lightness) = hsl(base);
+    let base = main.iter().map(|(rgb, _)| *rgb).max_by(|a, b| chroma(*a).total_cmp(&chroma(*b))).unwrap_or([0.5, 0.5, 0.5]);
+    // (A cover that shows no colour, its colours grey: as light as they are, of no hue.)
+    if chroma(base) < SEEN {
+        let grey = hsl(base).2;
+        return ([grey; 3], [grey; 3]);
+    }
+    let hue = hsl(base).0;
     let apart = |rgb: [f32; 3]| {
         let away = (hsl(rgb).0 - hue).abs();
         away.min(360.0 - away)
     };
-    let accent = main.iter().map(|(rgb, _)| *rgb).filter(|rgb| (25.0..=160.0).contains(&apart(*rgb)) && hsl(*rgb).1 > 0.15).max_by(|a, b| telling(*a).total_cmp(&telling(*b)));
-    (base, accent.unwrap_or_else(|| rgb((hue + 40.0) % 360.0, saturation, lightness)))
+    let accent = main.iter().map(|(rgb, _)| *rgb).filter(|rgb| (25.0..=160.0).contains(&apart(*rgb)) && chroma(*rgb) >= SEEN).max_by(|a, b| chroma(*a).total_cmp(&chroma(*b)));
+    (base, accent.unwrap_or(base))
+}
+
+/// How much colour a colour shows: how far apart its channels are (0, a grey, black or white, to 1). (Not its
+/// saturation: a colour all but black or white may be all but wholly saturated and show none.)
+fn chroma(rgb: [f32; 3]) -> f32 {
+    rgb[0].max(rgb[1]).max(rgb[2]) - rgb[0].min(rgb[1]).min(rgb[2])
 }
 
 /// A cover's main colours and how much of it each is: its pixels (at four bits a channel) split, box by box, along
@@ -255,7 +266,7 @@ fn median_cut(pixels: &[u8], count: usize) -> Vec<([f32; 3], f32)> {
         .iter()
         .map(|colours| {
             let weight: u32 = colours.iter().map(|c| c.1).sum();
-            let mean = |channel: usize| colours.iter().map(|c| (c.0[channel] as f32 * 17.0 + 8.0) * c.1 as f32).sum::<f32>() / weight.max(1) as f32 / 255.0;
+            let mean = |channel: usize| colours.iter().map(|c| (c.0[channel] as f32 * 16.0 + 8.0) * c.1 as f32).sum::<f32>() / weight.max(1) as f32 / 255.0;
             ([mean(0), mean(1), mean(2)], weight as f32 / all as f32)
         })
         .collect()
@@ -315,6 +326,36 @@ mod tests {
         let (h, s, l) = hsl([0.8, 0.2, 0.2]);
         let back = rgb(h, s, l);
         assert!((back[0] - 0.8).abs() < 1e-3 && (back[1] - 0.2).abs() < 1e-3);
+    }
+
+    /// A cover of one colour on the near black (pink lines on a night that is all but black, blue only in name, and a
+    /// little white): no other colour shows on it, so the one it has goes with itself. Not a colour made from the
+    /// near black's hue, lightened (a blue the cover never shows), nor one turned round the wheel from its own.
+    #[test]
+    fn a_cover_of_one_colour_on_the_dark_goes_with_itself() {
+        let mut pixels = Vec::new();
+        for i in 0..1000 {
+            let bgr = if i < 800 { [25, 8, 8] } else if i < 830 { [243, 236, 232] } else if i < 880 { [118, 80, 170] } else { [86, 25, 185] };
+            pixels.extend_from_slice(&[bgr[0], bgr[1], bgr[2], 255]);
+        }
+        let (base, accent) = colours(&pixels);
+        let pink = |rgb: [f32; 3]| (300.0..=360.0).contains(&hsl(rgb).0) && hsl(rgb).1 > 0.3;
+        assert!(pink(base) && pink(accent), "{base:?} {accent:?}");
+        // (Its main colours, each a colour: the white's channels no more than wholly lit.)
+        assert!(median_cut(&pixels, 8).iter().all(|(rgb, _)| rgb.iter().all(|v| (0.0..=1.0).contains(v))));
+    }
+
+    /// A cover that shows no colour (the night alone, and a little white): its colours grey, not a blue made from the
+    /// near black's hue.
+    #[test]
+    fn a_cover_of_no_colour_is_grey() {
+        let mut pixels = Vec::new();
+        for i in 0..1000 {
+            let bgr = if i < 900 { [25, 8, 8] } else { [243, 236, 232] };
+            pixels.extend_from_slice(&[bgr[0], bgr[1], bgr[2], 255]);
+        }
+        let (base, accent) = colours(&pixels);
+        assert!(hsl(base).1 == 0.0 && hsl(accent).1 == 0.0, "{base:?} {accent:?}");
     }
 
     /// Reads the cover of the music playing: `cargo test -- --ignored reads_the_cover --nocapture`.
