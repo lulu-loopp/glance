@@ -964,7 +964,7 @@ fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
     let folder = unsafe { SHGetKnownFolderPath(known, KF_FLAG_DEFAULT, None) }.expect("application data folder");
     let path = PathBuf::from(unsafe { folder.to_string() }.expect("folder path"));
     unsafe { CoTaskMemFree(Some(folder.0 as *const _)) };
-    path.join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
+    crate::elevation::where_it_is(&path).join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
 }
 
 #[cfg(windows)]

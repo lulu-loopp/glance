@@ -284,6 +284,17 @@ fn same_path(a: &Path, b: &Path) -> bool {
     plain(a) == plain(b)
 }
 
+/// Where the user's own `folder` (their application data) really is, through any link or junction it is reached by:
+/// a profile, or its application data, moved to another drive by one leads there. What Glance keeps under it is read
+/// and written from there, each folder below checked to be where its path says (see `read_in_place`): checked from
+/// the path as given, a folder reached through a link above it was never where its path said, and Glance neither
+/// read nor kept anything (its settings were as new at every start). Following what leads to the folder itself gives
+/// no one a way in that they had not: where it is, is the user's to say (Windows takes it from their own registry).
+/// As given, where it cannot be found.
+pub fn where_it_is(folder: &Path) -> PathBuf {
+    std::fs::canonicalize(folder).map_or_else(|_| folder.to_path_buf(), |found| plain(&found))
+}
+
 /// Whether `folder` holds nothing but an earlier Glance.
 fn only_ours(folder: &Path) -> bool {
     let ours = |name: &str| INSTALLED.iter().any(|known| known.eq_ignore_ascii_case(name));
@@ -1161,7 +1172,7 @@ pub fn ensure_folder(folder: &Path) -> std::io::Result<()> {
 /// handle: nothing elsewhere can be reached through a link.
 pub fn remove_settings() -> bool {
     // Glance's own, and the phone remote's (the phones paired and how the lights are lit, as kept and as it was being kept anew; and its log).
-    let remote = std::env::var_os("APPDATA").map(|roaming| std::path::PathBuf::from(roaming).join("dev.weiyi.glance.remote"));
+    let remote = std::env::var_os("APPDATA").map(|roaming| where_it_is(Path::new(&roaming)).join("dev.weiyi.glance.remote"));
     // (The reports sent, and the pictures kept of them, first: their folder is in its own.)
     let reports = remove_all_kept(&crate::settings::config_dir().join(crate::reports::PICTURES));
     let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE, crate::reports::FILE]);
@@ -1668,6 +1679,32 @@ fn mark_pawnio_ours() {
 
 #[cfg(test)]
 mod tests {
+    /// Settings kept under application data reached through a junction (a profile moved to another drive by one) are
+    /// kept and read again from where the folder really is, while a link in the folder Glance keeps them in is still
+    /// never followed.
+    #[test]
+    fn keeps_what_is_under_a_folder_reached_through_a_junction() {
+        let root = crate::settings::local_dir().join("moved-profile");
+        let _ = std::fs::remove_dir_all(&root);
+        let (moved, profile) = (root.join("moved"), root.join("profile"));
+        std::fs::create_dir_all(&moved).unwrap();
+        let junction = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&profile).arg(&moved).output().unwrap();
+        assert!(junction.status.success(), "{junction:?}");
+        let own = super::where_it_is(&profile).join("dev.weiyi.glance");
+        let kept = super::ensure_folder(&own).and_then(|()| super::write_in_place(&own, "settings.json", b"{}"));
+        let read = super::read_in_place(&own, "settings.json", 16);
+        // A link in Glance's own folder: refused, as before.
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let inner = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(own.join("linked")).arg(&elsewhere).output().unwrap();
+        let through = super::write_in_place(&own.join("linked"), "settings.json", b"{}");
+        let landed = elsewhere.join("settings.json").exists();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(kept.is_ok(), "{kept:?}");
+        assert_eq!(read.as_deref(), Some("{}"));
+        assert!(inner.status.success() && through.is_err() && !landed, "written through a link in its own folder");
+    }
+
     /// A folder taken out whole as Glance is uninstalled (the station's): its files, the folders in it and theirs, and
     /// a link in it to a folder elsewhere taken as the link, what it leads to left as it is.
     #[test]
