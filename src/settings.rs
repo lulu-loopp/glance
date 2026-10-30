@@ -223,9 +223,15 @@ pub struct Places {
 }
 
 impl Default for Places {
-    /// The readings at the right edge of every screen.
+    /// Every component on an edge of every screen, that each is found: the readings at the right edge (first, what a
+    /// panel opened by hand shows: see `by_hand`), the workbench at the left, what plays at the top.
     fn default() -> Self {
-        Places { same: true, every: vec![Hold { edge: Edge::Right, part: Part::Monitor }], screens: Vec::new() }
+        let every = vec![
+            Hold { edge: Edge::Right, part: Part::Monitor },
+            Hold { edge: Edge::Left, part: Part::Workbench },
+            Hold { edge: Edge::Top, part: Part::Music },
+        ];
+        Places { same: true, every, screens: Vec::new() }
     }
 }
 
@@ -987,7 +993,7 @@ fn own_folder_in(known: &windows::core::GUID) -> PathBuf {
     let folder = unsafe { SHGetKnownFolderPath(known, KF_FLAG_DEFAULT, None) }.expect("application data folder");
     let path = PathBuf::from(unsafe { folder.to_string() }.expect("folder path"));
     unsafe { CoTaskMemFree(Some(folder.0 as *const _)) };
-    path.join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
+    crate::elevation::where_it_is(&path).join(if cfg!(debug_assertions) { "dev.weiyi.glance.debug" } else { "dev.weiyi.glance" })
 }
 
 #[cfg(windows)]
@@ -1390,8 +1396,12 @@ mod tests {
     #[test]
     fn each_edge_opens_what_it_holds() {
         use Part::{Monitor, Music, Workbench};
-        // At first, the readings at the right edge of every screen.
-        let mut places = Places::default();
+        // At first, every component on an edge of every screen, and opened by hand, the readings.
+        let first = Places::default();
+        assert_eq!([Edge::Right, Edge::Left, Edge::Top].map(|edge| first.part("a", edge)), [Some(Monitor), Some(Workbench), Some(Music)]);
+        assert_eq!(first.by_hand(), (Edge::Right, Monitor));
+        // The readings alone, at the right edge.
+        let mut places = Places { same: true, every: vec![Hold { edge: Edge::Right, part: Monitor }], screens: Vec::new() };
         assert_eq!(places.part("a", Edge::Right), Some(Monitor));
         assert_eq!(places.lit("b"), Lit::of(&[Edge::Right]));
         // Every screen alike: what one is given, all are.
