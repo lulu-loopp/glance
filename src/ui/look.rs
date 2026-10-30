@@ -3,7 +3,8 @@
 //! sheet beside what it was called up from, drawn in the skin the panel is (its glass frosted over the screen,
 //! Windows 11's acrylic, chart paper), light or dark as the panel is: a picture whole (zoomed by the wheel about the
 //! pointer, moved by a drag, between fitted and its own pixels by a double click), words all of them, a document or
-//! a video as Explorer pictures it, else its icon and what it is. It goes back into its tile as the shortcut or Esc
+//! a video as Explorer's preview pane shows it (live, by its kind's previewer: see `pane`), else as Explorer pictures
+//! it, else its icon and what it is. It goes back into its tile as the shortcut or Esc
 //! is pressed again, or as anything but it and what it was called up from is clicked.
 //!
 //! It never takes the keyboard: what called it up keeps it, and hands it the keys that are its own while it is up
@@ -43,6 +44,8 @@ use super::text::Lang;
 use super::theme::{self, Skin, Theme};
 use super::view::Rect;
 use crate::station::run::Ask;
+
+mod pane;
 
 /// One thing to look at.
 #[derive(Clone, Debug)]
@@ -123,9 +126,10 @@ static SHOWN: AtomicU64 = AtomicU64::new(0);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
-/// Its messages: something asked; something read.
+/// Its messages: something asked, something read, a previewer wanted for what it shows (see `pane`).
 const ASKED: u32 = WM_APP + 1;
 const LOADED: u32 = WM_APP + 2;
+const PANE: u32 = WM_APP + 3;
 /// Its timers: each frame while it moves; a look at the buttons pressed elsewhere, and at what changed.
 const FRAME: usize = 1;
 const FRAME_MS: u32 = 10;
@@ -359,6 +363,9 @@ enum Body {
     Words { text: String, fixed: bool, cut: bool },
     /// A page of a document, a frame of a video, as Explorer pictures it.
     Pictured(Picture),
+    /// What its kind's previewer shows, live, over the body while the sheet rests (see `pane`). Meanwhile its picture,
+    /// as Explorer makes it, where it has one.
+    Live { picture: Option<Picture>, previewer: windows::core::GUID },
     /// Files together: each one's name and where it is.
     Files(Vec<(PathBuf, String, String)>),
     /// What has no picture: its icon (made as it shows), what kind of file it is.
@@ -462,13 +469,6 @@ fn read_file(path: &Path, lang: Lang, scale: f32, key: u64) -> Read {
             return Read { body: Body::Picture(picture, own), about: about(Some(own)) };
         }
     }
-    if matches!(kind, Kind::Page | Kind::Video | Kind::Picture) {
-        // (As large as a page may be shown on this screen, as Explorer pictures it: its first page, a frame.)
-        let side = (1600.0 * scale.max(1.0)).min(2400.0) as u32;
-        if let Some(picture) = crate::station::thumbs::made_now(path, side, crate::station::thumbs::Made::Thumbnail, key) {
-            return Read { body: Body::Pictured(picture), about: about(None) };
-        }
-    }
     if kind == Kind::Unknown {
         if let Some((text, cut)) = words_of(path) {
             // (Plain text in the face words are written in; anything else, code, in a fixed one.)
@@ -476,7 +476,17 @@ fn read_file(path: &Path, lang: Lang, scale: f32, key: u64) -> Read {
             return Read { body: Body::Words { text, fixed: !plain, cut }, about: about(None) };
         }
     }
-    Read { body: Body::Other(Some(path.to_path_buf())), about: about(None) }
+    // (Its kind's previewer, where it has one, and a picture standing for it meanwhile. Else only the picture: as
+    // large as a page may be shown on this screen, as Explorer pictures it, its first page, a frame.)
+    let previewer = if kind == Kind::Picture { None } else { pane::previewer(path) };
+    let side = (1600.0 * scale.max(1.0)).min(2400.0) as u32;
+    let pictured = previewer.is_some() || matches!(kind, Kind::Page | Kind::Video | Kind::Picture);
+    let picture = if pictured { crate::station::thumbs::made_now(path, side, crate::station::thumbs::Made::Thumbnail, key) } else { None };
+    match (previewer, picture) {
+        (Some(previewer), picture) => Read { body: Body::Live { picture, previewer }, about: about(None) },
+        (None, Some(picture)) => Read { body: Body::Pictured(picture), about: about(None) },
+        (None, None) => Read { body: Body::Other(Some(path.to_path_buf())), about: about(None) },
+    }
 }
 
 /// Milliseconds since 1970 of `time`.
@@ -696,6 +706,9 @@ struct Looker {
     pictures: u64,
     /// Where on its window it takes clicks now (px), as its sheet is drawn.
     region: RECT,
+    /// The window a previewer shows in (made as one is first wanted), and whether one is being made for it.
+    pane: Option<pane::Pane>,
+    pane_making: bool,
 }
 
 impl Looker {
@@ -734,6 +747,8 @@ impl Looker {
             held: false,
             pictures: 0,
             region: RECT::default(),
+            pane: None,
+            pane_making: false,
         }
     }
 
@@ -843,6 +858,9 @@ impl Looker {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         crate::widget::own_window_changed(self.monitor);
+        if let Some(pane) = &mut self.pane {
+            pane.unload();
+        }
         self.items.clear();
         self.read.clear();
         self.asked.clear();
@@ -1048,7 +1066,8 @@ impl Looker {
         let item = &self.items[self.at];
         match self.body() {
             Some(Body::Picture(_, own)) => pictured(*own, true),
-            Some(Body::Pictured(picture)) => pictured(picture.size, true),
+            Some(Body::Pictured(picture) | Body::Live { picture: Some(picture), .. }) => pictured(picture.size, true),
+            Some(Body::Live { picture: None, .. }) => page(),
             Some(Body::Words { .. } | Body::Files(_)) => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
             Some(Body::Other(_)) => OTHER,
             // (Not read yet: as large as what its name says it is wants, a picture of the shape its tile's is.)
@@ -1173,6 +1192,92 @@ impl Looker {
             Err(error) if gfx::failed("look", Some(&error)) => {}
             _ => self.drawn = Some(drawn),
         }
+        self.place_pane(shape);
+    }
+
+    // ----- Its previewer -----
+
+    /// The file shown, and its previewer, where one shows it: while the sheet rests.
+    fn live(&self) -> Option<(PathBuf, windows::core::GUID)> {
+        match (self.body()?, &self.items[self.at].shows) {
+            (Body::Live { previewer, .. }, Shows::File(path)) if matches!(self.motion, Motion::Resting) => Some((path.clone(), *previewer)),
+            _ => None,
+        }
+    }
+
+    /// Where the body of the sheet drawn as `shape` is on the screen (physical px).
+    fn body_on_screen(&self, shape: Shape) -> RECT {
+        on_screen(self.body_at(shape.size), shape.at, self.scale, self.monitor)
+    }
+
+    /// Its previewer laid over the body of the sheet drawn as `shape`, where one shows what it shows (asked to be made,
+    /// where it is not yet: see `pane_wanted`). Else hidden.
+    fn place_pane(&mut self, shape: Shape) {
+        let Some((path, _)) = self.live() else {
+            if let Some(pane) = &mut self.pane {
+                pane.hide();
+            }
+            return;
+        };
+        if self.pane.is_none() {
+            self.pane = pane::Pane::new(self.hwnd);
+        }
+        let (at, radius) = (self.body_on_screen(shape), (self.body_radius() * self.scale).round() as i32);
+        let Some(pane) = &mut self.pane else { return };
+        if pane.shows() == Some(path.as_path()) {
+            pane.show_at(at, radius);
+        } else if !self.pane_making {
+            self.pane_making = true;
+            let _ = unsafe { PostMessageW(Some(self.hwnd), PANE, WPARAM(0), LPARAM(0)) };
+        }
+    }
+
+    /// The previewer to be made for what it shows, where one is still wanted (the one it had let go of), the body's size.
+    fn pane_wanted(&mut self) -> Option<pane::Wanted> {
+        let wanted = self.live().filter(|(path, _)| self.pane.as_ref().is_some_and(|pane| pane.shows() != Some(path.as_path())));
+        let Some((path, previewer)) = wanted else {
+            self.pane_making = false;
+            return None;
+        };
+        let at = self.body_on_screen(self.shape(Instant::now()));
+        let ground = if self.dark { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
+        let colours = pane::Colours { ground: over(self.colours(false).sheet, ground), text: Theme::new(self.skin, self.dark).text };
+        let radius = (self.body_radius() * self.scale).round() as i32;
+        let pane = self.pane.as_mut()?;
+        pane.unload();
+        pane.lay(at, radius);
+        Some(pane::Wanted { host: pane.host(), path, previewer, size: (at.right - at.left, at.bottom - at.top), colours })
+    }
+
+    /// The previewer made for the file at `path` (see `pane::load`) shown, where it is still wanted. One that could not
+    /// be made: the thing shown as it is without it (its picture, else what it is).
+    fn pane_made(&mut self, path: PathBuf, made: windows::core::Result<windows::Win32::UI::Shell::IPreviewHandler>) {
+        self.pane_making = false;
+        let wanted = self.live().is_some_and(|(live, _)| live == path);
+        match (made, self.pane.as_mut()) {
+            (Ok(handler), Some(pane)) if wanted => pane.took(&path, handler),
+            (Ok(handler), _) => unsafe {
+                let _ = handler.Unload();
+            },
+            (Err(_), _) => {
+                let shown = matches!(&self.items[self.at].shows, Shows::File(file) if *file == path);
+                if let Some(read) = self.read.get_mut(self.at).and_then(Option::as_mut).filter(|_| shown) {
+                    if let Body::Live { picture, .. } = &read.body {
+                        read.body = match picture {
+                            Some(picture) => Body::Pictured(picture.clone()),
+                            None => Body::Other(Some(path)),
+                        };
+                        // (Sized anew for what it shows now.)
+                        let now = Instant::now();
+                        self.motion = Motion::Moving { was: self.shape(now).at, start: now, fade: false };
+                        unsafe {
+                            let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
+                        }
+                    }
+                }
+            }
+        }
+        self.draw();
     }
 
     /// Its clicks taken only where its sheet is drawn, `at` (DIPs), and the room for its shadow round that: elsewhere
@@ -1315,15 +1420,25 @@ impl Looker {
         frame.text(&about, small, theme.text3, pad, top + 18.0, room, Align::Start);
     }
 
-    /// Its body: what the thing shows.
-    fn paint_body(&mut self, frame: &Frame, theme: &Theme, (w, h): (f32, f32)) {
+    /// Where its body is on a sheet laid out `(w, h)` large (DIPs on the sheet).
+    fn body_at(&self, (w, h): (f32, f32)) -> Rect {
         let (top, pad) = (self.body_top(), self.inset());
-        let body = Rect { x: pad, y: top, w: (w - 2.0 * pad).max(0.0), h: (h - top - pad).max(0.0) };
-        self.hits.push((body, Hit::Body));
-        let radius = match self.skin {
+        Rect { x: pad, y: top, w: (w - 2.0 * pad).max(0.0), h: (h - top - pad).max(0.0) }
+    }
+
+    /// How round the corners of what its body shows are (DIPs): a third as round as its own, chart paper's square.
+    fn body_radius(&self) -> f32 {
+        match self.skin {
             Skin::Paper => 0.0,
             _ => (self.colours(true).radius / 3.0).max(4.0),
-        };
+        }
+    }
+
+    /// Its body: what the thing shows.
+    fn paint_body(&mut self, frame: &Frame, theme: &Theme, (w, h): (f32, f32)) {
+        let body = self.body_at((w, h));
+        self.hits.push((body, Hit::Body));
+        let radius = self.body_radius();
         let Some(read) = self.read.get(self.at).cloned().flatten() else {
             // (Being read: its tile's picture, where it has one, else nothing yet.)
             if let Shows::File(path) = &self.items[self.at].shows {
@@ -1345,6 +1460,13 @@ impl Looker {
                 frame.picture_within(picture, at, within, 1.0);
                 if self.skin == Skin::Paper && self.zoom <= 1.0 {
                     frame.stroke_rounded(Fill::Solid(theme.rule), at.0, at.1, at.2, at.3, 0.0, 1.0);
+                }
+            }
+            // (Its previewer over it at rest: its picture as it moves, and while the previewer is made.)
+            Body::Live { picture, .. } => {
+                if let Some(picture) = picture {
+                    let (x, y, pw, ph) = picture.fitted_in(body.x, body.y, body.w, body.h);
+                    frame.picture(picture, x, y, pw, ph, radius, 1.0);
                 }
             }
             Body::Words { text, fixed, cut } => {
@@ -1609,8 +1731,9 @@ impl Looker {
             let mut at = POINT::default();
             let _ = unsafe { GetCursorPos(&mut at) };
             let under = unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) };
-            // (On it, or on what called it up: theirs to say what is done.)
-            if under != self.hwnd && under != owner {
+            // (On it, its previewer, or what called it up: theirs to say what is done.)
+            let on_pane = self.pane.as_ref().is_some_and(|pane| pane.host() == under);
+            if under != self.hwnd && under != owner && !on_pane {
                 self.held = held;
                 return self.close();
             }
@@ -1644,6 +1767,19 @@ fn between(a: Rect, b: Rect, p: f32) -> Rect {
     Rect { x: mix(a.x, b.x), y: mix(a.y, b.y), w: mix(a.w, b.w), h: mix(a.h, b.h) }
 }
 
+/// `body` (DIPs on a sheet at `sheet`, DIPs on a window covering the screen `monitor`, `scale` px a DIP) on the screen
+/// (physical px).
+fn on_screen(body: Rect, sheet: Rect, scale: f32, monitor: RECT) -> RECT {
+    let (x, y) = (monitor.left as f32 + (sheet.x + body.x) * scale, monitor.top as f32 + (sheet.y + body.y) * scale);
+    RECT { left: x.round() as i32, top: y.round() as i32, right: (x + body.w * scale).round() as i32, bottom: (y + body.h * scale).round() as i32 }
+}
+
+/// `color` laid over the solid `ground`: what shows, solid.
+fn over(color: Color, ground: Color) -> Color {
+    let mix = |a: f32, b: f32| a * color.a + b * (1.0 - color.a);
+    Color { r: mix(color.r, ground.r), g: mix(color.g, ground.g), b: mix(color.b, ground.b), a: 1.0 }
+}
+
 /// How light `color` is (0 black, 1 white).
 fn luminance(color: Color) -> f32 {
     0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
@@ -1674,6 +1810,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         LOADED => {
             with(Looker::loaded);
+            LRESULT(0)
+        }
+        // (Made with its state let go of: the window's thread keeps handling what it is sent while a previewer is made.)
+        PANE => {
+            if let Some(wanted) = with(Looker::pane_wanted).flatten() {
+                let mut made = Some(pane::load(&wanted));
+                if with(|looker| looker.pane_made(wanted.path, made.take().unwrap())).is_none() {
+                    if let Some(Ok(handler)) = made {
+                        let _ = unsafe { handler.Unload() };
+                    }
+                }
+            }
             LRESULT(0)
         }
         // A click on it leaves the keyboard where it was.
@@ -1855,6 +2003,15 @@ mod tests {
         for orientation in 2..=8 {
             assert!(turn_of(orientation).is_some(), "{orientation}");
         }
+    }
+
+    /// A sheet's body on the screen: at the sheet's place on its window, on the screen the window covers, in px.
+    #[test]
+    fn a_body_is_found_on_the_screen() {
+        let monitor = RECT { left: -1920, top: 100, right: 0, bottom: 1180 };
+        let body = Rect { x: 20.0, y: 80.0, w: 400.0, h: 300.0 };
+        let sheet = Rect { x: 100.0, y: 50.0, w: 440.0, h: 400.0 };
+        assert_eq!(on_screen(body, sheet, 1.5, monitor), RECT { left: -1920 + 180, top: 100 + 195, right: -1920 + 780, bottom: 100 + 645 });
     }
 
     /// Between two boxes, and a box made smaller about its middle.
