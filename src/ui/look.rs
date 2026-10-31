@@ -2245,7 +2245,7 @@ impl Looker {
         let (at, length) = (self.shown_at(), self.player.as_ref().and_then(play::Player::length));
         let mid = strip.y + STRIP / 2.0;
         self.centred_text(frame, &clock(at), font, white.alpha(0.86), toggle.x + toggle.w + 4.0, mid, clock_wide);
-        let mute = self.paint_volume(frame, strip.x + strip.w - 10.0, mid, white, white.alpha(0.22));
+        let mute = self.paint_volume(frame, strip.x + strip.w - 10.0, false, mid, white, white.alpha(0.22));
         let length_x = mute - 6.0 - clock_wide;
         self.centred_text(frame, &length.map_or_else(|| "--:--".into(), clock), font, white.alpha(0.86), length_x, mid, clock_wide);
         let start = toggle.x + toggle.w + 4.0 + clock_wide + 6.0;
@@ -2263,13 +2263,15 @@ impl Looker {
         self.hits.push((track, Hit::Track));
     }
 
-    /// The volume's button, its slider opened to its left as the pointer is on them, from `right` (DIPs on the sheet)
-    /// leftwards, centred on `mid`, `ink` on `rail`. Where its button begins (its left edge).
-    fn paint_volume(&mut self, frame: &Frame, right: f32, mid: f32, ink: Color, rail: Color) -> f32 {
+    /// The volume's button, and its slider opened to its right as the pointer is on them: from `from` (DIPs on the
+    /// sheet) rightwards, or (`rightwards` not) ending there, centred on `mid`, `ink` on `rail`. Where its button
+    /// begins (its left edge).
+    fn paint_volume(&mut self, frame: &Frame, from: f32, rightwards: bool, mid: f32, ink: Color, rail: Color) -> f32 {
         let open = self.slider_open_now(Instant::now());
         let wide = SLIDER * open;
-        let slider = Rect { x: right - wide, y: mid - 9.0, w: wide, h: 18.0 };
-        let mute = Rect { x: slider.x - 4.0 * open - 28.0, y: mid - 14.0, w: 28.0, h: 28.0 };
+        let left = if rightwards { from } else { from - wide - 4.0 * open - 28.0 };
+        let mute = Rect { x: left, y: mid - 14.0, w: 28.0, h: 28.0 };
+        let slider = Rect { x: mute.x + 28.0 + 4.0 * open, y: mid - 9.0, w: wide, h: 18.0 };
         let silent = self.muted || self.volume <= 0.0;
         self.round_button(frame, mute, if silent { Icon::Muted } else { Icon::Volume }, ink, Hit::Mute);
         if wide > 1.0 {
@@ -2281,7 +2283,7 @@ impl Looker {
             self.hits.push((slider, Hit::Volume));
         }
         self.slider_at = Some(Rect { x: slider.x, y: slider.y, w: SLIDER, h: slider.h });
-        self.loud_at = Some(Rect { x: mute.x, y: mid - STRIP / 2.0, w: right - mute.x, h: STRIP });
+        self.loud_at = Some(Rect { x: mute.x, y: mid - STRIP / 2.0, w: slider.x + slider.w - mute.x, h: STRIP });
         mute.x
     }
 
@@ -2373,8 +2375,7 @@ impl Looker {
         let ink = Color::hex(if self.dark { 0x14161A } else { 0xFFFFFF }, 1.0);
         frame.icon(if playing { Icon::Pause } else { Icon::Play }, Point { x: button.x + 20.0 + if playing { 0.0 } else { 1.5 }, y: button.y + 20.0 }, 18.0, ink);
         self.hits.push((button, Hit::Toggle));
-        let right = button.x + 40.0 + 10.0 + 28.0 + 4.0 + SLIDER;
-        self.paint_volume(frame, right, button.y + 20.0, theme.text, theme.text.alpha(0.18));
+        self.paint_volume(frame, button.x + 40.0 + 10.0, true, button.y + 20.0, theme.text, theme.text.alpha(0.18));
     }
 
     // ----- The pointer -----
