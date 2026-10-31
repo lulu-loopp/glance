@@ -1,6 +1,6 @@
 [package]
 name = "glance"
-version = "0.4.2"
+version = "0.4.3"
 license = "MIT"
 edition = "2021"
 # `cargo run` runs Glance itself; its sensors (src/bin/glance-sensors.rs) are started by it.
