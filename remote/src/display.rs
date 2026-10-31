@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use windows::core::{w, Result, BOOL, GUID};
 use windows::Win32::Devices::Display::{
     DestroyPhysicalMonitors, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR,
-    GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
+    GetVCPFeatureAndVCPFeatureReply, QueryDisplayConfig, SetVCPFeature, DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL, DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, DISPLAYCONFIG_DEVICE_INFO_HEADER,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, PHYSICAL_MONITOR, QDC_ONLY_ACTIVE_PATHS,
 };
 use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -668,10 +668,29 @@ fn text(wide: &[u16]) -> String {
     String::from_utf16_lossy(&wide[..wide.iter().position(|c| *c == 0).unwrap_or(wide.len())])
 }
 
+/// Whether a display is one a program makes rather than a screen: one whose adapter is a driver alone, with no
+/// device under it (Windows lists such a driver's adapter under ROOT or SWD, not under the bus a card or a dock is on),
+/// or one that says it is virtual. Some say they are wired as a cable is (a virtual display for streaming the desktop
+/// says it is DVI), so its adapter is what tells.
+fn made(adapter: &str, output: DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY) -> bool {
+    let bus = adapter.trim_start_matches(r"\\?\").split('#').next().unwrap_or_default();
+    bus.eq_ignore_ascii_case("ROOT") || bus.eq_ignore_ascii_case("SWD") || output == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL
+}
+
 /// Each display output in use (as `\\.\DISPLAY1`) with the name the
 /// monitor on it gives itself ("DELL S2725QS"): what Windows' own display
 /// settings call it.
-fn names() -> Vec<(String, String, bool)> {
+struct Output {
+    /// As Windows names the output (`\\.\DISPLAY1`).
+    source: String,
+    name: String,
+    /// The PC's own screen (a laptop's): wired inside it.
+    built_in: bool,
+    /// One a program makes, not a screen (see `made`).
+    made: bool,
+}
+
+fn names() -> Vec<Output> {
     let (mut paths, mut modes) = (0u32, 0u32);
     if unsafe { GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut paths, &mut modes) }.is_err() {
         return Vec::new();
@@ -688,11 +707,12 @@ fn names() -> Vec<(String, String, bool)> {
             source.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, size: size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32, adapterId: path.sourceInfo.adapterId, id: path.sourceInfo.id };
             let mut target = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
             target.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME, size: size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32, adapterId: path.targetInfo.adapterId, id: path.targetInfo.id };
-            let got = unsafe { DisplayConfigGetDeviceInfo(&mut source.header) == 0 && DisplayConfigGetDeviceInfo(&mut target.header) == 0 };
-            let name = text(&target.monitorFriendlyDeviceName);
-            // A screen that is part of the PC itself (a laptop's): wired inside it.
+            let mut adapter = DISPLAYCONFIG_ADAPTER_NAME::default();
+            adapter.header = DISPLAYCONFIG_DEVICE_INFO_HEADER { r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME, size: size_of::<DISPLAYCONFIG_ADAPTER_NAME>() as u32, adapterId: path.targetInfo.adapterId, id: 0 };
+            let got = unsafe { DisplayConfigGetDeviceInfo(&mut source.header) == 0 && DisplayConfigGetDeviceInfo(&mut target.header) == 0 && DisplayConfigGetDeviceInfo(&mut adapter.header) == 0 };
             let built_in = [DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED].contains(&path.targetInfo.outputTechnology);
-            got.then(|| (text(&source.viewGdiDeviceName), name, built_in))
+            let made = made(&text(&adapter.adapterDevicePath), path.targetInfo.outputTechnology);
+            got.then(|| Output { source: text(&source.viewGdiDeviceName), name: text(&target.monitorFriendlyDeviceName), built_in, made })
         })
         .collect()
 }
@@ -714,6 +734,8 @@ static KNOWN: Mutex<Option<(Instant, Vec<Monitor>)>> = Mutex::new(None);
 /// Goes through every monitor that is connected, in the order Windows has
 /// them: `with` is handed each one's place in that order, its name, where
 /// it is on the desktop, whether it is the PC's own screen, and its handle for DDC/CI.
+/// A display a program makes (see `made`) is none: it has no light to put out or dim, and one covered in black
+/// shows black to whatever it is made for (a phone streaming it, say).
 fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), bool, HANDLE)) {
     let names = names();
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> BOOL {
@@ -730,9 +752,12 @@ fn each_monitor(mut with: impl FnMut(usize, String, (i32, i32, i32, i32), bool, 
         let at = info.monitorInfo.rcMonitor;
         let place = (at.left, at.top, at.right - at.left, at.bottom - at.top);
         let output = text(&info.szDevice);
-        let known = names.iter().find(|(source, _, _)| *source == output);
-        let named = known.map(|(_, name, _)| name.clone()).filter(|name| !name.is_empty());
-        let built_in = known.is_some_and(|(_, _, built_in)| *built_in);
+        let known = names.iter().find(|known| known.source == output);
+        if known.is_some_and(|known| known.made) {
+            continue;
+        }
+        let named = known.map(|known| known.name.clone()).filter(|name| !name.is_empty());
+        let built_in = known.is_some_and(|known| known.built_in);
         let mut count = 0;
         if unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(screen, &mut count) }.is_err() || count == 0 {
             continue;
@@ -908,6 +933,19 @@ pub fn turn(index: usize, on: bool) -> std::result::Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A display a program makes is told by its adapter, whatever output it says it has; a monitor on a card, a
+    /// dock or a laptop's own is a screen.
+    #[test]
+    fn a_display_a_program_makes_is_no_screen() {
+        use windows::Win32::Devices::Display::{DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI};
+        assert!(made(r"\\?\ROOT#DISPLAY#0000#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI));
+        assert!(made(r"\\?\SWD#RemoteDisplayEnum#1&2#{5b45201d-f2f2-4f3b-85bb-30ff1f953599}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI));
+        assert!(made(r"\\?\USB#VID_17E9&PID_6000#1#{5b45201d}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL));
+        assert!(!made(r"\\?\PCI#VEN_10DE&DEV_2C05&SUBSYS_53151462&REV_A1#4&1&0&0008#{5b45201d}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DVI));
+        assert!(!made(r"\\?\USB#VID_17E9&PID_6000#1#{5b45201d}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_HDMI));
+        assert!(!made(r"\\?\PCI#VEN_1002&DEV_13C0#4&1#{5b45201d}", DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL));
+    }
 
     /// A monitor made up to be told and asked: what it is, what it does with
     /// what it is told and when, and the time that has gone by.

@@ -46,6 +46,16 @@ fn hear_kinds(window: HWND, hear: bool, kinds: &[(u16, u16)]) -> windows::core::
     unsafe { RegisterRawInputDevices(&devices, size_of::<RAWINPUTDEVICE>() as u32) }
 }
 
+/// What a program that works this PC for someone elsewhere (a phone it streams the desktop to, say) marks the input
+/// it makes with, as that input's extra information ("DPKT"): none of it is anyone here touching the PC.
+const FROM_ELSEWHERE: usize = 0x4450_4B54;
+
+/// Whether input came from a program that works the PC for someone elsewhere (see `FROM_ELSEWHERE`): made by a
+/// program (from no device), and so marked.
+fn from_elsewhere(device: HANDLE, extra: usize) -> bool {
+    (device.is_invalid() || device.0.is_null()) && extra == FROM_ELSEWHERE
+}
+
 /// A device as it is named in a log: what kind it is and whose (its bus,
 /// maker and model), without the numbers that tell one unit from another.
 fn device(handle: HANDLE) -> String {
@@ -144,12 +154,14 @@ impl Heard {
         }
         let raw = unsafe { &*(data.as_ptr() as *const RAWINPUT) };
         // A mouse that neither moved nor had a button or its wheel touched said nothing; a key is always a touch.
+        // Neither says anything that a program working the PC for someone elsewhere made.
+        let source = raw.header.hDevice;
         let (kind, said) = match raw.header.dwType {
             kind if kind == RIM_TYPEMOUSE.0 => {
                 let mouse = unsafe { raw.data.mouse };
-                ("a mouse", mouse.lLastX != 0 || mouse.lLastY != 0 || unsafe { mouse.Anonymous.Anonymous.usButtonFlags } != 0)
+                ("a mouse", !from_elsewhere(source, mouse.ulExtraInformation as usize) && (mouse.lLastX != 0 || mouse.lLastY != 0 || unsafe { mouse.Anonymous.Anonymous.usButtonFlags } != 0))
             }
-            kind if kind == RIM_TYPEKEYBOARD.0 => ("a keyboard", true),
+            kind if kind == RIM_TYPEKEYBOARD.0 => ("a keyboard", !from_elsewhere(source, unsafe { raw.data.keyboard }.ExtraInformation as usize)),
             _ => ("another kind of device", says_something(raw.header.hDevice, unsafe { &raw.data.hid })),
         };
         let handle = raw.header.hDevice.0 as isize;
@@ -159,5 +171,19 @@ impl Heard {
         let from = format!("{} ({kind})", self.last.as_ref().map_or("", |(_, name)| name));
         *(if said { &mut self.touched } else { &mut self.nothing }) = Some((from, now));
         Some(said)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only input a program made and marked as from elsewhere is so: a device's never, whatever it carries.
+    #[test]
+    fn input_from_elsewhere_is_a_program_s_and_marked() {
+        let nothing = HANDLE(std::ptr::null_mut());
+        assert!(from_elsewhere(nothing, FROM_ELSEWHERE));
+        assert!(!from_elsewhere(nothing, 0));
+        assert!(!from_elsewhere(HANDLE(0x1234 as *mut _), FROM_ELSEWHERE));
     }
 }
