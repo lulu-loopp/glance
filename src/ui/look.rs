@@ -48,6 +48,7 @@ use super::view::Rect;
 use crate::station::run::Ask;
 
 mod pane;
+mod play;
 
 /// One thing to look at.
 #[derive(Clone, Debug)]
@@ -106,6 +107,8 @@ pub enum Key {
     Open,
     Copy,
     Back,
+    /// Space while it shows what plays (see `plays`): played or paused.
+    Toggle,
 }
 
 /// What is asked of its thread.
@@ -129,6 +132,8 @@ static WINDOW: OnceLock<Option<isize>> = OnceLock::new();
 static OWNER: AtomicIsize = AtomicIsize::new(0);
 static SHOWN: AtomicU64 = AtomicU64::new(0);
 static INSIDE: AtomicBool = AtomicBool::new(false);
+/// Whether what it shows plays (a video, a sound: see `play`).
+static PLAYS: AtomicBool = AtomicBool::new(false);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
@@ -136,6 +141,8 @@ static TAKEN: AtomicBool = AtomicBool::new(false);
 const ASKED: u32 = WM_APP + 1;
 const LOADED: u32 = WM_APP + 2;
 const PANE: u32 = WM_APP + 3;
+/// What plays told something of itself (see `play::Player`): WPARAM what.
+const PLAYED: u32 = WM_APP + 4;
 /// Its timers: each frame while it moves; a look at the buttons pressed elsewhere, and at what changed.
 const FRAME: usize = 1;
 const FRAME_MS: u32 = 10;
@@ -174,6 +181,20 @@ const GROUP_WIDE: f32 = 640.0;
 const GROUP_ROW: f32 = 150.0;
 const GROUP_GAP: f32 = 10.0;
 const GROUP_NAME: f32 = 22.0;
+/// A sound: how wide its sheet is, and how large its cover is (its body as tall); in how many parts its loudness is
+/// read along it.
+const SOUND_WIDE: f32 = 480.0;
+const SOUND_COVER: f32 = 140.0;
+const LOUDNESS_PARTS: usize = 400;
+/// What plays: the strip of its controls over a video (how tall, how far in from the video's edges), how long they
+/// show after the pointer last moves over it, and how long they fade; how wide its volume's slider opens, and how
+/// long it takes to.
+const STRIP: f32 = 38.0;
+const STRIP_IN: f32 = 10.0;
+const CONTROLS_FOR: Duration = Duration::from_millis(2000);
+const CONTROLS_FADE: Duration = Duration::from_millis(250);
+const SLIDER: f32 = 64.0;
+const SLIDER_FOR: Duration = Duration::from_millis(180);
 const OTHER: (f32, f32) = (400.0, 290.0);
 const MOST: (f32, f32) = (0.6, 0.82);
 const GAP: f32 = 24.0;
@@ -242,6 +263,11 @@ pub fn is_up() -> bool {
 /// Whether it shows a file of a group by itself, up: Backspace is its own then (back to the group).
 pub fn inside() -> bool {
     is_up() && INSIDE.load(Ordering::Acquire)
+}
+
+/// Whether it shows what plays, up: Space is its own then (played or paused).
+pub fn plays() -> bool {
+    is_up() && PLAYS.load(Ordering::Acquire)
 }
 
 /// The window it was called up from, while it is up.
@@ -349,6 +375,7 @@ enum Kind {
     Words,
     Page,
     Video,
+    Sound,
     Files,
     Unknown,
 }
@@ -360,6 +387,7 @@ fn kind_of(path: &Path) -> Kind {
         "png" | "jpg" | "jpeg" | "jfif" | "gif" | "bmp" | "dib" | "tif" | "tiff" | "webp" | "heic" | "heif" | "avif" | "ico" | "jxr" | "wdp" | "dds" => Kind::Picture,
         "pdf" | "doc" | "docx" | "rtf" | "odt" | "xls" | "xlsx" | "csv" | "ods" | "ppt" | "pptx" | "odp" | "xps" | "oxps" | "epub" | "vsdx" | "pub" => Kind::Page,
         "mp4" | "m4v" | "mov" | "mkv" | "avi" | "wmv" | "webm" | "flv" | "ts" | "m2ts" | "mts" | "3gp" | "mpg" | "mpeg" => Kind::Video,
+        "mp3" | "m4a" | "aac" | "flac" | "wav" | "wma" | "ogg" | "oga" | "opus" | "aif" | "aiff" | "mka" | "ac3" | "amr" => Kind::Sound,
         _ => Kind::Unknown,
     }
 }
@@ -387,6 +415,10 @@ enum Body {
     Live { picture: Option<Picture>, previewer: windows::core::GUID },
     /// Files together: each one, as its picture shows in rows (see `group_cells`).
     Group(Vec<Member>),
+    /// A video or a `sound`, played (see `play`): the picture standing for it till it plays (a video's frame, a
+    /// sound's cover, as Explorer makes it, where it has one), and a sound's loudness along it (see `play::loudness`),
+    /// once read.
+    Played { picture: Option<Picture>, sound: bool, loudness: Option<Vec<f32>> },
     /// What has no picture: its icon (made as it shows), what kind of file it is.
     Other(Option<PathBuf>),
 }
@@ -452,8 +484,17 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
         }
         let key = asked.number ^ ((asked.at as u64) << 40) ^ asked.member.map_or(0, |member| (member as u64 + 1) << 20);
         let read = read(&asked.shows, asked.lang, asked.scale, key);
-        READ.lock().unwrap().push((asked.number, asked.at, asked.member, read));
+        let sound = matches!(read.body, Body::Played { sound: true, .. });
+        READ.lock().unwrap().push((asked.number, asked.at, asked.member, read.clone()));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+        // (A sound read through for how loud it is along it, after it shows: told again with that.)
+        if let (true, Shows::File(path), Read { body: Body::Played { picture, .. }, about }) = (sound, &asked.shows, read) {
+            if let Some(loudness) = play::loudness(path, LOUDNESS_PARTS) {
+                let read = Read { body: Body::Played { picture, sound: true, loudness: Some(loudness) }, about };
+                READ.lock().unwrap().push((asked.number, asked.at, asked.member, read));
+                let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+            }
+        }
     }
 }
 
@@ -520,11 +561,17 @@ fn read_file(path: &Path, lang: Lang, scale: f32, key: u64) -> Read {
             return Read { body: Body::Words { text, fixed: !plain, cut }, about: about(None) };
         }
     }
-    // (Its kind's previewer, where it has one, and a picture standing for it meanwhile. Else only the picture: as
-    // large as a page may be shown on this screen, as Explorer pictures it, its first page, a frame.)
-    let previewer = if kind == Kind::Picture { None } else { pane::previewer(path) };
+    // (A video or a sound: played, its picture standing for it till it plays, as large as a page may be shown on this
+    // screen.)
     let side = (1600.0 * scale.max(1.0)).min(2400.0) as u32;
-    let pictured = previewer.is_some() || matches!(kind, Kind::Page | Kind::Video | Kind::Picture);
+    if matches!(kind, Kind::Video | Kind::Sound) {
+        let picture = crate::station::thumbs::made_now(path, side, crate::station::thumbs::Made::Thumbnail, key);
+        return Read { body: Body::Played { picture, sound: kind == Kind::Sound, loudness: None }, about: about(None) };
+    }
+    // (Its kind's previewer, where it has one, and a picture standing for it meanwhile. Else only the picture, as
+    // Explorer pictures it: its first page.)
+    let previewer = if kind == Kind::Picture { None } else { pane::previewer(path) };
+    let pictured = previewer.is_some() || matches!(kind, Kind::Page | Kind::Picture);
     let picture = if pictured { crate::station::thumbs::made_now(path, side, crate::station::thumbs::Made::Thumbnail, key) } else { None };
     match (previewer, picture) {
         (Some(previewer), picture) => Read { body: Body::Live { picture, previewer }, about: about(None) },
@@ -764,6 +811,20 @@ enum Hit {
     /// A file of the group shown, by its place; the button back to the group.
     Cell(usize),
     Back,
+    /// What plays: played or paused (its button, a video itself), where it is along it (its track, a sound's
+    /// loudness), how loud (the slider), muted or not; the strip of a video's controls (clicks on it go nowhere).
+    Toggle,
+    Track,
+    Volume,
+    Mute,
+    Strip,
+}
+
+/// What of what plays is held (dragged): its track (where it is taken to, seconds), its volume's slider.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Holding {
+    Track(f64),
+    Volume,
 }
 
 struct Looker {
@@ -823,6 +884,24 @@ struct Looker {
     /// The window a previewer shows in (made as one is first wanted), and whether one is being made for it.
     pane: Option<pane::Pane>,
     pane_making: bool,
+    /// What plays the thing shown (made as it rests: see `tend_player`), and whether it could not be played; how loud
+    /// (0 to 1) and whether muted, as the settings keep it.
+    player: Option<play::Player>,
+    unplayable: bool,
+    volume: f32,
+    muted: bool,
+    /// When the pointer last moved over a video (its controls show till a while after), what of them is held, whether
+    /// the volume's slider is to be open (how open it was, since when it opens or closes), and where its parts are
+    /// (DIPs on the sheet, as last drawn): the strip, the track, the volume's button and slider together, the slider.
+    stirred: Instant,
+    holding: Option<Holding>,
+    slider_open: (bool, f32, Instant),
+    strip_at: Option<Rect>,
+    track_at: Option<Rect>,
+    loud_at: Option<Rect>,
+    slider_at: Option<Rect>,
+    /// How it was last drawn: where what plays was (seconds), how clear its controls, how open its slider.
+    drawn_playing: (f64, f32, f32),
 }
 
 impl Looker {
@@ -870,6 +949,18 @@ impl Looker {
             region: RECT::default(),
             pane: None,
             pane_making: false,
+            player: None,
+            unplayable: false,
+            volume: 0.7,
+            muted: false,
+            stirred: Instant::now(),
+            holding: None,
+            slider_open: (false, 0.0, Instant::now()),
+            strip_at: None,
+            track_at: None,
+            loud_at: None,
+            slider_at: None,
+            drawn_playing: (0.0, 1.0, 0.0),
         }
     }
 
@@ -923,6 +1014,10 @@ impl Looker {
         (self.skin, self.dark, self.frost) = (opening.skin, opening.dark, opening.frost);
         (self.monitor, self.work, self.scale) = (contact.monitor, contact.work, contact.scale);
         (self.owner, self.tell, self.beside) = (opening.owner, opening.tell, opening.beside);
+        {
+            let settings = crate::app().settings.lock().unwrap();
+            (self.volume, self.muted) = (settings.look_volume.clamp(0.0, 1.0), settings.look_muted);
+        }
         self.read = vec![None; opening.items.len()];
         self.measured = vec![None; opening.items.len()];
         self.asked = vec![false; opening.items.len()];
@@ -961,6 +1056,11 @@ impl Looker {
         let to = self.tile_of(self.at).unwrap_or_else(|| shrunk(was, 0.92));
         self.motion = Motion::Closing { was, to, start: now };
         self.dragging = None;
+        // (Still as it goes back: its frame then shrinks with it.)
+        if let Some(player) = &self.player {
+            player.pause();
+        }
+        self.holding = None;
         let _ = unsafe { ReleaseCapture() };
         // (Gone for what called it up at once: its keys its own again, as it goes.)
         OWNER.store(0, Ordering::Release);
@@ -984,6 +1084,7 @@ impl Looker {
         if let Some(pane) = &mut self.pane {
             pane.unload();
         }
+        self.stop_playing();
         self.items.clear();
         self.read.clear();
         self.measured.clear();
@@ -1070,7 +1171,9 @@ impl Looker {
         INSIDE.store(false, Ordering::Release);
     }
 
+    /// What was had of the thing shown let go of, another to be shown: as it was zoomed, scrolled, played.
     fn reset_view(&mut self) {
+        self.stop_playing();
         self.zoom = 1.0;
         self.pan = (0.0, 0.0);
         self.dragging = None;
@@ -1247,7 +1350,7 @@ impl Looker {
     /// as large as it was measured, fitted.
     fn member_fit(&self, member: usize, body: Rect) -> Rect {
         let picture = self.member_read.get(member).and_then(Option::as_ref).and_then(|read| match &read.body {
-            Body::Picture(picture, _) | Body::Pictured(picture) | Body::Live { picture: Some(picture), .. } => Some(picture.size),
+            Body::Picture(picture, _) | Body::Pictured(picture) | Body::Live { picture: Some(picture), .. } | Body::Played { picture: Some(picture), sound: false, .. } => Some(picture.size),
             _ => None,
         });
         let seen = picture.or_else(|| self.members()?.get(member)?.seen).unwrap_or((1, 1));
@@ -1459,6 +1562,12 @@ impl Looker {
         match self.body() {
             Some(Body::Picture(_, own)) => pictured(*own, true),
             // (A video's picture stands for it, made no larger than may be asked: it is shown at its frames' size.)
+            Some(Body::Played { sound: true, .. }) => (SOUND_WIDE.min(most.0), top + SOUND_COVER + pad),
+            // (A video at its frames' size, as measured, else as its picture is.)
+            Some(Body::Played { picture, .. }) => match measured.or(picture.as_ref().map(|picture| picture.size)) {
+                Some(size) => pictured(size, true),
+                None => most,
+            },
             Some(Body::Pictured(picture) | Body::Live { picture: Some(picture), .. }) => pictured(measured.unwrap_or(picture.size), true),
             Some(Body::Live { picture: None, .. }) => measured.map_or_else(page, |size| pictured(size, true)),
             Some(Body::Words { .. }) => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
@@ -1480,6 +1589,7 @@ impl Looker {
                         None => most,
                     },
                     Kind::Page => page(),
+                    Kind::Sound => (SOUND_WIDE.min(most.0), top + SOUND_COVER + pad),
                     Kind::Words | Kind::Files => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
                     Kind::Unknown => OTHER,
                 },
@@ -1533,8 +1643,10 @@ impl Looker {
             return;
         }
         self.motion = Motion::Resting;
-        unsafe {
-            let _ = KillTimer(Some(self.hwnd), FRAME);
+        if !self.plays_on(now) {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), FRAME);
+            }
         }
     }
 
@@ -1581,6 +1693,7 @@ impl Looker {
         if self.showing.is_none() {
             self.showing = Some(super::life::Showing::of(&self.gfx));
         }
+        self.tend_player();
         let shape = self.shape(now);
         self.take_clicks(shape.at);
         let gfx = self.gfx.clone();
@@ -1602,6 +1715,7 @@ impl Looker {
             _ => self.drawn = Some(drawn),
         }
         self.place_pane(shape);
+        self.drawn_playing = (self.shown_at(), self.controls_clear(now), self.slider_open_now(now));
     }
 
     // ----- Its previewer -----
@@ -1980,7 +2094,7 @@ impl Looker {
             }
         };
         let picture = read.and_then(|read| match read.body {
-            Body::Picture(picture, _) | Body::Pictured(picture) | Body::Live { picture: Some(picture), .. } => Some(picture),
+            Body::Picture(picture, _) | Body::Pictured(picture) | Body::Live { picture: Some(picture), .. } | Body::Played { picture: Some(picture), sound: false, .. } => Some(picture),
             _ => None,
         });
         if let Some(picture) = picture.or_else(|| crate::station::thumbs::of(&member_of.path, 512)) {
@@ -2043,6 +2157,8 @@ impl Looker {
             }
             // (Drawn as `paint_group`: a group's files are each read as a file.)
             Body::Group(_) => {}
+            Body::Played { picture, sound: false, .. } => self.paint_video(frame, body, picture.as_ref()),
+            Body::Played { picture, sound: true, loudness } => self.paint_sound(frame, theme, body, picture.as_ref(), loudness.as_deref()),
             Body::Other(path) => {
                 let side = 72.0;
                 let mut y = body.y + (body.h - side - 70.0).max(0.0) / 2.0;
@@ -2070,6 +2186,197 @@ impl Looker {
         }
     }
 
+    /// A video in `body`: its latest frame (else the picture standing for it), fitted, on black; paused, a play button
+    /// over its middle; its controls along its bottom (see `paint_strip`), as clear as they are now.
+    fn paint_video(&mut self, frame: &Frame, body: Rect, picture: Option<&Picture>) {
+        let radius = self.body_radius();
+        frame.fill_rounded(Color::hex(0x000000, 1.0), body.x, body.y, body.w, body.h, radius);
+        match (self.player.as_mut().and_then(|player| player.frame(&frame.dc)), picture) {
+            (Some((bitmap, size)), _) => {
+                let at = fit_in(size, body);
+                frame.bitmap_within(&bitmap, size, (at.x, at.y, at.w, at.h), (at.x, at.y, at.w, at.h, radius), 1.0);
+            }
+            (None, Some(picture)) => {
+                let (x, y, w, h) = picture.fitted_in(body.x, body.y, body.w, body.h);
+                frame.picture(picture, x, y, w, h, radius, 1.0);
+            }
+            (None, None) => {}
+        }
+        if self.unplayable {
+            let said = self.lang.pick("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
+            let font = self.font(12.5, 500.0);
+            let wide = frame.measure(said, font).min(body.w - 24.0);
+            let (x, y) = (body.x + (body.w - wide - 24.0) / 2.0, body.y + body.h - 16.0 - 32.0);
+            frame.fill_rounded(Color::hex(0x101216, 0.72), x, y, wide + 24.0, 32.0, 16.0);
+            let (ascent, descent) = frame.gfx.baseline(font);
+            frame.text(said, font, Color::hex(0xFFFFFF, 1.0), x + 12.0, y + (32.0 - ascent - descent) / 2.0, wide, Align::Start);
+            return;
+        }
+        let Some(playing) = self.player.as_ref().map(play::Player::playing) else { return };
+        self.hits.push((body, Hit::Toggle));
+        let white = Color::hex(0xFFFFFF, 1.0);
+        if !playing {
+            let (cx, cy) = (body.x + body.w / 2.0, body.y + body.h / 2.0);
+            frame.fill_rounded(Color::hex(0x101216, 0.62), cx - 30.0, cy - 30.0, 60.0, 60.0, 30.0);
+            frame.stroke_rounded(Fill::Solid(white.alpha(0.09)), cx - 30.0, cy - 30.0, 60.0, 60.0, 30.0, 1.0);
+            frame.icon(Icon::Play, Point { x: cx + 2.0, y: cy }, 24.0, white);
+        }
+        let clear = self.controls_clear(Instant::now());
+        if clear > 0.0 {
+            faded(frame, clear, || self.paint_strip(frame, body, playing));
+        } else {
+            (self.strip_at, self.track_at, self.loud_at, self.slider_at) = (None, None, None, None);
+        }
+    }
+
+    /// A video's controls, along the bottom of `body`: played or paused, where it is, its track, how long it is, how
+    /// loud.
+    fn paint_strip(&mut self, frame: &Frame, body: Rect, playing: bool) {
+        let strip = Rect { x: body.x + STRIP_IN, y: body.y + body.h - STRIP_IN - STRIP, w: (body.w - 2.0 * STRIP_IN).max(0.0), h: STRIP };
+        let white = Color::hex(0xFFFFFF, 1.0);
+        frame.fill_rounded(Color::hex(0x101216, 0.62), strip.x, strip.y, strip.w, strip.h, STRIP / 2.0);
+        frame.stroke_rounded(Fill::Solid(white.alpha(0.09)), strip.x, strip.y, strip.w, strip.h, STRIP / 2.0, 1.0);
+        self.strip_at = Some(strip);
+        self.hits.push((strip, Hit::Strip));
+        let toggle = Rect { x: strip.x + 5.0, y: strip.y + 5.0, w: 28.0, h: 28.0 };
+        self.round_button(frame, toggle, if playing { Icon::Pause } else { Icon::Play }, white, Hit::Toggle);
+        let font = self.font(12.0, 500.0);
+        let clock_wide = 44.0;
+        let (at, length) = (self.shown_at(), self.player.as_ref().and_then(play::Player::length));
+        let mid = strip.y + STRIP / 2.0;
+        self.centred_text(frame, &clock(at), font, white.alpha(0.86), toggle.x + toggle.w + 4.0, mid, clock_wide);
+        let mute = self.paint_volume(frame, strip.x + strip.w - 10.0, mid, white, white.alpha(0.22));
+        let length_x = mute - 6.0 - clock_wide;
+        self.centred_text(frame, &length.map_or_else(|| "--:--".into(), clock), font, white.alpha(0.86), length_x, mid, clock_wide);
+        let start = toggle.x + toggle.w + 4.0 + clock_wide + 6.0;
+        let track = Rect { x: start, y: mid - 9.0, w: (length_x - 6.0 - start).max(0.0), h: 18.0 };
+        let part = length.map_or(0.0, |length| (at / length).clamp(0.0, 1.0)) as f32;
+        let lit = self.holding.is_some_and(|held| matches!(held, Holding::Track(_))) || self.pointer_on(track);
+        let thick = if lit { 6.0 } else { 4.0 };
+        frame.fill_rounded(white.alpha(0.22), track.x, mid - thick / 2.0, track.w, thick, thick / 2.0);
+        frame.fill_rounded(white, track.x, mid - thick / 2.0, track.w * part, thick, thick / 2.0);
+        if lit {
+            frame.fill_rounded(white, track.x + track.w * part - 6.0, mid - 6.0, 12.0, 12.0, 6.0);
+            self.paint_time_tip(frame, track, strip.y - 6.0, length);
+        }
+        self.track_at = Some(track);
+        self.hits.push((track, Hit::Track));
+    }
+
+    /// The volume's button, its slider opened to its left as the pointer is on them, from `right` (DIPs on the sheet)
+    /// leftwards, centred on `mid`, `ink` on `rail`. Where its button begins (its left edge).
+    fn paint_volume(&mut self, frame: &Frame, right: f32, mid: f32, ink: Color, rail: Color) -> f32 {
+        let open = self.slider_open_now(Instant::now());
+        let wide = SLIDER * open;
+        let slider = Rect { x: right - wide, y: mid - 9.0, w: wide, h: 18.0 };
+        let mute = Rect { x: slider.x - 4.0 * open - 28.0, y: mid - 14.0, w: 28.0, h: 28.0 };
+        let silent = self.muted || self.volume <= 0.0;
+        self.round_button(frame, mute, if silent { Icon::Muted } else { Icon::Volume }, ink, Hit::Mute);
+        if wide > 1.0 {
+            frame.clip(slider.x, slider.y, slider.w, slider.h);
+            let whole = Rect { x: slider.x, y: slider.y, w: SLIDER, h: slider.h };
+            frame.fill_rounded(rail, whole.x, mid - 2.0, SLIDER, 4.0, 2.0);
+            frame.fill_rounded(ink, whole.x, mid - 2.0, SLIDER * if silent { 0.0 } else { self.volume }, 4.0, 2.0);
+            frame.unclip();
+            self.hits.push((slider, Hit::Volume));
+        }
+        self.slider_at = Some(Rect { x: slider.x, y: slider.y, w: SLIDER, h: slider.h });
+        self.loud_at = Some(Rect { x: mute.x, y: mid - STRIP / 2.0, w: right - mute.x, h: STRIP });
+        mute.x
+    }
+
+    /// A round button at `at` with `icon` in `ink`, lit under the pointer: `hit` as it is clicked.
+    fn round_button(&mut self, frame: &Frame, at: Rect, icon: Icon, ink: Color, hit: Hit) {
+        if self.pointer_on(at) {
+            frame.fill_rounded(ink.alpha(0.12), at.x, at.y, at.w, at.h, at.w / 2.0);
+        }
+        frame.icon(icon, Point { x: at.x + at.w / 2.0, y: at.y + at.h / 2.0 }, 16.0, ink);
+        self.hits.push((at, hit));
+    }
+
+    /// `text` in the middle of `wide` from `x`, its line's middle on `mid`.
+    fn centred_text(&self, frame: &Frame, text: &str, font: Font, ink: Color, x: f32, mid: f32, wide: f32) {
+        let (ascent, descent) = frame.gfx.baseline(font);
+        let w = frame.measure(text, font);
+        frame.text(text, font, ink, x + ((wide - w) / 2.0).max(0.0), mid - (ascent + descent) / 2.0, wide, Align::Start);
+    }
+
+    /// The time under the pointer (or where the track is held) along `track`, in a tip whose bottom is at `bottom`.
+    fn paint_time_tip(&self, frame: &Frame, track: Rect, bottom: f32, length: Option<f64>) {
+        let Some(length) = length else { return };
+        let x = match (self.holding, self.pointer) {
+            (Some(Holding::Track(seconds)), _) => track.x + track.w * (seconds / length) as f32,
+            (_, Some((x, _))) => x.clamp(track.x, track.x + track.w),
+            _ => return,
+        };
+        let said = clock(f64::from((x - track.x) / track.w.max(1.0)) * length);
+        let font = self.font(11.5, 500.0);
+        let wide = frame.measure(&said, font) + 14.0;
+        frame.fill_rounded(Color::hex(0x000000, 0.75), x - wide / 2.0, bottom - 20.0, wide, 20.0, 6.0);
+        self.centred_text(frame, &said, font, Color::hex(0xFFFFFF, 1.0), x - wide / 2.0, bottom - 10.0, wide);
+    }
+
+    /// A sound in `body`: its cover (else a note) at its left; to its right, its loudness along it (what is played of it
+    /// in the accent), where it is and how long it is, played or paused, how loud.
+    fn paint_sound(&mut self, frame: &Frame, theme: &Theme, body: Rect, picture: Option<&Picture>, loudness: Option<&[f32]>) {
+        let radius = self.body_radius();
+        let side = body.h.min(body.w / 2.0);
+        match picture {
+            Some(picture) => frame.picture_within(picture, (body.x, body.y, side, side), (body.x, body.y, side, side, radius), 1.0),
+            None => {
+                frame.fill_rounded(theme.track, body.x, body.y, side, side, radius);
+                frame.icon(Icon::Music, Point { x: body.x + side / 2.0, y: body.y + side / 2.0 }, side * 0.32, theme.text3);
+            }
+        }
+        let x = body.x + side + 16.0;
+        let wide = (body.x + body.w - x).max(0.0);
+        let wave = Rect { x, y: body.y + 6.0, w: wide, h: 64.0 };
+        let (at, length) = (self.shown_at(), self.player.as_ref().and_then(play::Player::length));
+        let part = length.map_or(0.0, |length| (at / length).clamp(0.0, 1.0)) as f32;
+        let accent = theme::accent(self.dark);
+        // (Its loudness in bars, each the loudest of its parts; not read yet, a line.)
+        match loudness.filter(|loudness| !loudness.is_empty()) {
+            Some(loudness) => {
+                let bars = ((wide / 4.0).floor() as usize).max(1);
+                let step = wide / bars as f32;
+                for bar in 0..bars {
+                    let (from, to) = (bar * loudness.len() / bars, ((bar + 1) * loudness.len() / bars).max(bar * loudness.len() / bars + 1));
+                    let loud = loudness[from.min(loudness.len() - 1)..to.min(loudness.len())].iter().copied().fold(0f32, f32::max);
+                    let tall = (loud * wave.h).max(2.0);
+                    let ink = if (bar as f32 + 0.5) / bars as f32 <= part { accent } else { theme.text.alpha(0.28) };
+                    frame.fill_rounded(ink, wave.x + bar as f32 * step + (step - 2.0) / 2.0, wave.y + (wave.h - tall) / 2.0, 2.0, tall, 1.0);
+                }
+            }
+            None => {
+                frame.fill_rounded(theme.text.alpha(0.28), wave.x, wave.y + wave.h / 2.0 - 1.0, wave.w, 2.0, 1.0);
+                frame.fill_rounded(accent, wave.x, wave.y + wave.h / 2.0 - 1.0, wave.w * part, 2.0, 1.0);
+            }
+        }
+        let font = self.font(12.0, 500.0);
+        let below = wave.y + wave.h + 6.0;
+        if self.unplayable {
+            let said = self.lang.pick("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
+            frame.text(said, font, theme.text3, x, below, wide, Align::Start);
+            return;
+        }
+        let Some(playing) = self.player.as_ref().map(play::Player::playing) else { return };
+        if self.pointer_on(wave) || matches!(self.holding, Some(Holding::Track(_))) {
+            self.paint_time_tip(frame, wave, wave.y - 2.0, length);
+        }
+        self.track_at = Some(wave);
+        self.hits.push((wave, Hit::Track));
+        frame.text(&clock(at), font, theme.text2, x, below, wide, Align::Start);
+        frame.text(&length.map_or_else(|| "--:--".into(), clock), font, theme.text2, x, below, wide, Align::End);
+        let button = Rect { x, y: body.y + body.h - 40.0, w: 40.0, h: 40.0 };
+        let lit = self.pointer_on(button);
+        frame.fill_rounded(theme.text.alpha(if lit { 1.0 } else { 0.9 }), button.x, button.y, 40.0, 40.0, 20.0);
+        let ink = Color::hex(if self.dark { 0x14161A } else { 0xFFFFFF }, 1.0);
+        frame.icon(if playing { Icon::Pause } else { Icon::Play }, Point { x: button.x + 20.0 + if playing { 0.0 } else { 1.5 }, y: button.y + 20.0 }, 18.0, ink);
+        self.hits.push((button, Hit::Toggle));
+        let right = button.x + 40.0 + 10.0 + 28.0 + 4.0 + SLIDER;
+        self.paint_volume(frame, right, button.y + 20.0, theme.text, theme.text.alpha(0.18));
+    }
+
     // ----- The pointer -----
 
     /// The pointer on the window (px in it) on the sheet (DIPs), as it rests there.
@@ -2094,6 +2401,7 @@ impl Looker {
     fn moved(&mut self, at: (i32, i32)) {
         let on = self.on_sheet(at);
         self.pointer = Some(on);
+        self.moved_over_player(on);
         if let Some((from, pan)) = self.dragging {
             self.pan = (pan.0 + on.0 - from.0, pan.1 + on.1 - from.1);
             self.keep_in_view();
@@ -2104,6 +2412,14 @@ impl Looker {
     fn press(&mut self, at: (i32, i32)) {
         let on = self.on_sheet(at);
         self.pressed = self.hit_at(on);
+        match self.pressed {
+            Some(Hit::Track) => self.track_to(on.0),
+            Some(Hit::Volume) => {
+                self.holding = Some(Holding::Volume);
+                self.volume_to(on.0);
+            }
+            _ => {}
+        }
         if self.pressed == Some(Hit::Body) && self.pictured() && self.zoom > 1.0 {
             self.dragging = Some((on, self.pan));
         }
@@ -2118,11 +2434,29 @@ impl Looker {
         let pressed = self.pressed.take();
         self.dragging = None;
         let _ = unsafe { ReleaseCapture() };
+        match self.holding.take() {
+            Some(Holding::Track(seconds)) => {
+                if let Some(player) = &self.player {
+                    player.seek(seconds);
+                }
+            }
+            Some(Holding::Volume) => self.keep_volume(),
+            None => {}
+        }
         match pressed.filter(|pressed| self.hit_at(on) == Some(*pressed)) {
             Some(Hit::Open) => self.key(Key::Open),
             Some(Hit::Copy) => self.key(Key::Copy),
             Some(Hit::Cell(member)) => self.enter(member),
             Some(Hit::Back) => self.leave(),
+            Some(Hit::Toggle) => self.key(Key::Toggle),
+            Some(Hit::Mute) => {
+                self.muted = !self.muted;
+                if let Some(player) = &self.player {
+                    player.set_volume(self.loudness());
+                }
+                self.keep_volume();
+                self.draw();
+            }
             _ => self.draw(),
         }
     }
@@ -2198,6 +2532,226 @@ impl Looker {
         self.draw();
     }
 
+    // ----- What plays -----
+
+    /// How loud what plays is played: as set (heard as louder the more it is set, as a player's slider is), or not at
+    /// all, muted.
+    fn loudness(&self) -> f32 {
+        if self.muted { 0.0 } else { self.volume * self.volume }
+    }
+
+    /// What plays the thing shown made, where it is a video or a sound, the sheet rests, and none is (it begins
+    /// playing as it is made). One that cannot be made: the thing shown as its picture, and said so.
+    fn tend_player(&mut self) {
+        if self.player.is_some() || self.unplayable || !matches!(self.motion, Motion::Resting) || !matches!(self.body(), Some(Body::Played { .. })) {
+            return;
+        }
+        let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
+        let made = self.gfx.d3d().and_then(|d3d| play::Player::new(&path, &d3d, self.loudness(), self.hwnd, PLAYED));
+        match made {
+            Ok(player) => {
+                player.play();
+                self.player = Some(player);
+                self.stirred = Instant::now();
+                PLAYS.store(true, Ordering::Release);
+                crate::app().controller.wake();
+                self.keep_drawing();
+            }
+            Err(error) => {
+                crate::journal::note(format!("look: {} could not be played ({error})", path.display()));
+                self.unplayable = true;
+            }
+        }
+    }
+
+    /// What played the thing shown let go of (another to be shown, or it gone).
+    fn stop_playing(&mut self) {
+        let played = self.player.take().is_some();
+        self.unplayable = false;
+        self.holding = None;
+        (self.strip_at, self.track_at, self.loud_at, self.slider_at) = (None, None, None, None);
+        if played {
+            PLAYS.store(false, Ordering::Release);
+            crate::app().controller.wake();
+        }
+    }
+
+    /// What plays told something of itself (`event`, as its engine says it): drawn as it is now. One that failed: the
+    /// thing shown as its picture, and said so.
+    fn played(&mut self, event: usize) {
+        if self.player.is_none() {
+            return;
+        }
+        if play::failed_event(event) {
+            if let Some(path) = self.shown_path() {
+                crate::journal::note(format!("look: {} could not be played", path.display()));
+            }
+            self.stop_playing();
+            self.unplayable = true;
+        } else if self.player.as_ref().is_some_and(play::Player::playing) {
+            self.keep_drawing();
+        }
+        self.draw();
+    }
+
+    /// Played, or paused; at its end, played again from its beginning. The pointer stirred: a video's controls show.
+    fn toggle(&mut self) {
+        let Some(player) = self.player.as_ref().filter(|_| !matches!(self.motion, Motion::Closing { .. })) else { return };
+        if player.playing() {
+            player.pause();
+        } else {
+            if player.ended() {
+                player.seek(0.0);
+            }
+            player.play();
+        }
+        self.stirred = Instant::now();
+        self.keep_drawing();
+        self.draw();
+    }
+
+    /// Its frame timer running: what plays drawn as it goes (see `frame_due`).
+    fn keep_drawing(&self) {
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
+        }
+    }
+
+    /// Whether it is to be drawn on as time goes, at rest: what plays plays, or is dragged along, or its controls fade,
+    /// or its slider opens or closes.
+    fn plays_on(&self, now: Instant) -> bool {
+        let clear = self.controls_clear(now);
+        self.player.as_ref().is_some_and(play::Player::playing) || self.holding.is_some() || (clear > 0.0 && clear < 1.0) || self.slider_moving(now)
+    }
+
+    /// A frame's time: it drawn where it moves; at rest, where what plays has a new frame, or has gone on far enough to
+    /// show (its clock, its track by a pixel), or its controls or slider change. Its timer stopped once nothing does.
+    fn frame_due(&mut self) {
+        if !self.up() {
+            return;
+        }
+        if !matches!(self.motion, Motion::Resting) {
+            return self.draw();
+        }
+        let now = Instant::now();
+        let fresh = match (self.player.as_mut(), self.gfx.d3d()) {
+            (Some(player), Ok(d3d)) => player.advance(&d3d),
+            _ => false,
+        };
+        let (at, (drawn_at, drawn_clear, drawn_open)) = (self.shown_at(), self.drawn_playing);
+        let length = self.player.as_ref().and_then(play::Player::length).unwrap_or(0.0);
+        let gone_on = at.floor() != drawn_at.floor() || (length > 0.0 && (at - drawn_at).abs() / length * 800.0 >= 1.0);
+        if fresh || gone_on || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
+            self.draw();
+        }
+        if self.hides_pointer() {
+            unsafe { SetCursor(None) };
+        }
+        if !self.plays_on(now) {
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), FRAME);
+            }
+        }
+    }
+
+    /// Where what plays is (seconds): where its track is dragged to, while it is.
+    fn shown_at(&self) -> f64 {
+        match self.holding {
+            Some(Holding::Track(seconds)) => seconds,
+            _ => self.player.as_ref().map_or(0.0, play::Player::at),
+        }
+    }
+
+    /// How clear a video's controls are at `now`: whole while it is paused, held, or the pointer is on them or moved
+    /// over it a moment ago (`CONTROLS_FOR`); fading after.
+    fn controls_clear(&self, now: Instant) -> f32 {
+        let Some(player) = &self.player else { return 1.0 };
+        if !player.playing() || self.holding.is_some() || self.strip_at.is_some_and(|strip| self.pointer_on(strip)) {
+            return 1.0;
+        }
+        match now.checked_duration_since(self.stirred + CONTROLS_FOR) {
+            None => 1.0,
+            Some(past) => (1.0 - past.as_secs_f32() / CONTROLS_FADE.as_secs_f32()).max(0.0),
+        }
+    }
+
+    /// How open the volume's slider is at `now` (0 shut, 1 open), and whether it is still opening or shutting.
+    fn slider_open_now(&self, now: Instant) -> f32 {
+        let (open, from, start) = self.slider_open;
+        let p = MOVE_EASE.at((now.duration_since(start).as_secs_f32() / SLIDER_FOR.as_secs_f32()).clamp(0.0, 1.0));
+        from + (f32::from(u8::from(open)) - from) * p
+    }
+
+    fn slider_moving(&self, now: Instant) -> bool {
+        now.duration_since(self.slider_open.2) < SLIDER_FOR
+    }
+
+    /// Whether the pointer is hidden: over a video playing with its controls gone, the pointer on its window.
+    fn hides_pointer(&self) -> bool {
+        let video = self.player.as_ref().is_some_and(|player| player.playing() && player.video_size().is_some());
+        if !video || self.controls_clear(Instant::now()) > 0.0 || !matches!(self.motion, Motion::Resting) {
+            return false;
+        }
+        let body = self.body_at(self.shape(Instant::now()).size);
+        let mut at = POINT::default();
+        let _ = unsafe { GetCursorPos(&mut at) };
+        let over = unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) } == self.hwnd;
+        over && self.pointer_on(body)
+    }
+
+    /// The pointer moved to `on` (DIPs on the sheet): over a video, its controls shown; where its track or slider is
+    /// held, taken along; over the volume, its slider opened (and shut as it leaves).
+    fn moved_over_player(&mut self, on: (f32, f32)) {
+        if self.player.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        let body = self.body_at(self.shape(now).size);
+        if self.pointer_on(body) {
+            self.stirred = now;
+        }
+        match self.holding {
+            Some(Holding::Track(_)) => self.track_to(on.0),
+            Some(Holding::Volume) => self.volume_to(on.0),
+            None => {}
+        }
+        let open = self.holding == Some(Holding::Volume) || self.loud_at.is_some_and(|loud| self.pointer_on(loud));
+        if open != self.slider_open.0 {
+            self.slider_open = (open, self.slider_open_now(now), now);
+        }
+        self.keep_drawing();
+    }
+
+    /// What plays taken to where `x` (DIPs on the sheet) is along its track, and held there.
+    fn track_to(&mut self, x: f32) {
+        let (Some(track), Some(player)) = (self.track_at, &self.player) else { return };
+        let Some(length) = player.length() else { return };
+        let seconds = f64::from(((x - track.x) / track.w.max(1.0)).clamp(0.0, 1.0)) * length;
+        player.seek(seconds);
+        self.holding = Some(Holding::Track(seconds));
+        self.keep_drawing();
+    }
+
+    /// As loud as `x` (DIPs on the sheet) is along the volume's slider, heard so at once.
+    fn volume_to(&mut self, x: f32) {
+        let Some(slider) = self.slider_at else { return };
+        self.volume = ((x - slider.x) / SLIDER).clamp(0.0, 1.0);
+        self.muted = false;
+        if let Some(player) = &self.player {
+            player.set_volume(self.loudness());
+        }
+        self.keep_drawing();
+    }
+
+    /// How loud it plays kept in the settings, for every look after.
+    fn keep_volume(&self) {
+        let (volume, muted) = (self.volume, self.muted);
+        crate::app().change(move |settings| {
+            settings.look_volume = volume;
+            settings.look_muted = muted;
+        });
+    }
+
     // ----- The keys -----
 
     fn key(&mut self, key: Key) {
@@ -2207,6 +2761,7 @@ impl Looker {
         let group = self.members().is_some();
         match key {
             Key::Close => self.close(),
+            Key::Toggle => self.toggle(),
             // (A file of the group by itself: the others of it by the arrows; among them: the one picked.)
             Key::Left | Key::Right if self.inside.is_some() => self.step(key == Key::Right),
             Key::Up | Key::Down if self.inside.is_some() => {}
@@ -2313,6 +2868,22 @@ fn buttons_held() -> bool {
     [VK_LBUTTON, VK_RBUTTON, VK_MBUTTON].iter().any(|button| unsafe { GetAsyncKeyState(button.0 as i32) } as u16 & 0x8000 != 0)
 }
 
+/// A box of the shape `size` (px across, down) as large as fits in `room`, in its middle.
+fn fit_in(size: (u32, u32), room: Rect) -> Rect {
+    let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let k = (room.w / w).min(room.h / h);
+    Rect { x: room.x + (room.w - w * k) / 2.0, y: room.y + (room.h - h * k) / 2.0, w: w * k, h: h * k }
+}
+
+/// `seconds` as a clock shows them: minutes and seconds (hours too, an hour or more).
+fn clock(seconds: f64) -> String {
+    let whole = seconds.max(0.0).floor() as u64;
+    match whole / 3600 {
+        0 => format!("{}:{:02}", whole / 60, whole % 60),
+        hours => format!("{hours}:{:02}:{:02}", whole / 60 % 60, whole % 60),
+    }
+}
+
 /// `rect` made `k` as large about its middle.
 fn shrunk(rect: Rect, k: f32) -> Rect {
     Rect { x: rect.x + rect.w * (1.0 - k) / 2.0, y: rect.y + rect.h * (1.0 - k) / 2.0, w: rect.w * k, h: rect.h * k }
@@ -2401,6 +2972,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         // (Made with its state let go of: the window's thread keeps handling what it is sent while a previewer is made.)
+        PLAYED => {
+            with(|looker| looker.played(wparam.0));
+            LRESULT(0)
+        }
         PANE => {
             if let Some(wanted) = with(Looker::pane_wanted).flatten() {
                 let mut made = Some(pane::load(&wanted));
@@ -2423,8 +2998,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
-            let on_button = with(|looker| looker.pointer.and_then(|on| looker.hit_at(on)).is_some_and(|hit| matches!(hit, Hit::Open | Hit::Copy | Hit::Cell(_) | Hit::Back))).unwrap_or(false);
-            unsafe { SetCursor(LoadCursorW(None, if on_button { IDC_HAND } else { IDC_ARROW }).ok()) };
+            let (on_button, hidden) = with(|looker| {
+                let on_button = looker.pointer.and_then(|on| looker.hit_at(on)).is_some_and(|hit| matches!(hit, Hit::Open | Hit::Copy | Hit::Cell(_) | Hit::Back | Hit::Track | Hit::Volume | Hit::Mute));
+                (on_button, looker.hides_pointer())
+            })
+            .unwrap_or((false, false));
+            // (Over a video playing with its controls gone: none, as a player shows none.)
+            unsafe { SetCursor(if hidden { None } else { LoadCursorW(None, if on_button { IDC_HAND } else { IDC_ARROW }).ok() }) };
             LRESULT(1)
         }
         WM_MOUSEMOVE => {
@@ -2447,6 +3027,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(|looker| {
                 looker.dragging = None;
                 looker.pressed = None;
+                looker.holding = None;
             });
             LRESULT(0)
         }
@@ -2459,7 +3040,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_TIMER => {
             match wparam.0 {
-                FRAME => with(Looker::draw),
+                FRAME => with(Looker::frame_due),
                 _ => with(Looker::watch),
             };
             LRESULT(0)
@@ -2579,6 +3160,7 @@ mod tests {
         assert_eq!(kind_of(Path::new(r"C:\a\Shot.PNG")), Kind::Picture);
         assert_eq!(kind_of(Path::new(r"C:\a\Report.pdf")), Kind::Page);
         assert_eq!(kind_of(Path::new(r"C:\a\clip.mp4")), Kind::Video);
+        assert_eq!(kind_of(Path::new(r"C:\a\song.FLAC")), Kind::Sound);
         assert_eq!(kind_of(Path::new(r"C:\a\volume.rs")), Kind::Unknown);
         assert_eq!(kind_of(Path::new(r"C:\a\LICENSE")), Kind::Unknown);
     }
@@ -2695,6 +3277,15 @@ mod tests {
         // (One wider than the body: a row of its own, as wide.)
         let (cells, _) = group_cells(&[5.0, 1.0], 600.0);
         assert!((cells[0].w - 600.0).abs() < 1e-3 && cells[1].y > cells[0].y);
+    }
+
+    /// Times are told as a clock shows them.
+    #[test]
+    fn times_are_told_as_a_clock_shows_them() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(62.9), "1:02");
+        assert_eq!(clock(3725.0), "1:02:05");
+        assert_eq!(clock(-3.0), "0:00");
     }
 
     #[test]

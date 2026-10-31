@@ -1301,32 +1301,8 @@ impl Canvas for Frame<'_> {
     }
 
     fn picture_within(&self, picture: &super::canvas::Picture, at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
-        let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) else { return };
-        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four. So the box it is within.)
-        let (x, y, w, h) = self.on_pixels(at.0, at.1, at.2, at.3);
-        let (wx, wy, ww, wh) = self.on_pixels(within.0, within.1, within.2, within.3);
-        // (As large as covers the box, its middle on the box's.)
-        let (pw, ph) = (picture.size.0.max(1) as f32, picture.size.1.max(1) as f32);
-        let scale = (w / pw).max(h / ph);
-        let (from_x, from_y) = (x - (pw * scale - w) / 2.0, y - (ph * scale - h) / 2.0);
-        unsafe {
-            let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
-                extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR,
-            };
-            let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(from_x, from_y) };
-            let Ok(brush) = self.dc.CreateBitmapBrush(&bitmap, Some(&properties), Some(&placed)) else { return };
-            let radius = within.4.max(0.0).min(ww.min(wh) / 2.0);
-            // (Within its own box too, where the box it is within is larger: the brush goes on past its edges.)
-            let own = (x, y, w, h) != (wx, wy, ww, wh);
-            if own {
-                self.dc.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
-            }
-            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(wx, wy, ww, wh), radiusX: radius, radiusY: radius }, &brush);
-            if own {
-                self.dc.PopAxisAlignedClip();
-            }
+        if let Some(bitmap) = self.gfx.picture_bitmap(&self.dc, picture) {
+            self.bitmap_within(&bitmap, picture.size, at, within, opacity);
         }
     }
 
@@ -1403,6 +1379,38 @@ impl Canvas for Frame<'_> {
 }
 
 impl Frame<'_> {
+    /// `bitmap` (`size` px) drawn as a picture is (see `Canvas::picture_within`): covering the box `at`, its middle on
+    /// the box's, within the box `within` (its corners that round), `opacity` clear.
+    pub fn bitmap_within(&self, bitmap: &ID2D1Bitmap1, size: (u32, u32), at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {
+        // (Its box on whole pixels, as a rectangle's: its edges sharp, all four. So the box it is within.)
+        let (x, y, w, h) = self.on_pixels(at.0, at.1, at.2, at.3);
+        let (wx, wy, ww, wh) = self.on_pixels(within.0, within.1, within.2, within.3);
+        // (As large as covers the box, its middle on the box's.)
+        let (pw, ph) = (size.0.max(1) as f32, size.1.max(1) as f32);
+        let scale = (w / pw).max(h / ph);
+        let (from_x, from_y) = (x - (pw * scale - w) / 2.0, y - (ph * scale - h) / 2.0);
+        unsafe {
+            let properties = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                extendModeX: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: windows::Win32::Graphics::Direct2D::D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR,
+            };
+            let placed = windows::Win32::Graphics::Direct2D::D2D1_BRUSH_PROPERTIES { opacity, transform: Matrix3x2::scale(scale, scale) * Matrix3x2::translation(from_x, from_y) };
+            let Ok(brush) = self.dc.CreateBitmapBrush(bitmap, Some(&properties), Some(&placed)) else { return };
+            let radius = within.4.max(0.0).min(ww.min(wh) / 2.0);
+            // (Within its own box too, where the box it is within is larger: the brush goes on past its edges.)
+            let own = (x, y, w, h) != (wx, wy, ww, wh);
+            if own {
+                self.dc.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
+            }
+            self.dc.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: rect(wx, wy, ww, wh), radiusX: radius, radiusY: radius }, &brush);
+            if own {
+                self.dc.PopAxisAlignedClip();
+            }
+        }
+    }
+
+
     /// See `Canvas::frosted`. What `below` draws is recorded through the frame's transform (on the pixels it would be
     /// drawn on), blurred and deepened, and drawn back untransformed inside the rectangle.
     #[allow(clippy::too_many_arguments)]

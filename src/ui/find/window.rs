@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Gdi::{ValidateRect, LOGFONTW};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
     VK_LWIN, VK_MENU, VK_RWIN, VK_TAB, VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -1203,6 +1203,7 @@ impl Finder {
                 VK_DOWN | VK_RIGHT => return self.look_step(true),
                 VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN | VK_RETURN => {}
                 VK_C if ctrl => {}
+                VK_SPACE if look::plays() => return look::key(look::Key::Toggle),
                 _ => look::close(),
             }
         }

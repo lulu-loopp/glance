@@ -152,6 +152,8 @@ const LOOK_KEYS: [(i32, crate::ui::look::Key, bool, u16); 6] = [
 ];
 /// Backspace, while a look up from here shows a file of a group by itself: back to the group (see `ui::look::inside`).
 const LOOK_BACK_HOTKEY: i32 = 10;
+/// Space, while a look up from here shows what plays: played or paused (see `ui::look::plays`).
+const LOOK_PLAY_HOTKEY: i32 = 11;
 
 struct Config {
     /// Which edges of which screens open the panel, to a push (and how hard)
@@ -584,6 +586,7 @@ impl Controller {
         let mut preview: Option<crate::settings::Shortcut> = None;
         let mut look_keys = false;
         let mut look_back = false;
+        let mut look_play = false;
         let mut look_shown: Option<(isize, u64)> = None;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
@@ -954,6 +957,7 @@ impl Controller {
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_BACK_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Back),
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_PLAY_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Toggle),
                 // Esc: the music full screen left, over all else (and nothing more); a thing kept at hand dragged put
                 // back where it was (and nothing more); else the panels that go, gone.
                 // (A look up from here: back into its tile, and nothing more.)
@@ -1544,6 +1548,17 @@ impl Controller {
                         let _ = RegisterHotKey(None, LOOK_BACK_HOTKEY, MOD_NOREPEAT, 0x08);
                     } else {
                         let _ = UnregisterHotKey(None, LOOK_BACK_HOTKEY);
+                    }
+                }
+            }
+            let play = looking && crate::ui::look::plays();
+            if play != look_play {
+                look_play = play;
+                unsafe {
+                    if play {
+                        let _ = RegisterHotKey(None, LOOK_PLAY_HOTKEY, MOD_NOREPEAT, 0x20);
+                    } else {
+                        let _ = UnregisterHotKey(None, LOOK_PLAY_HOTKEY);
                     }
                 }
             }

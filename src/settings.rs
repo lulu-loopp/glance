@@ -726,6 +726,9 @@ pub struct Settings {
     /// The shortcut that previews what is under the pointer on a station, or picked in search (Ctrl+Q unless another
     /// is chosen); none, when it is cleared.
     pub preview_shortcut: Option<Shortcut>,
+    /// How loud a video or a sound looked at plays (0 to 1), and whether it is muted: as it was last set there.
+    pub look_volume: f32,
+    pub look_muted: bool,
     /// Up to 0.1.8, the shortcut's own switch: off, it reads as cleared.
     /// Read once, not written again.
     #[serde(skip_serializing)]
@@ -914,6 +917,8 @@ impl Default for Settings {
             shortcut: Some(Shortcut::default()),
             search_shortcut: Some(Shortcut::search()),
             preview_shortcut: Some(Shortcut::preview()),
+            look_volume: 0.7,
+            look_muted: false,
             hotkey: None,
             over_fullscreen: OverFullscreen::default(),
             heat_alert: false,
