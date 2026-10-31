@@ -2218,13 +2218,14 @@ impl Widgets {
 
     /// The menu a press on a widget's station asked for (see `Released::Menu`), taken: the button pressed, and the page
     /// its station shows.
-    /// The station's page `tab` shown on the widget at `hwnd` (chosen in its menu of them).
+    /// The station's page `tab` shown on the widget at `hwnd` (chosen in its menu of them, or something dragged over
+    /// where it is chosen): the one shown already keeps its filter.
     pub fn show_page(&mut self, hwnd: HWND, tab: view::Tab) {
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
-            if let Some(readings) = widget.content.readings_mut() {
-                readings.tab = tab;
+            if let Some(readings) = widget.content.readings_mut().filter(|readings| readings.tab != tab.again(readings.tab)) {
+                readings.tab = tab.again(readings.tab);
+                widget.next_frame = Instant::now();
             }
-            widget.next_frame = Instant::now();
         }
     }
 
@@ -2484,15 +2485,6 @@ impl Widgets {
     /// The thing on a station pressed on any of them, to be dragged off it (see `Widget::shelf_press`).
     pub fn shelf_pressed(&self) -> Option<view::Hit> {
         self.list.iter().find_map(|widget| widget.shelf_press.map(|(hit, _)| hit))
-    }
-
-    /// The station of the widget `hwnd` shown (something dragged over where its page is chosen).
-    pub fn show_station(&mut self, hwnd: HWND) {
-        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
-        if let Some(readings) = widget.content.readings_mut().filter(|readings| readings.tab != view::Tab::Shelf) {
-            readings.tab = view::Tab::Shelf;
-            widget.next_frame = Instant::now();
-        }
     }
 
     /// Each drawn at its next turn, not after its rest (what it shows has changed).

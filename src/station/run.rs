@@ -139,23 +139,23 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
     held.iter().map(|(of, area, lands)| (HWND(*of as *mut _), *area, *lands)).collect()
 }
 
-/// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where the station's
-/// page is chosen (its tab, while another page is shown), the station: a drag over it shows the station there (see
-/// `SHOW_STATION`), and one let go on it is put on it.
+/// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where a page of the
+/// workbench is chosen (its tab), that page: a drag over it shows the page there (see `SHOW_PAGE`), and one let go
+/// on it goes where the page takes it (the station's, onto the station; the others take none).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
-    Pages,
+    Pages(crate::ui::view::Tab),
 }
 
-/// Posted to a window (the panel's, a widget's) as something dragged comes over where its station's page is chosen:
-/// its station shown.
-pub const SHOW_STATION: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 20;
+/// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
+/// chosen: that page shown (WPARAM: which, see `Tab::number`).
+pub const SHOW_PAGE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 20;
 
 /// What a window catching drops saw (see `catch`; on the station's thread, perhaps as it does something already: so
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does; one
-/// over where the station's page is chosen in `window` shows it there.
+/// over where a page is chosen in `window` shows that page there.
 pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands, window: Option<HWND>) {
     if lands == Lands::Apps {
         // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
@@ -187,8 +187,14 @@ pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Land
         }
         return;
     }
-    if let (Lands::Pages, Dragged::Over(_), Some(window)) = (lands, &dragged, window) {
-        let _ = unsafe { PostMessageW(Some(window), SHOW_STATION, WPARAM(0), LPARAM(0)) };
+    if let Lands::Pages(page) = lands {
+        if let (Dragged::Over(_), Some(window)) = (&dragged, window) {
+            let _ = unsafe { PostMessageW(Some(window), SHOW_PAGE, WPARAM(page.number()), LPARAM(0)) };
+        }
+        // (A page other than the station's takes nothing: only shown.)
+        if page != crate::ui::view::Tab::Shelf {
+            return;
+        }
     }
     match dragged {
         Dragged::Over(at) => {

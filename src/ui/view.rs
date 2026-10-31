@@ -260,13 +260,14 @@ impl Hit {
         self.slider().is_some() || matches!(self, Hit::Note(_))
     }
 
-    /// Where what is dropped on it goes, where something dragged may be dropped on it (where the station's page is
-    /// chosen: the station, shown as it is dragged over).
+    /// Where what is dropped on it goes, where something dragged may be dropped on it (where a page is chosen: that
+    /// page, shown as it is dragged over; the menu of the pages, the station's).
     pub fn lands(self) -> Option<crate::station::run::Lands> {
         match self {
             Hit::Station => Some(crate::station::run::Lands::Station),
             Hit::AppsArea => Some(crate::station::run::Lands::Apps),
-            Hit::Tab(Tab::Shelf) | Hit::StationPages => Some(crate::station::run::Lands::Pages),
+            Hit::Tab(page) => Some(crate::station::run::Lands::Pages(page.page())),
+            Hit::StationPages => Some(crate::station::run::Lands::Pages(Tab::Shelf)),
             _ => None,
         }
     }
@@ -364,6 +365,19 @@ impl Tab {
     /// The page chosen again, with the filter it has while it is the one shown (`now`).
     pub fn again(self, now: Tab) -> Tab {
         if self.page() == now.page() { now } else { self.page() }
+    }
+
+    /// Which page it is, as a number (told in a message: see `station::run::SHOW_PAGE`), and the page a number is.
+    pub fn number(self) -> usize {
+        match self {
+            Tab::Shelf => 0,
+            Tab::Copies(_) => 1,
+            Tab::Recent(_) => 2,
+        }
+    }
+
+    pub fn numbered(number: usize) -> Option<Tab> {
+        [Tab::Shelf, Tab::Copies(Default::default()), Tab::Recent(Default::default())].get(number).copied()
     }
 }
 
@@ -7042,12 +7056,11 @@ seven".into()));
             assert_eq!(wide.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))).count(), 3, "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationPages) && !narrow.iter().any(|hit| matches!(hit.4, Hit::Tab(_))), "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationView), "{skin:?}");
-            // Something dragged over the station's tab, or the menu of its pages, shows the station there (another
-            // page shown): only over that.
-            for hits in [&wide, &narrow] {
-                let pages: Vec<Hit> = hits.iter().map(|hit| hit.4).filter(|hit| hit.lands() == Some(crate::station::run::Lands::Pages)).collect();
-                assert!(matches!(pages[..], [Hit::Tab(Tab::Shelf)] | [Hit::StationPages]), "{skin:?}: {pages:?}");
-            }
+            // Something dragged over a page's tab shows that page there; over the menu of the pages, the station's.
+            use crate::station::run::Lands;
+            let pages = |hits: &[HitBox]| -> Vec<Lands> { hits.iter().filter_map(|hit| hit.4.lands()).filter(|lands| matches!(lands, Lands::Pages(_))).collect() };
+            assert_eq!(pages(&wide), [Lands::Pages(Tab::Shelf), Lands::Pages(Tab::Copies(Default::default())), Lands::Pages(Tab::Recent(Default::default()))], "{skin:?}");
+            assert_eq!(pages(&narrow), [Lands::Pages(Tab::Shelf)], "{skin:?}");
         }
     }
 

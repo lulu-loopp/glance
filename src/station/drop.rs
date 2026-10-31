@@ -34,29 +34,36 @@ pub enum Dragged {
 const NAMELESS_MOST: u64 = 256 << 20;
 
 /// A station window's drop target: tells `told` what happens to a drag over it. One the station's own drags are
-/// dragged over (`own` false: the station's) takes none of them back: one put back where it was came on it twice.
+/// dragged over (`own` false: the station's) takes none of them back: one put back where it was came on it twice. One
+/// that `refuses` takes nothing, and is told all the same as something comes over it.
 #[implement(IDropTarget)]
 pub struct Target {
     told: Box<dyn Fn(Dragged)>,
     own: bool,
+    refuses: bool,
     /// What came over it is something it takes.
     takes: std::cell::Cell<bool>,
 }
 
 impl Target {
     pub fn new(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), own: true, takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: true, refuses: false, takes: std::cell::Cell::new(false) }.into()
     }
 
     /// One that takes nothing dragged off the station (see `Target`).
     pub fn not_own(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), own: false, takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: false, refuses: false, takes: std::cell::Cell::new(false) }.into()
+    }
+
+    /// One that takes nothing, only told what comes over it (see `Target`).
+    pub fn refusing(told: impl Fn(Dragged) + 'static) -> IDropTarget {
+        Target { told: Box::new(told), own: true, refuses: true, takes: std::cell::Cell::new(false) }.into()
     }
 }
 
 impl IDropTarget_Impl for Target_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, at: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let takes = data.as_ref().is_some_and(takes) && (self.own || !super::drag::under_way());
+        let takes = !self.refuses && data.as_ref().is_some_and(takes) && (self.own || !super::drag::under_way());
         self.takes.set(takes);
         self.answer(at, effect);
         Ok(())
@@ -84,12 +91,12 @@ impl IDropTarget_Impl for Target_Impl {
 
 impl Target_Impl {
     /// Answers a drag at `at`: a copy where it is something the station takes and the dragging program lets it be
-    /// copied; else nothing.
+    /// copied; else nothing. (Told it is there where so, or where it refuses all.)
     fn answer(&self, at: &POINTL, effect: *mut DROPEFFECT) {
         let offered = unsafe { *effect };
         let copies = self.takes.get() && offered.0 & DROPEFFECT_COPY.0 != 0;
         unsafe { *effect = if copies { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
-        if copies {
+        if copies || self.refuses {
             (self.told)(Dragged::Over(POINT { x: at.x, y: at.y }));
         }
     }

@@ -227,8 +227,13 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         let told = move |dragged: Dragged| super::run::caught(dragged, edge, lands, over);
-        // (What is kept at hand may be given a file off the station; the station, none of its own again.)
-        let target = if lands == super::run::Lands::Apps { Target::new(told) } else { Target::not_own(told) };
+        // (What is kept at hand may be given a file off the station; the station, none of its own again; a page other
+        // than the station's, nothing, only told it comes.)
+        let target = match lands {
+            Lands::Apps => Target::new(told),
+            Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
+            _ => Target::not_own(told),
+        };
         if RegisterDragDrop(window, &target).is_err() {
             let _ = DestroyWindow(window);
             return None;
