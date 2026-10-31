@@ -17,7 +17,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
 use windows::Win32::UI::Shell::{AssocQueryStringW, IInitializeWithItem, IPreviewHandler, IPreviewHandlerVisuals, IShellItem, SHCreateItemFromParsingName, SHCreateStreamOnFileEx, ASSOCF_INIT_DEFAULTTOSTAR, ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GW_CHILD, GW_HWNDNEXT, SWP_NOZORDER, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
     SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -67,6 +67,7 @@ impl Pane {
     /// Laid at `at` (physical px on the screen), its corners `radius` px round, and shown.
     pub fn show_at(&mut self, at: RECT, radius: i32) {
         self.lay(at, radius);
+        self.cover();
         if !self.up {
             self.up = true;
             unsafe {
@@ -89,6 +90,23 @@ impl Pane {
                     let _ = handler.SetRect(&RECT { left: 0, top: 0, right: w, bottom: h });
                 }
             }
+        }
+    }
+
+    /// What its previewer shows laid over all of it, as the previewer was asked (`SetWindow`, `SetRect`). One run in a
+    /// process of its own that knows only the main screen's scale (Edge's, for PDFs) lays its window where that scale
+    /// would put it: on a screen of another scale, or away from the main one, off it, and nothing shows.
+    fn cover(&self) {
+        let (w, h) = (self.at.right - self.at.left, self.at.bottom - self.at.top);
+        let mut child = unsafe { GetWindow(self.host, GW_CHILD) }.ok();
+        while let Some(window) = child {
+            let mut at = RECT::default();
+            unsafe {
+                if GetWindowRect(window, &mut at).is_ok() && at != self.at {
+                    let _ = SetWindowPos(window, None, 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+                }
+            }
+            child = unsafe { GetWindow(window, GW_HWNDNEXT) }.ok();
         }
     }
 
@@ -254,3 +272,4 @@ mod tests {
         assert_eq!(colorref(Color::hex(0x102030, 1.0)).0, 0x302010);
     }
 }
+
