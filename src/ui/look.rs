@@ -1445,9 +1445,15 @@ impl Looker {
             let k = if own { k.min(1.0) } else { k };
             ((pw * k + 2.0 * pad).max(PICTURE_LEAST), ph * k + top + pad)
         };
+        // (A page as tall as it may be; where that is wider than it may be, as wide as it may be and as tall as a page is
+        // for that width.)
         let page = || {
-            let h = most.1;
-            (((h - top - pad) / PAGE + 2.0 * pad + PAGE_ROOM).min(most.0).max(PICTURE_LEAST), h)
+            let w = (most.1 - top - pad) / PAGE + 2.0 * pad + PAGE_ROOM;
+            if w <= most.0 {
+                (w.max(PICTURE_LEAST), most.1)
+            } else {
+                (most.0, ((most.0 - 2.0 * pad - PAGE_ROOM) * PAGE + top + pad).min(most.1))
+            }
         };
         let measured = self.shown_measured();
         match self.body() {
@@ -2591,6 +2597,25 @@ mod tests {
     /// A picture's or a video's sheet is as large from the moment it is measured as once what it shows is read: a
     /// video's picture made smaller than its frames (as the shell makes it, no larger than asked), or a small picture,
     /// do not make it another size then.
+    /// A page is shown as a page's shape: as tall as it may be, or, on a screen taller than it is wide (where so tall it
+    /// would be wider than it may be), as wide as it may be and no taller than a page that wide.
+    #[test]
+    fn a_page_keeps_a_page_shape() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let item = Item { key: 1, title: "a.pdf".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:.pdf")), from: None, open: None, copy: None, pastes: false };
+        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        (looker.items, looker.read, looker.measured) = (vec![item], vec![None], vec![None]);
+        let (top, pad) = (looker.body_top(), looker.inset());
+        for most in [(1400.0, 900.0), (750.0, 1600.0)] {
+            let (w, h) = looker.wanted(most);
+            assert!(w <= most.0 && h <= most.1, "{most:?}: {w} × {h}");
+            let shape = (h - top - pad) / (w - 2.0 * pad - PAGE_ROOM);
+            assert!((shape - PAGE).abs() < 0.01, "{most:?}: {w} × {h} is a page's shape ({shape})");
+        }
+    }
+
     #[test]
     fn a_sheet_keeps_its_size_as_what_it_shows_is_read() {
         let _device = crate::ui::gfx::held().unwrap();

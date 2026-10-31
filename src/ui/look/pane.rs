@@ -84,8 +84,7 @@ impl Pane {
             let (w, h) = (at.right - at.left, at.bottom - at.top);
             unsafe {
                 let _ = SetWindowPos(self.host, Some(HWND_TOPMOST), at.left, at.top, w, h, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-                // (The region the system's from here on: not to be let go of here.)
-                SetWindowRgn(self.host, Some(CreateRoundRectRgn(0, 0, w + 1, h + 1, 2 * radius, 2 * radius)), true);
+                round(self.host, w, h, radius);
                 if let Some((_, handler)) = &self.shown {
                     let _ = handler.SetRect(&RECT { left: 0, top: 0, right: w, bottom: h });
                 }
@@ -213,6 +212,28 @@ unsafe fn initialize(handler: &IPreviewHandler, path: &Path) -> windows::core::R
         }
     }
     Err(failed)
+}
+
+/// `host` (`w` × `h` px) given corners `radius` px round: drawn smooth by the system where it rounds windows' corners
+/// (Windows 11: its own two radii, round and small, as a look's body has them), else cut by a region.
+unsafe fn round(host: HWND, w: i32, h: i32, radius: i32) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL};
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(host) }.max(96) as f32 / 96.0;
+    let corners = match radius as f32 / dpi {
+        r if r < 2.0 => DWMWCP_DONOTROUND,
+        r if r < 6.0 => DWMWCP_ROUNDSMALL,
+        _ => DWMWCP_ROUND,
+    };
+    unsafe {
+        let set = DwmSetWindowAttribute(host, DWMWA_WINDOW_CORNER_PREFERENCE, std::ptr::from_ref(&corners).cast(), std::mem::size_of_val(&corners) as u32);
+        if set.is_ok() {
+            let none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(host, DWMWA_BORDER_COLOR, std::ptr::from_ref(&none).cast(), std::mem::size_of_val(&none) as u32);
+        } else {
+            // (The region the system's from here on: not to be let go of here.)
+            SetWindowRgn(host, Some(CreateRoundRectRgn(0, 0, w + 1, h + 1, 2 * radius, 2 * radius)), true);
+        }
+    }
 }
 
 fn colorref(color: Color) -> COLORREF {
