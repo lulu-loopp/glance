@@ -150,6 +150,8 @@ const LOOK_KEYS: [(i32, crate::ui::look::Key, bool, u16); 6] = [
     (8, crate::ui::look::Key::Open, false, 0x0D),
     (9, crate::ui::look::Key::Copy, true, 0x43),
 ];
+/// Backspace, while a look up from here shows a file of a group by itself: back to the group (see `ui::look::inside`).
+const LOOK_BACK_HOTKEY: i32 = 10;
 
 struct Config {
     /// Which edges of which screens open the panel, to a push (and how hard)
@@ -581,6 +583,7 @@ impl Controller {
         // look up from here shows, and from what, as that was last drawn.
         let mut preview: Option<crate::settings::Shortcut> = None;
         let mut look_keys = false;
+        let mut look_back = false;
         let mut look_shown: Option<(isize, u64)> = None;
         // A rest on the seam between two screens: since when, and where;
         // and, as on the edge, armed once the pointer has left it.
@@ -950,6 +953,7 @@ impl Controller {
                         crate::ui::look::key(*key);
                     }
                 }
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_BACK_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Back),
                 // Esc: the music full screen left, over all else (and nothing more); a thing kept at hand dragged put
                 // back where it was (and nothing more); else the panels that go, gone.
                 // (A look up from here: back into its tile, and nothing more.)
@@ -1529,6 +1533,17 @@ impl Controller {
                         } else {
                             let _ = UnregisterHotKey(None, id);
                         }
+                    }
+                }
+            }
+            let back = looking && crate::ui::look::inside();
+            if back != look_back {
+                look_back = back;
+                unsafe {
+                    if back {
+                        let _ = RegisterHotKey(None, LOOK_BACK_HOTKEY, MOD_NOREPEAT, 0x08);
+                    } else {
+                        let _ = UnregisterHotKey(None, LOOK_BACK_HOTKEY);
                     }
                 }
             }
