@@ -1001,7 +1001,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Matrix3x2::identity(), on: None, failed: Default::default(), moving: Cell::new(false) });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Cell::new(Matrix3x2::identity()), on: None, failed: Default::default(), moving: Cell::new(false) });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -1112,8 +1112,8 @@ pub struct Frame<'a> {
     pub gfx: &'a Gfx,
     pub dc: ID2D1DeviceContext,
     brush: ID2D1SolidColorBrush,
-    /// Where the surface's region starts (DIPs).
-    base: Matrix3x2,
+    /// Where the surface's region starts (DIPs), and through what it is drawn besides (see `within`).
+    base: Cell<Matrix3x2>,
     /// Drawn apart (see `apart`): the bitmap drawn on, and how much of it (physical pixels).
     on: Option<(ID2D1Bitmap1, (u32, u32))>,
     /// What failed of the frame's drawing as it was drawn (see `fail`): the first.
@@ -1567,7 +1567,7 @@ impl<'a> Frame<'a> {
                 return Err(error);
             }
         };
-        Ok(Frame { gfx, dc, brush, base, on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false) })
+        Ok(Frame { gfx, dc, brush, base: Cell::new(base), on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false) })
     }
 
     /// A frame drawn apart by `paint` (see `apart`) and finished, ready to be put where it shows; failed, if anything
@@ -1824,7 +1824,19 @@ impl<'a> Frame<'a> {
 
     /// Draws from here on through `transform`, from the surface's corner.
     pub fn place(&self, transform: Matrix3x2) {
-        unsafe { self.dc.SetTransform(&(transform * self.base)) };
+        unsafe { self.dc.SetTransform(&(transform * self.base.get())) };
+    }
+
+    /// Draws what `paint` draws through `transform` as well, from the surface's corner: what it places (see `place`)
+    /// placed through `transform` too, as all it draws is.
+    pub fn within(&self, transform: Matrix3x2, paint: impl FnOnce(&Frame)) {
+        let (base, mut was) = (self.base.get(), Matrix3x2::default());
+        unsafe { self.dc.GetTransform(&mut was) };
+        self.base.set(transform * base);
+        unsafe { self.dc.SetTransform(&(transform * base)) };
+        paint(self);
+        self.base.set(base);
+        unsafe { self.dc.SetTransform(&was) };
     }
 
     /// Draws what `paint` draws `scale` times as large about `(x, y)` (DIPs), placed as it is now otherwise.

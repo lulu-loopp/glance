@@ -6,23 +6,23 @@
 //! the dialog again). Each step says so once the user has done it themselves. Then a word that it is done.
 //!
 //! It is the settings window's, drawn on its thread with its desktop and its panels (see `Ui::panel_on_stage`): the
-//! window made for it is hidden but for the step on its page.
+//! window stays up all through it, the dialog over it in its middle (the window covered under it and taking nothing
+//! meanwhile, as Windows 11 has a dialog over a window), the tip beside it.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
-use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
+use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, GetMonitorInfoW, MonitorFromWindow, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_ESCAPE, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsWindowVisible, LoadCursorW, LoadImageW, PostMessageW, RegisterClassExW, SetForegroundWindow, SetWindowPos,
-    ShowWindow, HICON, HTCAPTION, HTCLIENT, IDC_ARROW, IMAGE_ICON, LR_SHARED, MA_NOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-    SW_SHOWNOACTIVATE, WM_CLOSE, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT,
-    WNDCLASSEXW, WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowRect, IsWindowVisible, IsZoomed, LoadCursorW, LoadImageW, PostMessageW, RegisterClassExW, SetForegroundWindow,
+    SetWindowPos, ShowWindow, HICON, HTCAPTION, HTCLIENT, IDC_ARROW, IMAGE_ICON, LR_SHARED, MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE,
+    SW_SHOW, SW_SHOWNOACTIVATE, WM_CLOSE, WM_DPICHANGED, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOVING, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_PAINT, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_SYSMENU,
 };
 
 use super::*;
@@ -30,14 +30,16 @@ use crate::settings::Places;
 use crate::ui::motion::{Easing, LINEAR};
 
 /// The dialog: its width, the room round what is in it, the small desktop's height, its footer, a button's height and
-/// the least width of one, and a shortcut's row.
+/// the least width of one, and a shortcut's row; the room round it in its window for its shadow (and for it to grow
+/// into as it comes and goes: see `Change`).
 const WIDE: f32 = 640.0;
 const PAD: f32 = 24.0;
 const DESK: f32 = 300.0;
-const FOOTER: f32 = 80.0;
+const FOOTER: f32 = 64.0;
 const BUTTON: f32 = 32.0;
 const BUTTON_LEAST: f32 = 96.0;
 const KEY_ROW: f32 = 52.0;
+const ROOM: f32 = 40.0;
 /// The teaching tip: its width, the room inside it, its beak (how far it stands out), the room round it for its shadow,
 /// and how far from the window it stands.
 const TIP_WIDE: f32 = 340.0;
@@ -45,8 +47,9 @@ const TIP_PAD: f32 = 16.0;
 const BEAK: f32 = 10.0;
 const SHADOW: f32 = 24.0;
 const TIP_OFF: f32 = 6.0;
-/// How soon it is drawn again while anything in it plays.
+/// How soon it is drawn again while anything in it plays, and how long it is left without it.
 const FRAME: Duration = Duration::from_millis(15);
+const IDLE: Duration = Duration::from_secs(3600);
 
 const TITLE: Font = Font::new(Family::Segoe, 20.0, 600.0);
 const TIP_TITLE: Font = Font::new(Family::Segoe, 15.0, 600.0);
@@ -58,6 +61,34 @@ const STATE: Font = Font::new(Family::Segoe, 13.0, 400.0);
 const GLIDE: Easing = Easing(0.45, 0.05, 0.3, 1.0);
 const SLIDE_OUT: Easing = Easing(0.2, 0.9, 0.25, 1.04);
 const GROW: Easing = Easing(0.2, 0.9, 0.25, 1.05);
+
+/// How the guide changes from one step to the next (ms), as Windows 11 has its own dialogs come and go: the dialog
+/// coming from a little larger and going a little larger, fading; its content sliding out the way it is left and the
+/// next one in from the other side, the dialog growing or shrinking to it meanwhile; between the dialog and the tip, its
+/// plate carried at once to where the other stands and made it, what it showed fading out on it as it starts and what
+/// the other shows fading in on it after (never both at once); the cover over the window coming and going with the
+/// dialog. Shown by the guide, the window opens first, as Windows has it, and
+/// the dialog comes after.
+const DIALOG_IN: f32 = 260.0;
+const DIALOG_END: f32 = 160.0;
+const CONTENT_OUT: f32 = 120.0;
+const CONTENT_IN: f32 = 300.0;
+const CONTENT_IN_AFTER: f32 = 40.0;
+const GROWS: f32 = 320.0;
+const CARRIED: f32 = 500.0;
+const CARRIED_OUT: f32 = 150.0;
+const COVER_IN: f32 = 200.0;
+const COVER_OUT: f32 = 200.0;
+const WINDOW_LEAD: f32 = 200.0;
+/// How dark the cover over the window is at its darkest (black's opacity), as Windows 11's smoke under a dialog.
+const COVER: f32 = 0.3;
+/// How far the content slides (DIPs).
+const SLIDE: f32 = 28.0;
+/// The curves for what comes (slowing to rest, as Windows 11's), what goes (gathering speed, never so fast at its end
+/// that it leaps out of sight) and what moves.
+const DECELERATE: Easing = Easing(0.1, 0.9, 0.2, 1.0);
+const ACCELERATE: Easing = Easing(0.7, 0.0, 0.84, 0.0);
+const MOVE: Easing = Easing(0.3, 0.0, 0.12, 1.0);
 
 /// The first step's play (ms): the pointer at rest, gliding to the edge, the panel sliding out as it is pushed, the
 /// pointer back where it began, the panel put away as it leaves it.
@@ -154,10 +185,12 @@ struct Popup {
     scale: f32,
     /// Its size (DIPs): the tip's with the room for its shadow round it.
     size: (f32, f32),
+    /// What may be pressed, and the pointer, from `hits_from` in it (DIPs: the dialog's from its plate's corner).
     hits: Vec<(Rect, Hit)>,
+    hits_from: (f32, f32),
     pointer: Option<(f32, f32)>,
     pressed: Option<Hit>,
-    /// The tip: its plate in it (DIPs), and the side its beak is on and how far down that side it is; none where it
+    /// Its plate in it (DIPs), and the tip's beak: the side it is on and how far down that side it is; none where it
     /// stands over the window, pointing at nothing.
     plate: Rect,
     beak: Option<(Edge, f32)>,
@@ -192,6 +225,8 @@ pub(super) struct Guide {
     edge: (Edge, Option<Part>),
     dialog: Option<Popup>,
     tip: Option<Popup>,
+    /// The change of step under way.
+    change: Option<Change>,
     /// The play on the layout page, while it plays.
     drag: Option<Drag>,
     /// The skin's ground under search and under the look, in the small desktop.
@@ -329,6 +364,197 @@ impl Keying {
     }
 }
 
+/// A change of the guide under way: it coming up, it going, or from one step to another, within the dialog, from it to
+/// the window and the tip beside it, or back.
+struct Change {
+    kind: Kind,
+    from: Step,
+    /// When its first frame was drawn (none till it is: its clock starts once it shows, not as it is asked for, so
+    /// that a slow first frame, windows made or a page turned to, does not eat into it).
+    began: Option<Instant>,
+    /// Going back (the content slides the other way).
+    back: bool,
+    /// When the step it changes from began to play (played on as it goes).
+    from_since: Instant,
+    /// How tall the dialog is for the step it changes from and for the one it changes to (DIPs).
+    heights: (f32, f32),
+    /// How long the guide coming up waits for the window to open (ms): none, where it was up.
+    lead: f32,
+    /// Whether the window has been drawn since it began (as what it changes to has it: its page turned to, the edges
+    /// the layout's play changed put back), after which it is left as it is till it is over (see
+    /// `guide_holds_window`).
+    window_drawn: bool,
+    /// Done at once (Windows' animations off).
+    quick: bool,
+}
+
+/// What a change of the guide is: it coming up, it going, or from one step to another within the dialog, from the
+/// dialog to the tip, or back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Opening,
+    Ending,
+    Swap,
+    ToTip,
+    FromTip,
+}
+
+impl Change {
+    fn new(kind: Kind, from: Step, to: Step, from_since: Instant, heights: (f32, f32)) -> Change {
+        Change { kind, from, began: None, back: from.before() == Some(to), from_since, heights, lead: 0.0, window_drawn: false, quick: crate::panel::reduced_motion() }
+    }
+
+    /// The change of step from `from` to `to`.
+    fn between(from: Step, to: Step, from_since: Instant, heights: (f32, f32)) -> Change {
+        let kind = if to == Step::Layout {
+            Kind::ToTip
+        } else if from == Step::Layout {
+            Kind::FromTip
+        } else {
+            Kind::Swap
+        };
+        Change::new(kind, from, to, from_since, heights)
+    }
+
+    /// How long it lasts (ms).
+    fn length(&self) -> f32 {
+        match self.kind {
+            Kind::Opening => self.lead + DIALOG_IN.max(COVER_IN),
+            Kind::Ending => DIALOG_END.max(COVER_OUT),
+            Kind::Swap => (CONTENT_OUT + GROWS).max(CONTENT_OUT + CONTENT_IN_AFTER + CONTENT_IN),
+            Kind::ToTip | Kind::FromTip => CARRIED,
+        }
+    }
+
+    /// How far into it `now` is (ms): done at once, all of it.
+    fn ms(&self, now: Instant) -> f32 {
+        if self.quick {
+            f32::INFINITY
+        } else {
+            self.began.map_or(0.0, |began| now.saturating_duration_since(began).as_secs_f32() * 1000.0)
+        }
+    }
+
+}
+
+/// How the dialog shows: how opaque and how large (about its middle) it is, how tall (DIPs), whether it shows the step
+/// changed from (else the one shown now), how far its content is slid (DIPs) and how opaque that is, how opaque its
+/// footer is, and the buttons on it; between it and the tip, how far its plate is carried to the tip's (0 to 1) and
+/// how opaque the tip's content is on it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct DialogLook {
+    opacity: f32,
+    scale: f32,
+    height: f32,
+    old: bool,
+    slide: f32,
+    content: f32,
+    footer: f32,
+    buttons: f32,
+    carried: f32,
+    tip: f32,
+}
+
+/// How the dialog shows `ms` into `change` (none: at rest), on `step`, `height` tall at rest: none, not shown (the tip
+/// shows at rest on the layout's step, in its own window).
+fn dialog_look(change: Option<(&Change, f32)>, step: Step, height: f32) -> Option<DialogLook> {
+    let rest = DialogLook { opacity: 1.0, scale: 1.0, height, old: false, slide: 0.0, content: 1.0, footer: 1.0, buttons: 1.0, carried: 0.0, tip: 0.0 };
+    let Some((change, ms)) = change else { return (step != Step::Layout).then_some(rest) };
+    // (Between the dialog and the tip: the plate carried all along, what it shows going evenly as it starts (no later
+    // than the plate shrinks under it), what the other shows coming after.)
+    let carried = eased(ms, 0.0, CARRIED, MOVE);
+    let emptied = eased(ms, 0.0, CARRIED_OUT, LINEAR);
+    let filled = eased(ms, CARRIED_OUT, CARRIED - CARRIED_OUT, DECELERATE);
+    match change.kind {
+        Kind::Opening => (ms >= change.lead).then(|| {
+            let t = eased(ms, change.lead, DIALOG_IN, DECELERATE);
+            DialogLook { opacity: t, scale: 1.0 + 0.05 * (1.0 - t), ..rest }
+        }),
+        Kind::Ending => {
+            let t = eased(ms, 0.0, DIALOG_END, ACCELERATE);
+            Some(DialogLook { opacity: 1.0 - t, scale: 1.0 + 0.05 * t, ..rest })
+        }
+        Kind::ToTip => Some(DialogLook { height: change.heights.0, old: true, content: 1.0 - emptied, footer: 1.0 - emptied, buttons: 1.0 - emptied, carried, tip: filled, ..rest }),
+        Kind::FromTip => Some(DialogLook { content: filled, footer: filled, buttons: filled, carried: 1.0 - carried, tip: 1.0 - emptied, ..rest }),
+        Kind::Swap => {
+            let way = if change.back { -1.0 } else { 1.0 };
+            let (from, to) = change.heights;
+            // (The buttons changed with the content where the steps have others, else left as they are.)
+            let same = buttons(change.from, Lang::En) == buttons(step, Lang::En);
+            Some(if ms < CONTENT_OUT {
+                let out = eased(ms, 0.0, CONTENT_OUT, ACCELERATE);
+                DialogLook { height: from, old: true, slide: -SLIDE * way * out, content: 1.0 - out, buttons: if same { 1.0 } else { 1.0 - out }, ..rest }
+            } else {
+                let grown = eased(ms, CONTENT_OUT, GROWS, MOVE);
+                let come = eased(ms, CONTENT_OUT + CONTENT_IN_AFTER, CONTENT_IN, DECELERATE);
+                DialogLook { height: from + (to - from) * grown, slide: SLIDE * way * (1.0 - come), content: come, buttons: if same { 1.0 } else { come }, ..rest }
+            })
+        }
+    }
+}
+
+/// Whether the tip shows in its own window: at rest on the layout's step (as it changes, it is the dialog's to draw).
+fn tip_rests(change: Option<&Change>, step: Step) -> bool {
+    change.is_none() && step == Step::Layout
+}
+
+/// The change under way, its first frame drawn: its clock started, now.
+fn start_clock(guide: &mut Guide) {
+    if let Some(change) = guide.change.as_mut() {
+        change.began.get_or_insert_with(Instant::now);
+    }
+}
+
+/// How covered the window is `ms` into `change` (none: at rest), on `step` (0, not at all, to 1, at its darkest): as
+/// long as the dialog is over it. Evenly darkened and lightened: all the window darkening at once, any steeper reads as
+/// a jump.
+fn cover_look(change: Option<(&Change, f32)>, step: Step) -> f32 {
+    let Some((change, ms)) = change else { return if step == Step::Layout { 0.0 } else { 1.0 } };
+    match change.kind {
+        Kind::Opening => eased(ms, change.lead, COVER_IN, LINEAR),
+        Kind::Ending => 1.0 - eased(ms, 0.0, COVER_OUT, LINEAR),
+        Kind::Swap => 1.0,
+        // (Going as the plate is carried to the tip, coming as it is carried back.)
+        Kind::ToTip => 1.0 - eased(ms, 0.0, CARRIED, LINEAR),
+        Kind::FromTip => eased(ms, 0.0, CARRIED, LINEAR),
+    }
+}
+
+/// `hwnd` shown or hidden as Windows shows and hides its windows, its animation of that played.
+fn shown_by_system(hwnd: HWND, show: bool) {
+    let off = BOOL::from(false);
+    unsafe {
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &off as *const _ as *const _, 4);
+        let _ = ShowWindow(hwnd, if show { SW_SHOW } else { SW_HIDE });
+    }
+}
+
+/// `hwnd` placed at `at` (physical px), where it is not there already.
+fn place(hwnd: HWND, at: RECT) {
+    let mut was = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(hwnd, &mut was);
+        if was != at {
+            let _ = SetWindowPos(hwnd, None, at.left, at.top, at.right - at.left, at.bottom - at.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// The least rectangle holding both.
+fn union(a: RECT, b: RECT) -> RECT {
+    RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) }
+}
+
+/// `r` (physical px) from `corner` in DIPs at `scale`.
+fn dips(r: RECT, corner: (i32, i32), scale: f32) -> Rect {
+    Rect { x: (r.left - corner.0) as f32 / scale, y: (r.top - corner.1) as f32 / scale, w: (r.right - r.left) as f32 / scale, h: (r.bottom - r.top) as f32 / scale }
+}
+
+/// `a` carried `t` of the way (0 to 1) to `b`.
+fn carried(a: Rect, b: Rect, t: f32) -> Rect {
+    let at = |a: f32, b: f32| a + (b - a) * t;
+    Rect { x: at(a.x, b.x), y: at(a.y, b.y), w: at(a.w, b.w), h: at(a.h, b.h) }
+}
 
 /// The colours of its windows besides the settings window's own: a dialog's ground and its footer's, a teaching tip's,
 /// a button's (its ground, under the pointer, its outline), a tick's green, and the shadow round the tip, as Windows 11
@@ -456,7 +682,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             unsafe {
                 let _ = ValidateRect(Some(hwnd), None);
             }
-            with_ui(|ui| ui.next_frame = Instant::now());
+            with_ui(|ui| ui.guide_frame = Instant::now());
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
@@ -498,6 +724,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_CLOSE => {
             with_ui(|ui| ui.guide_hit(Hit::Skip));
             LRESULT(0)
+        }
+        // The dialog moved by hand: the window with it.
+        WM_MOVING => {
+            let to = unsafe { *(lparam.0 as *const RECT) };
+            with_ui(|ui| ui.guide_moved(hwnd, to));
+            LRESULT(1)
         }
         WM_DPICHANGED => {
             let suggested = unsafe { *(lparam.0 as *const RECT) };
@@ -651,6 +883,7 @@ impl Ui {
             edge: (Edge::Right, None),
             dialog: None,
             tip: None,
+            change: None,
             drag: None,
             grounds: [render::GroundLayers::default(), render::GroundLayers::default()],
             _showing: crate::ui::life::Showing::of(&self.gfx),
@@ -663,10 +896,17 @@ impl Ui {
             self.save();
         }
         self.guide_to(Step::Push);
+        // (Come up, not changed to: over the window, opened first where it was not up, as it is next drawn.)
+        let now = Instant::now();
+        if let Some(guide) = self.guide.as_mut() {
+            let mut opening = Change::new(Kind::Opening, Step::Push, Step::Push, now, (0.0, 0.0));
+            opening.lead = if was_up { 0.0 } else { WINDOW_LEAD };
+            guide.change = Some(opening);
+        }
     }
 
-    /// The guide turned to `step`: the layout's on the window's own page with the tip beside it, the others in the
-    /// dialog with the window hidden.
+    /// The guide turned to `step`, changing to it as `Change` has it: the layout's on the window's own page with the tip
+    /// beside it, the others in the dialog over the window.
     fn guide_to(&mut self, step: Step) {
         self.stop_drag();
         let now = Instant::now();
@@ -677,6 +917,8 @@ impl Ui {
         };
         let tip = if want_tip { self.make_tip() } else { None };
         let dialog = if want_dialog { self.make_dialog() } else { None };
+        let Some((from, from_since, edge)) = self.guide.as_ref().map(|guide| (guide.step, guide.since, guide.edge.0)) else { return };
+        let heights = (self.dialog_height(from, edge), self.dialog_height(step, edge));
         let Some(guide) = self.guide.as_mut() else { return };
         if tip.is_some() {
             guide.tip = tip;
@@ -684,16 +926,13 @@ impl Ui {
         if dialog.is_some() {
             guide.dialog = dialog;
         }
+        guide.change = Some(Change::between(from, step, from_since, heights));
         guide.step = step;
         guide.since = now;
         // (What was done before the step is shown is not its doing.)
         TOLD.store(0, Ordering::Release);
+        // (The windows shown and hidden as the change goes: see `draw_guide`.)
         if step == Step::Layout {
-            if let Some(dialog) = &guide.dialog {
-                unsafe {
-                    let _ = ShowWindow(dialog.hwnd, SW_HIDE);
-                }
-            }
             self.turn_to(Page::Layout);
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -703,7 +942,6 @@ impl Ui {
                 self.view = self.stage_screen();
             }
             self.shown_edge = None;
-            self.show_for_guide();
             let screen = self.editor_screen().or_else(|| self.stage.screen.clone()).unwrap_or_default();
             let before = self.settings.places().clone();
             let held = before.part(&screen, Edge::Left);
@@ -712,39 +950,21 @@ impl Ui {
                 guide.drag = Some(Drag { before, screen, moves, at: 0, since: now, from: None, pointer: None });
             }
         } else {
-            if let Some(tip) = &guide.tip {
-                unsafe {
-                    let _ = ShowWindow(tip.hwnd, SW_HIDE);
-                }
-            }
             // The edge the panel is shown opened from: the right, where it opens anything, else the first that does.
             let screen = self.stage.screen.clone().unwrap_or_default();
             let places = self.settings.places();
             let edge = if places.part(&screen, Edge::Right).is_some() { Edge::Right } else { places.lit(&screen).each().next().unwrap_or(Edge::Right) };
             let part = places.part(&screen, edge);
             guide.edge = (edge, part);
-            unsafe {
-                let _ = ShowWindow(self.hwnd, SW_HIDE);
-            }
-            self.fit_dialog();
-            if let Some(dialog) = self.guide.as_ref().and_then(|guide| guide.dialog.as_ref()) {
-                unsafe {
-                    // (Glance started hidden has the system take the first window it shows as hidden: shown again.)
-                    let _ = ShowWindow(dialog.hwnd, SW_SHOW);
-                    if !IsWindowVisible(dialog.hwnd).as_bool() {
-                        let _ = ShowWindow(dialog.hwnd, SW_SHOW);
-                    }
-                    let _ = SetForegroundWindow(dialog.hwnd);
-                }
-            }
         }
-        self.next_frame = now;
+        self.guide_frame = now;
     }
 
-    /// The window shown and in front, for the guide's step on its page.
+    /// The window shown and in front, for the guide (as Windows shows a window).
     fn show_for_guide(&self) {
+        shown_by_system(self.hwnd, true);
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            // (Glance started hidden has the system take the first window it shows as hidden: shown again.)
             if !IsWindowVisible(self.hwnd).as_bool() {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
             }
@@ -752,16 +972,79 @@ impl Ui {
         }
     }
 
-    /// The guide ended (left, or done): its windows gone, and the window shown again on the general page if it was up
-    /// as it began, else closed.
+    /// The guide leaving: the dialog going, the guide ended once it has (see `draw_guide`); the window turned meanwhile,
+    /// under the dialog and its cover, to the general page it was begun from.
+    fn leave_guide(&mut self) {
+        self.stop_drag();
+        let now = Instant::now();
+        let Some(guide) = self.guide.as_mut() else { return };
+        guide.change = Some(Change::new(Kind::Ending, guide.step, guide.step, guide.since, (0.0, 0.0)));
+        if guide.was_up {
+            self.turn_to(Page::General);
+        }
+        self.guide_frame = now;
+    }
+
+    /// The window made to take nothing (`covered`, the dialog over it) or to take input again, as a window under a
+    /// dialog of its own is: pressed, it brings the dialog to the front.
+    fn guide_covers(&self, covered: bool) {
+        unsafe {
+            if IsWindowEnabled(self.hwnd).as_bool() == covered {
+                let _ = EnableWindow(self.hwnd, !covered);
+            }
+        }
+    }
+
+    /// The window drawn: as the change under way has it, from here on (see `guide_holds_window`).
+    pub(super) fn guide_saw_window_drawn(&mut self) {
+        if let Some(change) = self.guide.as_mut().and_then(|guide| guide.change.as_mut()) {
+            change.window_drawn = true;
+        }
+    }
+
+    /// Whether the window is left as it was last drawn, so that only the guide is drawn as it plays: under the dialog
+    /// at rest on its step, where nothing of it can be seen clearly or touched; and through a change of the guide once
+    /// it has been drawn for it (what a page first drawn fetches, its desktops and pictures, each drawing it whole as
+    /// it comes, taken in as the change is over). Not where it is another size than it was drawn at (moved to a screen
+    /// of another scale under the dialog).
+    pub(super) fn guide_holds_window(&self) -> bool {
+        let under = self.guide.as_ref().is_some_and(|guide| match &guide.change {
+            Some(change) => change.window_drawn,
+            None => guide.step != Step::Layout,
+        });
+        let mut inside = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut inside);
+        }
+        under && self.drawn_size == Some((inside.right.max(1) as u32, inside.bottom.max(1) as u32))
+    }
+
+    /// The dialog `hwnd` moved by hand to `to` (physical px): the window moved with it, as far, the dialog kept in its
+    /// middle.
+    fn guide_moved(&self, hwnd: HWND, to: RECT) {
+        if !self.guide.as_ref().and_then(|guide| guide.dialog.as_ref()).is_some_and(|dialog| dialog.hwnd == hwnd) {
+            return;
+        }
+        let (mut was, mut window) = (RECT::default(), RECT::default());
+        unsafe {
+            let _ = GetWindowRect(hwnd, &mut was);
+            let _ = GetWindowRect(self.hwnd, &mut window);
+            let _ = SetWindowPos(self.hwnd, None, window.left + to.left - was.left, window.top + to.top - was.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    /// The guide ended (left, or done): the window taking input again before its windows go (so that it is what comes
+    /// to the front), then left up if it was up as it began, else closed.
     fn end_guide(&mut self) {
         self.stop_drag();
+        self.guide_covers(false);
         let Some(guide) = self.guide.take() else { return };
         let was_up = guide.was_up;
         drop(guide);
         if was_up {
-            self.turn_to(Page::General);
-            self.show_for_guide();
+            unsafe {
+                let _ = SetForegroundWindow(self.hwnd);
+            }
         } else {
             unsafe {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
@@ -769,26 +1052,21 @@ impl Ui {
         }
     }
 
-    /// The dialog's window, made hidden, in the middle of the screen the window is on.
+    /// The dialog's window, made hidden (placed in the middle of the window as it is drawn: see `fit`), the window's
+    /// own as a dialog is: kept over it, and in front where it is brought there. All of it its own to draw, its plate's
+    /// shadow and round corners too (see `paint_dialog`).
     fn make_dialog(&self) -> Option<Popup> {
-        let work = work_of(self.hwnd);
-        let (wide, tall) = ((WIDE * self.scale) as i32, (DESK * self.scale) as i32);
-        let (x, y) = ((work.left + work.right - wide) / 2, (work.top + work.bottom - tall) / 2);
+        let size = (WIDE + 2.0 * ROOM, DESK + 2.0 * ROOM);
         unsafe {
             let module = GetModuleHandleW(None).ok()?;
             let title = HSTRING::from(pick(self.lang, "Glance 使用引导", "Glance guide"));
-            let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, CLASS, &title, WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, wide, tall, None, None, Some(module.into()), None).ok()?;
-            // Its shadow and its round corners, as Windows gives a window with a frame.
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 });
-            let round = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &round as *const _ as *const _, size_of_val(&round) as u32);
-            let dark = BOOL::from(self.dark);
-            let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const _ as *const _, 4);
-            // (Its frame gone at once: the size it was made at is the size it is.)
-            let _ = SetWindowPos(hwnd, None, x, y, wide, tall, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, CLASS, &title, WS_POPUP | WS_SYSMENU, 0, 0, 1, 1, Some(self.hwnd), None, Some(module.into()), None).ok()?;
+            let square = DWMWCP_DONOTROUND;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &square as *const _ as *const _, size_of_val(&square) as u32);
             let surface = Surface::new(&self.gfx, hwnd).ok();
             let scale = GetDpiForWindow(hwnd).max(96) as f32 / 96.0;
-            Some(Popup { hwnd, surface, scale, size: (WIDE, DESK), hits: Vec::new(), pointer: None, pressed: None, plate: Rect { x: 0.0, y: 0.0, w: WIDE, h: DESK }, beak: None })
+            let plate = Rect { x: ROOM, y: ROOM, w: WIDE, h: DESK };
+            Some(Popup { hwnd, surface, scale, size, hits: Vec::new(), hits_from: (ROOM, ROOM), pointer: None, pressed: None, plate, beak: None })
         }
     }
 
@@ -798,41 +1076,18 @@ impl Ui {
             let module = GetModuleHandleW(None).ok()?;
             let hwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW, CLASS, w!(""), WS_POPUP, 0, 0, 1, 1, Some(self.hwnd), None, Some(module.into()), None).ok()?;
             let surface = Surface::new(&self.gfx, hwnd).ok();
-            Some(Popup { hwnd, surface, scale: self.scale, size: (0.0, 0.0), hits: Vec::new(), pointer: None, pressed: None, plate: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, beak: None })
+            Some(Popup { hwnd, surface, scale: self.scale, size: (0.0, 0.0), hits: Vec::new(), hits_from: (0.0, 0.0), pointer: None, pressed: None, plate: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, beak: None })
         }
     }
 
-    /// The dialog as tall as its step asks, its middle where it was.
-    fn fit_dialog(&mut self) {
-        let tall = self.dialog_height();
-        let Some(dialog) = self.guide.as_mut().and_then(|guide| guide.dialog.as_mut()) else { return };
-        if dialog.size.1 == tall {
-            return;
-        }
-        dialog.size = (WIDE, tall);
-        dialog.plate = Rect { x: 0.0, y: 0.0, w: WIDE, h: tall };
-        let mut was = RECT::default();
-        unsafe {
-            let _ = GetWindowRect(dialog.hwnd, &mut was);
-        }
-        let work = work_of(dialog.hwnd);
-        let (wide, high) = ((WIDE * dialog.scale) as i32, ((tall * dialog.scale) as i32).min(work.bottom - work.top));
-        let x = ((was.left + was.right - wide) / 2).clamp(work.left, (work.right - wide).max(work.left));
-        let y = ((was.top + was.bottom - high) / 2).clamp(work.top, (work.bottom - high).max(work.top));
-        unsafe {
-            let _ = SetWindowPos(dialog.hwnd, None, x, y, wide, high, SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-    }
-
-    /// How tall the dialog is for the step it shows (DIPs).
-    fn dialog_height(&self) -> f32 {
-        let Some(guide) = &self.guide else { return DESK };
-        let words = words(guide.step, guide.edge.0, self.lang);
+    /// How tall the dialog is for `step` (DIPs), the first step's panel opened from `edge`.
+    fn dialog_height(&self, step: Step, edge: Edge) -> f32 {
+        let words = words(step, edge, self.lang);
         let inner = WIDE - 2.0 * PAD;
-        let desk = if guide.step == Step::Ready { 0.0 } else { DESK + 20.0 };
+        let desk = DESK + 20.0;
         let body = if words.body.is_empty() { 0.0 } else { 6.0 + self.gfx.wrapped_height(&words.body, BODY, inner) };
-        let keys = if guide.step == Step::Keys { 12.0 + 2.0 * KEY_ROW + 8.0 } else { 0.0 };
-        let state = if guide.step == Step::Ready { 0.0 } else { 12.0 + 20.0 };
+        let keys = if step == Step::Keys { 12.0 + 2.0 * KEY_ROW + 8.0 } else { 0.0 };
+        let state = if step == Step::Ready { 0.0 } else { 12.0 + 20.0 };
         PAD + desk + 28.0 + body + keys + state + PAD + FOOTER
     }
 
@@ -890,7 +1145,14 @@ impl Ui {
     /// The guide's windows drawn, what was done elsewhere taken in first: the dialog, or the tip beside the window,
     /// placed by it as it is now.
     pub(super) fn draw_guide(&mut self, now: Instant) {
-        let Some(mut guide) = self.guide.take() else { return };
+        let Some(mut guide) = self.guide.take() else {
+            self.guide_frame = now + IDLE;
+            return;
+        };
+        let _timed = crate::perf::Timed::start("guide frame", || match &guide.change {
+            Some(change) => format!("{:?} {:?} {:.1} ms in", guide.step, change.kind, change.ms(now)),
+            None => format!("{:?}", guide.step),
+        });
         let told = TOLD.swap(0, Ordering::AcqRel);
         match guide.step {
             Step::Push if told & Saw::Pushed.bit() != 0 => guide.done[0] = true,
@@ -906,38 +1168,165 @@ impl Ui {
             }
             _ => {}
         }
+        // The change under way moved on: the window opened as the guide comes up where it was not up, and the change
+        // over once it is (the guide ended, where it was leaving).
+        let mut ended = false;
+        if let Some(change) = guide.change.as_mut() {
+            let ms = change.ms(now);
+            if change.kind == Kind::Opening && !guide.was_up && !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+                self.show_for_guide();
+            }
+            if ms >= change.length() {
+                ended = change.kind == Kind::Ending;
+                guide.change = None;
+            }
+        }
+        if ended {
+            self.guide = Some(guide);
+            return self.end_guide();
+        }
+        let height = self.dialog_height(guide.step, guide.edge.0);
+        let (look, cover, step_shown, since, rests, between) = {
+            let change = guide.change.as_ref().map(|change| (change, change.ms(now)));
+            let look = dialog_look(change, guide.step, height);
+            let (step, since) = match (look, change) {
+                (Some(look), Some((change, _))) if look.old => (change.from, change.from_since),
+                _ => (guide.step, guide.since),
+            };
+            let between = change.is_some_and(|(change, _)| matches!(change.kind, Kind::ToTip | Kind::FromTip));
+            (look, cover_look(change, guide.step), step, since, tip_rests(change.map(|(change, _)| change), guide.step), between)
+        };
+        // The window taking nothing while the dialog is over it (before the dialog goes, so that the window is what
+        // comes to the front as it does).
+        self.guide_covers(look.is_some());
+        // The tip beside the window as it is now (moved, sized, on another screen): where it rests, and where the
+        // dialog's plate is carried to or from.
+        let tip_at = match guide.tip.as_mut().filter(|_| rests || between) {
+            Some(tip) => {
+                tip.scale = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0;
+                let plate_h = self.tip_height();
+                let (beak, at) = self.place_tip(tip.scale, plate_h);
+                tip.size = ((at.right - at.left) as f32 / tip.scale, (at.bottom - at.top) as f32 / tip.scale);
+                tip.plate = Rect { x: SHADOW, y: SHADOW, w: TIP_WIDE, h: plate_h };
+                tip.beak = beak;
+                Some(at)
+            }
+            None => None,
+        };
         let gfx = self.gfx.clone();
-        if let Some(mut dialog) = guide.dialog.take() {
-            if guide.step != Step::Layout && unsafe { IsWindowVisible(dialog.hwnd) }.as_bool() {
-                self.draw_popup(&gfx, &mut dialog, |ui, frame, popup| ui.paint_dialog(frame, &mut guide, popup, now));
+        // (What comes shown before what goes is hidden: never a frame with neither.)
+        let carried_by = tip_at.filter(|_| between);
+        if rests {
+            self.show_tip(&gfx, &mut guide, tip_at);
+            self.show_dialog(&gfx, &mut guide, look, cover, step_shown, since, carried_by, now);
+        } else {
+            self.show_dialog(&gfx, &mut guide, look, cover, step_shown, since, carried_by, now);
+            self.show_tip(&gfx, &mut guide, None);
+        }
+        start_clock(&mut guide);
+        // Drawn again as anything of it plays; the window too while its own page plays the layout's step.
+        let plays = guide.drag.is_some() && rests;
+        self.guide = Some(guide);
+        self.guide_frame = now + FRAME;
+        if plays {
+            self.next_frame = self.next_frame.min(now + FRAME);
+        }
+    }
+
+    /// The dialog's window over the window's inside (and over where the tip stands, `tip_at`, as the dialog's plate is
+    /// carried to or from it), drawn as `look` has it, the window covered under it as dark as `cover`; hidden where
+    /// neither shows. Its plate in the middle of the window, kept on its screen.
+    #[allow(clippy::too_many_arguments)]
+    fn show_dialog(&mut self, gfx: &Rc<Gfx>, guide: &mut Guide, look: Option<DialogLook>, cover: f32, step: Step, since: Instant, tip_at: Option<RECT>, now: Instant) {
+        let Some(mut dialog) = guide.dialog.take() else { return };
+        if look.is_none() && cover <= 0.0 {
+            unsafe {
+                if IsWindowVisible(dialog.hwnd).as_bool() {
+                    let _ = ShowWindow(dialog.hwnd, SW_HIDE);
+                }
             }
             guide.dialog = Some(dialog);
+            return;
         }
-        if let Some(mut tip) = guide.tip.take().filter(|_| guide.step == Step::Layout) {
-            // Beside the window, as it is now (moved, sized, on another screen).
-            tip.scale = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0;
-            let plate_h = self.tip_height();
-            let (beak, at) = self.place_tip(tip.scale, plate_h);
-            let mut was = RECT::default();
-            unsafe {
-                let _ = GetWindowRect(tip.hwnd, &mut was);
-                if was != at {
-                    let _ = SetWindowPos(tip.hwnd, None, at.left, at.top, at.right - at.left, at.bottom - at.top, SWP_NOZORDER | SWP_NOACTIVATE);
-                }
+        dialog.scale = unsafe { GetDpiForWindow(self.hwnd) }.max(96) as f32 / 96.0;
+        let scale = dialog.scale;
+        let px = |dips: f32| (dips * scale).round() as i32;
+        let mut inside = RECT::default();
+        let mut corner = POINT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd, &mut inside);
+            let _ = ClientToScreen(self.hwnd, &mut corner);
+        }
+        let inside = RECT { left: corner.x, top: corner.y, right: corner.x + inside.right, bottom: corner.y + inside.bottom };
+        let work = work_of(self.hwnd);
+        let (wide, high) = (px(WIDE), px(look.map_or(0.0, |look| look.height)));
+        let x = ((inside.left + inside.right - wide) / 2).clamp(work.left, (work.right - wide).max(work.left));
+        let y = ((inside.top + inside.bottom - high) / 2).clamp(work.top, (work.bottom - high).max(work.top));
+        let plate = RECT { left: x, top: y, right: x + wide, bottom: y + high };
+        let room = px(ROOM);
+        let mut at = union(inside, RECT { left: plate.left - room, top: plate.top - room, right: plate.right + room, bottom: plate.bottom + room });
+        if let Some(tip) = tip_at {
+            at = union(at, tip);
+        }
+        place(dialog.hwnd, at);
+        let from = (at.left, at.top);
+        dialog.size = ((at.right - at.left) as f32 / scale, (at.bottom - at.top) as f32 / scale);
+        dialog.plate = dips(plate, from, scale);
+        dialog.hits_from = (dialog.plate.x, dialog.plate.y);
+        let covered = dips(inside, from, scale);
+        // (The tip, drawn on the plate as it is carried, from where its window stands.)
+        let mut tip = match (tip_at, guide.tip.take()) {
+            (Some(tip_at), Some(tip)) => Some((tip, ((tip_at.left - from.0) as f32 / scale, (tip_at.top - from.1) as f32 / scale))),
+            (None, kept) => {
+                guide.tip = kept;
+                None
             }
-            tip.size = ((at.right - at.left) as f32 / tip.scale, (at.bottom - at.top) as f32 / tip.scale);
-            tip.plate = Rect { x: SHADOW, y: SHADOW, w: TIP_WIDE, h: plate_h };
-            tip.beak = beak;
-            self.draw_popup(&gfx, &mut tip, |ui, frame, popup| ui.paint_tip(frame, &guide, popup));
-            unsafe {
-                if !IsWindowVisible(tip.hwnd).as_bool() {
-                    let _ = ShowWindow(tip.hwnd, SW_SHOWNOACTIVATE);
-                }
+            (Some(_), None) => None,
+        };
+        self.draw_popup(gfx, &mut dialog, |ui, frame, popup| {
+            if cover > 0.0 {
+                frame.fill(Color::hex(0x000000, COVER * cover), covered.x, covered.y, covered.w, covered.h);
             }
+            if let Some(look) = look {
+                ui.paint_dialog(frame, guide, popup, &look, step, since, tip.as_mut().map(|(tip, corner)| (tip, *corner)), now);
+            }
+        });
+        if let Some((tip, _)) = tip {
             guide.tip = Some(tip);
         }
-        self.guide = Some(guide);
-        self.next_frame = self.next_frame.min(now + FRAME);
+        unsafe {
+            if !IsWindowVisible(dialog.hwnd).as_bool() {
+                // (Glance started hidden has the system take the first window it shows as hidden: shown again.)
+                let _ = ShowWindow(dialog.hwnd, SW_SHOW);
+                if !IsWindowVisible(dialog.hwnd).as_bool() {
+                    let _ = ShowWindow(dialog.hwnd, SW_SHOW);
+                }
+                let _ = SetForegroundWindow(dialog.hwnd);
+            }
+        }
+        guide.dialog = Some(dialog);
+    }
+
+    /// The tip's window at `at` (physical px: see `place_tip`), drawn; hidden where it is none (not at rest).
+    fn show_tip(&mut self, gfx: &Rc<Gfx>, guide: &mut Guide, at: Option<RECT>) {
+        let Some(mut tip) = guide.tip.take() else { return };
+        match at {
+            Some(at) => {
+                place(tip.hwnd, at);
+                self.draw_popup(gfx, &mut tip, |ui, frame, popup| ui.paint_tip(frame, guide, popup));
+                unsafe {
+                    if !IsWindowVisible(tip.hwnd).as_bool() {
+                        let _ = ShowWindow(tip.hwnd, SW_SHOWNOACTIVATE);
+                    }
+                }
+            }
+            None => unsafe {
+                if IsWindowVisible(tip.hwnd).as_bool() {
+                    let _ = ShowWindow(tip.hwnd, SW_HIDE);
+                }
+            },
+        }
+        guide.tip = Some(tip);
     }
 
     /// `popup` drawn by `paint` (at its own scale: what is drawn as the window's is drawn at the popup's meanwhile).
@@ -961,34 +1350,82 @@ impl Ui {
         popup.surface = Some(surface);
     }
 
-    /// The dialog: the small desktop with the step's play at its top, its place among the steps, its title and what it
-    /// asks (the shortcuts' rows, on the last step), whether it is done; the buttons in the footer.
-    fn paint_dialog(&mut self, frame: &Frame, guide: &mut Guide, dialog: &mut Popup, now: Instant) {
+    /// The dialog as `look` has it: its plate, its shadow round it; on it what `step` shows (played from `since`), and
+    /// the step's buttons in the footer. Between it and the tip (`tip`, and its window's corner in the dialog's), the
+    /// plate carried to the tip's place and made its plate, the content of each on it as it goes.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_dialog(&mut self, frame: &Frame, guide: &mut Guide, dialog: &mut Popup, look: &DialogLook, step: Step, since: Instant, tip: Option<(&mut Popup, (f32, f32))>, now: Instant) {
         let palette = self.palette.clone();
         let grounds = Grounds::new(self.dark);
-        let lang = self.lang;
-        let (width, height) = dialog.size;
-        let inner = width - 2.0 * PAD;
-        let footer = height - FOOTER;
         dialog.hits.clear();
-        frame.fill(grounds.dialog, 0.0, 0.0, width, height);
-        frame.fill(grounds.footer, 0.0, footer, width, FOOTER);
-        frame.fill(palette.rule, 0.0, footer, width, 1.0);
-        let step = guide.step;
+        let own = dialog.plate;
+        let p = match &tip {
+            Some((tip, corner)) => carried(own, Rect { x: corner.0 + tip.plate.x, y: corner.1 + tip.plate.y, w: tip.plate.w, h: tip.plate.h }, look.carried),
+            None => own,
+        };
+        let whole = Rect { x: 0.0, y: 0.0, w: dialog.size.0, h: dialog.size.1 };
+        let (cx, cy) = (p.x + p.w / 2.0, p.y + p.h / 2.0);
+        let about = Matrix3x2::translation(-cx, -cy) * Matrix3x2::scale(look.scale, look.scale) * Matrix3x2::translation(cx, cy);
+        let footer = p.y + p.h - FOOTER;
+        let lang = self.lang;
+        faded(frame, whole, look.opacity, || {
+            frame.within(about, |frame| {
+                frame.shadow(grounds.shadow, p.x, p.y, p.w, p.h, 8.0, 14.0, 8.0);
+                fill(frame, mix(grounds.dialog, grounds.flyout, look.carried), p.x, p.y, p.w, p.h, 8.0);
+                // (The footer the plate's foot, in its own ground.)
+                faded(frame, p, look.footer, || {
+                    unsafe { frame.dc.PushAxisAlignedClip(&rect(p.x, footer, p.w, FOOTER), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                    fill(frame, grounds.footer, p.x, p.y, p.w, p.h, 8.0);
+                    unsafe { frame.dc.PopAxisAlignedClip() };
+                    frame.fill(palette.rule, p.x, footer, p.w, 1.0);
+                });
+                stroke_inside(frame, p, 8.0, palette.rule);
+                // What the step shows, slid as it goes or comes, within the plate above the footer.
+                if look.content > 0.0 {
+                    unsafe { frame.dc.PushAxisAlignedClip(&rect(p.x, p.y, p.w, p.h - FOOTER), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                    faded(frame, p, look.content, || {
+                        frame.within(Matrix3x2::translation(p.x + look.slide, p.y), |frame| self.paint_step(frame, &palette, &grounds, guide, dialog, step, since, now));
+                    });
+                    unsafe { frame.dc.PopAxisAlignedClip() };
+                }
+                if look.buttons > 0.0 {
+                    faded(frame, p, look.buttons, || {
+                        frame.within(Matrix3x2::translation(p.x, p.y), |frame| {
+                            paint_buttons(frame, &palette, &grounds, dialog, &buttons(step, lang), WIDE - PAD, p.h - FOOTER / 2.0, BUTTON_LEAST);
+                        });
+                    });
+                }
+                // (Where the plate is now, as where it ends: the tip's window's corner, at the tip's plate.)
+                if let Some((tip, _)) = tip.filter(|_| look.tip > 0.0) {
+                    let (x, y) = (p.x - tip.plate.x, p.y - tip.plate.y);
+                    faded(frame, whole, look.tip, || frame.within(Matrix3x2::translation(x, y), |frame| self.paint_tip_content(frame, guide, tip)));
+                }
+            });
+        });
+    }
+
+    /// What `step` shows on the dialog, from its plate's corner: the small desktop with the step's play at its top
+    /// (played from `since`), its place among the steps, its title and what it asks (the shortcuts' rows, on the last
+    /// step), whether it is done.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_step(&mut self, frame: &Frame, palette: &Palette, grounds: &Grounds, guide: &mut Guide, dialog: &mut Popup, step: Step, since: Instant, now: Instant) {
+        let lang = self.lang;
+        let inner = WIDE - 2.0 * PAD;
         let words = words(step, guide.edge.0, lang);
         let mut y = PAD;
         let mut down = [0, 0];
-        if step != Step::Ready {
-            let area = Rect { x: PAD, y, w: inner, h: DESK };
-            fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
-            match step {
-                Step::Push => self.play_push(frame, guide, area, now),
-                Step::Keys => down = self.play_keys(frame, guide, area, now),
-                _ => {}
+        let area = Rect { x: PAD, y, w: inner, h: DESK };
+        fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
+        match step {
+            Step::Push => self.play_push(frame, guide, area, since, now),
+            Step::Keys => down = self.play_keys(frame, guide, area, since, now),
+            // (At the end, the desktop as it is, nothing played on it.)
+            _ => {
+                self.panel_on_stage(frame, area, None, None, true, 1.0);
             }
-            stroke_inside(frame, area, 8.0, palette.card_stroke);
-            y += DESK + 20.0;
         }
+        stroke_inside(frame, area, 8.0, palette.card_stroke);
+        y += DESK + 20.0;
         if let Some(index) = step.index() {
             let count = format!("{} / 3", index + 1);
             frame.text(&count, SMALL, palette.text3, PAD, y + 6.0, inner, Align::End);
@@ -1002,13 +1439,12 @@ impl Ui {
         }
         if step == Step::Keys {
             y += 12.0;
-            self.paint_keys(frame, &palette, &grounds, guide, dialog, Rect { x: PAD, y, w: inner, h: 2.0 * KEY_ROW + 8.0 }, down);
+            self.paint_keys(frame, palette, grounds, guide, dialog, Rect { x: PAD, y, w: inner, h: 2.0 * KEY_ROW + 8.0 }, down);
             y += 2.0 * KEY_ROW + 8.0;
         }
         if let Some(index) = step.index() {
-            paint_state(frame, &palette, &grounds, &words, guide.done[index], PAD, y + 12.0 + 10.0, inner);
+            paint_state(frame, palette, grounds, &words, guide.done[index], PAD, y + 12.0 + 10.0, inner);
         }
-        paint_buttons(frame, &palette, &grounds, dialog, &buttons(step, lang), width - PAD, footer + FOOTER / 2.0, BUTTON_LEAST);
     }
 
     /// The shortcuts' rows of the last step in `r`: what each calls up, its keys (as many down as `down` says, as the
@@ -1027,15 +1463,14 @@ impl Ui {
             stroke_inside(frame, row, 4.0, palette.card_stroke);
             frame.text(name, BODY, palette.text, row.x + 14.0, row.y + 8.0, row.w / 2.0, Align::Start);
             frame.text(about, SMALL, palette.text2, row.x + 14.0, row.y + 28.0, row.w / 2.0, Align::Start);
+            // The keys against the row's end, as far in as its words are; tried, the tick before them (nothing moved).
             let cy = row.y + row.h / 2.0;
-            let mut x = row.x + row.w - 14.0;
-            if guide.tried[at] {
-                frame.icon(Icon::Check, Point { x: x - 8.0, y: cy }, 16.0, grounds.done);
-            }
-            x -= 28.0;
             let keys = caps(shortcut, self.lang);
             let widths: Vec<f32> = keys.iter().map(|key| (frame.gfx.measure(key, SMALL) + 16.0).max(30.0)).collect();
-            x -= widths.iter().sum::<f32>() + 6.0 * (keys.len() - 1) as f32;
+            let mut x = row.x + row.w - 14.0 - widths.iter().sum::<f32>() - 6.0 * (keys.len() - 1) as f32;
+            if guide.tried[at] {
+                frame.icon(Icon::Check, Point { x: x - 20.0, y: cy }, 16.0, grounds.done);
+            }
             for (index, (key, w)) in keys.iter().zip(widths).enumerate() {
                 let pressed = index < down[at];
                 let cap = Rect { x, y: cy - 12.0 + if pressed { 1.0 } else { 0.0 }, w, h: 24.0 };
@@ -1057,8 +1492,8 @@ impl Ui {
 
     /// The first step's play in `area`: the desktop, the pointer gliding to the edge and pushing it, the real panel
     /// sliding out, the pointer back and the panel put away, round and round.
-    fn play_push(&mut self, frame: &Frame, guide: &Guide, area: Rect, now: Instant) {
-        let (along, out) = pushing(now.saturating_duration_since(guide.since));
+    fn play_push(&mut self, frame: &Frame, guide: &Guide, area: Rect, since: Instant, now: Instant) {
+        let (along, out) = pushing(now.saturating_duration_since(since));
         let (edge, part) = guide.edge;
         let screen = match part {
             Some(Part::Music) => self.music_on_stage(frame, area, edge, out).1,
@@ -1083,9 +1518,9 @@ impl Ui {
     /// The last step's play in `area`: the desktop by the middle of its top, search coming up on it as its shortcut is
     /// pressed, the first file found looked at larger beside it as the preview's is, both gone again, round and round.
     /// How many of each shortcut's keys are down.
-    fn play_keys(&mut self, frame: &Frame, guide: &mut Guide, area: Rect, now: Instant) -> [usize; 2] {
+    fn play_keys(&mut self, frame: &Frame, guide: &mut Guide, area: Rect, since: Instant, now: Instant) -> [usize; 2] {
         let keys = (caps(self.settings.search_shortcut, self.lang).len(), caps(self.settings.preview_shortcut, self.lang).len());
-        let (down, search, look) = Keying::new(keys).at(now.saturating_duration_since(guide.since));
+        let (down, search, look) = Keying::new(keys).at(now.saturating_duration_since(since));
         // Search where it comes up, a little way down the middle of the screen, the look beside it; the part of the
         // screen they are in, and some room round them, shown.
         let (sw, sh) = self.stage.size;
@@ -1132,17 +1567,25 @@ impl Ui {
         down
     }
 
-    /// The tip: its plate, its beak at the editor, its place among the steps, its title and what it asks, whether it is
-    /// done, its buttons.
+    /// The tip at rest in its own window: its plate, its shadow round it, what it shows on it.
     fn paint_tip(&mut self, frame: &Frame, guide: &Guide, tip: &mut Popup) {
+        let palette = self.palette.clone();
+        let grounds = Grounds::new(self.dark);
+        let p = tip.plate;
+        frame.shadow(grounds.shadow, p.x, p.y, p.w, p.h, 8.0, 14.0, 8.0);
+        fill(frame, grounds.flyout, p.x, p.y, p.w, p.h, 8.0);
+        stroke_inside(frame, p, 8.0, palette.rule);
+        self.paint_tip_content(frame, guide, tip);
+    }
+
+    /// What the tip shows on its plate: its beak at the editor, its place among the steps, its title and what it asks,
+    /// whether it is done, its buttons.
+    fn paint_tip_content(&mut self, frame: &Frame, guide: &Guide, tip: &mut Popup) {
         let palette = self.palette.clone();
         let grounds = Grounds::new(self.dark);
         let lang = self.lang;
         tip.hits.clear();
         let p = tip.plate;
-        frame.shadow(grounds.shadow, p.x, p.y, p.w, p.h, 8.0, 16.0, 6.0);
-        fill(frame, grounds.flyout, p.x, p.y, p.w, p.h, 8.0);
-        stroke_inside(frame, p, 8.0, palette.rule);
         if let Some((side, down)) = tip.beak {
             // Over the plate's edge where it stands out, outlined but at its foot.
             let (foot, point) = match side {
@@ -1166,12 +1609,16 @@ impl Ui {
         paint_buttons(frame, &palette, &grounds, tip, &buttons(Step::Layout, lang), x + inner, y + BUTTON / 2.0, 72.0);
     }
 
-    /// Whether a press at `x`, `y` (physical px) on the guide's window `hwnd` moves it: on the dialog, where it takes no
-    /// press.
+    /// Whether a press at `x`, `y` (physical px) on the guide's window `hwnd` moves it (and the window with it): on the
+    /// dialog, where it takes no press, the window not maximized.
     fn guide_caption(&self, hwnd: HWND, x: f32, y: f32) -> bool {
+        if unsafe { IsZoomed(self.hwnd) }.as_bool() {
+            return false;
+        }
         let Some(dialog) = self.guide.as_ref().and_then(|guide| guide.dialog.as_ref()).filter(|dialog| dialog.hwnd == hwnd) else { return false };
-        let (x, y) = (x / dialog.scale, y / dialog.scale);
-        !dialog.hits.iter().any(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+        let (x, y) = (x / dialog.scale - dialog.hits_from.0, y / dialog.scale - dialog.hits_from.1);
+        let on = x >= 0.0 && y >= 0.0 && x < dialog.plate.w && y < dialog.plate.h;
+        on && !dialog.hits.iter().any(|(r, _)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
     }
 
     /// The pointer on the guide's window `hwnd` at `at` (physical px; none: gone from it), pressed (true) or let go
@@ -1179,7 +1626,7 @@ impl Ui {
     fn guide_pointer(&mut self, hwnd: HWND, at: Option<(f32, f32)>, press: Option<bool>) {
         let Some(guide) = self.guide.as_mut() else { return };
         let Some(popup) = [guide.dialog.as_mut(), guide.tip.as_mut()].into_iter().flatten().find(|popup| popup.hwnd == hwnd) else { return };
-        popup.pointer = at.map(|(x, y)| (x / popup.scale, y / popup.scale));
+        popup.pointer = at.map(|(x, y)| (x / popup.scale - popup.hits_from.0, y / popup.scale - popup.hits_from.1));
         let hit = match press {
             Some(true) => {
                 popup.pressed = popup.hovered();
@@ -1188,17 +1635,18 @@ impl Ui {
             Some(false) => popup.pressed.take().filter(|&pressed| popup.hovered() == Some(pressed)),
             None => None,
         };
-        self.next_frame = Instant::now();
+        self.guide_frame = Instant::now();
         if let Some(hit) = hit {
             self.guide_hit(hit);
         }
     }
 
-    /// Does what `hit` does.
+    /// Does what `hit` does: leaving it goes to its end (and from there, ends it). Nothing while it changes step.
     fn guide_hit(&mut self, hit: Hit) {
-        let Some(step) = self.guide.as_ref().map(|guide| guide.step) else { return };
+        let Some(step) = self.guide.as_ref().filter(|guide| guide.change.is_none()).map(|guide| guide.step) else { return };
         match hit {
-            Hit::Skip => self.end_guide(),
+            Hit::Skip if step == Step::Ready => self.leave_guide(),
+            Hit::Skip => self.guide_to(Step::Ready),
             Hit::Back => {
                 if let Some(before) = step.before() {
                     self.guide_to(before);
@@ -1206,7 +1654,7 @@ impl Ui {
             }
             Hit::Next => match step.after() {
                 Some(after) => self.guide_to(after),
-                None => self.end_guide(),
+                None => self.leave_guide(),
             },
             Hit::Search => crate::ui::find::toggle(),
             Hit::Look => crate::ui::find::preview(),
@@ -1257,8 +1705,8 @@ impl Ui {
     /// The guide's play on the layout page moved on to `now`: the pointer where its move has it, what the moves passed
     /// do done (a component taken up, or let go on an edge or off it), as the window was last drawn.
     pub(super) fn play_drag(&mut self, now: Instant) {
-        let Some(mut drag) = self.guide.as_mut().and_then(|guide| guide.drag.take()) else { return };
-        // First shown at the foot of the editor, a moment before it plays.
+        let Some(mut drag) = self.guide.as_mut().filter(|guide| guide.change.is_none()).and_then(|guide| guide.drag.take()) else { return };
+        // First shown at the foot of the editor, a moment before it plays (once the change to its step is over).
         if drag.pointer.is_none() {
             if let Some(rest) = self.spot_at(&drag, Spot::Rest) {
                 drag.pointer = Some(rest);
@@ -1403,6 +1851,97 @@ mod tests {
             assert!(searched && looked);
             assert_eq!(keying.at(Duration::ZERO), ([0, 0], 0.0, 0.0));
             assert_eq!(keying.at(Duration::from_millis(keying.end as u64 - 1)), ([0, 0], 0.0, 0.0));
+        }
+    }
+
+    /// Every change of the guide goes on with nothing jumping: the dialog and the cover over the window grow, fade and
+    /// slide a little from one frame to the next; what comes shows from nothing, what goes ends in nothing; the content
+    /// changes for the next only while none of it shows; between the dialog and the tip, the plate is carried evenly,
+    /// never with what both show on it at once, what comes showing as it goes (half in before it is nearly there); the cover darkens and lightens evenly; and each ends as it is at rest
+    /// (the tip's in its own window).
+    #[test]
+    fn a_change_of_step_never_jumps() {
+        let now = Instant::now();
+        let heights = (560.0, 470.0);
+        let changes = [
+            (Kind::Opening, Step::Push, Step::Push, 0.0),
+            (Kind::Opening, Step::Push, Step::Push, WINDOW_LEAD),
+            (Kind::Ending, Step::Ready, Step::Ready, 0.0),
+            (Kind::Swap, Step::Keys, Step::Ready, 0.0),
+            (Kind::Swap, Step::Ready, Step::Keys, 0.0),
+            (Kind::ToTip, Step::Push, Step::Layout, 0.0),
+            (Kind::FromTip, Step::Layout, Step::Keys, 0.0),
+        ];
+        let steepest_cover = 1.0 / COVER_IN.min(COVER_OUT).min(CARRIED) + 1e-4;
+        for (kind, from, to, lead) in changes {
+            let change = Change { kind, from, began: Some(now), back: from.before() == Some(to), from_since: now, heights, lead, window_drawn: false, quick: false };
+            let at_rest = if kind == Kind::Swap { heights.1 } else { heights.0 };
+            let look = |ms: f32| dialog_look(Some((&change, ms)), to, at_rest);
+            let mut was = look(0.0);
+            let mut was_cover = cover_look(Some((&change, 0.0)), to);
+            // (Between the dialog and the tip: when what comes is half in, and when the plate is nearly where it goes.)
+            let (mut half_in, mut nearly_there) = (None, None);
+            // (Shown from the start at rest, else coming from nothing.)
+            if let Some(dialog) = was {
+                assert!(dialog.opacity >= 1.0 || dialog.opacity <= 0.0, "{kind:?} begins at {dialog:?}");
+            }
+            assert!(was_cover >= 1.0 || was_cover <= 0.0, "{kind:?} begins covered {was_cover}");
+            for ms in 1..=(change.length() as u32 + 20) {
+                let dialog = look(ms as f32);
+                let cover = cover_look(Some((&change, ms as f32)), to);
+                assert!((cover - was_cover).abs() <= steepest_cover, "{kind:?} {ms} ms: covered {was_cover} to {cover}");
+                was_cover = cover;
+                match (was, dialog) {
+                    (Some(a), Some(b)) => {
+                        assert!((a.opacity - b.opacity).abs() < 0.08 && (a.scale - b.scale).abs() < 0.005 && (a.height - b.height).abs() < 3.0, "{kind:?} {ms} ms: {a:?} to {b:?}");
+                        assert!((a.content - b.content).abs() < 0.08 && (a.footer - b.footer).abs() < 0.08 && (a.buttons - b.buttons).abs() < 0.08 && (a.tip - b.tip).abs() < 0.08, "{kind:?} {ms} ms: {a:?} to {b:?}");
+                        assert!((a.carried - b.carried).abs() < 0.01, "{kind:?} {ms} ms: carried {a:?} to {b:?}");
+                        assert!(a.old == b.old || a.content.max(b.content).max(a.buttons).max(b.buttons) < 0.08, "{kind:?} {ms} ms: changed while shown");
+                        assert!((a.slide - b.slide).abs() < 2.0 || a.content.max(b.content) < 0.08, "{kind:?} {ms} ms: {a:?} to {b:?}");
+                        // (Never the dialog's content and the tip's on the plate at once.)
+                        assert!(b.content.max(b.footer).max(b.buttons) < 0.08 || b.tip < 0.08, "{kind:?} {ms} ms: both shown {b:?}");
+                    }
+                    (None, Some(b)) => assert!(b.opacity < 0.08, "{kind:?} {ms} ms: came at {b:?}"),
+                    (Some(a), None) => assert!(a.opacity < 0.08, "{kind:?} {ms} ms: went at {a:?}"),
+                    (None, None) => {}
+                }
+                if let Some(b) = dialog {
+                    let (coming, carried) = match kind {
+                        Kind::ToTip => (b.tip, b.carried),
+                        Kind::FromTip => (b.content, 1.0 - b.carried),
+                        _ => (0.0, 0.0),
+                    };
+                    if coming >= 0.5 {
+                        half_in.get_or_insert(ms);
+                    }
+                    if carried >= 0.95 {
+                        nearly_there.get_or_insert(ms);
+                    }
+                }
+                was = dialog;
+            }
+            // What comes shows as the plate goes, not once it is there.
+            if matches!(kind, Kind::ToTip | Kind::FromTip) {
+                assert!(half_in < nearly_there, "{kind:?}: half in at {half_in:?} ms, the plate nearly there at {nearly_there:?} ms");
+            }
+            // Over: as at rest (gone, where it ended; where it was carried to the tip, the tip as it rests).
+            match kind {
+                Kind::Ending => {
+                    assert!(was.is_some_and(|dialog| dialog.opacity <= 0.0), "{was:?}");
+                    assert!(was_cover <= 0.0, "{kind:?} ends covered {was_cover}");
+                }
+                Kind::ToTip => {
+                    let end = was.expect("the plate at the tip's place");
+                    assert!(end.carried >= 1.0 && end.tip >= 1.0 && end.content <= 0.0 && end.footer <= 0.0 && end.buttons <= 0.0 && end.opacity >= 1.0 && end.scale == 1.0, "{end:?}");
+                    assert!(dialog_look(None, to, at_rest).is_none() && tip_rests(None, to));
+                    assert_eq!(was_cover, cover_look(None, to), "{kind:?}");
+                }
+                _ => {
+                    assert_eq!(was, dialog_look(None, to, at_rest), "{kind:?}");
+                    assert!(!tip_rests(None, to));
+                    assert_eq!(was_cover, cover_look(None, to), "{kind:?}");
+                }
+            }
         }
     }
 

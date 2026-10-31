@@ -1330,10 +1330,13 @@ impl Finder {
     /// first that is, as it is.
     fn preview_first(&mut self) {
         if !self.visible() {
+            // (Showing, it looks again afresh, and what is found afresh puts away what was looked at: the first of
+            // what it finds looked at, once found.)
             self.show();
-        } else {
-            self.come_forward();
+            self.preview_owed = true;
+            return;
         }
+        self.come_forward();
         let lang = self.lang;
         let Some(first) = self.shown.rows().position(|row| looked_at(row, lang).is_some()) else {
             self.preview_owed = true;

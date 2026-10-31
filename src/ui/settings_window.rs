@@ -46,6 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
+use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::backdrop::Capture;
@@ -152,7 +153,7 @@ const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0
 /// A frame that takes longer than this shows as a stutter: noted.
 const SLOW_FRAME: Duration = Duration::from_millis(33);
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
-/// How often the window, hidden while the guide shows a step of its own, looks again at what it shows.
+/// How often the window, hidden (made for the guide, till it shows it), looks again at what it shows.
 const HIDDEN_LOOKED_AT: Duration = Duration::from_millis(250);
 /// The pen of the preview's charts runs this far behind the newest sample
 /// beyond one interval, as the panel's does.
@@ -335,7 +336,7 @@ thread_local! {
 /// Whether it is open and not minimized: what it shows can be seen.
 pub fn is_seen() -> bool {
     let hwnd = WINDOW.load(Ordering::Relaxed);
-    // (Hidden while the guide shows a step of its own: see `guide`.)
+    // (Hidden while made for the guide, till it shows it: see `guide`.)
     hwnd != 0 && unsafe { IsWindowVisible(HWND(hwnd as *mut _)) }.as_bool() && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
@@ -387,7 +388,7 @@ pub fn open_at_reports(place: Option<RECT>) {
 }
 
 /// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
-/// and kept hidden but for the step shown on its own page.
+/// and shown by the guide as it comes up.
 pub fn open_guide() {
     open_at(Asked { to: Some(To::Guide), place: None });
 }
@@ -446,7 +447,7 @@ fn open_at(asked: Asked) {
         if let Some(message) = message {
             let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) };
         }
-        // (The guide shows the window as its steps ask, not at once.)
+        // (The guide brings the window up itself as it comes up, under its dialog.)
         if to == Some(To::Guide) {
             return;
         }
@@ -594,6 +595,14 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     made?;
     let mut msg = MSG::default();
     let mut again = None;
+    // What the next frame is waited on with, to the moment it is due: a wait of whole milliseconds rounds to the
+    // system's tick (15.6 ms), and a frame asked for every 15 ms came every 31.
+    let frame_timer = unsafe {
+        CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+            .or_else(|_| CreateWaitableTimerExW(None, None, 0, TIMER_ALL_ACCESS.0))
+            .ok()
+            .map(|timer| windows_core::Owned::new(timer))
+    };
     loop {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
@@ -613,7 +622,15 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
         let Some(due) = tick(Instant::now()) else { return Some(again) };
         if !due.is_zero() {
             let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
-            unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
+            match frame_timer.as_deref().copied().filter(|_| due < Duration::from_secs(1)) {
+                Some(timer) => unsafe {
+                    let _ = SetWaitableTimer(timer, &-((due.as_nanos() / 100) as i64).max(1), 0, None, None, false);
+                    MsgWaitForMultipleObjects(Some(&[timer]), false, ms, QS_ALLINPUT);
+                },
+                None => unsafe {
+                    MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
+                },
+            }
         }
     }
 }
@@ -766,10 +783,15 @@ fn tick(now: Instant) -> Option<Duration> {
             ui.relabel();
         }
         ui.follow_when_free();
-        if now >= ui.next_frame {
+        // (The window left as it is under the guide's dialog, the guide alone drawn.)
+        let held = ui.guide_holds_window();
+        if now >= ui.next_frame && !held {
             ui.draw(now);
+        } else if now >= ui.guide_frame {
+            ui.draw_guide(now);
         }
-        ui.next_frame.saturating_duration_since(now)
+        let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
+        next.saturating_duration_since(now)
     })
 }
 
@@ -1762,6 +1784,8 @@ struct Ui {
     layers: PanelLayers,
     last_frame: Instant,
     next_frame: Instant,
+    /// When the guide is next drawn, apart from the window (see `guide`).
+    guide_frame: Instant,
     /// The client size it was last drawn at (physical pixels), if it has been drawn.
     drawn_size: Option<(u32, u32)>,
     /// The largest panel size at which the panel still grows on the screen the preview shows (see
@@ -2009,6 +2033,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
+            guide_frame: Instant::now(),
             drawn_size: None,
             largest: SIZES.1,
             guide: None,
@@ -2030,7 +2055,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         ui.draw(Instant::now());
         let gfx = ui.gfx.clone();
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
-        // (Made for the guide: shown only as a step of it asks, see `guide`.)
+        // (Made for the guide: shown by it as it comes up, see `guide`.)
         if shown.is_none() || to == Some(To::Guide) {
             return Some(hwnd);
         }
@@ -4878,7 +4903,7 @@ impl Ui {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
-        // Hidden while the guide shows a step of its own: only the guide drawn (see `guide`).
+        // Hidden (made for the guide, about to be shown by it): only the guide drawn (see `guide`).
         if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
             self.next_frame = now + HIDDEN_LOOKED_AT;
             self.draw_guide(now);
@@ -4913,6 +4938,7 @@ impl Ui {
             return;
         }
         self.gfx.sweep();
+        self.guide_saw_window_drawn();
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if self.by_hand {
             self.was_sized = true;
