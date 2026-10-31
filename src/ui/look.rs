@@ -2367,6 +2367,10 @@ impl Looker {
                     }
                     frame.unclip();
                 }
+                // (And a line where it is, across it: it moves on as it plays, between the bars too.)
+                if part > 0.0 {
+                    frame.fill_rounded(accent, wave.x + played - 1.0, wave.y, 2.0, wave.h, 1.0);
+                }
             }
             None => {
                 frame.fill_rounded(theme.text.alpha(0.28), wave.x, wave.y + wave.h / 2.0 - 1.0, wave.w, 2.0, 1.0);
