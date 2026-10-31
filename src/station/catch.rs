@@ -19,15 +19,20 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 const STRIP: i32 = 6;
 
 /// A window catching drops: where it is (and the parts of that it takes: see `uncovered`), its window, what it is for
-/// (an edge's strip opens the station there), and where what is dropped on it goes.
+/// (an edge's strip opens the station there), where what is dropped on it goes, and the window it catches for (none:
+/// an edge's strip).
 struct Catcher {
     rect: RECT,
     parts: Vec<RECT>,
     window: HWND,
     edge: Option<Edge>,
     lands: Lands,
+    over: Option<HWND>,
     _target: IDropTarget,
 }
+
+/// Where a catcher is wanted: as `Catcher` says, less its own window.
+type Wanted = (RECT, Vec<RECT>, Option<Edge>, Lands, Option<HWND>);
 
 /// The catchers up, while something is dragged.
 #[derive(Default)]
@@ -51,14 +56,15 @@ pub fn dragging() -> bool {
     }
 }
 
-/// Where drops are caught now (and the parts of each): each station and quick launch shown, as much of it as no other
-/// window covers, and each edge of each screen that holds the workbench while it shows a station, as a strip.
-fn wanted() -> Vec<(RECT, Vec<RECT>, Option<Edge>, Lands)> {
-    let mut wanted: Vec<(RECT, Vec<RECT>, Option<Edge>, Lands)> = super::run::areas()
+/// Where drops are caught now (and the parts of each): each station and quick launch shown, and where a station's page
+/// is chosen, as much of it as no other window covers, and each edge of each screen that holds the workbench while it
+/// shows a station, as a strip.
+fn wanted() -> Vec<Wanted> {
+    let mut wanted: Vec<Wanted> = super::run::areas()
         .into_iter()
         .filter_map(|(window, area, lands)| {
             let parts = uncovered(window, area);
-            (!parts.is_empty()).then_some((area, parts, None, lands))
+            (!parts.is_empty()).then_some((area, parts, None, lands, Some(window)))
         })
         .collect();
     let (places, station) = {
@@ -79,7 +85,7 @@ fn wanted() -> Vec<(RECT, Vec<RECT>, Option<Edge>, Lands)> {
                 Edge::Right => RECT { left: monitor.right - STRIP, ..monitor },
                 Edge::Top => RECT { bottom: monitor.top + STRIP, ..monitor },
             };
-            wanted.push((strip, vec![strip], Some(edge), Lands::Station));
+            wanted.push((strip, vec![strip], Some(edge), Lands::Station, None));
         }
     }
     wanted
@@ -160,13 +166,13 @@ impl Catchers {
     /// Up where drops are wanted while something is dragged; none else. What each sees goes to `run::caught`.
     pub fn follow(&mut self) {
         let wanted = if dragging() { wanted() } else { Vec::new() };
-        let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands);
+        let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands, over), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands && *over == up.over);
         if same {
             return;
         }
         self.clear();
-        for (rect, parts, edge, lands) in wanted {
-            if let Some(catcher) = make(rect, parts, edge, lands) {
+        for (rect, parts, edge, lands, over) in wanted {
+            if let Some(catcher) = make(rect, parts, edge, lands, over) {
                 self.up.push(catcher);
             }
         }
@@ -183,10 +189,10 @@ impl Catchers {
     }
 }
 
-/// A window catching drops over `rect` (screen px; along `edge`, where it is a strip there), as far as `parts` of it,
-/// above all, all but invisible (hit by the pointer: a window wholly clear is passed over), telling `run::caught` what
-/// it sees.
-fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands) -> Option<Catcher> {
+/// A window catching drops over `rect` (screen px; along `edge`, where it is a strip there; for the window `over`), as
+/// far as `parts` of it, above all, all but invisible (hit by the pointer: a window wholly clear is passed over),
+/// telling `run::caught` what it sees.
+fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Option<HWND>) -> Option<Catcher> {
     unsafe {
         let class = WNDCLASSW { lpfnWndProc: Some(procedure), lpszClassName: w!("GlanceStationCatcher"), ..Default::default() };
         RegisterClassW(&class);
@@ -220,14 +226,14 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands) -> Optio
         }
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-        let told = move |dragged: Dragged| super::run::caught(dragged, edge, lands);
+        let told = move |dragged: Dragged| super::run::caught(dragged, edge, lands, over);
         // (What is kept at hand may be given a file off the station; the station, none of its own again.)
-        let target = if lands == super::run::Lands::Station { Target::not_own(told) } else { Target::new(told) };
+        let target = if lands == super::run::Lands::Apps { Target::new(told) } else { Target::not_own(told) };
         if RegisterDragDrop(window, &target).is_err() {
             let _ = DestroyWindow(window);
             return None;
         }
-        Some(Catcher { rect, parts, window, edge, lands, _target: target })
+        Some(Catcher { rect, parts, window, edge, lands, over, _target: target })
     }
 }
 

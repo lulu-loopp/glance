@@ -260,11 +260,13 @@ impl Hit {
         self.slider().is_some() || matches!(self, Hit::Note(_))
     }
 
-    /// Where what is dropped on it goes, where something dragged may be dropped on it.
+    /// Where what is dropped on it goes, where something dragged may be dropped on it (where the station's page is
+    /// chosen: the station, shown as it is dragged over).
     pub fn lands(self) -> Option<crate::station::run::Lands> {
         match self {
             Hit::Station => Some(crate::station::run::Lands::Station),
             Hit::AppsArea => Some(crate::station::run::Lands::Apps),
+            Hit::Tab(Tab::Shelf) | Hit::StationPages => Some(crate::station::run::Lands::Pages),
             _ => None,
         }
     }
@@ -7040,6 +7042,12 @@ seven".into()));
             assert_eq!(wide.iter().filter(|hit| matches!(hit.4, Hit::Tab(_))).count(), 3, "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationPages) && !narrow.iter().any(|hit| matches!(hit.4, Hit::Tab(_))), "{skin:?}");
             assert!(narrow.iter().any(|hit| hit.4 == Hit::StationView), "{skin:?}");
+            // Something dragged over the station's tab, or the menu of its pages, shows the station there (another
+            // page shown): only over that.
+            for hits in [&wide, &narrow] {
+                let pages: Vec<Hit> = hits.iter().map(|hit| hit.4).filter(|hit| hit.lands() == Some(crate::station::run::Lands::Pages)).collect();
+                assert!(matches!(pages[..], [Hit::Tab(Tab::Shelf)] | [Hit::StationPages]), "{skin:?}: {pages:?}");
+            }
         }
     }
 

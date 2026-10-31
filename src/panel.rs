@@ -995,6 +995,15 @@ impl Controller {
                 }
                 crate::ui::window::SCREENS_CHANGED if widgets.owns(msg.hwnd) || widgets.full_owns(msg.hwnd) => widgets.screens_changed(),
                 crate::widget::CAPTURED if widgets.owns(msg.hwnd) => widgets.captured(msg.hwnd),
+                // Something dragged over where a station's page is chosen: that station shown.
+                crate::station::run::SHOW_STATION if owner.is_some() => {
+                    let panel = &mut panels[owner.unwrap()];
+                    if panel.tab != view::Tab::Shelf {
+                        panel.tab = view::Tab::Shelf;
+                        panel.next_frame = now;
+                    }
+                }
+                crate::station::run::SHOW_STATION if widgets.owns(msg.hwnd) => widgets.show_station(msg.hwnd),
                 OPEN_SETTINGS => settings_window::open(crate::ui::genie::of_told(msg.lParam.0)),
                 STICK_NOTES => {
                     for (name, asked) in std::mem::take(&mut *STUCK.lock().unwrap()) {

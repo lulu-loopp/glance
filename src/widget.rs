@@ -2486,6 +2486,15 @@ impl Widgets {
         self.list.iter().find_map(|widget| widget.shelf_press.map(|(hit, _)| hit))
     }
 
+    /// The station of the widget `hwnd` shown (something dragged over where its page is chosen).
+    pub fn show_station(&mut self, hwnd: HWND) {
+        let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        if let Some(readings) = widget.content.readings_mut().filter(|readings| readings.tab != view::Tab::Shelf) {
+            readings.tab = view::Tab::Shelf;
+            widget.next_frame = Instant::now();
+        }
+    }
+
     /// Each drawn at its next turn, not after its rest (what it shows has changed).
     pub fn draw_soon(&mut self) {
         let now = Instant::now();

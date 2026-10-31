@@ -139,16 +139,24 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
     held.iter().map(|(of, area, lands)| (HWND(*of as *mut _), *area, *lands)).collect()
 }
 
-/// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`).
+/// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where the station's
+/// page is chosen (its tab, while another page is shown), the station: a drag over it shows the station there (see
+/// `SHOW_STATION`), and one let go on it is put on it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
+    Pages,
 }
 
+/// Posted to a window (the panel's, a widget's) as something dragged comes over where its station's page is chosen:
+/// its station shown.
+pub const SHOW_STATION: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 20;
+
 /// What a window catching drops saw (see `catch`; on the station's thread, perhaps as it does something already: so
-/// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does.
-pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands) {
+/// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does; one
+/// over where the station's page is chosen in `window` shows it there.
+pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands, window: Option<HWND>) {
     if lands == Lands::Apps {
         // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
         ask(Ask::AppsOver(matches!(dragged, Dragged::Over(_))));
@@ -178,6 +186,9 @@ pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Land
             });
         }
         return;
+    }
+    if let (Lands::Pages, Dragged::Over(_), Some(window)) = (lands, &dragged, window) {
+        let _ = unsafe { PostMessageW(Some(window), SHOW_STATION, WPARAM(0), LPARAM(0)) };
     }
     match dragged {
         Dragged::Over(at) => {

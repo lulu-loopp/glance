@@ -601,7 +601,7 @@ fn show(opening: Opening) {
                 let over = matches!(dragged, Dragged::Over(_));
                 let _ = PostMessageW(Some(HWND(told as *mut _)), DROPPING, WPARAM(usize::from(over)), LPARAM(0));
                 if matches!(dragged, Dragged::Dropped(_)) {
-                    crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps);
+                    crate::station::run::caught(dragged, None, crate::station::run::Lands::Apps, None);
                 }
             });
             let _ = windows::Win32::System::Ole::RegisterDragDrop(hwnd, &target);
