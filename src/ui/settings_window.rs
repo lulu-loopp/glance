@@ -67,6 +67,7 @@ use crate::elevation;
 use crate::metrics;
 use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitivity, Settings, Shortcut, EDGES};
 
+pub(crate) mod guide;
 mod layout_page;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
@@ -151,6 +152,8 @@ const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0
 /// A frame that takes longer than this shows as a stutter: noted.
 const SLOW_FRAME: Duration = Duration::from_millis(33);
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
+/// How often the window, hidden while the guide shows a step of its own, looks again at what it shows.
+const HIDDEN_LOOKED_AT: Duration = Duration::from_millis(250);
 /// The pen of the preview's charts runs this far behind the newest sample
 /// beyond one interval, as the panel's does.
 const PEN_LAG_MS: f64 = 100.0;
@@ -313,6 +316,9 @@ const PERF_LIVE: u32 = WM_APP + 91;
 const TO_WORKBENCH: u32 = WM_APP + 42;
 /// Asked to turn to the page of the reports sent.
 const TO_REPORTS: u32 = WM_APP + 44;
+/// Asked to begin the guide; told that what a step of it asks was done elsewhere (see `guide::saw`).
+const TO_GUIDE: u32 = WM_APP + 46;
+const GUIDE_TOLD: u32 = WM_APP + 47;
 /// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there,
 /// closed the report or opened it again, or closed the window. Kept as told (`THREAD_SEND`, `THREAD_TURN`,
 /// `THREAD_CLOSE`), and seen to as the window is next looked at (see `tick`), outside whatever holds its state then.
@@ -329,7 +335,8 @@ thread_local! {
 /// Whether it is open and not minimized: what it shows can be seen.
 pub fn is_seen() -> bool {
     let hwnd = WINDOW.load(Ordering::Relaxed);
-    hwnd != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
+    // (Hidden while the guide shows a step of its own: see `guide`.)
+    hwnd != 0 && unsafe { IsWindowVisible(HWND(hwnd as *mut _)) }.as_bool() && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Brings the settings window up, from any thread: raised if it is open, else made, by the panel's thread, poured
@@ -379,12 +386,20 @@ pub fn open_at_reports(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Reports), place });
 }
 
+/// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
+/// and kept hidden but for the step shown on its own page.
+pub fn open_guide() {
+    open_at(Asked { to: Some(To::Guide), place: None });
+}
+
 /// A page the window is opened at, other than the one last shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum To {
     Overlay,
     Workbench,
     Reports,
+    /// The guide begun (see `guide`).
+    Guide,
 }
 
 impl Asked {
@@ -402,6 +417,7 @@ impl To {
             Some(To::Overlay) => 1,
             Some(To::Workbench) => 2,
             Some(To::Reports) => 3,
+            Some(To::Guide) => 4,
         }
     }
 
@@ -410,6 +426,7 @@ impl To {
             1 => Some(To::Overlay),
             2 => Some(To::Workbench),
             3 => Some(To::Reports),
+            4 => Some(To::Guide),
             _ => None,
         }
     }
@@ -423,10 +440,15 @@ fn open_at(asked: Asked) {
             Some(To::Overlay) => Some(TO_OVERLAY),
             Some(To::Workbench) => Some(TO_WORKBENCH),
             Some(To::Reports) => Some(TO_REPORTS),
+            Some(To::Guide) => Some(TO_GUIDE),
             None => None,
         };
         if let Some(message) = message {
             let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) };
+        }
+        // (The guide shows the window as its steps ask, not at once.)
+        if to == Some(To::Guide) {
+            return;
         }
         return show(None);
     }
@@ -1315,6 +1337,7 @@ enum Target {
     More,
     /// Asks for a newer release now.
     CheckNow,
+    Guide,
     Diagnostics,
     Update,
     Uninstall,
@@ -1388,6 +1411,8 @@ enum Row {
     Shortcut(Keys),
     /// This Glance's version, how the last asking went, and asking now.
     Version,
+    /// Shows the guide again (see `guide`).
+    Guide,
     Diagnostics,
     /// The reports this PC sent, how many and with how much unread: opens their page.
     MyReports,
@@ -1742,6 +1767,12 @@ struct Ui {
     /// The largest panel size at which the panel still grows on the screen the preview shows (see
     /// `arrange::largest`): past it a larger size changed the figure and nothing else.
     largest: f32,
+    /// The guide to Glance, while it is up (see `guide`).
+    guide: Option<guide::Guide>,
+    /// Where the layout's editor was last drawn (window DIPs), for the guide's step on it to point at.
+    editor_at: Option<Rect>,
+    /// Where the layout's components were last drawn (window DIPs), for the guide's tip to stay off them.
+    library_at: Option<Rect>,
 }
 
 impl Lives for Ui {
@@ -1980,6 +2011,9 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             next_frame: Instant::now(),
             drawn_size: None,
             largest: SIZES.1,
+            guide: None,
+            editor_at: None,
+            library_at: None,
         };
         crate::perf::mark(|| "settings state".into());
         ui.raise_more();
@@ -1996,7 +2030,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         ui.draw(Instant::now());
         let gfx = ui.gfx.clone();
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
-        if shown.is_none() {
+        // (Made for the guide: shown only as a step of it asks, see `guide`.)
+        if shown.is_none() || to == Some(To::Guide) {
             return Some(hwnd);
         }
         // Poured out of its place: hidden as it is shown, then pictured (see `genie`).
@@ -2079,6 +2114,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         TO_REPORTS => {
             to_reports();
+            LRESULT(0)
+        }
+        TO_GUIDE => {
+            with_ui(|ui| ui.turn_as_asked(To::Guide));
+            LRESULT(0)
+        }
+        GUIDE_TOLD => {
+            with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
         }
         THREAD_TOLD => {
@@ -2454,6 +2497,7 @@ impl Ui {
                 if update::available().is_some() {
                     rows.push(Row::Update);
                 }
+                rows.push(Row::Guide);
                 rows.push(Row::Diagnostics);
                 if !self.followed.is_empty() {
                     rows.push(Row::MyReports);
@@ -2613,6 +2657,7 @@ impl Ui {
                 self.followed = crate::reports::list();
                 self.turn_to(Page::Reports);
             }
+            To::Guide => self.begin_guide(),
         }
     }
 
@@ -3165,6 +3210,11 @@ impl Ui {
                 p("添加文件夹", "Add a folder"),
                 p("所选文件夹的子文件夹一并列出，不列出的文件夹除外", "Their subfolders are listed too, but for folders not listed"),
                 vec![(if self.choosing_folders.is_some() { (p("选择中", "Choosing"), Target::AddRecentFolder, Button::Quiet) } else { (p("选择", "Choose"), Target::AddRecentFolder, Button::Plain) })],
+            ),
+            Row::Guide => (
+                p("使用引导", "Guide"),
+                p("再次查看如何呼出面板、调整布局与使用快捷键", "Shows again how to open panels, arrange them and use the shortcuts"),
+                vec![(p("查看", "Show"), Target::Guide, Button::Plain)],
             ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
@@ -4186,6 +4236,7 @@ impl Ui {
     }
 
     fn press(&mut self, x: f32, y: f32) {
+        self.stop_drag();
         self.pointer = Some((x, y));
         if self.page == Page::Phone && self.press_phone(x, y) {
             return;
@@ -4402,6 +4453,7 @@ impl Ui {
             Target::Diagnostics if self.reporting.is_none() => self.reporting = Some((ReportFor::Copy, std::thread::spawn(crate::diagnostics::report))),
             Target::Diagnostics => {}
             Target::Quit => crate::quit(),
+            Target::Guide => self.begin_guide(),
             // Put together first (see `tick`), then shown whole: nothing leaves this PC that was not read and agreed to.
             Target::SendReport if self.sending.is_none() && self.reporting.is_none() => self.reporting = Some((ReportFor::Send, std::thread::spawn(crate::diagnostics::report))),
             Target::SendReport => {}
@@ -4486,6 +4538,7 @@ impl Ui {
                     (None, crate::netease::Installed::No) => vec![Target::NetEase(NetEaseWork::Install)],
                 },
                 Row::Quit => vec![Target::Quit],
+                Row::Guide => vec![Target::Guide],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true), Target::GetApp],
                 Row::WebPage => vec![Target::OpenPage],
                 Row::Phone(id, _) => vec![Target::Unpair(id)],
@@ -4509,6 +4562,7 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
+        self.stop_drag();
         if let Some(which) = self.recording {
             self.take_shortcut(which, key);
             return true;
@@ -4627,7 +4681,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
@@ -4824,6 +4878,12 @@ impl Ui {
             self.next_frame = now + DEVICE_RETRY;
             return;
         }
+        // Hidden while the guide shows a step of its own: only the guide drawn (see `guide`).
+        if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            self.next_frame = now + HIDDEN_LOOKED_AT;
+            self.draw_guide(now);
+            return;
+        }
         self.shown();
         let gfx = self.gfx.clone();
         let mut surface = self.surface.take().unwrap();
@@ -4868,11 +4928,14 @@ impl Ui {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
         };
+        self.draw_guide(now);
     }
 
     /// Draws everything, and returns how fast the preview's charts move
     /// (physical pixels a second).
     fn paint(&mut self, frame: &Frame, now: Instant) -> Option<f32> {
+        // (The guide's demonstration on the layout page moved on, where what it moves to is as last drawn.)
+        self.play_drag(now);
         let palette = self.palette.clone();
         let (width, height) = self.client();
         if !self.mica {
@@ -4895,6 +4958,7 @@ impl Ui {
             self.paint_list(frame, &palette, now, height);
         }
         unsafe { frame.dc.PopAxisAlignedClip() };
+        self.paint_played_pointer(frame);
         creep
     }
 
@@ -5400,7 +5464,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -6067,7 +6131,7 @@ impl Ui {
         // open from.
         let prefs = self.prefs.clone().holding(self.previewed());
         let edge = self.preview_edge();
-        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
+        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false, 1.0).0
     }
 
     /// How the stage is shown in `area` with a panel `pw` wide (stage DIPs) slid out from `edge`: how large a stage
@@ -6117,11 +6181,12 @@ impl Ui {
         Rect { x: left, y: top, w: right - left, h: bottom - top }
     }
 
-    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
-    /// live: the whole screen (`whole`), else the whole height of it
+    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it (as far as
+    /// `out`: 1 all the way, 0 just past the edge), running live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
-    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool) -> (Option<f32>, Rect) {
+    #[allow(clippy::too_many_arguments)]
+    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool, out: f32) -> (Option<f32>, Rect) {
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
@@ -6159,10 +6224,12 @@ impl Ui {
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
+        // (Slid in, as far past the edge as its shadow reaches.)
+        let away = 1.0 - out;
         let pos = match edge {
-            Edge::Left => (inset, along(sh / 2.0, ph, sh)),
-            Edge::Right => (sw - inset - pw, along(sh / 2.0, ph, sh)),
-            Edge::Top => (along(sw / 2.0, pw, sw), inset),
+            Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+            Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+            Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
         };
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.

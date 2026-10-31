@@ -111,6 +111,7 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn paint_library(&mut self, frame: &Frame, palette: &Palette, left: f32, y: f32, width: f32, height: f32, hovered: &Option<Target>) {
         card(frame, palette, left, y, width, height, palette.card);
+        self.library_at = Some(Rect { x: left, y, w: width, h: height });
         let (label, hint) = (Font::new(Family::Segoe, 14.0, 400.0), Font::new(Family::Segoe, HINT, 400.0));
         let (name, word) = self.library_words();
         let room = width - 2.0 * ROW_SIDE;
@@ -231,6 +232,7 @@ impl Ui {
         let hovered = self.hovered_now.clone();
         let lang = self.lang;
         self.zones.clear();
+        self.editor_at = Some(area);
         let places = self.settings.places().clone();
         // The head: a button for every screen together and one for each, and every screen alike. They follow one
         // another in rows as wide as the editor, a row more where one does not hold the next (the switch at the end
@@ -314,7 +316,7 @@ impl Ui {
         }
         frame.text_wrapped(rest, small, palette.text3, area.x + EDITOR_ROOM, top + (row + 1) as f32 * LEGEND_ROW + 4.0, width);
         // What is carried, at the pointer.
-        if let (Some(carry), Some((px, py))) = (self.carry.as_ref().filter(|carry| carry.moved), self.pointer) {
+        if let (Some(carry), Some((px, py))) = (self.carry.as_ref().filter(|carry| carry.moved), self.hand()) {
             let part = carry.part;
             self.chip(frame, palette, part, Rect { x: px + 10.0, y: py + 6.0, w: self.chip_width(frame, part) - CHIP + 8.0, h: CHIP }, true, 0.92, None);
         }
@@ -369,7 +371,7 @@ impl Ui {
         // screen is drawn whole wherever a panel is: where it is is known before it is drawn.)
         let r = self.whole_stage(canvas);
         let carried = self.carry.as_ref().filter(|carry| carry.moved).and_then(|carry| {
-            let (x, y) = self.pointer?;
+            let (x, y) = self.hand()?;
             let edge = EDGES.into_iter().find(|&edge| {
                 let zone = zone_of(r, edge, ZONE_LARGE, ZONE_TOP_LARGE);
                 x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h
@@ -378,12 +380,12 @@ impl Ui {
         });
         let held = carried.or_else(|| self.shown_edge.and_then(|edge| Some((edge, places.part(screen, edge)?))));
         let (creep, r) = match held {
-            Some((edge, Part::Music)) => self.music_on_stage(frame, canvas, edge),
+            Some((edge, Part::Music)) => self.music_on_stage(frame, canvas, edge, 1.0),
             Some((edge, part)) => {
                 let prefs = self.prefs.clone().holding(part);
-                self.panel_on_stage(frame, canvas, Some(edge), Some(&prefs), true)
+                self.panel_on_stage(frame, canvas, Some(edge), Some(&prefs), true, 1.0)
             }
-            None => self.panel_on_stage(frame, canvas, None, None, true),
+            None => self.panel_on_stage(frame, canvas, None, None, true, 1.0),
         };
         let work = self.stage.work;
         let monitors: Vec<RECT> = self.screens.iter().map(|known| known.monitor).collect();
@@ -393,10 +395,10 @@ impl Ui {
     }
 
     /// The stage's whole screen in `area`, and what plays slid out from its `edge` as the panel shows it there (as
-    /// large as on the screen, the screen made smaller with it). Returns how soon to draw again, and where the screen
-    /// was drawn.
-    fn music_on_stage(&mut self, frame: &Frame, area: Rect, edge: Edge) -> (Option<f32>, Rect) {
-        let (_, r) = self.panel_on_stage(frame, area, None, None, true);
+    /// large as on the screen, the screen made smaller with it), as far as `out` (1 all the way, 0 just past the edge).
+    /// Returns how soon to draw again, and where the screen was drawn.
+    pub(super) fn music_on_stage(&mut self, frame: &Frame, area: Rect, edge: Edge, out: f32) -> (Option<f32>, Rect) {
+        let (_, r) = self.panel_on_stage(frame, area, None, None, true, 1.0);
         let k = r.w / self.stage.size.0;
         let shows = super::super::music::Shows::from(&self.settings.view);
         let room = self.settings.music_rooms.at(edge == Edge::Top);
@@ -405,10 +407,11 @@ impl Ui {
         let (w, h) = size;
         let (sw, sh) = self.stage.size;
         let inset = 8.0;
+        let away = 1.0 - out;
         let (x, y) = match edge {
-            Edge::Left => (inset, (sh - h) / 2.0),
-            Edge::Right => (sw - inset - w, (sh - h) / 2.0),
-            Edge::Top => ((sw - w) / 2.0, inset),
+            Edge::Left => (inset - away * (w + inset + GAP), (sh - h) / 2.0),
+            Edge::Right => (sw - inset - w + away * (w + inset + GAP), (sh - h) / 2.0),
+            Edge::Top => ((sw - w) / 2.0, inset - away * (h + inset + GAP)),
         };
         unsafe { frame.dc.PushAxisAlignedClip(&rect(r.x, r.y, r.w, r.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let local = Matrix3x2::scale(k, k) * Matrix3x2::translation(r.x + x * k, r.y + y * k);
@@ -450,7 +453,7 @@ impl Ui {
             let upright = edge != Edge::Top;
             let zone = zone_of(r, edge, deep, deep_top);
             let part = places.part(screen, edge);
-            let over = carrying && self.pointer.is_some_and(|(x, y)| x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h);
+            let over = carrying && self.hand().is_some_and(|(x, y)| x >= zone.x && x < zone.x + zone.w && y >= zone.y && y < zone.y + zone.h);
             // While a component is carried, every edge glows where it takes it, the one under the pointer more, each
             // easing to how it is; and the screen pointed at, large, shows what its edge would open lighter.
             let glow = self.animate(format!("glow:{screen}:{edge:?}:{large}"), if over { GLOW.1 } else if carrying { GLOW.0 } else { 0.0 }, SLIDE, now, false);
@@ -573,7 +576,16 @@ impl Ui {
             }
             return;
         }
-        let zone = self.pointer.and_then(|(x, y)| self.zones.iter().find(|zone| x >= zone.rect.x && x < zone.rect.x + zone.rect.w && y >= zone.rect.y && y < zone.rect.y + zone.rect.h));
+        if self.put(carry, self.pointer) {
+            self.save();
+            self.guide_saw_layout();
+        }
+    }
+
+    /// `carry` let go at `at` (window DIPs): on an edge, put there (taken off the one it came from), the panel slid
+    /// out from it; off every edge, taken off the one it came from. Whether the edges changed (saved by the caller).
+    pub(super) fn put(&mut self, carry: Carry, at: Option<(f32, f32)>) -> bool {
+        let zone = at.and_then(|(x, y)| self.zones.iter().find(|zone| x >= zone.rect.x && x < zone.rect.x + zone.rect.w && y >= zone.rect.y && y < zone.rect.y + zone.rect.h));
         let dropped = zone.map(|zone| (zone.screen.clone(), zone.edge));
         let places = self.settings.places_mut();
         match (dropped, &carry.from) {
@@ -582,9 +594,15 @@ impl Ui {
                 self.shown_edge = Some(edge);
             }
             (None, Some((screen, edge))) => places.take(screen, *edge),
-            (None, None) => return,
+            (None, None) => return false,
         }
-        self.save();
+        self.next_frame = Instant::now();
+        true
+    }
+
+    /// Where what is carried is: at the pointer, or, while the guide plays its step here, at the pointer it moves.
+    pub(super) fn hand(&self) -> Option<(f32, f32)> {
+        self.played_hand().or(self.pointer)
     }
 
     /// The editor shows screen `screen` large, the real panel slid out from its `edge`.

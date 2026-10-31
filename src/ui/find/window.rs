@@ -52,6 +52,8 @@ const LISTED: u32 = WM_APP + 3;
 const LEFT: u32 = WM_APP + 4;
 /// The look at the name picked (see `ui::look`) shows another of those it may (WPARAM its place among them), or went.
 const LOOKED: u32 = WM_APP + 5;
+/// It is shown, and the first name in it that may be looked at larger is (see `preview`).
+const PREVIEW: u32 = WM_APP + 6;
 
 /// Its timers: the caret's blinking; a look at what may have changed while it shows (the drives' indexing, the
 /// pictures made for its rows); a frame of the mark of the kind chosen sliding to it.
@@ -97,13 +99,24 @@ static WINDOW: OnceLock<Option<isize>> = OnceLock::new();
 
 /// Shows the search window, or hides it where it is up in front: from any thread (the shortcut's, the workbench's).
 pub fn toggle() {
+    tell(TOGGLE);
+}
+
+/// Shows the search window, and the first name in it that may be looked at larger looked at, as its preview's shortcut
+/// there does: from any thread (the guide's, which shows the shortcut).
+pub fn preview() {
+    tell(PREVIEW);
+}
+
+/// Tells its window `message`, made with its thread first where it is not yet.
+fn tell(message: u32) {
     let made = WINDOW.get_or_init(|| {
         let (sender, made) = std::sync::mpsc::channel();
         std::thread::Builder::new().name("glance: search window".into()).spawn(move || run(sender)).ok()?;
         made.recv().ok().flatten()
     });
     if let Some(hwnd) = *made {
-        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), TOGGLE, WPARAM(0), LPARAM(0)) };
+        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), message, WPARAM(0), LPARAM(0)) };
     }
 }
 
@@ -286,6 +299,8 @@ struct Finder {
     height: f32,
     /// Each name looked at larger may be, by its place among those shown, in the look's order (see `preview`).
     looked: Vec<usize>,
+    /// The first name found that may be looked at larger to be, once one is (see `preview_first`).
+    preview_owed: bool,
 }
 
 impl Finder {
@@ -328,6 +343,7 @@ impl Finder {
             told: None,
             height: 0.0,
             looked: Vec::new(),
+            preview_owed: false,
         }
     }
 
@@ -368,6 +384,7 @@ impl Finder {
     }
 
     fn show(&mut self) {
+        super::super::settings_window::guide::saw(super::super::settings_window::guide::Saw::Searched);
         let (skin, pref, lang) = Finder::look();
         if skin != self.skin {
             self.drawn = None;
@@ -453,6 +470,7 @@ impl Finder {
         crate::widget::own_window_changed(self.rect);
         self.pressed = None;
         self.selecting = false;
+        self.preview_owed = false;
         // (What it draws with let go of while it is hidden.)
         self.drawn = None;
         self.showing = None;
@@ -494,6 +512,9 @@ impl Finder {
         }
         self.follow = true;
         self.draw();
+        if self.preview_owed {
+            self.preview_first();
+        }
     }
 
     fn rows(&self) -> usize {
@@ -1305,6 +1326,28 @@ impl Finder {
         look::up_for(self.hwnd)
     }
 
+    /// Shown, in front, and the first name in it that may be looked at larger picked and looked at; none found yet, the
+    /// first that is, as it is.
+    fn preview_first(&mut self) {
+        if !self.visible() {
+            self.show();
+        } else {
+            self.come_forward();
+        }
+        let lang = self.lang;
+        let Some(first) = self.shown.rows().position(|row| looked_at(row, lang).is_some()) else {
+            self.preview_owed = true;
+            return;
+        };
+        self.preview_owed = false;
+        self.pick = first;
+        self.follow = true;
+        if !self.looking() {
+            self.preview();
+        }
+        self.draw();
+    }
+
     /// The name picked looked at larger beside the sheet, the others that may be had by the arrows; looked at, gone back
     /// into its row. (A program, a page of Settings: nothing more to show, nothing done.)
     fn preview(&mut self) {
@@ -1689,6 +1732,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     match message {
         TOGGLE => {
             with(Finder::toggle);
+            LRESULT(0)
+        }
+        PREVIEW => {
+            with(Finder::preview_first);
             LRESULT(0)
         }
         FOUND => {

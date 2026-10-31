@@ -2539,6 +2539,9 @@ impl<'a> Panel<'a> {
         if self.is_open() {
             return;
         }
+        if pushed {
+            crate::ui::settings_window::guide::saw(crate::ui::settings_window::guide::Saw::Pushed);
+        }
         let began = Instant::now();
         let mut taking = Duration::ZERO;
         // A reopening during the way out picks the panel up where it is.

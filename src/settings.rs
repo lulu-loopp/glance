@@ -747,6 +747,9 @@ pub struct Settings {
     pub netease_loader: bool,
     /// The version that last ran: a newer one starting says it was updated.
     pub last_version: Option<String>,
+    /// Whether the guide to Glance has been shown (see `settings_window::guide`): it is, once, as Glance first starts
+    /// with it, installed or updated.
+    pub guided: bool,
     /// The day Glance first ran here (days since 1970), where it has been
     /// known since: asking its site for a newer version, Glance says how
     /// many weeks ago that was, and no more of when.
@@ -925,6 +928,7 @@ impl Default for Settings {
             tray_hidden: false,
             netease_loader: false,
             last_version: None,
+            guided: false,
             began: None,
             asked_as: None,
             overlay: OverlaySettings::default(),
