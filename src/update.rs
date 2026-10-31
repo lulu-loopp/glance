@@ -251,16 +251,26 @@ pub fn watch() {
     }
 }
 
+/// Whether Glance found settings of its own as it started (see `note_settings_found`).
+static SETTINGS_FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Notes whether there were settings as Glance started (`found`), looked at before anything it does as it starts
+/// writes them: on a first install, what it settles first (each GPU's number) is written before it says whether it
+/// was updated.
+pub fn note_settings_found(found: bool) {
+    let _ = SETTINGS_FOUND.set(found);
+}
+
 /// Says so once if this is the first start since Glance was updated, and
 /// notes the version that runs. Settings from before versions were noted
-/// (0.1.8 and earlier) count as an update; none at all, as a first install.
+/// (0.1.8 and earlier) count as an update; none as Glance started, as a first install.
 pub fn tell_if_updated() {
     let app = crate::app();
     let version = env!("CARGO_PKG_VERSION");
     let last = app.settings.lock().unwrap().last_version.clone();
     let updated = match last.as_deref() {
         Some(last) => newer(version, last),
-        None => crate::settings::saved(&app.config),
+        None => *SETTINGS_FOUND.get().expect("noted as Glance started"),
     };
     if last.as_deref() == Some(version) {
         return;
