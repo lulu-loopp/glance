@@ -11,6 +11,7 @@
 //!     glance-remote ask METHOD PATH [JSON]   asks the helper that listens, from this PC, as a phone would
 //!     glance-remote address    says where the page for a phone's browser is
 //!     glance-remote restore    puts on again the monitors a helper since ended was keeping dark
+//!     glance-remote night-key [new|none]   says the key night is put on and off by alone; makes one anew, or keeps none
 
 // No console of its own: it runs unseen for as long as the remote is on.
 // (Asked something from a terminal, it answers into that terminal: see `main`.)
@@ -595,6 +596,36 @@ impl Helper {
             body.extend_from_slice(&came);
         }
         body.truncate(length);
+        // Night, asked by whoever has the key kept for that alone (see `Config::night_key`): a phone's shortcut,
+        // which cannot sign. Nothing else is done by it, and nothing is answered of the PC but whether it is night.
+        if path == NIGHT_BY_KEY {
+            let given = header("x-glance-key");
+            let kept = Config::load().night_key;
+            let (status, answer) = if method != "POST" || !kept.as_deref().is_some_and(|kept| sign::is_key(given, kept)) {
+                journal::note(format!("refused {method} {path} from {}: not the night key", stream.peer_addr().map_or_else(|_| "?".into(), |from| from.ip().to_string())));
+                (401, json!({ "error": "forged" }))
+            } else {
+                let on = serde_json::from_slice::<Value>(&body).ok().and_then(|asked| asked.get("on").and_then(Value::as_bool));
+                match on {
+                    None => (400, json!({ "error": "\"on\" is missing" })),
+                    Some(on) => {
+                        let done = self.night(on);
+                        journal::note(format!("asked {path} by the night key, on {on}: {}", done.as_ref().map_or_else(|error| error.as_str(), |_| "done")));
+                        match done {
+                            Ok(()) => (200, json!({ "name": self.config.name, "night": on })),
+                            Err(error) => (500, json!({ "error": error })),
+                        }
+                    }
+                }
+            };
+            let answer = answer.to_string();
+            return write!(stream, "HTTP/1.1 {status} {}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{answer}", if status == 200 { "OK" } else { "Error" }, answer.len());
+        }
         // The page a phone's browser controls this PC from (a phone with no
         // app for it): anyone's to fetch, for it holds nothing; what it
         // then asks is signed as the app's is, with a key it was paired by.
@@ -697,6 +728,9 @@ fn pairing(config: &Config, key: &str) -> String {
 
 /// What this PC calls itself, asking its own helper (see `Helper::admit`).
 const LOCAL: &str = "this-pc";
+
+/// Where night is asked for by the night key (see `Config::night_key`).
+const NIGHT_BY_KEY: &str = "/v1/night/key";
 
 /// Asks the helper that listens on this PC, as this PC: its answer's
 /// status and what it said. Asked again once, for the run the helper says
@@ -882,6 +916,21 @@ fn main() -> std::io::Result<()> {
                 let dark = display::restore(&config.darkened);
                 Config::change(|config| config.darkened = dark)?;
             }
+            return Ok(());
+        }
+        // glance-remote night-key [new|none]: the key night alone is put on and off by, said; made anew first (any
+        // shortcut made with the one before asks in vain from then on), or none kept.
+        Some("night-key") => {
+            let config = match std::env::args().nth(2).as_deref() {
+                Some("new") => {
+                    let mut key = [0u8; 32];
+                    getrandom::getrandom(&mut key).map_err(|error| std::io::Error::other(error.to_string()))?;
+                    Config::change(|config| config.night_key = Some(sign::hex(&key)))?
+                }
+                Some("none") => Config::change(|config| config.night_key = None)?,
+                _ => config,
+            };
+            say!("{}", config.night_key.as_deref().unwrap_or("none"));
             return Ok(());
         }
         // glance-remote screens [signal|kept]: how the screens are put out, set (with one of the two) and said.

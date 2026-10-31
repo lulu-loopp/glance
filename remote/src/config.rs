@@ -101,6 +101,9 @@ pub struct Config {
     /// each as it is to be put back: one that ends before it has put them
     /// back does so when it next starts.
     pub darkened: Vec<crate::display::Darkened>,
+    /// A key that puts night on and off and does nothing else (hex, 32 bytes), where one is kept: for a phone's
+    /// shortcut, which cannot sign what it asks (see `night_key` in main). Made on this PC by hand, never offered.
+    pub night_key: Option<String>,
 }
 
 impl Default for Config {
@@ -122,6 +125,7 @@ impl Default for Config {
             screens: Screens::default(),
             screens_chosen: false,
             darkened: Vec::new(),
+            night_key: None,
         }
     }
 }

@@ -45,6 +45,17 @@ pub fn here(key: &[u8; 32], nonce: &str) -> String {
     hex(&mac.finalize().into_bytes())
 }
 
+/// Whether `given` is the key kept as `kept` (hex): compared as a whole, in the same time however much of it is
+/// right, so that it cannot be found out a part at a time.
+pub fn is_key(given: &str, kept: &str) -> bool {
+    let (Some(given), Some(kept)) = (unhex(given), key(kept)) else { return false };
+    let mut mac = Hmac::<Sha256>::new_from_slice(&kept).expect("a key of any length");
+    mac.update(b"key\n");
+    let mut asked = Hmac::<Sha256>::new_from_slice(&given).expect("a key of any length");
+    asked.update(b"key\n");
+    mac.verify(&asked.finalize().into_bytes()).is_ok()
+}
+
 /// A request as it came: what it asks, and what it gives to prove whose
 /// it is.
 pub struct Request<'a> {
@@ -188,5 +199,18 @@ mod tests {
         assert_ne!(answer(&key, "a1", 200, b"{}"), answer(&key, "a1", 401, b"{}"));
         assert_ne!(answer(&key, "a1", 200, b"{}"), answer(&key, "a1", 200, b"{ }"));
         assert!(super::key(&hex(&key)).is_some() && super::key("12").is_none());
+    }
+
+    /// The night key is taken whole and only so: not a part of it, nor another key, nor what is no key.
+    #[test]
+    fn the_night_key_is_taken_whole() {
+        let kept = hex(&[7u8; 32]);
+        assert!(super::is_key(&kept, &kept));
+        assert!(super::is_key(&kept.to_uppercase(), &kept));
+        assert!(!super::is_key(&kept[..62], &kept));
+        assert!(!super::is_key(&hex(&[8u8; 32]), &kept));
+        assert!(!super::is_key("", &kept));
+        assert!(!super::is_key("zz", &kept));
+        assert!(!super::is_key(&kept, ""));
     }
 }
