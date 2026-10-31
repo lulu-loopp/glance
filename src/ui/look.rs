@@ -391,6 +391,10 @@ struct Reading {
 
 /// What was read, for which look and which thing.
 static READ: Mutex<Vec<(u64, usize, Read)>> = Mutex::new(Vec::new());
+/// How large a thing is seen (see `measure`), for which look and which thing: known before it is read.
+static MEASURED: Mutex<Vec<(u64, usize, Seen)>> = Mutex::new(Vec::new());
+/// A thing's size as it is seen (px across, down).
+type Seen = (u32, u32);
 
 /// Things read as they are asked for, the latest first (those of a look gone left), each told to the window as it is.
 fn reading(asks: Receiver<Reading>, hwnd: isize) {
@@ -409,14 +413,21 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
         let latest = waiting.iter().map(|asked| asked.number).max().unwrap_or(0);
         waiting.retain(|asked| asked.number == latest);
         let Some(asked) = waiting.pop() else { continue };
+        // (How large it is seen first, told at once: the sheet grows to that size as it opens, and keeps it as what it
+        // shows is read, which may take a while.)
+        if let Some(size) = measure(&asked.shows) {
+            MEASURED.lock().unwrap().push((asked.number, asked.at, size));
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+        }
         let read = read(&asked.shows, asked.lang, asked.scale, asked.number ^ ((asked.at as u64) << 40));
         READ.lock().unwrap().push((asked.number, asked.at, read));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
     }
 }
 
-/// What was read of the things `before` (by their places there) at their places among `items`: none for those new.
-fn carried(before: &[Item], mut read: Vec<Option<Read>>, items: &[Item]) -> Vec<Option<Read>> {
+/// What was read (or measured) of the things `before` (by their places there) at their places among `items`: none for
+/// those new.
+fn carried<T>(before: &[Item], mut read: Vec<Option<T>>, items: &[Item]) -> Vec<Option<T>> {
     items.iter().map(|item| before.iter().position(|had| had.key == item.key).and_then(|at| read.get_mut(at)?.take())).collect()
 }
 
@@ -551,14 +562,24 @@ fn in_code_page(bytes: &[u8]) -> Option<String> {
     (written > 0).then(|| String::from_utf16_lossy(&wide[..written as usize]))
 }
 
-/// The picture in the file at `path`, turned as its camera says it was held, no larger than `PICTURE_SIDE` and
-/// `PICTURE_PIXELS` (made smaller to fit), premultiplied, known by `key`; and its own size, turned so.
-fn decode(path: &Path, key: u64) -> windows::core::Result<(Picture, (u32, u32))> {
+/// How large a thing is seen (px, turned as it is seen), where that is known before it is read, and at once: a
+/// picture's own size (its header, not its pixels), a video's frames' (as the shell knows them). What the sheet is
+/// sized by from its first frame (see `Looker::wanted`).
+fn measure(shows: &Shows) -> Option<(u32, u32)> {
+    let Shows::File(path) = shows else { return None };
+    match kind_of(path) {
+        Kind::Picture => picture_size(path).ok(),
+        Kind::Video => video_size(path),
+        _ => None,
+    }
+}
+
+/// The picture in the file at `path`, its first frame's size (px) and how its camera says it was held, read from its
+/// header (its pixels are not).
+fn picture_header(factory: &windows::Win32::Graphics::Imaging::IWICImagingFactory, path: &Path) -> windows::core::Result<(windows::Win32::Graphics::Imaging::IWICBitmapFrameDecode, (u32, u32), u16)> {
     use windows::Win32::Foundation::GENERIC_READ;
-    use windows::Win32::Graphics::Imaging::*;
-    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    use windows::Win32::Graphics::Imaging::WICDecodeMetadataCacheOnDemand;
     unsafe {
-        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let decoder = factory.CreateDecoderFromFilename(&HSTRING::from(path.as_os_str()), None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)?;
         let frame = decoder.GetFrame(0)?;
         let (mut width, mut height) = (0u32, 0u32);
@@ -567,6 +588,48 @@ fn decode(path: &Path, key: u64) -> windows::core::Result<(Picture, (u32, u32))>
             return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
         }
         let orientation = orientation_of(&frame);
+        Ok((frame, (width, height), orientation))
+    }
+}
+
+/// A picture's own size, turned as it is seen (see `decode`).
+fn picture_size(path: &Path) -> windows::core::Result<(u32, u32)> {
+    use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, IWICImagingFactory};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    let factory: IWICImagingFactory = unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)? };
+    let (_, (width, height), orientation) = picture_header(&factory, path)?;
+    Ok(if matches!(orientation, 5..=8) { (height, width) } else { (width, height) })
+}
+
+/// A video's frames' size (px), turned as it plays (a phone's, held upright, is kept on its side and said to be
+/// turned), as the shell knows it: none where it does not.
+fn video_size(path: &Path) -> Option<(u32, u32)> {
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::UI::Shell::{IShellItem2, SHCreateItemFromParsingName};
+    // (The shell's System.Video.FrameWidth, FrameHeight and Orientation.)
+    const VIDEO: windows::core::GUID = windows::core::GUID::from_u128(0x64440491_4c8b_11d1_8b70_080036b11a03);
+    const WIDTH: PROPERTYKEY = PROPERTYKEY { fmtid: VIDEO, pid: 3 };
+    const HEIGHT: PROPERTYKEY = PROPERTYKEY { fmtid: VIDEO, pid: 4 };
+    const TURNED: PROPERTYKEY = PROPERTYKEY { fmtid: VIDEO, pid: 99 };
+    unsafe {
+        let item: IShellItem2 = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
+        let (width, height) = (item.GetUInt32(&WIDTH).ok()?, item.GetUInt32(&HEIGHT).ok()?);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let quarter = item.GetUInt32(&TURNED).is_ok_and(|degrees| degrees % 180 == 90);
+        Some(if quarter { (height, width) } else { (width, height) })
+    }
+}
+
+/// The picture in the file at `path`, turned as its camera says it was held, no larger than `PICTURE_SIDE` and
+/// `PICTURE_PIXELS` (made smaller to fit), premultiplied, known by `key`; and its own size, turned so.
+fn decode(path: &Path, key: u64) -> windows::core::Result<(Picture, (u32, u32))> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    unsafe {
+        let factory: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let (frame, (width, height), orientation) = picture_header(&factory, path)?;
         // (Made smaller as a whole: its longer side, and all its pixels, no more than may be held.)
         let k = (PICTURE_SIDE as f64 / width.max(height) as f64).min((PICTURE_PIXELS as f64 / (width as f64 * height as f64)).sqrt()).min(1.0);
         let source: IWICBitmapSource = if k < 1.0 {
@@ -684,8 +747,10 @@ struct Looker {
     monitor: RECT,
     work: RECT,
     scale: f32,
-    /// What each thing read is (by its place), and those asked to be.
+    /// What each thing read is (by its place), how large each is seen where that was known before (see `measure`), and
+    /// those asked to be.
     read: Vec<Option<Read>>,
+    measured: Vec<Option<(u32, u32)>>,
     asked: Vec<bool>,
     motion: Motion,
     /// A picture zoomed (1: fitted), moved (DIPs), and where a drag of it began (the pointer, and where it was moved).
@@ -733,6 +798,7 @@ impl Looker {
             work: RECT::default(),
             scale: 1.0,
             read: Vec::new(),
+            measured: Vec::new(),
             asked: Vec::new(),
             motion: Motion::Resting,
             zoom: 1.0,
@@ -803,6 +869,7 @@ impl Looker {
         (self.monitor, self.work, self.scale) = (contact.monitor, contact.work, contact.scale);
         (self.owner, self.tell, self.beside) = (opening.owner, opening.tell, opening.beside);
         self.read = vec![None; opening.items.len()];
+        self.measured = vec![None; opening.items.len()];
         self.asked = vec![false; opening.items.len()];
         self.items = opening.items;
         self.at = at;
@@ -863,6 +930,7 @@ impl Looker {
         }
         self.items.clear();
         self.read.clear();
+        self.measured.clear();
         self.asked.clear();
         self.drawn = None;
         self.showing = None;
@@ -871,6 +939,7 @@ impl Looker {
         self.pressed = None;
         self.told = None;
         READ.lock().unwrap().clear();
+        MEASURED.lock().unwrap().clear();
     }
 
     /// What called it up told which thing it shows now.
@@ -902,6 +971,7 @@ impl Looker {
         let was = self.shape(Instant::now()).at;
         let shown = self.items[self.at].key;
         let read = carried(&self.items, std::mem::take(&mut self.read), &items);
+        self.measured = carried(&self.items, std::mem::take(&mut self.measured), &items);
         // (What is being read is for the places as they were: asked again, where it is wanted, at theirs now.)
         self.number += 1;
         self.asked = read.iter().map(Option::is_some).collect();
@@ -956,10 +1026,18 @@ impl Looker {
         }
     }
 
-    /// What was read, where it is for this look: taken up (a picture of its own size, its sheet sized for it anew).
+    /// What was read (or measured), where it is for this look: taken up (its sheet sized for it anew).
     fn loaded(&mut self) {
+        let measured = std::mem::take(&mut *MEASURED.lock().unwrap());
         let read = std::mem::take(&mut *READ.lock().unwrap());
         let mut resized = false;
+        for (number, at, size) in measured {
+            if number != self.number || at >= self.measured.len() || !self.asked[at] {
+                continue;
+            }
+            resized |= at == self.at;
+            self.measured[at] = Some(size);
+        }
         for (number, at, read) in read {
             if number != self.number || at >= self.read.len() || !self.asked[at] {
                 continue;
@@ -1049,7 +1127,9 @@ impl Looker {
     }
 
     /// How large the sheet wants to be for the thing shown, `most` at most (DIPs): a picture whole, as large as fits, no
-    /// larger than its own pixels; a page as tall as it may be; words, and what has no picture, at their sizes.
+    /// larger than its own pixels; a video as a picture of its frames' size; a page as tall as it may be; words, and
+    /// what has no picture, at their sizes. A picture or a video is so from before it is read, by its size measured
+    /// (see `measure`): the sheet is not opened at one size and made another as what it shows comes.
     fn wanted(&self, most: (f32, f32)) -> (f32, f32) {
         let (top, pad) = (self.body_top(), self.inset());
         // A picture `(pw, ph)` px large, as large as fits, no larger than its own pixels where they are known (`own`).
@@ -1064,21 +1144,28 @@ impl Looker {
             (((h - top - pad) / PAGE + 2.0 * pad + PAGE_ROOM).min(most.0).max(PICTURE_LEAST), h)
         };
         let item = &self.items[self.at];
+        let measured = self.measured.get(self.at).copied().flatten();
         match self.body() {
             Some(Body::Picture(_, own)) => pictured(*own, true),
-            Some(Body::Pictured(picture) | Body::Live { picture: Some(picture), .. }) => pictured(picture.size, true),
-            Some(Body::Live { picture: None, .. }) => page(),
+            // (A video's picture stands for it, made no larger than may be asked: it is shown at its frames' size.)
+            Some(Body::Pictured(picture) | Body::Live { picture: Some(picture), .. }) => pictured(measured.unwrap_or(picture.size), true),
+            Some(Body::Live { picture: None, .. }) => measured.map_or_else(page, |size| pictured(size, true)),
             Some(Body::Words { .. } | Body::Files(_)) => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
             Some(Body::Other(_)) => OTHER,
-            // (Not read yet: as large as what its name says it is wants, a picture of the shape its tile's is.)
-            None => match kind_shown(&item.shows) {
-                Kind::Picture | Kind::Video => match &item.shows {
-                    Shows::File(path) => crate::station::thumbs::of(path, 256).map_or(most, |thumb| pictured(thumb.size, false)),
-                    _ => most,
+            // (Not read yet: as large as it was measured.)
+            None => match measured {
+                Some(size) => pictured(size, true),
+                // (Neither read nor measured yet, the first moment it opens: as large as what its name says it is wants, a
+                // picture of the shape its tile's is.)
+                None => match kind_shown(&item.shows) {
+                    Kind::Picture | Kind::Video => match &item.shows {
+                        Shows::File(path) => crate::station::thumbs::of(path, 256).map_or(most, |thumb| pictured(thumb.size, false)),
+                        _ => most,
+                    },
+                    Kind::Page => page(),
+                    Kind::Words | Kind::Files => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
+                    Kind::Unknown => OTHER,
                 },
-                Kind::Page => page(),
-                Kind::Words | Kind::Files => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
-                Kind::Unknown => OTHER,
             },
         }
     }
@@ -1993,6 +2080,44 @@ mod tests {
         assert_eq!(kind_of(Path::new(r"C:\a\clip.mp4")), Kind::Video);
         assert_eq!(kind_of(Path::new(r"C:\a\volume.rs")), Kind::Unknown);
         assert_eq!(kind_of(Path::new(r"C:\a\LICENSE")), Kind::Unknown);
+    }
+
+    /// A picture is measured from its header at its own size, and a thing that is neither a picture nor a video is not.
+    #[test]
+    fn a_picture_is_measured_before_it_is_read() {
+        // (As on the reading thread.)
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let file = |name: &str| PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR")));
+        assert_eq!(measure(&Shows::File(file("icons/128x128@2x.png"))), Some((256, 256)));
+        assert_eq!(measure(&Shows::File(file("Cargo.toml"))), None);
+        assert_eq!(measure(&Shows::Words("words".into())), None);
+    }
+
+    /// A picture's or a video's sheet is as large from the moment it is measured as once what it shows is read: a
+    /// video's picture made smaller than its frames (as the shell makes it, no larger than asked), or a small picture,
+    /// do not make it another size then.
+    #[test]
+    fn a_sheet_keeps_its_size_as_what_it_shows_is_read() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let item = |name: &str| Item { key: 1, title: name.into(), about: String::new(), shows: Shows::File(PathBuf::from(format!(r"C:\a\{name}"))), from: None, open: None, copy: None, pastes: false };
+        let picture = |size: (u32, u32)| Picture { key: 1, size, pixels: std::sync::Arc::new(Vec::new()) };
+        let most = (1400.0, 900.0);
+        for (name, size, read) in [
+            ("clip.mp4", (1920, 1080), Body::Live { picture: Some(picture((1600, 900))), previewer: windows::core::GUID::zeroed() }),
+            ("clip.mkv", (1280, 720), Body::Pictured(picture((640, 360)))),
+            ("tall.mp4", (1080, 1920), Body::Live { picture: None, previewer: windows::core::GUID::zeroed() }),
+            ("small.png", (300, 200), Body::Picture(picture((300, 200)), (300, 200))),
+        ] {
+            let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+            looker.scale = 1.5;
+            looker.items = vec![item(name)];
+            (looker.read, looker.measured) = (vec![None], vec![Some(size)]);
+            let measured = looker.wanted(most);
+            looker.read = vec![Some(Read { body: read, about: None })];
+            assert_eq!(looker.wanted(most), measured, "{name}");
+        }
     }
 
     /// The camera's orientations each turn the picture upright, the four that turn it a quarter swapping its sides.
