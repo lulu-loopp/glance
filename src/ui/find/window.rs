@@ -1203,7 +1203,6 @@ impl Finder {
                 VK_DOWN | VK_RIGHT => return self.look_step(true),
                 VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN | VK_RETURN => {}
                 VK_C if ctrl => {}
-                VK_SPACE if look::plays() => return look::key(look::Key::Toggle),
                 _ => look::close(),
             }
         }
@@ -1706,6 +1705,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let mut typed = MSG::default();
             let _ = unsafe { PeekMessageW(&mut typed, Some(hwnd), WM_CHAR, WM_SYSCHAR, PM_REMOVE) };
             with(Finder::preview);
+            LRESULT(0)
+        }
+        // Space while its look shows what plays: played or paused (the space it would type taken with it).
+        WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_SPACE && look::plays() && with(|finder| finder.looking()).unwrap_or(false) => {
+            let mut typed = MSG::default();
+            let _ = unsafe { PeekMessageW(&mut typed, Some(hwnd), WM_CHAR, WM_CHAR, PM_REMOVE) };
+            // (Once as it goes down, not again as it is held.)
+            if lparam.0 & (1 << 30) == 0 {
+                look::key(look::Key::Toggle);
+            }
             LRESULT(0)
         }
         LISTED => {
