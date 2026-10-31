@@ -1143,6 +1143,9 @@ enum Field {
     StationKeep,
     StationCopy,
     StationAfterDrag,
+    /// What Recent files lists from: the drives, each on or off, or only the folders chosen, whatever drive they are
+    /// on (see `Settings::recent_only`). Each kept as the other is chosen.
+    RecentScope,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -1284,8 +1287,6 @@ enum Switch {
     HeatAlert,
     /// The phone remote.
     Remote,
-    /// Whether Recent files lists only the files in the folders chosen (see `Settings::recent_only`).
-    RecentOnly,
     /// Whether the remote sets the lights: the program that does, fetched or not.
     RemoteLights,
     /// Whether the remote puts the screens out with their signal kept.
@@ -2462,21 +2463,23 @@ impl Ui {
             (Page::Layout, _) => rows.extend([
                 Row::Library,
                 Row::Group(pick(self.lang, "呼出方式", "How it opens")),
-                Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
+                Row::Choice(Field::Anchor),
+                Row::Choice(Field::OverFullscreen),
+                Row::Switch(Switch::TearOff),
+                Row::Group(pick(self.lang, "快捷键", "Shortcuts")),
                 Row::Shortcut(Keys::Panel),
                 Row::Shortcut(Keys::Search),
                 Row::Shortcut(Keys::Preview),
-                Row::Choice(Field::OverFullscreen),
-                Row::Switch(Switch::TearOff),
             ]),
             (Page::Look, _) => {
-                rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme)]);
+                rows.extend([Row::Skins, Row::Choice(Field::Theme)]);
                 // (Only a skin that shows what is behind it has it to show live.)
                 if Skin::named(&self.settings.skin).sees_backdrop() {
                     rows.push(Row::Switch(Switch::Live));
                 }
+                rows.push(Row::Slider(Field::PanelSize));
             }
             (Page::Monitor, tab) => {
                 rows.push(Row::Tabs);
@@ -2497,12 +2500,16 @@ impl Ui {
             }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
-                rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
-                rows.push(Row::Choice(Field::MusicGround));
                 // (Only where NetEase is installed.)
                 if self.netease.is_some() {
                     rows.push(Row::NetEase);
                 }
+                rows.push(Row::Group(pick(self.lang, "显示内容", "What it shows")));
+                rows.push(Row::Choice(Field::MusicGround));
+                // (Its elements as they stand in the widget, top to bottom.)
+                let mut elements: Vec<&'static str> = super::prefs::items("lyrics").iter().map(|item| item.name).collect();
+                elements.sort_by_key(|name| ["cover", "title", "translation", "spectrum", "controls"].iter().position(|at| at == name));
+                rows.extend(elements.into_iter().map(Row::Element));
                 rows.push(Row::Note(pick(
                     self.lang,
                     "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
@@ -2521,18 +2528,24 @@ impl Ui {
             (Page::General, _) => {
                 rows.push(Row::Choice(Field::Language));
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
-                // The switches together, then the buttons.
-                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden), Row::Switch(Switch::Updates), Row::Version]);
+                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden)]);
+                rows.push(Row::Group(pick(self.lang, "更新", "Updates")));
+                rows.push(Row::Version);
                 if update::available().is_some() {
                     rows.push(Row::Update);
                 }
+                rows.push(Row::Switch(Switch::Updates));
+                rows.push(Row::Group(pick(self.lang, "帮助与反馈", "Help and feedback")));
                 rows.push(Row::Guide);
                 rows.push(Row::Diagnostics);
                 if !self.followed.is_empty() {
                     rows.push(Row::MyReports);
                 }
                 if self.uninstaller.is_some() {
+                    rows.push(Row::Group(pick(self.lang, "卸载与退出", "Uninstall and quit")));
                     rows.push(Row::Uninstall);
+                } else {
+                    rows.push(Row::Group(pick(self.lang, "退出", "Quit")));
                 }
                 rows.push(Row::Quit);
             }
@@ -2568,16 +2581,12 @@ impl Ui {
                 }
             }
             Tab::Overlay => {
-                rows.extend([
-                    Row::Choice(Field::OverlayShow),
-                    Row::Slider(Field::OverlaySize),
-                    Row::Slider(Field::OverlayClear),
-                    Row::Choice(Field::OverlayLayout),
-                ]);
+                rows.extend([Row::Choice(Field::OverlayShow), Row::Choice(Field::OverlayLayout)]);
                 // Rows only for a strip.
                 if self.settings.overlay.layout == Layout::Strip {
                     rows.push(Row::Choice(Field::OverlayRows));
                 }
+                rows.extend([Row::Slider(Field::OverlaySize), Row::Slider(Field::OverlayClear)]);
                 // What it shows, group by group, as the panel's modules are.
                 // (A battery's only on a machine that has shown one.)
                 let battery = crate::app().controller.seen.lock().unwrap().battery;
@@ -2593,16 +2602,17 @@ impl Ui {
         }
     }
 
-    /// Recent files' rows, while it is on: each drive it reads (listed or left out), whether it lists only the folders
-    /// chosen, and while it does, those folders and the row that adds more, and the folders not listed, while there
-    /// are any.
+    /// Recent files' rows, while it is on: what it lists from (see `Field::RecentScope`), and by drive, each drive it
+    /// reads (listed or left out), else the folders chosen and the row that adds more; then the folders not listed,
+    /// while there are any.
     fn recent_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Group(pick(self.lang, "最近文件", "Recent files")));
-        rows.extend(drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().map(|drive| Row::Drive(drive.volume)));
-        rows.push(Row::Switch(Switch::RecentOnly));
+        rows.push(Row::Choice(Field::RecentScope));
         if self.settings.recent_only {
             rows.extend(self.settings.recent_folders.iter().cloned().map(Row::RecentFolder));
             rows.push(Row::AddRecentFolder);
+        } else {
+            rows.extend(drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().map(|drive| Row::Drive(drive.volume)));
         }
         if !self.settings.recent_hidden.is_empty() {
             rows.push(Row::Choice(Field::StationHidden));
@@ -3090,9 +3100,9 @@ impl Ui {
             }
             &Row::Shortcut(which) => {
                 let (name, what, taken) = match which {
-                    Keys::Panel => (p("快捷键", "Shortcut"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
-                    Keys::Search => (p("搜索快捷键", "Search shortcut"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
-                    Keys::Preview => (p("预览快捷键", "Preview shortcut"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
+                    Keys::Panel => (p("面板", "Panel"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
+                    Keys::Search => (p("搜索", "Search"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
+                    Keys::Preview => (p("预览", "Preview"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
                 };
                 let recording = self.recording == Some(which);
                 let shortcut = self.shortcut(which);
@@ -3383,6 +3393,7 @@ impl Ui {
             ),
             Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
             Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
+            Field::RecentScope => (pick(lang, "列出范围", "Listed from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
                 vec!["75 °C".into(), "85 °C".into(), "95 °C".into()],
@@ -3420,6 +3431,7 @@ impl Ui {
             Field::StationKeep => settings.station.keep_days = STATION_DAYS[index],
             Field::StationCopy => settings.station.always_copy = index == 1,
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
+            Field::RecentScope => settings.recent_only = index == 1,
         }
         self.save();
         match field {
@@ -3561,6 +3573,11 @@ impl Ui {
                 "封面为模糊的专辑封面，跟随外观时与其他组件的底色、文字颜色一致，无背景时文字加描边",
                 "The cover blurred, the skin's ground and ink as every other widget has, or none with its words edged",
             )),
+            Field::RecentScope => Some(pick(
+                self.lang,
+                "选择指定文件夹时，仅列出下列文件夹及其子文件夹中的文件",
+                "Chosen folders lists only the files in the folders below and their subfolders",
+            )),
             Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
             Field::OverFullscreen => Some(pick(
                 self.lang,
@@ -3623,11 +3640,6 @@ impl Ui {
                 )),
                 self.remote_screens,
             ),
-            Switch::RecentOnly => (
-                p("仅列出指定文件夹", "Only these folders"),
-                Some(p("开启后，仅列出下列文件夹及其子文件夹中的文件", "When on, only files in the folders below and their subfolders are listed")),
-                self.settings.recent_only,
-            ),
             Switch::Remote => {
                 let hint = if self.remote_there {
                     p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
@@ -3672,7 +3684,6 @@ impl Ui {
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::TrayHidden => settings.tray_hidden ^= true,
-            Switch::RecentOnly => settings.recent_only ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
