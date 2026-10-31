@@ -1265,28 +1265,7 @@ impl Canvas for Frame<'_> {
     }
 
     fn icon(&self, icon: Icon, centre: Point, size: f32, color: Color) {
-        let Some(path) = self.gfx.icon_path(icon) else { return };
-        // Its middle where a circle's is put (on a whole pixel: a button's plate, its ring and its glyph one about
-        // another), and as many pixels across as that leaves its box's corner on a whole pixel too (an even number:
-        // drawn between two, every stroke of it was spread over both, and blurred).
-        let (cx, cy) = self.on_pixel(centre.x, centre.y);
-        let size = match self.grid() {
-            Some((t, device)) => {
-                let per = t.M11 * device;
-                (2.0 * whole_pixel(size * per / 2.0)).max(2.0) / per
-            }
-            None => size,
-        };
-        let scale = size / 24.0;
-        let (left, top) = (cx - size / 2.0, cy - size / 2.0);
-        let mut parent = Matrix3x2::default();
-        unsafe {
-            self.dc.GetTransform(&mut parent);
-            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(left, top) * parent;
-            self.dc.SetTransform(&placed);
-            self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
-            self.dc.SetTransform(&parent);
-        }
+        self.placed_icon(icon, centre, size, color, false);
     }
 
     fn pixels_per_dip(&self) -> f32 {
@@ -1379,6 +1358,41 @@ impl Canvas for Frame<'_> {
 }
 
 impl Frame<'_> {
+    /// `icon` filled, as a button's glyph that is the thing pressed (played, paused) is drawn: see `Canvas::icon`.
+    pub fn icon_solid(&self, icon: Icon, centre: Point, size: f32, color: Color) {
+        self.placed_icon(icon, centre, size, color, true);
+    }
+
+    /// `icon` drawn about `centre`, `size` across, in `color`: its lines, or (`solid`) filled too.
+    fn placed_icon(&self, icon: Icon, centre: Point, size: f32, color: Color, solid: bool) {
+        let Some(path) = self.gfx.icon_path(icon) else { return };
+        // Its middle where a circle's is put (on a whole pixel: a button's plate, its ring and its glyph one about
+        // another), and as many pixels across as that leaves its box's corner on a whole pixel too (an even number:
+        // drawn between two, every stroke of it was spread over both, and blurred).
+        let (cx, cy) = self.on_pixel(centre.x, centre.y);
+        let size = match self.grid() {
+            Some((t, device)) => {
+                let per = t.M11 * device;
+                (2.0 * whole_pixel(size * per / 2.0)).max(2.0) / per
+            }
+            None => size,
+        };
+        let scale = size / 24.0;
+        let (left, top) = (cx - size / 2.0, cy - size / 2.0);
+        let mut parent = Matrix3x2::default();
+        unsafe {
+            self.dc.GetTransform(&mut parent);
+            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(left, top) * parent;
+            self.dc.SetTransform(&placed);
+            // (Solid: filled, and its edge drawn round as ever, its corners rounded as a stroked one's.)
+            if solid {
+                self.dc.FillGeometry(&path, self.brush(color), None);
+            }
+            self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
+            self.dc.SetTransform(&parent);
+        }
+    }
+
     /// `bitmap` (`size` px) drawn as a picture is (see `Canvas::picture_within`): covering the box `at`, its middle on
     /// the box's, within the box `within` (its corners that round), `opacity` clear.
     pub fn bitmap_within(&self, bitmap: &ID2D1Bitmap1, size: (u32, u32), at: (f32, f32, f32, f32), within: (f32, f32, f32, f32, f32), opacity: f32) {

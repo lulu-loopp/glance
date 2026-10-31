@@ -194,6 +194,8 @@ const STRIP_IN: f32 = 10.0;
 const CONTROLS_FOR: Duration = Duration::from_millis(2000);
 const CONTROLS_FADE: Duration = Duration::from_millis(250);
 const SLIDER: f32 = 64.0;
+/// How large the knob on a track or the volume's slider is.
+const KNOB: f32 = 10.0;
 const SLIDER_FOR: Duration = Duration::from_millis(180);
 const OTHER: (f32, f32) = (400.0, 290.0);
 const MOST: (f32, f32) = (0.6, 0.82);
@@ -2219,7 +2221,7 @@ impl Looker {
             let (cx, cy) = (body.x + body.w / 2.0, body.y + body.h / 2.0);
             frame.fill_rounded(Color::hex(0x101216, 0.62), cx - 30.0, cy - 30.0, 60.0, 60.0, 30.0);
             frame.stroke_rounded(Fill::Solid(white.alpha(0.09)), cx - 30.0, cy - 30.0, 60.0, 60.0, 30.0, 1.0);
-            frame.icon(Icon::Play, Point { x: cx + 2.0, y: cy }, 24.0, white);
+            frame.icon_solid(Icon::Play, Point { x: cx + 2.0, y: cy }, 20.0, white);
         }
         let clear = self.controls_clear(Instant::now());
         if clear > 0.0 {
@@ -2256,7 +2258,7 @@ impl Looker {
         frame.fill_rounded(white.alpha(0.22), track.x, mid - thick / 2.0, track.w, thick, thick / 2.0);
         frame.fill_rounded(white, track.x, mid - thick / 2.0, track.w * part, thick, thick / 2.0);
         if lit {
-            frame.fill_rounded(white, track.x + track.w * part - 6.0, mid - 6.0, 12.0, 12.0, 6.0);
+            frame.fill_rounded(white, track.x + track.w * part - KNOB / 2.0, mid - KNOB / 2.0, KNOB, KNOB, KNOB / 2.0);
             self.paint_time_tip(frame, track, strip.y - 6.0, length);
         }
         self.track_at = Some(track);
@@ -2276,9 +2278,13 @@ impl Looker {
         self.round_button(frame, mute, if silent { Icon::Muted } else { Icon::Volume }, ink, Hit::Mute);
         if wide > 1.0 {
             frame.clip(slider.x, slider.y, slider.w, slider.h);
-            let whole = Rect { x: slider.x, y: slider.y, w: SLIDER, h: slider.h };
-            frame.fill_rounded(rail, whole.x, mid - 2.0, SLIDER, 4.0, 2.0);
-            frame.fill_rounded(ink, whole.x, mid - 2.0, SLIDER * if silent { 0.0 } else { self.volume }, 4.0, 2.0);
+            let (start, long) = (slider.x + KNOB / 2.0, SLIDER - KNOB);
+            let loud = long * if silent { 0.0 } else { self.volume };
+            frame.fill_rounded(rail, start, mid - 2.0, long, 4.0, 2.0);
+            frame.fill_rounded(ink, start, mid - 2.0, loud, 4.0, 2.0);
+            if self.holding == Some(Holding::Volume) || self.pointer_on(slider) {
+                frame.fill_rounded(ink, start + loud - KNOB / 2.0, mid - KNOB / 2.0, KNOB, KNOB, KNOB / 2.0);
+            }
             frame.unclip();
             self.hits.push((slider, Hit::Volume));
         }
@@ -2287,12 +2293,16 @@ impl Looker {
         mute.x
     }
 
-    /// A round button at `at` with `icon` in `ink`, lit under the pointer: `hit` as it is clicked.
+    /// A button at `at` with `icon` in `ink`, a little dimmer till the pointer is on it (played or paused: solid):
+    /// `hit` as it is clicked.
     fn round_button(&mut self, frame: &Frame, at: Rect, icon: Icon, ink: Color, hit: Hit) {
-        if self.pointer_on(at) {
-            frame.fill_rounded(ink.alpha(0.12), at.x, at.y, at.w, at.h, at.w / 2.0);
+        let ink = ink.alpha(ink.a * if self.pointer_on(at) { 1.0 } else { 0.78 });
+        let centre = Point { x: at.x + at.w / 2.0, y: at.y + at.h / 2.0 };
+        match icon {
+            Icon::Play => frame.icon_solid(icon, Point { x: centre.x + 1.0, ..centre }, 13.0, ink),
+            Icon::Pause => frame.icon_solid(icon, centre, 13.0, ink),
+            _ => frame.icon(icon, centre, 16.0, ink),
         }
-        frame.icon(icon, Point { x: at.x + at.w / 2.0, y: at.y + at.h / 2.0 }, 16.0, ink);
         self.hits.push((at, hit));
     }
 
@@ -2341,12 +2351,21 @@ impl Looker {
             Some(loudness) => {
                 let bars = ((wide / 4.0).floor() as usize).max(1);
                 let step = wide / bars as f32;
-                for bar in 0..bars {
-                    let (from, to) = (bar * loudness.len() / bars, ((bar + 1) * loudness.len() / bars).max(bar * loudness.len() / bars + 1));
-                    let loud = loudness[from.min(loudness.len() - 1)..to.min(loudness.len())].iter().copied().fold(0f32, f32::max);
-                    let tall = (loud * wave.h).max(2.0);
-                    let ink = if (bar as f32 + 0.5) / bars as f32 <= part { accent } else { theme.text.alpha(0.28) };
-                    frame.fill_rounded(ink, wave.x + bar as f32 * step + (step - 2.0) / 2.0, wave.y + (wave.h - tall) / 2.0, 2.0, tall, 1.0);
+                // (Drawn twice: as yet unplayed, then in the accent as far as it is played, to the pixel, a bar
+                // coloured as it is gone through.)
+                let played = wide * part;
+                for (ink, until) in [(theme.text.alpha(0.28), wide), (accent, played)] {
+                    if until <= 0.0 {
+                        continue;
+                    }
+                    frame.clip(wave.x, wave.y, until, wave.h);
+                    for bar in 0..bars {
+                        let (from, to) = (bar * loudness.len() / bars, ((bar + 1) * loudness.len() / bars).max(bar * loudness.len() / bars + 1));
+                        let loud = loudness[from.min(loudness.len() - 1)..to.min(loudness.len())].iter().copied().fold(0f32, f32::max);
+                        let tall = (loud * wave.h).max(2.0);
+                        frame.fill_rounded(ink, wave.x + bar as f32 * step + (step - 2.0) / 2.0, wave.y + (wave.h - tall) / 2.0, 2.0, tall, 1.0);
+                    }
+                    frame.unclip();
                 }
             }
             None => {
@@ -2373,7 +2392,7 @@ impl Looker {
         let lit = self.pointer_on(button);
         frame.fill_rounded(theme.text.alpha(if lit { 1.0 } else { 0.9 }), button.x, button.y, 40.0, 40.0, 20.0);
         let ink = Color::hex(if self.dark { 0x14161A } else { 0xFFFFFF }, 1.0);
-        frame.icon(if playing { Icon::Pause } else { Icon::Play }, Point { x: button.x + 20.0 + if playing { 0.0 } else { 1.5 }, y: button.y + 20.0 }, 18.0, ink);
+        frame.icon_solid(if playing { Icon::Pause } else { Icon::Play }, Point { x: button.x + 20.0 + if playing { 0.0 } else { 1.5 }, y: button.y + 20.0 }, 15.0, ink);
         self.hits.push((button, Hit::Toggle));
         self.paint_volume(frame, button.x + 40.0 + 10.0, true, button.y + 20.0, theme.text, theme.text.alpha(0.18));
     }
@@ -2641,7 +2660,8 @@ impl Looker {
         };
         let (at, (drawn_at, drawn_clear, drawn_open)) = (self.shown_at(), self.drawn_playing);
         let length = self.player.as_ref().and_then(play::Player::length).unwrap_or(0.0);
-        let gone_on = at.floor() != drawn_at.floor() || (length > 0.0 && (at - drawn_at).abs() / length * 800.0 >= 1.0);
+        let track = f64::from(self.track_at.map_or(0.0, |track| track.w * self.scale));
+        let gone_on = at.floor() != drawn_at.floor() || (length > 0.0 && (at - drawn_at).abs() / length * track >= 0.5);
         if fresh || gone_on || self.controls_clear(now) != drawn_clear || self.slider_open_now(now) != drawn_open {
             self.draw();
         }
@@ -2736,7 +2756,7 @@ impl Looker {
     /// As loud as `x` (DIPs on the sheet) is along the volume's slider, heard so at once.
     fn volume_to(&mut self, x: f32) {
         let Some(slider) = self.slider_at else { return };
-        self.volume = ((x - slider.x) / SLIDER).clamp(0.0, 1.0);
+        self.volume = ((x - slider.x - KNOB / 2.0) / (SLIDER - KNOB)).clamp(0.0, 1.0);
         self.muted = false;
         if let Some(player) = &self.player {
             player.set_volume(self.loudness());
