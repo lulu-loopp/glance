@@ -493,6 +493,7 @@ pub fn run() {
     // (Glance's own run ends waiting for what was noted: see its end.)
     journal::write_apart();
     let config = settings::config_dir();
+    update::note_settings_found(settings::saved(&config));
     let mut settings = Settings::load(&config);
 
     // Started elevated (an earlier version's task, a build run by hand), Glance reads the sensors itself, and does
