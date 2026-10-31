@@ -198,6 +198,8 @@ const SLIDER: f32 = 64.0;
 const KNOB: f32 = 10.0;
 const SLIDER_FOR: Duration = Duration::from_millis(180);
 const OTHER: (f32, f32) = (400.0, 290.0);
+/// What is said of what cannot be played here.
+const UNPLAYABLE: (&str, &str) = ("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
 const MOST: (f32, f32) = (0.6, 0.82);
 const GAP: f32 = 24.0;
 /// A page's shape (A4: its height to its width), and the room beside it.
@@ -1398,20 +1400,28 @@ impl Looker {
                 _ => {}
             }
         }
-        if resized && self.up() {
-            // (As it opens, it grows to the size it now has; else it moves there from where it is.)
-            if let Motion::Resting | Motion::Moving { .. } = self.motion {
-                let now = Instant::now();
-                let was = self.shape(now).at;
-                if was != self.target() {
-                    self.motion = Motion::Moving { was, start: now, fade: false };
-                    unsafe {
-                        let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
-                    }
+        if resized {
+            self.refit();
+        }
+        self.draw();
+    }
+
+    /// The sheet moved to the size the thing shown now wants, where that has changed (it was read, or what plays it
+    /// found its size or that it cannot): as it opens, it grows to it; else it moves there from where it is.
+    fn refit(&mut self) {
+        if !self.up() {
+            return;
+        }
+        if let Motion::Resting | Motion::Moving { .. } = self.motion {
+            let now = Instant::now();
+            let was = self.shape(now).at;
+            if was != self.target() {
+                self.motion = Motion::Moving { was, start: now, fade: false };
+                unsafe {
+                    let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
                 }
             }
         }
-        self.draw();
     }
 
     /// What the thing shown was read as (by itself: the file of its group shown so).
@@ -1565,9 +1575,11 @@ impl Looker {
             Some(Body::Picture(_, own)) => pictured(*own, true),
             // (A video's picture stands for it, made no larger than may be asked: it is shown at its frames' size.)
             Some(Body::Played { sound: true, .. }) => (SOUND_WIDE.min(most.0), top + SOUND_COVER + pad),
-            // (A video at its frames' size, as measured, else as its picture is.)
-            Some(Body::Played { picture, .. }) => match measured.or(picture.as_ref().map(|picture| picture.size)) {
+            // (A video at its frames' size, as measured, else as its picture is, else as what plays it says once it knows;
+            // one that cannot be played with none of those has nothing to show, and is as large as what has no preview.)
+            Some(Body::Played { picture, .. }) => match measured.or(picture.as_ref().map(|picture| picture.size)).or_else(|| self.player.as_ref().and_then(play::Player::video_size)) {
                 Some(size) => pictured(size, true),
+                None if self.unplayable => OTHER,
                 None => most,
             },
             Some(Body::Pictured(picture) | Body::Live { picture: Some(picture), .. }) => pictured(measured.unwrap_or(picture.size), true),
@@ -2159,32 +2171,44 @@ impl Looker {
             }
             // (Drawn as `paint_group`: a group's files are each read as a file.)
             Body::Group(_) => {}
+            // (A video that cannot be played and has no picture: nothing of it to show, so as what has no preview.)
+            Body::Played { picture: None, sound: false, .. } if self.unplayable => {
+                let said = opens.then(|| self.lang.pick(UNPLAYABLE.0, UNPLAYABLE.1));
+                self.paint_other(frame, theme, body, path.as_deref(), title, read.about.as_deref(), said);
+            }
             Body::Played { picture, sound: false, .. } => self.paint_video(frame, body, picture.as_ref()),
             Body::Played { picture, sound: true, loudness } => self.paint_sound(frame, theme, body, picture.as_ref(), loudness.as_deref()),
             Body::Other(path) => {
-                let side = 72.0;
-                let mut y = body.y + (body.h - side - 70.0).max(0.0) / 2.0;
-                let icon = path.as_ref().and_then(|path| crate::station::thumbs::icon(path, (side * self.scale).round() as u32));
-                match icon {
-                    Some(icon) => frame.picture(&icon, body.x + (body.w - side) / 2.0, y, side, side, 0.0, 1.0),
-                    None => frame.icon(Icon::File, Point { x: body.x + body.w / 2.0, y: y + side / 2.0 }, side * 0.7, theme.text2),
-                }
-                y += side + 10.0;
-                // (Each line under the middle of its icon; one wider than the body from its left, wrapped.)
-                let centred = |text: &str, font: Font, colour, top: f32| {
-                    let wide = frame.measure(text, font);
-                    let left = body.x + ((body.w - wide) / 2.0).max(0.0);
-                    frame.text(text, font, colour, left, top, body.w - (left - body.x), Align::Start);
-                };
-                centred(title, self.font(13.0, 600.0), theme.text, y);
-                if let Some(about) = &read.about {
-                    centred(about, self.font(12.0, 400.0), theme.text2, y + 22.0);
-                }
-                if opens {
-                    let said = self.lang.pick("没有可用的预览，按 Enter 用默认程序打开", "No preview is available. Press Enter to open it in its program");
-                    centred(said, self.font(12.0, 400.0), theme.text3, y + 42.0);
-                }
+                let said = opens.then(|| self.lang.pick("没有可用的预览，按 Enter 用默认程序打开", "No preview is available. Press Enter to open it in its program"));
+                self.paint_other(frame, theme, body, path.as_deref(), title, read.about.as_deref(), said);
             }
+        }
+    }
+
+    /// What has nothing of it to show, in `body`: its icon (the file's at `path`, else a file's), what it is called and
+    /// what it is under it, and what may be done with it (`said`) under those.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_other(&self, frame: &Frame, theme: &Theme, body: Rect, path: Option<&Path>, title: &str, about: Option<&str>, said: Option<&str>) {
+        let side = 72.0;
+        let mut y = body.y + (body.h - side - 70.0).max(0.0) / 2.0;
+        let icon = path.and_then(|path| crate::station::thumbs::icon(path, (side * self.scale).round() as u32));
+        match icon {
+            Some(icon) => frame.picture(&icon, body.x + (body.w - side) / 2.0, y, side, side, 0.0, 1.0),
+            None => frame.icon(Icon::File, Point { x: body.x + body.w / 2.0, y: y + side / 2.0 }, side * 0.7, theme.text2),
+        }
+        y += side + 10.0;
+        // (Each line under the middle of its icon; one wider than the body from its left, wrapped.)
+        let centred = |text: &str, font: Font, colour, top: f32| {
+            let wide = frame.measure(text, font);
+            let left = body.x + ((body.w - wide) / 2.0).max(0.0);
+            frame.text(text, font, colour, left, top, body.w - (left - body.x), Align::Start);
+        };
+        centred(title, self.font(13.0, 600.0), theme.text, y);
+        if let Some(about) = about {
+            centred(about, self.font(12.0, 400.0), theme.text2, y + 22.0);
+        }
+        if let Some(said) = said {
+            centred(said, self.font(12.0, 400.0), theme.text3, y + 42.0);
         }
     }
 
@@ -2205,7 +2229,7 @@ impl Looker {
             (None, None) => {}
         }
         if self.unplayable {
-            let said = self.lang.pick("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
+            let said = self.lang.pick(UNPLAYABLE.0, UNPLAYABLE.1);
             let font = self.font(12.5, 500.0);
             let wide = frame.measure(said, font).min(body.w - 24.0);
             let (x, y) = (body.x + (body.w - wide - 24.0) / 2.0, body.y + body.h - 16.0 - 32.0);
@@ -2380,7 +2404,7 @@ impl Looker {
         let font = self.font(12.0, 500.0);
         let below = wave.y + wave.h + 6.0;
         if self.unplayable {
-            let said = self.lang.pick("无法在此播放该文件，按 Enter 用默认程序打开", "This file cannot be played here. Press Enter to open it in its program");
+            let said = self.lang.pick(UNPLAYABLE.0, UNPLAYABLE.1);
             frame.text(said, font, theme.text3, x, below, wide, Align::Start);
             return;
         }
@@ -2584,6 +2608,7 @@ impl Looker {
             Err(error) => {
                 crate::journal::note(format!("look: {} could not be played ({error})", path.display()));
                 self.unplayable = true;
+                self.refit();
             }
         }
     }
@@ -2615,6 +2640,8 @@ impl Looker {
         } else if self.player.as_ref().is_some_and(play::Player::playing) {
             self.keep_drawing();
         }
+        // (Its size may be known now, or that it has none.)
+        self.refit();
         self.draw();
     }
 
@@ -3245,6 +3272,25 @@ mod tests {
             looker.read = vec![Some(Read { body: read, about: None })];
             assert_eq!(looker.wanted(most), measured, "{name}");
         }
+    }
+
+    /// A video that cannot be played and has neither a size nor a picture has nothing to show: its sheet is as large as
+    /// what has no preview, not as large as may be. One with a picture keeps its picture's size.
+    #[test]
+    fn a_video_with_nothing_to_show_is_as_large_as_what_has_no_preview() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let item = Item { key: 1, title: "broken.mp4".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a\broken.mp4")), from: None, open: None, copy: None, pastes: false };
+        let most = (1400.0, 900.0);
+        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        looker.items = vec![item];
+        (looker.read, looker.measured) = (vec![Some(Read { body: Body::Played { picture: None, sound: false, loudness: None }, about: None })], vec![None]);
+        looker.unplayable = true;
+        assert_eq!(looker.wanted(most), OTHER);
+        let picture = Picture { key: 1, size: (1280, 720), pixels: std::sync::Arc::new(Vec::new()) };
+        looker.read = vec![Some(Read { body: Body::Played { picture: Some(picture), sound: false, loudness: None }, about: None })];
+        assert_ne!(looker.wanted(most), OTHER);
     }
 
     /// The camera's orientations each turn the picture upright, the four that turn it a quarter swapping its sides.
