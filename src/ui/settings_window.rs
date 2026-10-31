@@ -784,6 +784,7 @@ fn tick(now: Instant) -> Option<Duration> {
         }
         ui.follow_when_free();
         // (The window left as it is under the guide's dialog, the guide alone drawn.)
+        ui.take_in();
         let held = ui.guide_holds_window();
         if now >= ui.next_frame && !held {
             ui.draw(now);
@@ -1788,6 +1789,8 @@ struct Ui {
     guide_frame: Instant,
     /// The client size it was last drawn at (physical pixels), if it has been drawn.
     drawn_size: Option<(u32, u32)>,
+    /// Something it shows taken in since it was last drawn (see `take_in`).
+    taken_unseen: bool,
     /// The largest panel size at which the panel still grows on the screen the preview shows (see
     /// `arrange::largest`): past it a larger size changed the figure and nothing else.
     largest: f32,
@@ -2035,6 +2038,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             next_frame: Instant::now(),
             guide_frame: Instant::now(),
             drawn_size: None,
+            taken_unseen: false,
             largest: SIZES.1,
             guide: None,
             editor_at: None,
@@ -4850,11 +4854,15 @@ impl Ui {
         true
     }
 
-    fn draw(&mut self, now: Instant) {
-        let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
-        // Desktops read meanwhile: the one shown, if it waited for it; else kept (unless kept already); the map's in
-        // place, if it is still of that screen as it is.
+    /// What has come in since it last looked, taken in: desktops read meanwhile (the one shown, if it waited for it;
+    /// else kept, unless kept already; the map's in place, if it is still of that screen as it is), and the screen the
+    /// preview shows, as it is now. On every turn of the loop, the window drawn or not (held under the guide, whose
+    /// small desktops are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
+    fn take_in(&mut self) {
         while let Ok(read) = self.read.1.try_recv() {
+            // (Drawn with it now, as far as it is drawn: see `guide_holds_window`.)
+            self.taken_unseen = true;
+            self.next_frame = Instant::now();
             match read {
                 Read::Stage(stage) => {
                     let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
@@ -4883,6 +4891,12 @@ impl Ui {
         if let Some(screen) = self.stage_screen() {
             self.show_screen(&screen);
         }
+    }
+
+    fn draw(&mut self, now: Instant) {
+        let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
+        self.take_in();
+        self.taken_unseen = false;
         crate::playing::show_in_settings(matches!(self.page, Page::Music | Page::Layout));
         self.sources = crate::playing::music_players();
         if let Some(chosen) = self.settings.music_source.as_ref().filter(|chosen| !self.sources.iter().any(|(id, _)| *id == chosen.id)) {

@@ -498,6 +498,16 @@ fn tip_rests(change: Option<&Change>, step: Step) -> bool {
     change.is_none() && step == Step::Layout
 }
 
+/// Whether the window under the guide is left as it was last drawn (see `Ui::guide_holds_window`): through a change
+/// once it has been drawn for it; at rest under the dialog, unless something it shows has come in since it was drawn
+/// (`taken_unseen`).
+fn holds(change: Option<&Change>, step: Step, taken_unseen: bool) -> bool {
+    match change {
+        Some(change) => change.window_drawn,
+        None => step != Step::Layout && !taken_unseen,
+    }
+}
+
 /// The change under way, its first frame drawn: its clock started, now.
 fn start_clock(guide: &mut Guide) {
     if let Some(change) = guide.change.as_mut() {
@@ -1006,12 +1016,10 @@ impl Ui {
     /// at rest on its step, where nothing of it can be seen clearly or touched; and through a change of the guide once
     /// it has been drawn for it (what a page first drawn fetches, its desktops and pictures, each drawing it whole as
     /// it comes, taken in as the change is over). Not where it is another size than it was drawn at (moved to a screen
-    /// of another scale under the dialog).
+    /// of another scale under the dialog). At rest, not where something it shows has come in since (see `take_in`):
+    /// drawn once with it.
     pub(super) fn guide_holds_window(&self) -> bool {
-        let under = self.guide.as_ref().is_some_and(|guide| match &guide.change {
-            Some(change) => change.window_drawn,
-            None => guide.step != Step::Layout,
-        });
+        let under = self.guide.as_ref().is_some_and(|guide| holds(guide.change.as_ref(), guide.step, self.taken_unseen));
         let mut inside = RECT::default();
         unsafe {
             let _ = GetClientRect(self.hwnd, &mut inside);
@@ -1852,6 +1860,23 @@ mod tests {
             assert_eq!(keying.at(Duration::ZERO), ([0, 0], 0.0, 0.0));
             assert_eq!(keying.at(Duration::from_millis(keying.end as u64 - 1)), ([0, 0], 0.0, 0.0));
         }
+    }
+
+    /// The window under the dialog, held at rest on a step, is drawn once with what it shows as that comes in (a
+    /// desktop read after it was first drawn, which the guide's small desktop shows too); through a change drawn for,
+    /// it is held, and drawn with it after.
+    #[test]
+    fn what_comes_in_under_the_dialog_is_drawn_once_at_rest() {
+        let now = Instant::now();
+        for step in [Step::Push, Step::Keys, Step::Ready] {
+            assert!(holds(None, step, false), "{step:?}: held at rest, nothing new");
+            assert!(!holds(None, step, true), "{step:?}: drawn once what it shows has come in");
+        }
+        assert!(!holds(None, Step::Layout, false), "the layout's step: never held at rest");
+        let mut change = Change { kind: Kind::Swap, from: Step::Keys, began: Some(now), back: false, from_since: now, heights: (560.0, 470.0), lead: 0.0, window_drawn: false, quick: false };
+        assert!(!holds(Some(&change), Step::Ready, false), "a change not drawn for yet: drawn");
+        change.window_drawn = true;
+        assert!(holds(Some(&change), Step::Ready, true), "through a change drawn for: held, what came in taken in after it");
     }
 
     /// Every change of the guide goes on with nothing jumping: the dialog and the cover over the window grow, fade and
