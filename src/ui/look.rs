@@ -160,11 +160,11 @@ const CLOSE_STILL: (f32, f32) = (0.7, 0.85);
 /// Its parts (DIPs): its buttons (the bar, and the room round its parts: see `bar`, `inset`); its least width for a picture; its sizes for
 /// words, and for what has no picture; how much of the screen it takes at most, and how far from the screen's edges and
 /// what it was called up from it keeps.
-/// (Its bar: its name's two lines, `NAME` tall, and `UNDER_NAME` under them; the room round its parts is its corners'
-/// radius at least, see `inset`.)
+/// (Its bar: its name's two lines, `NAME` tall, and `UNDER_NAME` under them; the room round its parts makes its body's
+/// corners concentric with its own, see `inset`.)
 const NAME: f32 = 36.0;
 const UNDER_NAME: f32 = 12.0;
-const INSET_LEAST: f32 = 20.0;
+const INSET_LEAST: f32 = 16.0;
 const BUTTON: f32 = 30.0;
 const PICTURE_LEAST: f32 = 320.0;
 const WORDS: (f32, f32) = (560.0, 340.0);
@@ -1414,10 +1414,10 @@ impl Looker {
         Some(Rect { x: self.inset() + cell.x, y: self.body_top() + cell.y - self.grid_scroll, w: cell.w, h: cell.h })
     }
 
-    /// How far in from its edges its parts are, all round (DIPs): as far as the centres of its corners' arcs, so that
-    /// what is at a corner is concentric with it (glass's round ones), and no less than `INSET_LEAST`.
+    /// How far in from its edges its parts are, all round (DIPs): as far as makes the corners of what its body shows
+    /// concentric with its own (its corners' radius less theirs), and no less than `INSET_LEAST`.
     fn inset(&self) -> f32 {
-        Theme::new(self.skin, self.dark).radius.max(INSET_LEAST)
+        (Theme::new(self.skin, self.dark).radius - self.body_radius()).max(INSET_LEAST)
     }
 
     /// How tall its bar is (DIPs): its name `inset` down from its top, and room under it. (Windows 11's bar drawn so
