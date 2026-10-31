@@ -1490,9 +1490,10 @@ impl Controller {
                 _ => {}
             }
 
-            // (A look up from here takes Esc too: see `ui::look`.)
+            // (A look up from here takes Esc too: see `ui::look`. None while another program drags something: Esc is
+            // its, to call the drag off, over the panel too.)
             let looking = looking_here(&panels, &widgets);
-            let wanted = looking || panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app());
+            let wanted = !crate::station::catch::dragging() && (looking || panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app()));
             if wanted != escape {
                 escape = wanted;
                 unsafe {
