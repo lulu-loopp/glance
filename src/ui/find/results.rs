@@ -168,18 +168,42 @@ impl Shown {
     pub fn rows(&self) -> impl Iterator<Item = &Row> {
         self.lines.iter().filter_map(|line| if let Line::Row(row, _) = line { Some(row) } else { None })
     }
+
+    /// The files and folders among its names (the paths, and whether each is a folder), to be told of (see `told`).
+    pub fn paths(&self) -> Vec<(PathBuf, bool)> {
+        self.rows().filter_map(|row| if let What::Path(path) = &row.what { Some((path.clone(), row.kind == Kind::Folder)) } else { None }).collect()
+    }
+
+    /// Its files and folders told of as `was` told of them.
+    pub fn told_as(&mut self, was: &Shown) {
+        for row in was.rows() {
+            if let (What::Path(path), Some(changed)) = (&row.what, row.changed) {
+                self.told(path, (row.bytes.unwrap_or_default(), changed));
+            }
+        }
+    }
+
+    /// The file or folder at `path` told of: its size (a file's) and when it changed, as they are now.
+    pub fn told(&mut self, path: &Path, (bytes, changed): (u64, SystemTime)) {
+        for line in &mut self.lines {
+            if let Line::Row(row, _) = line {
+                if matches!(&row.what, What::Path(at) if at == path) {
+                    row.bytes = (row.kind != Kind::Folder).then_some(bytes);
+                    row.changed = Some(changed);
+                }
+            }
+        }
+    }
 }
 
 /// Where names are found: the Start menu's programs, the notes, what the station holds, the files that came lately,
-/// the drives' files and folders (as `search::find` finds them), a file's size and when it changed (none where it is
-/// not there), in the language the user reads.
+/// the drives' files and folders (as `search::find` finds them), in the language the user reads.
 pub struct Sources<'a> {
     pub programs: &'a [Program],
     pub notes: &'a [Note],
     pub held: &'a [Item],
     pub lately: &'a [Came],
     pub files: &'a dyn Fn(&Query, usize) -> crate::search::Found,
-    pub stat: &'a dyn Fn(&Path) -> Option<(u64, SystemTime)>,
     pub lang: Lang,
 }
 
@@ -223,7 +247,7 @@ pub fn gather(typed: &str, view: View, expanded: bool, sources: &Sources) -> Sho
         _ => LISTED,
     };
     let found = view.files(query).map(|query| (sources.files)(&query, most)).unwrap_or_default();
-    let (mut folders, mut files): (Vec<Row>, Vec<Row>) = found.hits.into_iter().map(|hit| file_row(hit, sources)).partition(|row| row.kind == Kind::Folder);
+    let (mut folders, mut files): (Vec<Row>, Vec<Row>) = found.hits.into_iter().map(file_row).partition(|row| row.kind == Kind::Folder);
     for rows in [&mut programs, &mut pages, &mut glance, &mut folders, &mut files] {
         rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
     }
@@ -289,7 +313,7 @@ fn lately(view: View, sources: &Sources) -> Shown {
             let mut came: Vec<&Came> = sources.lately.iter().filter(|came| view.takes(came.kind)).collect();
             came.sort_by(|a, b| b.came_ms.cmp(&a.came_ms));
             came.truncate(if view == View::All { LATELY } else { LISTED });
-            let rows = came.into_iter().map(|came| path_shown(came.path.clone(), false, 0.0, Vec::new(), sources)).collect();
+            let rows = came.into_iter().map(|came| path_shown(came.path.clone(), false, 0.0, Vec::new())).collect();
             (Group::Lately, rows)
         }
     };
@@ -383,15 +407,15 @@ fn held_shown(item: &Item, rank: f32, marks: Vec<(usize, usize)>, lang: Lang) ->
     Row { kind, name: held_name(&item.what, lang), marks, detail: detail.into(), what: What::Item(item.id), rank, bytes: None, changed: None }
 }
 
-fn file_row(hit: crate::search::Hit, sources: &Sources) -> Row {
-    let mut row = path_shown(hit.path, hit.folder, hit.rank, hit.marks, sources);
+fn file_row(hit: crate::search::Hit) -> Row {
+    let mut row = path_shown(hit.path, hit.folder, hit.rank, hit.marks);
     row.name = hit.name;
     row
 }
 
-/// The file or folder at `path`, by its name, said to be in the folder it is in, its size and when it changed as they
-/// are now.
-fn path_shown(path: PathBuf, folder: bool, rank: f32, marks: Vec<(usize, usize)>, sources: &Sources) -> Row {
+/// The file or folder at `path`, by its name, said to be in the folder it is in (its size and when it changed told
+/// after: see `Shown::told`).
+fn path_shown(path: PathBuf, folder: bool, rank: f32, marks: Vec<(usize, usize)>) -> Row {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
     let detail = path.parent().map(|parent| parent.display().to_string()).unwrap_or_default();
     let kind = if folder {
@@ -399,8 +423,7 @@ fn path_shown(path: PathBuf, folder: bool, rank: f32, marks: Vec<(usize, usize)>
     } else {
         Kind::File(recent::kind_of_extension(&path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).unwrap_or_default()))
     };
-    let stat = (sources.stat)(&path);
-    Row { kind, name, marks, detail, what: What::Path(path), rank, bytes: stat.filter(|_| !folder).map(|(bytes, _)| bytes), changed: stat.map(|(_, changed)| changed) }
+    Row { kind, name, marks, detail, what: What::Path(path), rank, bytes: None, changed: None }
 }
 
 #[cfg(test)]
@@ -472,8 +495,7 @@ mod tests {
             let (total, folders, hits) = query.find(&index, "D:\\", most);
             crate::search::Found { total, folders, hits }
         };
-        let stat = |_: &Path| None;
-        let sources = Sources { programs: &programs, notes, held, lately, files: &files, stat: &stat, lang: Lang::Zh };
+        let sources = Sources { programs: &programs, notes, held, lately, files: &files, lang: Lang::Zh };
         gather(typed, view, expanded, &sources)
             .lines
             .iter()
@@ -542,5 +564,34 @@ mod tests {
         assert_eq!(shown("", View::Pictures, false, &[], &[], &lately), ["# 最近的文件", "a.png"]);
         assert_eq!(shown("", View::Folders, false, &[], &[], &lately), Vec::<String>::new());
         assert_eq!(shown(" ", View::Programs, false, &[], &[], &lately), ["# 应用", "QQ音乐", "Steam", "Visual Studio Code", "网易云音乐"]);
+    }
+
+    /// Files and folders found are shown before anything of them is asked of their drives (a USB drive busy held the
+    /// list till each was), told of after (a folder's size never), and found again, told of as before till told anew.
+    #[test]
+    fn files_found_are_told_of_after() {
+        let programs = [program("Steam")];
+        let index = drive(PATHS);
+        let files = |query: &Query, most: usize| {
+            let (total, folders, hits) = query.find(&index, "D:\\", most);
+            crate::search::Found { total, folders, hits }
+        };
+        let sources = Sources { programs: &programs, notes: &[], held: &[], lately: &[], files: &files, lang: Lang::Zh };
+        let mut shown = gather("music", View::All, false, &sources);
+        assert!(shown.rows().all(|row| row.bytes.is_none() && row.changed.is_none()));
+        let paths = shown.paths();
+        assert_eq!(paths[0], (PathBuf::from("D:\\Music"), true));
+        assert!(paths.contains(&(PathBuf::from("D:\\a\\music 1.txt"), false)));
+        let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        shown.told(Path::new("D:\\Music"), (4096, when));
+        shown.told(Path::new("D:\\a\\music 1.txt"), (12, when));
+        let told = |shown: &Shown, name: &str| shown.rows().find(|row| row.name == name).map(|row| (row.bytes, row.changed));
+        assert_eq!(told(&shown, "Music"), Some((None, Some(when))));
+        assert_eq!(told(&shown, "music 1.txt"), Some((Some(12), Some(when))));
+        assert_eq!(told(&shown, "music 2.txt"), Some((None, None)));
+        let mut again = gather("music", View::All, false, &sources);
+        again.told_as(&shown);
+        assert_eq!(told(&again, "Music"), Some((None, Some(when))));
+        assert_eq!(told(&again, "music 1.txt"), Some((Some(12), Some(when))));
     }
 }

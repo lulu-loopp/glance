@@ -5,11 +5,12 @@
 //! frosted, Windows 11's acrylic, chart paper), light or dark as the panel is.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -52,6 +53,8 @@ const LISTED: u32 = WM_APP + 3;
 const LEFT: u32 = WM_APP + 4;
 /// The look at the name picked (see `ui::look`) shows another of those it may (WPARAM its place among them), or went.
 const LOOKED: u32 = WM_APP + 5;
+/// Files and folders found were told of (their sizes, when they changed: see `tell`).
+const TOLD: u32 = WM_APP + 6;
 
 /// Its timers: the caret's blinking; a look at what may have changed while it shows (the drives' indexing, the
 /// pictures made for its rows); a frame of the mark of the kind chosen sliding to it.
@@ -126,8 +129,18 @@ struct Asked {
 /// What the finding thread found last: for which asking, and whether it was a fresh one.
 static ANSWER: Mutex<Option<(u64, bool, Shown)>> = Mutex::new(None);
 
-/// What is asked looked for, the latest only (those asked meanwhile left), and the window told as it is found.
-fn work(asks: Receiver<Asked>, hwnd: isize) {
+/// The asking last made (see `Finder::ask`), and the files and folders found told of since the window last took them:
+/// for which asking each, its path, its size and when it changed.
+static ASKED: AtomicU64 = AtomicU64::new(0);
+static TOLD_OF: Mutex<Vec<Told>> = Mutex::new(Vec::new());
+type Told = (u64, PathBuf, (u64, SystemTime));
+
+/// How long what is told of the files found gathers before the window is told (it is drawn again as it is).
+const TELL_EVERY: Duration = Duration::from_millis(100);
+
+/// What is asked looked for, the latest only (those asked meanwhile left), and the window told as it is found; the
+/// files and folders found then told of (see `tell`).
+fn work(asks: Receiver<Asked>, hwnd: isize, tells: Sender<(u64, Vec<(PathBuf, bool)>)>) {
     while let Ok(mut asked) = asks.recv() {
         while let Ok(newer) = asks.try_recv() {
             asked = Asked { fresh: asked.fresh || newer.fresh, ..newer };
@@ -137,14 +150,45 @@ fn work(asks: Receiver<Asked>, hwnd: isize) {
         let held = run::shown();
         let lately = crate::station::recent::shown();
         let files = |query: &crate::search::Query, most: usize| crate::search::find(query, most);
-        let stat = |path: &Path| {
-            let meta = std::fs::metadata(path).ok()?;
-            Some((meta.len(), meta.modified().ok()?))
-        };
-        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, lately: &lately, files: &files, stat: &stat, lang: asked.lang };
+        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, lately: &lately, files: &files, lang: asked.lang };
         let shown = results::gather(&asked.typed, asked.view, asked.expanded, &sources);
+        let paths = shown.paths();
         *ANSWER.lock().unwrap() = Some((asked.number, asked.fresh, shown));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), FOUND, WPARAM(0), LPARAM(0)) };
+        if !paths.is_empty() {
+            let _ = tells.send((asked.number, paths));
+        }
+    }
+}
+
+/// The files and folders found told of (each one's size and when it changed), on a thread of their own: what is found
+/// shows at once, a drive slow to answer (a USB drive busy) holds nothing of it. The latest asking's only, left as
+/// another is asked; the window told as they gather.
+fn tell(asks: Receiver<(u64, Vec<(PathBuf, bool)>)>, hwnd: isize) {
+    while let Ok(mut asked) = asks.recv() {
+        while let Ok(newer) = asks.try_recv() {
+            asked = newer;
+        }
+        let (number, paths) = asked;
+        let mut since = Instant::now();
+        let mut gathered = false;
+        for (path, _) in paths {
+            if ASKED.load(Ordering::Acquire) != number {
+                break;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else { continue };
+            let Ok(changed) = meta.modified() else { continue };
+            TOLD_OF.lock().unwrap().push((number, path, (meta.len(), changed)));
+            gathered = true;
+            if since.elapsed() >= TELL_EVERY {
+                since = Instant::now();
+                gathered = false;
+                let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), TOLD, WPARAM(0), LPARAM(0)) };
+            }
+        }
+        if gathered {
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), TOLD, WPARAM(0), LPARAM(0)) };
+        }
     }
 }
 
@@ -159,7 +203,10 @@ fn run(made: Sender<Option<isize>>) {
     };
     let (asks, asked) = std::sync::mpsc::channel();
     let to = hwnd.0 as isize;
-    if std::thread::Builder::new().name("glance: search finding".into()).spawn(move || work(asked, to)).is_err() {
+    let (tells, told) = std::sync::mpsc::channel();
+    let finding = std::thread::Builder::new().name("glance: search finding".into()).spawn(move || work(asked, to, tells));
+    let telling = std::thread::Builder::new().name("glance: search files told".into()).spawn(move || tell(told, to));
+    if finding.is_err() || telling.is_err() {
         let _ = made.send(None);
         return;
     }
@@ -471,6 +518,7 @@ impl Finder {
     /// What is typed looked for (again), in the view chosen: `fresh`, the first name picked once it is found.
     fn ask(&mut self, fresh: bool) {
         self.asked += 1;
+        ASKED.store(self.asked, Ordering::Release);
         let _ = self.asks.send(Asked { number: self.asked, typed: self.typing.string(), view: self.view, expanded: self.expanded, lang: self.lang, fresh });
     }
 
@@ -485,7 +533,9 @@ impl Finder {
         if fresh && self.looking() {
             look::close();
         }
-        self.shown = shown;
+        // (Found again: its files told of as before, till they are told of again.)
+        let was = std::mem::replace(&mut self.shown, shown);
+        self.shown.told_as(&was);
         // (Found again as it was, the same name stays picked.)
         let again = (!fresh).then(|| picked.and_then(|what| self.shown.rows().position(|row| row.what == what))).flatten();
         self.pick = again.unwrap_or(0);
@@ -494,6 +544,21 @@ impl Finder {
         }
         self.follow = true;
         self.draw();
+    }
+
+    /// The files and folders found told of (see `tell`), where they are of what was last asked.
+    fn told(&mut self) {
+        let told = std::mem::take(&mut *TOLD_OF.lock().unwrap());
+        let mut changed = false;
+        for (number, path, stat) in told {
+            if number == self.asked {
+                self.shown.told(&path, stat);
+                changed = true;
+            }
+        }
+        if changed {
+            self.draw();
+        }
     }
 
     fn rows(&self) -> usize {
@@ -1693,6 +1758,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         FOUND => {
             with(Finder::found);
+            LRESULT(0)
+        }
+        TOLD => {
+            with(Finder::told);
             LRESULT(0)
         }
         LOOKED => {
