@@ -215,20 +215,22 @@ pub fn follow_next() -> bool {
     true
 }
 
-/// What `find` finds for `key`, found once: a program's name does not
-/// change while it runs. (What is not found is looked for again.)
-fn once(kept: &Mutex<Vec<(String, String)>>, key: &str, find: impl FnOnce() -> Option<String>) -> Option<String> {
+/// What `find` finds for `key`, looked for once, found or not: a program's
+/// name does not change while it runs (and looked for again each time
+/// what is played is asked, one with none touched its file, on a drive that
+/// may be slow to answer, every time).
+fn once(kept: &Mutex<Vec<(String, Option<String>)>>, key: &str, find: impl FnOnce() -> Option<String>) -> Option<String> {
     if let Some((_, found)) = kept.lock().unwrap().iter().find(|(of, _)| of == key) {
-        return Some(found.clone());
+        return found.clone();
     }
-    let found = find()?;
+    let found = find();
     let mut kept = kept.lock().unwrap();
     // (No more than a session's worth of programs.)
     if kept.len() >= 64 {
         kept.clear();
     }
     kept.push((key.to_string(), found.clone()));
-    Some(found)
+    found
 }
 
 /// The name Windows shows a program by (as in the Start menu), for one it
@@ -388,7 +390,7 @@ fn named(session: &str) -> Option<(String, String)> {
 /// names it, where it does ("QQ音乐"); else as the file says the program is, in the first language it says it in
 /// (which may be more than its name: "QQ音乐 听我想听").
 fn described(path: &str) -> Option<String> {
-    static DESCRIBED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    static DESCRIBED: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
     once(&DESCRIBED, path, || on_drives(path).and_then(|path| shown_as(&path)).or_else(|| read_description(path)))
 }
 
@@ -434,15 +436,14 @@ fn read_description(path: &str) -> Option<String> {
 
 /// What a program is shown as: by the name Windows has for it (as in the
 /// Start menu), else as its file describes it, where its file is known by
-/// the sound it has open; `id` as Windows identifies it.
+/// the sound it has open; `id` as Windows identifies it. (Its file looked
+/// for among the sounds as it is asked: one may open its sound after.)
 fn shown(id: &str) -> Option<String> {
-    static SHOWN: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-    once(&SHOWN, id, || {
-        shown_as(id).or_else(|| {
-            let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
-            let sounds = sounds().ok()?;
-            sounds.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(file)).and_then(|(_, path, _)| described(path))
-        })
+    static SHOWN: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+    once(&SHOWN, id, || shown_as(id)).or_else(|| {
+        let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
+        let sounds = sounds().ok()?;
+        sounds.iter().find(|(name, _, _)| name.eq_ignore_ascii_case(file)).and_then(|(_, path, _)| described(path))
     })
 }
 
@@ -625,6 +626,23 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
 
 #[cfg(test)]
 mod tests {
+    /// What is not found is looked for once, as what is: a name the Start menu does not have, or a file that says
+    /// nothing, was looked for (its file touched) each time what plays was asked.
+    #[test]
+    fn what_is_not_found_is_looked_for_once() {
+        let kept = std::sync::Mutex::new(Vec::new());
+        let looked = std::cell::Cell::new(0);
+        let find = |found: Option<&str>| {
+            looked.set(looked.get() + 1);
+            found.map(str::to_string)
+        };
+        assert_eq!(super::once(&kept, "a", || find(None)), None);
+        assert_eq!(super::once(&kept, "a", || find(Some("A"))), None);
+        assert_eq!(super::once(&kept, "b", || find(Some("B"))), Some("B".into()));
+        assert_eq!(super::once(&kept, "b", || find(None)), Some("B".into()));
+        assert_eq!(looked.get(), 2);
+    }
+
     /// Apple Music's "Artist — Album" told as who it is by is who it is by and the album; another program's, or one
     /// with an album told, as told.
     #[test]
