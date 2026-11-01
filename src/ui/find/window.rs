@@ -151,6 +151,31 @@ fn take_told(told: &mut Vec<Told>, shown: &mut Shown, shown_for: u64, asked: u64
     taken
 }
 
+/// What the preview's shortcut does (see `Finder::preview`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Previewing {
+    /// The look up from it goes.
+    Close,
+    /// The name picked is looked at larger.
+    Open,
+    /// What is typed is not found yet (what shows is of what was typed before): what it finds picked is looked at
+    /// larger as it comes.
+    WhenFound,
+    /// Pressed again before it came: not.
+    Not,
+}
+
+/// What the preview's shortcut does: its look up (`looking`), what shows found for what was last asked or not
+/// (`found`), it pressed already as that is found (`waiting`).
+fn previewing(looking: bool, found: bool, waiting: bool) -> Previewing {
+    match (looking, found, waiting) {
+        (true, ..) => Previewing::Close,
+        (false, true, _) => Previewing::Open,
+        (false, false, false) => Previewing::WhenFound,
+        (false, false, true) => Previewing::Not,
+    }
+}
+
 /// How long what is told of the files found gathers before the window is told (it is drawn again as it is).
 const TELL_EVERY: Duration = Duration::from_millis(100);
 
@@ -321,6 +346,9 @@ struct Finder {
     asked: u64,
     /// The asking what is shown was found for.
     shown_for: u64,
+    /// The preview's shortcut pressed before what was last asked was found: what it finds picked is looked at larger
+    /// as it comes (see `previewing`).
+    look_found: bool,
     asks: Sender<Asked>,
     /// The name picked (by its place among those shown), and how far the list is scrolled; whether it is to scroll to
     /// show the one picked when next drawn.
@@ -376,6 +404,7 @@ impl Finder {
             shown: Shown::default(),
             asked: 0,
             shown_for: 0,
+            look_found: false,
             asks,
             pick: 0,
             scroll: 0.0,
@@ -509,6 +538,7 @@ impl Finder {
         if self.looking() {
             look::close();
         }
+        self.look_found = false;
         let held = unsafe { GetForegroundWindow() } == self.hwnd;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), CARET);
@@ -565,6 +595,10 @@ impl Finder {
             self.scroll = 0.0;
         }
         self.follow = true;
+        // (Asked to be looked at larger before it came: what it found picked is.)
+        if std::mem::take(&mut self.look_found) {
+            self.preview();
+        }
         self.draw();
     }
 
@@ -1392,9 +1426,16 @@ impl Finder {
     /// The name picked looked at larger beside the sheet, the others that may be had by the arrows; looked at, gone back
     /// into its row. (A program, a page of Settings: nothing more to show, nothing done.)
     fn preview(&mut self) {
-        if self.looking() {
-            return look::close();
+        match previewing(self.looking(), self.shown_for == self.asked, self.look_found) {
+            Previewing::Close => look::close(),
+            Previewing::WhenFound => self.look_found = true,
+            Previewing::Not => self.look_found = false,
+            Previewing::Open => self.look_at_picked(),
         }
+    }
+
+    /// The name picked looked at larger (see `preview`).
+    fn look_at_picked(&mut self) {
         let lang = self.lang;
         let on_screen = self.rows_on_screen();
         let mut looked = Vec::new();
@@ -1930,6 +1971,18 @@ mod tests {
         assert!(take_told(&mut told, &mut shown, 2, 2));
         assert!(told.is_empty());
         assert_eq!(shown.rows().next().map(|row| (row.bytes, row.changed)), Some((Some(2), Some(when))));
+    }
+
+    /// The preview's shortcut pressed as what is typed is still looked for looks at what it finds, not at what is shown
+    /// of what was typed before; pressed again meanwhile, at nothing.
+    #[test]
+    fn what_is_looked_at_waits_for_what_is_typed_to_be_found() {
+        assert_eq!(previewing(false, false, false), Previewing::WhenFound);
+        assert_eq!(previewing(false, false, true), Previewing::Not);
+        assert_eq!(previewing(false, true, false), Previewing::Open);
+        assert_eq!(previewing(false, true, true), Previewing::Open);
+        assert_eq!(previewing(true, false, false), Previewing::Close);
+        assert_eq!(previewing(true, true, false), Previewing::Close);
     }
 
     #[test]
