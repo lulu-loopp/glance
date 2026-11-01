@@ -1007,12 +1007,14 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
             let folder = crate::station::folder::Folder::own();
             let tile = Tile::of(item, &folder, lang, now);
             let (title, shows, pastes) = match &item.what {
-                // (A file gone from where it was, by the copy kept of it, where one is.)
+                // (A file gone from where it was, by the copy kept of it, where one is. Whether it is gone as last looked
+                // at, on a thread of its own, as its tile says: a drive slow to answer never holds the panel.)
                 What::Files { paths, kept } => {
+                    let gone = |path: &std::path::Path| crate::station::thumbs::looked(path) == Some(crate::station::thumbs::Looked::Gone);
                     let paths = paths
                         .iter()
                         .enumerate()
-                        .map(|(at, path)| match kept.get(at).filter(|name| !name.is_empty() && !path.exists()) {
+                        .map(|(at, path)| match kept.get(at).filter(|name| !name.is_empty() && gone(path)) {
                             Some(name) => folder.path(name),
                             None => path.clone(),
                         })

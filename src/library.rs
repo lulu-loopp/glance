@@ -73,11 +73,23 @@ fn matching<'a>(index: &'a HashMap<PathBuf, Song>, track: &Track) -> Vec<&'a Pat
     found
 }
 
-/// The index of the files in `folders`, looked at again: those gone left out, those new or changed read.
+/// How long the folders, once looked at, are taken as they were (a track with no cover is asked for one every few
+/// seconds while it plays: the folders, which may be on a USB drive or a network's, were walked whole each time).
+const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The index of the files in `folders`, looked at again (no more often than `LOOK_AGAIN`): those gone left out, those
+/// new or changed read.
 fn looked_at(folders: &[PathBuf]) -> HashMap<PathBuf, Song> {
+    static LOOKED: Mutex<Option<(Vec<PathBuf>, std::time::Instant)>> = Mutex::new(None);
     let mut held = INDEX.lock().unwrap();
     let dir = crate::settings::local_dir();
     let index = held.get_or_insert_with(|| crate::elevation::read_in_place(&dir, INDEX_FILE, INDEX_MOST).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default());
+    let mut looked = LOOKED.lock().unwrap();
+    if looked.as_ref().is_some_and(|(those, at)| those == folders && at.elapsed() < LOOK_AGAIN) {
+        return index.clone();
+    }
+    *looked = Some((folders.to_vec(), std::time::Instant::now()));
+    drop(looked);
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }

@@ -37,23 +37,20 @@ fn again() -> &'static Event {
 /// A note's link followed, `to` where it goes, in the note's folder `folder`: a web address (or an e-mail's) in what
 /// opens it; else a file of the PC's (where it is, or from the folder), opened as Explorer opens it, where it is there
 /// and not of a kind Windows holds unsafe to open (a program, a script): those, and anything else, not followed. On a
-/// thread of its own (the shell may take a while).
+/// thread of its own (the shell may take a while, and a file's drive be slow to say it is there).
 pub fn follow_link(to: &str, folder: &std::path::Path) {
     let lower = to.to_ascii_lowercase();
-    let target = if ["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) {
-        to.to_string()
-    } else {
-        let path = folder.join(decoded(to));
-        let safe = path.exists() && !unsafe { windows::Win32::UI::Shell::AssocIsDangerous(&windows::core::HSTRING::from(path.as_os_str())) }.as_bool();
-        if !safe {
+    let web = ["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme));
+    let target = if web { to.to_string() } else { folder.join(decoded(to)).to_string_lossy().into_owned() };
+    let to = to.to_string();
+    let _ = std::thread::Builder::new().name("glance: link".into()).spawn(move || unsafe {
+        let path = windows::core::HSTRING::from(target.as_str());
+        if !web && (!std::path::Path::new(&target).exists() || windows::Win32::UI::Shell::AssocIsDangerous(&path).as_bool()) {
             crate::journal::note(format!("notes: a link not followed, to {to}"));
             return;
         }
-        path.to_string_lossy().into_owned()
-    };
-    let _ = std::thread::Builder::new().name("glance: link".into()).spawn(move || unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-        windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
+        windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &path, None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
         windows::Win32::System::Com::CoUninitialize();
     });
 }

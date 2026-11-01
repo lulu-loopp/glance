@@ -511,14 +511,19 @@ impl Kept {
         self.files.iter().filter(|came| !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
     }
 
-    /// What is listed from the drives at `letters`, and what waits to be tried on them, let go of, with where their
-    /// journals were read up to; whether anything listed was.
-    fn let_go(&mut self, letters: &[char]) -> bool {
-        let before = self.files.len();
+    /// What was listed from the drives `outside` (by their letters and volumes), what waits to be tried on them, and
+    /// where their journals were read up to, let go of: each only where its letter last had that volume (a drive of
+    /// the PC's own once at that letter keeps its own). Whether anything was.
+    fn let_go(&mut self, outside: &[(char, String)]) -> bool {
+        let letters: Vec<char> = outside.iter().filter(|drive| self.volumes.contains(drive)).map(|(letter, _)| *letter).collect();
+        if letters.is_empty() {
+            return false;
+        }
         self.files.retain(|came| !letters.contains(&came.key.drive));
         self.later.retain(|(letter, ..)| !letters.contains(letter));
         self.read.retain(|(letter, ..)| !letters.contains(letter));
-        self.files.len() != before
+        self.volumes.retain(|(letter, _)| !letters.contains(letter));
+        true
     }
 
     /// Those made longer ago than the days kept before `now` taken off; whether any were.
@@ -726,6 +731,9 @@ fn follow() {
                 publish(Vec::new());
                 shown_scope = None;
             }
+            // (Off, no drive is held: each is opened again as it is on.)
+            drives.clear();
+            looked_for_drives = None;
             drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| wanted.is_none()).unwrap());
             continue;
         };
@@ -733,10 +741,11 @@ fn follow() {
         // what was listed from a drive plugged in from outside let go of (listed before such drives were left alone).
         let mut let_go = false;
         if looked_for_drives.is_none_or(|looked| looked.elapsed() > Duration::from_secs(60)) {
-            drives = os::drives();
+            let outside;
+            (drives, outside) = os::drives();
             looked_for_drives = Some(Instant::now());
             kept.saw(drives.iter().map(|drive| (drive.letter, drive.volume.as_str())));
-            let_go = kept.let_go(&os::outside());
+            let_go = kept.let_go(&outside);
         }
         // (The folders skipped are known by their numbers: one out of what was shown may be in what is shown now.)
         if forgotten.elapsed() > FORGET_EVERY || shown_scope.as_ref().is_some_and(|shown| *shown != scope) {
@@ -898,9 +907,25 @@ mod os {
         }
     }
 
-    /// The fixed drives with a change journal the user may read (NTFS's and ReFS's).
-    pub fn drives() -> Vec<Drive> {
-        letters().filter_map(Drive::at).collect()
+    /// The PC's own fixed drives with a change journal the user may read (NTFS's and ReFS's), and the drives plugged in
+    /// from outside, by their letters and volumes (each told once: one that cannot be told is neither).
+    pub fn drives() -> (Vec<Drive>, Vec<(char, String)>) {
+        let (mut own, mut outside) = (Vec::new(), Vec::new());
+        for letter in letters() {
+            match crate::drives::outside(letter) {
+                Some(false) => own.extend(Drive::at(letter)),
+                Some(true) => outside.extend(volume(&HSTRING::from(format!("{letter}:\\"))).map(|volume| (letter, volume))),
+                None => {}
+            }
+        }
+        (own, outside)
+    }
+
+    /// The volume at `root` ("D:\"), as Windows names it.
+    fn volume(root: &HSTRING) -> Option<String> {
+        let mut volume = [0u16; 64];
+        unsafe { GetVolumeNameForVolumeMountPointW(root, &mut volume) }.ok()?;
+        Some(String::from_utf16_lossy(&volume).trim_end_matches('\0').to_string())
     }
 
     /// The drives' letters Windows has now.
@@ -909,7 +934,7 @@ mod os {
         (0..26u8).filter(move |bit| mask & (1 << bit) != 0).map(|bit| (b'A' + bit) as char)
     }
 
-    /// The drive at `letter`, where it is one whose journal is followed: one of the PC's own fixed drives, NTFS or
+    /// The drive at `letter`, one of the PC's own (see `drives`), where its journal is followed: a fixed drive, NTFS or
     /// ReFS. Removable ones are not (most have no journal, and one held open could not be taken out safely), nor is a
     /// drive plugged in from outside that Windows calls fixed (a USB hard drive: held open, it could not be taken out
     /// safely either, and each file copied to it was opened again as it came, the drive read while it was being written).
@@ -918,7 +943,7 @@ mod os {
         let root = HSTRING::from(format!("{letter}:\\"));
         unsafe {
             // (DRIVE_FIXED.)
-            if GetDriveTypeW(&root) != 3 || crate::drives::outside(letter) {
+            if GetDriveTypeW(&root) != 3 {
                 return None;
             }
             let (mut label, mut system) = ([0u16; 261], [0u16; 32]);
@@ -928,20 +953,16 @@ mod os {
             if system != "NTFS" && system != "ReFS" {
                 return None;
             }
-            let mut volume = [0u16; 64];
-            GetVolumeNameForVolumeMountPointW(&root, &mut volume).ok()?;
-            Some((text(&volume), text(&label), system == "ReFS"))
+            Some((volume(&root)?, text(&label), system == "ReFS"))
         }
-    }
-
-    /// The letters of the drives plugged in from outside (see `drives::outside`).
-    pub fn outside() -> Vec<char> {
-        letters().filter(|&letter| crate::drives::outside(letter)).collect()
     }
 
     /// The drives whose journals are followed, as the settings offer them (none opened).
     pub fn volumes() -> Vec<super::Volume> {
-        letters().filter_map(|letter| followed(letter).map(|(volume, label, _)| super::Volume { letter, volume, label })).collect()
+        letters()
+            .filter(|&letter| crate::drives::outside(letter) == Some(false))
+            .filter_map(|letter| followed(letter).map(|(volume, label, _)| super::Volume { letter, volume, label }))
+            .collect()
     }
 
     impl Drive {
@@ -1405,7 +1426,7 @@ mod tests {
     }
 
     /// What was listed from a drive plugged in from outside is let go of, with what waits to be tried there and where
-    /// its journal was read up to; the PC's own drives' kept.
+    /// its journal was read up to; the PC's own drives' kept, one once at the same letter too.
     #[test]
     fn lets_go_of_what_came_on_a_drive_from_outside() {
         let now = 1_760_800_000_000;
@@ -1413,14 +1434,23 @@ mod tests {
         kept.files = vec![
             Came { key: Key { drive: 'C', file: 1 }, ..come(1, r"C:\Users\a\Downloads\a.zip", now, 5, Kind::Archive) },
             Came { key: Key { drive: 'G', file: 2 }, ..come(2, r"G:\bak\b.zip", now, 5, Kind::Archive) },
+            Came { key: Key { drive: 'D', file: 4 }, ..come(4, r"D:\Documents\d.pdf", now, 5, Kind::Document) },
         ];
         kept.later = vec![('G', Change { file: 3, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, 0)];
-        kept.read = vec![('C', 1, 100), ('G', 2, 200)];
-        assert!(kept.let_go(&['G']));
-        assert_eq!(kept.files.iter().map(|came| came.key.drive).collect::<Vec<_>>(), ['C']);
+        kept.read = vec![('C', 1, 100), ('G', 2, 200), ('D', 3, 300)];
+        kept.saw([('C', "vol-c"), ('G', "vol-usb"), ('D', "vol-own")]);
+        // (D: is now another drive, from outside: what was its own stays.)
+        assert!(kept.let_go(&[('G', "vol-usb".into()), ('D', "vol-other".into())]));
+        assert_eq!(kept.files.iter().map(|came| came.key.drive).collect::<Vec<_>>(), ['C', 'D']);
         assert!(kept.later.is_empty());
-        assert_eq!(kept.read, [('C', 1, 100)]);
-        assert!(!kept.let_go(&['G']));
+        assert_eq!(kept.read, [('C', 1, 100), ('D', 3, 300)]);
+        assert!(!kept.let_go(&[('G', "vol-usb".into())]));
+
+        // Only what waits there, or where it was read up to: let go of, and said so (to be kept so).
+        kept.read.push(('G', 2, 200));
+        kept.saw([('G', "vol-usb")]);
+        assert!(kept.let_go(&[('G', "vol-usb".into())]));
+        assert_eq!(kept.read, [('C', 1, 100), ('D', 3, 300)]);
     }
 
     /// A file come, as the bursts' rule takes it: its folder, its name, when it came (ms), how large it is, what it is.
@@ -1528,7 +1558,7 @@ mod tests {
         let now = crate::station::now_ms();
         let mut kept = Kept::default();
         let tools = Tools::new(&places, looked_at);
-        for drive in os::drives() {
+        for drive in os::drives().0 {
             let mut from = drive.start(64 << 20);
             let mut batches = 0;
             loop {

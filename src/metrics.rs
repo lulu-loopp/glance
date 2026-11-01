@@ -129,6 +129,8 @@ pub struct Sampler {
     /// nothing: shown so while Glance's own window is the one in front.
     by_hand: Option<crate::presents::Presenting>,
     buf: Vec<u64>,
+    /// Space on the drives, read on a thread of its own.
+    spaces: Spaces,
     pub info: StaticInfo,
 }
 
@@ -235,6 +237,7 @@ impl Sampler {
             playing: None,
             by_hand: None,
             buf: Vec::new(),
+            spaces: Spaces::start(),
             info,
             started: Started::read(),
             wsl: None,
@@ -454,7 +457,7 @@ impl Sampler {
             disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
             disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
             disk_active: counter(self.disk_idle).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).map(|idle| (100.0 - idle).clamp(0.0, 100.0) as f32),
-            volumes: volumes(),
+            volumes: self.spaces.take(),
             processes: self.slow.processes.clone(),
             system: SystemSample {
                 uptime_s: self.started.uptime_s(),
@@ -1063,6 +1066,43 @@ impl ProcessTable {
     }
 }
 
+/// Space on the drives (see `volumes`), read on a thread of its own as each sample asks: a drive slow to answer (a USB
+/// hard drive busy copying) holds that thread alone, never the sample, which takes what was read last.
+struct Spaces {
+    read: std::sync::Arc<std::sync::Mutex<Vec<VolumeSample>>>,
+    ask: std::sync::mpsc::SyncSender<()>,
+}
+
+impl Spaces {
+    /// Its thread started, a first reading asked (none read till it is), ending as it is dropped.
+    fn start() -> Spaces {
+        Spaces::reading(volumes)
+    }
+
+    /// Its thread started, reading as `volumes` does.
+    fn reading(volumes: fn() -> Vec<VolumeSample>) -> Spaces {
+        let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (ask, asked) = std::sync::mpsc::sync_channel::<()>(1);
+        let _ = std::thread::Builder::new().name("glance: drive space".into()).spawn({
+            let read = read.clone();
+            move || {
+                while asked.recv().is_ok() {
+                    let spaces = volumes();
+                    *read.lock().unwrap() = spaces;
+                }
+            }
+        });
+        let _ = ask.try_send(());
+        Spaces { read, ask }
+    }
+
+    /// What was read last, a reading asked anew (one asked and not yet begun, not asked twice).
+    fn take(&self) -> Vec<VolumeSample> {
+        let _ = self.ask.try_send(());
+        self.read.lock().unwrap().clone()
+    }
+}
+
 /// Space on every fixed drive that is mounted with a letter.
 fn volumes() -> Vec<VolumeSample> {
     let mounted = unsafe { GetLogicalDrives() };
@@ -1496,6 +1536,25 @@ pub fn reg_string(key: PCWSTR, value: PCWSTR) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Space on the drives is read on a thread of its own: a drive slow to answer holds no sample, which takes what
+    /// was read last (none before the first reading), and the reading asked anew.
+    #[test]
+    fn a_drive_slow_to_tell_its_space_holds_no_sample() {
+        fn slow() -> Vec<crate::reading::VolumeSample> {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            vec![crate::reading::VolumeSample { name: "G:".into(), used: 1, total: 2 }]
+        }
+        let spaces = super::Spaces::reading(slow);
+        let began = std::time::Instant::now();
+        assert!(spaces.take().is_empty());
+        assert!(began.elapsed() < std::time::Duration::from_millis(100), "not waited for");
+        let until = began + std::time::Duration::from_secs(5);
+        while spaces.take().is_empty() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(spaces.take().first().map(|space| space.name.clone()), Some("G:".to_string()));
+    }
+
     /// A process just begun on the GPU, its engine's instance new and not yet read, is left out of that reading (the
     /// card's use known still); one read before and unread now leaves it unknown; one read is counted.
     #[test]

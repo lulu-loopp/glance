@@ -5,6 +5,7 @@
 //! reads of it for failure prediction, now and then, never while it sleeps.
 
 use crate::reading::DriveTemperature;
+use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
@@ -24,32 +25,41 @@ pub fn models() -> Vec<(u32, String)> {
 }
 
 /// Every physical drive that reports a temperature, by its model name. Each drive asked only the way it gave one the
-/// first time (see `Way`): one that gave none is not asked again while it stays (a USB drive's bridge asked every
-/// second of what it does not know may stall the drive's own reading and writing).
+/// first time (see `Way`): one plugged in from outside never (a USB drive's bridge asked every second of what it
+/// does not know may stall the drive's own reading and writing, and asked once, may not answer), one of the PC's own
+/// that gave none not again for a while.
 pub fn temperatures() -> Vec<DriveTemperature> {
-    static WAYS: std::sync::Mutex<Vec<(String, Way)>> = std::sync::Mutex::new(Vec::new());
+    static WAYS: std::sync::Mutex<Vec<(String, Way, Instant)>> = std::sync::Mutex::new(Vec::new());
     let mut ways = WAYS.lock().unwrap();
     let mut seen = Vec::new();
     let mut found = Vec::new();
+    let now = Instant::now();
     each_drive(|index, path, handle| {
         seen.push(path.to_string());
-        if let Some(celsius) = asked(&mut ways, path, &Opened { index, handle }) {
+        if let Some(celsius) = asked(&mut ways, path, &Opened { index, handle }, now) {
             found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
     });
     // (A drive taken out is forgotten: put back, it is learned anew.)
-    ways.retain(|(path, _)| seen.contains(path));
+    ways.retain(|(path, ..)| seen.contains(path));
     found
 }
 
-/// The temperature `drive` (listed as `path`) gives now, asked the way `ways` knows it gives one, learned (and kept
-/// there) the first time it is asked.
-fn asked(ways: &mut Vec<(String, Way)>, path: &str, drive: &impl Asked) -> Option<f32> {
-    match ways.iter().find(|(known, _)| known == path) {
-        Some((_, way)) => way.read(drive),
-        None => {
-            let (way, celsius) = Way::learn(drive);
-            ways.push((path.to_string(), way));
+/// How long a drive of the PC's own that gave no temperature is left before it is learned anew (one whose answers
+/// failed for a moment, as the PC woke, is not left without one for good).
+const RELEARN: Duration = Duration::from_secs(10 * 60);
+
+/// The temperature `drive` (listed as `path`) gives `now`, asked the way `ways` knows it gives one, learned (and kept
+/// there, with when) the first time it is asked, and again where it gave none `RELEARN` before.
+fn asked(ways: &mut Vec<(String, Way, Instant)>, path: &str, drive: &impl Asked, now: Instant) -> Option<f32> {
+    match ways.iter().position(|(known, ..)| known == path) {
+        Some(at) if !(ways[at].1 == Way::None && now.duration_since(ways[at].2) >= RELEARN) => ways[at].1.read(drive),
+        known => {
+            let (way, celsius) = Way::learn(drive)?;
+            if let Some(at) = known {
+                ways.remove(at);
+            }
+            ways.push((path.to_string(), way, now));
             celsius
         }
     }
@@ -93,26 +103,33 @@ enum Way {
     HealthLog,
     /// Its SMART attributes (see `smart_temperature`): a SATA drive's, asked now and then while it is awake.
     Smart,
-    /// None: not asked again.
+    /// None found: not asked again for a while (see `RELEARN`).
     None,
+    /// Plugged in from outside (see `BUSES_OUTSIDE`): never asked.
+    Outside,
 }
 
 impl Way {
-    /// How `drive` gives its temperature, and what it gives now: its property, else its health log where it is an
-    /// NVMe drive, else its SMART attributes where it is a SATA drive (one asleep now, or not due, gives none yet, and
-    /// is asked so again), else none (a drive on another bus, a USB drive's, is asked nothing more).
-    fn learn(drive: &impl Asked) -> (Way, Option<f32>) {
-        if let Some(celsius) = drive.property() {
-            return (Way::Property, Some(celsius));
+    /// How `drive` gives its temperature, and what it gives now, by the bus it is on (which Windows tells of itself,
+    /// asking the drive nothing): one from outside, nothing asked; an NVMe drive, its property, else its health log;
+    /// a SATA drive, its property, else its SMART attributes (one asleep now, or not due, gives none yet, and is
+    /// asked so again); another, its property. None while its bus cannot be told: asked so again.
+    fn learn(drive: &impl Asked) -> Option<(Way, Option<f32>)> {
+        let bus = drive.bus()?;
+        if BUSES_OUTSIDE.contains(&bus) {
+            return Some((Way::Outside, None));
         }
-        match drive.bus() {
-            Some(BUS_NVME) => {
+        if let Some(celsius) = drive.property() {
+            return Some((Way::Property, Some(celsius)));
+        }
+        Some(match bus {
+            BUS_NVME => {
                 let celsius = drive.health_log();
                 (if celsius.is_some() { Way::HealthLog } else { Way::None }, celsius)
             }
-            Some(BUS_ATA | BUS_SATA) => (Way::Smart, drive.smart()),
+            BUS_ATA | BUS_SATA => (Way::Smart, drive.smart()),
             _ => (Way::None, None),
-        }
+        })
     }
 
     /// The temperature `drive` gives this way.
@@ -121,7 +138,7 @@ impl Way {
             Way::Property => drive.property(),
             Way::HealthLog => drive.health_log(),
             Way::Smart => drive.smart(),
-            Way::None => None,
+            Way::None | Way::Outside => None,
         }
     }
 }
@@ -191,10 +208,12 @@ pub fn describe() -> Vec<String> {
     let mut found = Vec::new();
     each_drive(|index, _, handle| {
         let read = match Way::learn(&Opened { index, handle }) {
-            (Way::Property, _) => "its property",
-            (Way::HealthLog, _) => "its NVMe health log",
-            (Way::Smart, Some(_)) => "its SMART attributes",
-            (Way::Smart | Way::None, _) => "none",
+            Some((Way::Property, _)) => "its property",
+            Some((Way::HealthLog, _)) => "its NVMe health log",
+            Some((Way::Smart, Some(_))) => "its SMART attributes",
+            Some((Way::Outside, _)) => "not asked (plugged in from outside)",
+            Some((Way::Smart | Way::None, _)) => "none",
+            None => "not asked (its bus not told)",
         };
         found.push(format!("Drive {index}: {}, bus {}, temperature: {read}", model(handle).unwrap_or_default(), bus(handle).map_or("unknown".to_string(), |bus| bus.to_string())));
     });
@@ -202,7 +221,7 @@ pub fn describe() -> Vec<String> {
 }
 
 /// How often a SATA drive is asked for its SMART attributes.
-const SMART_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+const SMART_EVERY: Duration = Duration::from_secs(10);
 /// The SATA and (parallel) ATA buses, as STORAGE_BUS_TYPE numbers them.
 const BUS_ATA: i32 = 3;
 const BUS_SATA: i32 = 11;
@@ -249,20 +268,19 @@ fn smart_celsius(data: &[u8; 512]) -> Option<f32> {
     attribute(194).or_else(|| attribute(190)).filter(|celsius| plausible(*celsius) && *celsius > 0).map(f32::from)
 }
 
-/// The buses a drive is plugged into from outside the PC on, as STORAGE_BUS_TYPE numbers them: USB, FireWire, an SD
-/// card's and an MMC card's.
-const BUSES_OUTSIDE: [i32; 4] = [7, 4, 12, 13];
+/// The buses a drive is plugged into from outside the PC on, as STORAGE_BUS_TYPE numbers them: USB and FireWire. (Not
+/// SD's and MMC's: a PC's own drive may be eMMC, and a card in a reader is a removable drive to Windows already.)
+const BUSES_OUTSIDE: [i32; 2] = [7, 4];
 
 /// Whether the drive at `letter` is one plugged into the PC from outside (see `BUSES_OUTSIDE`), whatever Windows calls
 /// it: a USB hard drive is a fixed drive to it, as the PC's own are. Asked of the volume opened for its properties only
-/// (no access to its data), which Windows answers itself, asking the drive nothing; one that cannot say is taken for
-/// the PC's own.
-pub fn outside(letter: char) -> bool {
+/// (no access to its data), what Windows keeps of the drive since it came. None where it cannot be told.
+pub fn outside(letter: char) -> Option<bool> {
     let path = windows::core::HSTRING::from(format!(r"\\.\{letter}:"));
-    let Ok(handle) = (unsafe { CreateFileW(&path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }) else { return false };
+    let handle = unsafe { CreateFileW(&path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }.ok()?;
     let on = bus(handle);
     let _ = unsafe { CloseHandle(handle) };
-    on.is_some_and(|bus| BUSES_OUTSIDE.contains(&bus))
+    on.map(|bus| BUSES_OUTSIDE.contains(&bus))
 }
 
 /// The bus a drive is on, as STORAGE_BUS_TYPE numbers it.
@@ -416,7 +434,7 @@ mod tests {
     fn tells_this_pcs_drives_from_outside() {
         let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
         for letter in (0..26u8).filter(|bit| mask & (1 << bit) != 0).map(|bit| (b'A' + bit) as char) {
-            println!("{letter}: outside {}", super::outside(letter));
+            println!("{letter}: outside {:?}", super::outside(letter));
         }
     }
 
@@ -454,35 +472,57 @@ mod tests {
         }
     }
 
-    /// A drive that gives no temperature (a USB drive's bridge, asked every second, stalled the drive's copying) is
-    /// asked the first time only, while one that gives one is asked it the way it gave it, and nothing else.
+    /// A drive plugged in from outside (a USB drive's bridge, asked every second, stalled the drive's copying) is asked
+    /// for no temperature at all, its bus alone told once; one of the PC's own is asked the way it gave one, and
+    /// nothing else; one that gave none, not again for a while; one whose bus cannot be told, learned as it can be.
     #[test]
-    fn a_drive_that_gives_no_temperature_is_not_asked_again() {
+    fn a_drive_is_asked_only_the_way_it_gives_a_temperature() {
+        let start = std::time::Instant::now();
         let mut ways = Vec::new();
-        let usb = Made::new(None, 7, None, None);
+        let usb = Made::new(Some(30.0), 7, None, None);
         for _ in 0..5 {
-            assert_eq!(super::asked(&mut ways, "usb", &usb), None);
+            assert_eq!(super::asked(&mut ways, "usb", &usb, start), None);
         }
-        assert_eq!(usb.asked.get(), 2, "its property and its bus, once");
+        assert_eq!(usb.asked.get(), 1, "its bus, once");
+        assert_eq!(super::asked(&mut ways, "usb", &usb, start + super::RELEARN), None);
+        assert_eq!(usb.asked.get(), 1, "never again");
 
         let nvme = Made::new(Some(40.0), super::BUS_NVME, Some(41.0), None);
         for _ in 0..3 {
-            assert_eq!(super::asked(&mut ways, "nvme", &nvme), Some(40.0));
+            assert_eq!(super::asked(&mut ways, "nvme", &nvme, start), Some(40.0));
         }
-        assert_eq!(nvme.asked.get(), 3, "its property alone, each time");
+        assert_eq!(nvme.asked.get(), 2 + 2, "its bus and property, then its property alone");
 
         let log = Made::new(None, super::BUS_NVME, Some(38.0), None);
         for _ in 0..3 {
-            assert_eq!(super::asked(&mut ways, "log", &log), Some(38.0));
+            assert_eq!(super::asked(&mut ways, "log", &log, start), Some(38.0));
         }
         assert_eq!(log.asked.get(), 3 + 2, "its health log alone after the first time");
 
         // A SATA drive asleep the first time is asked again, as it wakes.
         let sata = Made::new(None, super::BUS_SATA, None, None);
-        assert_eq!(super::asked(&mut ways, "sata", &sata), None);
+        assert_eq!(super::asked(&mut ways, "sata", &sata, start), None);
         sata.smart.set(Some(35.0));
-        assert_eq!(super::asked(&mut ways, "sata", &sata), Some(35.0));
+        assert_eq!(super::asked(&mut ways, "sata", &sata, start), Some(35.0));
         assert_eq!(sata.asked.get(), 3 + 1);
+
+        // One of the PC's own that gave none (its answers failing as the PC woke) is left, then learned anew.
+        let mut none = Made::new(None, super::BUS_NVME, None, None);
+        for _ in 0..3 {
+            assert_eq!(super::asked(&mut ways, "none", &none, start), None);
+        }
+        assert_eq!(none.asked.get(), 3, "learned once");
+        none.health_log = Some(44.0);
+        assert_eq!(super::asked(&mut ways, "none", &none, start + super::RELEARN / 2), None);
+        assert_eq!(super::asked(&mut ways, "none", &none, start + super::RELEARN), Some(44.0));
+
+        // One whose bus cannot be told is asked nothing more, and learned as it can be.
+        let mut unknown = Made::new(Some(33.0), 0, None, None);
+        unknown.bus = None;
+        assert_eq!(super::asked(&mut ways, "unknown", &unknown, start), None);
+        assert_eq!(unknown.asked.get(), 1);
+        unknown.bus = Some(super::BUS_SATA);
+        assert_eq!(super::asked(&mut ways, "unknown", &unknown, start), Some(33.0));
     }
 
     #[test]
