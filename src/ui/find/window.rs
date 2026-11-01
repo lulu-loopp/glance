@@ -135,6 +135,22 @@ static ASKED: AtomicU64 = AtomicU64::new(0);
 static TOLD_OF: Mutex<Vec<Told>> = Mutex::new(Vec::new());
 type Told = (u64, PathBuf, (u64, SystemTime));
 
+/// What is `told` of files and folders found (see `tell`) taken into `shown` (found for the asking `shown_for`,
+/// `asked` the last): what is told of those found for what was last asked, not shown yet (told before they came),
+/// kept till they are; what is told of an asking before let go of. Whether anything was taken in.
+fn take_told(told: &mut Vec<Told>, shown: &mut Shown, shown_for: u64, asked: u64) -> bool {
+    let mut taken = false;
+    told.retain(|(number, path, stat)| {
+        if *number == shown_for && *number == asked {
+            shown.told(path, *stat);
+            taken = true;
+            return false;
+        }
+        *number == asked
+    });
+    taken
+}
+
 /// How long what is told of the files found gathers before the window is told (it is drawn again as it is).
 const TELL_EVERY: Duration = Duration::from_millis(100);
 
@@ -303,6 +319,8 @@ struct Finder {
     expanded: bool,
     shown: Shown,
     asked: u64,
+    /// The asking what is shown was found for.
+    shown_for: u64,
     asks: Sender<Asked>,
     /// The name picked (by its place among those shown), and how far the list is scrolled; whether it is to scroll to
     /// show the one picked when next drawn.
@@ -357,6 +375,7 @@ impl Finder {
             expanded: false,
             shown: Shown::default(),
             asked: 0,
+            shown_for: 0,
             asks,
             pick: 0,
             scroll: 0.0,
@@ -535,7 +554,10 @@ impl Finder {
         }
         // (Found again: its files told of as before, till they are told of again.)
         let was = std::mem::replace(&mut self.shown, shown);
+        self.shown_for = number;
         self.shown.told_as(&was);
+        // (Told of before it came: see `told`.)
+        self.take_told();
         // (Found again as it was, the same name stays picked.)
         let again = (!fresh).then(|| picked.and_then(|what| self.shown.rows().position(|row| row.what == what))).flatten();
         self.pick = again.unwrap_or(0);
@@ -546,19 +568,16 @@ impl Finder {
         self.draw();
     }
 
-    /// The files and folders found told of (see `tell`), where they are of what was last asked.
+    /// The files and folders found told of (see `tell`), drawn so.
     fn told(&mut self) {
-        let told = std::mem::take(&mut *TOLD_OF.lock().unwrap());
-        let mut changed = false;
-        for (number, path, stat) in told {
-            if number == self.asked {
-                self.shown.told(&path, stat);
-                changed = true;
-            }
-        }
-        if changed {
+        if self.take_told() {
             self.draw();
         }
+    }
+
+    /// What is told of the files and folders shown (see `tell`) taken in (see `take_told`).
+    fn take_told(&mut self) -> bool {
+        take_told(&mut TOLD_OF.lock().unwrap(), &mut self.shown, self.shown_for, self.asked)
     }
 
     fn rows(&self) -> usize {
@@ -1895,6 +1914,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What is told of the files found for the last asking, before what was found for it is shown (an older telling
+    /// taking it in first), is kept till it is, and taken in then; what is told of an asking before is let go of.
+    #[test]
+    fn what_is_told_before_its_files_show_waits_for_them() {
+        let row = |path: &str| Line::Row(Row { kind: Kind::File(FileKind::Document), name: path.into(), marks: Vec::new(), detail: String::new(), what: What::Path(path.into()), rank: 0.0, bytes: None, changed: None }, false);
+        let when = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let mut shown = Shown { lines: vec![row("D:\\old.txt")], total: 1 };
+        let mut told = vec![(1, PathBuf::from("D:\\old.txt"), (1, when)), (2, PathBuf::from("D:\\new.txt"), (2, when))];
+        // Asked again (2), its files not shown yet: what is told of them waits, the asking before's let go of.
+        assert!(!take_told(&mut told, &mut shown, 1, 2));
+        assert_eq!(told.len(), 1);
+        shown = Shown { lines: vec![row("D:\\new.txt")], total: 1 };
+        assert!(take_told(&mut told, &mut shown, 2, 2));
+        assert!(told.is_empty());
+        assert_eq!(shown.rows().next().map(|row| (row.bytes, row.changed)), Some((Some(2), Some(when))));
+    }
 
     #[test]
     fn counts_are_said_with_their_thousands_apart() {
