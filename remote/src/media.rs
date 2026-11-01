@@ -8,6 +8,7 @@
 //! media key.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use windows::core::{Interface, Result};
 use windows::Media::Control::{GlobalSystemMediaTransportControlsSession as Session, GlobalSystemMediaTransportControlsSessionManager as Manager, GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status};
@@ -215,13 +216,19 @@ pub fn follow_next() -> bool {
     true
 }
 
-/// What `find` finds for `key`, looked for once, found or not: a program's
-/// name does not change while it runs (and looked for again each time
-/// what is played is asked, one with none touched its file, on a drive that
-/// may be slow to answer, every time).
-fn once(kept: &Mutex<Vec<(String, Option<String>)>>, key: &str, find: impl FnOnce() -> Option<String>) -> Option<String> {
-    if let Some((_, found)) = kept.lock().unwrap().iter().find(|(of, _)| of == key) {
-        return found.clone();
+/// What `find` finds for `key`, found once: a program's name does not
+/// change while it runs. What is not found is looked for again only after
+/// `LOOK_AGAIN` (looked for each time what is played is asked, one with
+/// none touched its file, on a drive that may be slow to answer, every
+/// time; one not found for a while, its file being updated, is found then).
+fn once(kept: &Mutex<Vec<Kept>>, key: &str, find: impl FnOnce() -> Option<String>) -> Option<String> {
+    let now = Instant::now();
+    {
+        let mut kept = kept.lock().unwrap();
+        kept.retain(|(_, found, when)| found.is_some() || now.duration_since(*when) < LOOK_AGAIN);
+        if let Some((_, found, _)) = kept.iter().find(|(of, _, _)| of == key) {
+            return found.clone();
+        }
     }
     let found = find();
     let mut kept = kept.lock().unwrap();
@@ -229,9 +236,15 @@ fn once(kept: &Mutex<Vec<(String, Option<String>)>>, key: &str, find: impl FnOnc
     if kept.len() >= 64 {
         kept.clear();
     }
-    kept.push((key.to_string(), found.clone()));
+    kept.push((key.to_string(), found.clone(), now));
     found
 }
+
+/// A name looked for (see `once`): for what, what was found, and when.
+type Kept = (String, Option<String>, Instant);
+
+/// How long a name not found is not looked for again (see `once`).
+const LOOK_AGAIN: Duration = Duration::from_secs(60);
 
 /// The name Windows shows a program by (as in the Start menu), for one it
 /// identifies as `id`; none for a program Windows has no such name for.
@@ -390,7 +403,7 @@ fn named(session: &str) -> Option<(String, String)> {
 /// names it, where it does ("QQ音乐"); else as the file says the program is, in the first language it says it in
 /// (which may be more than its name: "QQ音乐 听我想听").
 fn described(path: &str) -> Option<String> {
-    static DESCRIBED: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+    static DESCRIBED: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
     once(&DESCRIBED, path, || on_drives(path).and_then(|path| shown_as(&path)).or_else(|| read_description(path)))
 }
 
@@ -439,7 +452,7 @@ fn read_description(path: &str) -> Option<String> {
 /// the sound it has open; `id` as Windows identifies it. (Its file looked
 /// for among the sounds as it is asked: one may open its sound after.)
 fn shown(id: &str) -> Option<String> {
-    static SHOWN: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+    static SHOWN: Mutex<Vec<Kept>> = Mutex::new(Vec::new());
     once(&SHOWN, id, || shown_as(id)).or_else(|| {
         let file = id.strip_suffix(".exe").or_else(|| id.strip_suffix(".EXE")).unwrap_or(id);
         let sounds = sounds().ok()?;
@@ -626,8 +639,9 @@ pub fn ask_of(follow: Follow, what: &str) -> Asked {
 
 #[cfg(test)]
 mod tests {
-    /// What is not found is looked for once, as what is: a name the Start menu does not have, or a file that says
-    /// nothing, was looked for (its file touched) each time what plays was asked.
+    /// What is not found is not looked for again for a while (a name the Start menu does not have, or a file that
+    /// says nothing, was looked for, its file touched, each time what plays was asked), and is after it; what is found
+    /// is found once.
     #[test]
     fn what_is_not_found_is_looked_for_once() {
         let kept = std::sync::Mutex::new(Vec::new());
@@ -641,6 +655,13 @@ mod tests {
         assert_eq!(super::once(&kept, "b", || find(Some("B"))), Some("B".into()));
         assert_eq!(super::once(&kept, "b", || find(None)), Some("B".into()));
         assert_eq!(looked.get(), 2);
+        // (Looked for a while ago.)
+        for (_, _, when) in kept.lock().unwrap().iter_mut() {
+            *when -= super::LOOK_AGAIN;
+        }
+        assert_eq!(super::once(&kept, "a", || find(Some("A"))), Some("A".into()));
+        assert_eq!(super::once(&kept, "b", || find(None)), Some("B".into()));
+        assert_eq!(looked.get(), 3);
     }
 
     /// Apple Music's "Artist — Album" told as who it is by is who it is by and the album; another program's, or one
