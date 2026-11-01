@@ -3,7 +3,8 @@
 //! folders to list again: what a folder holds is always as it is listed.
 
 use super::drive::Drive;
-use windows::core::Result;
+use windows::core::{Error, Result};
+use windows::Win32::Foundation::ERROR_DEVICE_REMOVED;
 use windows::Win32::System::Ioctl::{FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_UNPRIVILEGED_USN_JOURNAL, READ_USN_JOURNAL_DATA_V0, USN_JOURNAL_DATA_V0, USN_RECORD_COMMON_HEADER};
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -38,18 +39,10 @@ pub enum Read {
 pub fn query(drive: &Drive) -> Result<Journal> {
     let mut journal = USN_JOURNAL_DATA_V0::default();
     let mut got = 0u32;
-    unsafe {
-        DeviceIoControl(
-            drive.root(),
-            FSCTL_QUERY_USN_JOURNAL,
-            None,
-            0,
-            Some(&mut journal as *mut _ as *mut _),
-            size_of::<USN_JOURNAL_DATA_V0>() as u32,
-            Some(&mut got),
-            None,
-        )?;
-    }
+    let asked = drive.with_root(|root| unsafe {
+        DeviceIoControl(root, FSCTL_QUERY_USN_JOURNAL, None, 0, Some(&mut journal as *mut _ as *mut _), size_of::<USN_JOURNAL_DATA_V0>() as u32, Some(&mut got), None)
+    });
+    asked.unwrap_or_else(|| Err(Error::from(ERROR_DEVICE_REMOVED)))?;
     Ok(Journal { id: journal.UsnJournalID, first: journal.FirstUsn, next: journal.NextUsn })
 }
 
@@ -67,18 +60,20 @@ pub fn read(drive: &Drive, id: u64, from: i64) -> Result<Read> {
     loop {
         let asked = READ_USN_JOURNAL_DATA_V0 { StartUsn: at_usn, ReasonMask: NAMED, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: id };
         let mut got = 0u32;
-        let read = unsafe {
-            DeviceIoControl(
-                drive.root(),
-                FSCTL_READ_UNPRIVILEGED_USN_JOURNAL,
-                Some(&asked as *const _ as *const _),
-                size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
-                Some(buffer.as_mut_ptr() as *mut _),
-                CHUNK as u32,
-                Some(&mut got),
-                None,
-            )
-        };
+        let read = drive
+            .with_root(|root| unsafe {
+                DeviceIoControl(
+                    root,
+                    FSCTL_READ_UNPRIVILEGED_USN_JOURNAL,
+                    Some(&asked as *const _ as *const _),
+                    size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    CHUNK as u32,
+                    Some(&mut got),
+                    None,
+                )
+            })
+            .unwrap_or_else(|| Err(Error::from(ERROR_DEVICE_REMOVED)));
         if let Err(error) = read {
             if error.code() == windows::core::HRESULT::from_win32(ENTRY_DELETED) {
                 return Ok(Read::Lost);

@@ -2,16 +2,10 @@
 //! program watching it: the folders names were made, gone or renamed in, by their paths from its root. Only while it
 //! is watched: what changed while Glance was not running is found by listing the drive whole as it starts.
 
+use super::drive::Drive;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use windows::core::HSTRING;
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_INFORMATION,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-};
-
-/// FILE_LIST_DIRECTORY.
-const LIST: u32 = 0x1;
+use windows::Win32::Storage::FileSystem::{ReadDirectoryChangesW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_INFORMATION};
 
 /// What watching found.
 pub enum Seen {
@@ -21,14 +15,10 @@ pub enum Seen {
     Lost,
 }
 
-/// Watches the drive whose root is `root` ("E:\") on this thread, telling `tell` what it sees, till the drive is
-/// gone or `tell` is not heard any more.
-pub fn watch(root: &str, tell: Sender<Seen>) {
-    let Ok(folder) = (unsafe {
-        CreateFileW(&HSTRING::from(root), LIST, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None)
-    }) else {
-        return;
-    };
+/// Watches `drive` on this thread, telling `tell` what it sees, till the drive is gone or let go of (its watching
+/// cancelled: see `Drive::watch`), or `tell` is not heard any more.
+pub fn watch(drive: &Drive, tell: Sender<Seen>) {
+    let Some(folder) = drive.watch() else { return };
     // (u64s: the records in it are on 4-byte boundaries.)
     let mut buffer = vec![0u64; 64 * 1024 / 8];
     loop {
@@ -53,9 +43,7 @@ pub fn watch(root: &str, tell: Sender<Seen>) {
             break;
         }
     }
-    unsafe {
-        let _ = windows::Win32::Foundation::CloseHandle(folder);
-    }
+    drive.unwatch();
 }
 
 /// The folders of the names in the records in `bytes`.

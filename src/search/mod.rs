@@ -53,6 +53,13 @@ pub struct Volume {
     kept_times: AtomicU64,
 }
 
+impl Volume {
+    /// Whether it is no longer followed: gone, or let go of as Windows asked to take it out.
+    fn away(&self) -> bool {
+        self.gone.load(Ordering::Relaxed) || self.drive.left()
+    }
+}
+
 /// How a drive's search stands.
 #[derive(Clone, Debug)]
 pub struct Standing {
@@ -93,6 +100,15 @@ fn drives() {
             .collect();
         let mut volumes = VOLUMES.lock().unwrap();
         volumes.retain(|volume| {
+            // (One let go of as Windows asked to take it out is not opened again while it is there: the asking
+            // failed, it is followed anew.)
+            if volume.drive.left() {
+                let kept = !volume.drive.stays() && roots.contains(&volume.drive.path);
+                if !kept {
+                    volume.gone.store(true, Ordering::Relaxed);
+                }
+                return kept;
+            }
             let there = roots.contains(&volume.drive.path) && Drive::open(&volume.drive.path).is_ok_and(|now| now.serial == volume.drive.serial);
             if !there {
                 volume.gone.store(true, Ordering::Relaxed);
@@ -103,7 +119,10 @@ fn drives() {
             if volumes.iter().any(|volume| volume.drive.path == root) {
                 continue;
             }
-            let Ok(drive) = Drive::open(&root) else { continue };
+            let Ok(mut drive) = Drive::open(&root) else { continue };
+            if !drive.hear_removal() {
+                crate::journal::note(format!("search: {root} followed, its removal not heard (it may not be taken out safely while Glance runs)"));
+            }
             let index = Index::new(drive.root_id, drive.by_id());
             let volume = Arc::new(Volume { drive, index: RwLock::new(index), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0) });
             volumes.push(volume.clone());
@@ -114,8 +133,8 @@ fn drives() {
     }
 }
 
-/// A drive's names found (or read as kept), then kept current till it is gone.
-fn follow(volume: &Volume) {
+/// A drive's names found (or read as kept), then kept current till it is gone, or let go of.
+fn follow(volume: &Arc<Volume>) {
     let drive = &volume.drive;
     let threads = walk::threads();
     let journal = if drive.by_id() { journal::query(drive).ok() } else { None };
@@ -137,8 +156,8 @@ fn follow(volume: &Volume) {
         follow_journal(volume, threads, keeping);
     } else {
         let (tell, told) = mpsc::channel();
-        let root = drive.path.clone();
-        let _ = std::thread::Builder::new().name(format!("glance: search watch {}", &root[..1])).spawn(move || watch::watch(&root, tell));
+        let watched = volume.clone();
+        let _ = std::thread::Builder::new().name(format!("glance: search watch {}", &drive.path[..1])).spawn(move || watch::watch(&watched.drive, tell));
         *volume.kept.lock().unwrap() = Some(store::Kept { serial: drive.serial, journal: None });
         // What was kept found at once, and listed again (nothing kept says what changed while Glance was not
         // running); else all of it listed.
@@ -169,6 +188,11 @@ impl Keeping {
     /// The index kept anew (it is between rounds of listing), where it changed and that is asked for (`now`, or by
     /// Glance quitting), it is a while since, or what changed since holds much memory or many dead.
     fn keep(&mut self, volume: &Volume, now: bool) {
+        // (A drive let go of is not kept anew: what was listed as it went may be partly listed. What was kept before
+        // stands, and what changed since is read from its journal as it comes back.)
+        if volume.drive.left() {
+            return;
+        }
         let asked = volume.keep_asked.swap(false, Ordering::Relaxed);
         let due = {
             let index = volume.index.read().unwrap();
@@ -203,7 +227,7 @@ fn follow_journal(volume: &Volume, threads: usize, mut keeping: Keeping) {
     let drive = &volume.drive;
     // Folders that could not be listed (another program had them, say), by their ids: listed again next time.
     let mut again: Vec<u64> = Vec::new();
-    while !volume.gone.load(Ordering::Relaxed) {
+    while !volume.away() {
         std::thread::sleep(JOURNAL_EVERY);
         let Some(cursor) = volume.kept.lock().unwrap().and_then(|kept| kept.journal) else { return };
         match journal::read(drive, cursor.journal, cursor.next) {
@@ -243,7 +267,7 @@ fn follow_journal(volume: &Volume, threads: usize, mut keeping: Keeping) {
 /// A drive with no journal kept current as Windows tells of names changed in its folders.
 fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, threads: usize, mut keeping: Keeping) {
     let mut again: Vec<u64> = Vec::new();
-    while !volume.gone.load(Ordering::Relaxed) {
+    while !volume.away() {
         match told.recv_timeout(JOURNAL_EVERY) {
             Ok(watch::Seen::Folders(paths)) => {
                 let mut places: Vec<u32> = {
@@ -284,7 +308,7 @@ pub fn keep_all() {
         volume.keep_asked.store(true, Ordering::Relaxed);
     }
     let until = Instant::now() + QUIT_WAIT;
-    while Instant::now() < until && volumes.iter().any(|(volume, times)| volume.kept_times.load(Ordering::Relaxed) == *times && !volume.gone.load(Ordering::Relaxed)) {
+    while Instant::now() < until && volumes.iter().any(|(volume, times)| volume.kept_times.load(Ordering::Relaxed) == *times && !volume.away()) {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
