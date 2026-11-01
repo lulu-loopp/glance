@@ -1313,8 +1313,24 @@ impl Finder {
 
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, ctrl: bool) {
         // Looked at larger: Esc ends the look (and nothing more), the arrows go through what may be looked at; Enter and
-        // Ctrl+C do as ever with the name picked; another key ends it, and is a key as ever.
+        // Ctrl+C do as ever with the name picked; another key ends it, and is a key as ever. Files together looked at
+        // (a folder's): the arrows, Enter, Ctrl+C and Backspace the look's, as on the panel (see `look::among`).
         if self.looking() {
+            if look::among() {
+                let handed = match key {
+                    VK_LEFT => Some(look::Key::Left),
+                    VK_RIGHT => Some(look::Key::Right),
+                    VK_UP => Some(look::Key::Up),
+                    VK_DOWN => Some(look::Key::Down),
+                    VK_RETURN => Some(look::Key::Open),
+                    VK_C if ctrl && !shift => Some(look::Key::Copy),
+                    VK_BACK if look::inside() => Some(look::Key::Back),
+                    _ => None,
+                };
+                if let Some(handed) = handed {
+                    return look::key(handed);
+                }
+            }
             match key {
                 VK_ESCAPE => return look::close(),
                 VK_UP | VK_LEFT => return self.look_step(false),

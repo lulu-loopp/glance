@@ -134,6 +134,8 @@ static WINDOW: OnceLock<Option<isize>> = OnceLock::new();
 static OWNER: AtomicIsize = AtomicIsize::new(0);
 static SHOWN: AtomicU64 = AtomicU64::new(0);
 static INSIDE: AtomicBool = AtomicBool::new(false);
+/// Whether it shows files together (a group's, a folder's), or one of them by itself: see `among`.
+static AMONG: AtomicBool = AtomicBool::new(false);
 /// Whether what it shows plays (a video, a sound: see `play`).
 static PLAYS: AtomicBool = AtomicBool::new(false);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
@@ -283,6 +285,13 @@ pub fn is_up() -> bool {
 /// group, out of the folder).
 pub fn inside() -> bool {
     is_up() && INSIDE.load(Ordering::Acquire)
+}
+
+/// Whether it shows files together (a group's, a folder's, or one of them by itself), up: the arrows, Enter, Ctrl+C
+/// are its own then (to go through them, to have the one picked), wherever it was called up from, as Backspace is
+/// while it is `inside`.
+pub fn among() -> bool {
+    is_up() && AMONG.load(Ordering::Acquire)
 }
 
 /// Whether it shows what plays, up: Space is its own then (played or paused).
@@ -2049,6 +2058,7 @@ impl Looker {
                 None => Surface::new(&self.gfx, self.hwnd).ok().map(Drawn::Plain),
             };
         }
+        AMONG.store(self.deeper() || self.members().is_some(), Ordering::Release);
         let Some(mut drawn) = self.drawn.take() else { return };
         if self.showing.is_none() {
             self.showing = Some(super::life::Showing::of(&self.gfx));
