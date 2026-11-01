@@ -489,6 +489,61 @@ mod tests {
         assert_eq!(previewer(Path::new(r"C:\a\Report.PDF")), previewer(Path::new(r"C:\a\report.pdf")));
     }
 
+    /// A previewer is made on the pane's thread, its window there, the window it is over told as it is made, what it
+    /// shows in the pane's window (left hidden here: nothing shows on the screen); the pane gone, its window and its
+    /// thread go.
+    #[test]
+    fn a_previewer_is_made_on_the_pane_s_thread() {
+        use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PeekMessageW, WINDOW_EX_STYLE, PM_REMOVE};
+        let folder = std::env::temp_dir().join(format!("glance-look-pane-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("a.txt");
+        std::fs::write(&path, "words to be previewed").unwrap();
+        let previewer = previewer(&path).expect("Windows' previewer for text");
+        let over = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None) }.unwrap();
+        const MADE: u32 = WM_APP + 9;
+        let mut pane = Pane::new(over, MADE).expect("its thread and window");
+        let host = pane.host();
+        let thread = |window: HWND| unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(window, None) };
+        assert_ne!(thread(host), unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }, "its window on its own thread");
+        let at = RECT { left: 100, top: 100, right: 500, bottom: 400 };
+        pane.lay(at, 0);
+        pane.make(Wanted { path: path.clone(), previewer, size: (400, 300), colours: Colours { ground: Color::hex(0xFFFFFF, 1.0), text: Color::hex(0x000000, 1.0) } });
+        // (Told as it is made: this thread's messages looked at meanwhile.)
+        let began = std::time::Instant::now();
+        let made = loop {
+            let mut msg = MSG::default();
+            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                if msg.message == MADE {
+                    assert_eq!(msg.hwnd, over);
+                }
+            }
+            if let Some(made) = pane.made() {
+                break made;
+            }
+            assert!(began.elapsed() < std::time::Duration::from_secs(20), "made within twenty seconds");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(made, (path.clone(), true));
+        pane.take(&path);
+        assert_eq!(pane.shows(), Some(path.as_path()));
+        let shown = (0..250).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            unsafe { GetWindow(host, GW_CHILD) }.is_ok()
+        });
+        assert!(shown, "what it shows in its window");
+        drop(pane);
+        let gone = (0..250).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            !unsafe { IsWindow(Some(host)) }.as_bool()
+        });
+        assert!(gone, "its window gone with it");
+        unsafe {
+            let _ = DestroyWindow(over);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// Colours as GDI takes them: red in the low byte.
     #[test]
     fn colours_are_given_as_gdi_takes_them() {
