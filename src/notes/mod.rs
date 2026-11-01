@@ -30,8 +30,21 @@ struct Event(windows::Win32::Foundation::HANDLE);
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
+impl Event {
+    /// One unset, set again as it is waited on.
+    fn new() -> Event {
+        Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event"))
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
 fn again() -> &'static Event {
-    AGAIN.get_or_init(|| Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event")))
+    AGAIN.get_or_init(Event::new)
 }
 
 /// A note's link followed, `to` where it goes, in the note's folder `folder`: a web address (or an e-mail's) in what
@@ -238,7 +251,7 @@ fn follow() {
         }
         // Read again as the folder changes (by Glance, another program, a sync), or as Glance asks.
         if let Some(watch) = &watched {
-            if !watch.wait() {
+            if !watch.wait(again()) {
                 watched = None;
             }
         } else {
@@ -278,12 +291,13 @@ impl Watch {
         self.path == path && self.id.is_some() && crate::elevation::folder_id(path) == self.id
     }
 
-    /// Till the folder changes, or Glance asks for it to be read again; whether it is still followed (followed again
-    /// before it is read, see `follow`: one gone, or renamed and another made in its place, is not).
-    fn wait(&self) -> bool {
+    /// Till the folder changes, or `asked` is set (Glance asks for it to be read again: see `again`); whether it is still
+    /// followed (followed again before it is read, see `follow`: one gone, or renamed and another made in its place, is
+    /// not).
+    fn wait(&self, asked: &Event) -> bool {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
-        let mut handles = vec![again().0, self.changed];
+        let mut handles = vec![asked.0, self.changed];
         handles.extend(self.above);
         let came = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
         // (Asked again: followed as it was. A folder changed: followed on as long as it can be.)
@@ -315,15 +329,21 @@ mod tests {
         let notes = root.join("Glance Notes");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        // Waited on as Glance's notes' own thread waits, asked only by this test: Glance's notes asked to be read again
+        // meanwhile (as other tests do, all at once) tells nothing of this folder.
+        let asked = Event::new();
         let told_within = |watch: &Watch, change: Box<dyn FnOnce() + Send>| {
             let changing = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(150));
                 change();
             });
+            read_again();
             let began = std::time::Instant::now();
-            assert!(watch.wait(), "followed still");
+            assert!(watch.wait(&asked), "followed still");
+            // (Timed as the wait ends, not as the change is over.)
+            let told = began.elapsed();
             changing.join().unwrap();
-            began.elapsed()
+            told
         };
         // Not there: the folder above it followed, for it to come.
         let above = Watch::start(root.clone(), &notes).expect("followed");
@@ -375,8 +395,11 @@ mod tests {
                 std::fs::write(elsewhere.join("a.md"), "a note").unwrap();
             }
         });
+        // (Asked only by this test, as above: Glance's notes asked to be read again meanwhile tell nothing of it.)
+        let asked = Event::new();
+        read_again();
         let began = std::time::Instant::now();
-        watch.wait();
+        watch.wait(&asked);
         let told = began.elapsed();
         changing.join().unwrap();
         drop(watch);
