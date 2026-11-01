@@ -6,7 +6,9 @@
 //! a video as Explorer's preview pane shows it (live, by its kind's previewer: see `pane`), else as Explorer pictures
 //! it, else its icon and what it is. Files together show as themselves, each its own picture in rows: one clicked
 //! grows out of its place into a look of its own, the others of them had by the arrows, and shrinks back into its place
-//! (its back button, Backspace). It goes back into its tile as the shortcut or Esc is pressed again, or as anything but
+//! (its back button, Backspace). A folder shows what it holds, in rows (as files together, where all of them are
+//! pictures or videos): a file of it is had as a file of files together is, a folder of it gone into (what it holds
+//! sliding in for what holds it), and left again as a file is. It goes back into its tile as the shortcut or Esc is pressed again, or as anything but
 //! it and what it was called up from is clicked.
 //!
 //! It never takes the keyboard: what called it up keeps it, and hands it the keys that are its own while it is up
@@ -96,7 +98,7 @@ pub struct Opening {
 }
 
 /// A key of its own, handed to it by what called it up: Esc (and its shortcut), the arrows, Enter, Ctrl+C; Backspace
-/// while it shows a file of a group by itself (see `inside`).
+/// while it shows a file of a group by itself, or a folder gone into (see `inside`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Close,
@@ -159,6 +161,9 @@ const OPEN_WHOLE_AT: f32 = 0.55;
 const MOVE_FOR: Duration = Duration::from_millis(180);
 /// A file of a group grown out of its place to be looked at by itself, or shrunk back into it.
 const INTO_FOR: Duration = Duration::from_millis(300);
+/// A folder gone into or left, and how far what it holds and what holds it slide as they come in and go out (DIPs).
+const SLIDE_FOR: Duration = Duration::from_millis(260);
+const SLIDE_BY: f32 = 60.0;
 const MOVE_EASE: Easing = Easing(0.2, 0.8, 0.2, 1.0);
 const FADE_IN: Duration = Duration::from_millis(150);
 const CLOSE_FOR: Duration = Duration::from_millis(200);
@@ -182,6 +187,15 @@ const GROUP_WIDE: f32 = 640.0;
 const GROUP_ROW: f32 = 150.0;
 const GROUP_GAP: f32 = 10.0;
 const GROUP_NAME: f32 = 22.0;
+/// A folder's rows: how tall each is, the room between them, how far in its parts are, how large a file's icon (or
+/// picture) is, and how wide its columns of when it was written and how large it is; at the least as many rows tall.
+const LIST_ROW: f32 = 34.0;
+const LIST_GAP: f32 = 2.0;
+const LIST_IN: f32 = 9.0;
+const LIST_ICON: f32 = 20.0;
+const LIST_WRITTEN: f32 = 96.0;
+const LIST_SIZE: f32 = 64.0;
+const LIST_LEAST: usize = 3;
 /// A sound: how wide its sheet is, and how large its cover is (its body as tall); in how many parts its loudness is
 /// read along it.
 const SOUND_WIDE: f32 = 480.0;
@@ -265,7 +279,8 @@ pub fn is_up() -> bool {
     OWNER.load(Ordering::Acquire) != 0
 }
 
-/// Whether it shows a file of a group by itself, up: Backspace is its own then (back to the group).
+/// Whether it shows a file of a group by itself, or a folder gone into, up: Backspace is its own then (back to the
+/// group, out of the folder).
 pub fn inside() -> bool {
     is_up() && INSIDE.load(Ordering::Acquire)
 }
@@ -420,6 +435,10 @@ enum Body {
     Live { picture: Option<Picture>, previewer: windows::core::GUID },
     /// Files together: each one, as its picture shows in rows (see `group_cells`).
     Group(Vec<Member>),
+    /// A folder: what it holds (its folders first, then its files, each by name, as Explorer sorts them), listed in
+    /// `rows` (see `row_cells`), else (all of them pictures or videos) as files together are; nothing where it could not
+    /// be `readable`.
+    Folder { members: Vec<Member>, rows: bool, readable: bool },
     /// A video or a `sound`, played (see `play`): the picture standing for it till it plays (a video's frame, a
     /// sound's cover, as Explorer makes it, where it has one), and a sound's loudness along it (see `play::loudness`),
     /// once read.
@@ -428,13 +447,18 @@ enum Body {
     Other(Option<PathBuf>),
 }
 
-/// A file of a group: where it is, its name, and how large it is seen (a picture's, a video's: see `measure`), where it
-/// is known; else its picture, Explorer's, is drawn in a square.
+/// A file of a group (or of a folder): where it is, its name, and how large it is seen (a picture's, a video's: see
+/// `measure`), where it is known, else its picture, Explorer's, is drawn in a square; whether it is a folder; as its
+/// row says (see `Body::Folder`) how large it is (bytes; a folder's: how many things it holds, once counted) and when
+/// it was written (ms since 1970).
 #[derive(Clone, Debug, PartialEq)]
 struct Member {
     path: PathBuf,
     name: String,
     seen: Option<Seen>,
+    folder: bool,
+    size: Option<u64>,
+    written: Option<u64>,
 }
 
 /// A thing read: what its body shows, and what it is said to be (a file's: its kind, size, when it was written).
@@ -444,20 +468,21 @@ struct Read {
     about: Option<String>,
 }
 
-/// What its reading thread is asked: the thing `at` of the look numbered `number` read (or its group's file `member`),
-/// in `lang`, its pictures for a screen `scale` px a DIP.
+/// What its reading thread is asked: the thing `at` of the look numbered `number` read (or its group's file `member`, of
+/// the folder `depth` folders into it: see `Looker::within`), in `lang`, its pictures for a screen `scale` px a DIP.
 struct Reading {
     number: u64,
     at: usize,
     member: Option<usize>,
+    depth: usize,
     shows: Shows,
     lang: Lang,
     scale: f32,
 }
 
-/// What was read, for which look and which thing (and which file of its group).
+/// What was read, for which look and which thing (and which file of its group, how deep).
 static READ: Mutex<Vec<ReadFor>> = Mutex::new(Vec::new());
-type ReadFor = (u64, usize, Option<usize>, Read);
+type ReadFor = (u64, usize, Option<usize>, usize, Read);
 /// How large a thing is seen (see `measure`), for which look and which thing: known before it is read. (A group's
 /// files are measured as the group is read.)
 static MEASURED: Mutex<Vec<(u64, usize, Seen)>> = Mutex::new(Vec::new());
@@ -469,11 +494,12 @@ type Seen = (u32, u32);
 static LOOKING: AtomicU64 = AtomicU64::new(0);
 
 /// A sound to be read through for how loud it is along it (see `hearing`): for which look, which thing (and which
-/// file of its group), its file, and what was read of it already.
+/// file of its group, how deep), its file, and what was read of it already.
 struct Hear {
     number: u64,
     at: usize,
     member: Option<usize>,
+    depth: usize,
     path: PathBuf,
     read: Read,
 }
@@ -506,11 +532,18 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
         let key = asked.number ^ ((asked.at as u64) << 40) ^ asked.member.map_or(0, |member| (member as u64 + 1) << 20);
         let read = read(&asked.shows, asked.lang, asked.scale, key);
         let sound = matches!(read.body, Body::Played { sound: true, .. });
-        READ.lock().unwrap().push((asked.number, asked.at, asked.member, read.clone()));
-        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+        let told = |read: Read| {
+            READ.lock().unwrap().push((asked.number, asked.at, asked.member, asked.depth, read));
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+        };
+        told(read.clone());
+        // (A folder's rows shown as they are listed, and told again with what takes longer to find of them.)
+        if let Some(filled) = filled(&read, || LOOKING.load(Ordering::Acquire) == asked.number) {
+            told(filled);
+        }
         // (A sound read through for how loud it is along it, after it shows, on a thread of its own: see `hearing`.)
         if let (true, Shows::File(path)) = (sound, &asked.shows) {
-            let _ = hears.send(Hear { number: asked.number, at: asked.at, member: asked.member, path: path.clone(), read });
+            let _ = hears.send(Hear { number: asked.number, at: asked.at, member: asked.member, depth: asked.depth, path: path.clone(), read });
         }
     }
 }
@@ -530,11 +563,11 @@ fn hearing(asks: Receiver<Hear>, hwnd: isize) {
         waiting.extend(asks.try_iter());
         let looking = LOOKING.load(Ordering::Acquire);
         waiting.retain(|asked| asked.number == looking);
-        let Some(Hear { number, at, member, path, read: Read { body: Body::Played { picture, .. }, about } }) = waiting.pop() else { continue };
+        let Some(Hear { number, at, member, depth, path, read: Read { body: Body::Played { picture, .. }, about } }) = waiting.pop() else { continue };
         let wanted = || LOOKING.load(Ordering::Acquire) == number;
         if let Some(loudness) = play::loudness(&path, LOUDNESS_PARTS, &wanted) {
             let read = Read { body: Body::Played { picture, sound: true, loudness: Some(loudness) }, about };
-            READ.lock().unwrap().push((number, at, member, read));
+            READ.lock().unwrap().push((number, at, member, depth, read));
             let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
         }
     }
@@ -562,7 +595,7 @@ fn read(shows: &Shows, lang: Lang, scale: f32, key: u64) -> Read {
                 .iter()
                 .map(|path| {
                     let name = path.file_name().map_or_else(|| path.display().to_string(), |name| name.to_string_lossy().into_owned());
-                    Member { path: path.clone(), name, seen: measure(&Shows::File(path.clone())) }
+                    Member { path: path.clone(), name, seen: measure(&Shows::File(path.clone())), folder: path.is_dir(), size: None, written: None }
                 })
                 .collect();
             Read { body: Body::Group(members), about: None }
@@ -573,10 +606,11 @@ fn read(shows: &Shows, lang: Lang, scale: f32, key: u64) -> Read {
 
 fn read_file(path: &Path, lang: Lang, scale: f32, key: u64) -> Read {
     let meta = std::fs::metadata(path).ok();
+    if meta.as_ref().is_some_and(std::fs::Metadata::is_dir) {
+        return list(path, lang);
+    }
     let Some(meta) = meta.filter(|meta| meta.is_file()) else {
-        let folder = std::fs::metadata(path).is_ok_and(|meta| meta.is_dir());
-        let said = if folder { lang.pick("文件夹", "Folder") } else { lang.pick("文件已不存在", "File no longer exists") };
-        return Read { body: Body::Other(folder.then(|| path.to_path_buf())), about: Some(said.into()) };
+        return Read { body: Body::Other(None), about: Some(lang.pick("文件已不存在", "File no longer exists").into()) };
     };
     let kind_name = type_name(path);
     let written = meta.modified().ok().map(|time| super::text::since(ms_of(time), crate::station::now_ms(), lang));
@@ -620,6 +654,96 @@ fn read_file(path: &Path, lang: Lang, scale: f32, key: u64) -> Read {
         (None, Some(picture)) => Read { body: Body::Pictured(picture), about: about(None) },
         (None, None) => Read { body: Body::Other(Some(path.to_path_buf())), about: about(None) },
     }
+}
+
+/// The folder at `path` read: what it holds as it lists it (see `Body::Folder`), where it is and how many of each it
+/// holds. As files together, its pictures (or videos) measured as they are listed, laid out by their shapes from the
+/// first; its rows shown at once, and what takes longer to find of them found after (see `filled`).
+fn list(path: &Path, lang: Lang) -> Read {
+    let Some(mut members) = listed(path) else {
+        return Read { body: Body::Folder { members: Vec::new(), rows: true, readable: false }, about: Some(lang.pick("文件夹", "Folder").into()) };
+    };
+    let rows = members.is_empty() || members.iter().any(|member| member.folder || !matches!(kind_of(&member.path), Kind::Picture | Kind::Video));
+    if !rows {
+        for member in &mut members {
+            member.seen = measure(&Shows::File(member.path.clone()));
+        }
+    }
+    let (folders, files) = (members.iter().filter(|member| member.folder).count(), members.iter().filter(|member| !member.folder).count());
+    let about = format!("{} · {}", path.display(), held(folders, files, lang));
+    Read { body: Body::Folder { members, rows, readable: true }, about: Some(about) }
+}
+
+/// What the folder at `path` holds, as Explorer lists it: what is hidden left out, its folders first, then its files,
+/// each by name (numbers in them by their worth: "2" before "10"). None where it cannot be read.
+fn listed(path: &Path) -> Option<Vec<Member>> {
+    let mut members: Vec<Member> = entries(path)?
+        .map(|(entry, meta)| {
+            let folder = meta.is_dir();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            Member { path: entry.path(), name, seen: None, folder, size: (!folder).then_some(meta.len()), written: meta.modified().ok().map(ms_of) }
+        })
+        .collect();
+    members.sort_by(|a, b| b.folder.cmp(&a.folder).then_with(|| by_name(&a.name, &b.name)));
+    Some(members)
+}
+
+/// What the folder at `path` holds that Explorer lists (not what is hidden), each as what it is (a link: as what it
+/// leads to). None where it cannot be read.
+fn entries(path: &Path) -> Option<impl Iterator<Item = (std::fs::DirEntry, std::fs::Metadata)>> {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_SYSTEM};
+    Some(std::fs::read_dir(path).ok()?.filter_map(|entry| {
+        let entry = entry.ok()?;
+        let meta = entry.metadata().ok()?;
+        if meta.file_attributes() & (FILE_ATTRIBUTE_HIDDEN.0 | FILE_ATTRIBUTE_SYSTEM.0) != 0 {
+            return None;
+        }
+        let meta = if meta.is_symlink() { std::fs::metadata(entry.path()).ok()? } else { meta };
+        Some((entry, meta))
+    }))
+}
+
+/// Two names in the order Explorer sorts them: numbers in them by their worth.
+fn by_name(a: &str, b: &str) -> std::cmp::Ordering {
+    use windows::Win32::UI::Shell::StrCmpLogicalW;
+    unsafe { StrCmpLogicalW(&HSTRING::from(a), &HSTRING::from(b)) }.cmp(&0)
+}
+
+/// How many folders and files a folder holds, said.
+fn held(folders: usize, files: usize, lang: Lang) -> String {
+    let said = |count: usize, zh: &str, one: &str, many: &str| match lang {
+        Lang::Zh => format!("{count} 个{zh}"),
+        Lang::En => format!("{count} {}", if count == 1 { one } else { many }),
+    };
+    match (folders, files) {
+        (0, 0) => lang.pick("空文件夹", "Empty folder").into(),
+        (folders, 0) => said(folders, "文件夹", "folder", "folders"),
+        (0, files) => said(files, "文件", "file", "files"),
+        (folders, files) => format!("{}{}{}", said(folders, "文件夹", "folder", "folders"), lang.pick("，", ", "), said(files, "文件", "file", "files")),
+    }
+}
+
+/// A folder's rows `read` with what takes longer to find of them: how many things each folder of it holds, how large
+/// each picture or video of it is seen. None for what is not a folder's rows, or where it is no longer `wanted` (its
+/// look gone) before all is found.
+fn filled(read: &Read, wanted: impl Fn() -> bool) -> Option<Read> {
+    let Body::Folder { members, rows: true, readable: true } = &read.body else { return None };
+    if members.is_empty() {
+        return None;
+    }
+    let mut members = members.clone();
+    for member in &mut members {
+        if !wanted() {
+            return None;
+        }
+        if member.folder {
+            member.size = entries(&member.path).map(|held| held.count() as u64);
+        } else {
+            member.seen = measure(&Shows::File(member.path.clone()));
+        }
+    }
+    Some(Read { body: Body::Folder { members, rows: true, readable: true }, about: read.about.clone() })
 }
 
 /// Milliseconds since 1970 of `time`.
@@ -831,6 +955,9 @@ enum Motion {
     /// sheet from where it was; shrunk back into its place from where it was shown (`from`).
     Into { member: usize, cell: Rect, was: Rect, start: Instant },
     OutOf { member: usize, from: Rect, cell: Rect, was: Rect, start: Instant },
+    /// A folder of the files shown gone into (`deeper`), or left: what it holds coming in from the side it goes
+    /// towards as what was shown (see `Looker::slid`) goes out the other way, the sheet from where it was.
+    Sliding { deeper: bool, was: Rect, start: Instant },
     Closing { was: Rect, to: Rect, start: Instant },
     Resting,
 }
@@ -869,6 +996,28 @@ enum Holding {
     Volume,
 }
 
+/// A folder gone into from the files shown (a group's, a folder's): which of them it is, and how they were had (the one
+/// picked, how far scrolled, what each was read as by itself and those asked to be), as they are had again once it is
+/// left.
+struct Within {
+    member: usize,
+    picked: Option<usize>,
+    scroll: f32,
+    member_read: Vec<Option<Read>>,
+    member_asked: Vec<bool>,
+}
+
+/// Files shown together as they are had: each of them, laid out in rows or by their pictures (see `Body::Folder`),
+/// whether they could be read (a folder's), how far scrolled, which picked.
+#[derive(Clone)]
+struct Listing {
+    members: Vec<Member>,
+    rows: bool,
+    readable: bool,
+    scroll: f32,
+    picked: Option<usize>,
+}
+
 struct Looker {
     hwnd: HWND,
     gfx: Rc<Gfx>,
@@ -904,6 +1053,10 @@ struct Looker {
     grid_scroll_most: f32,
     member_read: Vec<Option<Read>>,
     member_asked: Vec<bool>,
+    /// The folders gone into from them, the first from what the thing shows (those fields then of the last one's), and
+    /// what was shown before as it slides out (see `Motion::Sliding`).
+    within: Vec<Within>,
+    slid: Option<Listing>,
     motion: Motion,
     /// A picture zoomed (1: fitted), moved (DIPs), and where a drag of it began (the pointer, and where it was moved).
     zoom: f32,
@@ -976,6 +1129,8 @@ impl Looker {
             grid_scroll_most: 0.0,
             member_read: Vec::new(),
             member_asked: Vec::new(),
+            within: Vec::new(),
+            slid: None,
             motion: Motion::Resting,
             zoom: 1.0,
             pan: (0.0, 0.0),
@@ -1179,6 +1334,9 @@ impl Looker {
         LOOKING.store(self.number, Ordering::Release);
         self.asked = read.iter().map(Option::is_some).collect();
         self.member_asked = self.member_read.iter().map(Option::is_some).collect();
+        for within in &mut self.within {
+            within.member_asked = within.member_read.iter().map(Option::is_some).collect();
+        }
         self.read = read;
         self.items = items;
         self.at = at;
@@ -1206,14 +1364,27 @@ impl Looker {
         self.draw();
     }
 
-    /// What was had of the group shown let go of: none of its files looked at by itself, none picked, not scrolled.
+    /// What was had of the group shown let go of: none of its files looked at by itself, no folder of it gone into,
+    /// none picked, not scrolled.
     fn out_of_group(&mut self) {
         self.inside = None;
         self.picked = None;
         self.grid_scroll = 0.0;
         self.member_read.clear();
         self.member_asked.clear();
-        INSIDE.store(false, Ordering::Release);
+        self.within.clear();
+        self.slid = None;
+        self.went_in();
+    }
+
+    /// Whether it shows a file of a group by itself, or a folder gone into from one: told, Backspace its own then (see
+    /// `inside`).
+    fn deeper(&self) -> bool {
+        self.inside.is_some() || !self.within.is_empty()
+    }
+
+    fn went_in(&self) {
+        INSIDE.store(self.deeper(), Ordering::Release);
     }
 
     /// What was had of the thing shown let go of, another to be shown: as it was zoomed, scrolled, played.
@@ -1239,7 +1410,7 @@ impl Looker {
         for place in [at + 1, at.wrapping_sub(1), at] {
             if place < self.items.len() && !self.asked[place] {
                 self.asked[place] = true;
-                let _ = self.reads.send(Reading { number: self.number, at: place, member: None, shows: self.items[place].shows.clone(), lang: self.lang, scale: self.scale });
+                let _ = self.reads.send(Reading { number: self.number, at: place, member: None, depth: 0, shows: self.items[place].shows.clone(), lang: self.lang, scale: self.scale });
             }
         }
     }
@@ -1247,7 +1418,14 @@ impl Looker {
     /// The file of the group looked at by itself read, and those beside it (for the arrows); what is read of those
     /// further off let go of.
     fn read_members_around(&mut self) {
-        let Some(member) = self.inside else { return };
+        if let Some(member) = self.inside {
+            self.read_members(member);
+        }
+    }
+
+    /// The file `member` of the files shown read by itself (a folder: what it holds), and those beside it; what is read
+    /// of those further off let go of.
+    fn read_members(&mut self, member: usize) {
         let Some(paths) = self.members().map(|members| members.iter().map(|member| member.path.clone()).collect::<Vec<_>>()) else { return };
         if self.member_read.len() != paths.len() {
             self.member_read = vec![None; paths.len()];
@@ -1264,8 +1442,17 @@ impl Looker {
             if place < paths.len() && !self.member_asked[place] {
                 self.member_asked[place] = true;
                 let shows = Shows::File(paths[place].clone());
-                let _ = self.reads.send(Reading { number: self.number, at: self.at, member: Some(place), shows, lang: self.lang, scale: self.scale });
+                let _ = self.reads.send(Reading { number: self.number, at: self.at, member: Some(place), depth: self.within.len(), shows, lang: self.lang, scale: self.scale });
             }
+        }
+    }
+
+    /// The file `member` of the files shown had: a folder gone into (see `go_in`), else looked at by itself.
+    fn open_member(&mut self, member: usize) {
+        match self.members().and_then(|members| members.get(member)).map(|member| member.folder) {
+            Some(true) => self.go_in(member),
+            Some(false) => self.enter(member),
+            None => {}
         }
     }
 
@@ -1279,11 +1466,65 @@ impl Looker {
         let was = self.shape(now).at;
         self.inside = Some(member);
         self.picked = Some(member);
-        INSIDE.store(true, Ordering::Release);
+        self.went_in();
         self.reset_view();
         self.read_members_around();
         self.motion = Motion::Into { member, cell, was, start: now };
         self.moving();
+    }
+
+    /// The folder `member` of the files shown gone into: what it holds (read as it comes, where it is not yet) slides
+    /// in for them, the sheet to its size; how they were had kept for when it is left (see `go_out`).
+    fn go_in(&mut self, member: usize) {
+        if matches!(self.motion, Motion::Closing { .. }) {
+            return;
+        }
+        let Some(was_shown) = self.listing() else { return };
+        self.read_members(member);
+        let now = Instant::now();
+        let was = self.shape(now).at;
+        self.slid = Some(was_shown);
+        self.within.push(Within {
+            member,
+            picked: Some(member),
+            scroll: self.grid_scroll,
+            member_read: std::mem::take(&mut self.member_read),
+            member_asked: std::mem::take(&mut self.member_asked),
+        });
+        (self.inside, self.picked, self.grid_scroll) = (None, None, 0.0);
+        self.went_in();
+        self.reset_view();
+        self.motion = Motion::Sliding { deeper: true, was, start: now };
+        self.moving();
+    }
+
+    /// Back out of the folder last gone into: what holds it slides back in, had as it was (the folder picked in it),
+    /// the sheet to its size.
+    fn go_out(&mut self) {
+        if matches!(self.motion, Motion::Closing { .. }) {
+            return;
+        }
+        let Some(was_shown) = self.listing() else { return };
+        let Some(within) = self.within.pop() else { return };
+        let now = Instant::now();
+        let was = self.shape(now).at;
+        self.slid = Some(was_shown);
+        (self.inside, self.picked, self.grid_scroll) = (None, within.picked, within.scroll);
+        (self.member_read, self.member_asked) = (within.member_read, within.member_asked);
+        self.went_in();
+        self.reset_view();
+        self.reveal(within.member);
+        self.motion = Motion::Sliding { deeper: false, was, start: now };
+        self.moving();
+    }
+
+    /// One step back: from a file looked at by itself to the files it is among, else out of the folder last gone into.
+    fn back(&mut self) {
+        if self.inside.is_some() {
+            self.leave();
+        } else {
+            self.go_out();
+        }
     }
 
     /// Back to the group from the file of it looked at by itself: shrunk back into its place (the group scrolled to
@@ -1306,7 +1547,7 @@ impl Looker {
             None => self.member_fit(member, body),
         };
         self.inside = None;
-        INSIDE.store(false, Ordering::Release);
+        self.went_in();
         self.reset_view();
         self.reveal(member);
         let Some(cell) = self.cell_on_sheet(member) else { return };
@@ -1314,14 +1555,13 @@ impl Looker {
         self.moving();
     }
 
-    /// The file of the group beside the one looked at by itself (`forward`: after it) looked at instead.
+    /// The file of the group beside the one looked at by itself (`forward`: after it; its folders passed over) looked
+    /// at instead.
     fn step(&mut self, forward: bool) {
         let Some(member) = self.inside else { return };
-        let count = self.members().map_or(0, <[Member]>::len);
-        let next = if forward { member + 1 } else { member.wrapping_sub(1) };
-        if next >= count || matches!(self.motion, Motion::Closing { .. }) {
-            return;
-        }
+        let Some(members) = self.members() else { return };
+        let next = if forward { (member + 1..members.len()).find(|place| !members[*place].folder) } else { (0..member).rev().find(|place| !members[*place].folder) };
+        let Some(next) = next.filter(|_| !matches!(self.motion, Motion::Closing { .. })) else { return };
         let now = Instant::now();
         let was = self.shape(now).at;
         self.inside = Some(next);
@@ -1332,17 +1572,19 @@ impl Looker {
         self.moving();
     }
 
-    /// Another file of the group shown picked by the arrow `key`: the one beside it in its row, or the nearest in the row
-    /// above or below. Past the group's first or last (none that way), the thing before or after it shown instead.
+    /// Another file of the files shown picked by the arrow `key`: in rows, the one above or below; among pictures, the
+    /// one beside it in its row, or the nearest in the row above or below. Past their first or last (none that way),
+    /// the thing before or after it shown instead.
     fn pick(&mut self, key: Key) {
-        let Some(members) = self.members() else { return };
-        let (cells, _) = group_cells(&shapes(members), self.group_inner());
+        let Some(listing) = self.listing() else { return };
+        let (cells, _) = self.cells(&listing);
         let picked = match self.picked {
-            None => Some(0),
+            None => (!cells.is_empty()).then_some(0),
             Some(at) => {
                 let here = cells[at];
                 let middle = |cell: &Rect| cell.x + cell.w / 2.0;
                 match key {
+                    Key::Left | Key::Right if listing.rows => None,
                     Key::Left => at.checked_sub(1),
                     Key::Right => Some(at + 1).filter(|next| *next < cells.len()),
                     _ => {
@@ -1374,14 +1616,15 @@ impl Looker {
         }
     }
 
-    /// The group shown scrolled as little as shows the file `member` of it whole, and its name, as the sheet is to be.
+    /// The files shown scrolled as little as shows the file `member` of them whole (and its name), as the sheet is to
+    /// be.
     fn reveal(&mut self, member: usize) {
-        let Some(members) = self.members() else { return };
-        let (cells, tall) = group_cells(&shapes(members), self.group_inner());
+        let Some(listing) = self.listing() else { return };
+        let (cells, tall) = self.cells(&listing);
+        let Some(cell) = cells.get(member).copied() else { return };
         let target = self.target();
         let room = self.body_at((target.w, target.h)).h;
-        let cell = cells[member];
-        let (top, bottom) = (cell.y, cell.y + cell.h + GROUP_NAME);
+        let (top, bottom) = (cell.y, cell.y + cell.h + if listing.rows { 0.0 } else { GROUP_NAME });
         if top < self.grid_scroll {
             self.grid_scroll = top;
         } else if bottom > self.grid_scroll + room {
@@ -1424,7 +1667,7 @@ impl Looker {
             resized |= at == self.at;
             self.measured[at] = Some(size);
         }
-        for (number, at, member, read) in read {
+        for (number, at, member, depth, read) in read {
             if number != self.number || at >= self.read.len() {
                 continue;
             }
@@ -1433,10 +1676,18 @@ impl Looker {
                     resized |= at == self.at;
                     self.read[at] = Some(read);
                 }
-                // (A file of the group shown, read by itself.)
-                Some(member) if at == self.at && self.member_asked.get(member) == Some(&true) => {
-                    resized |= self.inside == Some(member);
-                    self.member_read[member] = Some(read);
+                // (A file of the files shown, read by itself, or of those a folder gone into is among.)
+                Some(member) if at == self.at => {
+                    let deepest = self.within.len();
+                    let (reads, asked) = match self.within.get_mut(depth) {
+                        Some(within) => (&mut within.member_read, &within.member_asked),
+                        None if depth == deepest => (&mut self.member_read, &self.member_asked),
+                        None => continue,
+                    };
+                    if asked.get(member) == Some(&true) {
+                        reads[member] = Some(read);
+                        resized = true;
+                    }
                 }
                 _ => {}
             }
@@ -1465,10 +1716,22 @@ impl Looker {
         }
     }
 
-    /// What the thing shown was read as (by itself: the file of its group shown so).
+    /// What the thing shown was read as (by itself: the file of its group shown so; a folder gone into: what it holds).
     fn shown_read(&self) -> Option<&Read> {
         match self.inside {
             Some(member) => self.member_read.get(member)?.as_ref(),
+            None => self.listed_at(self.within.len()),
+        }
+    }
+
+    /// What the files shown `depth` folders in were read as: the thing's (the files of a group, a folder), else the
+    /// folder gone into there's.
+    fn listed_at(&self, depth: usize) -> Option<&Read> {
+        match depth.checked_sub(1) {
+            Some(below) => {
+                let within = self.within.get(below)?;
+                within.member_read.get(within.member)?.as_ref()
+            }
             None => self.read.get(self.at)?.as_ref(),
         }
     }
@@ -1477,20 +1740,36 @@ impl Looker {
         self.shown_read().map(|read| &read.body)
     }
 
-    /// The files of the group shown, read.
-    fn members(&self) -> Option<&[Member]> {
-        match &self.read.get(self.at)?.as_ref()?.body {
-            Body::Group(members) => Some(members),
+    /// The files shown together (a group's, a folder's), read, `depth` folders in.
+    fn members_at(&self, depth: usize) -> Option<&[Member]> {
+        match &self.listed_at(depth)?.body {
+            Body::Group(members) | Body::Folder { members, .. } => Some(members),
             _ => None,
         }
     }
 
-    /// The file shown: the thing's, or the file of its group shown by itself.
+    /// The files shown together now (those of the folder last gone into).
+    fn members(&self) -> Option<&[Member]> {
+        self.members_at(self.within.len())
+    }
+
+    /// The files shown together now as they are had (see `Listing`).
+    fn listing(&self) -> Option<Listing> {
+        let (members, rows, readable) = match &self.listed_at(self.within.len())?.body {
+            Body::Group(members) => (members.clone(), false, true),
+            Body::Folder { members, rows, readable } => (members.clone(), *rows, *readable),
+            _ => return None,
+        };
+        Some(Listing { members, rows, readable, scroll: self.grid_scroll, picked: self.picked })
+    }
+
+    /// The file shown: the thing's, the file of its group shown by itself, the folder last gone into.
     fn shown_path(&self) -> Option<&Path> {
-        match self.inside {
-            Some(member) => Some(self.members()?.get(member)?.path.as_path()),
+        match (self.inside, self.within.last()) {
+            (Some(member), _) => Some(self.members()?.get(member)?.path.as_path()),
+            (None, Some(within)) => Some(self.members_at(self.within.len() - 1)?.get(within.member)?.path.as_path()),
             // (None once it is gone: what was asked for it may still be told after.)
-            None => match &self.items.get(self.at)?.shows {
+            (None, None) => match &self.items.get(self.at)?.shows {
                 Shows::File(path) => Some(path),
                 _ => None,
             },
@@ -1499,17 +1778,19 @@ impl Looker {
 
     /// What the thing shown is before it is read.
     fn shown_kind(&self) -> Kind {
-        match self.inside {
-            Some(_) => self.shown_path().map_or(Kind::Unknown, kind_of),
-            None => kind_shown(&self.items[self.at].shows),
+        match (self.inside, self.within.is_empty()) {
+            (Some(_), _) => self.shown_path().map_or(Kind::Unknown, kind_of),
+            (None, false) => Kind::Files,
+            (None, true) => kind_shown(&self.items[self.at].shows),
         }
     }
 
     /// How large the thing shown is seen, where that was known before it was read (see `measure`).
     fn shown_measured(&self) -> Option<Seen> {
-        match self.inside {
-            Some(member) => self.members()?.get(member)?.seen,
-            None => self.measured.get(self.at).copied().flatten(),
+        match (self.inside, self.within.is_empty()) {
+            (Some(member), _) => self.members()?.get(member)?.seen,
+            (None, false) => None,
+            (None, true) => self.measured.get(self.at).copied().flatten(),
         }
     }
 
@@ -1563,11 +1844,19 @@ impl Looker {
         GROUP_WIDE.min(self.most().0) - 2.0 * self.inset()
     }
 
-    /// Where the file `member` of the group shown is on the sheet (DIPs), its picture in its place among the others, as
-    /// far as they are scrolled.
+    /// Where the files of `listing` are in the body (DIPs, not scrolled): in rows (see `row_cells`), else each its
+    /// picture in its place (see `group_cells`); and how tall they are together.
+    fn cells(&self, listing: &Listing) -> (Vec<Rect>, f32) {
+        if listing.rows { row_cells(listing.members.len(), self.group_inner()) } else { group_cells(&shapes(&listing.members), self.group_inner()) }
+    }
+
+    /// Where the file `member` of the files shown is on the sheet (DIPs), its picture in its place among the others (in
+    /// rows: its picture, or its icon, at its row's start), as far as they are scrolled.
     fn cell_on_sheet(&self, member: usize) -> Option<Rect> {
-        let (cells, _) = group_cells(&shapes(self.members()?), self.group_inner());
-        let cell = cells.get(member)?;
+        let listing = self.listing()?;
+        let (cells, _) = self.cells(&listing);
+        let cell = *cells.get(member)?;
+        let cell = if listing.rows { row_icon(cell, listing.members[member].seen) } else { cell };
         Some(Rect { x: self.inset() + cell.x, y: self.body_top() + cell.y - self.grid_scroll, w: cell.w, h: cell.h })
     }
 
@@ -1612,6 +1901,11 @@ impl Looker {
                 (most.0, ((most.0 - 2.0 * pad - PAGE_ROOM) * PAGE + top + pad).min(most.1))
             }
         };
+        let rows_of = |count: usize| {
+            let wide = GROUP_WIDE.min(most.0);
+            let (_, tall) = row_cells(count.max(LIST_LEAST), wide - 2.0 * pad);
+            (wide, (top + tall + pad).min(most.1))
+        };
         let measured = self.shown_measured();
         match self.body() {
             Some(Body::Picture(_, own)) => pictured(*own, true),
@@ -1628,12 +1922,16 @@ impl Looker {
             Some(Body::Live { picture: None, .. }) => measured.map_or_else(page, |size| pictured(size, true)),
             Some(Body::Words { .. }) => (WORDS.0.min(most.0), WORDS.1.min(most.1)),
             // (Its files in rows, as tall as they are, scrolled where they are taller than it may be.)
-            Some(Body::Group(members)) => {
+            Some(Body::Group(members) | Body::Folder { members, rows: false, .. }) => {
                 let wide = GROUP_WIDE.min(most.0);
                 let (_, tall) = group_cells(&shapes(members), wide - 2.0 * pad);
                 (wide, (top + tall + pad).min(most.1))
             }
+            // (Its rows, as tall as they are (as some are, where it holds fewer), scrolled where they are taller.)
+            Some(Body::Folder { members, rows: true, .. }) => rows_of(members.len()),
             Some(Body::Other(_)) => OTHER,
+            // (A folder gone into, not read yet: as large as a few rows.)
+            None if self.inside.is_none() && !self.within.is_empty() => rows_of(0),
             // (Not read yet: as large as it was measured.)
             None => match measured {
                 Some(size) => pictured(size, true),
@@ -1672,6 +1970,10 @@ impl Looker {
                 let at = between(was, target, MOVE_EASE.at(part(start, INTO_FOR)));
                 Shape { at, size: size(at), opacity: 1.0, body: 1.0 }
             }
+            Motion::Sliding { was, start, .. } => {
+                let at = between(was, target, MOVE_EASE.at(part(start, SLIDE_FOR)));
+                Shape { at, size: size(at), opacity: 1.0, body: 1.0 }
+            }
             Motion::Closing { was, to, start } => {
                 let p = CLOSE_EASE.at(part(start, CLOSE_FOR));
                 let (still_at, still) = CLOSE_STILL;
@@ -1688,6 +1990,7 @@ impl Looker {
             Motion::Opening { start, .. } => now.duration_since(start) >= OPEN_FOR,
             Motion::Moving { start, fade, .. } => now.duration_since(start) >= MOVE_FOR.max(if fade { FADE_IN } else { Duration::ZERO }),
             Motion::Into { start, .. } | Motion::OutOf { start, .. } => now.duration_since(start) >= INTO_FOR,
+            Motion::Sliding { start, .. } => now.duration_since(start) >= SLIDE_FOR,
             Motion::Closing { start, .. } => now.duration_since(start) >= CLOSE_FOR,
             Motion::Resting => true,
         };
@@ -1699,6 +2002,7 @@ impl Looker {
             return;
         }
         self.motion = Motion::Resting;
+        self.slid = None;
         if !self.plays_on(now) {
             unsafe {
                 let _ = KillTimer(Some(self.hwnd), FRAME);
@@ -1938,10 +2242,14 @@ impl Looker {
         let lang = self.lang;
         let item = &self.items[self.at];
         let (title, small) = (self.font(13.0, 650.0), self.font(11.5, 400.0));
-        // (A file of the group by itself: its name, what it is once read, and its own buttons.)
-        let member = self.inside.and_then(|member| Some((member, self.members()?.get(member)?.name.clone(), self.members()?.len())));
-        let (title_text, about, open_label, pastes, opens, copies) = match &member {
-            Some((_, name, _)) => (name.clone(), self.shown_read().and_then(|read| read.about.clone()).unwrap_or_default(), lang.pick("打开", "Open"), false, true, true),
+        // (A file of the group by itself, a folder gone into: its name, what it is once read, and its own buttons.)
+        let deeper = match (self.inside, self.within.last()) {
+            (Some(member), _) => self.members().and_then(|members| members.get(member)),
+            (None, Some(within)) => self.members_at(self.within.len() - 1).and_then(|members| members.get(within.member)),
+            (None, None) => None,
+        };
+        let (title_text, about, open_label, pastes, opens, copies) = match deeper.map(|member| member.name.clone()) {
+            Some(name) => (name, self.shown_read().and_then(|read| read.about.clone()).unwrap_or_default(), lang.pick("打开", "Open"), false, true, true),
             None => (
                 item.title.clone(),
                 self.read.get(self.at).and_then(|read| read.as_ref()?.about.clone()).unwrap_or_else(|| item.about.clone()),
@@ -2001,10 +2309,15 @@ impl Looker {
             self.hits.push((at, hit));
             right -= 8.0;
         }
-        // Which of how many it is, before them (of its group's files, one of them by itself).
-        let (place, count) = match member {
-            Some((member, _, count)) => (member, count),
-            None => (self.at, self.items.len()),
+        // Which of how many it is, before them (of the files it is among, one of them by itself: its folders not
+        // counted; none for a folder gone into).
+        let (place, count) = match (self.inside, self.within.is_empty()) {
+            (Some(member), _) => {
+                let files = |members: &[Member]| members.iter().filter(|member| !member.folder).count();
+                self.members().map_or((0, 0), |members| (files(&members[..member]), files(members)))
+            }
+            (None, false) => (0, 0),
+            (None, true) => (self.at, self.items.len()),
         };
         if count > 1 {
             let said = format!("{} / {}", place + 1, count);
@@ -2015,9 +2328,9 @@ impl Looker {
             frame.text(&said, font, theme.text3, right, pad + (NAME - ascent - descent) / 2.0, wide + 1.0, Align::Start);
             right -= 12.0;
         }
-        // A file of the group by itself: the button back to the group first, as its buttons are.
+        // A file of the group by itself, a folder gone into: the button back first, as its buttons are.
         let mut left = pad;
-        if self.inside.is_some() {
+        if self.deeper() {
             let at = Rect { x: pad, y: pad + (NAME - BUTTON) / 2.0, w: BUTTON, h: BUTTON };
             let lit = self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == Hit::Back);
             if self.skin == Skin::Glass {
@@ -2051,15 +2364,24 @@ impl Looker {
         }
     }
 
-    /// Its body: what the thing shows (files together: their pictures in rows; one of them by itself: it).
+    /// Its body: what the thing shows (files together: their pictures in rows, or a folder's rows; one of them by
+    /// itself: it).
     fn paint_body(&mut self, frame: &Frame, theme: &Theme, (w, h): (f32, f32)) {
         let body = self.body_at((w, h));
         self.hits.push((body, Hit::Body));
-        if let Motion::Into { .. } | Motion::OutOf { .. } = self.motion {
-            return self.paint_morph(frame, theme, body);
+        match self.motion {
+            Motion::Into { .. } | Motion::OutOf { .. } => return self.paint_morph(frame, theme, body),
+            Motion::Sliding { .. } => return self.paint_slide(frame, theme, body),
+            _ => {}
         }
-        if self.inside.is_none() && self.members().is_some() {
-            return self.paint_group(frame, theme, body, None);
+        if self.inside.is_none() {
+            if let Some(listing) = self.listing() {
+                return self.paint_listing(frame, theme, body, &listing, None, true);
+            }
+            // (A folder gone into, being read: nothing of it yet.)
+            if !self.within.is_empty() {
+                return;
+            }
         }
         let (read, path, title, opens) = match self.inside {
             Some(member) => {
@@ -2075,54 +2397,151 @@ impl Looker {
         self.paint_read(frame, theme, body, read, path, &title, opens);
     }
 
-    /// The files of the group shown in `body`, each its picture in its place (see `group_cells`) with its name under it,
-    /// as far as they are scrolled; but `apart`'s (grown out of its place: drawn by itself).
-    fn paint_group(&mut self, frame: &Frame, theme: &Theme, body: Rect, apart: Option<usize>) {
-        let Some(members) = self.members().map(<[Member]>::to_vec) else { return };
-        let (cells, tall) = group_cells(&shapes(&members), self.group_inner());
-        if matches!(self.motion, Motion::Resting | Motion::Moving { .. }) {
+    /// The files of `listing` in `body`, as far as they are scrolled: in rows, else each its picture in its place;
+    /// but `apart`'s (grown out of its place: drawn by itself). `live`: as they are had now (clicked, lit under the
+    /// pointer; else as they were, sliding out).
+    fn paint_listing(&mut self, frame: &Frame, theme: &Theme, body: Rect, listing: &Listing, apart: Option<usize>, live: bool) {
+        let (cells, tall) = self.cells(listing);
+        if live && matches!(self.motion, Motion::Resting | Motion::Moving { .. }) {
             self.grid_scroll_most = (tall - body.h).max(0.0);
             self.grid_scroll = self.grid_scroll.clamp(0.0, self.grid_scroll_most);
         }
-        let (radius, name_font) = (self.body_radius(), self.font(11.5, 400.0));
-        let resting = matches!(self.motion, Motion::Resting);
+        let scroll = if live { self.grid_scroll } else { listing.scroll };
+        // (A folder holding nothing to list, or that could not be read: said so.)
+        if listing.members.is_empty() {
+            let said = if listing.readable { self.lang.pick("此文件夹为空", "This folder is empty") } else { self.lang.pick("无法读取此文件夹", "This folder cannot be read") };
+            let font = self.font(12.5, 400.0);
+            let wide = frame.measure(said, font).min(body.w);
+            let (ascent, descent) = frame.gfx.baseline(font);
+            frame.text(said, font, theme.text3, body.x + (body.w - wide) / 2.0, body.y + (body.h - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+            return;
+        }
+        let resting = live && matches!(self.motion, Motion::Resting);
         // (Room past the body's sides for the ring round a picture at its edge.)
         frame.clip(body.x - 4.0, body.y, body.w + 8.0, body.h);
-        for (place, (member, cell)) in members.iter().zip(&cells).enumerate() {
-            let at = Rect { x: body.x + cell.x, y: body.y + cell.y - self.grid_scroll, w: cell.w, h: cell.h };
-            if at.y + at.h + GROUP_NAME < body.y || at.y > body.y + body.h || apart == Some(place) {
+        for (place, (member, cell)) in listing.members.iter().zip(&cells).enumerate() {
+            // (A row as wide as the body it is drawn in.)
+            let at = Rect { x: body.x + cell.x, y: body.y + cell.y - scroll, w: if listing.rows { body.w } else { cell.w }, h: cell.h };
+            let below = if listing.rows { 0.0 } else { GROUP_NAME };
+            if at.y + at.h + below < body.y || at.y > body.y + body.h || apart == Some(place) {
                 continue;
             }
-            // (Its picture made for as many px as it takes, of two sizes: made once for either.)
-            let side = if at.w.max(at.h) * self.scale > 256.0 { 512 } else { 256 };
-            let thumb = crate::station::thumbs::of(&member.path, side);
-            match (member.seen, thumb) {
-                (Some(_), Some(thumb)) => {
-                    let (x, y, pw, ph) = thumb.fitted_in(at.x, at.y, at.w, at.h);
-                    frame.picture(&thumb, x, y, pw, ph, radius, 1.0);
-                }
-                // (No picture of it yet, or none of its own: its square, and in it Explorer's picture of it.)
-                (seen, thumb) => {
-                    frame.fill_rounded(theme.track, at.x, at.y, at.w, at.h, radius);
-                    let thumb = thumb.filter(|_| seen.is_none());
-                    if let Some(thumb) = thumb.or_else(|| crate::station::thumbs::icon(&member.path, (48.0 * self.scale).round() as u32)) {
-                        let inner = (at.w.min(at.h) - 24.0).clamp(0.0, 96.0);
-                        let (x, y, pw, ph) = thumb.fitted_in(at.x + (at.w - inner) / 2.0, at.y + (at.h - inner) / 2.0, inner, inner);
-                        frame.picture(&thumb, x, y, pw, ph, 0.0, 1.0);
-                    }
-                }
-            }
             let lit = resting && self.pointer_on(at) && self.pressed.is_none_or(|pressed| pressed == Hit::Cell(place));
-            let ring = if self.picked == Some(place) { Some(theme::accent(self.dark)) } else { lit.then(|| theme.text.alpha(0.3)) };
-            if let Some(ring) = ring {
-                frame.stroke_rounded(Fill::Solid(ring), at.x - 2.0, at.y - 2.0, at.w + 4.0, at.h + 4.0, radius + 2.0, 2.0);
+            let picked = listing.picked == Some(place);
+            if listing.rows {
+                self.paint_row(frame, theme, at, member, lit, picked);
+            } else {
+                self.paint_cell(frame, theme, at, member, lit, picked);
             }
-            frame.text(&member.name, name_font, theme.text3, at.x, at.y + at.h + 4.0, at.w, Align::Start);
             // (Clicked only where it shows in the body.)
             let (top, bottom) = (at.y.max(body.y), (at.y + at.h).min(body.y + body.h));
-            if bottom > top {
+            if live && bottom > top {
                 self.hits.push((Rect { x: at.x, y: top, w: at.w, h: bottom - top }, Hit::Cell(place)));
             }
+        }
+        frame.unclip();
+    }
+
+    /// A file of files together at `at`: its picture (made for as many px as it takes), else its square and in it
+    /// Explorer's picture of it; ringed where it is picked or `lit`; its name under it.
+    fn paint_cell(&self, frame: &Frame, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool) {
+        let radius = self.body_radius();
+        // (Of two sizes: made once for either.)
+        let side = if at.w.max(at.h) * self.scale > 256.0 { 512 } else { 256 };
+        let thumb = crate::station::thumbs::of(&member.path, side);
+        match (member.seen, thumb) {
+            (Some(_), Some(thumb)) => {
+                let (x, y, pw, ph) = thumb.fitted_in(at.x, at.y, at.w, at.h);
+                frame.picture(&thumb, x, y, pw, ph, radius, 1.0);
+            }
+            // (No picture of it yet, or none of its own: its square, and in it Explorer's picture of it.)
+            (seen, thumb) => {
+                frame.fill_rounded(theme.track, at.x, at.y, at.w, at.h, radius);
+                let thumb = thumb.filter(|_| seen.is_none());
+                if let Some(thumb) = thumb.or_else(|| crate::station::thumbs::icon(&member.path, (48.0 * self.scale).round() as u32)) {
+                    let inner = (at.w.min(at.h) - 24.0).clamp(0.0, 96.0);
+                    let (x, y, pw, ph) = thumb.fitted_in(at.x + (at.w - inner) / 2.0, at.y + (at.h - inner) / 2.0, inner, inner);
+                    frame.picture(&thumb, x, y, pw, ph, 0.0, 1.0);
+                }
+            }
+        }
+        let ring = if picked { Some(theme::accent(self.dark)) } else { lit.then(|| theme.text.alpha(0.3)) };
+        if let Some(ring) = ring {
+            frame.stroke_rounded(Fill::Solid(ring), at.x - 2.0, at.y - 2.0, at.w + 4.0, at.h + 4.0, radius + 2.0, 2.0);
+        }
+        frame.text(&member.name, self.font(11.5, 400.0), theme.text3, at.x, at.y + at.h + 4.0, at.w, Align::Start);
+    }
+
+    /// A file (or folder) of a folder's rows, `at`: its picture (a picture's, a video's, made small) else its icon, its
+    /// name, when it was written, how large it is (a folder: how many things it holds); lit where the pointer is on it,
+    /// marked where it is `picked`.
+    fn paint_row(&self, frame: &Frame, theme: &Theme, at: Rect, member: &Member, lit: bool, picked: bool) {
+        let radius = self.body_radius().min(8.0);
+        let accent = match self.skin {
+            Skin::Paper => theme.text,
+            _ => theme::accent(self.dark),
+        };
+        if picked {
+            frame.fill_rounded(accent.alpha(0.16), at.x, at.y, at.w, at.h, radius);
+            frame.stroke_rounded(Fill::Solid(accent), at.x + 0.75, at.y + 0.75, at.w - 1.5, at.h - 1.5, radius, 1.5);
+        } else if lit {
+            frame.fill_rounded(theme.hover, at.x, at.y, at.w, at.h, radius);
+        }
+        let pictured = !member.folder && matches!(kind_of(&member.path), Kind::Picture | Kind::Video);
+        let icon = row_icon(at, member.seen);
+        let thumb = pictured.then(|| crate::station::thumbs::of(&member.path, 64)).flatten();
+        match thumb {
+            Some(thumb) => {
+                let (x, y, w, h) = thumb.fitted_in(icon.x, icon.y, icon.w, icon.h);
+                frame.picture(&thumb, x, y, w, h, 3.0, 1.0);
+            }
+            None => {
+                let square = row_icon(at, None);
+                match crate::station::thumbs::icon(&member.path, (LIST_ICON * self.scale).round() as u32) {
+                    Some(icon) => frame.picture(&icon, square.x, square.y, square.w, square.h, 0.0, 1.0),
+                    None => frame.icon(if member.folder { Icon::Folder } else { Icon::File }, Point { x: square.x + square.w / 2.0, y: square.y + square.h / 2.0 }, LIST_ICON * 0.8, theme.text3),
+                }
+            }
+        }
+        let (font, small) = (self.font(13.0, 400.0), self.font(12.0, 400.0));
+        let middle = |font: Font| {
+            let (ascent, descent) = frame.gfx.baseline(font);
+            at.y + (at.h - ascent - descent) / 2.0
+        };
+        let size_x = at.x + at.w - LIST_IN - LIST_SIZE;
+        let written_x = size_x - 10.0 - LIST_WRITTEN;
+        let name_x = at.x + LIST_IN + LIST_ICON + 11.0;
+        frame.text(&member.name, font, theme.text, name_x, middle(font), (written_x - 10.0 - name_x).max(0.0), Align::Start);
+        if let Some(written) = member.written {
+            frame.text(&super::text::since(written, crate::station::now_ms(), self.lang), small, theme.text3, written_x, middle(small), LIST_WRITTEN, Align::Start);
+        }
+        let size = match (member.folder, member.size) {
+            (_, None) => None,
+            (true, Some(0)) => Some(self.lang.pick("空", "Empty").to_string()),
+            (true, Some(held)) => Some(match self.lang {
+                Lang::Zh => format!("{held} 项"),
+                Lang::En => format!("{held} {}", if held == 1 { "item" } else { "items" }),
+            }),
+            (false, Some(bytes)) => Some(super::text::bytes(bytes as f64)),
+        };
+        if let Some(size) = size {
+            frame.text(&size, small, theme.text3, size_x, middle(small), LIST_SIZE, Align::End);
+        }
+    }
+
+    /// A folder gone into or left (see `Motion::Sliding`): what it holds coming in from the side it goes towards, fading
+    /// in, as what was shown goes out the other way, fading out.
+    fn paint_slide(&mut self, frame: &Frame, theme: &Theme, body: Rect) {
+        let Motion::Sliding { deeper, start, .. } = self.motion else { return };
+        let p = MOVE_EASE.at((start.elapsed().as_secs_f32() / SLIDE_FOR.as_secs_f32()).clamp(0.0, 1.0));
+        let way = if deeper { 1.0 } else { -1.0 };
+        let moved = |by: f32| Rect { x: body.x + by, ..body };
+        frame.clip(body.x - 4.0, body.y, body.w + 8.0, body.h);
+        if let Some(slid) = self.slid.clone() {
+            faded(frame, 1.0 - p, || self.paint_listing(frame, theme, moved(-way * SLIDE_BY * p), &slid, None, false));
+        }
+        if let Some(listing) = self.listing() {
+            faded(frame, p, || self.paint_listing(frame, theme, moved(way * SLIDE_BY * (1.0 - p)), &listing, None, false));
         }
         frame.unclip();
     }
@@ -2139,7 +2558,9 @@ impl Looker {
             _ => return,
         };
         let others = if into { (1.0 - p / 0.6).max(0.0) } else { ((p - 0.3) / 0.7).clamp(0.0, 1.0) };
-        faded(frame, others, || self.paint_group(frame, theme, body, Some(member)));
+        if let Some(listing) = self.listing() {
+            faded(frame, others, || self.paint_listing(frame, theme, body, &listing, Some(member), true));
+        }
         let Some(member_of) = self.members().and_then(|members| members.get(member)).cloned() else { return };
         let read = self.member_read.get(member).cloned().flatten();
         if member_of.seen.is_none() {
@@ -2216,7 +2637,7 @@ impl Looker {
                 frame.unclip();
             }
             // (Drawn as `paint_group`: a group's files are each read as a file.)
-            Body::Group(_) => {}
+            Body::Group(_) | Body::Folder { .. } => {}
             // (A video that cannot be played and has no picture: nothing of it to show, so as what has no preview.)
             Body::Played { picture: None, sound: false, .. } if self.unplayable => {
                 let said = opens.then(|| self.lang.pick(UNPLAYABLE.0, UNPLAYABLE.1));
@@ -2540,8 +2961,8 @@ impl Looker {
         match pressed.filter(|pressed| self.hit_at(on) == Some(*pressed)) {
             Some(Hit::Open) => self.key(Key::Open),
             Some(Hit::Copy) => self.key(Key::Copy),
-            Some(Hit::Cell(member)) => self.enter(member),
-            Some(Hit::Back) => self.leave(),
+            Some(Hit::Cell(member)) => self.open_member(member),
+            Some(Hit::Back) => self.back(),
             Some(Hit::Toggle) => self.key(Key::Toggle),
             Some(Hit::Mute) => {
                 self.muted = !self.muted;
@@ -2620,7 +3041,7 @@ impl Looker {
             self.zoom_about(on, self.zoom * ZOOM_TURN.powf(turns));
         } else if matches!(self.body(), Some(Body::Words { .. })) {
             self.scroll = (self.scroll - turns * 3.0 * 22.0).clamp(0.0, self.scroll_most);
-        } else if matches!(self.body(), Some(Body::Group(_))) {
+        } else if self.inside.is_none() && self.members().is_some() {
             self.grid_scroll = (self.grid_scroll - turns * 3.0 * 22.0).clamp(0.0, self.grid_scroll_most);
         }
         self.draw();
@@ -2864,16 +3285,17 @@ impl Looker {
             Key::Left | Key::Right if self.inside.is_some() => self.step(key == Key::Right),
             Key::Up | Key::Down if self.inside.is_some() => {}
             Key::Left | Key::Right | Key::Up | Key::Down if group => self.pick(key),
-            Key::Back => self.leave(),
-            Key::Open if self.inside.is_some() => {
+            Key::Back => self.back(),
+            Key::Open if group && self.inside.is_none() && self.picked.is_some() => self.open_member(self.picked.unwrap_or_default()),
+            // (A file of the group by itself, a folder gone into: it opened, copied.)
+            Key::Open if self.deeper() => {
                 let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
                 let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
                 crate::station::run::ask(Ask::Files(vec![path], crate::station::run::FilesAct::Open));
                 self.told = Some((Hit::Open, Instant::now()));
                 self.close();
             }
-            Key::Open if group && self.picked.is_some() => self.enter(self.picked.unwrap_or_default()),
-            Key::Copy if self.inside.is_some() => {
+            Key::Copy if self.deeper() => {
                 let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
                 crate::station::run::ask(Ask::Files(vec![path], crate::station::run::FilesAct::Copy(None)));
                 self.told = Some((Hit::Copy, Instant::now()));
@@ -3016,6 +3438,22 @@ fn group_cells(shapes: &[f32], inner: f32) -> (Vec<Rect>, f32) {
         first = last + 1;
     }
     (cells, (y - GROUP_GAP).max(0.0))
+}
+
+/// Where the files of a folder listed in rows are in a body `inner` wide (DIPs): `count` rows `LIST_ROW` tall, one
+/// under another; and how tall they are together.
+fn row_cells(count: usize, inner: f32) -> (Vec<Rect>, f32) {
+    let cells = (0..count).map(|place| Rect { x: 0.0, y: place as f32 * (LIST_ROW + LIST_GAP), w: inner, h: LIST_ROW }).collect();
+    (cells, (count as f32 * (LIST_ROW + LIST_GAP) - LIST_GAP).max(0.0))
+}
+
+/// Where a file's picture (as large as it was `seen`, fitted; else its icon, square) is in its `row`, at its start.
+fn row_icon(row: Rect, seen: Option<Seen>) -> Rect {
+    let square = Rect { x: row.x + LIST_IN, y: row.y + (row.h - LIST_ICON) / 2.0, w: LIST_ICON, h: LIST_ICON };
+    match seen {
+        Some(seen) => fit_in(seen, square),
+        None => square,
+    }
 }
 
 /// How wide the picture of each file of a group is for its height, as it was measured (none: square); none narrower
@@ -3201,6 +3639,58 @@ mod tests {
         crate::studio::save_png(&out.join("look.png"), w, h, &pixels).unwrap();
     }
 
+    /// A folder's rows in each skin, light and dark (`cargo test --profile fast --features studio --lib -- --ignored
+    /// folder_looks` writes `target/looks/folder.png`).
+    #[cfg(feature = "studio")]
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    fn folder_looks() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let now = crate::station::now_ms();
+        let member = |name: &str, folder: bool, size: u64, ago: u64| Member { path: PathBuf::from(format!(r"C:\site\{name}")), name: name.into(), seen: None, folder, size: Some(size), written: Some(now - ago * 60_000) };
+        let members = vec![member("assets", true, 4, 600), member("docs", true, 6, 120), member("scripts", true, 0, 9000), member("build.ps1", false, 2048, 4000), member("README.md", false, 3100, 120), member("release-notes.pdf", false, 312_000, 12_000)];
+        let read = Read { body: Body::Folder { members, rows: true, readable: true }, about: Some(r"C:\site · 3 个文件夹，3 个文件".into()) };
+        let item = Item { key: 1, title: "site".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\site")), from: None, open: Some(Ask::Open(1)), copy: Some(Ask::Copy(1)), pastes: false };
+        let looks = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
+        let px = 1.5f32;
+        let mut sizes = Vec::new();
+        for &(skin, dark) in &looks {
+            let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+            (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
+            looker.items = vec![item.clone()];
+            looker.read = vec![Some(read.clone())];
+            looker.picked = Some(1);
+            sizes.push(looker.wanted((1400.0, 900.0)));
+        }
+        let cell = (GROUP_WIDE + 2.0 * SHADOW + 20.0, sizes.iter().map(|size| size.1).fold(0.0, f32::max) + 2.0 * SHADOW + 20.0);
+        let (w, h) = ((2.0 * cell.0 * px) as u32, (3.0 * cell.1 * px) as u32);
+        let pixels = gfx
+            .draw_offscreen((w, h), px, |frame| {
+                frame.fill(Color::hex(0x7C93B4, 1.0), 0.0, 0.0, 2.0 * cell.0, 3.0 * cell.1);
+                for (place, &(skin, dark)) in looks.iter().enumerate() {
+                    let (column, row) = ((place % 2) as f32, (place / 2) as f32);
+                    if dark {
+                        frame.fill(Color::hex(0x1B2433, 1.0), column * cell.0, row * cell.1, cell.0, cell.1);
+                    }
+                    let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+                    (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
+                    looker.items = vec![item.clone()];
+                    looker.read = vec![Some(read.clone())];
+                    looker.picked = Some(1);
+                    let size = sizes[place];
+                    let at = Rect { x: column * cell.0 + SHADOW + 10.0, y: row * cell.1 + SHADOW + 10.0, w: size.0, h: size.1 };
+                    looker.paint(frame, skin != Skin::Paper, Shape { at, size, opacity: 1.0, body: 1.0 });
+                    frame.place(Matrix3x2::identity());
+                }
+            })
+            .expect("drawn");
+        let out = PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        crate::studio::save_png(&out.join("folder.png"), w, h, &pixels).unwrap();
+    }
+
     /// Its things had anew as they show now (a tile clicked of another list, or scrolled to): what was read of those
     /// still among them kept at their places now, none for those new.
     #[test]
@@ -3355,6 +3845,130 @@ mod tests {
     }
 
     /// Between two boxes, and a box made smaller about its middle.
+    /// A folder of its own for a test, made empty.
+    fn folder_for(name: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!("glance-look-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    fn hidden(path: &Path) {
+        use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+        unsafe { SetFileAttributesW(&HSTRING::from(path.as_os_str()), FILE_ATTRIBUTE_HIDDEN) }.unwrap();
+    }
+
+    /// A folder lists what it holds as Explorer does: its folders first, then its files, each by name with the numbers
+    /// in them by their worth, what is hidden left out; each file how large it is and when it was written. Its folders
+    /// are counted after (what they hold but what is hidden), as its rows show; the rows' folder said where it is and
+    /// how many of each it holds.
+    #[test]
+    fn a_folder_lists_what_it_holds_as_explorer_does() {
+        let folder = folder_for("listed");
+        for name in ["b10.txt", "b2.txt", "A.md", ".secret"] {
+            std::fs::write(folder.join(name), name).unwrap();
+        }
+        hidden(&folder.join(".secret"));
+        for name in ["zeta", "alpha"] {
+            std::fs::create_dir(folder.join(name)).unwrap();
+        }
+        std::fs::write(folder.join("alpha").join("one"), "1").unwrap();
+        std::fs::write(folder.join("alpha").join("two"), "2").unwrap();
+        std::fs::write(folder.join("alpha").join("gone"), "").unwrap();
+        hidden(&folder.join("alpha").join("gone"));
+        let read = list(&folder, Lang::Zh);
+        let Body::Folder { members, rows: true, readable: true } = &read.body else { panic!("listed in rows") };
+        assert_eq!(members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(), ["alpha", "zeta", "A.md", "b2.txt", "b10.txt"]);
+        assert_eq!(members.iter().map(|member| member.folder).collect::<Vec<_>>(), [true, true, false, false, false]);
+        assert_eq!((members[0].size, members[3].size), (None, Some(6)));
+        assert!(members.iter().all(|member| member.written.is_some()));
+        assert_eq!(read.about, Some(format!("{} · 2 个文件夹，3 个文件", folder.display())));
+        let counted = filled(&read, || true).expect("filled");
+        let Body::Folder { members, .. } = &counted.body else { panic!("a folder") };
+        assert_eq!((members[0].size, members[1].size), (Some(2), Some(0)));
+        assert!(filled(&read, || false).is_none());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A folder of pictures and videos only shows as files together do, each measured as it is listed; one holding
+    /// nothing, or that cannot be read, in rows (none of them, said so).
+    #[test]
+    fn a_folder_of_pictures_shows_them_as_files_together() {
+        // (As on the reading thread.)
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let folder = folder_for("pictures");
+        let picture = PathBuf::from(format!("{}/icons/128x128@2x.png", env!("CARGO_MANIFEST_DIR")));
+        std::fs::copy(&picture, folder.join("one.png")).unwrap();
+        std::fs::copy(&picture, folder.join("two.png")).unwrap();
+        let Body::Folder { members, rows: false, readable: true } = list(&folder, Lang::Zh).body else { panic!("as files together") };
+        assert!(members.iter().all(|member| member.seen == Some((256, 256))));
+        assert!(filled(&list(&folder, Lang::Zh), || true).is_none());
+        std::fs::create_dir(folder.join("more")).unwrap();
+        assert!(matches!(list(&folder, Lang::Zh).body, Body::Folder { rows: true, .. }));
+        let empty = folder.join("more");
+        let read = list(&empty, Lang::En);
+        assert!(matches!(&read.body, Body::Folder { members, rows: true, readable: true } if members.is_empty()));
+        assert_eq!(read.about, Some(format!("{} · Empty folder", empty.display())));
+        assert!(matches!(list(&folder.join("one.png"), Lang::Zh).body, Body::Folder { readable: false, .. }));
+        assert!(matches!(read_file(&folder.join("none"), Lang::Zh, 1.0, 1).body, Body::Other(None)));
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn what_a_folder_holds_is_said() {
+        assert_eq!(held(1, 0, Lang::En), "1 folder");
+        assert_eq!(held(0, 2, Lang::En), "2 files");
+        assert_eq!(held(3, 1, Lang::En), "3 folders, 1 file");
+        assert_eq!(held(0, 0, Lang::Zh), "空文件夹");
+        assert_eq!(held(2, 5, Lang::Zh), "2 个文件夹，5 个文件");
+    }
+
+    /// A folder gone into shows what it holds: its files are those had (picked, clicked, stepped through), it is the
+    /// file opened or copied, the sheet is sized for its rows; the folder holding it, what was had of it, kept apart.
+    #[test]
+    fn a_folder_gone_into_is_what_shows() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::current().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None };
+        let outer = (0..30).map(|place| member(&format!("{place}"), place == 0)).collect::<Vec<_>>();
+        let inner = vec![member(r"0\x.txt", false), member(r"0\y.txt", false)];
+        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        looker.scale = 1.0;
+        looker.items = vec![Item { key: 1, title: "a".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a")), from: None, open: None, copy: None, pastes: false }];
+        (looker.read, looker.measured, looker.asked) = (vec![Some(Read { body: Body::Folder { members: outer, rows: true, readable: true }, about: None })], vec![None], vec![true]);
+        let most = (1400.0, 900.0);
+        let (top, pad) = (looker.body_top(), looker.inset());
+        assert_eq!(looker.wanted(most), (GROUP_WIDE, most.1));
+        assert_eq!(looker.members().map(<[Member]>::len), Some(30));
+        // (Gone into, not read yet: a few rows' room, nothing of it to have.)
+        looker.within.push(Within { member: 0, picked: Some(0), scroll: 0.0, member_read: vec![None; 30], member_asked: vec![true; 30] });
+        assert!(looker.deeper());
+        assert_eq!(looker.wanted(most), (GROUP_WIDE, top + 3.0 * LIST_ROW + 2.0 * LIST_GAP + pad));
+        assert!(looker.members().is_none());
+        assert_eq!(looker.shown_path(), Some(Path::new(r"C:\a\0")));
+        assert_eq!(looker.shown_kind(), Kind::Files);
+        looker.within[0].member_read[0] = Some(Read { body: Body::Folder { members: inner, rows: true, readable: true }, about: Some("x".into()) });
+        assert_eq!(looker.members().map(|members| members[1].name.clone()), Some(r"0\y.txt".into()));
+        assert_eq!(looker.shown_read().and_then(|read| read.about.clone()), Some("x".into()));
+        assert_eq!(looker.members_at(0).map(<[Member]>::len), Some(30));
+        looker.inside = Some(1);
+        assert_eq!(looker.shown_path(), Some(Path::new(r"C:\a\0\y.txt")));
+    }
+
+    /// A folder's rows are laid one under another, each as wide as the body.
+    #[test]
+    fn rows_are_laid_one_under_another() {
+        let (cells, tall) = row_cells(3, 500.0);
+        assert_eq!(cells[2], Rect { x: 0.0, y: 2.0 * (LIST_ROW + LIST_GAP), w: 500.0, h: LIST_ROW });
+        assert_eq!(tall, 3.0 * LIST_ROW + 2.0 * LIST_GAP);
+        assert_eq!(row_cells(0, 500.0), (Vec::new(), 0.0));
+        // (A picture's at the row's start, fitted to its shape; an icon square.)
+        let row = Rect { x: 10.0, y: 100.0, w: 500.0, h: LIST_ROW };
+        assert_eq!(row_icon(row, None), Rect { x: 10.0 + LIST_IN, y: 100.0 + (LIST_ROW - LIST_ICON) / 2.0, w: LIST_ICON, h: LIST_ICON });
+        assert_eq!(row_icon(row, Some((200, 100))).h, LIST_ICON / 2.0);
+    }
+
     /// Files together are laid out in rows that fill the body's width, each picture of its own shape, none over another,
     /// the last row as tall as a row is wanted.
     #[test]
