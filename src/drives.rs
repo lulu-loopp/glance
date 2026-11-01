@@ -19,19 +19,111 @@ use windows::Win32::System::IO::DeviceIoControl;
 /// Every physical drive: its number, and its model name.
 pub fn models() -> Vec<(u32, String)> {
     let mut found = Vec::new();
-    each_drive(|index, handle| found.push((index, model(handle).unwrap_or_else(|| format!("Disk {index}")))));
+    each_drive(|index, _, handle| found.push((index, model(handle).unwrap_or_else(|| format!("Disk {index}")))));
     found
 }
 
-/// Every physical drive that reports a temperature, by its model name.
+/// Every physical drive that reports a temperature, by its model name. Each drive asked only the way it gave one the
+/// first time (see `Way`): one that gave none is not asked again while it stays (a USB drive's bridge asked every
+/// second of what it does not know may stall the drive's own reading and writing).
 pub fn temperatures() -> Vec<DriveTemperature> {
+    static WAYS: std::sync::Mutex<Vec<(String, Way)>> = std::sync::Mutex::new(Vec::new());
+    let mut ways = WAYS.lock().unwrap();
+    let mut seen = Vec::new();
     let mut found = Vec::new();
-    each_drive(|index, handle| {
-        if let Some(celsius) = temperature(handle).or_else(|| nvme_temperature(handle)).or_else(|| smart_temperature(index, handle)) {
+    each_drive(|index, path, handle| {
+        seen.push(path.to_string());
+        if let Some(celsius) = asked(&mut ways, path, &Opened { index, handle }) {
             found.push(DriveTemperature { id: index, name: model(handle).unwrap_or_else(|| format!("Disk {index}")), celsius });
         }
     });
+    // (A drive taken out is forgotten: put back, it is learned anew.)
+    ways.retain(|(path, _)| seen.contains(path));
     found
+}
+
+/// The temperature `drive` (listed as `path`) gives now, asked the way `ways` knows it gives one, learned (and kept
+/// there) the first time it is asked.
+fn asked(ways: &mut Vec<(String, Way)>, path: &str, drive: &impl Asked) -> Option<f32> {
+    match ways.iter().find(|(known, _)| known == path) {
+        Some((_, way)) => way.read(drive),
+        None => {
+            let (way, celsius) = Way::learn(drive);
+            ways.push((path.to_string(), way));
+            celsius
+        }
+    }
+}
+
+/// What a drive can be asked for its temperature: each way it may give one, and the bus it is on.
+trait Asked {
+    fn property(&self) -> Option<f32>;
+    fn bus(&self) -> Option<i32>;
+    fn health_log(&self) -> Option<f32>;
+    fn smart(&self) -> Option<f32>;
+}
+
+/// A drive by its number, opened for its properties.
+struct Opened {
+    index: u32,
+    handle: HANDLE,
+}
+
+impl Asked for Opened {
+    fn property(&self) -> Option<f32> {
+        temperature(self.handle)
+    }
+    fn bus(&self) -> Option<i32> {
+        bus(self.handle)
+    }
+    fn health_log(&self) -> Option<f32> {
+        health_celsius(self.handle)
+    }
+    fn smart(&self) -> Option<f32> {
+        smart_temperature(self.index, self.handle)
+    }
+}
+
+/// The way a drive gives its temperature, as found the first time it was asked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Way {
+    /// Its property (see `temperature`).
+    Property,
+    /// Its NVMe health log (see `health_celsius`).
+    HealthLog,
+    /// Its SMART attributes (see `smart_temperature`): a SATA drive's, asked now and then while it is awake.
+    Smart,
+    /// None: not asked again.
+    None,
+}
+
+impl Way {
+    /// How `drive` gives its temperature, and what it gives now: its property, else its health log where it is an
+    /// NVMe drive, else its SMART attributes where it is a SATA drive (one asleep now, or not due, gives none yet, and
+    /// is asked so again), else none (a drive on another bus, a USB drive's, is asked nothing more).
+    fn learn(drive: &impl Asked) -> (Way, Option<f32>) {
+        if let Some(celsius) = drive.property() {
+            return (Way::Property, Some(celsius));
+        }
+        match drive.bus() {
+            Some(BUS_NVME) => {
+                let celsius = drive.health_log();
+                (if celsius.is_some() { Way::HealthLog } else { Way::None }, celsius)
+            }
+            Some(BUS_ATA | BUS_SATA) => (Way::Smart, drive.smart()),
+            _ => (Way::None, None),
+        }
+    }
+
+    /// The temperature `drive` gives this way.
+    fn read(self, drive: &impl Asked) -> Option<f32> {
+        match self {
+            Way::Property => drive.property(),
+            Way::HealthLog => drive.health_log(),
+            Way::Smart => drive.smart(),
+            Way::None => None,
+        }
+    }
 }
 
 /// The NVMe bus, as STORAGE_BUS_TYPE numbers it.
@@ -64,14 +156,6 @@ struct ProtocolData {
 /// drive whose driver gives Windows none as a property (some vendors' drivers, and RAID ones, do not). Asked as
 /// Windows documents for NVMe drives, through the handle opened for properties. (Opened to read and write besides,
 /// for drivers that might want it, it looked to virus scanners like a program writing to the drive's boot record.)
-fn nvme_temperature(properties: HANDLE) -> Option<f32> {
-    if bus(properties)? != BUS_NVME {
-        return None;
-    }
-    health_celsius(properties)
-}
-
-/// The composite temperature in an NVMe drive's health log, read through `handle`.
 fn health_celsius(handle: HANDLE) -> Option<f32> {
     // The query (its property and kind), what is asked of the protocol, and room for the page after it.
     #[repr(C)]
@@ -105,15 +189,12 @@ fn health_celsius(handle: HANDLE) -> Option<f32> {
 /// its temperature is read, if any is.
 pub fn describe() -> Vec<String> {
     let mut found = Vec::new();
-    each_drive(|index, handle| {
-        let read = if temperature(handle).is_some() {
-            "its property"
-        } else if nvme_temperature(handle).is_some() {
-            "its NVMe health log"
-        } else if smart_temperature(index, handle).is_some() {
-            "its SMART attributes"
-        } else {
-            "none"
+    each_drive(|index, _, handle| {
+        let read = match Way::learn(&Opened { index, handle }) {
+            (Way::Property, _) => "its property",
+            (Way::HealthLog, _) => "its NVMe health log",
+            (Way::Smart, Some(_)) => "its SMART attributes",
+            (Way::Smart | Way::None, _) => "none",
         };
         found.push(format!("Drive {index}: {}, bus {}, temperature: {read}", model(handle).unwrap_or_default(), bus(handle).map_or("unknown".to_string(), |bus| bus.to_string())));
     });
@@ -168,6 +249,22 @@ fn smart_celsius(data: &[u8; 512]) -> Option<f32> {
     attribute(194).or_else(|| attribute(190)).filter(|celsius| plausible(*celsius) && *celsius > 0).map(f32::from)
 }
 
+/// The buses a drive is plugged into from outside the PC on, as STORAGE_BUS_TYPE numbers them: USB, FireWire, an SD
+/// card's and an MMC card's.
+const BUSES_OUTSIDE: [i32; 4] = [7, 4, 12, 13];
+
+/// Whether the drive at `letter` is one plugged into the PC from outside (see `BUSES_OUTSIDE`), whatever Windows calls
+/// it: a USB hard drive is a fixed drive to it, as the PC's own are. Asked of the volume opened for its properties only
+/// (no access to its data), which Windows answers itself, asking the drive nothing; one that cannot say is taken for
+/// the PC's own.
+pub fn outside(letter: char) -> bool {
+    let path = windows::core::HSTRING::from(format!(r"\\.\{letter}:"));
+    let Ok(handle) = (unsafe { CreateFileW(&path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }) else { return false };
+    let on = bus(handle);
+    let _ = unsafe { CloseHandle(handle) };
+    on.is_some_and(|bus| BUSES_OUTSIDE.contains(&bus))
+}
+
 /// The bus a drive is on, as STORAGE_BUS_TYPE numbers it.
 fn bus(handle: HANDLE) -> Option<i32> {
     let mut buf = [0u64; 128];
@@ -177,16 +274,16 @@ fn bus(handle: HANDLE) -> Option<i32> {
     Some(unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) }.BusType.0)
 }
 
-/// Calls `visit` with each physical drive (by its number, as `\.\PhysicalDriveN` names it), opened for its
-/// properties only. Each drive Windows lists, by its own number, whatever numbers are free between them (tried one
+/// Calls `visit` with each physical drive (by its number, as `\.\PhysicalDriveN` names it, and the path Windows lists
+/// it by, which stays its own while it is there), opened for its properties only. Each drive Windows lists, by its own number, whatever numbers are free between them (tried one
 /// number after another, those after a gap of four were missed: drives taken out, a card reader's empty slots).
-fn each_drive(mut visit: impl FnMut(u32, HANDLE)) {
+fn each_drive(mut visit: impl FnMut(u32, &str, HANDLE)) {
     use windows::Win32::Devices::DeviceAndDriverInstallation::{
         SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
         SP_DEVICE_INTERFACE_DETAIL_DATA_W,
     };
     use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER};
-    let mut drives: Vec<(u32, HANDLE)> = Vec::new();
+    let mut drives: Vec<(u32, String, HANDLE)> = Vec::new();
     unsafe {
         let Ok(set) = SetupDiGetClassDevsW(Some(&GUID_DEVINTERFACE_DISK), PCWSTR::null(), None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE) else { return };
         for member in 0.. {
@@ -204,22 +301,23 @@ fn each_drive(mut visit: impl FnMut(u32, HANDLE)) {
                 continue;
             }
             // Access 0: properties only, never the data.
-            let opened = CreateFileW(PCWSTR((*detail).DevicePath.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None);
+            let path = PCWSTR((*detail).DevicePath.as_ptr());
+            let opened = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None);
             let Ok(handle) = opened else { continue };
             let mut number = STORAGE_DEVICE_NUMBER::default();
             let mut returned = 0u32;
             let numbered = DeviceIoControl(handle, IOCTL_STORAGE_GET_DEVICE_NUMBER, None, 0, Some(&mut number as *mut _ as *mut _), size_of::<STORAGE_DEVICE_NUMBER>() as u32, Some(&mut returned), None);
             if numbered.is_ok() {
-                drives.push((number.DeviceNumber, handle));
+                drives.push((number.DeviceNumber, path.to_string().unwrap_or_default(), handle));
             } else {
                 let _ = CloseHandle(handle);
             }
         }
         let _ = SetupDiDestroyDeviceInfoList(set);
     }
-    drives.sort_by_key(|(number, _)| *number);
-    for (number, handle) in drives {
-        visit(number, handle);
+    drives.sort_by_key(|(number, ..)| *number);
+    for (number, path, handle) in drives {
+        visit(number, &path, handle);
         let _ = unsafe { CloseHandle(handle) };
     }
 }
@@ -311,6 +409,82 @@ mod tests {
         assert_eq!(super::smart_celsius(&[0u8; 512]), None);
     }
 
+    /// Which of this PC's drives are plugged in from outside:
+    /// `cargo test --lib -- --ignored tells_this_pcs_drives_from_outside --nocapture`.
+    #[test]
+    #[ignore = "reads this PC's drives"]
+    fn tells_this_pcs_drives_from_outside() {
+        let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+        for letter in (0..26u8).filter(|bit| mask & (1 << bit) != 0).map(|bit| (b'A' + bit) as char) {
+            println!("{letter}: outside {}", super::outside(letter));
+        }
+    }
+
+    /// A drive that answers as it is made to, counting what it is asked.
+    struct Made {
+        property: Option<f32>,
+        bus: Option<i32>,
+        health_log: Option<f32>,
+        smart: std::cell::Cell<Option<f32>>,
+        asked: std::cell::Cell<u32>,
+    }
+
+    impl Made {
+        fn new(property: Option<f32>, bus: i32, health_log: Option<f32>, smart: Option<f32>) -> Made {
+            Made { property, bus: Some(bus), health_log, smart: smart.into(), asked: 0.into() }
+        }
+        fn ask<T>(&self, answer: T) -> T {
+            self.asked.set(self.asked.get() + 1);
+            answer
+        }
+    }
+
+    impl super::Asked for Made {
+        fn property(&self) -> Option<f32> {
+            self.ask(self.property)
+        }
+        fn bus(&self) -> Option<i32> {
+            self.ask(self.bus)
+        }
+        fn health_log(&self) -> Option<f32> {
+            self.ask(self.health_log)
+        }
+        fn smart(&self) -> Option<f32> {
+            self.ask(self.smart.get())
+        }
+    }
+
+    /// A drive that gives no temperature (a USB drive's bridge, asked every second, stalled the drive's copying) is
+    /// asked the first time only, while one that gives one is asked it the way it gave it, and nothing else.
+    #[test]
+    fn a_drive_that_gives_no_temperature_is_not_asked_again() {
+        let mut ways = Vec::new();
+        let usb = Made::new(None, 7, None, None);
+        for _ in 0..5 {
+            assert_eq!(super::asked(&mut ways, "usb", &usb), None);
+        }
+        assert_eq!(usb.asked.get(), 2, "its property and its bus, once");
+
+        let nvme = Made::new(Some(40.0), super::BUS_NVME, Some(41.0), None);
+        for _ in 0..3 {
+            assert_eq!(super::asked(&mut ways, "nvme", &nvme), Some(40.0));
+        }
+        assert_eq!(nvme.asked.get(), 3, "its property alone, each time");
+
+        let log = Made::new(None, super::BUS_NVME, Some(38.0), None);
+        for _ in 0..3 {
+            assert_eq!(super::asked(&mut ways, "log", &log), Some(38.0));
+        }
+        assert_eq!(log.asked.get(), 3 + 2, "its health log alone after the first time");
+
+        // A SATA drive asleep the first time is asked again, as it wakes.
+        let sata = Made::new(None, super::BUS_SATA, None, None);
+        assert_eq!(super::asked(&mut ways, "sata", &sata), None);
+        sata.smart.set(Some(35.0));
+        assert_eq!(super::asked(&mut ways, "sata", &sata), Some(35.0));
+        assert_eq!(sata.asked.get(), 3 + 1);
+    }
+
     #[test]
     fn tells_readings_from_markers() {
         assert!(super::plausible(34));
@@ -337,7 +511,7 @@ mod nvme_tests {
     #[test]
     #[ignore = "reads this PC's drives"]
     fn reads_nvme_logs() {
-        super::each_drive(|index, handle| {
+        super::each_drive(|index, _, handle| {
             if super::bus(handle) == Some(super::BUS_NVME) {
                 println!("drive {index} {:?}: property {:?}, health log {:?}", super::model(handle), super::temperature(handle), super::health_celsius(handle));
             }

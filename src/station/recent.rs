@@ -1,7 +1,7 @@
 //! Recent files: the files lately come to the user's folders, wherever they landed (downloaded, a screenshot, a
 //! document saved), newest first, shown as a page of the station.
 //!
-//! Read as the user, never through the elevated sensors: from each fixed drive's change journal, read the way NTFS
+//! Read as the user, never through the elevated sensors: from the change journal of each of the PC's own fixed drives, read the way NTFS
 //! lets anyone read it (`FSCTL_READ_UNPRIVILEGED_USN_JOURNAL`, through the drive's root folder). Its records name no
 //! files there, so each file come is opened by its number (`OpenFileById`) and its path asked of it: a file the user
 //! may not open is not opened, and so never listed. The journal keeps what changed while Glance was not running: where
@@ -511,6 +511,16 @@ impl Kept {
         self.files.iter().filter(|came| !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
     }
 
+    /// What is listed from the drives at `letters`, and what waits to be tried on them, let go of, with where their
+    /// journals were read up to; whether anything listed was.
+    fn let_go(&mut self, letters: &[char]) -> bool {
+        let before = self.files.len();
+        self.files.retain(|came| !letters.contains(&came.key.drive));
+        self.later.retain(|(letter, ..)| !letters.contains(letter));
+        self.read.retain(|(letter, ..)| !letters.contains(letter));
+        self.files.len() != before
+    }
+
     /// Those made longer ago than the days kept before `now` taken off; whether any were.
     fn age(&mut self, now: u64) -> bool {
         let before = self.files.len();
@@ -719,11 +729,14 @@ fn follow() {
             drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| wanted.is_none()).unwrap());
             continue;
         };
-        // The drives looked for again now and then (one put in, or formatted), and the volume at each letter kept.
+        // The drives looked for again now and then (one put in, or formatted), and the volume at each letter kept;
+        // what was listed from a drive plugged in from outside let go of (listed before such drives were left alone).
+        let mut let_go = false;
         if looked_for_drives.is_none_or(|looked| looked.elapsed() > Duration::from_secs(60)) {
             drives = os::drives();
             looked_for_drives = Some(Instant::now());
             kept.saw(drives.iter().map(|drive| (drive.letter, drive.volume.as_str())));
+            let_go = kept.let_go(&os::outside());
         }
         // (The folders skipped are known by their numbers: one out of what was shown may be in what is shown now.)
         if forgotten.elapsed() > FORGET_EVERY || shown_scope.as_ref().is_some_and(|shown| *shown != scope) {
@@ -739,7 +752,7 @@ fn follow() {
         let volumes = kept.volumes.clone();
         let out_on = |letter: char, path: &Path| out(path) || outside(&scope, &volumes, letter, path);
         let now = super::now_ms();
-        let mut changed = kept.age(now);
+        let mut changed = kept.age(now) | let_go;
         let mut folder_renamed = false;
         let mut more = false;
         for drive in &mut drives {
@@ -896,14 +909,16 @@ mod os {
         (0..26u8).filter(move |bit| mask & (1 << bit) != 0).map(|bit| (b'A' + bit) as char)
     }
 
-    /// The drive at `letter`, where it is one whose journal is followed: a fixed drive, NTFS or ReFS (removable ones
-    /// are not: most have no journal, and one held open could not be taken out safely). Its volume, its label, and
-    /// whether it is ReFS.
+    /// The drive at `letter`, where it is one whose journal is followed: one of the PC's own fixed drives, NTFS or
+    /// ReFS. Removable ones are not (most have no journal, and one held open could not be taken out safely), nor is a
+    /// drive plugged in from outside that Windows calls fixed (a USB hard drive: held open, it could not be taken out
+    /// safely either, and each file copied to it was opened again as it came, the drive read while it was being written).
+    /// Its volume, its label, and whether it is ReFS.
     fn followed(letter: char) -> Option<(String, String, bool)> {
         let root = HSTRING::from(format!("{letter}:\\"));
         unsafe {
             // (DRIVE_FIXED.)
-            if GetDriveTypeW(&root) != 3 {
+            if GetDriveTypeW(&root) != 3 || crate::drives::outside(letter) {
                 return None;
             }
             let (mut label, mut system) = ([0u16; 261], [0u16; 32]);
@@ -917,6 +932,11 @@ mod os {
             GetVolumeNameForVolumeMountPointW(&root, &mut volume).ok()?;
             Some((text(&volume), text(&label), system == "ReFS"))
         }
+    }
+
+    /// The letters of the drives plugged in from outside (see `drives::outside`).
+    pub fn outside() -> Vec<char> {
+        letters().filter(|&letter| crate::drives::outside(letter)).collect()
     }
 
     /// The drives whose journals are followed, as the settings offer them (none opened).
@@ -1382,6 +1402,25 @@ mod tests {
         let open = |drive: char, _: u128| Looked::At(PathBuf::from(format!(r"{drive}:\Documents\one.pdf")), now - 10, 5, 0);
         assert!(kept.retry(now, &places, &|drive, _| drive == 'E', open, |_| None));
         assert_eq!(kept.files.iter().map(|came| came.key.drive).collect::<Vec<_>>(), ['D']);
+    }
+
+    /// What was listed from a drive plugged in from outside is let go of, with what waits to be tried there and where
+    /// its journal was read up to; the PC's own drives' kept.
+    #[test]
+    fn lets_go_of_what_came_on_a_drive_from_outside() {
+        let now = 1_760_800_000_000;
+        let mut kept = Kept::default();
+        kept.files = vec![
+            Came { key: Key { drive: 'C', file: 1 }, ..come(1, r"C:\Users\a\Downloads\a.zip", now, 5, Kind::Archive) },
+            Came { key: Key { drive: 'G', file: 2 }, ..come(2, r"G:\bak\b.zip", now, 5, Kind::Archive) },
+        ];
+        kept.later = vec![('G', Change { file: 3, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, 0)];
+        kept.read = vec![('C', 1, 100), ('G', 2, 200)];
+        assert!(kept.let_go(&['G']));
+        assert_eq!(kept.files.iter().map(|came| came.key.drive).collect::<Vec<_>>(), ['C']);
+        assert!(kept.later.is_empty());
+        assert_eq!(kept.read, [('C', 1, 100)]);
+        assert!(!kept.let_go(&['G']));
     }
 
     /// A file come, as the bursts' rule takes it: its folder, its name, when it came (ms), how large it is, what it is.
