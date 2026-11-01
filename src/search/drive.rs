@@ -441,7 +441,8 @@ mod tests {
         let held = Drive::open(&root).unwrap();
         let (veto, why) = eject(device);
         println!("held as before: veto {veto} ({why})");
-        assert_eq!(veto, windows::Win32::Devices::DeviceAndDriverInstallation::PNP_VetoOutstandingOpen.0, "held, it could not be taken out, for what was open");
+        // (Refused by its volume, which cannot be let go of with a folder of it open: PNP_VetoDevice, naming it.)
+        assert!(veto != 0 && why.contains("STORAGE\\Volume"), "held, it could not be taken out, for what was open");
         drop(held);
         // Followed now: let go of as Windows asks, and taken out.
         let mut drive = Drive::open(&root).unwrap();
@@ -449,6 +450,51 @@ mod tests {
         let (veto, why) = eject(device);
         println!("followed: veto {veto} ({why}), let go of {}", drive.left());
         assert!(veto == 0 && drive.left());
+    }
+
+    /// A USB drive being listed and watched, as search follows one, can be taken out safely as Windows asks: its
+    /// listing and its watching end, and nothing more is opened of it:
+    /// `$env:GLANCE_EJECT="G"; cargo test --lib -- --ignored a_usb_drive_listed_and_watched_can_be_taken_out --nocapture`
+    /// (it is taken out: put it in again after).
+    #[test]
+    #[ignore = "takes a drive put in out"]
+    fn a_usb_drive_listed_and_watched_can_be_taken_out() {
+        let letter = std::env::var("GLANCE_EJECT").expect("GLANCE_EJECT: the drive's letter");
+        let root = format!("{letter}:\\");
+        let device = removable_device(&letter).expect("a removable device under the drive");
+        let mut drive = Drive::open(&root).unwrap();
+        assert!(drive.hear_removal());
+        let drive = std::sync::Arc::new(drive);
+        let (tell, _told) = std::sync::mpsc::channel();
+        let (watch_ended, watching) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let drive = drive.clone();
+            move || {
+                super::super::watch::watch(&drive, tell);
+                let _ = watch_ended.send(());
+            }
+        });
+        // Its root listed over and over, as a round of listing does, till it can be no more.
+        let (list_ended, listing) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let drive = drive.clone();
+            let root = std::path::PathBuf::from(&root);
+            move || {
+                let mut buffer = buffer();
+                let mut times = 0u32;
+                while !matches!(drive.list(&Folder::Path(root.clone()), &mut buffer), Listing::Failed(_)) {
+                    times += 1;
+                }
+                let _ = list_ended.send(times);
+            }
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let (veto, why) = eject(device);
+        println!("listed and watched: veto {veto} ({why}), let go of {}", drive.left());
+        assert!(veto == 0 && drive.left());
+        let times = listing.recv_timeout(Duration::from_secs(5)).expect("its listing ended");
+        println!("listed {times} times before");
+        assert!(times > 0 && watching.recv_timeout(Duration::from_secs(5)).is_ok(), "its watching ended");
     }
 
     /// The device that is taken out with the drive at `letter`: the nearest above its disk that Windows may remove.
