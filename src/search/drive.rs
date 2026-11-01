@@ -378,7 +378,7 @@ pub fn buffer() -> Vec<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Let go of (as Windows asks to take the drive out), all held of a drive is closed: its root, once the listing
@@ -498,7 +498,7 @@ mod tests {
     }
 
     /// The device that is taken out with the drive at `letter`: the nearest above its disk that Windows may remove.
-    fn removable_device(letter: &str) -> Option<u32> {
+    pub(crate) fn removable_device(letter: &str) -> Option<u32> {
         use windows::Win32::Devices::DeviceAndDriverInstallation::*;
         use windows::Win32::System::Ioctl::{GUID_DEVINTERFACE_DISK, IOCTL_STORAGE_GET_DEVICE_NUMBER, STORAGE_DEVICE_NUMBER};
         let number = |path: &HSTRING| unsafe {
@@ -550,7 +550,7 @@ mod tests {
     }
 
     /// `device` asked to be taken out: why it was refused (PNP_VETO_TYPE, 0: it was not), and by what.
-    fn eject(device: u32) -> (i32, String) {
+    pub(crate) fn eject(device: u32) -> (i32, String) {
         use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_Request_Device_EjectW, PNP_VETO_TYPE};
         let mut veto = PNP_VETO_TYPE::default();
         let mut name = [0u16; 260];

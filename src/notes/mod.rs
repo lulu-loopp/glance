@@ -12,6 +12,7 @@ pub mod store;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use windows::Win32::Devices::DeviceAndDriverInstallation::HCMNOTIFICATION;
 
 pub use store::{Colour, Folder, Note, Written};
 
@@ -234,7 +235,7 @@ fn follow() {
             }
         }
         // Read again as the folder changes (by Glance, another program, a sync), or as Glance asks.
-        if let Some(watch) = &watched {
+        if let Some(watch) = &mut watched {
             if !watch.wait() {
                 watched = None;
             }
@@ -249,13 +250,93 @@ fn follow() {
 /// What the system tells of a folder's changes: the notes' folder's (a note come, gone, renamed or written), or one
 /// above it while it is not there (a folder come in it, which may be it, or on the way to it). The notes' folder
 /// followed, the folders in the one above it are followed too: the system tells of what changes in a folder, not of
-/// the folder itself (renamed, or gone).
+/// the folder itself (renamed, or gone). Its drive asked to be taken out (a USB drive, see `removal`), all it holds
+/// of it is let go of, for Windows to take it out.
 struct Watch {
     path: PathBuf,
     /// Which folder it is (see `elevation::folder_id`).
     id: Option<(u32, u64)>,
     changed: windows::Win32::Foundation::HANDLE,
     above: Option<windows::Win32::Foundation::HANDLE>,
+    /// The folder held open to hear through as its drive is asked to be taken out, and how that is heard (none where
+    /// it cannot be), and what was heard.
+    held: Option<(windows::Win32::Foundation::HANDLE, HCMNOTIFICATION)>,
+    leaving: Box<Leaving>,
+    /// Whether what it holds was let go of.
+    let_go: bool,
+}
+// (Handles name what it holds: waited on and let go of from any thread.)
+unsafe impl Send for Watch {}
+
+/// How long Windows asking to take a followed folder's drive out waits for it to be let go of (by the thread following
+/// it, see `Watch::wait`), at most: one reading the folder's notes lets go as it is done.
+const LET_GO_WAIT: Duration = Duration::from_secs(5);
+
+/// What was heard of a followed folder's drive being taken out (see `removal`): what the thread following it waits on
+/// besides the folder (set, it lets go), and how far that went.
+struct Leaving {
+    asked: Event,
+    stage: Mutex<Stage>,
+    moved: std::sync::Condvar,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Stage {
+    Held,
+    /// Asked to be let go of (its drive to be taken out), and let go of.
+    Asked,
+    LetGo,
+    /// Not taken out after all (another program held it): followed again.
+    Stays,
+    /// Taken out, or about to be.
+    Gone,
+}
+
+impl Leaving {
+    /// Asked to let go, waited for that (see `LET_GO_WAIT`).
+    fn ask(&self) {
+        let mut stage = self.stage.lock().unwrap();
+        *stage = Stage::Asked;
+        unsafe {
+            let _ = windows::Win32::System::Threading::SetEvent(self.asked.0);
+        }
+        drop(self.moved.wait_timeout_while(stage, LET_GO_WAIT, |stage| *stage == Stage::Asked).unwrap());
+    }
+
+    /// Told it went `to` that.
+    fn to(&self, to: Stage) {
+        *self.stage.lock().unwrap() = to;
+        self.moved.notify_all();
+    }
+}
+
+/// Windows telling of a followed folder's drive (`context` its `Leaving`): asked to take it out, the thread following it
+/// lets go of all it holds of it (Windows waits for that, then takes it out, see `Watch::wait`); the asking failed
+/// (another program held it), it is followed again; taken out (asked first or not), it is let go of likewise, and the
+/// folder looked for till it comes again.
+unsafe extern "system" fn removal(
+    _: HCMNOTIFICATION,
+    context: *const core::ffi::c_void,
+    action: windows::Win32::Devices::DeviceAndDriverInstallation::CM_NOTIFY_ACTION,
+    _: *const windows::Win32::Devices::DeviceAndDriverInstallation::CM_NOTIFY_EVENT_DATA,
+    _: u32,
+) -> u32 {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_NOTIFY_ACTION_DEVICEQUERYREMOVE, CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED, CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE, CM_NOTIFY_ACTION_DEVICEREMOVEPENDING};
+    let leaving = unsafe { &*(context as *const Leaving) };
+    match action {
+        CM_NOTIFY_ACTION_DEVICEQUERYREMOVE => leaving.ask(),
+        CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED => leaving.to(Stage::Stays),
+        CM_NOTIFY_ACTION_DEVICEREMOVEPENDING | CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE => {
+            // (Taken out unasked: let go of first.)
+            let unasked = matches!(*leaving.stage.lock().unwrap(), Stage::Held | Stage::Stays);
+            if unasked {
+                leaving.ask();
+            }
+            leaving.to(Stage::Gone);
+        }
+        _ => {}
+    }
+    0
 }
 
 impl Watch {
@@ -267,7 +348,10 @@ impl Watch {
         let wide = windows::core::HSTRING::from(path.as_os_str());
         let changed = unsafe { FindFirstChangeNotificationW(&wide, false, what) }.ok()?;
         let above = path.parent().filter(|_| path == notes).and_then(|above| unsafe { FindFirstChangeNotificationW(&windows::core::HSTRING::from(above.as_os_str()), false, FILE_NOTIFY_CHANGE_DIR_NAME) }.ok());
-        Some(Watch { path, id, changed, above })
+        let asked = Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event"));
+        let leaving = Box::new(Leaving { asked, stage: Mutex::new(Stage::Held), moved: std::sync::Condvar::new() });
+        let held = hear_removal(&wide, &leaving);
+        Some(Watch { path, id, changed, above, held, leaving, let_go: false })
     }
 
     /// Whether it follows the folder at `path` now: that folder, not one renamed away with another made in its place.
@@ -275,26 +359,80 @@ impl Watch {
         self.path == path && self.id.is_some() && crate::elevation::folder_id(path) == self.id
     }
 
-    /// Till the folder changes, or Glance asks for it to be read again; whether it is still followed (followed again
-    /// before it is read, see `follow`: one gone, or renamed and another made in its place, is not).
-    fn wait(&self) -> bool {
+    /// Till the folder changes, or Glance asks for it to be read again, or its drive is asked to be taken out; whether
+    /// it is still followed (followed again before it is read, see `follow`: one gone, or renamed and another made in
+    /// its place, is not). Its drive asked to be taken out: let go of, and not followed, once Windows has taken it out
+    /// or given up (it stays, to be followed again).
+    fn wait(&mut self) -> bool {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
-        let mut handles = vec![again().0, self.changed];
+        let mut handles = vec![again().0, self.leaving.asked.0, self.changed];
         handles.extend(self.above);
         let came = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
         // (Asked again: followed as it was. A folder changed: followed on as long as it can be.)
         match came.0.checked_sub(WAIT_OBJECT_0.0).map(|at| at as usize) {
-            Some(at) if (1..handles.len()).contains(&at) => unsafe { windows::Win32::Storage::FileSystem::FindNextChangeNotification(handles[at]) }.is_ok(),
+            Some(1) => {
+                self.let_go();
+                let stage = self.leaving.stage.lock().unwrap();
+                drop(self.leaving.moved.wait_while(stage, |stage| matches!(stage, Stage::Asked | Stage::LetGo)).unwrap());
+                false
+            }
+            Some(at) if (2..handles.len()).contains(&at) => unsafe { windows::Win32::Storage::FileSystem::FindNextChangeNotification(handles[at]) }.is_ok(),
             _ => true,
+        }
+    }
+
+    /// All it holds of the folder let go of (its drive to be taken out, or it is followed no more), told so.
+    fn let_go(&mut self) {
+        if !self.let_go {
+            self.let_go = true;
+            for changed in std::iter::once(self.changed).chain(self.above) {
+                let _ = unsafe { windows::Win32::Storage::FileSystem::FindCloseChangeNotification(changed) };
+            }
+            if let Some((folder, _)) = self.held {
+                let _ = unsafe { windows::Win32::Foundation::CloseHandle(folder) };
+            }
+        }
+        let mut stage = self.leaving.stage.lock().unwrap();
+        if *stage == Stage::Asked {
+            *stage = Stage::LetGo;
+            self.leaving.moved.notify_all();
         }
     }
 }
 
+/// The folder at `path` held open for Windows to tell `leaving` through (see `removal`) as its drive is asked to be
+/// taken out, and how that is heard. None where it cannot be (a folder on the network).
+fn hear_removal(path: &windows::core::HSTRING, leaving: &Leaving) -> Option<(windows::Win32::Foundation::HANDLE, HCMNOTIFICATION)> {
+    use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_Register_Notification, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0, CM_NOTIFY_FILTER_0_1, CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE, CR_SUCCESS};
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    let folder = unsafe { CreateFileW(path, FILE_LIST_DIRECTORY.0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.ok()?;
+    let filter = CM_NOTIFY_FILTER {
+        cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
+        FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
+        u: CM_NOTIFY_FILTER_0 { DeviceHandle: CM_NOTIFY_FILTER_0_1 { hTarget: folder } },
+        ..Default::default()
+    };
+    let mut heard = HCMNOTIFICATION::default();
+    let context = leaving as *const Leaving as *const core::ffi::c_void;
+    if unsafe { CM_Register_Notification(&filter, Some(context), Some(removal), &mut heard) } != CR_SUCCESS {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(folder) };
+        return None;
+    }
+    Some((folder, heard))
+}
+
 impl Drop for Watch {
     fn drop(&mut self) {
-        for changed in std::iter::once(self.changed).chain(self.above) {
-            let _ = unsafe { windows::Win32::Storage::FileSystem::FindCloseChangeNotification(changed) };
+        // (Let go of first: a telling under way waits for that, and unregistering waits for a telling under way.)
+        self.let_go();
+        if let Some((_, heard)) = self.held {
+            unsafe {
+                let _ = windows::Win32::Devices::DeviceAndDriverInstallation::CM_Unregister_Notification(heard);
+            }
+        }
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.leaving.asked.0);
         }
     }
 }
@@ -312,7 +450,7 @@ mod tests {
         let notes = root.join("Glance Notes");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        let told_within = |watch: &Watch, change: Box<dyn FnOnce() + Send>| {
+        let told_within = |watch: &mut Watch, change: Box<dyn FnOnce() + Send>| {
             let changing = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(150));
                 change();
@@ -323,20 +461,20 @@ mod tests {
             began.elapsed()
         };
         // Not there: the folder above it followed, for it to come.
-        let above = Watch::start(root.clone(), &notes).expect("followed");
-        let made = told_within(&above, Box::new({
+        let mut above = Watch::start(root.clone(), &notes).expect("followed");
+        let made = told_within(&mut above, Box::new({
             let notes = notes.clone();
             move || std::fs::create_dir(&notes).unwrap()
         }));
         // Come: followed itself, a note written into it told of.
-        let watch = Watch::start(notes.clone(), &notes).expect("followed");
-        let written = told_within(&watch, Box::new({
+        let mut watch = Watch::start(notes.clone(), &notes).expect("followed");
+        let written = told_within(&mut watch, Box::new({
             let notes = notes.clone();
             move || std::fs::write(notes.join("a.md"), "a note").unwrap()
         }));
         assert!(watch.follows(&notes));
         // Renamed away and another made in its place: told of, and not taken for it (followed afresh, see `follow`).
-        told_within(&watch, Box::new({
+        told_within(&mut watch, Box::new({
             let (notes, old) = (notes.clone(), root.join("Glance Notes before"));
             move || {
                 std::fs::rename(&notes, &old).unwrap();
@@ -361,7 +499,7 @@ mod tests {
         let elsewhere = root.join("Old Notes");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&notes).unwrap();
-        let watch = Watch::start(notes.clone(), &notes).expect("followed");
+        let mut watch = Watch::start(notes.clone(), &notes).expect("followed");
         let changing = std::thread::spawn({
             let (notes, elsewhere) = (notes.clone(), elsewhere.clone());
             move || {
@@ -379,6 +517,74 @@ mod tests {
         drop(watch);
         let _ = std::fs::remove_dir_all(&root);
         assert!(told >= Duration::from_millis(100) && told < Duration::from_secs(2), "{told:?}");
+    }
+
+    /// Windows asking to take the folder's drive out (as `removal` hears it) has all it holds of it let go of before
+    /// the asking is answered, by the thread following it, which then waits: the asking failed, it is followed again;
+    /// taken out, not followed. Taken out unasked (pulled out), it is let go of likewise.
+    #[test]
+    fn the_folder_is_let_go_of_as_its_drive_is_taken_out() {
+        use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_NOTIFY_ACTION, CM_NOTIFY_ACTION_DEVICEQUERYREMOVE, CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED, CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE};
+        let notes = std::env::temp_dir().join(format!("glance-notes-taken-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&notes);
+        std::fs::create_dir_all(&notes).unwrap();
+        let tell = |leaving: usize, action: CM_NOTIFY_ACTION| unsafe { removal(HCMNOTIFICATION::default(), leaving as *const core::ffi::c_void, action, std::ptr::null(), 0) };
+        // (Followed on a thread of its own, as `follow` does, till it is followed no more: whether it let go then.
+        // Asked to read again meanwhile, by another test, it waits again.)
+        let followed = |mut watch: Watch| {
+            let (ended, end) = std::sync::mpsc::channel();
+            let leaving = &*watch.leaving as *const Leaving as usize;
+            std::thread::spawn(move || {
+                while watch.wait() {}
+                let _ = ended.send(watch.let_go);
+                drop(watch);
+            });
+            (leaving, end)
+        };
+        for (asked, then) in [(true, CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED), (true, CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE), (false, CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE)] {
+            let watch = Watch::start(notes.clone(), &notes).expect("followed");
+            assert!(watch.held.is_some(), "its drive's removal heard");
+            let (leaving, end) = followed(watch);
+            std::thread::sleep(Duration::from_millis(100));
+            let began = std::time::Instant::now();
+            if asked {
+                tell(leaving, CM_NOTIFY_ACTION_DEVICEQUERYREMOVE);
+                let stage = unsafe { *(*(leaving as *const Leaving)).stage.lock().unwrap() };
+                assert_eq!(stage, Stage::LetGo, "let go of as it was asked, not after waiting it out");
+                assert!(began.elapsed() < LET_GO_WAIT);
+                // (Not followed again till Windows has said how it went.)
+                assert!(end.recv_timeout(Duration::from_millis(200)).is_err());
+            }
+            tell(leaving, then);
+            assert!(end.recv_timeout(Duration::from_secs(2)).expect("followed no more"), "let go of");
+            assert!(began.elapsed() < LET_GO_WAIT);
+        }
+        let _ = std::fs::remove_dir_all(&notes);
+    }
+
+    /// A USB drive with the notes' folder on it, followed, can be taken out safely as Windows asks (it was refused, the
+    /// folder held open):
+    /// `$env:GLANCE_EJECT="G"; cargo test --lib -- --ignored a_usb_drive_with_the_notes_can_be_taken_out --nocapture`
+    /// (its root followed as the notes' folder, nothing written to it; it is taken out: put it in again after).
+    #[test]
+    #[ignore = "takes a drive put in out"]
+    fn a_usb_drive_with_the_notes_can_be_taken_out() {
+        use crate::search::drive::tests::{eject, removable_device};
+        let letter = std::env::var("GLANCE_EJECT").expect("GLANCE_EJECT: the drive's letter");
+        let root = PathBuf::from(format!("{letter}:\\"));
+        let device = removable_device(&letter).expect("a removable device under the drive");
+        let mut watch = Watch::start(root.clone(), &root).expect("followed");
+        assert!(watch.held.is_some(), "its drive's removal heard");
+        let (ended, end) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while watch.wait() {}
+            let _ = ended.send(());
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let (veto, why) = eject(device);
+        println!("notes followed: veto {veto} ({why})");
+        assert_eq!(veto, 0, "taken out");
+        assert!(end.recv_timeout(Duration::from_secs(5)).is_ok(), "followed no more");
     }
 
     /// A conflict's copy known by its name, in either language, a second one numbered; a note merely about conflicts
