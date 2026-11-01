@@ -138,6 +138,9 @@ impl Pane {
     /// The previewer made for `path` (see `made`) shown in it, from now on, in place of the one there was.
     pub fn take(&mut self, path: &Path) {
         self.shown = Some(path.to_path_buf());
+        // (Its thread lets go of the one there was, hiding it, laid nowhere: laid and shown again as it is next shown.)
+        self.up = false;
+        self.at = RECT::default();
         self.ask(Do::Take);
     }
 
@@ -489,9 +492,9 @@ mod tests {
         assert_eq!(previewer(Path::new(r"C:\a\Report.PDF")), previewer(Path::new(r"C:\a\report.pdf")));
     }
 
-    /// A previewer is made on the pane's thread, its window there, the window it is over told as it is made, what it
-    /// shows in the pane's window (left hidden here: nothing shows on the screen); the pane gone, its window and its
-    /// thread go.
+    /// A previewer is made on the pane's thread, its window there, the window it is over told as it is made; taken and
+    /// shown (far off the screen here: nothing shows on it), what it shows covers the pane's window (it was drawn none
+    /// large, laid where nothing was); the pane gone, its window and its thread go.
     #[test]
     fn a_previewer_is_made_on_the_pane_s_thread() {
         use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PeekMessageW, WINDOW_EX_STYLE, PM_REMOVE};
@@ -506,7 +509,7 @@ mod tests {
         let host = pane.host();
         let thread = |window: HWND| unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(window, None) };
         assert_ne!(thread(host), unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }, "its window on its own thread");
-        let at = RECT { left: 100, top: 100, right: 500, bottom: 400 };
+        let at = RECT { left: -20000, top: -20000, right: -19600, bottom: -19700 };
         pane.lay(at, 0);
         pane.make(Wanted { path: path.clone(), previewer, size: (400, 300), colours: Colours { ground: Color::hex(0xFFFFFF, 1.0), text: Color::hex(0x000000, 1.0) } });
         // (Told as it is made: this thread's messages looked at meanwhile.)
@@ -526,12 +529,18 @@ mod tests {
         };
         assert_eq!(made, (path.clone(), true));
         pane.take(&path);
+        pane.show_at(at, 0);
         assert_eq!(pane.shows(), Some(path.as_path()));
+        let size = |window: HWND| {
+            let mut rect = RECT::default();
+            let _ = unsafe { GetWindowRect(window, &mut rect) };
+            (rect.right - rect.left, rect.bottom - rect.top)
+        };
         let shown = (0..250).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(20));
-            unsafe { GetWindow(host, GW_CHILD) }.is_ok()
+            unsafe { GetWindow(host, GW_CHILD) }.is_ok_and(|child| size(child) == (400, 300))
         });
-        assert!(shown, "what it shows in its window");
+        assert!(shown, "what it shows covering its window: {:?}", unsafe { GetWindow(host, GW_CHILD) }.ok().map(size));
         drop(pane);
         let gone = (0..250).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(20));

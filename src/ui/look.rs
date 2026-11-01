@@ -1489,7 +1489,8 @@ impl Looker {
     fn shown_path(&self) -> Option<&Path> {
         match self.inside {
             Some(member) => Some(self.members()?.get(member)?.path.as_path()),
-            None => match &self.items[self.at].shows {
+            // (None once it is gone: what was asked for it may still be told after.)
+            None => match &self.items.get(self.at)?.shows {
                 Shows::File(path) => Some(path),
                 _ => None,
             },
