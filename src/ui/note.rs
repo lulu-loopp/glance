@@ -36,6 +36,10 @@ const BUTTON_TOP: f32 = 12.0;
 const BUTTON_IN: f32 = 16.0;
 /// How long after the last key a note is kept.
 pub const KEEP_AFTER_MS: u32 = 600;
+/// How often a keeping under way is looked at (see `Writing::keep_soon`), and how long after one failed it is tried
+/// again.
+pub const KEEP_LOOK_MS: u32 = 100;
+pub const KEEP_AGAIN_MS: u32 = 5000;
 
 /// `color` as Windows' GDI writes one.
 fn colorref(color: Color) -> COLORREF {
@@ -808,11 +812,52 @@ fn clipboard_pasted(owner: HWND) -> Option<crate::notes::edit::Pasted> {
     written.filter(|written| !written.text.is_empty()).or_else(|| text.map(plain))
 }
 
+/// How keeping a note on a thread of its own goes (see `Writing::keep_soon`): all written is kept, it is under way, or
+/// it failed (said so).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Keeping {
+    Kept,
+    Under,
+    Failed,
+}
+
+/// A note's file as read: its words, and its stamp.
+type Read = (String, crate::notes::store::Stamp);
+
+/// A keeping under way: what it tells as it is done (see `kept`), and how many changes in the words it keeps were.
+struct Under {
+    told: std::sync::mpsc::Receiver<(String, std::io::Result<crate::notes::Written>)>,
+    edits: u64,
+}
+
+/// The note `name` in `folder` (none: a new one) kept as `text` (see `notes::Folder::write`), its file as last read or
+/// written here `stamp`: a new one named by its title as it is first kept (in `lang` where it has none), of `colour`,
+/// one changed outside meanwhile kept apart. The name it is kept under, and how that went.
+fn kept(folder: &crate::notes::Folder, name: Option<String>, text: String, colour: crate::notes::Colour, stamp: Option<crate::notes::store::Stamp>, lang: Lang) -> (String, std::io::Result<crate::notes::Written>) {
+    let name = match name {
+        Some(name) => name,
+        None => {
+            let title = crate::notes::Note { name: String::new(), text: text.clone(), colour, stamp: Default::default() }.title();
+            let today = super::text::Local::at(crate::station::now_ms());
+            let named = folder.name_for(&title, &match lang {
+                Lang::Zh => format!("便签 {}月{}日", today.month, today.day),
+                Lang::En => format!("Note {}-{}", today.month, today.day),
+            });
+            let _ = folder.colour(&named, colour);
+            named
+        }
+    };
+    let written = folder.write(&name, &text, stamp);
+    (name, written)
+}
+
 /// A note as it is written: its file's name (none till it is first kept), its file as last read or written here, its
 /// colour, its words' box, whether what is written is not yet kept, and what was last said of keeping it.
 pub struct Writing {
     /// The folder it is in (kept to: the folder chosen in the settings changed meanwhile, it is kept where it was read).
     pub folder: std::path::PathBuf,
+    /// What a conflict's copy of it is called after its name, as its folder said when it was opened.
+    apart: &'static str,
     pub name: Option<String>,
     stamp: Option<crate::notes::store::Stamp>,
     pub colour: crate::notes::Colour,
@@ -822,6 +867,11 @@ pub struct Writing {
     palette: Palette,
     pub unkept: bool,
     pub said: Option<String>,
+    /// How many times its words were changed (see `written`), its keeping under way (see `keep_soon`), and its file
+    /// being read (see `read_outside`) with its stamp as that began.
+    edits: u64,
+    keeping: Option<Under>,
+    reading: Option<(std::sync::mpsc::Receiver<Option<Read>>, Option<crate::notes::store::Stamp>)>,
     /// How its Markdown shows, as it was last dressed (see `notes::markdown::Shown`), the same for its box's messages
     /// (see `Reads`).
     shown: crate::notes::markdown::Shown,
@@ -873,6 +923,7 @@ impl Writing {
         let editor = Rc::new(editor);
         let mut writing = Writing {
             folder: folder.path.clone(),
+            apart: folder.apart,
             name,
             written_ms: read.as_ref().map_or_else(crate::station::now_ms, |(_, stamp)| stamp.written_ms),
             stamp: read.map(|(_, stamp)| stamp),
@@ -881,6 +932,9 @@ impl Writing {
             palette,
             unkept: false,
             said: None,
+            edits: 0,
+            keeping: None,
+            reading: None,
             shown: Default::default(),
             source: false,
             laid: Vec::new(),
@@ -1623,37 +1677,78 @@ impl Writing {
         if changed {
             self.unkept = true;
             self.said = None;
+            self.edits += 1;
         }
         changed
     }
 
-    /// Kept in its file, where what is written is not kept yet (see `notes::Folder::write`): a new one named by its title
-    /// as it is first kept (an empty one never), one changed outside meanwhile kept apart (said so). Whether all that was
-    /// written is kept now (a failure leaves it not kept, saying so).
+    /// Kept in its file now, where what is written is not kept yet (see `kept`), a keeping under way on its thread (see
+    /// `keep_soon`) waited for first. Whether all that was written is kept now (a failure leaves it not kept, saying so).
     pub fn keep(&mut self, lang: Lang) -> bool {
-        if !self.unkept {
+        if let Some(keeping) = self.keeping.take() {
+            let told = keeping.told.recv().ok();
+            if let Some(told) = told {
+                let _ = self.took_kept(told, keeping.edits, lang);
+            }
+        }
+        if self.kept_already() {
             return true;
         }
-        let text = self.editor.text();
-        let folder = crate::notes::folder_at(self.folder.clone());
-        let name = match &self.name {
-            Some(name) => name.clone(),
-            None if text.trim().is_empty() => {
-                self.unkept = false;
-                return true;
+        let edits = self.edits;
+        let told = kept(&self.store(), self.name.clone(), self.editor.text(), self.colour, self.stamp, lang);
+        self.took_kept(told, edits, lang) && !self.unkept
+    }
+
+    /// Kept in its file on a thread of its own (a drive slow to answer, one on the network gone, never holds the
+    /// window's thread), where what is written is not kept yet: how that goes, as it is looked at again. One keeping
+    /// under way at a time: what is written meanwhile is kept by the next, as this is looked at again once it is done.
+    pub fn keep_soon(&mut self, lang: Lang) -> Keeping {
+        if let Some(keeping) = self.keeping.take() {
+            match keeping.told.try_recv() {
+                Ok(told) => {
+                    if !self.took_kept(told, keeping.edits, lang) {
+                        return Keeping::Failed;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.keeping = Some(keeping);
+                    return Keeping::Under;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Keeping::Failed,
             }
-            None => {
-                let title = crate::notes::Note { name: String::new(), text: text.clone(), colour: self.colour, stamp: Default::default() }.title();
-                let today = super::text::Local::at(crate::station::now_ms());
-                let named = folder.name_for(&title, &match lang {
-                    Lang::Zh => format!("便签 {}月{}日", today.month, today.day),
-                    Lang::En => format!("Note {}-{}", today.month, today.day),
-                });
-                let _ = folder.colour(&named, self.colour);
-                named
-            }
-        };
-        match folder.write(&name, &text, self.stamp) {
+        }
+        if self.kept_already() {
+            return Keeping::Kept;
+        }
+        let (folder, name, text, colour, stamp) = (self.store(), self.name.clone(), self.editor.text(), self.colour, self.stamp);
+        let (tell, told) = std::sync::mpsc::channel();
+        let started = std::thread::Builder::new().name("glance: note kept".into()).spawn(move || {
+            let _ = tell.send(kept(&folder, name, text, colour, stamp, lang));
+        });
+        if started.is_err() {
+            return Keeping::Failed;
+        }
+        self.keeping = Some(Under { told, edits: self.edits });
+        Keeping::Under
+    }
+
+    /// Its folder, to be kept in and read from.
+    fn store(&self) -> crate::notes::Folder {
+        crate::notes::Folder { path: self.folder.clone(), apart: self.apart }
+    }
+
+    /// Whether all written is kept: nothing written since, or a new note empty (never kept, as it goes).
+    fn kept_already(&mut self) -> bool {
+        if self.unkept && self.name.is_none() && self.editor.text().trim().is_empty() {
+            self.unkept = false;
+        }
+        !self.unkept
+    }
+
+    /// What keeping it told (`told`, of its words as they were `edits` changes in) taken in: its name and stamp as
+    /// kept, kept apart said so, a failure said so. Not kept since, where its words changed after. Whether it was kept.
+    fn took_kept(&mut self, (name, written): (String, std::io::Result<crate::notes::Written>), edits: u64, lang: Lang) -> bool {
+        match written {
             Ok(crate::notes::Written::Done(stamp)) => {
                 self.name = Some(name);
                 self.stamp = Some(stamp);
@@ -1673,7 +1768,9 @@ impl Writing {
                 return false;
             }
         }
-        self.unkept = false;
+        if self.edits == edits {
+            self.unkept = false;
+        }
         crate::notes::read_again();
         true
     }
@@ -1694,10 +1791,30 @@ impl Writing {
     /// As its file is now, where that was changed outside and nothing written here waits to be kept (or is being
     /// composed): read again, what was chosen kept as far as the words go. (With something waiting, it is kept apart as it
     /// is kept: see `keep`. Deleted outside: left as it is, kept apart likewise.)
-    pub fn read_outside(&mut self) {
-        let Some((folder, name)) = self.to_read() else { return };
-        let Some((text, stamp)) = crate::notes::folder_at(folder).read(&name) else { return };
-        self.take_outside(&text, stamp);
+    /// Read on a thread of its own (a drive slow to answer, one on the network gone, never holds the window's thread),
+    /// one reading at a time: what the last one read taken in as this is next asked, and another begun. Whether what
+    /// was read was taken in.
+    pub fn read_outside(&mut self) -> bool {
+        let mut took = false;
+        if let Some((reading, from)) = self.reading.take() {
+            match reading.try_recv() {
+                // (Kept here, or read, since it began: what it read may be from before, not to be taken for now.)
+                Ok(Some((text, stamp))) if self.stamp == from => took = self.take_outside(&text, stamp),
+                Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.reading = Some((reading, from));
+                    return false;
+                }
+            }
+        }
+        let Some((_, name)) = self.to_read() else { return took };
+        let (tell, told) = std::sync::mpsc::channel();
+        let folder = self.store();
+        let started = std::thread::Builder::new().name("glance: note read".into()).spawn(move || {
+            let _ = tell.send(folder.read(&name));
+        });
+        self.reading = started.is_ok().then_some((told, self.stamp));
+        took
     }
 
     /// Where its file is to be read for a change made outside (its folder and its name), while it may be read again:
@@ -1710,10 +1827,10 @@ impl Writing {
     }
 
     /// Its file as read (`text`, as `stamp` says it was) taken in, where it changed since it was last read or kept, and
-    /// it may still be read again (read elsewhere meanwhile: see `to_read`).
-    pub fn take_outside(&mut self, text: &str, stamp: crate::notes::store::Stamp) {
+    /// it may still be read again (read elsewhere meanwhile: see `to_read`). Whether it was.
+    pub fn take_outside(&mut self, text: &str, stamp: crate::notes::store::Stamp) -> bool {
         if self.to_read().is_none() || self.stamp.is_some_and(|was| was.same(&stamp)) {
-            return;
+            return false;
         }
         // (A link being written there left: what it was for is written anew.)
         link::end(&self.link, link::Ending::Left);
@@ -1726,6 +1843,7 @@ impl Writing {
         self.stamp = Some(stamp);
         self.written_ms = stamp.written_ms;
         self.dress();
+        true
     }
 
     /// Whether the notes as last read show it as it is written here (kept, and read again since): drawn from them, it
@@ -2495,6 +2613,78 @@ mod tests {
         assert!(writing.pressing.get());
         answer(hwnd, WM_LBUTTONUP, WPARAM(0), at(words.right + 4, words.top + 2));
         assert!(!writing.pressing.get());
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A note is kept and read on threads of their own (a drive slow to answer holds no window's thread): kept as it
+    /// is looked at again once done, what is written meanwhile kept by the next. A reading begun before it was kept
+    /// is not taken for what it is now (its file as it was before).
+    #[test]
+    fn a_note_is_kept_and_read_on_threads_of_their_own() {
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WM_CHAR, WS_POPUP};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        let folder = std::env::temp_dir().join(format!("glance-note-kept-soon-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("k.md"), "甲").unwrap();
+        let hwnd = unsafe { CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WS_POPUP, 0, 0, 400, 300, None, None, None, None) }.unwrap();
+        let theme = super::Theme::new(super::Skin::Paper, false);
+        let mut writing = super::Writing::open(hwnd, super::words_box(0, 0, 400, 300, 1.0), &crate::notes::store::Folder { path: folder.clone(), apart: " (conflicted copy)" }, Some("k.md".into()), &theme, super::WORDS).unwrap();
+        let answer = writing.answer();
+        let typed = |writing: &mut super::Writing, text: &str| {
+            for c in text.encode_utf16() {
+                answer(hwnd, WM_CHAR, WPARAM(usize::from(c)), LPARAM(0));
+                writing.written();
+            }
+        };
+        let on_disk = || std::fs::read_to_string(folder.join("k.md")).unwrap();
+        let settled = |writing: &mut super::Writing| {
+            let mut looks = 0;
+            loop {
+                match writing.keep_soon(super::Lang::Zh) {
+                    super::Keeping::Under => looks += 1,
+                    done => return done,
+                }
+                assert!(looks < 500, "kept within five seconds");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        writing.editor.select((1, 1));
+        typed(&mut writing, "乙");
+        assert_eq!(writing.keep_soon(super::Lang::Zh), super::Keeping::Under);
+        // Written in while it is kept: not kept till the next is done.
+        typed(&mut writing, "丙");
+        let under = writing.keeping.take().unwrap();
+        let told = under.told.recv().unwrap();
+        assert!(writing.took_kept(told, under.edits, super::Lang::Zh));
+        assert_eq!(on_disk().trim_end(), "甲乙");
+        assert!(writing.unkept);
+        assert_eq!(settled(&mut writing), super::Keeping::Kept);
+        assert!(!writing.unkept);
+        assert_eq!(on_disk().trim_end(), "甲乙丙");
+        // Its file read as it was, kept since: what was read is not taken.
+        assert!(!writing.read_outside());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        typed(&mut writing, "丁");
+        assert!(writing.keep(super::Lang::Zh));
+        assert!(!writing.read_outside());
+        assert_eq!(writing.editor.words().trim_end(), "甲乙丙丁");
+        // Changed outside: read, and taken in.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::fs::write(folder.join("k.md"), "戊").unwrap();
+        let mut looks = 0;
+        while !writing.read_outside() {
+            looks += 1;
+            assert!(looks < 500, "read within five seconds");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(writing.editor.words().trim_end(), "戊");
         unsafe {
             let _ = DestroyWindow(hwnd);
         }

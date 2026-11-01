@@ -839,10 +839,8 @@ struct Widget {
     in_place: Option<InPlace>,
 }
 
-/// How often a note written in where it is looks at its file for a change made outside, and how long after keeping it
-/// failed it is tried again.
+/// How often a note written in where it is looks at its file for a change made outside.
 const READ_OUTSIDE: Duration = Duration::from_secs(1);
-const KEEP_AGAIN: Duration = Duration::from_secs(5);
 
 /// A note stuck on the desktop written in where it is, on its widget (see `ui::keys`, `ui::note::Writing`): its words
 /// in a box the text services write, placed where its card's are and drawn in the card's place (see
@@ -867,9 +865,6 @@ struct InPlace {
     /// When what was written is next kept, and its file next looked at (see `READ_OUTSIDE`).
     keep_at: Option<Instant>,
     read_at: Instant,
-    /// Its file being read on a thread of its own (a drive slow to answer, one on the network gone, never holds the
-    /// panel's thread): what it was found to be, told as it is read.
-    reading: Option<std::sync::mpsc::Receiver<Option<(String, crate::notes::store::Stamp)>>>,
     /// Since when the caret blinks (it shows at once as it moves, or as a key comes), and what was chosen then.
     blink_from: Instant,
     chosen: (i32, i32),
@@ -892,6 +887,17 @@ impl Drop for InPlace {
 }
 
 impl InPlace {
+    /// What was written kept on a thread of its own (see `Writing::keep_soon`): looked at again shortly while under way,
+    /// tried again a while after it failed.
+    fn keep_soon(&mut self, now: Instant) {
+        let after = |ms: u32| Some(now + Duration::from_millis(u64::from(ms)));
+        self.keep_at = match self.writing.keep_soon(self.lang) {
+            crate::ui::note::Keeping::Kept => None,
+            crate::ui::note::Keeping::Under => after(crate::ui::note::KEEP_LOOK_MS),
+            crate::ui::note::Keeping::Failed => after(crate::ui::note::KEEP_AGAIN_MS),
+        };
+    }
+
     /// Its menu's button, in its card's head (DIPs from its window's corner).
     fn menu_button(&self) -> (f32, f32, f32, f32) {
         crate::ui::note::button_at(0, (self.card.0, self.card.1, self.card.2))
@@ -2955,7 +2961,7 @@ impl Widget {
             let now = Instant::now();
             let chosen = writing.editor.selection();
             let hwnd = self.window.hwnd;
-            self.in_place = Some(InPlace { writing, number, name, hwnd, lang: crate::update::language(), taking: false, before: HWND::default(), clicks: Default::default(), selecting: false, menu_pressed: false, keep_at: None, read_at: now + READ_OUTSIDE, reading: None, blink_from: now, chosen, styled: (px, theme.skin, theme.dark), card });
+            self.in_place = Some(InPlace { writing, number, name, hwnd, lang: crate::update::language(), taking: false, before: HWND::default(), clicks: Default::default(), selecting: false, menu_pressed: false, keep_at: None, read_at: now + READ_OUTSIDE, blink_from: now, chosen, styled: (px, theme.skin, theme.dark), card });
         }
         self.take_keys();
         true
@@ -3001,7 +3007,7 @@ impl Widget {
         }
         let _ = in_place.writing.written();
         let now = Instant::now();
-        in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
+        in_place.keep_soon(now);
         let before = in_place.before;
         self.window.take_keys(false);
         if escaped && !before.is_invalid() && unsafe { IsWindow(Some(before)) }.as_bool() {
@@ -3019,33 +3025,16 @@ impl Widget {
             self.stop_writing(false);
         }
         let in_place = self.in_place.as_mut()?;
+        // (Kept on a thread of its own: see `InPlace::keep_soon`.)
         if in_place.keep_at.is_some_and(|at| now >= at) && !in_place.writing.answering() {
-            in_place.keep_at = (!in_place.writing.keep(in_place.lang)).then_some(now + KEEP_AGAIN);
+            in_place.keep_soon(now);
             self.next_frame = now;
         }
         // Its file read (on a thread of its own, one reading at a time), and what was read taken in.
-        if let Some(reading) = &in_place.reading {
-            match reading.try_recv() {
-                Ok(read) => {
-                    in_place.reading = None;
-                    if let Some((text, stamp)) = read {
-                        in_place.writing.take_outside(&text, stamp);
-                        self.next_frame = now;
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => in_place.reading = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-        }
         if in_place.taking && now >= in_place.read_at {
             in_place.read_at = now + READ_OUTSIDE;
-            if let (None, Some((folder, name))) = (&in_place.reading, in_place.writing.to_read()) {
-                let (told, reading) = std::sync::mpsc::channel();
-                let folder = crate::notes::folder_at(folder);
-                let started = std::thread::Builder::new().name("glance: note read".into()).spawn(move || {
-                    let _ = told.send(folder.read(&name));
-                });
-                in_place.reading = started.is_ok().then_some(reading);
+            if in_place.writing.read_outside() {
+                self.next_frame = now;
             }
         }
         if !in_place.taking && in_place.keep_at.is_none() && in_place.writing.read_as_written() {

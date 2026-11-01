@@ -806,7 +806,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     BLINK => beside.caret_on = !beside.caret_on,
                     KEEP => {
                         let _ = unsafe { KillTimer(Some(hwnd), KEEP) };
-                        let _ = beside.keep();
+                        beside.keep_soon();
                     }
                     FOLLOW => beside.read_outside(),
                     SHOW => {
@@ -1009,6 +1009,21 @@ impl Beside {
         if let Some(menu) = super::menu::Menu::open_at(items, self.menu_look(), at, false, false) {
             MENU.with(|held| *held.borrow_mut() = Some((menu, choices)));
         }
+    }
+
+    /// The note written kept in its file on a thread of its own (see `note::Writing::keep_soon`), its name told as it is
+    /// kept: looked at again shortly while that is under way, tried again a while after it failed.
+    fn keep_soon(&mut self) {
+        let lang = self.lang;
+        let Some(writing) = self.writing.as_mut() else { return };
+        let keeping = writing.keep_soon(lang);
+        *WRITING.lock().unwrap() = writing.name.clone();
+        let again = match keeping {
+            super::note::Keeping::Kept => return,
+            super::note::Keeping::Under => super::note::KEEP_LOOK_MS,
+            super::note::Keeping::Failed => super::note::KEEP_AGAIN_MS,
+        };
+        let _ = unsafe { SetTimer(Some(self.hwnd), KEEP, again, None) };
     }
 
     /// The note on the page as its file is now, where that was changed outside (see `note::Writing::read_outside`).
