@@ -285,8 +285,9 @@ fn read_on(device: &ID3D11Device, shared: &ID3D11Texture2D, size: (u32, u32)) ->
 }
 
 /// How loud the sound in the file at `path` is along it, in `parts` equal parts of its length: each part's loudest
-/// sample, made relative to the loudest of all (1). None where it cannot be read through (or holds no sound).
-pub fn loudness(path: &Path, parts: usize) -> Option<Vec<f32>> {
+/// sample, made relative to the loudest of all (1), read through while it is wanted still (`still`). None where it cannot
+/// be read through (or holds no sound), or it was wanted no more.
+pub fn loudness(path: &Path, parts: usize, still: &dyn Fn() -> bool) -> Option<Vec<f32>> {
     if !started() || parts == 0 {
         return None;
     }
@@ -306,6 +307,9 @@ pub fn loudness(path: &Path, parts: usize) -> Option<Vec<f32>> {
         }
         let mut peaks = vec![0f32; parts];
         loop {
+            if !still() {
+                return None;
+            }
             let (mut flags, mut time) = (0u32, 0i64);
             let mut sample = None;
             reader.ReadSample(audio, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)).ok()?;
@@ -360,7 +364,7 @@ mod tests {
         assert!(copied > 10 && player.video_size().is_some() && player.at() > 1.0);
         let sound = std::path::PathBuf::from(std::env::var("GLANCE_SOUND").unwrap());
         let start = std::time::Instant::now();
-        let loud = loudness(&sound, 400).unwrap();
+        let loud = loudness(&sound, 400, &|| true).unwrap();
         println!("sound read in {} ms, loudest parts {:?}", start.elapsed().as_millis(), &loud[..8]);
         assert_eq!(loud.len(), 400);
         assert!(loud.iter().any(|part| *part == 1.0));

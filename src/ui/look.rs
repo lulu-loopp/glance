@@ -137,10 +137,11 @@ static PLAYS: AtomicBool = AtomicBool::new(false);
 /// Whether its shortcut was wanted but another program had it as it was last taken (see `key_was_taken`).
 static TAKEN: AtomicBool = AtomicBool::new(false);
 
-/// Its messages: something asked, something read, a previewer wanted for what it shows (see `pane`).
+/// Its messages: something asked, something read, a previewer wanted for what it shows (see `pane`), and one made.
 const ASKED: u32 = WM_APP + 1;
 const LOADED: u32 = WM_APP + 2;
 const PANE: u32 = WM_APP + 3;
+const PANE_MADE: u32 = WM_APP + 5;
 /// What plays told something of itself (see `play::Player`): WPARAM what.
 const PLAYED: u32 = WM_APP + 4;
 /// Its timers: each frame while it moves; a look at the buttons pressed elsewhere, and at what changed.
@@ -463,10 +464,26 @@ static MEASURED: Mutex<Vec<(u64, usize, Seen)>> = Mutex::new(Vec::new());
 /// A thing's size as it is seen (px across, down).
 type Seen = (u32, u32);
 
+/// The look up now, by its number (see `Looker::number`; 0 while none is): what is read through for a look gone (or
+/// gone back into its tile) is left.
+static LOOKING: AtomicU64 = AtomicU64::new(0);
+
+/// A sound to be read through for how loud it is along it (see `hearing`): for which look, which thing (and which
+/// file of its group), its file, and what was read of it already.
+struct Hear {
+    number: u64,
+    at: usize,
+    member: Option<usize>,
+    path: PathBuf,
+    read: Read,
+}
+
 /// Things read as they are asked for, the latest first (those of a look gone left), each told to the window as it is.
 fn reading(asks: Receiver<Reading>, hwnd: isize) {
     // (The shell's picture makers expect a single-threaded apartment.)
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+    let (hears, heard) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("glance: look loudness".into()).spawn(move || hearing(heard, hwnd));
     let mut waiting: Vec<Reading> = Vec::new();
     loop {
         if waiting.is_empty() {
@@ -491,13 +508,34 @@ fn reading(asks: Receiver<Reading>, hwnd: isize) {
         let sound = matches!(read.body, Body::Played { sound: true, .. });
         READ.lock().unwrap().push((asked.number, asked.at, asked.member, read.clone()));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
-        // (A sound read through for how loud it is along it, after it shows: told again with that.)
-        if let (true, Shows::File(path), Read { body: Body::Played { picture, .. }, about }) = (sound, &asked.shows, read) {
-            if let Some(loudness) = play::loudness(path, LOUDNESS_PARTS) {
-                let read = Read { body: Body::Played { picture, sound: true, loudness: Some(loudness) }, about };
-                READ.lock().unwrap().push((asked.number, asked.at, asked.member, read));
-                let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
+        // (A sound read through for how loud it is along it, after it shows, on a thread of its own: see `hearing`.)
+        if let (true, Shows::File(path)) = (sound, &asked.shows) {
+            let _ = hears.send(Hear { number: asked.number, at: asked.at, member: asked.member, path: path.clone(), read });
+        }
+    }
+}
+
+/// Sounds read through for how loud they are along them, the latest asked first, each told to the window again with
+/// that as it is: not holding what else is read meanwhile (the thing next to it), and left as its look goes (a long
+/// one on a slow drive was read to its end, the drive held all along).
+fn hearing(asks: Receiver<Hear>, hwnd: isize) {
+    let mut waiting: Vec<Hear> = Vec::new();
+    loop {
+        if waiting.is_empty() {
+            match asks.recv() {
+                Ok(asked) => waiting.push(asked),
+                Err(_) => return,
             }
+        }
+        waiting.extend(asks.try_iter());
+        let looking = LOOKING.load(Ordering::Acquire);
+        waiting.retain(|asked| asked.number == looking);
+        let Some(Hear { number, at, member, path, read: Read { body: Body::Played { picture, .. }, about } }) = waiting.pop() else { continue };
+        let wanted = || LOOKING.load(Ordering::Acquire) == number;
+        if let Some(loudness) = play::loudness(&path, LOUDNESS_PARTS, &wanted) {
+            let read = Read { body: Body::Played { picture, sound: true, loudness: Some(loudness) }, about };
+            READ.lock().unwrap().push((number, at, member, read));
+            let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LOADED, WPARAM(0), LPARAM(0)) };
         }
     }
 }
@@ -1014,6 +1052,7 @@ impl Looker {
             self.drawn = None;
         }
         self.number += 1;
+        LOOKING.store(self.number, Ordering::Release);
         self.lang = crate::update::language();
         (self.skin, self.dark, self.frost) = (opening.skin, opening.dark, opening.frost);
         (self.monitor, self.work, self.scale) = (contact.monitor, contact.work, contact.scale);
@@ -1066,8 +1105,9 @@ impl Looker {
         }
         self.holding = None;
         let _ = unsafe { ReleaseCapture() };
-        // (Gone for what called it up at once: its keys its own again, as it goes.)
+        // (Gone for what called it up at once: its keys its own again, as it goes. What is read through for it left.)
         OWNER.store(0, Ordering::Release);
+        LOOKING.store(0, Ordering::Release);
         if let Some(tell) = self.tell {
             let _ = unsafe { PostMessageW(Some(HWND(self.owner as *mut _)), tell, WPARAM(usize::MAX), LPARAM(0)) };
         }
@@ -1136,6 +1176,7 @@ impl Looker {
         self.measured = carried(&self.items, std::mem::take(&mut self.measured), &items);
         // (What is being read is for the places as they were: asked again, where it is wanted, at theirs now.)
         self.number += 1;
+        LOOKING.store(self.number, Ordering::Release);
         self.asked = read.iter().map(Option::is_some).collect();
         self.member_asked = self.member_read.iter().map(Option::is_some).collect();
         self.read = read;
@@ -1757,7 +1798,7 @@ impl Looker {
             return;
         };
         if self.pane.is_none() {
-            self.pane = pane::Pane::new(self.hwnd);
+            self.pane = pane::Pane::new(self.hwnd, PANE_MADE);
         }
         let (at, radius) = (self.body_on_screen(shape), (self.body_radius() * self.scale).round() as i32);
         let Some(pane) = &mut self.pane else { return };
@@ -1769,34 +1810,38 @@ impl Looker {
         }
     }
 
-    /// The previewer to be made for what it shows, where one is still wanted (the one it had let go of), the body's size.
-    fn pane_wanted(&mut self) -> Option<pane::Wanted> {
+    /// The previewer for what it shows made (see `pane::Pane::make`), where one is still wanted (the one it had let go
+    /// of), the body's size.
+    fn make_pane(&mut self) {
         let wanted = self.live().filter(|(path, _)| self.pane.as_ref().is_some_and(|pane| pane.shows() != Some(path.as_path())));
         let Some((path, previewer)) = wanted else {
             self.pane_making = false;
-            return None;
+            return;
         };
         let at = self.body_on_screen(self.shape(Instant::now()));
         let ground = if self.dark { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
         let colours = pane::Colours { ground: over(self.colours(false).sheet, ground), text: Theme::new(self.skin, self.dark).text };
         let radius = (self.body_radius() * self.scale).round() as i32;
-        let pane = self.pane.as_mut()?;
+        let Some(pane) = self.pane.as_mut() else {
+            self.pane_making = false;
+            return;
+        };
         pane.unload();
         pane.lay(at, radius);
-        Some(pane::Wanted { host: pane.host(), path, previewer, size: (at.right - at.left, at.bottom - at.top), colours })
+        pane.make(pane::Wanted { path, previewer, size: (at.right - at.left, at.bottom - at.top), colours });
     }
 
-    /// The previewer made for the file at `path` (see `pane::load`) shown, where it is still wanted. One that could not
-    /// be made: the thing shown as it is without it (its picture, else what it is).
-    fn pane_made(&mut self, path: PathBuf, made: windows::core::Result<windows::Win32::UI::Shell::IPreviewHandler>) {
+    /// The previewer made for what it showed (see `make_pane`) shown, where it is still wanted. One that could not be
+    /// made: the thing shown as it is without it (its picture, else what it is).
+    fn pane_made(&mut self) {
+        let Some((path, made)) = self.pane.as_ref().and_then(pane::Pane::made) else { return };
         self.pane_making = false;
         let wanted = self.live().is_some_and(|(live, _)| live == path);
         match (made, self.pane.as_mut()) {
-            (Ok(handler), Some(pane)) if wanted => pane.took(&path, handler),
-            (Ok(handler), _) => unsafe {
-                let _ = handler.Unload();
-            },
-            (Err(_), _) => {
+            (true, Some(pane)) if wanted => pane.take(&path),
+            (true, Some(pane)) => pane.leave(),
+            (true, None) => {}
+            (false, _) => {
                 let shown = self.shown_path() == Some(path.as_path());
                 let read = match self.inside {
                     Some(member) => self.member_read.get_mut(member),
@@ -3023,20 +3068,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(Looker::loaded);
             LRESULT(0)
         }
-        // (Made with its state let go of: the window's thread keeps handling what it is sent while a previewer is made.)
         PLAYED => {
             with(|looker| looker.played(wparam.0));
             LRESULT(0)
         }
         PANE => {
-            if let Some(wanted) = with(Looker::pane_wanted).flatten() {
-                let mut made = Some(pane::load(&wanted));
-                if with(|looker| looker.pane_made(wanted.path, made.take().unwrap())).is_none() {
-                    if let Some(Ok(handler)) = made {
-                        let _ = unsafe { handler.Unload() };
-                    }
-                }
-            }
+            with(Looker::make_pane);
+            LRESULT(0)
+        }
+        PANE_MADE => {
+            with(Looker::pane_made);
             LRESULT(0)
         }
         // A click on it leaves the keyboard where it was.

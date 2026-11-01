@@ -5,9 +5,12 @@
 //! while the sheet moves, and under it while it is made.
 //!
 //! Each previewer is run as Explorer runs it: in a process of its own where it says it may be (the system's host for
-//! previewers, or its program's own), so that one that fails or hangs takes nothing of Glance with it.
+//! previewers, or its program's own), so that one that fails or hangs takes nothing of Glance with it; and made, its
+//! file opened, on a thread of the pane's own, so that a drive slow to answer holds nothing of the look.
 
-use std::path::Path;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 
 use windows::core::{w, Interface, GUID, HSTRING, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -17,7 +20,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
 use windows::Win32::UI::Shell::{AssocQueryStringW, IInitializeWithItem, IPreviewHandler, IPreviewHandlerVisuals, IShellItem, SHCreateItemFromParsingName, SHCreateStreamOnFileEx, ASSOCF_INIT_DEFAULTTOSTAR, ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GW_CHILD, GW_HWNDNEXT, SWP_NOZORDER, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, TranslateMessage, MSG, WM_APP, GetWindow, GetWindowLongPtrW, GetWindowRect, GW_CHILD, GW_HWNDNEXT, SWP_NOZORDER, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
     SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -39,20 +42,47 @@ pub fn previewer(path: &Path) -> Option<GUID> {
     GUID::try_from(said.trim().trim_start_matches('{').trim_end_matches('}')).ok()
 }
 
-/// The window a previewer draws in, and the previewer in it now (with the file it shows).
+/// The window a previewer draws in, run on a thread of its own (see `run`): a previewer is made, and the file it shows
+/// opened, there, never on the look's (a drive slow to answer, or a previewer slow to start, holds nothing of the
+/// look); what it is asked is done there in the order asked. And what the look knows of it: the file whose previewer it
+/// took, where it was last laid, whether it shows, and what it is told as a previewer it asked for is made.
 pub struct Pane {
     host: HWND,
-    shown: Option<(std::path::PathBuf, IPreviewHandler)>,
-    /// Where it is (physical px on the screen), as it was last laid there, and whether it shows.
+    asks: Sender<Do>,
+    made: Receiver<(PathBuf, bool)>,
+    shown: Option<PathBuf>,
     at: RECT,
     up: bool,
 }
 
+/// What its thread is asked (see `Hosted`).
+enum Do {
+    Lay(RECT, i32),
+    Show,
+    Hide,
+    /// A previewer made as `Wanted` says (the one it had let go of first), kept aside till it is taken.
+    Make(Wanted),
+    /// The one made last taken, shown from now on (or let go of).
+    Take,
+    Leave,
+    Unload,
+    Quit,
+}
+
+/// Its thread's message telling it it was asked something (see `Do`).
+const ASKED: u32 = WM_APP + 1;
+
 impl Pane {
-    /// Its window made, kept over `over` (the look's), hidden.
-    pub fn new(over: HWND) -> Option<Self> {
-        let host = unsafe { make_host(over)? };
-        Some(Pane { host, shown: None, at: RECT::default(), up: false })
+    /// Its window made, on its thread (started for it), kept over `over` (the look's), hidden; `over` told `told` as a
+    /// previewer it asked for is made (see `made`).
+    pub fn new(over: HWND, told: u32) -> Option<Self> {
+        let (asks, asked) = std::sync::mpsc::channel();
+        let (tell, made) = std::sync::mpsc::channel();
+        let (tell_host, host) = std::sync::mpsc::channel();
+        let over_at = over.0 as isize;
+        std::thread::Builder::new().name("glance: look pane".into()).spawn(move || run(HWND(over_at as *mut _), told, asked, tell, tell_host)).ok()?;
+        let host = HWND(host.recv().ok()?? as *mut _);
+        Some(Pane { host, asks, made, shown: None, at: RECT::default(), up: false })
     }
 
     pub fn host(&self) -> HWND {
@@ -61,19 +91,22 @@ impl Pane {
 
     /// The file it shows now, where it shows one.
     pub fn shows(&self) -> Option<&Path> {
-        self.shown.as_ref().map(|(path, _)| path.as_path())
+        self.shown.as_deref()
+    }
+
+    fn ask(&self, what: Do) {
+        if self.asks.send(what).is_ok() {
+            unsafe {
+                let _ = PostMessageW(Some(self.host), ASKED, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 
     /// Laid at `at` (physical px on the screen), its corners `radius` px round, and shown.
     pub fn show_at(&mut self, at: RECT, radius: i32) {
         self.lay(at, radius);
-        self.cover();
-        if !self.up {
-            self.up = true;
-            unsafe {
-                let _ = ShowWindow(self.host, SW_SHOWNOACTIVATE);
-            }
-        }
+        self.up = true;
+        self.ask(Do::Show);
     }
 
     /// Laid at `at` (physical px on the screen), its corners `radius` px round, shown or not as it was: before a
@@ -81,11 +114,183 @@ impl Pane {
     pub fn lay(&mut self, at: RECT, radius: i32) {
         if at != self.at {
             self.at = at;
+            self.ask(Do::Lay(at, radius));
+        }
+    }
+
+    pub fn hide(&mut self) {
+        if self.up {
+            self.up = false;
+            self.ask(Do::Hide);
+        }
+    }
+
+    /// A previewer made as `wanted` says, on its thread: told as it is made (see `made`), to be taken or left.
+    pub fn make(&mut self, wanted: Wanted) {
+        self.ask(Do::Make(wanted));
+    }
+
+    /// The previewer last asked for, as it is made: for which file, and whether it could be. None till then.
+    pub fn made(&self) -> Option<(PathBuf, bool)> {
+        self.made.try_recv().ok()
+    }
+
+    /// The previewer made for `path` (see `made`) shown in it, from now on, in place of the one there was.
+    pub fn take(&mut self, path: &Path) {
+        self.shown = Some(path.to_path_buf());
+        self.ask(Do::Take);
+    }
+
+    /// The previewer made (see `made`) let go of: no longer wanted.
+    pub fn leave(&mut self) {
+        self.ask(Do::Leave);
+    }
+
+    /// Its previewer let go of (it ends what it shows), and it hidden.
+    pub fn unload(&mut self) {
+        self.up = false;
+        self.at = RECT::default();
+        self.shown = None;
+        self.ask(Do::Unload);
+    }
+}
+
+impl Drop for Pane {
+    fn drop(&mut self) {
+        self.ask(Do::Quit);
+    }
+}
+
+/// What its thread holds: its window, where it was last laid, the previewer in it, the one made and not yet taken,
+/// and how it tells the look of one made.
+struct Hosted {
+    host: HWND,
+    at: RECT,
+    shown: Option<IPreviewHandler>,
+    made: Option<IPreviewHandler>,
+    up: bool,
+    asked: Receiver<Do>,
+    over: HWND,
+    told: u32,
+    tell: Sender<(PathBuf, bool)>,
+}
+
+thread_local! {
+    static HOSTED: RefCell<Option<Hosted>> = const { RefCell::new(None) };
+}
+
+/// Its thread: its window made over `over` (told to `tell_host`), and what it is asked done as it is (see `Do`), till
+/// it is asked to quit.
+fn run(over: HWND, told: u32, asked: Receiver<Do>, tell: Sender<(PathBuf, bool)>, tell_host: Sender<Option<isize>>) {
+    // (Previewers expect a single-threaded apartment, as Explorer's preview pane has.)
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+    let Some(host) = (unsafe { make_host(over) }) else {
+        let _ = tell_host.send(None);
+        return;
+    };
+    HOSTED.with(|hosted| *hosted.borrow_mut() = Some(Hosted { host, at: RECT::default(), shown: None, made: None, up: false, asked, over, told, tell }));
+    let _ = tell_host.send(Some(host.0 as isize));
+    let mut msg = MSG::default();
+    unsafe {
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// What its thread was asked done, in order (see `Do`). A previewer being made (which may take a while: a program
+/// started for it) keeps handling what the thread is sent meanwhile, as one waiting on another process does: what is
+/// asked then is done after.
+fn asked() {
+    loop {
+        let next = HOSTED.with(|hosted| hosted.try_borrow().ok().and_then(|hosted| hosted.as_ref().and_then(|hosted| hosted.asked.try_recv().ok())));
+        let Some(what) = next else { return };
+        match what {
+            Do::Make(wanted) => {
+                // (Made with its state let go of: it may take a while, and the thread is sent things meanwhile.)
+                let path = wanted.path.clone();
+                let Some(host) = HOSTED.with(|hosted| hosted.borrow().as_ref().map(|hosted| hosted.host)) else { return };
+                let made = load(host, &wanted);
+                HOSTED.with(|hosted| {
+                    let mut hosted = hosted.borrow_mut();
+                    // (Asked to quit meanwhile: let go of at once.)
+                    let Some(hosted) = hosted.as_mut() else {
+                        if let Ok(made) = &made {
+                            unsafe {
+                                let _ = made.Unload();
+                            }
+                        }
+                        return;
+                    };
+                    let ok = made.is_ok();
+                    if let Some(old) = std::mem::replace(&mut hosted.made, made.ok()) {
+                        unsafe {
+                            let _ = old.Unload();
+                        }
+                    }
+                    if hosted.tell.send((path, ok)).is_ok() {
+                        unsafe {
+                            let _ = PostMessageW(Some(hosted.over), hosted.told, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                });
+            }
+            Do::Quit => {
+                let hosted = HOSTED.with(|hosted| hosted.borrow_mut().take());
+                if let Some(mut hosted) = hosted {
+                    hosted.unload();
+                    hosted.leave();
+                    unsafe {
+                        let _ = DestroyWindow(hosted.host);
+                        windows::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+                    }
+                }
+                return;
+            }
+            what => HOSTED.with(|hosted| {
+                if let Some(hosted) = hosted.borrow_mut().as_mut() {
+                    hosted.does(what);
+                }
+            }),
+        }
+    }
+}
+
+impl Hosted {
+    fn does(&mut self, what: Do) {
+        match what {
+            Do::Lay(at, radius) => self.lay(at, radius),
+            Do::Show => {
+                self.cover();
+                if !self.up {
+                    self.up = true;
+                    unsafe {
+                        let _ = ShowWindow(self.host, SW_SHOWNOACTIVATE);
+                    }
+                }
+            }
+            Do::Hide => self.hide(),
+            Do::Take => {
+                if let Some(made) = self.made.take() {
+                    self.unload();
+                    self.shown = Some(made);
+                }
+            }
+            Do::Leave => self.leave(),
+            Do::Unload => self.unload(),
+            Do::Make(_) | Do::Quit => {}
+        }
+    }
+
+    fn lay(&mut self, at: RECT, radius: i32) {
+        if at != self.at {
+            self.at = at;
             let (w, h) = (at.right - at.left, at.bottom - at.top);
             unsafe {
                 let _ = SetWindowPos(self.host, Some(HWND_TOPMOST), at.left, at.top, w, h, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 round(self.host, w, h, radius);
-                if let Some((_, handler)) = &self.shown {
+                if let Some(handler) = &self.shown {
                     let _ = handler.SetRect(&RECT { left: 0, top: 0, right: w, bottom: h });
                 }
             }
@@ -109,7 +314,7 @@ impl Pane {
         }
     }
 
-    pub fn hide(&mut self) {
+    fn hide(&mut self) {
         if self.up {
             self.up = false;
             unsafe {
@@ -118,29 +323,23 @@ impl Pane {
         }
     }
 
-    /// `made` (a previewer made by `load` for `path`) shown in it, from now on, in place of the one there was.
-    pub fn took(&mut self, path: &Path, made: IPreviewHandler) {
-        self.unload();
-        self.shown = Some((path.to_path_buf(), made));
-    }
-
-    /// Its previewer let go of (it ends what it shows), and it hidden.
-    pub fn unload(&mut self) {
-        self.hide();
-        self.at = RECT::default();
-        if let Some((_, handler)) = self.shown.take() {
+    /// The previewer made and not taken let go of.
+    fn leave(&mut self) {
+        if let Some(made) = self.made.take() {
             unsafe {
-                let _ = handler.Unload();
+                let _ = made.Unload();
             }
         }
     }
-}
 
-impl Drop for Pane {
-    fn drop(&mut self) {
-        self.unload();
-        unsafe {
-            let _ = DestroyWindow(self.host);
+    /// Its previewer let go of (it ends what it shows), and it hidden.
+    fn unload(&mut self) {
+        self.hide();
+        self.at = RECT::default();
+        if let Some(handler) = self.shown.take() {
+            unsafe {
+                let _ = handler.Unload();
+            }
         }
     }
 }
@@ -152,10 +351,9 @@ pub struct Colours {
     pub text: Color,
 }
 
-/// A previewer to be made: the window it is to show in (laid where it is to show, `size` px large), the file, the previewer its kind
+/// A previewer to be made (in its window, laid where it is to show, `size` px large): the file, the previewer its kind
 /// has, the colours it is asked to show in.
 pub struct Wanted {
-    pub host: HWND,
     pub path: std::path::PathBuf,
     pub previewer: GUID,
     pub size: (i32, i32),
@@ -163,11 +361,11 @@ pub struct Wanted {
 }
 
 /// The previewer `wanted` made, shown: in a process of its own where it says it may be run so, else in this one. Its
-/// asking may take a while (a program started for it): the window's thread keeps handling what it is sent meanwhile,
+/// asking may take a while (a program started for it): the pane's thread keeps handling what it is sent meanwhile,
 /// as one waiting on another process does.
-pub fn load(wanted: &Wanted) -> windows::core::Result<IPreviewHandler> {
-    let Wanted { host, path, previewer, size, colours } = wanted;
-    let (host, colours) = (*host, *colours);
+fn load(host: HWND, wanted: &Wanted) -> windows::core::Result<IPreviewHandler> {
+    let Wanted { path, previewer, size, colours } = wanted;
+    let colours = *colours;
     unsafe {
         SetWindowLongPtrW(host, GWLP_USERDATA, colorref(colours.ground).0 as isize);
         let handler: IPreviewHandler = CoCreateInstance(previewer, None, CLSCTX_LOCAL_SERVER).or_else(|_| CoCreateInstance(previewer, None, CLSCTX_INPROC_SERVER))?;
@@ -254,6 +452,10 @@ unsafe fn make_host(over: HWND) -> Option<HWND> {
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
+        ASKED => {
+            asked();
+            LRESULT(0)
+        }
         // A click on what a previewer shows leaves the keyboard where it was (with what called the look up).
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => {
