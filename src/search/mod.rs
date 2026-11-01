@@ -98,25 +98,29 @@ fn drives() {
             .map(|bit| format!("{}:\\", (b'A' + bit) as char))
             .filter(|root| matches!(unsafe { GetDriveTypeW(&HSTRING::from(root.as_str())) }, DRIVE_FIXED | DRIVE_REMOVABLE))
             .collect();
-        let mut volumes = VOLUMES.lock().unwrap();
-        volumes.retain(|volume| {
-            // (One let go of as Windows asked to take it out is not opened again while it is there: the asking
-            // failed, it is followed anew.)
-            if volume.drive.left() {
-                let kept = !volume.drive.stays() && roots.contains(&volume.drive.path);
-                if !kept {
+        // Each drive asked without the list held (this thread alone changes it): a drive slow to answer holds none
+        // searching meanwhile.
+        let followed = VOLUMES.lock().unwrap().clone();
+        let staying: Vec<Arc<Volume>> = followed
+            .into_iter()
+            .filter(|volume| {
+                // (One let go of as Windows asked to take it out is not opened again while it is there: the asking
+                // failed, it is followed anew, and taken out, it is forgotten, to be followed anew as it comes back.)
+                let there = if volume.drive.left() {
+                    !volume.drive.stays() && !volume.drive.removed() && roots.contains(&volume.drive.path)
+                } else {
+                    // (Asked through the root it holds, not opened anew: what letting it go closes is all it holds.)
+                    roots.contains(&volume.drive.path) && volume.drive.with_root(drive::serial) == Some(Some(volume.drive.serial))
+                };
+                if !there {
                     volume.gone.store(true, Ordering::Relaxed);
                 }
-                return kept;
-            }
-            let there = roots.contains(&volume.drive.path) && Drive::open(&volume.drive.path).is_ok_and(|now| now.serial == volume.drive.serial);
-            if !there {
-                volume.gone.store(true, Ordering::Relaxed);
-            }
-            there
-        });
+                there
+            })
+            .collect();
+        let mut come = Vec::new();
         for root in roots {
-            if volumes.iter().any(|volume| volume.drive.path == root) {
+            if staying.iter().any(|volume| volume.drive.path == root) {
                 continue;
             }
             let Ok(mut drive) = Drive::open(&root) else { continue };
@@ -124,11 +128,12 @@ fn drives() {
                 crate::journal::note(format!("search: {root} followed, its removal not heard (it may not be taken out safely while Glance runs)"));
             }
             let index = Index::new(drive.root_id, drive.by_id());
-            let volume = Arc::new(Volume { drive, index: RwLock::new(index), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0) });
-            volumes.push(volume.clone());
-            let _ = std::thread::Builder::new().name(format!("glance: search {}", &root[..1])).spawn(move || follow(&volume));
+            come.push(Arc::new(Volume { drive, index: RwLock::new(index), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0) }));
         }
-        drop(volumes);
+        *VOLUMES.lock().unwrap() = staying.into_iter().chain(come.iter().cloned()).collect();
+        for volume in come {
+            let _ = std::thread::Builder::new().name(format!("glance: search {}", &volume.drive.path[..1])).spawn(move || follow(&volume));
+        }
         std::thread::sleep(DRIVES_EVERY);
     }
 }

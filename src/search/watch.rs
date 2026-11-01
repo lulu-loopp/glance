@@ -21,7 +21,8 @@ pub fn watch(drive: &Drive, tell: Sender<Seen>) {
     let Some(folder) = drive.watch() else { return };
     // (u64s: the records in it are on 4-byte boundaries.)
     let mut buffer = vec![0u64; 64 * 1024 / 8];
-    loop {
+    // (Let go of between two waits, not waited on again: one asked as it was let go of is cancelled there.)
+    while !drive.left() {
         let mut got = 0u32;
         let read = unsafe {
             ReadDirectoryChangesW(

@@ -48,12 +48,33 @@ struct Held {
     /// Its root folder: none once let go of. Held (read) through each use of it, a folder's listing whole, that it is
     /// let go of between them.
     root: RwLock<Option<HANDLE>>,
-    /// Its root opened again to be watched (see `watch`), where it is, and told as it is closed.
-    watched: Mutex<Option<HANDLE>>,
+    /// What is under way on it, to be cancelled as it is let go of; told as its watching ends.
+    busy: Mutex<Busy>,
     unwatched: Condvar,
-    /// Let go of (Windows asked to take it out, or took it), and the asking failed since: the drive stays.
+    /// Let go of (Windows asked to take it out, or took it: set with `busy` held, which what begins on it looks at
+    /// under the same), the asking failed since (the drive stays), and taken out.
     left: AtomicBool,
     stays: AtomicBool,
+    removed: AtomicBool,
+}
+
+/// What is under way on a drive: its root (as a journal is read through it), each folder being listed, and its root
+/// opened again to be watched (see `Drive::watch`).
+struct Busy {
+    root: Option<HANDLE>,
+    listing: Vec<HANDLE>,
+    watched: Option<HANDLE>,
+}
+
+impl Busy {
+    /// All under way cancelled: a journal read, a listing, a watch waiting (each a request, which its call ends on).
+    fn cancel(&self) {
+        for handle in self.root.iter().chain(&self.listing).chain(&self.watched) {
+            unsafe {
+                let _ = windows::Win32::System::IO::CancelIoEx(*handle, None);
+            }
+        }
+    }
 }
 
 // (The handles are only listed and read through, from any thread, and its removal's telling is only unregistered.)
@@ -82,38 +103,56 @@ impl Drop for Drive {
 const UNWATCH_WAIT: Duration = Duration::from_secs(5);
 
 impl Held {
-    /// All held of the drive let go of: its root closed (once what uses it now is done), its watching cancelled and
-    /// waited for (cancelled again as it waits: a watch asked again as it was cancelled is ended too).
+    /// All held of the drive let go of: what is under way on it cancelled (nothing begun after), its root closed once
+    /// what uses it now has ended, and its watching waited for (cancelled again as it waits, a watch asked again as
+    /// it was cancelled ended too), for `UNWATCH_WAIT` at most.
     fn let_go(&self) {
-        self.left.store(true, Ordering::Relaxed);
+        {
+            let busy = self.busy.lock().unwrap();
+            self.left.store(true, Ordering::SeqCst);
+            busy.cancel();
+        }
         if let Some(root) = self.root.write().unwrap().take() {
+            self.busy.lock().unwrap().root = None;
             unsafe {
                 let _ = CloseHandle(root);
             }
         }
         let until = Instant::now() + UNWATCH_WAIT;
-        let mut watched = self.watched.lock().unwrap();
-        while let Some(folder) = *watched {
-            unsafe {
-                let _ = windows::Win32::System::IO::CancelIoEx(folder, None);
-            }
+        let mut busy = self.busy.lock().unwrap();
+        while busy.watched.is_some() {
+            busy.cancel();
             let now = Instant::now();
             if now >= until {
                 break;
             }
-            watched = self.unwatched.wait_timeout(watched, (until - now).min(Duration::from_millis(100))).unwrap().0;
+            busy = self.unwatched.wait_timeout(busy, (until - now).min(Duration::from_millis(100))).unwrap().0;
         }
+    }
+
+    fn left(&self) -> bool {
+        self.left.load(Ordering::SeqCst)
     }
 }
 
 /// Windows telling of a drive's removal: asked to take it out, or taken (pulled out unasked), all held of it is let
 /// go of at once (Windows waits for this, then takes it out), and the drive is not opened again while it is there;
-/// the asking failed (another program held it), it stays, to be opened again.
+/// the asking failed (another program held it), it stays, to be opened again; taken out, it is forgotten (put in
+/// again, even at once at the same letter, it is followed anew).
 unsafe extern "system" fn removal(_: HCMNOTIFICATION, context: *const core::ffi::c_void, action: CM_NOTIFY_ACTION, _: *const CM_NOTIFY_EVENT_DATA, _: u32) -> u32 {
     let held = unsafe { &*(context as *const Held) };
     match action {
-        CM_NOTIFY_ACTION_DEVICEQUERYREMOVE | CM_NOTIFY_ACTION_DEVICEREMOVEPENDING | CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE => held.let_go(),
-        CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED => held.stays.store(true, Ordering::Relaxed),
+        CM_NOTIFY_ACTION_DEVICEQUERYREMOVE => {
+            // (A failing before is of an asking before: this one is not known to fail.)
+            held.stays.store(false, Ordering::SeqCst);
+            held.let_go();
+        }
+        CM_NOTIFY_ACTION_DEVICEREMOVEPENDING => held.let_go(),
+        CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE => {
+            held.let_go();
+            held.removed.store(true, Ordering::SeqCst);
+        }
+        CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED => held.stays.store(true, Ordering::SeqCst),
         _ => {}
     }
     0
@@ -141,7 +180,14 @@ impl Drive {
     pub fn open(path: &str) -> Result<Drive> {
         let root = open_folder(path)?;
         // (Closed if what follows fails.)
-        let held = Held { root: RwLock::new(Some(root)), watched: Mutex::new(None), unwatched: Condvar::new(), left: AtomicBool::new(false), stays: AtomicBool::new(false) };
+        let held = Held {
+            root: RwLock::new(Some(root)),
+            busy: Mutex::new(Busy { root: Some(root), listing: Vec::new(), watched: None }),
+            unwatched: Condvar::new(),
+            left: AtomicBool::new(false),
+            stays: AtomicBool::new(false),
+            removed: AtomicBool::new(false),
+        };
         let mut drive = Drive { held: Box::new(held), removal: None, path: path.to_string(), serial: 0, system: String::new(), root_id: 0 };
         let mut system = [0u16; 32];
         unsafe { GetVolumeInformationByHandleW(root, None, Some(&mut drive.serial), None, None, Some(&mut system))? };
@@ -171,37 +217,50 @@ impl Drive {
         true
     }
 
-    /// Whether what was held of it was let go of (Windows asked to take it out), and whether it stays since (the
-    /// asking failed).
+    /// Whether what was held of it was let go of (Windows asked to take it out), whether it stays since (the asking
+    /// failed), and whether it was taken out.
     pub fn left(&self) -> bool {
-        self.held.left.load(Ordering::Relaxed)
+        self.held.left()
     }
 
     pub fn stays(&self) -> bool {
-        self.held.stays.load(Ordering::Relaxed)
+        self.held.stays.load(Ordering::SeqCst)
     }
 
-    /// `asked` of its root folder, while it is held (none once let go of): it is not let go of meanwhile.
+    pub fn removed(&self) -> bool {
+        self.held.removed.load(Ordering::SeqCst)
+    }
+
+    /// `asked` of its root folder, while it is held (none once let go of): it is not let go of meanwhile, and a call
+    /// on it then is cancelled.
     pub fn with_root<T>(&self, asked: impl FnOnce(HANDLE) -> T) -> Option<T> {
         self.held.root.read().unwrap().map(asked)
     }
 
-    /// Its root opened again to be watched, kept to be let go of with the rest (none where it is let go of already, or
-    /// cannot be opened). Closed with `unwatch`.
+    /// Its root opened again to be watched, kept to be let go of with the rest (none where it is let go of, or cannot
+    /// be opened). Closed with `unwatch`.
     pub fn watch(&self) -> Option<HANDLE> {
-        let mut watched = self.held.watched.lock().unwrap();
         if self.left() {
             return None;
         }
+        // (Opened outside what letting go waits on: a slow drive is not waited for there.)
         let folder = open_folder(&self.path).ok()?;
-        *watched = Some(folder);
+        let mut busy = self.held.busy.lock().unwrap();
+        if self.left() {
+            drop(busy);
+            unsafe {
+                let _ = CloseHandle(folder);
+            }
+            return None;
+        }
+        busy.watched = Some(folder);
         Some(folder)
     }
 
     /// Its root opened to be watched (see `watch`) closed, as its watching ends.
     pub fn unwatch(&self) {
-        let mut watched = self.held.watched.lock().unwrap();
-        if let Some(folder) = watched.take() {
+        let mut busy = self.held.busy.lock().unwrap();
+        if let Some(folder) = busy.watched.take() {
             unsafe {
                 let _ = CloseHandle(folder);
             }
@@ -232,15 +291,17 @@ impl Drive {
             },
         };
         let folder = match opened {
-            Ok(folder) => Closed(folder),
+            Ok(folder) => Listed::new(&self.held, folder),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => return Listing::Denied,
             // (An id no longer of a file, ERROR_INVALID_PARAMETER, or a path not found.)
             Err(_) => return Listing::Gone,
         };
+        // (Let go of as it was opened: not read, and closed at once.)
+        let Some(folder) = folder else { return Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)) };
         let mut items = Vec::new();
         let mut class = FileIdBothDirectoryRestartInfo;
         loop {
-            let read = unsafe { GetFileInformationByHandleEx(folder.0, class, buffer.as_mut_ptr() as *mut _, (buffer.len() * 8) as u32) };
+            let read = unsafe { GetFileInformationByHandleEx(folder.handle, class, buffer.as_mut_ptr() as *mut _, (buffer.len() * 8) as u32) };
             if let Err(error) = read {
                 if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
                     return Listing::Items(items);
@@ -262,6 +323,46 @@ impl Drive {
                 }
                 at += info.NextEntryOffset as usize;
             }
+        }
+    }
+}
+
+/// The serial number of the volume `root` (a folder of it opened) is on, where it can be told.
+pub fn serial(root: HANDLE) -> Option<u32> {
+    let mut serial = 0u32;
+    unsafe { GetVolumeInformationByHandleW(root, None, Some(&mut serial), None, None, None) }.ok()?;
+    Some(serial)
+}
+
+/// A folder of a drive being listed, its handle kept among what is under way on the drive (see `Busy`) till it is
+/// closed, as it is dropped.
+struct Listed<'a> {
+    held: &'a Held,
+    handle: HANDLE,
+}
+
+impl<'a> Listed<'a> {
+    /// `handle` kept as being listed, unless the drive was let go of as it was opened: then closed, and none.
+    fn new(held: &'a Held, handle: HANDLE) -> Option<Listed<'a>> {
+        let mut busy = held.busy.lock().unwrap();
+        if held.left() {
+            drop(busy);
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return None;
+        }
+        busy.listing.push(handle);
+        Some(Listed { held, handle })
+    }
+}
+
+impl Drop for Listed<'_> {
+    fn drop(&mut self) {
+        // (Taken from what is under way before it is closed: never cancelled once closed.)
+        self.held.busy.lock().unwrap().listing.retain(|&handle| handle != self.handle);
+        unsafe {
+            let _ = CloseHandle(self.handle);
         }
     }
 }
@@ -291,20 +392,33 @@ mod tests {
         assert!(drive.hear_removal(), "its removal heard");
         let drive = std::sync::Arc::new(drive);
         let (tell, told) = std::sync::mpsc::channel();
-        let watching = std::thread::spawn({
+        let (ended, watch_ended) = std::sync::mpsc::channel();
+        std::thread::spawn({
             let drive = drive.clone();
-            move || super::super::watch::watch(&drive, tell)
+            move || {
+                super::super::watch::watch(&drive, tell);
+                let _ = ended.send(());
+            }
         });
-        // (Watching: a change seen.)
-        std::fs::write(folder.join("inner").join("a.txt"), "a").unwrap();
-        assert!(told.recv_timeout(Duration::from_secs(5)).is_ok(), "watched");
+        // (Watching: a change seen, written again till it is, the watch's first wait asked at its own time.)
+        let mut seen = false;
+        for at in 0..50 {
+            std::fs::write(folder.join("inner").join(format!("{at}.txt")), "a").unwrap();
+            if told.recv_timeout(Duration::from_millis(100)).is_ok() {
+                seen = true;
+                break;
+            }
+        }
+        assert!(seen, "watched");
         assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer()), Listing::Items(items) if !items.is_empty()));
 
-        let began = Instant::now();
         drive.held.let_go();
-        assert!(watching.join().is_ok() && began.elapsed() < UNWATCH_WAIT, "its watching ended at once");
+        assert!(watch_ended.recv_timeout(Duration::from_secs(1)).is_ok(), "its watching ended at once");
         assert!(drive.left() && !drive.stays());
-        assert!(drive.held.root.read().unwrap().is_none() && drive.held.watched.lock().unwrap().is_none());
+        {
+            let busy = drive.held.busy.lock().unwrap();
+            assert!(drive.held.root.read().unwrap().is_none() && busy.root.is_none() && busy.watched.is_none() && busy.listing.is_empty());
+        }
         assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer()), Listing::Failed(_)));
         assert!(drive.watch().is_none() && drive.with_root(|_| ()).is_none());
         // (Nothing held: the folder can be removed.)
@@ -312,7 +426,9 @@ mod tests {
         std::fs::remove_dir_all(&folder).unwrap();
     }
 
-    /// A USB drive followed can be taken out safely, as Windows asks for it, where held as before it could not:
+    /// A USB drive whose root is held can be taken out safely, as Windows asks for it, once its removal is heard, where
+    /// held as before it could not (the rest held as a drive is followed, listing and watching, is let go of with the
+    /// root: see `all_held_of_a_drive_is_let_go_of`):
     /// `$env:GLANCE_EJECT="G"; cargo test --lib -- --ignored a_usb_drive_followed_can_be_taken_out --nocapture`
     /// (it is taken out: put it in again after).
     #[test]
@@ -323,16 +439,16 @@ mod tests {
         let device = removable_device(&letter).expect("a removable device under the drive");
         // Held as before (its removal not heard): Windows may not take it out.
         let held = Drive::open(&root).unwrap();
-        let (refused, why) = eject(device);
-        println!("held as before: refused {refused} ({why})");
-        assert!(refused, "held, it could not be taken out");
+        let (veto, why) = eject(device);
+        println!("held as before: veto {veto} ({why})");
+        assert_eq!(veto, windows::Win32::Devices::DeviceAndDriverInstallation::PNP_VetoOutstandingOpen.0, "held, it could not be taken out, for what was open");
         drop(held);
         // Followed now: let go of as Windows asks, and taken out.
         let mut drive = Drive::open(&root).unwrap();
         assert!(drive.hear_removal());
-        let (refused, why) = eject(device);
-        println!("followed: refused {refused} ({why}), let go of {}", drive.left());
-        assert!(!refused && drive.left());
+        let (veto, why) = eject(device);
+        println!("followed: veto {veto} ({why}), let go of {}", drive.left());
+        assert!(veto == 0 && drive.left());
     }
 
     /// The device that is taken out with the drive at `letter`: the nearest above its disk that Windows may remove.
@@ -387,23 +503,13 @@ mod tests {
         }
     }
 
-    /// `device` asked to be taken out: whether it was refused, and by what.
-    fn eject(device: u32) -> (bool, String) {
+    /// `device` asked to be taken out: why it was refused (PNP_VETO_TYPE, 0: it was not), and by what.
+    fn eject(device: u32) -> (i32, String) {
         use windows::Win32::Devices::DeviceAndDriverInstallation::{CM_Request_Device_EjectW, PNP_VETO_TYPE};
         let mut veto = PNP_VETO_TYPE::default();
         let mut name = [0u16; 260];
         let asked = unsafe { CM_Request_Device_EjectW(device, Some(&mut veto), Some(&mut name), 0) };
         let name = String::from_utf16_lossy(&name[..name.iter().position(|&c| c == 0).unwrap_or(name.len())]);
-        (asked != CR_SUCCESS || veto.0 != 0, format!("{asked:?}, veto {} {name}", veto.0))
-    }
-}
-
-struct Closed(HANDLE);
-
-impl Drop for Closed {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
+        (veto.0, format!("{asked:?} {name}"))
     }
 }
