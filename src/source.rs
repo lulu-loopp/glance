@@ -49,12 +49,13 @@ static WANTED: Mutex<Option<Want>> = Mutex::new(None);
 static EDGES: Mutex<Option<Edges>> = Mutex::new(None);
 /// How the switches that need their rights are, as they last told (none: not told yet), and the turn of each
 /// told (for one waiting on an answer).
-static SWITCHES: Mutex<[(Option<bool>, u64); 2]> = Mutex::new([(None, 0), (None, 0)]);
+static SWITCHES: Mutex<[(Option<bool>, u64); 3]> = Mutex::new([(None, 0), (None, 0), (None, 0)]);
 
 fn slot(switch: Switch) -> usize {
     match switch {
         Switch::Autostart => 0,
         Switch::Remote => 1,
+        Switch::RaisedLights => 2,
     }
 }
 
@@ -76,6 +77,7 @@ pub fn switch(switch: Switch, on: bool) -> bool {
         return match switch {
             Switch::Autostart => crate::elevation::set_autostart(on),
             Switch::Remote => crate::phone::turn(on),
+            Switch::RaisedLights => crate::elevation::is_elevated() && crate::openrgb::turn(on),
         };
     }
     let turn = SWITCHES.lock().unwrap()[slot(switch)].1;

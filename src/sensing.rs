@@ -45,6 +45,7 @@ pub fn run() {
     let mut sampler = Sampler::new();
     *READING_SINCE.lock().unwrap() = None;
     crate::presents::start();
+    crate::openrgb::watch();
     std::thread::Builder::new().name("glance sensors: edges".into()).spawn(watch_edges).expect("a thread started");
     let want = Arc::new(Mutex::new(Want { interval_ms: 1000, refresh_slow: true, wsl: false, docker: false }));
     let pipes = Arc::new(pipes);
@@ -88,7 +89,8 @@ pub fn run() {
         let greeted = tell(&hello)
             && tell(&Told::Buttons { down: crate::mouse::buttons_held(), pressed: false })
             && tell(&Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() })
-            && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() });
+            && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() })
+            && tell(&Told::Switched { switch: Switch::RaisedLights, on: crate::openrgb::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
         let (report_wanted, report_asked) = mpsc::channel::<()>();
         let listener = std::thread::Builder::new().name("glance sensors: asked".into()).spawn({
@@ -111,6 +113,9 @@ pub fn run() {
                         }
                         Asked::Switch { switch: Switch::Remote, on } => {
                             tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::turn(on) });
+                        }
+                        Asked::Switch { switch: Switch::RaisedLights, on } => {
+                            tell(&Told::Switched { switch: Switch::RaisedLights, on: crate::openrgb::turn(on) });
                         }
                         // On a thread of its own (a download may take a while): what else is asked meanwhile is done.
                         Asked::Install(release) => {

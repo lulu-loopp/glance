@@ -528,7 +528,7 @@ fn installer_version(file: &Path) -> Option<String> {
 }
 
 /// The machine's ProgramData folder.
-fn program_data() -> Option<std::path::PathBuf> {
+pub(crate) fn program_data() -> Option<std::path::PathBuf> {
     let path = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }.ok()?;
     let text = unsafe { path.to_string() }.ok();
     unsafe { CoTaskMemFree(Some(path.0 as *const _)) };

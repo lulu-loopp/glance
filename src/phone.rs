@@ -272,6 +272,29 @@ pub fn set_lights(on: bool) -> bool {
     ask(&["lights", if on { "fetch" } else { "forget" }]).is_some_and(|said| said.lines().last().is_some_and(|last| last.trim() == "there"))
 }
 
+/// Whether the remote asks an OpenRGB run with an administrator's rights (see `openrgb`), and starts none of its own.
+pub fn lights_raised() -> bool {
+    ask(&["lights", "raised"]).is_some_and(|said| said.trim() == "raised")
+}
+
+/// OpenRGB run with an administrator's rights, or as the remote runs it: the release fetched for that first (some
+/// twenty megabytes), then the remote told, and the sensors asked. Whether it is so then. Takes as long as that does.
+pub fn raise_lights(on: bool) -> bool {
+    use crate::link::Switch;
+    if !on {
+        crate::source::switch(Switch::RaisedLights, false);
+        return ask(&["lights", "lower"]).is_none_or(|said| said.trim() != "plain");
+    }
+    if !ask(&["lights", "raise"]).is_some_and(|said| said.lines().last().is_some_and(|last| last.trim() == "raised")) {
+        return false;
+    }
+    let raised = crate::source::switch(Switch::RaisedLights, true);
+    if !raised {
+        let _ = ask(&["lights", "lower"]);
+    }
+    raised
+}
+
 /// Whether the remote puts the screens out with their signal kept (each
 /// monitor turned off by itself, or covered in black) rather than as
 /// Windows does, by stopping the signal to them all.

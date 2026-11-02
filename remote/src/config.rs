@@ -81,6 +81,9 @@ pub struct Config {
     /// The OpenRGB this helper started, by its program's number: its own
     /// to stop and start afresh (one the user started is not).
     pub openrgb_started: Option<u32>,
+    /// OpenRGB is run by Glance's sensors, with an administrator's rights (what the memory's lights need): this
+    /// helper waits for that one and starts none of its own.
+    pub lights_raised: bool,
     /// Whether the lights were last put on or out by this helper: what it
     /// says of them while no OpenRGB runs to be asked (as the PC has started
     /// and nothing has asked for it yet).
@@ -119,6 +122,7 @@ impl Default for Config {
             keys: None,
             lights_left_alone: false,
             openrgb_started: None,
+            lights_raised: false,
             lit: None,
             local: None,
             colours: None,

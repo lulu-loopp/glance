@@ -835,6 +835,7 @@ enum Read {
 /// asked: none), and the phones paired as it then has them.
 struct RemoteAnswer {
     lights: bool,
+    raised: bool,
     screens: bool,
     address: Option<String>,
     code: Option<Option<(crate::phone::Code, CodeFor)>>,
@@ -1243,6 +1244,8 @@ enum Switch {
     RecentOnly,
     /// Whether the remote sets the lights: the program that does, fetched or not.
     RemoteLights,
+    /// Whether the remote's lights are set with an administrator's rights (what the memory's need).
+    RemoteRaised,
     /// Whether the remote puts the screens out with their signal kept.
     RemoteScreens,
 }
@@ -1608,6 +1611,11 @@ struct Ui {
     remote_screens: bool,
     fetching: Option<std::thread::JoinHandle<bool>>,
     fetch_failed: bool,
+    /// Whether the lights are set with an administrator's rights, that being changed (on a thread: it may have to
+    /// fetch), and whether the last change failed.
+    remote_raised: bool,
+    raising: Option<std::thread::JoinHandle<bool>>,
+    raise_failed: bool,
     /// A switch that needs the sensors' rights, being turned (on another thread: their process is asked, and
     /// answers when the system has done it); what it is then.
     switching: Option<(SwitchAsked, std::thread::JoinHandle<bool>)>,
@@ -1907,6 +1915,9 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             remote_screens: false,
             fetching: None,
             fetch_failed: false,
+            remote_raised: false,
+            raising: None,
+            raise_failed: false,
             switching: None,
             reporting: None,
             netease_has: netease.as_ref().map_or(crate::netease::Installed::No, crate::netease::installed),
@@ -2566,6 +2577,9 @@ impl Ui {
         rows.push(Row::Switch(Switch::Remote));
         if self.remote {
             rows.push(Row::Switch(Switch::RemoteLights));
+            if self.remote_lights {
+                rows.push(Row::Switch(Switch::RemoteRaised));
+            }
             rows.push(Row::Switch(Switch::RemoteScreens));
             // A code shows under the row that asked for it.
             let shown = self.code.as_ref().map(|(_, what)| *what);
@@ -2753,7 +2767,7 @@ impl Ui {
         }
         self.remote_asked = Some(std::thread::spawn(move || {
             let code = ask();
-            RemoteAnswer { lights: crate::phone::lights(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code, phones: crate::phone::phones() }
+            RemoteAnswer { lights: crate::phone::lights(), raised: crate::phone::lights_raised(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code, phones: crate::phone::phones() }
         }));
         self.next_frame = Instant::now();
     }
@@ -3536,6 +3550,19 @@ impl Ui {
                 };
                 return (p("RGB 灯光控制", "RGB lighting"), Some(Cow::Borrowed(hint)), self.remote_lights);
             }
+            Switch::RemoteRaised => {
+                let hint = if self.raising.is_some() {
+                    p("正在处理，请稍候…", "Working…")
+                } else if self.raise_failed {
+                    p("操作失败，请稍后重试", "That failed. Try again later")
+                } else {
+                    p(
+                        "内存灯光须由具有管理员权限的 OpenRGB 控制。开启后，OpenRGB 将随 Glance 以管理员权限运行。其他厂商的灯光软件可能覆盖此处的设置",
+                        "Memory lights can only be set by OpenRGB with administrator rights. When on, OpenRGB runs with those rights alongside Glance. Other makers' lighting programs may override what is set here",
+                    )
+                };
+                return (p("内存灯光控制", "Memory lighting"), Some(Cow::Borrowed(hint)), self.remote_raised);
+            }
             Switch::RemoteScreens => (
                 p("关屏时保持显示器连接", "Keep monitors connected while off"),
                 Some(p(
@@ -3603,7 +3630,23 @@ impl Ui {
                 if self.fetching.is_none() {
                     let wanted = !self.remote_lights;
                     self.fetch_failed = false;
-                    self.fetching = Some(std::thread::spawn(move || crate::phone::set_lights(wanted) == wanted));
+                    let raised = self.remote_raised;
+                    self.fetching = Some(std::thread::spawn(move || {
+                        // (Its program taken away, none is left to run with an administrator's rights.)
+                        if !wanted && raised {
+                            crate::phone::raise_lights(false);
+                        }
+                        crate::phone::set_lights(wanted) == wanted
+                    }));
+                }
+                self.next_frame = Instant::now();
+                return;
+            }
+            Switch::RemoteRaised => {
+                if self.raising.is_none() {
+                    let wanted = !self.remote_raised;
+                    self.raise_failed = false;
+                    self.raising = Some(std::thread::spawn(move || crate::phone::raise_lights(wanted) == wanted));
                 }
                 self.next_frame = Instant::now();
                 return;
@@ -5056,6 +5099,7 @@ impl Ui {
         if self.remote_asked.as_ref().is_some_and(|asked| asked.is_finished()) {
             if let Ok(answer) = self.remote_asked.take().unwrap().join() {
                 self.remote_lights = answer.lights;
+                self.remote_raised = answer.raised;
                 self.remote_screens = answer.screens;
                 self.web_address = answer.address;
                 if let Some(code) = answer.code {
@@ -5069,12 +5113,20 @@ impl Ui {
             self.next_frame = self.next_frame.min(now + Duration::from_millis(100));
         }
         // The lights' program fetched (or taken away): how that went, once it is over.
-        if self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
+        // (Once what was being asked of the remote is over: that would not have heard of this, and another asked
+        // meanwhile is not taken.)
+        let free = self.remote_asked.is_none();
+        if free && self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
             let done = self.fetching.take().unwrap().join().unwrap_or(false);
             self.fetch_failed = !done;
             self.ask_remote(|| None);
         }
-        if self.fetching.is_some() {
+        if free && self.remote_asked.is_none() && self.raising.as_ref().is_some_and(|raising| raising.is_finished()) {
+            let done = self.raising.take().unwrap().join().unwrap_or(false);
+            self.raise_failed = !done;
+            self.ask_remote(|| None);
+        }
+        if self.fetching.is_some() || self.raising.is_some() {
             self.next_frame = now + Duration::from_millis(300);
         }
         if self.netease_work.as_ref().is_some_and(|(_, work)| work.is_finished()) {

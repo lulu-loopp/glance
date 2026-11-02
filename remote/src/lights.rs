@@ -34,6 +34,8 @@ const CLIENT_NAME: u32 = 50;
 const RESIZE_ZONE: u32 = 1000;
 const UPDATE_LEDS: u32 = 1050;
 const UPDATE_MODE: u32 = 1101;
+/// A mode's colour mode that shows the colours of the device's LEDs.
+const COLORS_PER_LED: u32 = 1;
 
 /// A mode of a device, as the server describes it: its name, and all of it
 /// as it was sent (handed back as it is to choose it), with where its
@@ -44,9 +46,23 @@ pub struct Mode {
     raw: Vec<u8>,
     /// Where in `raw` its colours are (their count, then each).
     colors_at: usize,
+    /// Where in `raw` its speed is, and its range: its slowest may be the larger number.
+    speed_at: usize,
+    slowest: u32,
+    fastest: u32,
+    /// It shows the colours of the device's LEDs, not any of its own.
+    per_led: bool,
 }
 
 impl Mode {
+    /// The mode at `share` of its range of speeds, from its slowest (0) to its fastest (1).
+    fn at_pace(&self, share: f64) -> Mode {
+        let mut mode = self.clone();
+        let speed = (self.slowest as f64 + (self.fastest as f64 - self.slowest as f64) * share).round() as u32;
+        mode.raw[self.speed_at..self.speed_at + 4].copy_from_slice(&speed.to_le_bytes());
+        mode
+    }
+
     /// The mode in `colour` (0x00BBGGRR): each colour it has, that one. A
     /// mode with none of its own (every colour in turn, say) is as it is.
     fn in_color(&self, colour: u32) -> Mode {
@@ -126,13 +142,18 @@ pub fn device(body: &[u8]) -> Option<Device> {
     for _ in 0..count {
         let whole = b.0;
         let name = b.string()?;
-        // Its value, flags, speeds, brightnesses, colour counts, speed,
+        // Its value and flags, speeds, brightnesses, colour counts, speed,
         // brightness, direction and colour mode.
-        b.take(12 * 4)?;
+        b.take(2 * 4)?;
+        let (slowest, fastest) = (b.u32()?, b.u32()?);
+        b.take(4 * 4)?;
+        let speed_at = whole.len() - b.0.len();
+        b.take(3 * 4)?;
+        let per_led = b.u32()? == COLORS_PER_LED;
         let colors_at = whole.len() - b.0.len();
         let colors = b.u16()? as usize;
         b.take(colors * 4)?;
-        modes.push(Mode { name, raw: whole[..whole.len() - b.0.len()].to_vec(), colors_at });
+        modes.push(Mode { name, raw: whole[..whole.len() - b.0.len()].to_vec(), colors_at, speed_at, slowest, fastest, per_led });
     }
     let mut zones = Vec::new();
     for _ in 0..b.u16()? {
@@ -256,11 +277,18 @@ fn server(config: &Config) -> std::io::Result<Client> {
     if let Ok(client) = Client::connect() {
         return Ok(client);
     }
-    let program = program(config).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OpenRGB is not installed"))?;
-    let started = std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?.id();
-    let _ = Config::change(|config| config.openrgb_started = Some(started));
-    // It listens before it has found the devices, and finds them one
-    // after another: asked until it has some, and as many twice running.
+    // (One Glance's sensors run is theirs to start: it is only waited for, as one started here is.)
+    if !Config::load().lights_raised {
+        let program = program(config).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "OpenRGB is not installed"))?;
+        let started = std::process::Command::new(&program).args(["--server", "--noautoconnect"]).current_dir(program.parent().unwrap()).creation_flags(NO_WINDOW).spawn()?.id();
+        let _ = Config::change(|config| config.openrgb_started = Some(started));
+    }
+    found_all()
+}
+
+/// Waits for an OpenRGB being started to have its devices: it listens before it has found them, and finds them one
+/// after another. Asked until it has some, and as many twice running.
+pub fn found_all() -> std::io::Result<Client> {
     let since = Instant::now();
     let mut before = 0;
     loop {
@@ -326,6 +354,17 @@ pub fn set(config: &Config, on: bool, light: &Light) -> std::io::Result<usize> {
     Err(std::io::Error::other("the lighting devices keep changing"))
 }
 
+/// The breathing of a device among others, as near theirs as it can be: a mode showing its LEDs' colours (the memory's)
+/// breathes far more slowly than the rest even at its fastest, so it goes at that, and the rest, where there is one
+/// such among them, at their slowest. With none, each goes as it would.
+fn paced(mode: &Mode, one_is_slow: bool) -> Mode {
+    match (mode.per_led, one_is_slow) {
+        (true, _) => mode.at_pace(1.0),
+        (false, true) => mode.at_pace(0.0),
+        (false, false) => mode.clone(),
+    }
+}
+
 /// `set`, for the devices there are as it begins: none, if by the time
 /// they are read back they are others (OpenRGB still finding them, or one
 /// plugged in or out).
@@ -353,6 +392,7 @@ fn set_those_there(config: &Config, on: bool, light: &Light) -> std::io::Result<
     let dimmed = |part: u8| ((part as u32 * light.brightness.min(100) as u32 + 50) / 100) as u8;
     let (r, g, b) = (dimmed(r), dimmed(g), dimmed(b));
     let colour = u32::from_le_bytes([r, g, b, 0]);
+    let one_is_slow = devices.iter().any(|device| device.modes.iter().any(|mode| mode.per_led && mode.name.eq_ignore_ascii_case("Breathing")));
     // What each device is to be: a mode (as it is sent), and, in the mode
     // that shows the colours it is sent, those colours.
     let wanted: Vec<(Option<(usize, Mode)>, Option<Vec<u32>>)> = devices
@@ -368,10 +408,14 @@ fn set_those_there(config: &Config, on: bool, light: &Light) -> std::io::Result<
                 // (Following the heat, the colour is what changes: whoever
                 // asks gives the colour of the moment.)
                 Effect::Steady | Effect::Heat => None,
-                Effect::Breathing => named("Breathing").map(|(at, mode)| (at, mode.in_color(colour))),
+                Effect::Breathing => named("Breathing").map(|(at, mode)| (at, paced(&mode, one_is_slow).in_color(colour))),
                 Effect::Rainbow => RAINBOWS.iter().find_map(|name| named(name)),
             };
-            own.map_or_else(|| paint(colour), |mode| (Some(mode), None))
+            // (One that shows its LEDs' colours is sent them too: else it shows what they were last.)
+            own.map_or_else(|| paint(colour), |(at, mode)| {
+                let colors = mode.per_led.then(|| vec![colour; device.leds]);
+                (Some((at, mode)), colors)
+            })
         })
         .collect();
     // Asked, then read back: a device that is not in the mode asked for
@@ -482,7 +526,8 @@ mod tests {
         body.extend_from_slice(&0x0000_FF00u32.to_le_bytes());
         let read = device(&body).unwrap();
         assert_eq!(read.name, "A card");
-        assert_eq!(read.modes, [Mode { name: "Off".into(), colors_at: off.len() - 2, raw: off }, Mode { name: "Rainbow Wave".into(), colors_at: wave.len() - 10, raw: wave.clone() }]);
+        let plain = |name: &str, raw: Vec<u8>, colors_at: usize| Mode { name: name.into(), speed_at: colors_at - 16, slowest: 0, fastest: 0, per_led: false, colors_at, raw };
+        assert_eq!(read.modes, [plain("Off", off.clone(), off.len() - 2), plain("Rainbow Wave", wave.clone(), wave.len() - 10)]);
         // A mode's colours, each made the one asked for; the rest of it as it was.
         let red = read.modes[1].in_color(0xFF);
         assert_eq!(&red.raw[wave.len() - 8..], [0xFF, 0, 0, 0, 0xFF, 0, 0, 0]);
@@ -494,11 +539,51 @@ mod tests {
         // its own, lit; painted black, out.
         assert!(!read.lit());
         assert!(Device { active: 1, ..read.clone() }.lit());
-        let painted = Device { modes: vec![Mode { name: "Direct".into(), raw: Vec::new(), colors_at: 0 }], active: 0, ..read.clone() };
+        let painted = Device { modes: vec![Mode { name: "Direct".into(), raw: Vec::new(), colors_at: 0, speed_at: 0, slowest: 0, fastest: 0, per_led: false }], active: 0, ..read.clone() };
         assert!(painted.lit() && !Device { colors: vec![0], ..painted }.lit());
         // Cut short, it is none.
         assert_eq!(device(&body[..body.len() - 3]), None);
         assert_eq!(rgb("ff8000"), Some((255, 128, 0)));
         assert_eq!(rgb("fff"), None);
+    }
+
+    /// A mode as the server describes it: `speeds` from slowest to fastest, at `speed`, showing `colour_mode`.
+    fn breathing(speeds: (u32, u32), speed: u32, colour_mode: u32) -> Mode {
+        let mut body = vec![0u8; 8];
+        for _ in 0..6 {
+            body.extend(string(""));
+        }
+        body.extend_from_slice(&1u16.to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend(string("Breathing"));
+        for word in [0, 0, speeds.0, speeds.1, 0, 0, 0, 0, speed, 0, 0, colour_mode] {
+            body.extend_from_slice(&word.to_le_bytes());
+        }
+        body.extend_from_slice(&0u16.to_le_bytes());
+        // No zones, LEDs or colours.
+        body.extend_from_slice(&[0u8; 6]);
+        device(&body).unwrap().modes.remove(0)
+    }
+
+    fn speed(mode: &Mode) -> u32 {
+        u32::from_le_bytes(mode.raw[mode.speed_at..mode.speed_at + 4].try_into().unwrap())
+    }
+
+    /// Its slowest may be the larger number (the memory's and the board's are, the card's is not).
+    #[test]
+    fn a_mode_goes_at_a_share_of_its_speeds_whichever_way_they_run() {
+        assert_eq!(speed(&breathing((4, 0), 2, 1).at_pace(1.0)), 0);
+        assert_eq!(speed(&breathing((9, 0), 4, 2).at_pace(0.0)), 9);
+        assert_eq!(speed(&breathing((0, 2), 1, 2).at_pace(0.0)), 0);
+        assert_eq!(speed(&breathing((0, 2), 1, 2).at_pace(1.0)), 2);
+    }
+
+    #[test]
+    fn breathing_slows_the_rest_only_for_a_device_that_cannot_keep_up() {
+        let (memory, board) = (breathing((4, 0), 2, COLORS_PER_LED), breathing((9, 0), 4, 2));
+        assert!(memory.per_led && !board.per_led);
+        assert_eq!(speed(&paced(&memory, true)), 0);
+        assert_eq!(speed(&paced(&board, true)), 9);
+        assert_eq!(speed(&paced(&board, false)), 4);
     }
 }

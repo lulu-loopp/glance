@@ -557,6 +557,18 @@ pub fn private_folder(parent: &Path, name: &str) -> Option<Private> {
     Some(Private { _held: held, path })
 }
 
+/// Removes the folders in `parent` whose names begin with `prefix`, each with all that is in it: those of
+/// administrators' alone, as `private_folder` made them. Another's that took such a name stays.
+pub fn remove_private_folders(parent: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_name().to_string_lossy().starts_with(prefix) && !is_link(&path) && path.is_dir() && only_trusted_can(&path, FOLDER_CHANGES) {
+            let _ = remove_all_kept(&path);
+        }
+    }
+}
+
 /// The key noting the update installers downloaded and not yet removed,
 /// under Glance's, which only administrators can write: a value each, named
 /// after its folder (new each time), holding the installer's path. Each is
@@ -1043,6 +1055,7 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     if !end_programs_in(&folder) {
         return Err(InstallFolder::Failed);
     }
+    crate::openrgb::forget();
     // The uninstaller last, and only once all the rest is gone: left, it is there to try again with (as Glance is
     // left in the installed programs: see the installer).
     let mut removed = true;

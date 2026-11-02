@@ -39,6 +39,8 @@ mod overlay;
 #[cfg(windows)]
 mod panel;
 #[cfg(windows)]
+mod openrgb;
+#[cfg(windows)]
 mod pawnio;
 #[cfg(windows)]
 mod perf;

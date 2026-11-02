@@ -61,6 +61,9 @@ const AT_ONCE_EACH: usize = 16;
 const WATCH: Duration = Duration::from_millis(500);
 /// How often lights that follow the heat are looked at again.
 const FOLLOW: Duration = Duration::from_secs(2);
+/// How long a maker's program started is given, and OpenRGB run by Glance's sensors to be started afresh and to find
+/// the devices, before the lights are put back.
+const AFRESH: Duration = Duration::from_secs(15);
 /// How many of the log's latest lines go into a report.
 const REPORTED: usize = 120;
 /// The heat the coolest colour is for, and the warmest (°C).
@@ -182,6 +185,17 @@ struct Admitted {
     secret: [u8; 32],
 }
 
+/// Whether the lights are on, as this helper starts: as OpenRGB has them if it is running, else as they were last set.
+/// One run by Glance's sensors starts with the PC as this does: it says nothing yet of how they are to be, having
+/// found them as the PC left them, or not found them yet, and they are put back as they were last set.
+fn lit_at_start(raised: bool, last_set: Option<bool>, running: impl FnOnce() -> Option<bool>) -> Option<bool> {
+    if raised {
+        last_set.or_else(running)
+    } else {
+        running().or(last_set)
+    }
+}
+
 impl Helper {
     fn lights(&self, on: bool) -> Result<(), String> {
         // (The state is not held while OpenRGB is asked: that may take a while.)
@@ -231,6 +245,29 @@ impl Helper {
     fn refresh(&self) {
         if self.stale.swap(false, std::sync::atomic::Ordering::SeqCst) {
             lights::afresh();
+        }
+    }
+
+    /// The lights put back as they were last set, once OpenRGB run by Glance's sensors is there again: a maker's
+    /// program sets the memory's as it starts, and those lights were left as it set them till they were next asked.
+    fn put_back(&self) {
+        let _one = self.lighting.lock().unwrap();
+        let Some(on) = self.state.lock().unwrap().lights else { return };
+        if lights_are_keys() {
+            return;
+        }
+        if let Err(error) = lights::found_all() {
+            journal::note(format!("the lights were not put back: {error}"));
+            return;
+        }
+        let mut light = self.light.lock().unwrap().clone();
+        if light.effect == Effect::Heat {
+            if let Some(celsius) = reads::read().as_ref().and_then(reads::hottest) {
+                light.color = heat(celsius);
+            }
+        }
+        if let Err(error) = lights::set(&self.config, on, &light) {
+            journal::note(format!("the lights were not put back: {error}"));
         }
     }
 
@@ -833,8 +870,34 @@ fn main() -> std::io::Result<()> {
                 }
                 Some("forget") => {
                     lights::afresh();
-                    Config::change(|config| config.lights_left_alone = true)?;
+                    Config::change(|config| {
+                        config.lights_left_alone = true;
+                        config.lights_raised = false;
+                    })?;
                     fetch::forget()?;
+                }
+                // Whether Glance's sensors run OpenRGB; that they are to (the release they take it from fetched, and
+                // the one this helper started stopped: it holds the port); that they no longer do.
+                Some("raised") => {
+                    say!("{}", if Config::load().lights_raised { "raised" } else { "plain" });
+                    return Ok(());
+                }
+                Some("raise") => {
+                    fetch::fetch()?;
+                    // (Told first: lights asked for as this one is stopped start no other.)
+                    Config::change(|config| {
+                        config.lights_left_alone = false;
+                        config.lights_raised = true;
+                    })?;
+                    lights::afresh();
+                    Config::change(|config| config.openrgb_started = None)?;
+                    say!("raised");
+                    return Ok(());
+                }
+                Some("lower") => {
+                    Config::change(|config| config.lights_raised = false)?;
+                    say!("plain");
+                    return Ok(());
                 }
                 _ => {}
             }
@@ -1076,14 +1139,15 @@ fn main() -> std::io::Result<()> {
     let session = sign::hex(&session);
     // (Kept once as this version keeps it: each phone with what it is told from the others by.)
     let _ = Config::change(|_| {});
-    // (Whether the lights are on, as OpenRGB has them if it is running; else as they were last set.)
-    let state = State { lights: lights::lit().or(config.lit), ..State::default() };
+    let state = State { lights: lit_at_start(config.lights_raised, config.lit, lights::lit), ..State::default() };
     let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(config.colours.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
     let following = helper.clone();
     std::thread::spawn(move || {
         let mut last = None;
         // The makers' lighting programs seen running, by their numbers: others than last time, one has started or gone.
         let mut rivals: Vec<u32> = Vec::new();
+        // When the lights are to be put back (see `put_back`): first as this helper starts with the PC.
+        let mut put_back_at = Config::load().lights_raised.then(|| std::time::Instant::now() + AFRESH);
         loop {
             std::thread::sleep(FOLLOW);
             let now: Vec<u32> = actions::programs().into_iter().filter(|(_, name)| lights::RIVALS.iter().any(|rival| name.eq_ignore_ascii_case(rival))).map(|(number, _)| number).collect();
@@ -1092,8 +1156,15 @@ fn main() -> std::io::Result<()> {
                 following.stale.store(true, std::sync::atomic::Ordering::SeqCst);
                 // (Lights that follow the heat are put in their colour again by the OpenRGB to come.)
                 last = None;
+                if Config::load().lights_raised {
+                    put_back_at = Some(std::time::Instant::now() + AFRESH);
+                }
             }
             rivals = now;
+            if put_back_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                put_back_at = None;
+                following.put_back();
+            }
             following.follow(&mut last);
         }
     });
@@ -1136,6 +1207,16 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// OpenRGB run by the sensors starts with this helper: that it has its lights dark, or none yet, is not how they
+    /// are to be. One running as this helper starts otherwise is the user's, and says how they are.
+    #[test]
+    fn lights_at_start_are_as_last_set_when_the_sensors_run_openrgb() {
+        assert_eq!(super::lit_at_start(true, Some(true), || Some(false)), Some(true));
+        assert_eq!(super::lit_at_start(true, None, || Some(false)), Some(false));
+        assert_eq!(super::lit_at_start(false, Some(true), || Some(false)), Some(false));
+        assert_eq!(super::lit_at_start(false, Some(true), || None), Some(true));
+    }
+
     /// Lights there only where something would take them: OpenRGB with no devices (as it last set them) is none,
     /// not yet asked, it may have some.
     #[test]

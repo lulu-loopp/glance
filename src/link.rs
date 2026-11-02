@@ -63,11 +63,12 @@ pub enum Told {
 pub const DEVICE_MOST: usize = 256;
 
 /// The switches that need the sensors' rights to be turned: Glance starting at sign-in (its task was made
-/// elevated), and the phone remote (its task, and its way through the firewall).
+/// elevated), the phone remote (its task, and its way through the firewall), and OpenRGB run with those rights.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Switch {
     Autostart,
     Remote,
+    RaisedLights,
 }
 
 /// Where taking an update stands, as it travels.
