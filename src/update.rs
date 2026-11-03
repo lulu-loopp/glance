@@ -69,11 +69,11 @@ const INSTALLERS_FROM: [&str; 3] = [
 ];
 
 /// Glance's publisher, as its signing certificates say it (a signing service's certificates last days; these
-/// stay): the identity validated by Microsoft's Artifact Signing (the identity-validated mark, and the
-/// certificate profile's own mark, which no one else's certificates carry), under Microsoft's root for it, for
-/// this subject.
+/// stay): this subject, its identity validated by Microsoft's Artifact Signing (its identity-validated mark), under
+/// Microsoft's root for it. Not by one certificate profile's own mark: a profile made anew for the same identity has
+/// another, and installers signed under it were refused (the first profile was suspended, 2026-10).
 const PUBLISHER: &str = "CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US";
-const PUBLISHER_MARKS: [&str; 2] = ["1.3.6.1.4.1.311.97.1.0", "1.3.6.1.4.1.311.97.921771326.840678362.737210289.98417136"];
+const PUBLISHER_MARK: &str = "1.3.6.1.4.1.311.97.1.0";
 /// Microsoft Identity Verification Root Certificate Authority 2020, its SHA-256.
 const PUBLISHER_ROOT: [u8; 32] = [
     0x53, 0x67, 0xF2, 0x0C, 0x7A, 0xDE, 0x0E, 0x2B, 0xCA, 0x79, 0x09, 0x15, 0x05, 0x6D, 0x08, 0x6B, 0x72, 0x0C, 0x33, 0xC1, 0xFA, 0x2A, 0x26, 0x61,
@@ -830,10 +830,12 @@ fn by_publisher(file: &Path, opened: &std::fs::File) -> bool {
     let Some(signature) = Signature::verify(file, opened) else { return false };
     let chain = signature.chain();
     let (Some(signer), Some(root)) = (chain.first(), chain.last()) else { return false };
-    chain.len() > 1
-        && subject(signer).as_deref() == Some(PUBLISHER)
-        && PUBLISHER_MARKS.iter().all(|mark| usages(signer).iter().any(|usage| usage == mark))
-        && sha256(root) == Some(PUBLISHER_ROOT)
+    chain.len() > 1 && publishers(subject(signer).as_deref(), &usages(signer), sha256(root))
+}
+
+/// Whether a signer of `subject`, for `usages`, under the root of SHA-256 `root`, is Glance's publisher.
+fn publishers(subject: Option<&str>, usages: &[String], root: Option<[u8; 32]>) -> bool {
+    subject == Some(PUBLISHER) && usages.iter().any(|usage| usage == PUBLISHER_MARK) && root == Some(PUBLISHER_ROOT)
 }
 
 /// A certificate's subject, written as `PUBLISHER` is (its most particular part first).
@@ -873,7 +875,7 @@ fn sha256(certificate: &CERT_CONTEXT) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{by_publisher, get, hold, installer_version, newer, release, INSTALLERS_FROM, SOURCES};
+    use super::{by_publisher, get, hold, installer_version, newer, publishers, release, INSTALLERS_FROM, PUBLISHER, PUBLISHER_ROOT, SOURCES};
     use std::path::Path;
 
     /// Over the network: the latest release is found, its installer
@@ -896,6 +898,23 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert!(ours, "{} not signed by Glance's publisher", releases[0].0);
         assert!(!theirs);
+    }
+
+    /// Glance's publisher is its identity as Microsoft validated it, under any certificate profile of it: one made
+    /// anew (another profile's mark) is still it, and another subject, an identity not validated, or another root
+    /// is not.
+    #[test]
+    fn its_publisher_is_its_identity_under_any_profile() {
+        let marks = |marks: &[&str]| marks.iter().map(|mark| mark.to_string()).collect::<Vec<_>>();
+        let first = marks(&["1.3.6.1.4.1.311.97.1.0","1.3.6.1.4.1.311.97.921771326.840678362.737210289.98417136", "1.3.6.1.5.5.7.3.3"]);
+        let anew = marks(&["1.3.6.1.4.1.311.97.1.0", "1.3.6.1.4.1.311.97.12345.678.910.1112", "1.3.6.1.5.5.7.3.3"]);
+        let root = Some(PUBLISHER_ROOT);
+        assert!(publishers(Some(PUBLISHER), &first, root));
+        assert!(publishers(Some(PUBLISHER), &anew, root));
+        assert!(!publishers(Some("CN=Someone Else, O=Someone Else, L=Ann Arbor, S=mi, C=US"), &anew, root));
+        assert!(!publishers(Some(PUBLISHER), &marks(&["1.3.6.1.5.5.7.3.3"]), root));
+        assert!(!publishers(Some(PUBLISHER), &anew, Some([0; 32])));
+        assert!(!publishers(None, &anew, root));
     }
 
     /// A released installer (`GLANCE_INSTALLER`) is signed by Glance's publisher; held, it is not written, but
