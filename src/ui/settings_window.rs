@@ -2305,10 +2305,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
-/// Sets `field`, a slider's, to `value` in `settings`.
-fn put_slider(settings: &mut Settings, field: Field, value: f32) {
+/// Sets `field`, a slider's, to `value` in `settings`: the panel's size, on the screen named `screen` (see
+/// `Settings::size_panel`).
+fn put_slider(settings: &mut Settings, field: Field, value: f32, screen: Option<&str>) {
     match field {
-        Field::PanelSize => settings.panel_size = value,
+        Field::PanelSize => settings.size_panel(screen, value),
         Field::OverlayClear => settings.overlay.clear = value,
         _ => settings.overlay.size = value,
     }
@@ -3427,19 +3428,31 @@ impl Ui {
         self.set_shortcut(which, Some(shortcut));
     }
 
+    /// How large the panel is drawn on the screen the window shows (see `Settings::panel_size_on`).
+    fn panel_size(&self) -> f32 {
+        self.settings.panel_size_on(self.stage.screen.as_deref())
+    }
+
     /// A slider's name, its least and most values, its step, and its value.
     fn slider(&self, field: Field) -> (&'static str, f32, f32, f32, f32) {
         let lang = self.lang;
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
-            // No larger than the screen holds it: at that, said so.
+            // No larger than the screen holds it: at that, said so. The size of the screen the window shows (its own),
+            // which, with more than one, is said.
             Field::PanelSize => {
                 // A hundredth at a step, as sizing the panel by its corner goes. (On a step, as the slider moves by
                 // them: a most between two could never be reached.)
                 const STEP: f32 = 0.01;
                 let most = (sizes.0 + ((self.largest - sizes.0) / STEP + 1e-4).floor() * STEP).clamp(sizes.0, sizes.1);
-                let value = self.settings.panel_size.clamp(sizes.0, most);
-                let name = if most < sizes.1 && value >= most - 0.001 { pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)") } else { pick(lang, "面板大小", "Panel size") };
+                let value = self.panel_size().clamp(sizes.0, most);
+                let full = most < sizes.1 && value >= most - 0.001;
+                let name = match (crate::screens::monitors().len() > 1, full) {
+                    (false, false) => pick(lang, "面板大小", "Panel size"),
+                    (false, true) => pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)"),
+                    (true, false) => pick(lang, "面板大小（本屏幕）", "Panel size (this screen)"),
+                    (true, true) => pick(lang, "面板大小（本屏幕，已达上限）", "Panel size (this screen, as large as it holds)"),
+                };
                 (name, sizes.0, most, STEP, value)
             }
             Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
@@ -3458,8 +3471,9 @@ impl Ui {
         if value == now {
             return;
         }
-        put_slider(&mut self.settings, field, value);
-        crate::app().preview(|live| put_slider(live, field, value));
+        let screen = self.stage.screen.clone();
+        put_slider(&mut self.settings, field, value, screen.as_deref());
+        crate::app().preview(|live| put_slider(live, field, value, screen.as_deref()));
         self.next_frame = Instant::now();
     }
 
@@ -3468,8 +3482,9 @@ impl Ui {
     fn keep_slider(&mut self, field: Field) {
         let value = self.slider(field).4;
         let mut now = None;
+        let screen = self.stage.screen.clone();
         crate::app().change(|held| {
-            put_slider(held, field, value);
+            put_slider(held, field, value, screen.as_deref());
             now = Some(held.clone());
         });
         self.take(now.unwrap());
@@ -6027,7 +6042,7 @@ impl Ui {
         let (sw, sh) = self.stage.size;
         let shows = super::music::Shows::from(&self.settings.view);
         let size = super::music::rests_at(self.settings.music_rooms.at(edge == Edge::Top), &shows);
-        let zoom = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        let zoom = self.panel_size().clamp(SIZES.0, SIZES.1);
         let (pw, ph) = (size.0 * zoom, size.1 * zoom);
         let inset = Theme::new(Skin::named(&self.settings.skin), false).inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
@@ -6206,7 +6221,7 @@ impl Ui {
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
         self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1, rail);
-        let size = self.settings.panel_size.clamp(SIZES.0, SIZES.1);
+        let size = self.panel_size().clamp(SIZES.0, SIZES.1);
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;

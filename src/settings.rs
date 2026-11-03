@@ -1,4 +1,5 @@
 #[cfg(windows)]
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -705,8 +706,14 @@ pub struct Settings {
     /// How many columns the panel's lanes are dealt into; none chosen, as
     /// few as fit the screen's height.
     pub columns: Option<usize>,
-    /// How large the panel is drawn, 1 as designed (0.75 to 2).
+    /// How large the panel is drawn, 1 as designed (0.75 to 2), on a screen not in `panel_sizes`. Up to 0.4.3, on
+    /// every screen.
     pub panel_size: f32,
+    /// How large the panel is drawn on each screen sized since, by the name that stays its own (see `screens`):
+    /// a large screen kept as designed, a small one made smaller. (Written even while empty, so that two screens
+    /// sized at once from two places each stand: see `merged`.)
+    #[serde(default)]
+    pub panel_sizes: BTreeMap<String, f32>,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -908,6 +915,7 @@ impl Default for Settings {
             anchor: Anchor::default(),
             columns: None,
             panel_size: 1.0,
+            panel_sizes: BTreeMap::new(),
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
             interval_ms: 1000,
@@ -959,6 +967,22 @@ impl Settings {
     /// What each screen edge opens, to be changed.
     pub fn places_mut(&mut self) -> &mut Places {
         self.places.as_mut().expect("places carried over as the settings were read")
+    }
+
+    /// How large the panel is drawn on the screen named `screen` (none: a screen not known by a name of its own).
+    pub fn panel_size_on(&self, screen: Option<&str>) -> f32 {
+        screen.and_then(|screen| self.panel_sizes.get(screen)).copied().unwrap_or(self.panel_size)
+    }
+
+    /// The panel sized `size` on the screen named `screen` (none: one not known by a name of its own, sized as every
+    /// screen not sized apart), the others as they are.
+    pub fn size_panel(&mut self, screen: Option<&str>, size: f32) {
+        match screen {
+            Some(screen) => {
+                self.panel_sizes.insert(screen.to_string(), size);
+            }
+            None => self.panel_size = size,
+        }
     }
 
     pub fn close_delay(&self) -> Duration {
@@ -1324,6 +1348,31 @@ mod tests {
         assert_eq!(settings.skin, "glass");
         assert_eq!(settings.panel_size, Settings::default().panel_size);
         assert_eq!(left_out, vec!["panel_size".to_string()]);
+    }
+
+    /// Each screen keeps the panel's size as it was made there: sized on the small one, the large one stays as it was.
+    /// Settings from before have every screen at their one size, and so has a screen not sized apart.
+    #[test]
+    fn each_screen_keeps_its_own_panel_size() {
+        let mut settings: Settings = serde_json::from_str(r#"{ "panel_size": 1.25 }"#).unwrap();
+        assert_eq!((settings.panel_size_on(Some("large")), settings.panel_size_on(Some("small")), settings.panel_size_on(None)), (1.25, 1.25, 1.25));
+        settings.size_panel(Some("small"), 0.8);
+        assert_eq!((settings.panel_size_on(Some("large")), settings.panel_size_on(Some("small")), settings.panel_size_on(Some("new"))), (1.25, 0.8, 1.25));
+        settings.size_panel(Some("large"), 1.0);
+        let read: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!((read.panel_size_on(Some("large")), read.panel_size_on(Some("small")), read.panel_size_on(Some("new"))), (1.0, 0.8, 1.25));
+    }
+
+    /// Two screens sized at once from two places (the panel by its corner, the settings window's slider): both stand.
+    #[test]
+    fn sizes_made_on_two_screens_at_once_both_stand() {
+        let base = Settings::default();
+        let mut held = base.clone();
+        held.size_panel(Some("a"), 0.8);
+        let mut mine = base.clone();
+        mine.size_panel(Some("b"), 1.5);
+        let merged = merged(&held, &base, &mine);
+        assert_eq!((merged.panel_size_on(Some("a")), merged.panel_size_on(Some("b"))), (0.8, 1.5));
     }
 
     #[test]

@@ -164,7 +164,9 @@ struct Config {
     tear_off: bool,
     anchor: Anchor,
     columns: Option<usize>,
+    /// How large the panel is drawn on a screen not sized apart, and on each sized apart (see `Settings::panel_sizes`).
     size: f32,
+    sizes: std::collections::BTreeMap<String, f32>,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
     /// The panels pinned open at their edges (see `Settings::panels_pinned`).
@@ -179,6 +181,14 @@ struct Config {
     view: serde_json::Value,
 }
 
+impl Config {
+    /// How large the panel is drawn on the screen named `screen` (see `Settings::panel_size_on`): as far as the
+    /// settings offer (the file may say anything).
+    fn size_on(&self, screen: Option<&str>) -> f32 {
+        screen.and_then(|screen| self.sizes.get(screen)).copied().unwrap_or(self.size).clamp(SIZES.0, SIZES.1)
+    }
+}
+
 fn config_from(settings: &Settings) -> Config {
     Config {
         edges: crate::push::Edges { places: settings.places().clone(), pressure: settings.sensitivity.pressure() },
@@ -187,8 +197,8 @@ fn config_from(settings: &Settings) -> Config {
         tear_off: settings.tear_off,
         anchor: settings.anchor,
         columns: settings.columns,
-        // As far as the settings offer: the file may say anything.
-        size: settings.panel_size.clamp(SIZES.0, SIZES.1),
+        size: settings.panel_size,
+        sizes: settings.panel_sizes.clone(),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
         panels_pinned: settings.panels_pinned.clone(),
@@ -1349,6 +1359,8 @@ impl Controller {
                         panel.screens_changed(0, now);
                     }
                     if let Some((at, size)) = kept.filter(|(at, size)| !matches!(at, Kept::Unchanged) || size.is_some()) {
+                        // (Sized: for the screen it is on.)
+                        let screen = panel.screen.clone();
                         crate::app().change(|settings| {
                             match at {
                                 Kept::At(at) => settings.panel_at = Some(at),
@@ -1356,7 +1368,7 @@ impl Controller {
                                 Kept::Unchanged => {}
                             }
                             if let Some(size) = size {
-                                settings.panel_size = size;
+                                settings.size_panel(screen.as_deref(), size);
                             }
                         });
                     }
@@ -2154,8 +2166,10 @@ struct Panel<'a> {
     part: Part,
     /// The columns chosen in the settings; none, as few as fit.
     columns: Option<usize>,
-    /// The size chosen in the settings, 1 as designed.
+    /// The size chosen for its screen, 1 as designed.
     size: f32,
+    /// The screen it is on, by the name that stays its own (see `screens`): its size is that screen's.
+    screen: Option<String>,
     /// Refresh the desktop behind the glass while the panel is open.
     live: bool,
     behind: Option<Behind>,
@@ -2332,6 +2346,7 @@ impl<'a> Panel<'a> {
             part: Part::Monitor,
             columns: None,
             size: 1.0,
+            screen: None,
             live: false,
             behind: None,
             tried_behind: Instant::now(),
@@ -2423,7 +2438,7 @@ impl<'a> Panel<'a> {
         self.columns = config.columns;
         // Mid-drag, the size is the drag's.
         if self.drag.is_none() {
-            self.size = config.size;
+            self.size = config.size_on(self.screen.as_deref());
         }
         let skin = Skin::named(&config.skin);
         // Up, and now a skin that sees the desktop: it is taken behind the
@@ -2544,10 +2559,11 @@ impl<'a> Panel<'a> {
         // A reopening during the way out picks the panel up where it is.
         if !self.is_shown() {
             self.edge = edge;
+            self.screen = crate::screens::id_of(contact.monitor);
             // What that edge holds (where it holds nothing, opened by hand: what a panel opened so shows).
             self.part = {
                 let places = &self.controller.config.lock().unwrap().edges.places;
-                crate::screens::id_of(contact.monitor).and_then(|id| places.part(&id, edge)).unwrap_or(places.by_hand().1)
+                self.screen.as_deref().and_then(|id| places.part(id, edge)).unwrap_or(places.by_hand().1)
             };
             self.restyle();
             // A new opening is laid out for what the machine shows now.
@@ -3543,13 +3559,18 @@ impl<'a> Panel<'a> {
             let config = self.controller.config.lock().unwrap();
             crate::screens::lit(&config.edges.places, contact.monitor)
         };
+        let sized = drag.sized;
         if let Some(edge) = lit.each().find(|edge| docks(*edge, contact, panel)) {
             self.edge = edge;
+            let other = contact != placement.contact;
             placement.contact = contact;
             placement.px = contact.scale;
             placement.floating = None;
             placement.held = None;
             placement.anchor = centre;
+            if other {
+                self.moved_to(contact.monitor, sized);
+            }
             if let Some(opening) = self.opening.take() {
                 self.held = Some(opening.seen);
             }
@@ -3561,6 +3582,7 @@ impl<'a> Panel<'a> {
             // it was let go.
             placement.contact = contact;
             placement.px = contact.scale;
+            self.moved_to(contact.monitor, sized);
             if let Some(opening) = self.opening.take() {
                 self.held = Some(opening.seen);
             }
@@ -3576,6 +3598,15 @@ impl<'a> Panel<'a> {
         let kept = self.kept_at()?;
         self.placement.as_mut()?.anchor = POINT { x: kept.screen.0, y: kept.screen.1 };
         Some((Kept::At(kept), size))
+    }
+
+    /// Let go on another screen, at `monitor`: that screen's, and as large as the panel is drawn there; as large as
+    /// the hand made it, `sized`, to be kept for that screen.
+    fn moved_to(&mut self, monitor: RECT, sized: bool) {
+        self.screen = crate::screens::id_of(monitor);
+        if !sized {
+            self.size = self.controller.config.lock().unwrap().size_on(self.screen.as_deref());
+        }
     }
 
     /// Where the panel is, as it is kept away from the edge: how far into
