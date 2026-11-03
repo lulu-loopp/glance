@@ -1812,9 +1812,10 @@ impl<'a> Frame<'a> {
         Moving { frame: self, was: self.set_moving(on || self.moving.get()) }
     }
 
-    /// How text is drawn: put on whole pixels, or where it falls while what is drawn moves (see `set_moving`).
+    /// How text is drawn: put on whole pixels, or where it falls while what is drawn moves (see `set_moving`), and in
+    /// its colours (see `text_options`).
     fn text_snap(&self) -> windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS {
-        if self.moving.get() { windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP } else { D2D1_DRAW_TEXT_OPTIONS_NONE }
+        text_options(if self.moving.get() { windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP } else { D2D1_DRAW_TEXT_OPTIONS_NONE })
     }
 
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
@@ -2185,7 +2186,7 @@ impl<'a> Frame<'a> {
                 windows_numerics::Vector2 { X: x, Y: y },
                 &layout,
                 self.brush(color),
-                windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP,
+                text_options(windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_NO_SNAP),
             )
         };
     }
@@ -2204,6 +2205,12 @@ impl<'a> Frame<'a> {
             )
         };
     }
+}
+
+/// `options` for drawing text, with its glyphs in their own colours where a font has them (an emoji's): without it,
+/// drawn in the text's one colour, as outlines.
+fn text_options(options: windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS) -> windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS {
+    options | windows::Win32::Graphics::Direct2D::D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT
 }
 
 /// What stands in a note's words for what of them is put away (see `Frame::markdown`): room `width` wide (none for a
@@ -2878,6 +2885,31 @@ mod tests {
             let rows = (0..tall).filter(|&y| inked(y) && (y == 0 || !inked(y - 1))).count();
             assert!(rows >= 4, "{text:?}: {rows} rows drawn");
         }
+    }
+
+    /// An emoji is drawn in its own colours however text is drawn (still or moving, in a line, wrapped, in a note's
+    /// words): drawn in the text's one colour, it was an outline.
+    #[test]
+    #[cfg(feature = "studio")]
+    fn an_emoji_is_drawn_in_its_colours() {
+        use super::super::canvas::{Align, Canvas, Color, Family, Font, Inks};
+        let gfx = super::Gfx::new().expect("graphics");
+        let white = Color::hex(0xffffff, 1.0);
+        let font = Font::new(Family::YaHei, 24.0, 400.0);
+        let size = 48u32;
+        let in_colour = |way: &str, paint: &dyn Fn(&super::Frame)| {
+            let pixels = gfx.draw_offscreen((size, size), 1.0, paint).expect("drawn");
+            let coloured = pixels.chunks(4).filter(|p| p[3] > 128 && p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 60).count();
+            assert!(coloured > 20, "{way}: {coloured} pixels in colour");
+        };
+        in_colour("text", &|frame| Canvas::text(frame, "😂", font, white, 4.0, 4.0, 40.0, Align::Start));
+        in_colour("moving", &|frame| frame.text_moving("😂", font, white, 4.0, 4.0, 40.0, Align::Start));
+        in_colour("moving_while", &|frame| {
+            let _moving = frame.moving_while(true);
+            Canvas::text(frame, "😂", font, white, 4.0, 4.0, 40.0, Align::Start);
+        });
+        in_colour("wrapped", &|frame| frame.text_wrapped("😂", font, white, 4.0, 4.0, 40.0));
+        in_colour("a note's", &|frame| frame.markdown("😂", font, Inks { words: white, faint: white, accent: white }, 4.0, 4.0, 40.0, 40.0, 0.0));
     }
 
     /// A layer drawn while a window is sized by hand is painted again only where what it shows has changed: one that
