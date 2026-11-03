@@ -9,14 +9,18 @@ use std::sync::mpsc;
 use std::sync::{Condvar, Mutex, RwLock};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
 
-/// What a round of listing did: how many folders it listed, how many the user may not, and those that could not be
-/// listed (by their ids).
+/// What a round of listing did: how many folders it listed, how many the user may not, those that could not be
+/// listed (by their ids), and the large ones listed (by their ids, with how many names each holds).
 #[derive(Default, Debug, Clone)]
 pub struct Listed {
     pub folders: usize,
     pub denied: usize,
     pub failed: Vec<u64>,
+    pub large: Vec<(u64, usize)>,
 }
+
+/// How many names a folder holds to be counted large.
+pub const LARGE: usize = 10_000;
 
 /// The folders to list (by their ids, and their paths where the drive keeps no ids), and whether the round is over.
 struct Jobs {
@@ -96,16 +100,20 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], threads: usi
             let before = before.remove(&id).unwrap_or_default();
             match listing {
                 Listing::Items(items) => {
+                    if items.len() >= LARGE {
+                        listed.large.push((id, items.len()));
+                    }
                     index.list(place, &items, &before, &mut changes);
-                    index.set_flag(place, flag::UNREAD, false);
+                    index.set_flag(place, flag::UNREAD | flag::STALE, false);
                 }
                 Listing::Denied => {
                     listed.denied += 1;
                     index.denied(place, &before);
+                    index.set_flag(place, flag::STALE, false);
                 }
                 Listing::Failed(_) => {
                     listed.failed.push(id);
-                    index.set_flag(place, flag::UNREAD, true);
+                    index.set_flag(place, flag::UNREAD | flag::STALE, true);
                 }
                 Listing::Gone => {}
             }

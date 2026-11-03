@@ -20,6 +20,7 @@ mod watch;
 use drive::Drive;
 use index::{flag, Index, ROOT};
 pub use query::{Hit, Only, Query};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Once, RwLock};
 use std::time::{Duration, Instant};
@@ -266,25 +267,17 @@ impl Keeping {
 /// A drive kept current as its journal says which folders changed.
 fn follow_journal(volume: &Volume, threads: usize, mut keeping: Keeping) {
     let drive = &volume.drive;
-    // Folders that could not be listed (another program had them, say), by their ids: listed again next time.
-    let mut again: Vec<u64> = Vec::new();
+    let mut pacing = Pacing::new(volume);
     while !volume.away() {
         std::thread::sleep(JOURNAL_EVERY);
         let Some(cursor) = volume.kept.lock().unwrap().and_then(|kept| kept.journal) else { return };
         match journal::read(drive, cursor.journal, cursor.next) {
-            Ok(journal::Read::Changed { mut folders, next }) => {
-                folders.append(&mut again);
-                folders.sort_unstable();
-                folders.dedup();
-                if !folders.is_empty() {
-                    let places: Vec<u32> = {
-                        let index = volume.index.read().unwrap();
-                        folders.iter().filter_map(|&id| index.folder(id)).collect()
-                    };
-                    again = walk::round(&volume.index, drive, &places, threads).failed;
+            Ok(journal::Read::Changed { folders, next }) => {
+                if pacing.list(volume, folders, threads) {
                     keeping.changed = true;
                 }
-                // (Only once what changed is in the index: kept now, it holds all before `next`.)
+                // (Only once what changed is in the index, or marked in it to be listed again: kept now, it holds all
+                // before `next`.)
                 if let Some(kept) = volume.kept.lock().unwrap().as_mut() {
                     kept.journal = Some(store::Cursor { next, ..cursor });
                 }
@@ -294,7 +287,7 @@ fn follow_journal(volume: &Volume, threads: usize, mut keeping: Keeping) {
                 if let Ok(journal) = journal::query(drive) {
                     *volume.kept.lock().unwrap() = Some(store::Kept { serial: drive.serial, journal: Some(store::Cursor { journal: journal.id, next: journal.next }) });
                     relist(volume, threads);
-                    again.clear();
+                    pacing = Pacing::new(volume);
                     keeping.changed = true;
                 }
             }
@@ -307,27 +300,104 @@ fn follow_journal(volume: &Volume, threads: usize, mut keeping: Keeping) {
 
 /// A drive with no journal kept current as Windows tells of names changed in its folders.
 fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, threads: usize, mut keeping: Keeping) {
-    let mut again: Vec<u64> = Vec::new();
+    let mut pacing = Pacing::new(volume);
     while !volume.away() {
-        match told.recv_timeout(JOURNAL_EVERY) {
+        let changed = match told.recv_timeout(JOURNAL_EVERY) {
             Ok(watch::Seen::Folders(paths)) => {
-                let mut places: Vec<u32> = {
+                let folders: Vec<u64> = {
                     let index = volume.index.read().unwrap();
-                    paths.iter().map(|path| index.folder_at(path)).chain(again.drain(..).filter_map(|id| index.folder(id))).collect()
+                    paths.iter().filter_map(|path| index.id(index.folder_at(path))).collect()
                 };
-                places.sort_unstable();
-                places.dedup();
-                again = walk::round(&volume.index, &volume.drive, &places, threads).failed;
-                keeping.changed = true;
+                pacing.list(volume, folders, threads)
             }
             Ok(watch::Seen::Lost) => {
                 relist(volume, threads);
-                keeping.changed = true;
+                pacing = Pacing::new(volume);
+                true
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => pacing.list(volume, Vec::new(), threads),
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        if changed {
+            keeping.changed = true;
         }
         keeping.keep(volume, false);
+    }
+}
+
+/// How many names a second a large folder that keeps changing is listed again at, at most: one of 110,000 names
+/// here (the user's temporary files, written to every second) took a tenth of a core listed every second.
+const NAMES_A_SECOND: u64 = 10_000;
+/// The longest a folder that changed waits to be listed again.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
+
+/// Folders that changed, each listed again as soon as it may be: a large one only a while after it was last listed
+/// (the longer, the more names it holds), what changes in it meanwhile listed with it then.
+#[derive(Default)]
+struct Pacing {
+    /// The large folders listed lately, by their ids, and when each may be listed again.
+    not_before: HashMap<u64, Instant>,
+    /// Those waiting (put off, or their listing failed), by their ids.
+    waiting: HashSet<u64>,
+}
+
+impl Pacing {
+    /// Begun with the folders that were waiting as the index was kept (marked in it).
+    fn new(volume: &Volume) -> Self {
+        let index = volume.index.read().unwrap();
+        let waiting = (0..index.len()).filter(|&place| index.entry(place).alive() && index.entry(place).flags & flag::STALE != 0).filter_map(|place| index.id(place)).collect();
+        Pacing { not_before: HashMap::new(), waiting }
+    }
+
+    /// How long a folder of `names` names waits to be listed again.
+    fn wait(names: usize) -> Duration {
+        Duration::from_millis(names as u64 * 1000 / NAMES_A_SECOND).min(LONGEST_WAIT)
+    }
+
+    /// The folders that `changed` (by their ids) put with those waiting: those that may be listed `now`, and those
+    /// left waiting.
+    fn take(&mut self, changed: Vec<u64>, now: Instant) -> (Vec<u64>, Vec<u64>) {
+        self.not_before.retain(|_, at| *at > now);
+        self.waiting.extend(changed);
+        let (later, due): (Vec<u64>, Vec<u64>) = self.waiting.drain().partition(|id| self.not_before.contains_key(id));
+        self.waiting.extend(&later);
+        (due, later)
+    }
+
+    /// What a round of listing begun `now` found: the large folders it listed wait, those that failed are tried again.
+    fn listed(&mut self, now: Instant, listed: walk::Listed) {
+        for (id, names) in listed.large {
+            self.not_before.insert(id, now + Pacing::wait(names));
+        }
+        self.waiting.extend(listed.failed);
+    }
+
+    /// The folders that `changed` (by their ids) and those waiting listed, those that may be now: the rest left
+    /// waiting, marked in the index (kept so, they are listed as Glance starts again). Whether the index changed.
+    fn list(&mut self, volume: &Volume, changed: Vec<u64>, threads: usize) -> bool {
+        let now = Instant::now();
+        let (due, later) = self.take(changed, now);
+        let mut marked = false;
+        {
+            let mut index = volume.index.write().unwrap();
+            let places: Vec<u32> = later.iter().filter_map(|&id| index.folder(id)).collect();
+            for place in places {
+                if index.entry(place).flags & flag::STALE == 0 {
+                    index.set_flag(place, flag::STALE, true);
+                    marked = true;
+                }
+            }
+        }
+        if due.is_empty() {
+            return marked;
+        }
+        let places: Vec<u32> = {
+            let index = volume.index.read().unwrap();
+            due.iter().filter_map(|&id| index.folder(id)).collect()
+        };
+        let listed = walk::round(&volume.index, &volume.drive, &places, threads);
+        self.listed(now, listed);
+        true
     }
 }
 
@@ -387,7 +457,8 @@ pub fn find(query: &Query, most: usize) -> Found {
 
 #[cfg(test)]
 mod tests {
-    use super::{begun, journal::Journal, store, Begun};
+    use super::{begun, journal::Journal, store, walk, Begun, Pacing, LONGEST_WAIT};
+    use std::time::{Duration, Instant};
 
     /// An index kept is read on from where it was kept while the journal still holds all since. Kept before what the
     /// journal holds now (Glance not running while it went on), or with another journal, it is searched as it was kept
@@ -403,5 +474,27 @@ mod tests {
         assert_eq!(begun(Some(&kept(8, 3000)), &journal), Begun::Relisted);
         assert_eq!(begun(Some(&store::Kept { serial: 1, journal: None }), &journal), Begun::Relisted);
         assert_eq!(begun(None, &journal), Begun::Listed);
+    }
+
+    /// A large folder that keeps changing (the user's temporary files: 110,000 names, written to every second) is
+    /// listed again only a while after it was last listed, the longer the larger, and then with all that changed in it
+    /// meanwhile. A small one is listed as it changes, and one whose listing failed is tried again.
+    #[test]
+    fn a_large_folder_that_keeps_changing_waits_to_be_listed_again() {
+        let mut pacing = Pacing::default();
+        let start = Instant::now();
+        let second = |n: u64| start + Duration::from_secs(n);
+        assert_eq!(pacing.take(vec![1, 2], start).0.len(), 2);
+        pacing.listed(start, walk::Listed { large: vec![(1, 110_000)], failed: vec![3], ..walk::Listed::default() });
+        assert_eq!(Pacing::wait(110_000), Duration::from_secs(11));
+        assert_eq!(Pacing::wait(5_000_000), LONGEST_WAIT);
+
+        let (mut due, later) = pacing.take(vec![1, 2], second(1));
+        due.sort_unstable();
+        assert_eq!((due, later), (vec![2, 3], vec![1]), "the large one waits, the small one and the failed one are listed");
+        pacing.listed(second(1), walk::Listed::default());
+        assert_eq!(pacing.take(vec![], second(5)), (vec![], vec![1]), "still waiting, though nothing else changed");
+        pacing.listed(second(5), walk::Listed::default());
+        assert_eq!(pacing.take(vec![], second(12)), (vec![1], vec![]), "listed once its wait is over");
     }
 }

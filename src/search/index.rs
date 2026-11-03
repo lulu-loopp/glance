@@ -45,8 +45,11 @@ pub mod flag {
     pub const CHINESE: u16 = 16;
     pub const HIDDEN: u16 = 32;
     pub const SYSTEM: u16 = 64;
+    /// A folder that changed and is to be listed again (put off, or its listing failed): kept with the index, so that
+    /// it is listed as Glance starts again, if not before.
+    pub const STALE: u16 = 128;
     /// All there are.
-    pub const ALL: u16 = 127;
+    pub const ALL: u16 = 255;
 }
 
 /// A file or folder (16 bytes, as it is kept on disk too).
@@ -209,6 +212,9 @@ pub struct Index {
     ids: Vec<(u32, u64)>,
     /// The entries added since whose names hold Chinese characters.
     chinese: Vec<u32>,
+    /// Entries that may be in a folder other than the one the base says (added since, or moved), by that folder:
+    /// each where it went, and perhaps since gone on (each entry is looked at as it is now).
+    adopted: HashMap<u32, Vec<u32>>,
     dead: usize,
     /// Whether its folders are known by their file ids (an NTFS drive's), or else by their names alone, each
     /// given an id of its own from `made`.
@@ -262,7 +268,7 @@ fn folded_in<'a>(entries: &[Entry], run: &'a [u8], place: usize) -> &'a str {
 
 impl Index {
     fn empty(by_id: bool) -> Self {
-        Index { base: None, changed: HashMap::new(), entries: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), dead: 0, by_id, made: MADE }
+        Index { base: None, changed: HashMap::new(), entries: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), adopted: HashMap::new(), dead: 0, by_id, made: MADE }
     }
 
     /// An index of a drive whose root folder has `root_id` (a drive whose folders are known `by_id`, else by their
@@ -297,6 +303,9 @@ impl Index {
     }
 
     fn set_entry(&mut self, place: u32, entry: Entry) {
+        if self.entry(place).parent != entry.parent {
+            self.adopted.entry(entry.parent).or_default().push(place);
+        }
         let base_len = self.base_len();
         if place < base_len {
             self.changed.insert(place, entry);
@@ -332,6 +341,7 @@ impl Index {
             self.chinese.push(place);
         }
         self.entries.push(Entry { parent, at: at as u32, written, written_len, flags });
+        self.adopted.entry(parent).or_default().push(place);
         place
     }
 
@@ -424,10 +434,7 @@ impl Index {
     pub fn folder_at(&self, path: &std::path::Path) -> u32 {
         let mut folder = ROOT;
         for part in path.components() {
-            let found = (0..self.len()).find(|&place| {
-                let entry = self.entry(place);
-                entry.alive() && entry.folder() && entry.parent == folder && self.name(place) == part.as_os_str()
-            });
+            let found = self.held_by(folder).into_iter().find(|&place| self.entry(place).folder() && self.name(place) == part.as_os_str());
             match found {
                 Some(place) => folder = place,
                 None => break,
@@ -465,14 +472,40 @@ impl Index {
 
     /// The live entries in each of `folders`.
     pub fn children(&self, folders: &HashSet<u32>) -> HashMap<u32, Vec<u32>> {
-        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-        for place in 0..self.len() {
-            let entry = self.entry(place);
-            if entry.alive() && folders.contains(&entry.parent) {
-                children.entry(entry.parent).or_default().push(place);
-            }
-        }
-        children
+        folders
+            .iter()
+            .filter_map(|&folder| {
+                let held = self.held_by(folder);
+                (!held.is_empty()).then_some((folder, held))
+            })
+            .collect()
+    }
+
+    /// The live entries in `folder`, in order: those the base had in it and those that may have come since, each as
+    /// it is now. (Looked up, never looked for through all the entries.)
+    fn held_by(&self, folder: u32) -> Vec<u32> {
+        let came = self.adopted.get(&folder).into_iter().flatten().copied();
+        let mut held: Vec<u32> = self
+            .kept_in(folder)
+            .chain(came)
+            .filter(|&place| {
+                let entry = self.entry(place);
+                entry.alive() && entry.parent == folder
+            })
+            .collect();
+        held.sort_unstable();
+        held.dedup();
+        held
+    }
+
+    /// The base's entries that were in `folder` as it was kept: together, as the base's entries (but the root, the
+    /// first) are in order of their folders' places (see `write`).
+    fn kept_in(&self, folder: u32) -> std::ops::Range<u32> {
+        let Some(base) = &self.base else { return 0..0 };
+        let entries = &base.entries()[1..];
+        let from = entries.partition_point(|entry| entry.parent < folder);
+        let to = from + entries[from..].partition_point(|entry| entry.parent == folder);
+        from as u32 + 1..to as u32 + 1
     }
 
     /// `folder` as it is listed now, against `before`, its entries when the round began: names gone marked dead
@@ -493,7 +526,7 @@ impl Index {
                     _ => false,
                 };
                 if same {
-                    let kept = was.flags & (flag::FOLDER | flag::CHINESE | flag::UNREAD);
+                    let kept = was.flags & (flag::FOLDER | flag::CHINESE | flag::UNREAD | flag::STALE);
                     if kept | flags != was.flags {
                         self.set_entry(child, Entry { flags: kept | flags, ..was });
                     }
@@ -512,7 +545,7 @@ impl Index {
             if item.folder() && self.by_id {
                 if let Some(old) = self.folder(id) {
                     // Moved here, or renamed: its entries go with it.
-                    let place = self.add(folder, &item.name, flags | (self.entry(old).flags & flag::UNREAD));
+                    let place = self.add(folder, &item.name, flags | (self.entry(old).flags & (flag::UNREAD | flag::STALE)));
                     self.set_id(place, id);
                     self.kill(old);
                     changes.moved.insert(old, place);
@@ -546,9 +579,9 @@ impl Index {
                 }
                 place
             };
-            for place in 0..self.len() {
-                let entry = self.entry(place);
-                if entry.alive() && changes.moved.contains_key(&entry.parent) {
+            for (_, held) in self.children(&changes.moved.keys().copied().collect()) {
+                for place in held {
+                    let entry = self.entry(place);
                     self.set_entry(place, Entry { parent: moved(entry.parent), ..entry });
                 }
             }
@@ -567,11 +600,11 @@ impl Index {
     pub fn kill_within(&mut self, mut folders: HashSet<u32>) {
         while !folders.is_empty() {
             let mut within = HashSet::new();
-            for place in 0..self.len() {
-                let entry = self.entry(place);
-                if entry.alive() && folders.contains(&entry.parent) {
+            for (_, held) in self.children(&folders) {
+                for place in held {
+                    let folder = self.entry(place).folder();
                     self.kill(place);
-                    if entry.folder() {
+                    if folder {
                         within.insert(place);
                     }
                 }
@@ -628,6 +661,8 @@ impl Index {
             + self.folders.capacity() * (size_of::<(u64, Option<u32>)>() + 1)
             + self.ids.capacity() * size_of::<(u32, u64)>()
             + self.chinese.capacity() * 4
+            + self.adopted.capacity() * (size_of::<(u32, Vec<u32>)>() + 1)
+            + self.adopted.values().map(|places| places.capacity() * 4).sum::<usize>()
     }
 
     /// How deep each entry is (the root 0, what is in it 1, ...), `LEFT` for those left out as it is kept: the dead,
@@ -667,7 +702,8 @@ impl Index {
     }
 
     /// It as kept on disk (see `read`): the dead left out, and the rest placed anew, each after its folder (by how
-    /// deep it is, then as it was). How many entries, bytes of names folded, bytes of names as written, folders with
+    /// deep it is, then by its folder's new place, then as it was: the entries of a folder together, and all but the
+    /// root in order of their folders' places). How many entries, bytes of names folded, bytes of names as written, folders with
     /// ids and names holding Chinese there are, then the entries, the names folded, the names as written, the
     /// folders' places, their ids, their order by id, and the places of those holding Chinese: each part from a
     /// multiple of 8 bytes, all little-endian, written as it is made (never all of it at once in memory).
@@ -675,7 +711,8 @@ impl Index {
         let depth = self.depths();
         // The places anew: the old places in their new order, and the new place of each old one.
         let mut order = Vec::new();
-        {
+        // Where each depth's entries start in it (and the last ends).
+        let bounds = {
             let mut starts = vec![0u32; DEEPEST as usize + 2];
             for &deep in &depth {
                 if deep != LEFT {
@@ -685,6 +722,7 @@ impl Index {
             for at in 1..starts.len() {
                 starts[at] += starts[at - 1];
             }
+            let bounds = starts.clone();
             order.resize(starts[DEEPEST as usize + 1] as usize, 0u32);
             for (place, &deep) in depth.iter().enumerate() {
                 if deep != LEFT {
@@ -692,12 +730,22 @@ impl Index {
                     starts[deep as usize] += 1;
                 }
             }
-        }
+            bounds
+        };
         drop(depth);
+        // Each depth's entries by their folders' new places (those of the depth before, placed already), then as they
+        // were; and placed so.
+        let parents: Vec<u32> = (0..self.len()).map(|place| self.entry(place).parent).collect();
         let mut placed = vec![NONE; self.len() as usize];
-        for (new, &old) in order.iter().enumerate() {
-            placed[old as usize] = new as u32;
+        for deep in 0..=DEEPEST as usize {
+            let (from, to) = (bounds[deep] as usize, bounds[deep + 1] as usize);
+            let run = &mut order[from..to];
+            run.sort_by_key(|&old| if old == ROOT { 0 } else { placed[parents[old as usize] as usize] });
+            for (new, &old) in (from..).zip(run.iter()) {
+                placed[old as usize] = new as u32;
+            }
         }
+        drop(parents);
         // The folders kept with their ids (each id one folder's: the one it is known for), and those holding Chinese.
         let mut ids: Vec<(u32, u64)> = Vec::new();
         let mut chinese = 0usize;
@@ -841,6 +889,10 @@ impl Index {
                 return None;
             }
             if place != ROOT as usize && (entry.parent as usize >= place || !all[entry.parent as usize].folder()) {
+                return None;
+            }
+            // (Those of a folder together, in order of their folders: see `kept_in`.)
+            if place > 1 && entry.parent < all[place - 1].parent {
                 return None;
             }
             if entry.flags & flag::CHINESE != 0 {
@@ -999,6 +1051,51 @@ mod tests {
         let index = kept(&drive());
         assert!(index.entries.is_empty(), "all of it read where it lies");
         folders_listed_again_change_as_the_drive_did(index);
+    }
+
+    /// What each folder holds, looked through every entry.
+    fn held_looked_through(index: &Index, folders: &HashSet<u32>) -> HashMap<u32, Vec<u32>> {
+        let mut held: HashMap<u32, Vec<u32>> = HashMap::new();
+        for place in 0..index.len() {
+            let entry = index.entry(place);
+            if entry.alive() && folders.contains(&entry.parent) {
+                held.entry(entry.parent).or_default().push(place);
+            }
+        }
+        held
+    }
+
+    /// What a folder holds is looked up, not looked for through every entry (each round of listing asked it of the
+    /// whole drive, a million entries, every second something changed): the same as looked through, in memory, as
+    /// kept (each folder's entries together there, though added to it at different times), and over what was kept.
+    #[test]
+    fn what_a_folder_holds_is_looked_up_as_it_is_now() {
+        let mut index = Index::new(5, true);
+        round(&mut index, &[(ROOT, vec![item("A", 10, FOLDER), item("B", 11, FOLDER)])]);
+        let (a, b) = (place_of(&index, "C:\\A"), place_of(&index, "C:\\B"));
+        round(&mut index, &[(a, vec![item("a1", 20, FILE), item("Deep", 21, FOLDER)]), (b, vec![item("b1", 22, FILE)])]);
+        // (a2 added after b1: A's entries are not together in memory.)
+        round(&mut index, &[(a, vec![item("a1", 20, FILE), item("Deep", 21, FOLDER), item("a2", 23, FILE)])]);
+        let deep = place_of(&index, "C:\\A\\Deep");
+        round(&mut index, &[(deep, vec![item("d1", 30, FILE)])]);
+        let all = |index: &Index| (0..index.len()).filter(|&place| index.entry(place).alive() && index.entry(place).folder()).collect::<HashSet<u32>>();
+        assert_eq!(index.children(&all(&index)), held_looked_through(&index, &all(&index)));
+
+        let mut index = kept(&index);
+        let parents: Vec<u32> = (1..index.len()).map(|place| index.entry(place).parent).collect();
+        assert!(parents.windows(2).all(|two| two[0] <= two[1]), "kept in order of their folders");
+        assert_eq!(index.children(&all(&index)), held_looked_through(&index, &all(&index)));
+
+        // Over what was kept: Deep moved into B, a1 gone, b2 added, then B deleted with all it holds.
+        let (a, b) = (place_of(&index, "C:\\A"), place_of(&index, "C:\\B"));
+        round(&mut index, &[(a, vec![item("a2", 23, FILE)]), (b, vec![item("b1", 22, FILE), item("Deep", 21, FOLDER), item("b2", 24, FILE)])]);
+        assert_eq!(paths(&index), ["C:\\A", "C:\\A\\a2", "C:\\B", "C:\\B\\Deep", "C:\\B\\Deep\\d1", "C:\\B\\b1", "C:\\B\\b2"]);
+        assert_eq!(index.children(&all(&index)), held_looked_through(&index, &all(&index)));
+        assert_eq!(index.folder_at(std::path::Path::new("B\\Deep")), place_of(&index, "C:\\B\\Deep"));
+        round(&mut index, &[(ROOT, vec![item("A", 10, FOLDER)])]);
+        assert_eq!(paths(&index), ["C:\\A", "C:\\A\\a2"]);
+        assert_eq!(index.children(&all(&index)), held_looked_through(&index, &all(&index)));
+        assert_eq!(paths(&kept(&index)), ["C:\\A", "C:\\A\\a2"]);
     }
 
     #[test]

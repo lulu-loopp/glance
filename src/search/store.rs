@@ -17,7 +17,7 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, GetFileSizeEx, FILE_ATTRI
 use windows::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READONLY};
 
 const MAGIC: &[u8; 8] = b"GLNCSRCH";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// How long what is kept before the index is (bytes).
 const HEADER: usize = 48;
 
