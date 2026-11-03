@@ -557,9 +557,13 @@ impl Kept {
     /// screenshots' folder); taken off where it is gone, or where it is now `out` or no kind listed there; one that
     /// cannot be looked for now (its drive away, it locked) kept as it is. Whether the list changed. (By its number,
     /// not its path: another file put where it was is not it.)
-    fn recheck(&mut self, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool) -> bool {
+    /// Only those `which` asks for are looked for (the rest kept as they are).
+    fn recheck(&mut self, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool, which: impl Fn(&Came) -> bool) -> bool {
         let mut changed = false;
         self.files.retain_mut(|came| {
+            if !which(came) {
+                return true;
+            }
             let keep = match look(came.key) {
                 // (Made hidden, the system's or passing meanwhile: no longer listed.)
                 Looked::At(_, _, _, attributes) if attributes & reasons::NOT_LISTED != 0 => false,
@@ -610,6 +614,13 @@ fn looked_at(folder: &Path, programs: bool) -> bool {
                 let name = entry.file_name().to_string_lossy().to_lowercase();
                 (name.ends_with(".exe") || name.ends_with(".dll")) && entry.file_type().is_ok_and(|kind| kind.is_file())
             }))
+}
+
+/// Whether a folder renamed or moved, `now` where it is (see `os::Drive::look`), went where all in it is left out (by
+/// `out`, asked of a file in it) and made no other folder a tool's: what was asked of every other folder stands. A
+/// repository's `.git` makes the folder it is in one (see `looked_at`). One not to be looked at now: not known.
+fn moved_where_left_out(now: &Looked, out: impl Fn(&Path) -> bool) -> bool {
+    matches!(now, Looked::At(folder, ..) if !folder.file_name().is_some_and(|name| name.eq_ignore_ascii_case(".git")) && out(&folder.join("_")))
 }
 
 impl<F: Fn(&Path, bool) -> bool> Tools<F> {
@@ -763,6 +774,7 @@ fn follow() {
         let now = super::now_ms();
         let mut changed = kept.age(now) | let_go;
         let mut folder_renamed = false;
+        let mut files_moved = false;
         let mut more = false;
         for drive in &mut drives {
             // (Where its journal starts and ends now: a place read up to that its records have since run past is read
@@ -779,11 +791,18 @@ fn follow() {
             let letter = drive.letter;
             for change in together(changes) {
                 if change.attributes & reasons::FOLDER != 0 {
-                    // (A folder renamed or moved: its files are followed, and which folders are left out asked anew.)
+                    // (A folder renamed or moved: the files listed from it followed. Where it is now left out, what
+                    // was asked of every other folder stands, and the files listed that are no longer where they were
+                    // are looked for (one may have been in it); elsewhere, which folders are left out is asked anew,
+                    // and every file listed looked for. A user's temporary folders are renamed every second or so.)
                     if change.reason & reasons::RENAMED_TO != 0 && change.reason & reasons::CLOSED != 0 {
-                        folder_renamed = true;
-                        skipped.borrow_mut().retain(|(drive, _)| *drive != letter);
-                        tools.forget();
+                        if moved_where_left_out(&drive.look(change.file), |path| out_on(letter, path)) {
+                            files_moved = true;
+                        } else {
+                            folder_renamed = true;
+                            skipped.borrow_mut().retain(|(drive, _)| *drive != letter);
+                            tools.forget();
+                        }
                     }
                     continue;
                 }
@@ -827,8 +846,10 @@ fn follow() {
             read_owed = true;
         }
         if folder_renamed || rechecked.is_none_or(|rechecked| rechecked.elapsed() > RECHECK_EVERY) {
-            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out);
+            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out, |_| true);
             rechecked = Some(Instant::now());
+        } else if files_moved {
+            changed |= kept.recheck(&places, |key| open(key.drive, key.file), &out, |came| !came.path.exists());
         }
         if changed || shown_scope.as_ref() != Some(&scope) {
             publish(kept.shown(&scope));
@@ -1248,11 +1269,39 @@ mod tests {
             ('C', 8) => Looked::At(PathBuf::from(r"D:\Photos\sea.png"), 1, 1, 0),
             _ => Looked::Unknown,
         };
-        assert!(kept.recheck(&places(), look, &|path: &Path| path.starts_with(r"D:\repo")));
+        assert!(kept.recheck(&places(), look, &|path: &Path| path.starts_with(r"D:\repo"), |_| true));
         assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\a\one.pdf", r"D:\b renamed\two.pdf", r"E:\four.pdf", r"D:\d\five.pdf", r"D:\Photos\sea.png"]);
         assert_eq!(kept.files[0].bytes, 900);
         assert!(!kept.files[4].downloaded);
-        assert!(!kept.recheck(&places(), |_| Looked::Unknown, &|_| false));
+        assert!(!kept.recheck(&places(), |_| Looked::Unknown, &|_| false, |_| true));
+    }
+
+    /// A folder renamed where all in it is left out (in the user's temporary files, or into them) changes nothing
+    /// asked of other folders; one renamed where its files may be listed does, and so does a repository's `.git` put
+    /// anywhere (the folder it is in is now a tool's), and one not to be looked at now. As it does not, only the files
+    /// listed that are not where they were are looked for again.
+    #[test]
+    fn a_folder_renamed_where_all_is_left_out_changes_no_other() {
+        let at = |path: &str| Looked::At(PathBuf::from(path), 1, 0, reasons::FOLDER);
+        let out = |path: &Path| left_out(path, &[]);
+        assert!(moved_where_left_out(&at(r"C:\Users\a\AppData\Local\Temp\run-41"), out));
+        assert!(moved_where_left_out(&at(r"D:\work\target\debug"), out));
+        assert!(!moved_where_left_out(&at(r"D:\Documents\Reports 2026"), out));
+        assert!(!moved_where_left_out(&at(r"D:\Documents\site\.git"), out));
+        assert!(!moved_where_left_out(&at(r"D:\Documents\site\.GIT"), out));
+        assert!(!moved_where_left_out(&Looked::Gone, out));
+        assert!(!moved_where_left_out(&Looked::Unknown, out));
+
+        let came = |file: u128, path: &str| Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind: Kind::Document, downloaded: false, site: None };
+        let mut kept = Kept { files: vec![came(1, r"D:\stays\one.pdf"), came(2, r"D:\went\two.pdf")], ..Kept::default() };
+        let looked = std::cell::RefCell::new(Vec::new());
+        let look = |key: Key| {
+            looked.borrow_mut().push(key.file);
+            Looked::At(PathBuf::from(r"D:\went on\two.pdf"), 1, 1, 0)
+        };
+        assert!(kept.recheck(&places(), look, &|_| false, |came| came.path.starts_with(r"D:\went")));
+        assert_eq!(*looked.borrow(), [2]);
+        assert_eq!(kept.files.iter().map(|came| came.path.to_str().unwrap()).collect::<Vec<_>>(), [r"D:\stays\one.pdf", r"D:\went on\two.pdf"]);
     }
 
     /// A file come that could not be opened as it was read (locked, its drive not ready): tried again till it can be,
@@ -1300,7 +1349,7 @@ mod tests {
         assert!(kept.files.is_empty());
         // Made hidden while the journal was not read: taken off as it is looked for again.
         assert!(kept.take('D', Change { file: 1, folder: 9, reason: 0x8000_0100, attributes: 0x20, at_ms: now }, now, &places, &out, open(5), |_| None));
-        assert!(kept.recheck(&places, |_| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, 5, 0x22), &out));
+        assert!(kept.recheck(&places, |_| Looked::At(PathBuf::from(r"D:\Documents\a.txt"), now - 100, 5, 0x22), &out, |_| true));
         assert!(kept.files.is_empty());
     }
 
