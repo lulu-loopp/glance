@@ -239,8 +239,9 @@ fn paper(dark: bool) -> Theme {
 
 /// The user's accent colour, in the shade the system pairs with the theme.
 pub fn accent(dark: bool) -> Color {
-    // Where the system will not say, Windows' default blue in that shade.
-    Color::hex(crate::os::accent(dark).unwrap_or(if dark { 0x99EBFF } else { 0x005FB8 }), 1.0)
+    // Where the system will not say, Windows 11's default blue (0x0078D4) in that shade: its AccentLight2 and
+    // AccentDark1, as `os::accent` asks for (they were its Light3 and an older Dark1, a paler and a deeper blue).
+    Color::hex(crate::os::accent(dark).unwrap_or(if dark { 0x4CC2FF } else { 0x0067C0 }), 1.0)
 }
 
 /// Windows 11, as the Start menu and Quick Settings draw it: one acrylic
