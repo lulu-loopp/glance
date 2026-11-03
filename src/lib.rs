@@ -588,6 +588,9 @@ pub fn run() {
             }
         }
     }).expect("a thread started");
+    // Every drive's names found, and kept current, from the start: search is ready as it is called up, and a drive's
+    // journal read on while Glance runs does not go past what was kept (that drive then listed again).
+    search::start();
     // The desktops the settings' preview shows, read once Glance has settled: the settings open on them.
     thread::Builder::new()
         .name("glance: desktops read for the settings".into())
@@ -600,7 +603,7 @@ pub fn run() {
     // (What was changed last is on the disk before Glance goes, a note written in too, and what was noted last.)
     ui::beside::keep_as_glance_goes();
     app().controller.keep_writing();
-    // (The drives' names kept as they are now: read again as search is next called up, not found again.)
+    // (The drives' names kept as they are now: read again as Glance next starts, not found again.)
     search::keep_all();
     saved_all();
     presents::stop_started();

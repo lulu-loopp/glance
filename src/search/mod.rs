@@ -146,18 +146,33 @@ fn follow(volume: &Arc<Volume>) {
     let kept = store::kept(drive.serial);
     let mut keeping = Keeping { at: Instant::now(), changed: false };
     if let Some(journal) = journal {
-        let fits = |kept: &store::Kept| kept.journal.is_some_and(|cursor| cursor.journal == journal.id && cursor.next >= journal.first && cursor.next <= journal.next);
-        if let Some((index, kept)) = kept.filter(|(index, kept)| index.by_id() && fits(kept)) {
-            *volume.index.write().unwrap() = index;
-            *volume.kept.lock().unwrap() = Some(kept);
-        } else {
-            // (Where the journal was before listing: what changes while it lists is read after.)
-            *volume.kept.lock().unwrap() = Some(store::Kept { serial: drive.serial, journal: Some(store::Cursor { journal: journal.id, next: journal.next }) });
-            walk::round(&volume.index, drive, &[ROOT], threads);
-            keeping.changed = true;
-            keeping.keep(volume, true);
+        // (Where the journal is now, for an index not read on from where it was kept: what changes while its folders
+        // are listed is read after.)
+        let from_now = store::Kept { serial: drive.serial, journal: Some(store::Cursor { journal: journal.id, next: journal.next }) };
+        let kept = kept.filter(|(index, _)| index.by_id());
+        match (begun(kept.as_ref().map(|(_, kept)| kept), &journal), kept) {
+            (Begun::ReadOn, Some((index, kept))) => {
+                *volume.index.write().unwrap() = index;
+                *volume.kept.lock().unwrap() = Some(kept);
+                volume.ready.store(true, Ordering::Relaxed);
+            }
+            // Searched at once as it was kept, every folder listed again behind it.
+            (Begun::Relisted, Some((index, _))) => {
+                *volume.index.write().unwrap() = index;
+                *volume.kept.lock().unwrap() = Some(from_now);
+                volume.ready.store(true, Ordering::Relaxed);
+                relist(volume, threads);
+                keeping.changed = true;
+                keeping.keep(volume, true);
+            }
+            _ => {
+                *volume.kept.lock().unwrap() = Some(from_now);
+                walk::round(&volume.index, drive, &[ROOT], threads);
+                keeping.changed = true;
+                keeping.keep(volume, true);
+                volume.ready.store(true, Ordering::Relaxed);
+            }
         }
-        volume.ready.store(true, Ordering::Relaxed);
         follow_journal(volume, threads, keeping);
     } else {
         let (tell, told) = mpsc::channel();
@@ -180,6 +195,27 @@ fn follow(volume: &Arc<Volume>) {
         keeping.changed = true;
         keeping.keep(volume, true);
         follow_watch(volume, &told, threads, keeping);
+    }
+}
+
+/// How a drive with a journal is begun on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Begun {
+    /// Its kept index read on from where it was kept, its journal holding all that changed since.
+    ReadOn,
+    /// Its kept index searched at once and every folder listed again: the journal no longer holds all that changed
+    /// since it was kept (Glance not running for long, or the journal made anew).
+    Relisted,
+    /// Listed whole: nothing of it kept.
+    Listed,
+}
+
+/// How a drive is begun on, by what was kept of its index (one kept as the drive lists by id) and its journal now.
+fn begun(kept: Option<&store::Kept>, journal: &journal::Journal) -> Begun {
+    match kept {
+        None => Begun::Listed,
+        Some(kept) if kept.journal.is_some_and(|cursor| cursor.journal == journal.id && cursor.next >= journal.first && cursor.next <= journal.next) => Begun::ReadOn,
+        Some(_) => Begun::Relisted,
     }
 }
 
@@ -347,4 +383,25 @@ pub fn find(query: &Query, most: usize) -> Found {
         *shown <= most
     });
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{begun, journal::Journal, store, Begun};
+
+    /// An index kept is read on from where it was kept while the journal still holds all since. Kept before what the
+    /// journal holds now (Glance not running while it went on), or with another journal, it is searched as it was kept
+    /// and listed again behind it, not listed whole from nothing: two drives here were listed from nothing as search
+    /// was called up after Glance had run hours without it.
+    #[test]
+    fn a_kept_index_the_journal_has_gone_past_is_searched_as_it_was_and_listed_again() {
+        let journal = Journal { id: 7, first: 1000, next: 5000 };
+        let kept = |id: u64, next: i64| store::Kept { serial: 1, journal: Some(store::Cursor { journal: id, next }) };
+        assert_eq!(begun(Some(&kept(7, 1000)), &journal), Begun::ReadOn);
+        assert_eq!(begun(Some(&kept(7, 5000)), &journal), Begun::ReadOn);
+        assert_eq!(begun(Some(&kept(7, 999)), &journal), Begun::Relisted);
+        assert_eq!(begun(Some(&kept(8, 3000)), &journal), Begun::Relisted);
+        assert_eq!(begun(Some(&store::Kept { serial: 1, journal: None }), &journal), Begun::Relisted);
+        assert_eq!(begun(None, &journal), Begun::Listed);
+    }
 }
