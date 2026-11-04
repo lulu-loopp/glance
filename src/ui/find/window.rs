@@ -16,9 +16,8 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
-use windows::Win32::Graphics::Gdi::{ValidateRect, LOGFONTW};
+use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
     VK_LWIN, VK_MENU, VK_RWIN, VK_TAB, VK_UP, VK_V, VK_X,
@@ -187,7 +186,7 @@ fn work(asks: Receiver<Asked>, hwnd: isize, tells: Sender<(u64, Vec<(PathBuf, bo
             asked = Asked { fresh: asked.fresh || newer.fresh, ..newer };
         }
         let programs = crate::station::found::all().unwrap_or_default();
-        let notes = crate::notes::shown();
+        let notes = crate::notes::listed();
         let held = run::shown();
         let lately = crate::station::recent::shown();
         let files = |query: &crate::search::Query, most: usize| crate::search::find(query, most);
@@ -1055,6 +1054,7 @@ impl Finder {
             Kind::Note => Icon::StickyNote,
             Kind::Held => Icon::Inbox,
             Kind::Copied => Icon::Clipboard,
+            Kind::Todo => Icon::SquareCheck,
         };
         frame.icon(icon, centre, side * if drawn { 0.9 } else { 0.85 }, ink.text2);
     }
@@ -1107,22 +1107,7 @@ impl Finder {
     fn place_ime(&self) {
         let Some(caret) = self.caret else { return };
         let px = |dips: f32| ((dips + self.room) * self.scale).round() as i32;
-        unsafe {
-            let context = ImmGetContext(self.hwnd);
-            if context.is_invalid() {
-                return;
-            }
-            let at = POINT { x: px(caret.x), y: px(caret.y) };
-            let _ = ImmSetCompositionWindow(context, &COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: at, ..Default::default() });
-            let around = RECT { left: px(caret.x), top: px(caret.y), right: px(caret.x) + 1, bottom: px(caret.y + caret.h) };
-            let _ = ImmSetCandidateWindow(context, &CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_EXCLUDE, ptCurrentPos: POINT { x: around.left, y: around.bottom }, rcArea: around });
-            let mut face = LOGFONTW { lfHeight: -((19.0 * self.scale).round() as i32), lfWeight: 400, lfCharSet: windows::Win32::Graphics::Gdi::DEFAULT_CHARSET, ..Default::default() };
-            for (unit, to) in "Segoe UI".encode_utf16().zip(face.lfFaceName.iter_mut()) {
-                *to = unit;
-            }
-            let _ = ImmSetCompositionFontW(context, &face);
-            let _ = ImmReleaseContext(self.hwnd, context);
-        }
+        crate::ui::typing::place_ime(self.hwnd, POINT { x: px(caret.x), y: px(caret.y) }, px(caret.y + caret.h) - px(caret.y), "Segoe UI", (19.0 * self.scale).round() as i32);
     }
 
     /// Where in the field's words a point on the sheet (DIPs) is, as a caret put there would be.
@@ -1403,8 +1388,8 @@ impl Finder {
             }
             VK_V if ctrl => {
                 // (One line of what was pasted: a name is looked for, not lines.)
-                let pasted = clipboard_text();
-                let line: Vec<u16> = pasted.into_iter().take_while(|&unit| unit != u16::from(b'\r') && unit != u16::from(b'\n')).collect();
+                let pasted = crate::clipboard::text(self.hwnd).unwrap_or_default();
+                let line: Vec<u16> = pasted.lines().next().unwrap_or_default().encode_utf16().collect();
                 self.typing.put(&line);
             }
             _ => return,
@@ -1548,6 +1533,11 @@ impl Finder {
                 crate::ui::beside::open(crate::ui::beside::Opening { page: crate::ui::beside::Page::Note(Some(name.clone())), by, side: crate::ui::beside::Side::Below, skin, dark, folder: None, owner: 0 });
                 return;
             }
+            (What::Todo(text), Act::Open) => {
+                crate::todo::add(text, None);
+                self.close(false);
+                return;
+            }
             (What::Item(id), Act::Open) => run::ask(Ask::Open(*id)),
             (What::Item(id), Act::Show) => run::ask(Ask::Show(*id)),
             (What::Item(id), Act::Copy) => {
@@ -1653,33 +1643,6 @@ fn shell(verb: &str, file: &str, given: &str) {
     unsafe {
         ShellExecuteW(None, &HSTRING::from(verb), &HSTRING::from(file), given.as_ref().map_or(PCWSTR::null(), |given| PCWSTR(given.as_ptr())), PCWSTR::null(), SW_SHOWNORMAL);
     }
-}
-
-/// The text on the clipboard, if there is any.
-fn clipboard_text() -> Vec<u16> {
-    use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-    use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-    const CF_UNICODETEXT: u32 = 13;
-    let mut text = Vec::new();
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return text;
-        }
-        if let Ok(handle) = GetClipboardData(CF_UNICODETEXT) {
-            let memory = windows::Win32::Foundation::HGLOBAL(handle.0);
-            let units = GlobalLock(memory) as *const u16;
-            if !units.is_null() {
-                let mut length = 0;
-                while *units.add(length) != 0 {
-                    length += 1;
-                }
-                text = std::slice::from_raw_parts(units, length).to_vec();
-                let _ = GlobalUnlock(memory);
-            }
-        }
-        let _ = CloseClipboard();
-    }
-    text
 }
 
 /// How the drives' index stands, said: being made (and how far), or kept current; and whether it is being made.
@@ -1808,7 +1771,7 @@ fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
                 pastes: false,
             })
         }
-        What::Program(_) | What::Page(_) => None,
+        What::Program(_) | What::Page(_) | What::Todo(_) => None,
     }
 }
 

@@ -789,11 +789,7 @@ fn clipboard_data(owner: HWND, format: u32, unit: usize) -> Option<Vec<u8>> {
 
 /// The text on the clipboard (its line breaks `\n`), if there is any.
 fn clipboard_text(owner: HWND) -> Option<String> {
-    // (CF_UNICODETEXT.)
-    const TEXT: u32 = 13;
-    let bytes = clipboard_data(owner, TEXT, 2)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])).collect();
-    Some(String::from_utf16_lossy(&units).replace("\r\n", "\n").replace('\r', "\n"))
+    crate::clipboard::text(owner)
 }
 
 /// What is on the clipboard, to be pasted into a note: its HTML (a web page's, Word's) as Markdown (see `notes::html`),

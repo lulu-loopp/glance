@@ -1169,7 +1169,7 @@ impl Merged {
 /// A thing on a station's lane in it lifted off its room (`lifting`: it, and where its room is, from its corner): what
 /// it draws recorded into `lifted` from its room's corner (see `carry`), its room left to be drawn empty.
 #[allow(clippy::too_many_arguments)]
-fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(view::Hit, (f32, f32))>, lifted: &mut Option<Vec<Part>>) -> (Vec<view::HitBox>, bool) {
+fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(view::Hit, (f32, f32))>, lifted: &mut Option<Vec<Part>>, field: &view::todo::Field) -> (Vec<view::HitBox>, bool) {
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
@@ -1225,7 +1225,8 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 let Some(shown) = readings.last.clone() else { continue };
                 let z = shown.zoom;
                 // (Its music lane only where what plays is drawn in it.)
-                let lanes: Vec<view::Lane> = view::lanes_at(scene, |_| shown.detail).into_iter().filter(|lane| apart || lane.id() != "lyrics").collect();
+                let mut lanes: Vec<view::Lane> = view::lanes_at(scene, |_| shown.detail).into_iter().filter(|lane| apart || lane.id() != "lyrics").collect();
+                view::todo::write_in(&mut lanes, field);
                 // On the skin's ground (one piece, as large as all of it), where it is the one dropped onto; on what
                 // plays' ground, none.
                 let picture = render::Picture {
@@ -2275,8 +2276,12 @@ impl Widgets {
     /// caret shown at once where it moved.
     pub fn written(&mut self, hwnd: HWND) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
-        let Some(in_place) = widget.in_place.as_mut() else { return };
         let now = Instant::now();
+        // (A to-do written on it: drawn as it now is.)
+        if crate::ui::todo::writing(hwnd) {
+            widget.next_frame = now;
+        }
+        let Some(in_place) = widget.in_place.as_mut() else { return };
         let changed = in_place.writing.written();
         if changed {
             in_place.keep_at = Some(now + Duration::from_millis(u64::from(crate::ui::note::KEEP_AFTER_MS)));
@@ -2296,8 +2301,18 @@ impl Widgets {
     /// it takes them again as that goes).
     pub fn keys_left(&mut self, hwnd: HWND, escaped: bool) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
+        // (A to-do written on it gives them back to any window come in front: the picker of its time among them, which
+        // writes it in again as it goes.)
+        widget.stop_todo(escaped);
         if escaped || !front_is_ours() {
             widget.stop_writing(escaped);
+        }
+    }
+
+    /// A to-do written on the widget at `hwnd` again (the picker of its time put away: see `ui::todo::RESUME`).
+    pub fn write_todo(&mut self, hwnd: HWND) {
+        if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
+            widget.write_todo();
         }
     }
 
@@ -2593,6 +2608,10 @@ impl Widgets {
             }
             // A note on it written in where it is seen to, drawn as it is due (see `tend_writing`).
             if let Some(at) = widget.tend_writing(now) {
+                widget.next_frame = widget.next_frame.min(at);
+            }
+            // A to-do written on it: its caret blinking.
+            if let (_, Some(at)) = crate::ui::todo::field(widget.window.hwnd, now) {
                 widget.next_frame = widget.next_frame.min(at);
             }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
@@ -2965,6 +2984,24 @@ impl Widget {
         }
         self.take_keys();
         true
+    }
+
+    /// A to-do written on it: its field written in, it taking the keys (see `ui::todo::begin`). (Not while a note on it
+    /// takes them.)
+    fn write_todo(&mut self) {
+        if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
+            return;
+        }
+        crate::ui::todo::begin(&self.window);
+        self.next_frame = Instant::now();
+    }
+
+    /// A to-do written on it no more: the keys given back (the front too, where `escaped`).
+    fn stop_todo(&mut self, escaped: bool) {
+        if crate::ui::todo::writing(self.window.hwnd) {
+            crate::ui::todo::end(&self.window, escaped);
+            self.next_frame = Instant::now();
+        }
     }
 
     /// Its note written in where it is taking the keys (see `ui::keys`): it comes to the front with them, the caret
@@ -3911,7 +3948,21 @@ impl Widget {
                         // No button: what of its lanes is there (what plays, the sound).
                         None => {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
-                            match self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4) {
+                            let hit = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4);
+                            // A to-do being written: a press away from its field gives back the keys.
+                            if !matches!(hit, Some(view::Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
+                                self.stop_todo(false);
+                            }
+                            match hit {
+                                Some(view::Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
+                                    crate::ui::todo::Act::Nothing => {}
+                                    crate::ui::todo::Act::Write => self.write_todo(),
+                                    crate::ui::todo::Act::Pick(of) => {
+                                        if let Some(anchor) = self.hits_on_screen().into_iter().find(|(_, on)| *on == view::Hit::Todo(hit)).map(|(rect, _)| rect) {
+                                            crate::ui::todo::pick::open(self.window.hwnd, of, anchor, self.menu_look(), crate::update::language());
+                                        }
+                                    }
+                                },
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
                                 Some(hit) if crate::station::pressed(hit) => {}
@@ -4249,7 +4300,7 @@ impl Widget {
         for readings in readings {
             readings.scrolls.follow(view::lists_show(readings.tab));
             if note_pages {
-                view::keep_note(&mut readings.scrolls, &mut readings.note_shown, &crate::notes::shown(), writing.as_deref());
+                view::keep_note(&mut readings.scrolls, &mut readings.note_shown, &crate::notes::listed(), writing.as_deref());
             }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
@@ -4750,6 +4801,8 @@ impl Widget {
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, music_ground: MusicGround, now: Instant) {
+        // (A to-do written on it, as it is written.)
+        let (field, _) = crate::ui::todo::field(self.window.hwnd, now);
         let _timed = crate::perf::Timed::start("widget frame", || format!("{:?}", self.surface_size));
         if matches!(&self.content, Content::Readings(Readings { last: None, .. })) {
             return;
@@ -4830,7 +4883,8 @@ impl Widget {
             match content {
                 Content::Readings(readings) => {
                     let Some(shown) = readings.last.clone() else { return };
-                    let lanes = view::lanes_at(scene, |_| shown.detail);
+                    let mut lanes = view::lanes_at(scene, |_| shown.detail);
+                    view::todo::write_in(&mut lanes, &field);
                     let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let layout = shown.drawn_at(size, carried.is_some_and(|(card, ..)| card.is_some()));
@@ -4906,7 +4960,7 @@ impl Widget {
                 Content::Merged(merged) => {
                     let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
                     let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
-                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.map(|(hit, _, _, at)| (hit, at)), &mut lifted);
+                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.map(|(hit, _, _, at)| (hit, at)), &mut lifted, &field);
                     whole &= drawn_whole;
                     pressed = Some((hits, (0.0, 0.0)));
                 }

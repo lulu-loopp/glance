@@ -814,6 +814,9 @@ pub struct Settings {
     /// Whether notes show their Markdown as written, marks and all (see `notes::markdown::Shown`), not as it reads.
     #[serde(default)]
     pub notes_source: bool,
+    /// The times of day a to-do's time is chosen from (`HH:MM`, in order), as the user keeps them (see `ui::todo`).
+    #[serde(default = "todo_times")]
+    pub todo_times: Vec<String>,
     pub view: serde_json::Value,
 }
 
@@ -827,6 +830,11 @@ pub enum ShelfView {
     #[serde(alias = "pictures")]
     Large,
     List,
+}
+
+/// The times of day a to-do's time is chosen from, till the user keeps others: the morning's and the evening's.
+fn todo_times() -> Vec<String> {
+    vec!["09:00".into(), "18:00".into()]
 }
 
 /// The panel at `edge` of the screen `point` is on pinned there along it at `point`, or (not `pinned`) no longer, in
@@ -953,6 +961,7 @@ impl Default for Settings {
             notes_folder: None,
             notes_view: NotesView::Deck,
             notes_source: false,
+            todo_times: todo_times(),
             view: serde_json::Value::Null,
         }
     }

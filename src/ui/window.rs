@@ -35,6 +35,9 @@ pub const CLOSE_ASKED: u32 = WM_APP + 19;
 impl Drop for Window {
     fn drop(&mut self) {
         LIFTED.lock().unwrap().retain(|&lifted| lifted != self.hwnd.0 as isize);
+        // (Whatever it took the keys for, and the to-dos' picker opened from it, let go with it.)
+        super::keys::give_back(self.hwnd);
+        super::todo::went(self.hwnd);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         super::tip::went(self.hwnd);
     }

@@ -3974,7 +3974,14 @@ impl Ui {
                     "What plays: its cover, its track, its controls, how loud, and its lyrics as it plays. To find lyrics the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A track played from a file shows its own first. Lyrics need the player to say how far into the track it is (NetEase Cloud Music, with the InfLink-rs plugin)",
                 )),
             ),
-            "notes" => (p("便签", "Notes"), Some(p("想法与待办，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and to-dos, each kept as a Markdown file, which can be put on the desktop"))),
+            "notes" => (p("便签", "Notes"), Some(p("想法与备忘，每条保存为一个 Markdown 文件，可放在桌面上", "Thoughts and things to remember, each kept as a Markdown file, which can be put on the desktop"))),
+            "todo" => (
+                p("待办", "To-do"),
+                Some(p(
+                    "要做的事项，可设定日期与时间，勾选后移入已完成。全部事项保存在便签文件夹的“待办.md”中",
+                    "Things to do, each with a day and a time if wanted, moved among the finished once ticked. All are kept in “To-do.md” in the notes folder",
+                )),
+            ),
             "apps" => (p("快捷启动", "Quick launch"), Some(p("常用的程序、文件、文件夹与网址", "Programs, files, folders and web addresses used often"))),
             "search" => (p("搜索", "Search"), Some(p("搜索应用、设置、文件和便签", "Search apps, settings, files and notes"))),
             _ => (p("系统", "System"), Some(p("开机时长、进程数、线程数与句柄数", "Uptime, processes, threads and handles"))),

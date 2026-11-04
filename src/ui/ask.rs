@@ -15,21 +15,21 @@ use super::typing::{at_point, caret_at, height_of, line_of, Typing};
 use std::rc::Rc;
 
 use windows::core::{w, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
 use windows::Win32::Graphics::Direct2D::{D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LAYER_PARAMETERS1, D2D1_ROUNDED_RECT};
 use windows::Win32::Graphics::DirectWrite::{IDWriteTextLayout, DWRITE_HIT_TEST_METRICS};
 use windows::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, ScreenToClient, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::System::DataExchange::{AddClipboardFormatListener, EmptyClipboard, GetClipboardData, RemoveClipboardFormatListener, SetClipboardData};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, ScreenToClient, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::System::DataExchange::{AddClipboardFormatListener, EmptyClipboard, RemoveClipboardFormatListener, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::Ime::{
-    ImmAssociateContextEx, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, HIMC, IACE_DEFAULT,
+    ImmAssociateContextEx, HIMC, IACE_DEFAULT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT,
@@ -282,24 +282,7 @@ impl Colours {
 
 /// The text on the clipboard, its lines broken by `\n` alone, its tabs as spaces and nothing else unprintable.
 fn clipboard_text(owner: HWND) -> Vec<u16> {
-    let mut taken = Vec::new();
-    let Some(opened) = crate::clipboard::open(owner) else { return taken };
-    unsafe {
-        if let Ok(held) = GetClipboardData(TEXT) {
-            let memory = HGLOBAL(held.0);
-            let units = GlobalLock(memory) as *const u16;
-            if !units.is_null() {
-                let mut at = 0;
-                while *units.add(at) != 0 {
-                    taken.push(*units.add(at));
-                    at += 1;
-                }
-                let _ = GlobalUnlock(memory);
-            }
-        }
-    }
-    drop(opened);
-    let text = String::from_utf16_lossy(&taken).replace("\r\n", "\n").replace(['\r'], "\n").replace('\t', " ");
+    let text = crate::clipboard::text(owner).unwrap_or_default().replace('\t', " ");
     text.chars().filter(|&c| c == '\n' || !c.is_control()).collect::<String>().encode_utf16().collect()
 }
 
@@ -518,22 +501,7 @@ impl Dialog {
     fn place_ime(&self) {
         let Some(caret) = self.caret else { return };
         let px = |dips: f32| (dips * self.scale).round() as i32;
-        unsafe {
-            let context = ImmGetContext(self.hwnd);
-            if context.is_invalid() {
-                return;
-            }
-            let at = POINT { x: px(caret.x), y: px(caret.y) };
-            let _ = ImmSetCompositionWindow(context, &COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: at, ..Default::default() });
-            let around = RECT { left: px(caret.x), top: px(caret.y), right: px(caret.x) + 1, bottom: px(caret.y + caret.h) };
-            let _ = ImmSetCandidateWindow(context, &CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_EXCLUDE, ptCurrentPos: POINT { x: around.left, y: around.bottom }, rcArea: around });
-            let mut face = LOGFONTW { lfHeight: -px(BODY.size), lfWeight: 400, lfCharSet: windows::Win32::Graphics::Gdi::DEFAULT_CHARSET, ..Default::default() };
-            for (unit, to) in "Segoe UI".encode_utf16().zip(face.lfFaceName.iter_mut()) {
-                *to = unit;
-            }
-            let _ = ImmSetCompositionFontW(context, &face);
-            let _ = ImmReleaseContext(self.hwnd, context);
-        }
+        super::typing::place_ime(self.hwnd, POINT { x: px(caret.x), y: px(caret.y) }, px(caret.y + caret.h) - px(caret.y), "Segoe UI", px(BODY.size));
     }
 
     fn words_layout(&self) -> IDWriteTextLayout {

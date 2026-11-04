@@ -12,6 +12,9 @@ use super::theme::{Ink, Skin, Theme};
 use crate::settings::ShelfView;
 use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
 
+pub mod todo;
+pub use todo::TodoHit;
+
 /// A column's width (DIPs), whatever the skin.
 pub const COLUMN_WIDTH: f32 = 356.0;
 /// The label column of a lane, and the gap after it.
@@ -236,13 +239,15 @@ pub enum Hit {
     Shortened,
     /// The search box: search opened (see `ui::find`).
     Search,
+    /// The to-dos' lane (see `todo`).
+    Todo(TodoHit),
 }
 
 impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)))
     }
 
     /// The track it is, where it is one dragged along.
@@ -672,6 +677,8 @@ enum Block {
     Bench(Bench),
     /// The search box, and the keys that open search from anywhere (none where none are set).
     Search { keys: String },
+    /// The to-dos (see `todo`), their list in room `tall` high.
+    Todo { lane: todo::TodoLane, tall: f32 },
 }
 
 /// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
@@ -687,6 +694,9 @@ pub enum Bench {
     Time { figure: String, unit: String, date: String },
     /// The search box (see `Block::Search`).
     Search { keys: String },
+    /// The to-dos not done, the one due soonest first: each one's words, time, whether it is due by today, its place
+    /// among the note's and its key (see `todo::key_of`).
+    Todo(Vec<(String, Option<String>, bool, u32, u64)>),
 }
 
 /// The most of a note's lines under its title a workbench lane in a shape shows (as many as its room takes).
@@ -1133,7 +1143,7 @@ const NOTE_CARD_LINES: usize = 6;
 /// them as they show; else the last written alone.
 fn notes_lane(full: bool, lang: Lang) -> Vec<Block> {
     let now = crate::station::now_ms();
-    let notes: Vec<NoteCard> = crate::notes::shown().iter().map(|note| note_card(note, lang, now, NOTE_CARD_LINES)).collect();
+    let notes: Vec<NoteCard> = crate::notes::listed().iter().map(|note| note_card(note, lang, now, NOTE_CARD_LINES)).collect();
     // (The number alone, as the station's count is.)
     let count = match notes.len() {
         0 => String::new(),
@@ -2089,7 +2099,7 @@ impl Block {
     /// How tall a list at a lane's foot is laid out (what of it may give way, down to `LIST_LEAST`); none for others.
     fn list_tall(&self) -> Option<f32> {
         match self {
-            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => Some(*tall),
+            Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } | Block::Todo { tall, .. } => Some(*tall),
             _ => None,
         }
     }
@@ -2114,6 +2124,7 @@ impl Block {
             Block::StuckNote(_) => STUCK_NOTE.1,
             Block::Bench(_) => BENCH,
             Block::Search { .. } => SEARCH_BOX,
+            Block::Todo { lane, tall } => todo::height(lane, *tall),
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
@@ -2146,6 +2157,7 @@ impl Hash for Block {
             Block::Bench(what) => what.hash(state),
             Block::Search { keys } => keys.hash(state),
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
+            Block::Todo { lane, tall } => (lane, tall.to_bits()).hash(state),
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
@@ -3062,6 +3074,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "station" => station_lane(full, scene.tab, lang),
         "apps" => apps_lane(full, scene.theme, lang),
         "notes" => notes_lane(full, lang),
+        "todo" => todo::todo_lane(full, lang),
         "search" => vec![Block::Search { keys: crate::tray::search_keys() }],
         id if id.starts_with(STUCK_NOTE_LANE) => return stuck_note_lane(&id[STUCK_NOTE_LANE.len()..], lang),
         // What plays, in a widget merged with readings: drawn apart (see `Scene::music_apart`), its lane its head and
@@ -3557,6 +3570,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::StuckNote(_) => "stuck",
             Block::Bench(_) => "bench",
             Block::Search { .. } => "search",
+            Block::Todo { .. } => "todo",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -3578,6 +3592,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 paint_plot(frame, scene, ink, plot, plot_left, y + gap, plot_width, height - gap);
             }
             (_, Pass::Plots) => {}
+            (Block::Head { title, device, .. }, Pass::Content) if lane.id == "todo" => todo::paint_head(frame, scene, (left, y, width), title, device, hits),
+            (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), lane, *tall + spare, hits),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -5223,7 +5239,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             };
             Bench::Station { tiles, tab }
         }
-        "notes" => Bench::Notes(crate::notes::shown().iter().map(|note| note_card(note, lang, now, BENCH_LINES)).collect()),
+        "notes" => Bench::Notes(crate::notes::listed().iter().map(|note| note_card(note, lang, now, BENCH_LINES)).collect()),
         "apps" => Bench::Apps(crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect()),
         "time" => {
             let now = text::Local::at(scene.latest().t);
@@ -5231,6 +5247,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             Bench::Time { figure, unit: unit.to_string(), date: now.date(lang) }
         }
         "search" => Bench::Search { keys: crate::tray::search_keys() },
+        "todo" => todo::bench(lang),
         _ => return None,
     })
 }
@@ -5777,6 +5794,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 }
             }
         }
+        Bench::Todo(rows) => todo::paint_bench(frame, scene, (x, y, w, h), rows, hits),
         Bench::Search { keys } => {
             // A box across where one fits (as tall as a whole lane's at most, in the middle of the room); else its mark
             // alone, a button.

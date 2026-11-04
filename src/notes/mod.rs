@@ -21,6 +21,8 @@ pub use store::{Colour, Folder, Note, Written};
 const LOOKED_FOR_EVERY: Duration = Duration::from_secs(5);
 
 static SHOWN: Mutex<Option<Arc<Vec<Note>>>> = Mutex::new(None);
+/// The same, but the to-do note (see `listed`).
+static LISTED: Mutex<Option<Arc<Vec<Note>>>> = Mutex::new(None);
 static TOLD: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// What the thread that follows the folder waits on besides the folder: set, it reads it again (see `read_again`).
 static AGAIN: OnceLock<Event> = OnceLock::new();
@@ -80,16 +82,31 @@ fn decoded(path: &str) -> String {
 #[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
-    static PRETENDED: std::cell::RefCell<Option<Arc<Vec<Note>>>> = const { std::cell::RefCell::new(None) };
+    static PRETENDED: std::cell::RefCell<Option<(Arc<Vec<Note>>, Arc<Vec<Note>>)>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The notes, the last written first (none till first read).
 pub fn shown() -> Arc<Vec<Note>> {
     #[cfg(any(test, feature = "studio"))]
-    if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
+    if let Some((pretended, _)) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
     }
     SHOWN.lock().unwrap().clone().unwrap_or_default()
+}
+
+/// The notes listed as notes: all but the to-do note, which is the to-dos' (see `todo`).
+pub fn listed() -> Arc<Vec<Note>> {
+    #[cfg(any(test, feature = "studio"))]
+    if let Some((_, pretended)) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
+        return pretended;
+    }
+    LISTED.lock().unwrap().clone().unwrap_or_default()
+}
+
+/// `notes` but the to-do note.
+fn but_todo(notes: &[Note]) -> Vec<Note> {
+    let todo = crate::todo::note_of(notes).map(|note| note.name.clone());
+    notes.iter().filter(|note| Some(&note.name) != todo.as_ref()).cloned().collect()
 }
 
 static NUMBERS: crate::numbered::Numbered = crate::numbered::Numbered::new();
@@ -99,15 +116,16 @@ pub fn number_of(name: &str) -> u64 {
     NUMBERS.of(name)
 }
 
-/// The name of the note shown that `number` stands for (see `number_of`): none where it is gone.
+/// The name of the note listed that `number` stands for (see `number_of`): none where it is gone.
 pub fn named(number: u64) -> Option<String> {
-    shown().iter().find(|note| number_of(&note.name) == number).map(|note| note.name.clone())
+    listed().iter().find(|note| number_of(&note.name) == number).map(|note| note.name.clone())
 }
 
 /// For pictures: as if the folder held these.
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(notes: Vec<Note>) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(notes)));
+    let listed = Arc::new(but_todo(&notes));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some((Arc::new(notes), listed)));
 }
 
 /// The notes' folder as the settings have it (none chosen yet: the one in the language shown, kept as chosen once the
@@ -229,6 +247,7 @@ fn follow() {
         let now: Vec<(String, store::Stamp, Colour)> = notes.iter().map(|note| (note.name.clone(), note.stamp, note.colour)).collect();
         if now != held || SHOWN.lock().unwrap().is_none() {
             held = now;
+            *LISTED.lock().unwrap() = Some(Arc::new(but_todo(&notes)));
             *SHOWN.lock().unwrap() = Some(Arc::new(notes));
             if let Some(told) = TOLD.get() {
                 told();

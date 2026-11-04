@@ -763,7 +763,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     if shot.workbench {
-        known.extend(["station", "notes", "apps"].map(String::from));
+        known.extend(["station", "notes", "todo", "apps"].map(String::from));
         pretend_workbench(lang, &folder.join("props"))?;
     }
     let tab = match shot.tab.as_deref() {

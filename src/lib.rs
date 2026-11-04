@@ -115,6 +115,7 @@ mod reports;
 mod station;
 
 mod notes;
+mod todo;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
@@ -536,6 +537,7 @@ pub fn run() {
     notes::follow_settings(&app().settings.lock().unwrap());
     station::recent::follow_settings(&app().settings.lock().unwrap());
     notes::start(|| app().controller.wake());
+    todo::start(|| app().controller.wake());
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");
     // What touches the PC while the phone remote has the screens out, heard for it.

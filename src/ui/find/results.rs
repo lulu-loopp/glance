@@ -83,6 +83,8 @@ pub enum Kind {
     Held,
     /// Copied lately (the station's Recently copied).
     Copied,
+    /// What was typed after "待办 ", to be added as a to-do.
+    Todo,
 }
 
 /// What opens it.
@@ -97,6 +99,8 @@ pub enum What {
     Note(String),
     /// A thing on the station, or copied lately, by its number.
     Item(u64),
+    /// A to-do to add, its words as typed (see `todo_row`).
+    Todo(String),
 }
 
 /// A name found: what it is, its name and where its words met it (characters of the name), what is said under it
@@ -225,6 +229,40 @@ const PAGE_FIRST: f32 = 0.5;
 
 /// What is shown for `typed` in `view` (the files all, `expanded`), from `sources`.
 pub fn gather(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
+    let mut shown = found(typed, view, expanded, sources);
+    // Typed after "待办 ": first of all, larger, what adds it as a to-do.
+    if let Some(row) = todo_row(typed, sources.lang) {
+        for line in shown.lines.iter_mut() {
+            if let Line::Row(_, best) = line {
+                *best = false;
+            }
+        }
+        shown.lines.insert(0, Line::Row(row, true));
+        shown.total += 1;
+    }
+    shown
+}
+
+/// The words typed after what says they are a to-do ("待办 ", "todo "), where they are: as a row that adds them, what
+/// they say of a day and a time said under it.
+pub fn todo_row(typed: &str, lang: Lang) -> Option<Row> {
+    let typed = typed.trim_start();
+    let rest = ["待办 ", "待办：", "待办:", "todo ", "to-do "].iter().find_map(|lead| {
+        let head = typed.get(..lead.len())?;
+        head.eq_ignore_ascii_case(lead).then(|| &typed[lead.len()..])
+    })?;
+    let rest = rest.trim();
+    let (words, due) = crate::todo::words(rest, crate::todo::Day::today());
+    if words.trim().is_empty() {
+        return None;
+    }
+    let name = format!("{}{words}", lang.pick("添加为待办：", "Add as to-do: "));
+    let detail = due.map_or_else(|| lang.pick("待办", "To-do").to_string(), |due| due.label(crate::todo::Day::today(), lang == Lang::Zh));
+    Some(Row { kind: Kind::Todo, name, marks: Vec::new(), detail, what: What::Todo(rest.to_string()), rank: f32::MAX, bytes: None, changed: None })
+}
+
+/// What was found of what was typed (see `gather`).
+fn found(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
     let query = Query::read(typed);
     if query.is_empty() {
         return lately(view, sources);
@@ -429,6 +467,20 @@ fn path_shown(path: PathBuf, folder: bool, rank: f32, marks: Vec<(usize, usize)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Typed after "待办 " (or "todo "), the words are a to-do to add, what they say of a day said under it; typed
+    /// alone, they are not.
+    #[test]
+    fn typed_after_todo_is_a_to_do() {
+        let row = todo_row("待办 明天交报告", Lang::Zh).unwrap();
+        assert_eq!((row.kind, row.name.as_str(), row.detail.as_str()), (Kind::Todo, "添加为待办：交报告", "明天"));
+        assert_eq!(row.what, What::Todo("明天交报告".into()));
+        let row = todo_row("  TODO call the bank", Lang::En).unwrap();
+        assert_eq!((row.name.as_str(), row.detail.as_str()), ("Add as to-do: call the bank", "To-do"));
+        assert!(todo_row("交报告", Lang::Zh).is_none());
+        assert!(todo_row("待办 ", Lang::Zh).is_none());
+        assert!(todo_row("待办事项", Lang::Zh).is_none());
+    }
     use crate::search::index::{Changes, Index, Item as Listed, ROOT};
     use std::collections::{BTreeMap, HashMap};
 

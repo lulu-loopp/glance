@@ -77,6 +77,30 @@ unsafe fn hand_over(format: u32, bytes: &[u8]) -> bool {
     }
 }
 
+/// The text on the clipboard (its line breaks `\n` alone), read by window `owner`: none where there is none, or the
+/// clipboard was held by another all the while it was waited for.
+pub fn text(owner: HWND) -> Option<String> {
+    use windows::Win32::Foundation::HGLOBAL;
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    let _opened = open(owner)?;
+    let units = unsafe {
+        let held = GetClipboardData(TEXT).ok()?;
+        let memory = HGLOBAL(held.0);
+        let at = GlobalLock(memory) as *const u16;
+        if at.is_null() {
+            return None;
+        }
+        let mut length = 0;
+        while *at.add(length) != 0 {
+            length += 1;
+        }
+        let units = std::slice::from_raw_parts(at, length).to_vec();
+        let _ = GlobalUnlock(memory);
+        units
+    };
+    Some(String::from_utf16_lossy(&units).replace("\r\n", "\n").replace('\r', "\n"))
+}
+
 /// `text` as the clipboard keeps text (`TEXT`): UTF-16, ended by a zero.
 pub fn utf16_z(text: &str) -> Vec<u8> {
     text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()

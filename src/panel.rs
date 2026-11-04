@@ -652,6 +652,9 @@ impl Controller {
             // on before it), seen to.
             for hwnd in crate::ui::keys::took() {
                 widgets.written(hwnd);
+                for panel in panels.iter_mut().filter(|panel| panel.window.hwnd == hwnd) {
+                    panel.next_frame = Instant::now();
+                }
             }
             // A note's writing menu asked for on its words (see `Widgets::take_writing_menu_asked`).
             if widgets.writing_menu_was_asked() {
@@ -671,6 +674,10 @@ impl Controller {
                 // shortcut, an edge).
                 if menu.as_ref().is_some_and(|(open, _)| open.left() || (panels.iter().any(Panel::is_shown) && !open.over_the_panel())) {
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
+                }
+                // The picker of a to-do's time left as well.
+                if crate::ui::todo::pick::left() {
+                    end_pick(false, &mut panels, &mut widgets);
                 }
                 // The panels under what is in front of them: a menu up; the settings, but for one pressed since they came
                 // in front (in use). Not under the page beside: over it, always (its window's room for its shadow lay
@@ -814,6 +821,9 @@ impl Controller {
             if crate::ui::keys::queued(&msg) {
                 for hwnd in crate::ui::keys::took() {
                     widgets.written(hwnd);
+                    for panel in panels.iter_mut().filter(|panel| panel.window.hwnd == hwnd) {
+                        panel.next_frame = Instant::now();
+                    }
                 }
                 continue;
             }
@@ -822,12 +832,43 @@ impl Controller {
             // The panel whose window the message is for, where it is one's.
             let owner = panels.iter().position(|panel| panel.window.hwnd == msg.hwnd);
             if matches!(msg.message, windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN)
-                && (owner.is_some() || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)))
+                && (owner.is_some() || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)) || crate::ui::todo::pick::owns(msg.hwnd))
             {
                 OURS.fetch_add(1, Ordering::Relaxed);
             }
             if closing_press.takes(msg.message) {
                 continue;
+            }
+            // The picker of a to-do's time, as a menu: its own messages, a shortcut leaving it (Esc only that, putting it
+            // away as its own Esc would).
+            if crate::ui::todo::pick::is_up() {
+                use crate::ui::todo::pick::{self, Handled as Picked};
+                let esc = msg.hwnd.is_invalid() && msg.message == WM_HOTKEY && msg.wParam.0 == ESCAPE_HOTKEY as usize;
+                let handled = if pick::owns(msg.hwnd) {
+                    pick::handle(&msg)
+                } else if matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) {
+                    Picked::Done { asked: esc }
+                } else {
+                    Picked::Not
+                };
+                match handled {
+                    Picked::Done { asked } => {
+                        closing_press.closed_by(msg.message);
+                        end_pick(asked, &mut panels, &mut widgets);
+                        if !matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) || esc {
+                            continue;
+                        }
+                    }
+                    Picked::Chosen => {
+                        for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
+                            panel.next_frame = Instant::now();
+                        }
+                        widgets.draw_soon();
+                        continue;
+                    }
+                    Picked::Taken => continue,
+                    Picked::Not => {}
+                }
             }
             // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
             // panel stays), the rest are taken up as ever. (The panel's own shortcut comes as `TOGGLE`.)
@@ -974,6 +1015,11 @@ impl Controller {
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize => {
                     if looking_here(&panels, &widgets) {
                         crate::ui::look::key(crate::ui::look::Key::Close);
+                    } else if panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd)) {
+                        // A to-do being written on it: the keys given back, and nothing more.
+                        for panel in panels.iter_mut() {
+                            panel.stop_todo(true);
+                        }
                     } else if widgets.full().is_some() {
                         widgets.leave_full();
                     } else if panels.iter().any(Panel::dragging_app) {
@@ -1029,6 +1075,11 @@ impl Controller {
                 }
                 // A note written in where it is giving back the keys (Esc, another window in front).
                 crate::ui::keys::LEFT if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, msg.wParam.0 == 1),
+                // A to-do written on the panel giving back the keys (Esc, another window in front: the picker of its
+                // time, which writes it in again as it goes).
+                crate::ui::keys::LEFT if owner.is_some() => panels[owner.unwrap()].stop_todo(msg.wParam.0 == 1),
+                crate::ui::todo::RESUME if owner.is_some() => panels[owner.unwrap()].write_todo(),
+                crate::ui::todo::RESUME if widgets.owns(msg.hwnd) => widgets.write_todo(msg.hwnd),
                 // (Alt+F4 on a note written in where it is: as Esc. Other windows of Glance's are not closed so.)
                 crate::ui::window::CLOSE_ASKED if widgets.owns(msg.hwnd) => widgets.keys_left(msg.hwnd, true),
                 KEEP_WRITING => {
@@ -1627,6 +1678,19 @@ enum OnDesk {
 
 /// Told as what is written in notes where they are has been kept, Glance going (see `Controller::keep_writing`).
 static KEPT: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>> = std::sync::Mutex::new(None);
+
+/// The picker of a to-do's time put away (`asked`: by its own buttons or Esc), what it set drawn so, the pointer taken
+/// to have not yet come onto the panel (as a menu's going leaves it: see `Controller::end_menu`).
+fn end_pick(asked: bool, panels: &mut [Panel], widgets: &mut crate::widget::Widgets) {
+    crate::ui::todo::pick::close(asked);
+    for panel in panels.iter_mut() {
+        panel.menu_closed();
+        if panel.is_shown() {
+            panel.next_frame = Instant::now();
+        }
+    }
+    widgets.draw_soon();
+}
 
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
 fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {
@@ -2661,6 +2725,7 @@ impl<'a> Panel<'a> {
 
     fn begin_close(&mut self, now: Instant) {
         self.phase = Phase::Closing;
+        self.let_go_todo();
         // Pinned and closed by hand: no longer opened as Glance starts.
         if std::mem::take(&mut self.pinned) && !self.floating() {
             if let Some(placement) = &self.placement {
@@ -2726,6 +2791,30 @@ impl<'a> Panel<'a> {
         (open && !floating).then_some(Reopen { anchor, edge, pinned, game })
     }
 
+    /// A to-do written on it: its field written in, it taking the keys (see `ui::todo::begin`).
+    fn write_todo(&mut self) {
+        if self.is_open() {
+            crate::ui::todo::begin(&self.window);
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// A to-do written on it no more: the keys given back (the front too, where `escaped`).
+    fn stop_todo(&mut self, escaped: bool) {
+        if crate::ui::todo::writing(self.window.hwnd) {
+            crate::ui::todo::end(&self.window, escaped);
+            self.next_frame = Instant::now();
+        }
+    }
+
+    /// Going: a to-do written on it given back the keys, the picker of a time opened from it put away.
+    fn let_go_todo(&mut self) {
+        self.stop_todo(false);
+        if crate::ui::todo::pick::up_for(self.window.hwnd) {
+            crate::ui::todo::pick::close(false);
+        }
+    }
+
     /// Takes the panel down at once (for the settings, or screens no longer
     /// as they were): a game it opened over stays where it went.
     fn dismiss(&mut self) {
@@ -2737,6 +2826,7 @@ impl<'a> Panel<'a> {
             crate::ui::beside::close();
         }
         self.end_drag();
+        self.let_go_todo();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
         self.hover = None;
         self.unsay();
@@ -3034,7 +3124,7 @@ impl<'a> Panel<'a> {
         // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
         // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
         // closes the menu first.)
-        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up
+        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up || crate::ui::todo::holds(self.window.hwnd)
     }
 
     /// What may be looked at larger on it, as it was just drawn (see `ui::look`): each such thing, and where its tile is
@@ -3713,7 +3803,8 @@ impl<'a> Panel<'a> {
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
         };
-        let lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
+        let mut lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
+        view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
         let placement = self.placement.as_mut().unwrap();
@@ -3990,6 +4081,16 @@ impl<'a> Panel<'a> {
         // (Sooner, the preview's shortcut due to be said, or coming in.)
         if let Some(due) = self.hint.due(now) {
             self.next_frame = self.next_frame.min(due);
+        }
+        // A to-do written on it: its caret blinking, the input method's words put at it.
+        let hwnd = self.window.hwnd;
+        if let (_, Some(due)) = crate::ui::todo::field(hwnd, now) {
+            self.next_frame = self.next_frame.min(due);
+        }
+        if crate::ui::todo::writing(hwnd) {
+            if let Some(field) = self.on_screen(Hit::Todo(view::TodoHit::Field)) {
+                crate::ui::todo::placed(hwnd, field, px);
+            }
         }
     }
 
@@ -4294,7 +4395,21 @@ impl<'a> Panel<'a> {
         if self.shelf_press.take().is_some() {
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
         }
-        match self.hit_at(client) {
+        let hit = self.hit_at(client);
+        // A to-do being written: a press away from its field gives back the keys.
+        if !matches!(hit, Some(Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
+            self.stop_todo(false);
+        }
+        match hit {
+            Some(Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
+                crate::ui::todo::Act::Nothing => {}
+                crate::ui::todo::Act::Write => self.write_todo(),
+                crate::ui::todo::Act::Pick(of) => {
+                    if let Some(anchor) = self.on_screen(Hit::Todo(hit)) {
+                        crate::ui::todo::pick::open(self.window.hwnd, of, anchor, self.menu_look(), self.lang);
+                    }
+                }
+            },
             Some(Hit::Settings) => {
                 self.settings_from = self.on_screen(Hit::Settings);
                 crate::show_settings(self.settings_from);

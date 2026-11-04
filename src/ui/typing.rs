@@ -87,6 +87,29 @@ impl Typing {
     }
 }
 
+/// The input method's words and choices put at a caret in `hwnd` (its client area, px: where it is, how tall), in the
+/// face `face` `size` px tall, as the words written there.
+pub fn place_ime(hwnd: windows::Win32::Foundation::HWND, at: windows::Win32::Foundation::POINT, tall: i32, face: &str, size: i32) {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{DEFAULT_CHARSET, LOGFONTW};
+    use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
+    unsafe {
+        let context = ImmGetContext(hwnd);
+        if context.is_invalid() {
+            return;
+        }
+        let _ = ImmSetCompositionWindow(context, &COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: at, ..Default::default() });
+        let around = RECT { left: at.x, top: at.y, right: at.x + 1, bottom: at.y + tall };
+        let _ = ImmSetCandidateWindow(context, &CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_EXCLUDE, ptCurrentPos: POINT { x: around.left, y: around.bottom }, rcArea: around });
+        let mut font = LOGFONTW { lfHeight: -size, lfWeight: 400, lfCharSet: DEFAULT_CHARSET, ..Default::default() };
+        for (unit, to) in face.encode_utf16().zip(font.lfFaceName.iter_mut()) {
+            *to = unit;
+        }
+        let _ = ImmSetCompositionFontW(context, &font);
+        let _ = ImmReleaseContext(hwnd, context);
+    }
+}
+
 /// Where in `layout` the point `(x, y)` is, as the position a caret put there would have.
 pub fn at_point(layout: &IDWriteTextLayout, x: f32, y: f32) -> usize {
     let (mut trailing, mut inside, mut metrics) = (BOOL(0), BOOL(0), DWRITE_HIT_TEST_METRICS::default());

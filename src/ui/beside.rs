@@ -22,8 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, LOGFONTW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionFontW, ImmSetCompositionWindow, CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, InvalidateRect, MonitorFromRect, ValidateRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -1353,22 +1352,7 @@ impl Beside {
     fn place_ime(&self) {
         let Some((x, y, h)) = self.caret else { return };
         let px = |dips: f32| (dips * self.scale).round() as i32;
-        unsafe {
-            let context = ImmGetContext(self.hwnd);
-            if context.is_invalid() {
-                return;
-            }
-            let (x, y) = (x + self.inset, y + self.inset);
-            let _ = ImmSetCompositionWindow(context, &COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: POINT { x: px(x), y: px(y) }, ..Default::default() });
-            let around = RECT { left: px(x), top: px(y), right: px(x) + 1, bottom: px(y + h) };
-            let _ = ImmSetCandidateWindow(context, &CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_EXCLUDE, ptCurrentPos: POINT { x: around.left, y: around.bottom }, rcArea: around });
-            let mut face = LOGFONTW { lfHeight: -px(self.theme.body.size), lfWeight: 400, lfCharSet: windows::Win32::Graphics::Gdi::DEFAULT_CHARSET, ..Default::default() };
-            for (unit, to) in "Microsoft YaHei UI".encode_utf16().zip(face.lfFaceName.iter_mut()) {
-                *to = unit;
-            }
-            let _ = ImmSetCompositionFontW(context, &face);
-            let _ = ImmReleaseContext(self.hwnd, context);
-        }
+        super::typing::place_ime(self.hwnd, POINT { x: px(x + self.inset), y: px(y + self.inset) }, px(y + self.inset + h) - px(y + self.inset), "Microsoft YaHei UI", px(self.theme.body.size));
     }
 
     fn draw(&mut self) {
