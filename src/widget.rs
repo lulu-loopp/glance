@@ -5101,10 +5101,10 @@ impl Widget {
         crate::ui::menu::Menu::open(menu_items(lang, self.pinned, self.click_through, !self.on_desktop, self.shows_full()), self.menu_look(), over_the_panel)
     }
 
-    /// How a menu opened on it looks: in its skin, light or dark and as frosted as it was last drawn.
+    /// How a menu opened on it looks: in its skin, light or dark, as frosted as it was last drawn and as large.
     fn menu_look(&self) -> crate::ui::menu::Look {
         let frost = self.frost_shown.map_or(1.0, |(shown, _, _)| shown);
-        crate::ui::menu::Look::of(self.drawn_look.0, self.drawn_look.1).frosted(frost, self.behind.is_some())
+        crate::ui::menu::Look::of(self.drawn_look.0, self.drawn_look.1).frosted(frost, self.behind.is_some()).zoomed(self.zoom)
     }
 
     /// Whether it shows what plays, alone or merged with others (and so offers it over the whole screen). (Not by its

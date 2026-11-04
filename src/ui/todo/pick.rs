@@ -211,7 +211,7 @@ impl Picker {
             theme,
             look,
             lang,
-            scale: contact.scale,
+            scale: look.px(contact.scale),
             rect: RECT::default(),
             above: false,
             owner: owner.0 as isize,

@@ -3107,9 +3107,10 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// How a menu opened on it looks: in its skin, light or dark and as frosted as it is drawn.
+    /// How a menu opened on it looks: in its skin, light or dark, as frosted as it is drawn and as large.
     fn menu_look(&self) -> crate::ui::menu::Look {
-        crate::ui::menu::Look::of(self.theme.skin, self.theme.dark).frosted(self.frost, self.behind.is_some())
+        let zoom = self.placement.as_ref().map_or(1.0, |placement| placement.px / placement.contact.scale);
+        crate::ui::menu::Look::of(self.theme.skin, self.theme.dark).frosted(self.frost, self.behind.is_some()).zoomed(zoom)
     }
 
     /// Whether it is moved away from the edge.

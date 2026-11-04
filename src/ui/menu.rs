@@ -22,30 +22,42 @@ use super::window::{Window, CAPTURE_LOST};
 /// How a menu looks: in the skin of what it is opened on (`skin`: the panel's, a widget's, the page beside), or as
 /// Windows' own (none: the tray's, the overlay's, which are Windows' things); light or `dark`. On glass, as frosted as
 /// the glass it is opened on is drawn (`frost`, 0–1), so that it is a piece of that glass: as clear over a calm
-/// desktop, as tinted, its colours as lifted.
+/// desktop, as tinted, its colours as lifted. As large as what it is opened on is drawn (`zoom`: the panel or the
+/// widget made larger or smaller on its screen, 1 as its screen's scale has it).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Look {
     pub skin: Option<super::theme::Skin>,
     pub dark: bool,
     pub frost: f32,
+    pub zoom: f32,
 }
 
 impl Look {
     /// As Windows' own menus, light or dark as the apps are.
     pub fn system() -> Look {
-        Look { skin: None, dark: crate::os::apps_dark(), frost: 1.0 }
+        Look { skin: None, dark: crate::os::apps_dark(), frost: 1.0, zoom: 1.0 }
     }
 
     /// In `skin`, light or `dark`, as frosted as glass is at its most (glass with no picture of what is behind it is
     /// drawn so: see `skins::glass_tint`).
     pub fn of(skin: super::theme::Skin, dark: bool) -> Look {
-        Look { skin: Some(skin), dark, frost: 1.0 }
+        Look { skin: Some(skin), dark, frost: 1.0, zoom: 1.0 }
     }
 
     /// The same, opened on glass drawn `frost` frosted: `behind`, with a picture of what is behind it to frost (without
     /// one, glass is drawn as at its most frosted).
     pub fn frosted(self, frost: f32, behind: bool) -> Look {
         Look { frost: if behind { frost.clamp(0.0, 1.0) } else { 1.0 }, ..self }
+    }
+
+    /// The same, opened on what is drawn `zoom` times as large as its screen's scale has it.
+    pub fn zoomed(self, zoom: f32) -> Look {
+        Look { zoom, ..self }
+    }
+
+    /// Physical px to a DIP of it on a screen of `scale`: as many as on what it is opened on.
+    pub fn px(self, scale: f32) -> f32 {
+        scale * self.zoom
     }
 }
 
@@ -249,7 +261,7 @@ impl Menu {
                 return None;
             }
         };
-        let scale = contact.scale;
+        let scale = look.px(contact.scale);
         let sheet = Sheet::new(&gfx, &items, look);
         let room = surface.room(look);
         // At the pointer, turned back where it would leave its screen.
@@ -581,6 +593,21 @@ impl Colours {
     }
 }
 
+#[cfg(test)]
+mod sized {
+    use super::*;
+
+    /// A menu opened on a panel or a widget made smaller on its screen is as small as it: its words as large as theirs.
+    #[test]
+    fn a_menu_is_as_large_as_what_it_is_opened_on() {
+        use super::super::theme::Skin;
+        let look = Look::of(Skin::Glass, true).frosted(0.4, true).zoomed(0.8);
+        assert_eq!(look.px(1.5), 1.5 * 0.8);
+        assert_eq!(Look::of(Skin::Glass, true).px(1.5), 1.5);
+        assert_eq!(Look::system().px(1.25), 1.25);
+    }
+}
+
 #[cfg(all(test, feature = "studio"))]
 mod tests {
     use super::*;
@@ -593,7 +620,7 @@ mod tests {
         let gfx = gfx::Gfx::new().expect("graphics");
         let pink = Color::hex(0xEE556D, 1.0);
         let items = vec![Item { label: "粉色", mark: Some(Mark::Colour(pink)), checked: false, rule_before: false }];
-        for look in [Look { skin: None, dark: false, frost: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
+        for look in [Look { skin: None, dark: false, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
             let sheet = Sheet::new(&gfx, &items, look);
             let (w, h) = (sheet.width.ceil() as u32, sheet.height.ceil() as u32);
             let pixels = gfx.draw_offscreen((w, h), 1.0, |frame| sheet.paint(frame, &items, look, None, false)).expect("drawn");
@@ -641,7 +668,7 @@ mod tests {
             Item { label: "列表", mark: Some(Mark::Icon(Icon::List)), checked: true, rule_before: false },
             Item { label: "清空中转站", mark: None, checked: false, rule_before: true },
         ];
-        let looks = [Look { skin: None, dark: false, frost: 1.0 }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true, frost: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
+        let looks = [Look { skin: None, dark: false, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
         let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();
         let widest = sheets.iter().map(|sheet| sheet.width).fold(0.0, f32::max);
         let room = super::super::theme::room(&super::super::theme::Theme::new(Skin::Glass, false).shadows).max(SHADOW);
