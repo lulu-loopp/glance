@@ -1434,8 +1434,8 @@ impl MusicShown {
 /// The room round what plays for its shadow (DIPs).
 const MUSIC_SHADOW: f32 = 24.0;
 
-/// `theme` as a widget of the workbench's lanes is drawn in: no bar under them (its buttons are over it, as every
-/// widget's are; the bar held only how long the PC has been up, which none of them is about).
+/// `theme` as a widget of the workbench's lanes, or of one lane alone, is drawn in: no bar under them (its buttons are
+/// over it, as every widget's are, and the bar held only how long the PC has been up, which none of them is about).
 pub fn workbench_dressed(mut theme: Theme) -> Theme {
     theme.bar_gap = 0.0;
     theme.bar_height = 0.0;
@@ -1518,13 +1518,14 @@ impl Content {
         }
     }
 
-    /// `theme` as it is drawn in: the workbench's with no bar under its lanes (see `workbench_dressed`).
+    /// `theme` as it is drawn in: the workbench's, or one lane's alone, with no bar under its lanes (see
+    /// `workbench_dressed`). (All the panel's lanes torn off together keep the panel's bar.)
     ///
     /// A note stuck on the desktop alone: its card the whole of it, with no room round it, the skin's ground (the
     /// desktop frosted, on glass) as round as the card, under it alone (in the skin's sheet, the card read as a note in
     /// a frame; on no ground, glass's card was clear over the desktop, not frosted as on the panel).
     fn dressed(&self, mut theme: Theme) -> Theme {
-        if self.workbench() {
+        if self.workbench() || matches!(self, Content::Readings(readings) if readings.only.is_some()) {
             theme = workbench_dressed(theme);
         }
         if self.bare() {
@@ -5464,6 +5465,20 @@ mod tests {
             let drawn = [(card.0 + wx) * px, (card.1 + wy) * px, (card.0 + wx + ww) * px, (card.1 + wy + wh) * px];
             let placed = [words.left, words.top, words.right, words.bottom].map(|edge| edge as f32);
             assert!(drawn.iter().zip(placed).all(|(drawn, placed)| (drawn - placed).abs() <= 1.0), "{px}: {drawn:?} {placed:?}");
+        }
+    }
+
+    /// A widget of one of the panel's lanes alone has no bar under it (how long the PC has been up is not about that
+    /// lane), in every skin; one of all its lanes keeps the panel's.
+    #[test]
+    fn a_lane_alone_has_no_bar_under_it() {
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let alone = Content::Readings(Readings { only: Some("cpu".into()), ..Readings::new(choice) });
+        let all = Content::Readings(Readings::new(choice));
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            let theme = alone.dressed(Theme::new(skin, false));
+            assert_eq!((theme.bar_gap, theme.bar_height), (0.0, 0.0), "{skin:?}");
+            assert_eq!(all.dressed(Theme::new(skin, false)).bar_height, Theme::new(skin, false).bar_height, "{skin:?}");
         }
     }
 
