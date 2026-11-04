@@ -1631,7 +1631,7 @@ impl Beside {
                 (false, false) => theme.text3,
             };
             frame.icon(icon, Point { x: start + 7.5, y: cell.1 + cell.3 / 2.0 }, 15.0, ink);
-            frame.text(name, theme.body, ink, start + 21.0, frame.line_top(theme.body, cell.1 + cell.3 / 2.0), name_w + 2.0, Align::Start);
+            frame.text(name, theme.body, ink, start + 21.0, frame.line_in(theme.body, cell.1, cell.3), name_w + 2.0, Align::Start);
             hits.push((cell.0, cell.1, cell.2, cell.3, Hit::Kind(kind)));
         }
         // The search, its caret blinking: a field as every field is (see `view::paint_field_ground`), taking the keys
@@ -1642,7 +1642,7 @@ impl Beside {
         let middle = field.1 + SEARCH / 2.0;
         frame.icon(Icon::Search, Point { x: field.0 + super::view::FIELD_ICON_AT, y: middle }, super::view::FIELD_ICON, theme.text3);
         let text_x = field.0 + super::view::FIELD_WORDS;
-        let text_y = frame.line_top(theme.body, middle);
+        let text_y = frame.line_in(theme.body, field.1, SEARCH);
         let words = self.search.string();
         if words.is_empty() {
             let asked = match self.kind {
@@ -1742,7 +1742,7 @@ impl Beside {
             let words_w = mark.0 - 8.0 - words_x;
             let ink = if is_kept { theme.text2 } else { theme.text };
             if row.about.is_empty() {
-                frame.text(&row.name, theme.body, ink, words_x, frame.line_top(theme.body, ry + tall / 2.0), words_w, Align::Start);
+                frame.text(&row.name, theme.body, ink, words_x, frame.line_in(theme.body, ry, tall), words_w, Align::Start);
             } else {
                 let name_top = ry + (tall - theme.body.size * 1.35 - 15.0) / 2.0;
                 frame.text(&row.name, theme.body, ink, words_x, name_top, words_w, Align::Start);
@@ -1799,7 +1799,7 @@ impl Beside {
         let label_w = frame.measure(label, theme.body);
         let start = button.0 + (button.2 - 15.0 - 8.0 - label_w) / 2.0;
         frame.icon(icon, Point { x: start + 7.5, y: button.1 + button.3 / 2.0 }, 15.0, theme.text2);
-        frame.text(label, theme.body, theme.text, start + 23.0, frame.line_top(theme.body, button.1 + button.3 / 2.0), label_w + 2.0, Align::Start);
+        frame.text(label, theme.body, theme.text, start + 23.0, frame.line_in(theme.body, button.1, button.3), label_w + 2.0, Align::Start);
         hits.push((button.0, button.1, button.2, button.3, Hit::Choose));
         let hint_w = frame.measure(hint, theme.small);
         frame.text(hint, theme.small, theme.text3, (width - hint_w) / 2.0, bottom + 48.0, hint_w + 2.0, Align::Start);

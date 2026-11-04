@@ -654,13 +654,7 @@ impl Gfx {
     /// as the faces that draw it set it (a line in Chinese, in a face apart from the font's own, sits lower than
     /// `baseline` says).
     pub fn wrapped_baseline(&self, text: &str, font: Font, width: f32) -> f32 {
-        let layout = self.wrapped(text, font, width);
-        // (Asked first how many lines it has: a list too short for them is not filled.)
-        let mut count = 0;
-        let _ = unsafe { layout.GetLineMetrics(None, &mut count) };
-        let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
-        let _ = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
-        lines[0].baseline
+        first_baseline(&self.wrapped(text, font, width))
     }
 
     /// Lets go of what Direct2D keeps from earlier drawing, such as the
@@ -2193,9 +2187,13 @@ impl<'a> Frame<'a> {
 
     /// Draws `text` with its first baseline-box at `(x, y)`, put on a whole pixel (still text: drawn between two,
     /// its stems were spread over both, and it looked softer than the same words elsewhere), in a box `width` wide.
+    /// Its baseline is what is put on the pixel, once: the top put on one, the baseline below it (Direct2D puts it
+    /// on one too) came to a pixel again, and the words stood up to a pixel and a half from where they were placed.
     pub fn text(&self, text: &str, font: Font, color: Color, x: f32, y: f32, width: f32, align: Align) {
-        let (x, y) = self.on_pixel(x, y);
         let layout = self.gfx.layout(text, font, width, align);
+        let baseline = first_baseline(&layout);
+        let (x, line) = self.on_pixel(x, y + baseline);
+        let y = line - baseline;
         unsafe {
             self.dc.DrawTextLayout(
                 windows_numerics::Vector2 { X: x, Y: y },
@@ -2205,6 +2203,18 @@ impl<'a> Frame<'a> {
             )
         };
     }
+}
+
+/// Where the first line's baseline of `layout` falls below its top (DIPs), as the faces that draw it set it.
+fn first_baseline(layout: &IDWriteTextLayout) -> f32 {
+    // (A list too short for all its lines is not filled: one of more lines is asked again with room for them all.)
+    let (mut count, mut line) = (0, [DWRITE_LINE_METRICS::default()]);
+    if unsafe { layout.GetLineMetrics(Some(&mut line), &mut count) }.is_ok() {
+        return line[0].baseline;
+    }
+    let mut lines = vec![DWRITE_LINE_METRICS::default(); count.max(1) as usize];
+    let _ = unsafe { layout.GetLineMetrics(Some(&mut lines), &mut count) };
+    lines[0].baseline
 }
 
 /// `options` for drawing text, with its glyphs in their own colours where a font has them (an emoji's): without it,
@@ -2817,6 +2827,47 @@ pub(crate) fn threads_now() -> usize {
 #[cfg(test)]
 mod tests {
     use super::room;
+
+    /// A line of words set in a box stands with its ink across the middle of the box as it is drawn, at any scale and
+    /// wherever on a pixel the box falls, to under a pixel: half a pixel, the most a baseline put on a whole pixel can
+    /// be off, and what the face's hinting moves its strokes by to fit them to pixels. Its top put on a pixel, then
+    /// its baseline again, and centred on the middle asked rather than the box drawn, it stood up to a pixel and a
+    /// half off (the picker's buttons, high so on a screen at 150% with the panel made smaller).
+    #[test]
+    fn words_stand_in_the_middle_of_their_box_as_drawn() {
+        use crate::ui::canvas::{Align, Canvas, Color};
+        let _device = super::held().unwrap();
+        let gfx = super::Gfx::new().expect("graphics");
+        let theme = crate::ui::theme::Theme::new(crate::ui::theme::Skin::Glass, true);
+        let font = crate::ui::canvas::Font { size: 13.0, weight: 400.0, ..theme.body };
+        for scale in [1.0f32, 1.1, 1.143, 1.2, 1.25, 1.3, 1.4, 1.5, 1.6, 1.75, 1.9, 2.0, 2.25, 2.5] {
+            for text in ["中8", "今天"] {
+                for quarter in 0..4 {
+                    let (w, h) = ((120.0 * scale).ceil() as usize, (40.0 * scale).ceil() as usize);
+                    let top = 6.0 + quarter as f32 * 0.25 / scale;
+                    let draw = |words: bool| {
+                        gfx.draw_offscreen((w as u32, h as u32), scale, |frame| {
+                            frame.fill_rounded(Color::hex(0x404040, 1.0), 4.0, top, 100.0, 28.0, 8.0);
+                            if words {
+                                frame.text(text, font, Color::hex(0xFFFFFF, 1.0), 10.0, frame.line_in(font, top, 28.0), 100.0, Align::Start);
+                            }
+                        })
+                        .expect("drawn")
+                    };
+                    let (with, without) = (draw(true), draw(false));
+                    let ground: Vec<usize> = (0..h).filter(|row| without[(row * w + (50.0 * scale) as usize) * 4 + 3] > 0).collect();
+                    // How much of each row the words' ink covers at most (its strokes across, partly in a row at
+                    // their edge): their top and foot found to a part of a pixel.
+                    let covered: Vec<f32> = (0..h).map(|row| (0..w).map(|column| with[(row * w + column) * 4].abs_diff(without[(row * w + column) * 4]) as f32 / 255.0).fold(0.0, f32::max)).collect();
+                    let inked: Vec<usize> = (0..h).filter(|row| covered[*row] > 0.05).collect();
+                    let (first, last) = (inked[0], inked[inked.len() - 1]);
+                    let ink = (first as f32 + 1.0 - covered[first] + last as f32 + covered[last]) / 2.0;
+                    let off = ink - (ground[0] + ground[ground.len() - 1] + 1) as f32 / 2.0;
+                    assert!(off.abs() <= 0.85, "{text} at {scale}, {quarter}/4 of a pixel down: {off:+.2} px off the box's middle");
+                }
+            }
+        }
+    }
 
     /// What is drawn counted in pixels (a note's words written in where it is) comes where the same drawn in DIPs
     /// would, grown and turned as it would be: a note lifted and leaning had its words drawn as large and as straight

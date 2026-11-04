@@ -324,7 +324,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     let small = theme.small;
     let said_more = |frame: &dyn Canvas, n: usize, y: f32| {
         let says = if lang == Lang::Zh { format!("还有 {n} 项") } else { format!("{n} more") };
-        frame.text(&says, small, theme.text3, left + BOX + BOX_GAP, frame.line_top(small, y + MORE / 2.0), width, Align::Start);
+        frame.text(&says, small, theme.text3, left + BOX + BOX_GAP, frame.line_in(small, y, MORE), width, Align::Start);
     };
     if more > 0 {
         said_more(frame, more, top + fit_undone as f32 * ROW);
@@ -339,7 +339,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     // Nothing to do: said where the items would be.
     if undone == 0 && done == 0 {
         let says = lang.pick("没有待办事项", "Nothing to do");
-        frame.text(says, small, theme.text3, left, frame.line_top(small, top + ROW / 2.0), width, Align::Start);
+        frame.text(says, small, theme.text3, left, frame.line_in(small, top, ROW), width, Align::Start);
     }
 }
 
@@ -371,13 +371,13 @@ fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f
         let chip = frame.measure(due, small) + 14.0;
         let x = words_right - chip;
         frame.fill_rounded(theme.track, x, y + (FIELD - 22.0) / 2.0, chip, 22.0, (round - (FIELD - 22.0) / 2.0).max(4.0));
-        frame.text(due, small, theme.text, x + 7.0, frame.line_top(small, y + FIELD / 2.0), chip, Align::Start);
+        frame.text(due, small, theme.text, x + 7.0, frame.line_in(small, y, FIELD), chip, Align::Start);
         words_right = x - 6.0;
     }
     let words_left = left + FIELD_WORDS;
     let room = (words_right - words_left).max(0.0);
     let font = theme.body;
-    let line_y = frame.line_top(font, middle);
+    let line_y = frame.line_in(font, y, FIELD);
     // (The caret, and what is chosen, as tall as a line of it, across the middle.)
     let (caret_top, caret_tall) = (middle - font.size * 0.65, font.size * 1.3);
     if field.text.is_empty() {
@@ -463,7 +463,7 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
         if scene.hover == Some(due) {
             frame.fill_rounded(theme.hover, x, y + (ROW - ACT) / 2.0, wide, ACT, 6.0);
         }
-        frame.text(label, font, alpha(color), x + 6.0, frame.line_top(font, y + ROW / 2.0), wide, Align::Start);
+        frame.text(label, font, alpha(color), x + 6.0, frame.line_in(font, y, ROW), wide, Align::Start);
         if !row.done {
             hits.push((x, y + (ROW - ACT) / 2.0, wide, ACT, due));
         }
@@ -475,7 +475,7 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
     let room = (right - words_left).max(0.0);
     let shown = fitted(frame, &row.text, font, room);
     let ink = if row.done || row.tick > 0.0 { theme.text3 } else { theme.text };
-    let text_y = frame.line_top(font, y + ROW / 2.0);
+    let text_y = frame.line_in(font, y, ROW);
     frame.text(&shown, font, alpha(ink), words_left, text_y, room + 1.0, Align::Start);
     let struck = if row.done { 1.0 } else { ease_out(row.tick) };
     if struck > 0.0 {
@@ -527,7 +527,7 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
     if rows.is_empty() {
         let says = scene.lang.pick("没有待办事项", "Nothing to do");
         let font = theme.small;
-        frame.text(&fitted(frame, says, font, w), font, theme.text3, x, frame.line_top(font, y + h / 2.0), w + 1.0, Align::Start);
+        frame.text(&fitted(frame, says, font, w), font, theme.text3, x, frame.line_in(font, y, h), w + 1.0, Align::Start);
         return;
     }
     let fit = ((h / ROW).floor() as usize).max(1);

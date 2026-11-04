@@ -771,7 +771,7 @@ impl Finder {
         self.words = words;
         let text = self.typing.string();
         // (Its words' ink across its middle, as every line's: see `Canvas::line_top`.)
-        let top = super::super::canvas::Canvas::line_top(frame, font, FIELD / 2.0);
+        let top = super::super::canvas::Canvas::line_in(frame, font, 0.0, FIELD);
         let layout = frame.gfx.layout(&text, font, 100_000.0, Align::Start);
         let (x, line_top, tall) = caret_at(&layout, self.typing.caret);
         // Scrolled to show the caret, never past the words' end.

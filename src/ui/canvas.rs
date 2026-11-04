@@ -271,6 +271,13 @@ pub trait Canvas {
         let (top, bottom) = self.ink("中8", font);
         middle - (top + bottom) / 2.0
     }
+    /// Where the top of `font`'s line box goes for a line in it to stand centred in the box `top` down `height` tall
+    /// as a fill of it comes out (see `on_pixels`): a box put on whole pixels has its middle up to half a pixel from
+    /// where it was asked, and words centred on the middle asked stood that much more off the one drawn.
+    fn line_in(&self, font: Font, top: f32, height: f32) -> f32 {
+        let (_, top, _, height) = self.on_pixels(0.0, top, 1.0, height);
+        self.line_top(font, top + height / 2.0)
+    }
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
     fn unclip(&self);

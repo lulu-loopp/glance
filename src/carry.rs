@@ -297,7 +297,7 @@ fn paint_says(frame: &Frame, look: crate::ui::menu::Look, says: &str) {
     let wide = frame.measure(says, font) + 14.0 + 20.0;
     let plate = crate::ui::menu::plate(frame, look, (0.0, 0.0, wide, SAYS_TALL));
     frame.icon(crate::ui::icons::Icon::Add, Point { x: 14.0, y: SAYS_TALL / 2.0 }, 13.0, plate.highlight);
-    frame.text(says, font, theme.text, 24.0, frame.line_top(font, SAYS_TALL / 2.0), wide - 24.0, Align::Start);
+    frame.text(says, font, theme.text, 24.0, frame.line_in(font, 0.0, SAYS_TALL), wide - 24.0, Align::Start);
 }
 
 /// The skin a look is in (what a station's lane is lifted off is always in one), as light or dark.

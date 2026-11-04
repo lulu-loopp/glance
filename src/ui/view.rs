@@ -1647,7 +1647,7 @@ fn paint_note_row(frame: &dyn Canvas, scene: &Scene, note: &NoteCard, room: (f32
         }
         frame.text(&fitted(frame, line, theme.small, width - 24.0 - when_w), theme.small, theme.text3, x, line_y, width - 24.0 - when_w, Align::Start);
     }
-    frame.text(&note.when, theme.small, theme.text3, left, frame.line_top(theme.small, y + NOTE_ROW / 2.0), width, Align::End);
+    frame.text(&note.when, theme.small, theme.text3, left, frame.line_in(theme.small, y, NOTE_ROW), width, Align::End);
 }
 
 /// The deck's last written note, whole, in the box (`x`, `y`, `w`, `h`), `lit` under the pointer, over what `below`
@@ -1749,7 +1749,7 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
             let letter: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
             let font = Font { size: side * 0.45, weight: 650.0, ..theme.body };
             let ink = if gone { theme.text2.alpha(theme.text2.a * 0.45) } else { theme.text2 };
-            centred(frame, &letter, font, ink, x, frame.line_top(font, y + side / 2.0), side);
+            centred(frame, &letter, font, ink, x, frame.line_in(font, y, side), side);
         }
     }
 }
@@ -4650,7 +4650,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         let shown = fitted(frame, &row.label, theme.body, room);
         frame.text(&shown, theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
-        frame.text(&row.when, theme.small, theme.text3, left + width - when_w, frame.line_top(theme.small, y + LIST_ROW / 2.0), when_w + 1.0, Align::Start);
+        frame.text(&row.when, theme.small, theme.text3, left + width - when_w, frame.line_in(theme.small, y, LIST_ROW), when_w + 1.0, Align::Start);
         let copied = scene.thumbs.copied(pressed);
         copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(left + width, y + LIST_ROW / 2.0));
         if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
@@ -4718,7 +4718,7 @@ fn paint_filter(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32
             frame.fill_rounded(theme.hover, x, top, wide, CHIP_H, theme.control_radius.min(CHIP_H / 2.0));
         }
         let words = if is_chosen || hovered { theme.text } else { theme.text2 };
-        centred(frame, &name, theme.small, words, x, frame.line_top(theme.small, top + CHIP_H / 2.0), wide);
+        centred(frame, &name, theme.small, words, x, frame.line_in(theme.small, top, CHIP_H), wide);
         hits.push((x, top, wide, CHIP_H, hit));
     }
 }
@@ -4784,7 +4784,7 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark
     let faded = |color: Color| color.alpha(color.a * shown);
     frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
     frame.stroke_rounded(Fill::Solid(faded(colours.stroke)), left, top, wide, TALL, radius, 1.0);
-    frame.text(says, font, faded(colours.text), left + PAD, frame.line_top(font, top + TALL / 2.0), wide, Align::Start);
+    frame.text(says, font, faded(colours.text), left + PAD, frame.line_in(font, top, TALL), wide, Align::Start);
 }
 
 /// The mark on a thing just copied (see `copied`), as clear as `clear` (none at 0): a pill of the lane's `ink`, a tick
@@ -5172,13 +5172,13 @@ fn paint_bar(frame: &dyn Canvas, scene: &Scene, layout: &Layout, hits: &mut Vec<
     if !scene.buttons {
         let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
         let start = bar.x + theme.bar_pad.0;
-        frame.text(&label, theme.small, theme.text2, start, frame.line_top(theme.small, bar.y + bar.h / 2.0), bar.w - 2.0 * start, Align::Start);
+        frame.text(&label, theme.small, theme.text2, start, frame.line_in(theme.small, bar.y, bar.h), bar.w - 2.0 * start, Align::Start);
         frame.key("");
         return;
     }
     let label = if scene.lang == Lang::Zh { format!("已开机 {uptime}") } else { format!("Up {uptime}") };
     let start = bar.x + theme.bar_pad.0;
-    frame.text(&label, theme.small, theme.text2, start, frame.line_top(theme.small, bar.y + bar.h / 2.0), game - 8.0 - start, Align::Start);
+    frame.text(&label, theme.small, theme.text2, start, frame.line_in(theme.small, bar.y, bar.h), game - 8.0 - start, Align::Start);
     // The overlay's: a window with a trace in it, lit while it is on.
     // And the game button before it, lit while a game shows (found, or asked for by hand), as a widget's is.
     for (left, hit) in [(game, Hit::Game), (overlay, Hit::Overlay), (pin, Hit::Pin), (settings, Hit::Settings)] {
@@ -5553,7 +5553,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 if lit(Hit::StationPages) {
                     frame.fill_rounded(theme.hover, chip.0, chip.1, chip.2, chip.3, TAB_H / 2.0);
                 }
-                let top = frame.line_top(theme.title, y + TAB_H / 2.0);
+                let top = frame.line_in(theme.title, y, TAB_H);
                 frame.text(&fitted(frame, name, theme.title, name_w), theme.title, theme.text, x + 4.0, top, name_w + 1.0, Align::Start);
                 frame.text(&count, small, theme.text3, x + 4.0 + name_w + 5.0, top + 2.0, count_w + 1.0, Align::Start);
                 frame.icon(Icon::ChevronDown, Point { x: x + name_w + count_w + 18.0, y: y + TAB_H / 2.0 + 0.5 }, 9.0, theme.text2);
@@ -5706,7 +5706,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     Shape::Least if w.min(h) < 44.0 => {
                         let one: String = note.title.chars().take(1).collect();
                         let big = Font { size: (w.min(h) * 0.5).max(10.0), ..title };
-                        centred(frame, &one, big, title_ink, x, frame.line_top(big, y + h / 2.0), w);
+                        centred(frame, &one, big, title_ink, x, frame.line_in(big, y, h), w);
                     }
                     // Its title and lines across.
                     Shape::Least => across(y + h - if many { LINE + 2.0 } else { 0.0 }),
@@ -5790,7 +5790,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     frame.text(&shown, big, theme.text, start, y + (h - big.size * 1.2) / 2.0, fig_w + 1.0, Align::Start);
                     if with_date {
                         frame.key("time.detail");
-                        frame.text(date, theme.small, theme.text3, start + fig_w + 12.0, frame.line_top(theme.small, y + h / 2.0), date_w + 1.0, Align::Start);
+                        frame.text(date, theme.small, theme.text3, start + fig_w + 12.0, frame.line_in(theme.small, y, h), date_w + 1.0, Align::Start);
                     }
                     frame.key("");
                 }
@@ -5844,9 +5844,9 @@ fn paint_search(frame: &dyn Canvas, scene: &Scene, lane: Rect, keys: &str, hits:
     // The keys where both fit whole; else what it searches alone, shortened as far as it must be.
     let with_keys = keys_w > 0.0 && left + said_w + 16.0 + keys_w <= right;
     let room = right - left - if with_keys { keys_w + 16.0 } else { 0.0 };
-    frame.text(&fitted(frame, said, theme.body, room), theme.body, theme.text3, left, frame.line_top(theme.body, middle), room.max(0.0) + 1.0, Align::Start);
+    frame.text(&fitted(frame, said, theme.body, room), theme.body, theme.text3, left, frame.line_in(theme.body, y, h), room.max(0.0) + 1.0, Align::Start);
     if with_keys {
-        frame.text(keys, theme.small, theme.text3, right - keys_w, frame.line_top(theme.small, middle), keys_w + 1.0, Align::Start);
+        frame.text(keys, theme.small, theme.text3, right - keys_w, frame.line_in(theme.small, y, h), keys_w + 1.0, Align::Start);
     }
     hits.push((x, y, w, h, Hit::Search));
 }
