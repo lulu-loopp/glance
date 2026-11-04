@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::PickFor;
 use crate::todo::{clock, Day, Due};
 use crate::ui::canvas::{Align, Canvas, Color, Fill, Font, Point};
-use crate::ui::gfx::{self, Surface};
+use crate::ui::gfx;
 use crate::ui::icons::Icon;
 use crate::ui::menu::{self, Look};
 use crate::ui::text::Lang;
@@ -39,8 +39,6 @@ const CELL_GAP: f32 = 2.0;
 const LABEL: f32 = 24.0;
 const INPUT: f32 = 64.0;
 const REMOVE: f32 = 16.0;
-/// Room round the plate for its shadow.
-const ROOM: f32 = 16.0;
 /// How far from the button it is opened by.
 const APART: f32 = 6.0;
 
@@ -88,8 +86,15 @@ struct Writing {
 pub struct Picker {
     gfx: Rc<gfx::Gfx>,
     window: Window,
-    /// Its surface (taken out while it is drawn on).
-    surface: Option<Surface>,
+    /// What its window shows, as a menu's (frosted over the screen on glass and Windows 11's look: see
+    /// `menu::Drawn`), taken out while it is drawn on.
+    surface: Option<menu::Drawn>,
+    /// The room round its plate for its shadows (DIPs).
+    room: f32,
+    /// What is on its plate, kept as drawn (ringed on glass by the glass's halo, as the lanes' words are), and how
+    /// often it was drawn (each time anew: what it shows is drawn only as it changes).
+    words: gfx::Layer,
+    drawn: u64,
     theme: Theme,
     look: Look,
     lang: Lang,
@@ -182,7 +187,10 @@ impl Picker {
         let gfx = gfx::current().ok()?;
         let showing = crate::ui::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
-        let surface = match Surface::new(&gfx, window.hwnd) {
+        // (As frosted as glass is at its most, whatever the glass it is opened from is drawn as: it lies over that
+        // glass's own words, the lane it sets the time of, not over the desktop that glass is frosted for.)
+        let look = Look { frost: 1.0, ..look };
+        let surface = match menu::Drawn::new(&gfx, window.hwnd, look) {
             Ok(surface) => surface,
             Err(error) => {
                 window.destroy();
@@ -196,9 +204,12 @@ impl Picker {
         let mut picker = Picker {
             gfx,
             window,
+            room: surface.room(look),
             surface: Some(surface),
+            words: gfx::Layer::default(),
+            drawn: 0,
             theme,
-            look: Look { frost: 1.0, ..look },
+            look,
             lang,
             scale: contact.scale,
             rect: RECT::default(),
@@ -217,15 +228,15 @@ impl Picker {
         };
         // Below the button where it fits, else above it, else as near as its screen lets it; its right edge with the
         // button's.
-        let tall = picker.layout().height;
+        let (tall, room) = (picker.layout().height, picker.room);
         let px = |dips: f32| (dips * picker.scale).round() as i32;
-        let (w, h) = (px(WIDTH + 2.0 * ROOM), px(tall + 2.0 * ROOM));
+        let (w, h) = (px(WIDTH + 2.0 * room), px(tall + 2.0 * room));
         let work = contact.work;
-        let below = anchor.bottom + px(APART) - px(ROOM);
-        let above = anchor.top - px(APART) + px(ROOM) - h;
-        picker.above = below + h - px(ROOM) > work.bottom && above + px(ROOM) >= work.top;
-        let top = if picker.above { above } else { below.min(work.bottom - h + px(ROOM)) };
-        let left = (anchor.right - w + px(ROOM)).clamp(work.left - px(ROOM), (work.right - w + px(ROOM)).max(work.left - px(ROOM)));
+        let below = anchor.bottom + px(APART) - px(room);
+        let above = anchor.top - px(APART) + px(room) - h;
+        picker.above = below + h - px(room) > work.bottom && above + px(room) >= work.top;
+        let top = if picker.above { above } else { below.min(work.bottom - h + px(room)) };
+        let left = (anchor.right - w + px(room)).clamp(work.left - px(room), (work.right - w + px(room)).max(work.left - px(room)));
         picker.rect = RECT { left, top, right: left + w, bottom: top + h };
         if !picker.draw() {
             picker.window.destroy();
@@ -427,9 +438,9 @@ impl Picker {
 
     /// Drawn again as it is now, its window as tall as it is (its top kept, or its bottom, opened above its button).
     fn fit(&mut self) {
-        let tall = self.layout().height;
+        let (tall, room) = (self.layout().height, self.room);
         let px = |dips: f32| (dips * self.scale).round() as i32;
-        let h = px(tall + 2.0 * ROOM);
+        let h = px(tall + 2.0 * room);
         if self.rect.bottom - self.rect.top != h {
             if self.above {
                 self.rect.top = self.rect.bottom - h;
@@ -449,13 +460,13 @@ impl Picker {
     }
 
     fn inside(&self, x: i32, y: i32) -> bool {
-        let (x, y) = (x as f32 / self.scale - ROOM, y as f32 / self.scale - ROOM);
-        let height = (self.rect.bottom - self.rect.top) as f32 / self.scale - 2.0 * ROOM;
+        let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
+        let height = (self.rect.bottom - self.rect.top) as f32 / self.scale - 2.0 * self.room;
         (0.0..=WIDTH).contains(&x) && (0.0..=height).contains(&y)
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<PickHit> {
-        let (x, y) = (x as f32 / self.scale - ROOM, y as f32 / self.scale - ROOM);
+        let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
         self.hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4.clone())
     }
 
@@ -538,11 +549,10 @@ impl Picker {
         let mut hits = Vec::new();
         let size = ((self.rect.right - self.rect.left).max(1) as u32, (self.rect.bottom - self.rect.top).max(1) as u32);
         let Some(mut surface) = self.surface.take() else { return false };
-        let drawn = surface.draw(&self.gfx.clone(), size, self.scale, |frame| {
-            frame.origin(ROOM, ROOM);
-            self.paint(frame, &layout, &mut hits);
-        });
-        self.surface = Some(surface);
+        let mut words = std::mem::take(&mut self.words);
+        self.drawn += 1;
+        let drawn = surface.draw(&self.gfx.clone(), size, self.scale, self.look, self.room, (WIDTH, layout.height), &mut words, self.drawn, |_, _| {}, |frame, frosted| self.paint(frame, &layout, frosted, &mut hits));
+        (self.surface, self.words) = (Some(surface), words);
         self.hits = hits;
         if let Err(error) = &drawn {
             gfx::failed("to-do picker", Some(error));
@@ -550,17 +560,15 @@ impl Picker {
         drawn.is_ok()
     }
 
-    fn paint(&self, frame: &dyn Canvas, layout: &Layout, hits: &mut Vec<(f32, f32, f32, f32, PickHit)>) {
+    fn paint(&self, frame: &dyn Canvas, layout: &Layout, frosted: bool, hits: &mut Vec<(f32, f32, f32, f32, PickHit)>) {
         let theme = &self.theme;
         let zh = self.zh();
         let font = self.font();
         let bold = Font { weight: 600.0, ..font };
         let small = Font { size: 11.5, ..font };
         let today = Day::today();
-        // (Opaque: drawn over the lane it sets the time of, that lane's words did not show through it.)
-        let sheet = menu::Colours::new(self.look, false);
-        frame.fill_rounded(Color { a: 1.0, ..sheet.sheet }, 0.0, 0.0, WIDTH, layout.height, sheet.radius.min(layout.height / 2.0));
-        let plate = menu::plate(frame, self.look, (0.0, 0.0, WIDTH, layout.height));
+        // (On its plate, drawn as a menu's is: see `draw`.)
+        let highlight = menu::Colours::new(self.look, frosted).highlight;
         let (accent, on_accent) = mark(theme);
         let round = match theme.skin {
             Skin::Fluent => 4.0,
@@ -584,7 +592,7 @@ impl Picker {
                     frame.fill_rounded(theme.track, x, y, w, h, radius);
                 }
                 if lit {
-                    frame.fill_rounded(plate.highlight, x, y, w, h, radius);
+                    frame.fill_rounded(highlight, x, y, w, h, radius);
                 }
                 if plain { theme.text2 } else { theme.text }
             };
@@ -603,7 +611,7 @@ impl Picker {
         for (by, icon, x) in [(-1, Icon::ChevronLeft, WIDTH - PAD - 2.0 * HEAD - 2.0), (1, Icon::ChevronRight, WIDTH - PAD - HEAD)] {
             let hit = PickHit::Month(by);
             if hover == Some(&hit) {
-                frame.fill_rounded(plate.highlight, x, layout.head, HEAD, HEAD, round);
+                frame.fill_rounded(highlight, x, layout.head, HEAD, HEAD, round);
             }
             frame.icon(icon, Point { x: x + HEAD / 2.0, y: layout.head + HEAD / 2.0 }, 16.0, theme.text2);
             hits.push((x, layout.head, HEAD, HEAD, hit));
@@ -633,7 +641,7 @@ impl Picker {
                 }
             } else {
                 if hover == Some(&hit) {
-                    frame.fill_rounded(plate.highlight, *x, *y, *w, *h, cell_round);
+                    frame.fill_rounded(highlight, *x, *y, *w, *h, cell_round);
                 }
                 if *day == today {
                     soon(theme)
@@ -672,7 +680,7 @@ impl Picker {
             Ok((x, y, w, h)) => {
                 let hit = PickHit::Plus;
                 if hover == Some(&hit) {
-                    frame.fill_rounded(plate.highlight, x, y, w, h, round);
+                    frame.fill_rounded(highlight, x, y, w, h, round);
                 }
                 frame.stroke_rounded(Fill::Solid(theme.rule), x + 0.5, y + 0.5, w - 1.0, h - 1.0, round, 1.0);
                 frame.icon(Icon::Add, Point { x: x + w / 2.0, y: y + h / 2.0 }, 14.0, theme.text2);

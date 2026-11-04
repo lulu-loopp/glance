@@ -49,11 +49,97 @@ impl Look {
     }
 }
 
-/// What a menu's window shows: what is drawn, or (glass's) that over a pane of the screen behind it, frosted by the
-/// compositor as the screen changes (see `glass::Frosted`), as the panel's lanes are frosted over the desktop.
-enum Drawn {
+/// What a menu's window shows: what is drawn, or (glass's, Windows 11's) that over a pane of the screen behind it,
+/// frosted by the compositor as the screen changes (see `glass::Frosted`), as the panel's lanes are frosted over the
+/// desktop. Whatever else is shown as a menu is (the picker of a to-do's time) is shown on one too.
+pub enum Drawn {
     Plain(Surface),
     Frosted(super::glass::Frosted),
+}
+
+impl Drawn {
+    /// What the window `hwnd` shows, a menu in `look`: glass's over the screen frosted as the glass it is opened on is,
+    /// blurred and its colour lifted as its lanes are, Windows 11's as its acrylic is (each where the system frosts what
+    /// is behind a window), the rest drawn alone.
+    pub fn new(gfx: &Rc<gfx::Gfx>, hwnd: HWND, look: Look) -> windows::core::Result<Drawn> {
+        use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
+        let glass = match look.skin {
+            Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
+            Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
+            _ => None,
+        };
+        if let Some(mut frosted) = glass.and_then(|(frosting, _)| super::glass::Frosted::new(gfx, hwnd, frosting).ok()) {
+            frosted.set_frost(glass.map_or(1.0, |(_, frost)| frost));
+            return Ok(Drawn::Frosted(frosted));
+        }
+        Surface::new(gfx, hwnd).map(Drawn::Plain)
+    }
+
+    /// The room round a sheet on it for its shadows (DIPs): glass's as far as its lanes' reach.
+    pub fn room(&self, look: Look) -> f32 {
+        match (self, look.skin) {
+            (Drawn::Frosted(_), Some(super::theme::Skin::Glass)) => super::theme::room(&super::theme::Theme::new(super::theme::Skin::Glass, look.dark).shadows).max(SHADOW),
+            _ => SHADOW,
+        }
+    }
+
+    /// Draws on it, `size` (physical px) at `px` to a DIP, a menu's sheet `width` × `height` in `look`, `room` in from
+    /// its corner: what is `on` it under what is written on it (a choice lit, rules), then its `words` (what is written,
+    /// and drawn as words are), each from the sheet's corner and told whether it is frosted. Glass's is a piece of the
+    /// glass it is opened on, drawn as its lanes are (their shadows, the light inside their edge and along it), its
+    /// words kept in `layer` while `key` is what they show and ringed by the glass's faint halo, read over it as
+    /// clearly as the lanes' are.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, gfx: &Rc<gfx::Gfx>, size: (u32, u32), px: f32, look: Look, room: f32, (width, height): (f32, f32), layer: &mut gfx::Layer, key: u64, on: impl FnOnce(&gfx::Frame, bool), words: impl FnOnce(&gfx::Frame, bool)) -> windows::core::Result<()> {
+        match self {
+            Drawn::Plain(surface) => surface.draw(gfx, size, px, |frame| {
+                frame.origin(room, room);
+                let colours = Colours::new(look, false);
+                paint_plate(frame, &colours, (0.0, 0.0, width, height), colours.radius.min(height / 2.0));
+                on(frame, false);
+                words(frame, false);
+            }),
+            Drawn::Frosted(frosted) => {
+                let colours = Colours::new(look, true);
+                let radius = colours.radius.min(height / 2.0);
+                let pane = (room * px, room * px, width * px, height * px, radius * px);
+                let glass = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark));
+                let halo = glass.as_ref().map(|theme| theme.legibility);
+                frosted.draw(gfx, size, px, pane, |frame| {
+                    frame.origin(room, room);
+                    match &glass {
+                        Some(theme) => {
+                            let piece = super::view::Rect { x: 0.0, y: 0.0, w: width, h: height };
+                            if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
+                                gfx::failed("menu", Some(&error));
+                            }
+                            frame.origin(room, room);
+                        }
+                        None => paint_plate(frame, &colours, (0.0, 0.0, width, height), radius),
+                    }
+                    on(frame, true);
+                    let laid = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, width, height), px, halo, |frame| {
+                        words(frame, true);
+                        Ok(())
+                    });
+                    if let Err(error) = laid {
+                        gfx::failed("menu", Some(&error));
+                    }
+                })
+            }
+        }
+    }
+}
+
+/// A sheet's plate in `colours`, `radius` round: its shadow, its ground, its edge, and (glass's) the light along its top,
+/// as its lanes are lit.
+fn paint_plate(frame: &dyn Canvas, colours: &Colours, (x, y, width, height): (f32, f32, f32, f32), radius: f32) {
+    frame.shadow(colours.shadow, x, y, width, height, radius, 12.0, 6.0);
+    frame.fill_rounded(colours.sheet, x, y, width, height, radius);
+    frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, width, height, radius, 1.0);
+    if let Some(rim) = colours.rim {
+        frame.stroke_rounded(Fill::Down { top: y, from: rim, bottom: y + height, to: rim.alpha(rim.a * 0.3) }, x + 1.0, y + 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
+    }
 }
 
 /// What stands before a choice: an icon, or a colour, as a dot of it (a note's colours: an icon said nothing of which).
@@ -155,36 +241,17 @@ impl Menu {
         let gfx = gfx::current().ok()?;
         let showing = super::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
-        // (Glass's over the screen frosted as the glass it is opened on is, blurred and its colour lifted as its lanes
-        // are; Windows 11's as its acrylic is.)
-        use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
-        let glass = match look.skin {
-            Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
-            Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
-            _ => None,
-        };
-        let frosted = glass.and_then(|(frosting, frost)| super::glass::Frosted::new(&gfx, window.hwnd, frosting).ok().map(|frosted| (frosted, frost)));
-        let surface = match frosted {
-            Some((mut frosted, frost)) => {
-                frosted.set_frost(frost);
-                Drawn::Frosted(frosted)
+        let surface = match Drawn::new(&gfx, window.hwnd, look) {
+            Ok(surface) => surface,
+            Err(error) => {
+                window.destroy();
+                gfx::failed("menu", Some(&error));
+                return None;
             }
-            None => match Surface::new(&gfx, window.hwnd) {
-                Ok(surface) => Drawn::Plain(surface),
-                Err(error) => {
-                    window.destroy();
-                    gfx::failed("menu", Some(&error));
-                    return None;
-                }
-            },
         };
         let scale = contact.scale;
         let sheet = Sheet::new(&gfx, &items, look);
-        // Room round it for its shadows: glass's as far as its lanes' reach.
-        let room = match (&surface, look.skin) {
-            (Drawn::Frosted(_), Some(super::theme::Skin::Glass)) => super::theme::room(&super::theme::Theme::new(super::theme::Skin::Glass, look.dark).shadows).max(SHADOW),
-            _ => SHADOW,
-        };
+        let room = surface.room(look);
         // At the pointer, turned back where it would leave its screen.
         let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.height + 2.0 * room) * scale) as i32);
         let margin = (room * scale) as i32;
@@ -311,46 +378,10 @@ impl Menu {
     }
 
     fn draw(&mut self) -> bool {
-        let (sheet, items, look, lit, choices, room) = (&self.sheet, &self.items, self.look, self.lit, &mut self.choices, self.room);
+        let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
         let size = (self.size.0 as u32, self.size.1 as u32);
-        let drawn = match &mut self.surface {
-            Drawn::Plain(surface) => surface.draw(&self.gfx, size, self.scale, |frame| {
-                frame.origin(room, room);
-                sheet.paint(frame, items, look, lit, false);
-            }),
-            Drawn::Frosted(frosted) => {
-                let px = self.scale;
-                let radius = Colours::new(look, true).radius;
-                let pane = (room * px, room * px, sheet.width * px, sheet.height * px, radius * px);
-                // Glass's a piece of the glass it is opened on, drawn as its lanes are (their shadows, the light inside
-                // their edge and along it), its words ringed by their faint halo, read over it as clearly as theirs.
-                let glass = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark));
-                let halo = glass.as_ref().map(|theme| theme.legibility);
-                frosted.draw(&self.gfx, size, px, pane, |frame| {
-                    frame.origin(room, room);
-                    match &glass {
-                        Some(theme) => {
-                            let piece = super::view::Rect { x: 0.0, y: 0.0, w: sheet.width, h: sheet.height };
-                            if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
-                                gfx::failed("menu", Some(&error));
-                            }
-                            frame.origin(room, room);
-                            sheet.paint_rows(frame, items, look, lit, true);
-                        }
-                        None => sheet.paint_sheet(frame, items, look, lit, true),
-                    }
-                    let key = lit.map_or(u64::MAX, |row| row as u64);
-                    let area = (0.0, 0.0, sheet.width, sheet.height);
-                    let laid = choices.draw(frame, key, windows_numerics::Matrix3x2::identity(), area, px, halo, |frame| {
-                        sheet.paint_choices(frame, items, look, true);
-                        Ok(())
-                    });
-                    if let Err(error) = laid {
-                        gfx::failed("menu", Some(&error));
-                    }
-                })
-            }
-        };
+        // (Its choices' words are as they were whichever is lit.)
+        let drawn = self.surface.draw(&self.gfx, size, self.scale, look, self.room, (sheet.width, sheet.height), &mut self.choices, 0, |frame, frosted| sheet.paint_rows(frame, items, look, lit, frosted), |frame, frosted| sheet.paint_choices(frame, items, look, frosted));
         if let Err(error) = &drawn {
             gfx::failed("menu", Some(error));
         }
@@ -407,24 +438,19 @@ impl Sheet {
 
     /// Draws it, its corner at the frame's origin (its shadow beyond),
     /// as `look` has it, the choice `lit` highlighted; over the screen behind
-    /// it, `frosted` (see `Drawn`).
+    /// it, `frosted` (see `Drawn`). (The studio's, and the tests': a menu's window draws it through `Drawn::draw`.)
+    #[cfg(any(test, feature = "studio"))]
     pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         self.paint_sheet(frame, items, look, lit, frosted);
         self.paint_choices(frame, items, look, frosted);
     }
 
     /// Its sheet: the plate, the rules between groups and the choice `lit`'s highlight.
+    #[cfg(any(test, feature = "studio"))]
     fn paint_sheet(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let (width, height) = (self.width, self.height);
         let colours = Colours::new(look, frosted);
-        let radius = colours.radius;
-        frame.shadow(colours.shadow, 0.0, 0.0, width, height, radius, 12.0, 6.0);
-        frame.fill_rounded(colours.sheet, 0.0, 0.0, width, height, radius);
-        frame.stroke_rounded(Fill::Solid(colours.stroke), 0.0, 0.0, width, height, radius, 1.0);
-        if let Some(rim) = colours.rim {
-            // (Glass's: lit along its top, as its lanes are.)
-            frame.stroke_rounded(Fill::Down { top: 0.0, from: rim, bottom: height, to: rim.alpha(rim.a * 0.3) }, 1.0, 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
-        }
+        paint_plate(frame, &colours, (0.0, 0.0, width, height), colours.radius);
         self.paint_rows(frame, items, look, lit, frosted);
     }
 
@@ -479,12 +505,7 @@ pub struct Plate {
 pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32)) -> Plate {
     let colours = Colours::new(look, false);
     let radius = colours.radius.min(height / 2.0);
-    frame.shadow(colours.shadow, x, y, width, height, radius, 12.0, 6.0);
-    frame.fill_rounded(colours.sheet, x, y, width, height, radius);
-    frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, width, height, radius, 1.0);
-    if let Some(rim) = colours.rim {
-        frame.stroke_rounded(Fill::Down { top: y, from: rim, bottom: y + height, to: rim.alpha(rim.a * 0.3) }, x + 1.0, y + 1.0, width - 2.0, height - 2.0, radius - 1.0, 1.0);
-    }
+    paint_plate(frame, &colours, (x, y, width, height), radius);
     Plate { icon: colours.icon, highlight: colours.highlight, radius }
 }
 
