@@ -15,7 +15,7 @@ use crate::todo::{Day, Item};
 
 /// An item's row, the field, the line of those done and the line saying how many more there are (DIPs).
 const ROW: f32 = 32.0;
-const FIELD: f32 = 34.0;
+const FIELD: f32 = FIELD_TALL;
 const FIELD_GAP: f32 = 6.0;
 const DONE_HEAD: f32 = 30.0;
 const MORE: f32 = 26.0;
@@ -259,12 +259,16 @@ pub(super) fn paint_head(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f
     pressed(frame, scene, hits, Hit::Todo(TodoHit::Add), Icon::Add, left + width - MEDIA_ROW, button, false);
 }
 
-/// The field and the items, from (`left`, `y`), `width` across, in a list room `tall` high.
-pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), lane: &TodoLane, tall: f32, hits: &mut Vec<HitBox>) {
+/// The field and the items, from (`left`, `y`), `width` across (`pad` in from the lane's edges), in a list room `tall`
+/// high.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), pad: f32, lane: &TodoLane, tall: f32, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let mut top = y + SHELF_GAP;
     if let Some(field) = &lane.field {
-        paint_field(frame, scene, (left, top, width), field, hits);
+        // (Concentric with the lane's corners: see `field_fit`.)
+        let (out, round) = field_fit(theme, theme.radius, pad);
+        paint_field(frame, scene, (left - out, top, width + 2.0 * out), round, field, hits);
         top += FIELD + FIELD_GAP;
     }
     let lang = scene.lang;
@@ -320,7 +324,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     let small = theme.small;
     let said_more = |frame: &dyn Canvas, n: usize, y: f32| {
         let says = if lang == Lang::Zh { format!("还有 {n} 项") } else { format!("{n} more") };
-        frame.text(&says, small, theme.text3, left + BOX + BOX_GAP, y + (MORE - small.size * 1.3) / 2.0, width, Align::Start);
+        frame.text(&says, small, theme.text3, left + BOX + BOX_GAP, frame.line_top(small, y + MORE / 2.0), width, Align::Start);
     };
     if more > 0 {
         said_more(frame, more, top + fit_undone as f32 * ROW);
@@ -335,7 +339,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     // Nothing to do: said where the items would be.
     if undone == 0 && done == 0 {
         let says = lang.pick("没有待办事项", "Nothing to do");
-        frame.text(says, small, theme.text3, left, top + (ROW - small.size * 1.3) / 2.0, width, Align::Start);
+        frame.text(says, small, theme.text3, left, frame.line_top(small, top + ROW / 2.0), width, Align::Start);
     }
 }
 
@@ -346,15 +350,15 @@ fn ease_out(t: f32) -> f32 {
 /// The field at (`left`, `y`), `width` across: a plus, the words written (or what to write), the time set for them, and
 /// the button that sets it; while it is written in, ringed in the mark's colour (Windows 11's a bar of its accent under
 /// it), its caret and selection shown.
-fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), field: &Field, hits: &mut Vec<HitBox>) {
+fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), round: f32, field: &Field, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (mark, _) = mark(theme);
-    let round = theme.control_radius.clamp(6.0, 10.0);
     let lit = scene.hover == Some(Hit::Todo(TodoHit::Field)) && !field.writing;
-    frame.fill_rounded(if lit { theme.hover } else { theme.track }, left, y, width, FIELD, round);
-    frame.icon(Icon::Add, Point { x: left + 16.0, y: y + FIELD / 2.0 }, 15.0, theme.text3);
+    paint_field_ground(frame, theme, (left, y, width), round, lit, field.writing);
+    let middle = y + FIELD / 2.0;
+    frame.icon(Icon::Add, Point { x: left + FIELD_ICON_AT, y: middle }, FIELD_ICON, theme.text3);
     // The time's button, and the time set before it.
-    let button = left + width - ACT - 5.0;
+    let button = left + width - ACT - (FIELD - ACT) / 2.0;
     let lit = scene.hover == Some(Hit::Todo(TodoHit::FieldDue));
     if lit {
         frame.fill_rounded(theme.hover, button, y + (FIELD - ACT) / 2.0, ACT, ACT, theme.control_radius.min(ACT / 2.0));
@@ -366,14 +370,16 @@ fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f
     if let Some(due) = &field.due {
         let chip = frame.measure(due, small) + 14.0;
         let x = words_right - chip;
-        frame.fill_rounded(theme.track, x, y + (FIELD - 22.0) / 2.0, chip, 22.0, 6.0);
-        frame.text(due, small, theme.text, x + 7.0, y + (FIELD - small.size * 1.3) / 2.0, chip, Align::Start);
+        frame.fill_rounded(theme.track, x, y + (FIELD - 22.0) / 2.0, chip, 22.0, (round - (FIELD - 22.0) / 2.0).max(4.0));
+        frame.text(due, small, theme.text, x + 7.0, frame.line_top(small, y + FIELD / 2.0), chip, Align::Start);
         words_right = x - 6.0;
     }
-    let words_left = left + 32.0;
+    let words_left = left + FIELD_WORDS;
     let room = (words_right - words_left).max(0.0);
     let font = theme.body;
-    let line_y = y + (FIELD - font.size * 1.3) / 2.0;
+    let line_y = frame.line_top(font, middle);
+    // (The caret, and what is chosen, as tall as a line of it, across the middle.)
+    let (caret_top, caret_tall) = (middle - font.size * 0.65, font.size * 1.3);
     if field.text.is_empty() {
         let says = scene.lang.pick("添加待办，回车保存", "Add a to-do, Enter to keep");
         frame.text(&fitted(frame, says, font, room), font, theme.text3, words_left, line_y, room + 1.0, Align::Start);
@@ -386,24 +392,14 @@ fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f
     frame.clip(words_left, y, room, FIELD);
     if field.caret != field.anchor {
         let (from, to) = (before(field.caret.min(field.anchor)), before(field.caret.max(field.anchor)));
-        frame.fill(mark.alpha(0.3), words_left + from - shift, line_y, to - from, font.size * 1.3);
+        frame.fill(mark.alpha(0.3), words_left + from - shift, caret_top, to - from, caret_tall);
     }
     frame.text(&text, font, theme.text, words_left - shift, line_y, room + shift + 200.0, Align::Start);
     if field.writing && field.caret_on {
-        frame.fill(theme.text, words_left + caret_x - shift, line_y, 1.2, font.size * 1.3);
+        frame.fill(theme.text, words_left + caret_x - shift, caret_top, 1.2, caret_tall);
     }
     frame.unclip();
-    CARET.with(|caret| caret.set((words_left + caret_x - shift - left, line_y - y, font.size * 1.3, font.size)));
-    if field.writing {
-        match theme.skin {
-            Skin::Fluent => {
-                frame.clip(left, y + FIELD - 2.0, width, 2.0);
-                frame.fill_rounded(mark, left, y, width, FIELD, round);
-                frame.unclip();
-            }
-            _ => frame.stroke_rounded(Fill::Solid(mark), left + 0.75, y + 0.75, width - 1.5, FIELD - 1.5, round, 1.5),
-        }
-    }
+    CARET.with(|caret| caret.set((words_left + caret_x - shift - left, caret_top - y, caret_tall, font.size)));
     hits.push((left, y, width, FIELD, Hit::Todo(TodoHit::Field)));
 }
 
@@ -467,7 +463,7 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
         if scene.hover == Some(due) {
             frame.fill_rounded(theme.hover, x, y + (ROW - ACT) / 2.0, wide, ACT, 6.0);
         }
-        frame.text(label, font, alpha(color), x + 6.0, y + (ROW - font.size * 1.3) / 2.0, wide, Align::Start);
+        frame.text(label, font, alpha(color), x + 6.0, frame.line_top(font, y + ROW / 2.0), wide, Align::Start);
         if !row.done {
             hits.push((x, y + (ROW - ACT) / 2.0, wide, ACT, due));
         }
@@ -479,7 +475,7 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
     let room = (right - words_left).max(0.0);
     let shown = fitted(frame, &row.text, font, room);
     let ink = if row.done || row.tick > 0.0 { theme.text3 } else { theme.text };
-    let text_y = y + (ROW - font.size * 1.3) / 2.0;
+    let text_y = frame.line_top(font, y + ROW / 2.0);
     frame.text(&shown, font, alpha(ink), words_left, text_y, room + 1.0, Align::Start);
     let struck = if row.done { 1.0 } else { ease_out(row.tick) };
     if struck > 0.0 {
@@ -498,7 +494,7 @@ fn paint_done_head(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f3
     let says = format!("{} {done}", scene.lang.pick("已完成", "Done"));
     let font = Font { weight: 600.0, ..small };
     let lit = scene.hover == Some(Hit::Todo(TodoHit::Done));
-    let text_y = y + 2.0 + (DONE_HEAD - 2.0 - font.size * 1.3) / 2.0;
+    let text_y = frame.line_top(font, y + 2.0 + (DONE_HEAD - 2.0) / 2.0);
     frame.text(&says, font, if lit { theme.text } else { theme.text2 }, left, text_y, width, Align::Start);
     let wide = frame.measure(&says, font);
     frame.icon(if open { Icon::ChevronUp } else { Icon::ChevronDown }, Point { x: left + wide + 12.0, y: y + 2.0 + (DONE_HEAD - 2.0) / 2.0 }, 12.0, theme.text2);
@@ -509,7 +505,7 @@ fn paint_done_head(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f3
     if clear_lit {
         frame.fill_rounded(theme.hover, x, y + 2.0 + (DONE_HEAD - 2.0 - ACT) / 2.0, clear_w, ACT, 6.0);
     }
-    frame.text(clear, small, if clear_lit { theme.text } else { theme.text3 }, x + 8.0, y + 2.0 + (DONE_HEAD - 2.0 - small.size * 1.3) / 2.0, clear_w, Align::Start);
+    frame.text(clear, small, if clear_lit { theme.text } else { theme.text3 }, x + 8.0, frame.line_top(small, y + 2.0 + (DONE_HEAD - 2.0) / 2.0), clear_w, Align::Start);
     hits.push((x, y + 2.0 + (DONE_HEAD - 2.0 - ACT) / 2.0, clear_w, ACT, Hit::Todo(TodoHit::Clear)));
     hits.push((left, y, width, DONE_HEAD, Hit::Todo(TodoHit::Done)));
 }
@@ -531,7 +527,7 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
     if rows.is_empty() {
         let says = scene.lang.pick("没有待办事项", "Nothing to do");
         let font = theme.small;
-        frame.text(&fitted(frame, says, font, w), font, theme.text3, x, y + (h - font.size * 1.3) / 2.0, w + 1.0, Align::Start);
+        frame.text(&fitted(frame, says, font, w), font, theme.text3, x, frame.line_top(font, y + h / 2.0), w + 1.0, Align::Start);
         return;
     }
     let fit = ((h / ROW).floor() as usize).max(1);
@@ -543,4 +539,110 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
         paint_row(frame, scene, (x, top + at as f32 * ROW, w), &row, 1.0, hits);
     }
     frame.unclip();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The search's lane and a to-do field in each skin, at rest and under the pointer, over a picture of a desktop:
+    /// `GLANCE_BACKDROP=<png> GLANCE_OUT=<png> cargo test --features studio --lib -- --ignored fields_pictured` draws it.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn fields_pictured() {
+        use crate::ui::theme::Skin;
+        use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnLoad};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
+        let prefs = crate::ui::prefs::Prefs::default();
+        let seen = crate::ui::seen::Seen::default();
+        let path = std::env::var("GLANCE_BACKDROP").expect("GLANCE_BACKDROP");
+        let (w, h) = (900.0f32, 600.0f32);
+        let scale = 2.0;
+        let pixels = gfx
+            .draw_offscreen(((w * scale) as u32, (h * scale) as u32), scale, |frame| unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+                let decoder = wic.CreateDecoderFromFilename(&windows::core::HSTRING::from(path.as_str()), None, windows::Win32::Foundation::GENERIC_READ, WICDecodeMetadataCacheOnLoad).unwrap();
+                let converter = wic.CreateFormatConverter().unwrap();
+                converter.Initialize(&decoder.GetFrame(0).unwrap(), &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).unwrap();
+                let desktop = frame.dc.CreateBitmapFromWicBitmap(&converter, None).unwrap();
+                frame.dc.DrawImage(&desktop, None, None, Default::default(), Default::default());
+                for (row, (skin, dark)) in [(Skin::Glass, true), (Skin::Fluent, true), (Skin::Paper, false)].into_iter().enumerate() {
+                    let theme = Theme::new(skin, dark);
+                    let y0 = 20.0 + row as f32 * 195.0;
+                    for (column, hover) in [None, Some(Hit::Search)].into_iter().enumerate() {
+                        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+                        let lane = Rect { x: 20.0 + column as f32 * 300.0, y: y0, w: 280.0, h: 84.0 };
+                        let todo = Rect { x: 20.0 + column as f32 * 300.0, y: y0 + 92.0, w: 280.0, h: 86.0 };
+                        for piece in [lane, todo] {
+                            let radius = theme.radius.min(piece.h / 2.0);
+                            match skin {
+                                Skin::Glass => crate::ui::skins::glass_sheet(frame, &theme, piece, radius, 1.0).unwrap(),
+                                Skin::Fluent => frame.fill_rounded(Color::hex(0x202020, 0.92), piece.x, piece.y, piece.w, piece.h, radius),
+                                Skin::Paper => {
+                                    frame.fill_rounded(Color { a: 1.0, ..theme.paper }, piece.x, piece.y, piece.w, piece.h, radius);
+                                    frame.stroke_rounded(Fill::Solid(theme.stroke), piece.x, piece.y, piece.w, piece.h, radius, 1.0);
+                                }
+                            }
+                        }
+                        let mut hits = Vec::new();
+                        paint_search(frame, &scene, lane, "Ctrl+Alt+S", &mut hits);
+                        let pad = theme.pad_x;
+                        frame.text("待办", theme.title, theme.text, todo.x + pad, frame.line_top(theme.title, todo.y + 22.0), 100.0, Align::Start);
+                        let (out, round) = field_fit(&theme, theme.radius, pad);
+                        let field = Field { writing: column == 1, ..Field::default() };
+                        let scene = Scene { hover: None, ..scene };
+                        paint_field(frame, &scene, (todo.x + pad - out, todo.y + 40.0, todo.w - 2.0 * pad + 2.0 * out), round, &field, &mut hits);
+                    }
+                    frame.text(&format!("{skin:?}"), theme.title, Color::hex(0xFFFFFF, 1.0), 620.0, y0 + 30.0, 200.0, Align::Start);
+                }
+            })
+            .expect("drawn");
+        crate::studio::save_png(&std::path::PathBuf::from(std::env::var("GLANCE_OUT").expect("GLANCE_OUT")), (w * scale) as u32, (h * scale) as u32, &pixels).unwrap();
+    }
+
+    /// The field's words stand in its middle in every skin: their ink as far below its top as above its foot (they
+    /// were placed by a line height guessed for each, up to two DIPs off in some skins, and off by as much in each).
+    #[test]
+    fn the_field_s_words_stand_in_its_middle() {
+        use crate::ui::theme::Skin;
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
+        let prefs = crate::ui::prefs::Prefs::default();
+        let seen = crate::ui::seen::Seen::default();
+        let scale = 4.0;
+        let (wide, tall) = (300.0f32, FIELD);
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            for dark in [false, true] {
+                let theme = Theme::new(skin, dark);
+                let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+                let (w, h) = ((wide * scale) as usize, (tall * scale) as usize);
+                let paint = |words: bool| {
+                    gfx.draw_offscreen((w as u32, h as u32), scale, |frame| {
+                        let field = Field::default();
+                        let mut hits = Vec::new();
+                        if words {
+                            paint_field(frame, &scene, (0.0, 0.0, wide), 8.0, &field, &mut hits);
+                        } else {
+                            paint_field_ground(frame, &theme, (0.0, 0.0, wide), 8.0, false, false);
+                        }
+                    })
+                    .expect("drawn")
+                };
+                let (with, without) = (paint(true), paint(false));
+                // The rows where its words are: where, across them, it differs from its ground alone.
+                let from = ((FIELD_WORDS + 2.0) * scale) as usize;
+                let to = ((FIELD_WORDS + 110.0) * scale) as usize;
+                let inked: Vec<usize> = (0..h).filter(|row| (from..to).any(|column| (0..4).any(|c| with[(row * w + column) * 4 + c].abs_diff(without[(row * w + column) * 4 + c]) > 24))).collect();
+                let (first, last) = (*inked.first().expect("words drawn") as f32, *inked.last().unwrap() as f32 + 1.0);
+                let off = ((first + last) / 2.0 / scale) - tall / 2.0;
+                assert!(off.abs() <= 0.5, "{skin:?} dark {dark}: words {off:+.2} DIPs off the middle");
+            }
+        }
+    }
 }

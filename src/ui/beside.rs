@@ -71,7 +71,7 @@ pub enum Side {
 /// How wide it is (DIPs); its head, its search box, a row, a letter's heading, its foot; the room round its parts.
 const WIDTH: f32 = 360.0;
 const HEAD: f32 = 52.0;
-const SEARCH: f32 = 34.0;
+const SEARCH: f32 = super::view::FIELD_TALL;
 const ROW: f32 = 40.0;
 const LETTER: f32 = 26.0;
 const PAD: f32 = 16.0;
@@ -1631,29 +1631,18 @@ impl Beside {
                 (false, false) => theme.text3,
             };
             frame.icon(icon, Point { x: start + 7.5, y: cell.1 + cell.3 / 2.0 }, 15.0, ink);
-            frame.text(name, theme.body, ink, start + 21.0, cell.1 + (cell.3 - theme.body.size * 1.35) / 2.0, name_w + 2.0, Align::Start);
+            frame.text(name, theme.body, ink, start + 21.0, frame.line_top(theme.body, cell.1 + cell.3 / 2.0), name_w + 2.0, Align::Start);
             hits.push((cell.0, cell.1, cell.2, cell.3, Hit::Kind(kind)));
         }
-        // The search, its caret blinking.
+        // The search, its caret blinking: a field as every field is (see `view::paint_field_ground`), taking the keys
+        // all the while the page is up.
         let field = (PAD, SEARCH_TOP, inner, SEARCH);
-        // (Glass's a shallow well of its glass, lit along its foot: a grey bar, it was the heaviest thing on the page;
-        // Windows 11's its field, the accent along its foot as the words go in; chart paper's a faint wash of ink.)
-        match theme.skin {
-            Skin::Glass => {
-                frame.fill_rounded(if theme.dark { Color::hex(0xFFFFFF, 0.08) } else { Color::hex(0, 0.05) }, field.0, field.1, field.2, field.3, round(SEARCH));
-                frame.stroke_rounded(super::canvas::Fill::Down { top: field.1, from: Color::hex(0xFFFFFF, 0.0), bottom: field.1 + field.3, to: Color::hex(0xFFFFFF, if theme.dark { 0.18 } else { 0.6 }) }, field.0, field.1, field.2, field.3, round(SEARCH), 1.0);
-            }
-            Skin::Fluent => {
-                frame.fill_rounded(theme.track, field.0, field.1, field.2, field.3, round(SEARCH));
-                frame.clip(field.0, field.1 + field.3 - 2.0, field.2, 2.0);
-                frame.fill_rounded(super::theme::accent(theme.dark), field.0, field.1, field.2, field.3, round(SEARCH));
-                frame.unclip();
-            }
-            Skin::Paper => frame.fill_rounded(theme.track.alpha(theme.track.a * 0.6), field.0, field.1, field.2, field.3, round(SEARCH)),
-        }
-        frame.icon(Icon::Search, Point { x: field.0 + 16.0, y: field.1 + SEARCH / 2.0 }, 14.0, theme.text3);
-        let text_x = field.0 + 32.0;
-        let text_y = field.1 + (SEARCH - theme.body.size * 1.35) / 2.0;
+        let (_, field_round) = super::view::field_fit(&theme, theme.radius, PAD);
+        super::view::paint_field_ground(frame, &theme, (field.0, field.1, field.2), field_round, false, true);
+        let middle = field.1 + SEARCH / 2.0;
+        frame.icon(Icon::Search, Point { x: field.0 + super::view::FIELD_ICON_AT, y: middle }, super::view::FIELD_ICON, theme.text3);
+        let text_x = field.0 + super::view::FIELD_WORDS;
+        let text_y = frame.line_top(theme.body, middle);
         let words = self.search.string();
         if words.is_empty() {
             let asked = match self.kind {
@@ -1661,16 +1650,18 @@ impl Beside {
                 Kinds::Files => lang.pick("搜索最近用过的文件", "Search the files used lately"),
                 Kinds::Folders => lang.pick("搜索最近用过的文件夹", "Search the folders used lately"),
             };
-            frame.text(asked, theme.body, theme.text3, text_x, text_y, field.2 - 40.0, Align::Start);
+            frame.text(asked, theme.body, theme.text3, text_x, text_y, field.2 - super::view::FIELD_WORDS - 8.0, Align::Start);
         } else {
-            frame.text(&words, theme.body, theme.text, text_x, text_y, field.2 - 40.0, Align::Start);
+            frame.text(&words, theme.body, theme.text, text_x, text_y, field.2 - super::view::FIELD_WORDS - 8.0, Align::Start);
         }
         let before = String::from_utf16_lossy(&self.search.text[..self.search.caret]);
         let caret_x = text_x + frame.measure(&before, theme.body);
-        let caret_h = theme.body.size * 1.35;
-        self.caret = Some((caret_x, text_y, caret_h));
+        // (The caret as tall as a line of its words, across the middle.)
+        let caret_h = theme.body.size * 1.3;
+        let caret_top = middle - caret_h / 2.0;
+        self.caret = Some((caret_x, caret_top, caret_h));
         if self.caret_on {
-            frame.fill(theme.text, caret_x, text_y + 1.0, 1.2, caret_h - 2.0);
+            frame.fill(theme.text, caret_x, caret_top, 1.2, caret_h);
         }
         hits.push((field.0, field.1, field.2, field.3, Hit::Search));
         // The list: programs under each first letter (none while searching); files and folders used lately, each with
@@ -1751,7 +1742,7 @@ impl Beside {
             let words_w = mark.0 - 8.0 - words_x;
             let ink = if is_kept { theme.text2 } else { theme.text };
             if row.about.is_empty() {
-                frame.text(&row.name, theme.body, ink, words_x, ry + (tall - theme.body.size * 1.35) / 2.0, words_w, Align::Start);
+                frame.text(&row.name, theme.body, ink, words_x, frame.line_top(theme.body, ry + tall / 2.0), words_w, Align::Start);
             } else {
                 let name_top = ry + (tall - theme.body.size * 1.35 - 15.0) / 2.0;
                 frame.text(&row.name, theme.body, ink, words_x, name_top, words_w, Align::Start);
@@ -1808,7 +1799,7 @@ impl Beside {
         let label_w = frame.measure(label, theme.body);
         let start = button.0 + (button.2 - 15.0 - 8.0 - label_w) / 2.0;
         frame.icon(icon, Point { x: start + 7.5, y: button.1 + button.3 / 2.0 }, 15.0, theme.text2);
-        frame.text(label, theme.body, theme.text, start + 23.0, button.1 + (button.3 - theme.body.size * 1.35) / 2.0, label_w + 2.0, Align::Start);
+        frame.text(label, theme.body, theme.text, start + 23.0, frame.line_top(theme.body, button.1 + button.3 / 2.0), label_w + 2.0, Align::Start);
         hits.push((button.0, button.1, button.2, button.3, Hit::Choose));
         let hint_w = frame.measure(hint, theme.small);
         frame.text(hint, theme.small, theme.text3, (width - hint_w) / 2.0, bottom + 48.0, hint_w + 2.0, Align::Start);

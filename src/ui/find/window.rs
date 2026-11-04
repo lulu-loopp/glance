@@ -770,8 +770,8 @@ impl Finder {
         let words = Rect { x: TEXT_LEFT, y: 0.0, w: WIDTH - TEXT_LEFT - if typed { clear + 8.0 } else { 20.0 }, h: FIELD };
         self.words = words;
         let text = self.typing.string();
-        let (ascent, descent) = frame.gfx.baseline(font);
-        let top = (FIELD - ascent - descent) / 2.0;
+        // (Its words' ink across its middle, as every line's: see `Canvas::line_top`.)
+        let top = super::super::canvas::Canvas::line_top(frame, font, FIELD / 2.0);
         let layout = frame.gfx.layout(&text, font, 100_000.0, Align::Start);
         let (x, line_top, tall) = caret_at(&layout, self.typing.caret);
         // Scrolled to show the caret, never past the words' end.

@@ -264,6 +264,13 @@ pub trait Canvas {
     /// How far below the top of its line box `text`'s ink starts and ends:
     /// where its glyphs, from whichever face draws them, actually are.
     fn ink(&self, text: &str, font: Font) -> (f32, f32);
+    /// Where the top of `font`'s line box goes for a line in it to stand centred on `middle`: its ink as far above that
+    /// as below, as a line of Chinese and figures has it, whichever faces draw them. (The same for any words of one
+    /// line in one font, so that what is written does not move as it changes: words typed, a row and the next.)
+    fn line_top(&self, font: Font, middle: f32) -> f32 {
+        let (top, bottom) = self.ink("中8", font);
+        middle - (top + bottom) / 2.0
+    }
     /// Draws only inside the rectangle until `unclip`; clips nest.
     fn clip(&self, x: f32, y: f32, width: f32, height: f32);
     fn unclip(&self);

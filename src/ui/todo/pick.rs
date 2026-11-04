@@ -596,8 +596,7 @@ impl Picker {
                 }
                 if plain { theme.text2 } else { theme.text }
             };
-            let (top, bottom) = frame.ink(text, font);
-            centred(frame, text, font, ink, x, y + h / 2.0 - (top + bottom) / 2.0, w);
+            centred(frame, text, font, ink, x, frame.line_top(font, y + h / 2.0), w);
             hits.push((x, y, w, h, hit));
         };
         for (at, label, day) in &layout.quick {
@@ -606,8 +605,7 @@ impl Picker {
         // The month, and the buttons to the one before and after.
         let (year, month) = self.month;
         let title = if zh { format!("{year}年{month}月") } else { format!("{} {year}", MONTHS[month as usize - 1]) };
-        let (top, bottom) = frame.ink(&title, bold);
-        frame.text(&title, bold, theme.text, PAD, layout.head + HEAD / 2.0 - (top + bottom) / 2.0, WIDTH, Align::Start);
+        frame.text(&title, bold, theme.text, PAD, frame.line_top(bold, layout.head + HEAD / 2.0), WIDTH, Align::Start);
         for (by, icon, x) in [(-1, Icon::ChevronLeft, WIDTH - PAD - 2.0 * HEAD - 2.0), (1, Icon::ChevronRight, WIDTH - PAD - HEAD)] {
             let hit = PickHit::Month(by);
             if hover == Some(&hit) {
@@ -619,8 +617,7 @@ impl Picker {
         let column = (WIDTH - 2.0 * PAD) / 7.0;
         let names: [&str; 7] = if zh { ["一", "二", "三", "四", "五", "六", "日"] } else { ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"] };
         for (n, name) in names.iter().enumerate() {
-            let (top, bottom) = frame.ink(name, small);
-            centred(frame, name, small, theme.text3, PAD + column * n as f32, layout.weekdays + WEEKDAYS / 2.0 - (top + bottom) / 2.0 - 2.0, column);
+            centred(frame, name, small, theme.text3, PAD + column * n as f32, frame.line_top(small, layout.weekdays + WEEKDAYS / 2.0 - 2.0), column);
         }
         // The month's days: chosen, today (in the accent, bold), gone by (faint); round as glass's marks are, else as
         // the skin rounds its controls.
@@ -653,13 +650,11 @@ impl Picker {
             };
             let text = day.day.to_string();
             let face = if *day == today && !chosen { Font { weight: 700.0, ..font } } else { font };
-            let (top, bottom) = frame.ink(&text, face);
-            centred(frame, &text, face, ink, *x, y + h / 2.0 - (top + bottom) / 2.0, *w);
+            centred(frame, &text, face, ink, *x, frame.line_top(face, y + h / 2.0), *w);
             hits.push((*x, *y, *w, *h, hit));
         }
         let label = lang(zh, "时间", "Time");
-        let (top, bottom) = frame.ink(label, bold);
-        frame.text(label, bold, theme.text, PAD, layout.times_label + LABEL / 2.0 - (top + bottom) / 2.0 - 3.0, WIDTH, Align::Start);
+        frame.text(label, bold, theme.text, PAD, frame.line_top(bold, layout.times_label + LABEL / 2.0 - 3.0), WIDTH, Align::Start);
         let (at, text) = &layout.all_day;
         button(*at, text, self.day.is_some() && self.time.is_none(), false, PickHit::AllDay, round, hits);
         // The times kept: under the pointer, the mark that takes one out (before it, for its press to be its own).
@@ -689,8 +684,8 @@ impl Picker {
             Err(at) => self.paint_input(frame, at, true, lang(zh, "如 7:30", "e.g. 7:30"), round, hits),
         }
         let (label, y) = &layout.once_label;
-        let (top, bottom) = frame.ink(label, Font { size: 12.5, ..font });
-        frame.text(label, Font { size: 12.5, ..font }, theme.text3, PAD, y + BUTTON / 2.0 - (top + bottom) / 2.0, WIDTH, Align::Start);
+        let face = Font { size: 12.5, ..font };
+        frame.text(label, face, theme.text3, PAD, frame.line_top(face, y + BUTTON / 2.0), WIDTH, Align::Start);
         self.paint_input(frame, layout.once, false, lang(zh, "如 14:30", "e.g. 14:30"), round, hits);
         frame.fill(theme.rule, PAD, layout.rule, WIDTH - 2.0 * PAD, 1.0);
         let (at, text) = &layout.clear;
@@ -717,8 +712,7 @@ impl Picker {
             None if !keep => self.once().map(written_time).unwrap_or_default(),
             None => String::new(),
         };
-        let (top, bottom) = frame.ink("0:", font);
-        let line = y + h / 2.0 - (top + bottom) / 2.0;
+        let line = frame.line_top(font, y + h / 2.0);
         if text.is_empty() {
             frame.text(hint, font, theme.text3, x + 8.0, line, w - 10.0, Align::Start);
         } else {

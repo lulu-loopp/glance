@@ -451,14 +451,14 @@ impl Sheet {
     /// Draws it, its corner at the frame's origin (its shadow beyond),
     /// as `look` has it, the choice `lit` highlighted; over the screen behind
     /// it, `frosted` (see `Drawn`). (The studio's, and the tests': a menu's window draws it through `Drawn::draw`.)
-    #[cfg(any(test, feature = "studio"))]
+    #[cfg(feature = "studio")]
     pub fn paint(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         self.paint_sheet(frame, items, look, lit, frosted);
         self.paint_choices(frame, items, look, frosted);
     }
 
     /// Its sheet: the plate, the rules between groups and the choice `lit`'s highlight.
-    #[cfg(any(test, feature = "studio"))]
+    #[cfg(feature = "studio")]
     fn paint_sheet(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let (width, height) = (self.width, self.height);
         let colours = Colours::new(look, frosted);

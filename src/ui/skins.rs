@@ -757,6 +757,57 @@ fn rim(frame: &Frame, piece: Rect, radius: f32) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Glance's glass beside the page mockup's frost, each a circle over the same picture of a desktop:
+    /// `GLANCE_BACKDROP=<png> GLANCE_OUT=<png> cargo test --features studio --lib -- --ignored frost_compared` draws it.
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn frost_compared() {
+        use super::super::canvas::{Align, Canvas, Font};
+        use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnLoad};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+        let _device = crate::ui::gfx::held().unwrap();
+        let path = std::env::var("GLANCE_BACKDROP").expect("GLANCE_BACKDROP");
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let (w, h) = (1568.0f32, 882.0f32);
+        let pixels = gfx
+            .draw_offscreen((w as u32, h as u32), 1.0, |frame| unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
+                let decoder = wic.CreateDecoderFromFilename(&windows::core::HSTRING::from(path.as_str()), None, windows::Win32::Foundation::GENERIC_READ, WICDecodeMetadataCacheOnLoad).unwrap();
+                let converter = wic.CreateFormatConverter().unwrap();
+                converter.Initialize(&decoder.GetFrame(0).unwrap(), &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).unwrap();
+                let desktop = frame.dc.CreateBitmapFromWicBitmap(&converter, None).unwrap();
+                frame.dc.DrawImage(&desktop, None, None, Default::default(), Default::default());
+                let backdrop = (&desktop, Vector2::zero(), 1.0);
+                let theme = Theme::new(Skin::Glass, true);
+                let words = Font { size: 30.0, weight: 600.0, ..theme.figure };
+                let label = Font { size: 15.0, weight: 600.0, ..theme.body };
+                let side = 300.0;
+                for (n, (name, blur, saturation, tint, bend)) in [("现在的玻璃（最磨砂时）", FROST_BLUR, GLASS_SATURATION, glass_tint(&theme, 1.0, true), true), ("网页原型的磨砂", 22.0, 1.4, Color::hex(0x1C1F26, 0.52), false)].into_iter().enumerate() {
+                    let piece = Rect { x: 230.0 + n as f32 * 640.0, y: 300.0, w: side, h: side };
+                    let radius = side / 2.0;
+                    shadows_outside(frame, &[(piece, radius)], &theme.shadows).unwrap();
+                    let seen = if bend {
+                        lens(frame, backdrop, piece, radius, blur).unwrap()
+                    } else {
+                        let behind = backdrop_within(frame, backdrop, grow(piece, 3.0 * blur)).unwrap();
+                        output(&saturated(frame, &blurred(frame, &behind, blur).unwrap(), saturation).unwrap()).unwrap()
+                    };
+                    within(frame, piece, radius, || draw_image(frame, &seen, Vector2::zero())).unwrap();
+                    glass_piece(frame, piece, radius, tint).unwrap();
+                    let (top, bottom) = frame.ink("22:31", words);
+                    let wide = frame.measure("22:31", words);
+                    frame.text("22:31", words, theme.text, piece.x + (side - wide) / 2.0, piece.y + side / 2.0 - (top + bottom) / 2.0, wide + 2.0, Align::Start);
+                    let wide = frame.measure(name, label);
+                    frame.fill_rounded(Color::hex(0x000000, 0.6), piece.x + (side - wide) / 2.0 - 12.0, piece.y + side + 24.0, wide + 24.0, 30.0, 15.0);
+                    frame.text(name, label, Color::hex(0xFFFFFF, 1.0), piece.x + (side - wide) / 2.0, piece.y + side + 29.0, wide + 2.0, Align::Start);
+                }
+            })
+            .expect("drawn");
+        crate::studio::save_png(&std::path::PathBuf::from(std::env::var("GLANCE_OUT").expect("GLANCE_OUT")), w as u32, h as u32, &pixels).unwrap();
+    }
+
     /// Glass with no picture of the desktop to frost (none taken yet, or taken on a device since lost) is tinted as
     /// at its most frosted: the desktop shows through it sharp, and how busy it is is not known; tinted as the
     /// picture last had it, a busy desktop came through all but clear, and the readings over it were lost.
