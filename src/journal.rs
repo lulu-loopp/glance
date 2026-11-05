@@ -64,9 +64,57 @@ pub fn hold_for_the_app() {
     KEPT_FOR_THE_APP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The lines held since last asked (the latest `KEPT` of them), for the rest of Glance to write.
-pub fn take_held() -> Vec<String> {
-    HELD.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect()
+/// Says the lines held (the latest `KEPT` of them) by `say`, for the rest of Glance to write; whether all were said. A
+/// line `say` could not say stays held, with those after it: the pipe that broke takes no line along with it.
+pub fn say_held(say: impl FnMut(String) -> bool) -> bool {
+    say_each(&HELD, say)
+}
+
+fn say_each(held: &Mutex<VecDeque<String>>, mut say: impl FnMut(String) -> bool) -> bool {
+    loop {
+        // (The lock not held as it is said: a pipe no one reads holds whoever writes to it, and what notes a line waits
+        // for the lock.)
+        let Some(line) = held.lock().unwrap_or_else(PoisonError::into_inner).pop_front() else { return true };
+        if !say(line.clone()) {
+            held.lock().unwrap_or_else(PoisonError::into_inner).push_front(line);
+            return false;
+        }
+    }
+}
+
+/// What the sensors' process had still to say as it ended, kept in the settings folder for the rest of Glance to find
+/// (there was no link to say it over, or it had gone). A file of its own: two processes writing one file lose lines.
+const LEFT: &str = "sensors-left.log";
+
+/// Leaves the lines held for the rest of Glance to find (see `take_left`), as this process ends.
+pub fn leave_held() {
+    if KEPT_FOR_THE_APP.load(std::sync::atomic::Ordering::Relaxed) {
+        let lines: Vec<String> = HELD.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect();
+        leave_in(&crate::settings::config_dir(), &lines);
+    }
+}
+
+/// The latest `KEPT` of what was left in `dir`, `lines` added, each with the time it is left.
+fn leave_in(dir: &Path, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    let before = crate::elevation::read_in_place(dir, LEFT, FILE_MOST).unwrap_or_default();
+    let mut left: VecDeque<String> = before.lines().map(str::to_string).collect();
+    lines.iter().for_each(|line| push(&mut left, line.clone()));
+    let text: String = left.iter().map(|line| format!("{line}\n")).collect();
+    write_as(dir, LEFT, &text);
+}
+
+/// What the sensors' process left (see `leave_held`), oldest first, taken: it is not found twice.
+pub fn take_left() -> Vec<String> {
+    take_left_in(&crate::settings::config_dir())
+}
+
+fn take_left_in(dir: &Path) -> Vec<String> {
+    let left = crate::elevation::read_in_place(dir, LEFT, FILE_MOST).unwrap_or_default();
+    let _ = std::fs::remove_file(dir.join(LEFT));
+    left.lines().map(str::to_string).collect()
 }
 
 /// `note`, with the log kept in `dir`.
@@ -160,8 +208,12 @@ fn write_later(dir: PathBuf, text: String) {
 }
 
 fn write(dir: &Path, text: &str) {
+    write_as(dir, FILE, text);
+}
+
+fn write_as(dir: &Path, name: &str, text: &str) {
     if crate::elevation::ensure_folder(dir).is_ok() {
-        let _ = crate::elevation::write_in_place(dir, FILE, text.as_bytes());
+        let _ = crate::elevation::write_in_place(dir, name, text.as_bytes());
     }
 }
 
@@ -245,6 +297,7 @@ pub fn note_crashes() {
         });
         note(format!("crashed: {message}{}", place.unwrap_or_default()));
         written_now();
+        leave_held();
         previous(info);
     }));
 }
@@ -274,6 +327,50 @@ mod tests {
         assert!(lines[KEPT - 3].ends_with("  again"));
         assert!(lines[KEPT - 2].ends_with("  (the line before came 2 more times)"));
         assert!(lines[KEPT - 1].ends_with(r"could not read C:\Users\<user>\AppData\x and D:\Users\<user>/y"), "{}", lines[KEPT - 1]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A line the pipe would not take stays held, with those after it, and goes first the next time.
+    #[test]
+    fn a_line_not_said_stays_held() {
+        let held = Mutex::new(VecDeque::from(["one".to_string(), "two".to_string(), "three".to_string()]));
+        let mut said = Vec::new();
+        assert!(!say_each(&held, |line| {
+            let taken = line != "two";
+            if taken {
+                said.push(line);
+            }
+            taken
+        }));
+        assert_eq!(said, ["one"]);
+        assert_eq!(*held.lock().unwrap(), ["two", "three"]);
+        assert!(say_each(&held, |line| {
+            said.push(line);
+            true
+        }));
+        assert_eq!(said, ["one", "two", "three"]);
+        assert!(held.lock().unwrap().is_empty());
+    }
+
+    /// What the sensors left as they ended is found once, in order, from one end after another; no more of it is kept
+    /// than of the log.
+    #[test]
+    fn what_was_left_is_found_once() {
+        let dir = std::env::temp_dir().join(format!("glance-journal-left-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(take_left_in(&dir).is_empty());
+        leave_in(&dir, &["first".to_string()]);
+        leave_in(&dir, &[]);
+        leave_in(&dir, &["second".to_string()]);
+        let left = take_left_in(&dir);
+        assert_eq!(left.len(), 2);
+        assert!(left[0].ends_with("  first") && left[1].ends_with("  second"), "{left:?}");
+        assert!(take_left_in(&dir).is_empty());
+        let many: Vec<String> = (0..KEPT + 3).map(|i| format!("line {i}")).collect();
+        leave_in(&dir, &many);
+        let left = take_left_in(&dir);
+        assert_eq!(left.len(), KEPT);
+        assert!(left[KEPT - 1].ends_with(&format!("  line {}", KEPT + 2)), "{}", left[KEPT - 1]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

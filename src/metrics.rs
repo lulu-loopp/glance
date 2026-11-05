@@ -137,6 +137,15 @@ pub struct Sampler {
 // PDH handles are plain pointers owned by this struct; it lives on one thread at a time.
 unsafe impl Send for Sampler {}
 
+/// (The readings change hands, as sensors come and go: a sampler let go of leaves no query behind.)
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::System::Performance::PdhCloseQuery(self.query);
+        }
+    }
+}
+
 impl Sampler {
     pub fn new() -> Self {
         let mut query = PDH_HQUERY::default();

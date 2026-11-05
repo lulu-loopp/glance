@@ -22,6 +22,44 @@ const HELLO_WITHIN: Duration = Duration::from_secs(5);
 /// How long a reading may take before the sensors are taken to be stuck (a driver, a device, a system call that
 /// does not come back): they end, and the rest of Glance starts them again.
 const STUCK_AFTER: Duration = Duration::from_secs(30);
+/// How long the first look at the hardware may take before they are: it opens every device and asks each what it is,
+/// and just after signing in, or an update, it does so on a machine with much else to do. The rest of Glance reads what
+/// it can itself while it waits on this (see `source`).
+pub const FIRST_LOOK_WITHIN: Duration = Duration::from_secs(120);
+/// What is done as the sensors start that the rest of Glance need not wait for, if it takes longer than this, is noted.
+const NOTED_AFTER: Duration = Duration::from_secs(5);
+
+/// Whether this account's tasks are in order yet (see `keep_tasks`).
+static TASKS_KEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// What an elevated start of Glance has always done, for later starts, on a thread of its own: its tasks kept, and the
+/// installer of an update taken last time gone. Nothing that serves this start waits for either. Whether Glance starts
+/// at sign-in is told once it is done: till then its task may be under the name an earlier version gave it.
+fn keep_tasks() {
+    let began = Instant::now();
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    crate::elevation::register_launch_task();
+    crate::elevation::forget_download();
+    if began.elapsed() >= NOTED_AFTER {
+        crate::journal::note(format!("sensors: their tasks took {} s to keep", began.elapsed().as_secs()));
+    }
+    TASKS_KEPT.store(true, std::sync::atomic::Ordering::Release);
+    tell_autostart();
+}
+
+/// Tells the rest, if it is there and this account's tasks are in order, whether Glance starts at sign-in. (Said after
+/// `PUSHES_TO` is set as it comes, and after `TASKS_KEPT` is set here: it is told at least once, whichever is first.)
+fn tell_autostart() {
+    if !TASKS_KEPT.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let telling = PUSHES_TO.lock().unwrap().clone();
+    if let Some(telling) = telling {
+        let _ = link::tell(&mut telling.lock().unwrap(), &Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() });
+    }
+}
 
 /// Runs the sensors till the rest has gone for good. Not elevated, or with the sensors already running for
 /// this user, it does nothing.
@@ -29,21 +67,29 @@ pub fn run() {
     if !crate::elevation::is_elevated() {
         return;
     }
-    let Some(pipes) = link::Sensors::open() else { return };
-    // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines).
+    // Its lines go to the rest of Glance, which writes the log (two processes writing one file lose lines); what could
+    // not be said by the time this process ends is left for it (see `journal::leave_held`), a crash's too.
     crate::journal::hold_for_the_app();
-    // What an elevated start of Glance has always done: its task kept for later starts, the driver in place (its
-    // installer not waited for: see `ensure_pawnio`).
-    crate::elevation::register_launch_task();
-    crate::elevation::forget_download();
+    crate::journal::note_crashes();
+    let Some(pipes) = link::Sensors::open() else {
+        crate::journal::note("sensors: their pipes could not be made (sensors running already, or their pipes still held)");
+        crate::journal::leave_held();
+        return;
+    };
+    std::thread::Builder::new().name("glance sensors: tasks kept".into()).spawn(keep_tasks).expect("a thread started");
+    // The driver in place (its installer not waited for: see `ensure_pawnio`).
     if let Ok(exe) = std::env::current_exe() {
         crate::elevation::ensure_pawnio(&exe.with_file_name("resources").join("PawnIO_setup.exe"));
     }
-    // Watched from now: the first look at the hardware as each reading is, the rest waiting on it meanwhile.
+    // Watched from now: the first look at the hardware as each reading is, with the time it has.
     std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
-    *READING_SINCE.lock().unwrap() = Some(awake());
+    let began = Instant::now();
+    *READING_SINCE.lock().unwrap() = Some((awake(), FIRST_LOOK_WITHIN));
     let mut sampler = Sampler::new();
     *READING_SINCE.lock().unwrap() = None;
+    if began.elapsed() >= NOTED_AFTER {
+        crate::journal::note(format!("sensors: the first look at the hardware took {} s", began.elapsed().as_secs()));
+    }
     crate::presents::start();
     crate::openrgb::watch();
     std::thread::Builder::new().name("glance sensors: edges".into()).spawn(watch_edges).expect("a thread started");
@@ -64,8 +110,10 @@ pub fn run() {
         // told anything.
         let first = link::receive_within::<Asked>(&asked, HELLO_WITHIN);
         let checked = match first {
-            Some(Asked::Hello { version }) => pipes.check_client().map(|pid| (pid, version)),
-            _ => Err("it said nothing first".into()),
+            Ok(Asked::Hello { version }) => pipes.check_client().map(|pid| (pid, version)),
+            Ok(_) => Err("it said something else first".into()),
+            Err(link::Unheard::InTime) => Err(format!("it said nothing in {} s", HELLO_WITHIN.as_secs())),
+            Err(link::Unheard::Broke) => Err("it went before saying anything".into()),
         };
         let pid = match checked {
             Ok((pid, version)) if version == env!("CARGO_PKG_VERSION") => pid,
@@ -88,7 +136,6 @@ pub fn run() {
         let hello = Told::Hello { version: env!("CARGO_PKG_VERSION").into(), info: sampler.info.clone(), found: sampler.info.found.clone() };
         let greeted = tell(&hello)
             && tell(&Told::Buttons { down: crate::mouse::buttons_held(), pressed: false })
-            && tell(&Told::Switched { switch: Switch::Autostart, on: crate::elevation::autostart_enabled() })
             && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() })
             && tell(&Told::Switched { switch: Switch::RaisedLights, on: crate::openrgb::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
@@ -134,6 +181,7 @@ pub fn run() {
         }).expect("a thread started");
         // The pushes seen from now on, told to it.
         *PUSHES_TO.lock().unwrap() = Some(telling.clone());
+        tell_autostart();
         let mut next = Instant::now();
         let mut tick = 0u64;
         while greeted && !listener.is_finished() {
@@ -153,10 +201,10 @@ pub fn run() {
             next = if next + interval < now { now + interval } else { next + interval };
             tick += 1;
             let refresh_slow = wanted.refresh_slow || tick % crate::HIDDEN_SLOW_TICKS == 0;
-            if !crate::journal::take_held().into_iter().all(|line| tell(&Told::Note(line))) {
+            if !crate::journal::say_held(|line| tell(&Told::Note(line))) {
                 break;
             }
-            *READING_SINCE.lock().unwrap() = Some(awake());
+            *READING_SINCE.lock().unwrap() = Some((awake(), STUCK_AFTER));
             let sample = sampler.sample(refresh_slow, wanted.wsl, wanted.docker, interval);
             *READING_SINCE.lock().unwrap() = None;
             if let Some(sample) = sample {
@@ -181,10 +229,11 @@ pub fn run() {
         let _ = listener.join();
     }
     crate::presents::stop();
+    crate::journal::leave_held();
 }
 
-/// When the reading under way began, in time awake (see `awake`; none: none is).
-static READING_SINCE: Mutex<Option<Duration>> = Mutex::new(None);
+/// When the reading under way began, in time awake (see `awake`), and how long it may take (none: none is).
+static READING_SINCE: Mutex<Option<(Duration, Duration)>> = Mutex::new(None);
 
 /// How long the system has run awake: the time it slept left out (a reading under way as it went to sleep has not
 /// been taking all that while; counted by the clock, every one was taken for stuck as the PC woke, the sensors
@@ -195,32 +244,33 @@ fn awake() -> Duration {
     Duration::from_nanos(unbiased * 100)
 }
 
-/// Whether a reading that began `since` (in time awake) has been under way too long by `now`.
-fn stuck(since: Option<Duration>, now: Duration) -> bool {
-    since.is_some_and(|since| now.saturating_sub(since) > STUCK_AFTER)
+/// Whether a reading that began as `reading` says (in time awake) has been under way too long by `now`.
+fn stuck(reading: Option<(Duration, Duration)>, now: Duration) -> bool {
+    reading.is_some_and(|(since, within)| now.saturating_sub(since) > within)
 }
 
-/// Ends the sensors once a reading has been under way for longer than `STUCK_AFTER`, the rest of Glance told why
-/// (on the pipe the reading does not hold meanwhile): stuck, they serve nothing, and the rest starts them again.
+/// Ends the sensors once a reading has been under way for longer than it may be, the rest of Glance told why (on the
+/// pipe the reading does not hold meanwhile, or, there being none, by what is left for it to find): stuck, they serve
+/// nothing, and the rest starts them again.
 fn watch_readings() {
     loop {
         std::thread::sleep(STUCK_AFTER / 6);
-        let since = *READING_SINCE.lock().unwrap();
-        if stuck(since, awake()) {
-            let why = format!("sensors: starting or a reading has taken over {} s; ending, to be started again", STUCK_AFTER.as_secs());
-            // Told on a thread of its own, waited for a second at most (a pipe the rest has stopped reading holds
-            // whoever writes to it): the end comes either way.
+        let reading = *READING_SINCE.lock().unwrap();
+        if stuck(reading, awake()) {
+            let why = format!("sensors: starting or a reading has taken over {} s; ending, to be started again", reading.map_or(0, |(_, within)| within.as_secs()));
             let telling = PUSHES_TO.try_lock().ok().and_then(|pushes| pushes.clone());
-            if let Some(telling) = telling {
-                let (told, done) = mpsc::channel();
-                std::thread::spawn(move || {
-                    if let Ok(mut telling) = telling.try_lock() {
-                        let _ = link::tell(&mut telling, &Told::Note(why));
-                    }
-                    let _ = told.send(());
-                });
-                let _ = done.recv_timeout(Duration::from_secs(1));
-            }
+            // On a thread of its own, waited for a few seconds at most (a pipe the rest has stopped reading holds
+            // whoever writes to it, and a disk as busy as this may hold what writes to it): the end comes either way.
+            let (told, done) = mpsc::channel();
+            std::thread::spawn(move || {
+                let said = telling.is_some_and(|telling| telling.try_lock().is_ok_and(|mut telling| link::tell(&mut telling, &Told::Note(why.clone()))));
+                if !said {
+                    crate::journal::note(why);
+                }
+                crate::journal::leave_held();
+                let _ = told.send(());
+            });
+            let _ = done.recv_timeout(Duration::from_secs(3));
             std::process::exit(1);
         }
     }
@@ -384,10 +434,13 @@ mod tests {
     #[test]
     fn stuck_by_time_awake() {
         let began = awake();
-        assert!(!stuck(Some(began), awake()));
+        assert!(!stuck(Some((began, STUCK_AFTER)), awake()));
         assert!(!stuck(None, began + Duration::from_secs(3600)));
-        assert!(!stuck(Some(began), began + STUCK_AFTER));
-        assert!(stuck(Some(began), began + STUCK_AFTER + Duration::from_secs(1)));
+        assert!(!stuck(Some((began, STUCK_AFTER)), began + STUCK_AFTER));
+        assert!(stuck(Some((began, STUCK_AFTER)), began + STUCK_AFTER + Duration::from_secs(1)));
+        // The first look has longer: a machine busy as it starts is not one that is stuck.
+        assert!(!stuck(Some((began, FIRST_LOOK_WITHIN)), began + STUCK_AFTER + Duration::from_secs(1)));
+        assert!(stuck(Some((began, FIRST_LOOK_WITHIN)), began + FIRST_LOOK_WITHIN + Duration::from_secs(1)));
         // The time awake goes on as the clock does while awake, by much the same.
         let (clock, from) = (Instant::now(), awake());
         std::thread::sleep(Duration::from_millis(200));

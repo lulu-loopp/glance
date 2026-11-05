@@ -31,7 +31,7 @@ use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerforma
 use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
 use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE};
-use windows::Win32::UI::Input::{RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+use windows::Win32::UI::Input::{RegisterRawInputDevices, HRAWINPUT, RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DispatchMessageW, KillTimer, WaitMessage, MsgWaitForMultipleObjects,
     PeekMessageW, PostMessageW, SetTimer, SystemParametersInfoW, HWND_MESSAGE, MSG, PM_REMOVE,
@@ -129,7 +129,7 @@ const LYRIC: u32 = WM_APP + 13;
 /// The sensors' process saw a push into an edge (WPARAM the edge, LPARAM where: x low, y high, physical px).
 const PUSHED: u32 = WM_APP + 14;
 /// The sensors' process went: the mouse is heard here, and the edges watched, from now on.
-const HEAR_OWN: u32 = WM_APP + 15;
+const HEARING_CHANGED: u32 = WM_APP + 15;
 /// Something this thread looks at changed elsewhere (it takes it up as it wakes: see `Controller::wake`).
 const WAKE: u32 = WM_APP + 16;
 
@@ -294,9 +294,10 @@ impl Controller {
         }
     }
 
-    /// The sensors' process went: the edges are watched on the panel's thread from now on (from any thread).
-    pub fn hear_own(&self) {
-        self.post(HEAR_OWN);
+    /// The sensors' process went, or came: the edges are watched on the panel's thread while there is none, by it while
+    /// there is one (from any thread).
+    pub fn hearing_changed(&self) {
+        self.post(HEARING_CHANGED);
     }
 
     /// Which edges open the panel, as the settings have them now.
@@ -583,6 +584,8 @@ impl Controller {
             overlay.show(&history, &settings, panels[0].lang, playing, wanted, beneath);
         };
         self.sink.store(sink.0 as isize, Ordering::Release);
+        // (A link made or lost as this thread began had no one to tell yet.)
+        own_input = hear_as_linked(sink, own_input);
 
         // Once the panel has been up, the pointer has to leave the edge before
         // it can open the panel again: pushing on after it closed is the same
@@ -1518,9 +1521,9 @@ impl Controller {
                         open_pushed((cursor, contact, edge), &mut panels, &mut last_place);
                     }
                 }
-                // Their process gone: the edges are watched here from now on.
-                HEAR_OWN if !own_input => {
-                    own_input = hear_mouse(sink);
+                // Their process gone, or come: the edges are watched here while there is none.
+                HEARING_CHANGED => {
+                    own_input = hear_as_linked(sink, own_input);
                 }
                 // The mouse's own motion, heard here while there is no sensors' process to watch the edges (and
                 // passed on: what touches the PC is listened for here meanwhile too).
@@ -1912,6 +1915,21 @@ fn pushed_from(wparam: WPARAM, lparam: LPARAM) -> (Edge, POINT) {
 fn hear_mouse(sink: HWND) -> bool {
     let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: sink };
     unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.is_ok()
+}
+
+/// Has this thread's message window `sink` hear the mouse while there is no sensors' process to, and no longer once
+/// there is (`heard`: whether it does now): whether it does then.
+fn hear_as_linked(sink: HWND, heard: bool) -> bool {
+    let wanted = !crate::source::linked();
+    if wanted == heard {
+        return heard;
+    }
+    if wanted {
+        return hear_mouse(sink);
+    }
+    let mouse = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_REMOVE, hwndTarget: HWND::default() };
+    // (Not let go of, it is still heard, and pushes it sees are seen twice.)
+    unsafe { RegisterRawInputDevices(&[mouse], size_of::<RAWINPUTDEVICE>() as u32) }.is_err()
 }
 
 /// Whether a look is up from the panel or a widget (see `ui::look`), not one from search.

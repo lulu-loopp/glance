@@ -1436,6 +1436,10 @@ fn runs(task: &str, name: &str) -> bool {
     std::fs::canonicalize(&program).is_ok_and(|program| std::fs::canonicalize(&ours).is_ok_and(|ours| program == ours))
 }
 
+/// The priority Glance's tasks run at: an ordinary program's (Task Scheduler's own default, 7, is below it, for the CPU,
+/// the disk and memory alike, which suits work in the background: these hear the mouse, draw, and answer the phone).
+const TASK_PRIORITY: u32 = 5;
+
 /// A task for the current user: the launch task, which starts the sensors' program `exe` with highest privileges on
 /// demand; or, `at_sign_in`, the one that starts Glance (`exe`) as the user when the user signs in.
 fn task_xml(exe: &Path, at_sign_in: bool, enabled: bool) -> String {
@@ -1463,7 +1467,7 @@ fn task_xml(exe: &Path, at_sign_in: bool, enabled: bool) -> String {
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>{TASK_PRIORITY}</Priority>
     <Enabled>{enabled}</Enabled>
   </Settings>
   <Actions Context="Author">
@@ -1590,7 +1594,7 @@ fn remote_task_xml(helper: &Path) -> String {
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>{TASK_PRIORITY}</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec><Command>{helper}</Command></Exec>
@@ -1692,6 +1696,16 @@ fn mark_pawnio_ours() {
 
 #[cfg(test)]
 mod tests {
+    /// Glance's tasks run as an ordinary program does: Task Scheduler's own default is below that for the CPU, the disk
+    /// and memory alike, and what hears the mouse and draws should not wait behind all else on a busy machine.
+    #[test]
+    fn its_tasks_run_as_ordinary_programs() {
+        let exe = std::path::Path::new(r"C:\Program Files\Glance\glance-sensors.exe");
+        for xml in [super::task_xml(exe, false, true), super::task_xml(exe, true, true), super::remote_task_xml(exe)] {
+            assert!(xml.contains("<Priority>5</Priority>"), "{xml}");
+        }
+    }
+
     /// Settings kept under application data reached through a junction (a profile moved to another drive by one) are
     /// kept and read again from where the folder really is, while a link in the folder Glance keeps them in is still
     /// never followed.

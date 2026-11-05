@@ -11,7 +11,7 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::windows::io::FromRawHandle;
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToS
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND};
 use windows::Win32::System::Pipes::{ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
-use windows::Win32::System::Threading::{OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE};
+use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE};
 
 use crate::presents::GameMode;
 use crate::reading::{Sample, StaticInfo};
@@ -267,17 +267,30 @@ pub fn heard(from: &mut File) -> Option<Asked> {
     receive(from)
 }
 
-/// What comes on `from` within `within`, read on a thread of its own: none if nothing whole came by then (or the pipe
-/// broke). The read given up on is cancelled, again and again till that thread has ended: a read may be issued
-/// just after one is cancelled (a message comes in parts), and that one is not cancelled with it.
-pub fn receive_within<T: for<'de> Deserialize<'de> + Send + 'static>(from: &File, within: Duration) -> Option<T> {
+/// Why nothing whole came on a pipe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unheard {
+    /// Nothing by the time it was waited for.
+    InTime,
+    /// The other end has gone, or what it sent is no message.
+    Broke,
+}
+
+/// What comes on `from` within `within`, read on a thread of its own, or why nothing did. The read given up on is
+/// cancelled, again and again till that thread has ended: a read may be issued just after one is cancelled (a message
+/// comes in parts), and that one is not cancelled with it.
+pub fn receive_within<T: for<'de> Deserialize<'de> + Send + 'static>(from: &File, within: Duration) -> Result<T, Unheard> {
     use std::os::windows::io::AsRawHandle;
-    let mut reading = from.try_clone().ok()?;
+    let mut reading = from.try_clone().map_err(|_| Unheard::Broke)?;
     let (said, came) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
         let _ = said.send(receive::<T>(&mut reading));
     });
-    let got = came.recv_timeout(within).ok().flatten();
+    let got = match came.recv_timeout(within) {
+        Ok(Some(message)) => Ok(message),
+        Ok(None) => Err(Unheard::Broke),
+        Err(_) => Err(Unheard::InTime),
+    };
     while !reader.is_finished() {
         unsafe {
             let _ = windows::Win32::System::IO::CancelSynchronousIo(HANDLE(reader.as_raw_handle()));
@@ -395,29 +408,43 @@ fn runs_program(process: HANDLE, name: &str) -> bool {
 
 // ---- The rest's side ----
 
-/// The rest's ends: what it is told, and what it asks with.
+/// The rest's ends: what it is told, and what it asks with; and the process at the other end, held from the moment it
+/// was found to be the sensors' (see `gone_within`).
 pub struct Link {
     pub told: File,
     pub asked: File,
+    process: Option<OwnedHandle>,
+}
+
+/// What became of the sensors' process at the other end of a link let go of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gone {
+    /// It ended, with this code.
+    Ended(u32),
+    /// It had not ended by the time it was waited for.
+    Running,
+    /// Not known: its process could not be held, or looked at.
+    Unknown,
 }
 
 impl Link {
     /// Connects to the sensors, waiting up to `patience` for them; none if they are not there, or what answers is
     /// not the sensors' program beside this one, elevated.
-    pub fn connect(patience: Duration) -> Option<Link> {
-        let (told, asked) = names()?;
+    pub fn connect(patience: Duration) -> Result<Link, String> {
+        let (told, asked) = names().ok_or("this user's identity could not be read")?;
         let until = Instant::now() + patience;
         // Only as much as each end needs (the pipes give the user no more), and the sensors allowed to learn who
         // this is, never to act as it (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).
         let identification_only = windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x0011_0000);
-        let open = |name: &str, access: u32| -> Option<HANDLE> {
+        let open = |name: &str, access: u32| -> Result<HANDLE, String> {
             loop {
                 let opened = unsafe { CreateFileW(&HSTRING::from(name), access, FILE_SHARE_NONE, None, OPEN_EXISTING, identification_only, None) };
-                if let Ok(handle) = opened {
-                    return Some(handle);
-                }
+                let error = match opened {
+                    Ok(handle) => return Ok(handle),
+                    Err(error) => error,
+                };
                 if Instant::now() >= until {
-                    return None;
+                    return Err(format!("their pipe was not opened in {} s ({:#x})", patience.as_secs(), error.code().0));
                 }
                 // (Not made yet, or busy with another: waited for a moment.)
                 unsafe {
@@ -428,39 +455,51 @@ impl Link {
         };
         // FILE_GENERIC_READ; FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE.
         let told = open(&told, 0x0012_0089)?;
-        let Some(asked) = open(&asked, 0x0010_0082) else {
-            unsafe {
-                let _ = CloseHandle(told);
+        let asked = match open(&asked, 0x0010_0082) {
+            Ok(asked) => asked,
+            Err(why) => {
+                unsafe {
+                    let _ = CloseHandle(told);
+                }
+                return Err(why);
             }
-            return None;
         };
-        let mut link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0) } };
+        let mut link = unsafe { Link { told: File::from_raw_handle(told.0), asked: File::from_raw_handle(asked.0), process: None } };
         // Believed only from the sensors' program, elevated, at both ends.
         let (mut server, mut other) = (0u32, 0u32);
-        unsafe { GetNamedPipeServerProcessId(told, &mut server) }.ok()?;
-        unsafe { GetNamedPipeServerProcessId(asked, &mut other) }.ok()?;
-        if server != other || !is_sensors_elevated(server) {
-            return None;
+        unsafe { GetNamedPipeServerProcessId(told, &mut server) }.map_err(|e| format!("who made their pipe was not told ({:#x})", e.code().0))?;
+        unsafe { GetNamedPipeServerProcessId(asked, &mut other) }.map_err(|e| format!("who made their pipe was not told ({:#x})", e.code().0))?;
+        if server != other {
+            return Err(format!("two processes made their pipes, {server} and {other}"));
         }
-        send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }).then_some(link)
+        if !is_sensors_elevated(server) {
+            return Err(format!("process {server}, at their pipes, is not their program elevated"));
+        }
+        // (Held now, while the link is had: that process and no other, whenever it is looked at.)
+        link.process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, server) }.ok().map(|process| unsafe { OwnedHandle::from_raw_handle(process.0) });
+        if send(&mut link.asked, &Asked::Hello { version: env!("CARGO_PKG_VERSION").into() }) {
+            Ok(link)
+        } else {
+            Err("they could not be told who this is".into())
+        }
     }
 
-    /// The sensors' process at the other end, waited for (its handle, taken while the link is still had, so that
-    /// it is that process and no other): gone within `ceiling`, or already. (Another version's goes as it hears this
-    /// one; its pipes are free only then.)
-    pub fn gone_within(self, ceiling: Duration) -> bool {
+    /// Lets the link go, and waits up to `ceiling` for the sensors' process at its other end to end. (Another version's
+    /// goes as it hears this one; its pipes are free only then.)
+    pub fn gone_within(self, ceiling: Duration) -> Gone {
         use std::os::windows::io::AsRawHandle;
-        let mut server = 0u32;
-        let held = unsafe { GetNamedPipeServerProcessId(HANDLE(self.told.as_raw_handle()), &mut server) }
-            .ok()
-            .and_then(|()| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, server) }.ok());
-        drop(self);
-        let Some(process) = held else { return true };
-        let gone = unsafe { WaitForSingleObject(process, ceiling.as_millis().min(u32::MAX as u128) as u32) } == windows::Win32::Foundation::WAIT_OBJECT_0;
-        unsafe {
-            let _ = CloseHandle(process);
+        let Link { told, asked, process } = self;
+        drop((told, asked));
+        let Some(process) = process else { return Gone::Unknown };
+        let process = HANDLE(process.as_raw_handle());
+        if unsafe { WaitForSingleObject(process, ceiling.as_millis().min(u32::MAX as u128) as u32) } != windows::Win32::Foundation::WAIT_OBJECT_0 {
+            return Gone::Running;
         }
-        gone
+        let mut code = 0u32;
+        match unsafe { GetExitCodeProcess(process, &mut code) } {
+            Ok(()) => Gone::Ended(code),
+            Err(_) => Gone::Unknown,
+        }
     }
 
     pub fn receive(&mut self) -> Option<Told> {
