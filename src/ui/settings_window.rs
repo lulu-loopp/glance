@@ -6737,10 +6737,20 @@ mod pictures {
             // The workbench carried from the library over an edge: of every screen small (the first screen's left),
             // and of one screen large (its right).
             for (large, name) in [(false, "layout-carry"), (true, "layout-carry-one")] {
+                // (Painted to learn where things are: `draw` paints nothing of a window not shown.)
+                let painted = || {
+                    let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                    gfx.draw_offscreen(((cw * scale).round() as u32, (ch * scale).round() as u32), scale, |frame| {
+                        with_ui(|ui| ui.paint(frame, Instant::now()));
+                    })
+                    .unwrap();
+                };
                 with_ui(|ui| {
                     ui.turn_to(Page::Layout);
                     ui.view = None;
-                    ui.draw(Instant::now());
+                });
+                painted();
+                with_ui(|ui| {
                     // (A screen's picture, the largest of what shows one: the buttons above them show one too.)
                     let screen = ui.targets.iter().filter(|(_, target)| matches!(target, Target::View(Some(_)))).max_by(|a, b| (a.0.w * a.0.h).total_cmp(&(b.0.w * b.0.h))).map(|(r, target)| (*r, target.clone())).unwrap();
                     if large {
@@ -6748,14 +6758,17 @@ mod pictures {
                     }
                     ui.carry = Some(layout_page::Carry { part: crate::settings::Part::Workbench, from: None, start: (0.0, 0.0), moved: true });
                     ui.pointer = Some((screen.0.x + 8.0, screen.0.y + screen.0.h / 2.0));
-                    ui.draw(Instant::now());
-                    if large {
+                });
+                painted();
+                if large {
+                    with_ui(|ui| {
                         let zone = ui.targets.iter().find_map(|(r, target)| matches!(target, Target::Zone(_, Edge::Right)).then_some(*r)).unwrap();
                         ui.pointer = Some((zone.x + zone.w - 20.0, zone.y + zone.h / 2.0));
-                    }
-                });
+                    });
+                }
+                // (What moves comes to rest as it is painted.)
                 for _ in 0..12 {
-                    with_ui(|ui| ui.draw(Instant::now()));
+                    painted();
                     std::thread::sleep(Duration::from_millis(80));
                 }
                 let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
