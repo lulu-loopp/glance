@@ -383,9 +383,9 @@ impl Ui {
             Some((edge, Part::Music)) => self.music_on_stage(frame, canvas, edge, 1.0),
             Some((edge, part)) => {
                 let prefs = self.prefs.clone().holding(part);
-                self.panel_on_stage(frame, canvas, Some(edge), Some(&prefs), true, 1.0)
+                self.panel_on_stage(frame, canvas, Some((edge, &prefs, part)), true, 1.0)
             }
-            None => self.panel_on_stage(frame, canvas, None, None, true, 1.0),
+            None => self.panel_on_stage(frame, canvas, None, true, 1.0),
         };
         let work = self.stage.work;
         let monitors: Vec<RECT> = self.screens.iter().map(|known| known.monitor).collect();
@@ -398,7 +398,7 @@ impl Ui {
     /// large as on the screen, the screen made smaller with it), as far as `out` (1 all the way, 0 just past the edge).
     /// Returns how soon to draw again, and where the screen was drawn.
     pub(super) fn music_on_stage(&mut self, frame: &Frame, area: Rect, edge: Edge, out: f32) -> (Option<f32>, Rect) {
-        let (_, r) = self.panel_on_stage(frame, area, None, None, true, 1.0);
+        let (_, r) = self.panel_on_stage(frame, area, None, true, 1.0);
         let k = r.w / self.stage.size.0;
         let shows = super::super::music::Shows::from(&self.settings.view);
         let room = self.settings.music_rooms.at(edge == Edge::Top);

@@ -6258,9 +6258,10 @@ impl Ui {
 
         // The readings (or the workbench), laid out for the screen the window opened on, centred along the edge they
         // open from.
-        let prefs = self.prefs.clone().holding(self.previewed());
+        let part = self.previewed();
+        let prefs = self.prefs.clone().holding(part);
         let edge = self.preview_edge();
-        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false, 1.0).0
+        self.panel_on_stage(frame, area, Some((edge, &prefs, part)), false, 1.0).0
     }
 
     /// How the stage is shown in `area` with a panel `pw` wide (stage DIPs) slid out from `edge`: how large a stage
@@ -6310,16 +6311,17 @@ impl Ui {
         Rect { x: left, y: top, w: right - left, h: bottom - top }
     }
 
-    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it (as far as
-    /// `out`: 1 all the way, 0 just past the edge), running live: the whole screen (`whole`), else the whole height of it
+    /// The stage's desktop in `area` and, where `panel` is one, that part's panel showing its prefs slid out from its edge
+    /// (as large, and in as many columns, as that part's are, whichever page shows it; as far as `out`: 1 all the way, 0
+    /// just past the edge), running live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
     #[allow(clippy::too_many_arguments)]
-    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool, out: f32) -> (Option<f32>, Rect) {
+    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, whole: bool, out: f32) -> (Option<f32>, Rect) {
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
-        let (Some(edge), Some(prefs)) = (edge, prefs) else {
+        let Some((edge, prefs, part)) = panel else {
             let (ox, oy) = (area.x + (area.w - sw * fit) / 2.0, area.y + (area.h - sh * fit) / 2.0);
             self.stage_picture(frame, area, (ox, oy), fit, 1.0);
             return (None, Rect { x: ox, y: oy, w: sw * fit, h: sh * fit });
@@ -6347,9 +6349,9 @@ impl Ui {
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
-        let columns = self.settings.columns_of(self.previewed());
+        let columns = self.settings.columns_of(part);
         self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), columns, SIZES.1, rail);
-        let size = self.panel_size().clamp(SIZES.0, SIZES.1);
+        let size = self.settings.panel_size_on(part, self.stage.screen.as_deref()).clamp(SIZES.0, SIZES.1);
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;

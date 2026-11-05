@@ -1429,7 +1429,7 @@ impl Ui {
             Step::Keys => down = self.play_keys(frame, guide, area, since, now),
             // (At the end, the desktop as it is, nothing played on it.)
             _ => {
-                self.panel_on_stage(frame, area, None, None, true, 1.0);
+                self.panel_on_stage(frame, area, None, true, 1.0);
             }
         }
         stroke_inside(frame, area, 8.0, palette.card_stroke);
@@ -1507,9 +1507,9 @@ impl Ui {
             Some(Part::Music) => self.music_on_stage(frame, area, edge, out).1,
             Some(part) => {
                 let prefs = self.prefs.clone().holding(part);
-                self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false, out).1
+                self.panel_on_stage(frame, area, Some((edge, &prefs, part)), false, out).1
             }
-            None => self.panel_on_stage(frame, area, None, None, true, 1.0).1,
+            None => self.panel_on_stage(frame, area, None, true, 1.0).1,
         };
         // (The screen as much as shows of it.)
         let (left, top) = (screen.x.max(area.x), screen.y.max(area.y));
