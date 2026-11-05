@@ -2026,7 +2026,7 @@ mod timed {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        crate::pictured(crate::metrics::Sampler::new().info, Vec::new());
+        crate::pictured(crate::metrics::Sampler::new().info.clone(), Vec::new());
         let folder = std::env::temp_dir().join("glance-note-page-timed");
         let _ = std::fs::create_dir_all(&folder);
         std::fs::write(folder.join("a.md"), "# A note\nIts first line\nIts second\n- [ ] something to do\n").unwrap();

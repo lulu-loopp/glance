@@ -6636,7 +6636,7 @@ mod pictures {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         // This machine's names, and two minutes of made-up readings up to now.
-        let info = crate::metrics::Sampler::new().info;
+        let info = crate::metrics::Sampler::new().info.clone();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);
@@ -6737,8 +6737,9 @@ mod pictures {
                 ui.scroll_target = 0.0;
             });
             // The workbench carried from the library over an edge: of every screen small (the first screen's left),
-            // and of one screen large (its right).
-            for (large, name) in [(false, "layout-carry"), (true, "layout-carry-one")] {
+            // and of one screen large (its right); and so again with the workbench in two columns, smaller, the readings in
+            // three (what the layout page draws is the workbench's size and columns, not theirs).
+            for (large, name, sized) in [(false, "layout-carry", false), (true, "layout-carry-one", false), (true, "layout-carry-sized", true)] {
                 // (Painted to learn where things are: `draw` paints nothing of a window not shown.)
                 let painted = || {
                     let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
@@ -6750,6 +6751,12 @@ mod pictures {
                 with_ui(|ui| {
                     ui.turn_to(Page::Layout);
                     ui.view = None;
+                    if sized {
+                        ui.settings.set_columns(crate::settings::Part::Monitor, Some(3));
+                        ui.settings.set_columns(crate::settings::Part::Workbench, Some(2));
+                        let screen = ui.stage.screen.clone();
+                        ui.settings.size_panel(crate::settings::Part::Workbench, screen.as_deref(), 0.85);
+                    }
                 });
                 painted();
                 with_ui(|ui| {
@@ -6895,7 +6902,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let info = crate::metrics::Sampler::new().info;
+        let info = crate::metrics::Sampler::new().info.clone();
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
         let history = (0..120).map(|i| crate::studio::made_up(&info, now_ms as f64 - (120 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
         crate::pictured(info, history);

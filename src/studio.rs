@@ -733,7 +733,7 @@ pub fn run(script: &Path, out: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(script).map_err(|e| format!("{}: {e}", script.display()))?;
     let script: Script = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", script.display()))?;
     // This machine's own names, read as Glance reads them.
-    let info = crate::metrics::Sampler::new().info;
+    let info = crate::metrics::Sampler::new().info.clone();
     let gfx = Gfx::new().map_err(|e| e.to_string())?;
     let desktop = wallpaper::picture(&script.wallpaper, script.width, script.height).map_err(|e| format!("{}: {e}", script.wallpaper))?;
     // The files' pictures, made on a thread of their own (for the workbench), counted as they come.
@@ -1306,7 +1306,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     use windows::core::w;
     use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE};
     let (width, height, px) = (2560u32, 1440u32, 1.5f32);
-    let info = crate::metrics::Sampler::new().info;
+    let info = crate::metrics::Sampler::new().info.clone();
     let gfx = Gfx::new().map_err(|e| e.to_string())?;
     let desktop = wallpaper::picture(wallpaper, width, height).map_err(|e| format!("{wallpaper}: {e}"))?;
     let mut known = vec!["game".to_string(), "cpu".to_string()];
@@ -1407,7 +1407,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
 /// the page, in `out`.
 pub fn phone_page(out: &Path) -> Result<(), String> {
     use crate::ui::phone_art::{self, Making, SCREEN};
-    let info = crate::metrics::Sampler::new().info;
+    let info = crate::metrics::Sampler::new().info.clone();
     let gfx = Gfx::new().map_err(|e| e.to_string())?;
     let sample = made_up(&info, 1_760_000_000_000.0, 7, 0.4, None);
     let reads = crate::remote::figures(&sample, &info);
@@ -1600,7 +1600,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     };
     let px = 1.5f32;
     let (width, height) = (2560u32, 1440u32);
-    let info = crate::metrics::Sampler::new().info;
+    let info = crate::metrics::Sampler::new().info.clone();
     let mut known = vec!["game".to_string(), "cpu".to_string()];
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
