@@ -6,7 +6,7 @@
 //! the user asks: its installer is downloaded into a folder of
 //! administrators' alone and run only if it carries Glance's own signature for
 //! the version asked for (see `own_signature`), or Authenticode's by Glance's
-//! publisher (see `PUBLISHER`) on an installer of that version's numbers, and
+//! publisher (see `PUBLISHER`) on an installer that carries that version, and
 //! the version is newer than this one; it is held open, no one else writing it,
 //! till it is done.
 
@@ -34,7 +34,7 @@ use windows::Win32::Security::WinTrust::{
     WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA,
     WINTRUST_DATA_0, WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
-use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO};
+use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
 use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DEFAULT, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
@@ -451,8 +451,9 @@ fn fetch_and_run(release: &Release) -> State {
             note("the installer could not be written");
             return State::Failed;
         };
-        // Glance's own signature says the version with the bytes. Authenticode's says neither: what the installer
-        // carries says its numbers (a version resource holds nothing else, so a preview's are its release's).
+        // Glance's own signature says the version with the bytes. Authenticode's says neither: the version is what
+        // the installer carries, whole (its numbers alone are a preview's and its release's alike, and an older
+        // preview, signed, would pass for a later one).
         let own = own_signature_on(url, version, &held);
         if !own && !by_publisher(&installer, &held) {
             note(&format!("the installer from {host} is signed neither by Glance nor by its publisher; not run"));
@@ -460,8 +461,7 @@ fn fetch_and_run(release: &Release) -> State {
             continue;
         }
         let carried = installer_version(&installer);
-        let numbers = version.split(['-', '+']).next().unwrap_or(version);
-        let announced = own || carried.as_deref().is_some_and(|carried| !newer(carried, numbers) && !newer(numbers, carried));
+        let announced = own || carried.as_deref().is_some_and(|carried| same_version(carried, version));
         if !announced {
             note(&format!("the installer from {host} is version {}, not {version}; not run", carried.as_deref().unwrap_or("unknown")));
             outcome = State::Rejected;
@@ -526,8 +526,13 @@ fn hold(file: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(file)
 }
 
-/// The product version an installer carries in its version resource
-/// ("0.1.7" for 0.1.7.0).
+/// Whether two versions are one, by the order versions go in.
+fn same_version(a: &str, b: &str) -> bool {
+    !newer(a, b) && !newer(b, a)
+}
+
+/// The product version an installer carries in its version resource, as it was
+/// released ("0.4.3-preview": the resource's numbers say only 0.4.3.0).
 fn installer_version(file: &Path) -> Option<String> {
     let path = HSTRING::from(file.as_os_str());
     let size = unsafe { GetFileVersionInfoSizeW(&path, None) };
@@ -536,17 +541,20 @@ fn installer_version(file: &Path) -> Option<String> {
     }
     let mut data = vec![0u8; size as usize];
     unsafe { GetFileVersionInfoW(&path, None, size, data.as_mut_ptr().cast()) }.ok()?;
-    let (mut fixed, mut length) = (std::ptr::null_mut(), 0u32);
-    if !unsafe { VerQueryValueW(data.as_ptr().cast(), w!("\\"), &mut fixed, &mut length) }.as_bool() || (length as usize) < size_of::<VS_FIXEDFILEINFO>() {
+    // Under the language and code page it names first.
+    let (mut named, mut length) = (std::ptr::null_mut(), 0u32);
+    if !unsafe { VerQueryValueW(data.as_ptr().cast(), w!("\\VarFileInfo\\Translation"), &mut named, &mut length) }.as_bool() || (length as usize) < 2 * size_of::<u16>() {
         return None;
     }
-    let fixed = unsafe { &*(fixed as *const VS_FIXEDFILEINFO) };
-    let parts = [fixed.dwProductVersionMS >> 16, fixed.dwProductVersionMS & 0xFFFF, fixed.dwProductVersionLS >> 16, fixed.dwProductVersionLS & 0xFFFF];
-    let mut parts: Vec<String> = parts.iter().map(u32::to_string).collect();
-    while parts.len() > 1 && parts.last().is_some_and(|part| part == "0") {
-        parts.pop();
+    let (language, page) = unsafe { (*(named as *const u16), *(named as *const u16).add(1)) };
+    let key = HSTRING::from(format!("\\StringFileInfo\\{language:04x}{page:04x}\\ProductVersion"));
+    let (mut text, mut characters) = (std::ptr::null_mut(), 0u32);
+    if !unsafe { VerQueryValueW(data.as_ptr().cast(), &key, &mut text, &mut characters) }.as_bool() || characters == 0 {
+        return None;
     }
-    Some(parts.join("."))
+    let text = unsafe { std::slice::from_raw_parts(text as *const u16, characters as usize) };
+    let version = String::from_utf16_lossy(text);
+    Some(version.trim_end_matches('\0').to_string())
 }
 
 /// The machine's ProgramData folder.
@@ -931,7 +939,7 @@ fn sha256(certificate: &CERT_CONTEXT) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{by_publisher, get, hold, installer_version, newer, publishers, release, INSTALLERS_FROM, PUBLISHER, PUBLISHER_ROOT, SOURCES};
+    use super::{by_publisher, get, hold, installer_version, newer, publishers, release, same_version, INSTALLERS_FROM, PUBLISHER, PUBLISHER_ROOT, SOURCES};
     use std::path::Path;
 
     /// Over the network: the latest release is found, its installer
@@ -983,6 +991,18 @@ mod tests {
         assert!(by_publisher(Path::new(&installer), &held));
         assert!(std::fs::OpenOptions::new().append(true).open(&installer).is_err());
         assert!(installer_version(Path::new(&installer)).is_some());
+    }
+
+    /// Authenticode says nothing of the version: an older preview, signed, with the same numbers, does not pass for a
+    /// later one, nor for the release, nor the release for a preview before it.
+    #[test]
+    fn a_signed_installer_is_only_the_version_it_carries() {
+        assert!(same_version("0.4.3-preview", "0.4.3-preview"));
+        assert!(same_version("0.4.3", "0.4.3"));
+        assert!(!same_version("0.4.3-preview", "0.4.3-preview.2"));
+        assert!(!same_version("0.4.3-preview", "0.4.3"));
+        assert!(!same_version("0.4.3", "0.4.3-preview"));
+        assert!(!same_version("0.4.3", "0.4.4"));
     }
 
     /// The version an installer (`GLANCE_INSTALLER`, a released one) carries.
