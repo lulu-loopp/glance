@@ -4,11 +4,14 @@
 //! besides what is new in the reports this PC sent: see `reports`). A newer one
 //! is offered in the settings (and once by the tray), and taken only when
 //! the user asks: its installer is downloaded into a folder of
-//! administrators' alone and run only if it is signed by Glance's publisher
-//! (see `PUBLISHER`), of the version asked for, newer than this one; it is
-//! held open, no one else writing it, till it is done.
+//! administrators' alone and run only if it carries Glance's own signature for
+//! the version asked for (see `own_signature`), or Authenticode's by Glance's
+//! publisher (see `PUBLISHER`) on an installer of that version's numbers, and
+//! the version is newer than this one; it is held open, no one else writing it,
+//! till it is done.
 
 use std::cmp::Ordering;
+use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::{Condvar, Mutex};
 use std::thread;
@@ -425,10 +428,10 @@ fn fetch_and_run(release: &Release) -> State {
         return State::Failed;
     }
     // From each site in turn (only Glance's own: see `INSTALLERS_FROM`), until one gives an installer that is
-    // what it should be: signed by Glance's publisher, of the version that site announced, and newer than this
-    // one. No site is trusted for any of it: an older signed installer under a newer name would take Glance
-    // back, and a site claiming a version that is not out keeps no other from being tried. The installer is
-    // checked as held open, no one else writing it, and so held till it is done.
+    // what it should be: signed as Glance's, of the version that site announced, and newer than this one. No site
+    // is trusted for any of it: an older signed installer under a newer name would take Glance back, and a site
+    // claiming a version that is not out keeps no other from being tried. The installer is checked as held open,
+    // no one else writing it, and so held till it is done.
     let mut chosen = None;
     let mut outcome = State::Failed;
     for (version, url) in &release.installers {
@@ -448,13 +451,17 @@ fn fetch_and_run(release: &Release) -> State {
             note("the installer could not be written");
             return State::Failed;
         };
-        if !by_publisher(&installer, &held) {
-            note(&format!("the installer from {host} is not signed by Glance's publisher; not run"));
+        // Glance's own signature says the version with the bytes. Authenticode's says neither: what the installer
+        // carries says its numbers (a version resource holds nothing else, so a preview's are its release's).
+        let own = own_signature_on(url, version, &held);
+        if !own && !by_publisher(&installer, &held) {
+            note(&format!("the installer from {host} is signed neither by Glance nor by its publisher; not run"));
             outcome = State::Rejected;
             continue;
         }
         let carried = installer_version(&installer);
-        let announced = carried.as_deref().is_some_and(|carried| !newer(carried, version) && !newer(version, carried));
+        let numbers = version.split(['-', '+']).next().unwrap_or(version);
+        let announced = own || carried.as_deref().is_some_and(|carried| !newer(carried, numbers) && !newer(numbers, carried));
         if !announced || !newer(version, env!("CARGO_PKG_VERSION")) {
             note(&format!("the installer from {host} is version {}, not {version}; not run", carried.as_deref().unwrap_or("unknown")));
             outcome = State::Rejected;
@@ -496,6 +503,16 @@ fn fetch_and_run(release: &Release) -> State {
         drop(held);
     });
     State::Ready
+}
+
+/// Whether the installer held as `held`, downloaded from `url`, has Glance's own signature as `version`, in the file
+/// beside it there.
+fn own_signature_on(url: &str, version: &str, held: &std::fs::File) -> bool {
+    let Some(signature) = get(&format!("{url}.sig")) else { return false };
+    let mut bytes = Vec::new();
+    let mut reading = held;
+    let read = reading.read_to_end(&mut bytes).is_ok() && reading.rewind().is_ok();
+    read && crate::own_signature::is_glances(version, &bytes, &signature)
 }
 
 /// `file` opened to be read, as long as it is held: by others too, but neither written nor deleted.
@@ -627,15 +644,49 @@ fn release(body: &[u8]) -> Option<(String, String)> {
     installer.starts_with("https://").then_some((version, installer))
 }
 
-/// Whether version `a` comes after `b`, compared number by number (1.10
-/// after 1.9; a missing number counts as 0).
+/// Whether version `a` comes after `b`: number by number (1.10 after 1.9; a missing number counts as 0), and of the
+/// same numbers, as semantic versions are ordered, a preview before its release and previews by what follows the dash
+/// (0.4.3-preview, 0.4.3-preview.2, 0.4.3). What is not a version comes after nothing.
+///
+/// Glance before 0.4.3-preview read numbers alone and took a version with a dash for no version: such a release is
+/// never offered to it (`an_older_glance_is_offered_no_preview`).
 pub(crate) fn newer(a: &str, b: &str) -> bool {
-    let numbers = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|part| part.parse().ok()).collect() };
-    let (Some(mut a), Some(mut b)) = (numbers(a), numbers(b)) else { return false };
-    let length = a.len().max(b.len());
-    a.resize(length, 0);
-    b.resize(length, 0);
-    a > b
+    let (Some((mut numbers_a, preview_a)), Some((mut numbers_b, preview_b))) = (version_parts(a), version_parts(b)) else { return false };
+    let length = numbers_a.len().max(numbers_b.len());
+    numbers_a.resize(length, 0);
+    numbers_b.resize(length, 0);
+    numbers_a.cmp(&numbers_b).then_with(|| match (preview_a.is_empty(), preview_b.is_empty()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => preview_order(&preview_a, &preview_b),
+    }) == Ordering::Greater
+}
+
+/// A version's numbers, and what follows its dash, field by field (none for a release): nothing, if it is not one.
+fn version_parts(version: &str) -> Option<(Vec<u64>, Vec<&str>)> {
+    let (numbers, preview) = version.split_once('-').map_or((version, None), |(numbers, preview)| (numbers, Some(preview)));
+    let numbers = numbers.split('.').map(|part| part.parse().ok()).collect::<Option<Vec<u64>>>()?;
+    let preview: Vec<&str> = preview.map_or(Vec::new(), |preview| preview.split('.').collect());
+    let well_made = preview.iter().all(|field| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    well_made.then_some((numbers, preview))
+}
+
+/// Two previews' fields in order, as semantic versions have them: numbers by value and before words, words as written,
+/// and the one that ends first before the other.
+fn preview_order(a: &[&str], b: &[&str]) -> Ordering {
+    for (a, b) in a.iter().zip(b) {
+        let order = match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(a), Ok(b)) => a.cmp(&b),
+            (Ok(_), Err(_)) => Ordering::Less,
+            (Err(_), Ok(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => a.cmp(b),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 /// A WinHTTP handle, closed when dropped.
@@ -964,6 +1015,51 @@ mod tests {
         assert!(!newer("0.1.3", "0.1.3"));
         assert!(!newer("0.1", "0.1.0"));
         assert!(!newer("0.1.2", "0.1.3"));
-        assert!(!newer("0.2.0-beta", "0.1.3"));
+    }
+
+    /// In the order a release comes after its previews: each after all before it.
+    #[test]
+    fn a_preview_comes_before_its_release() {
+        let order = ["0.4.2", "0.4.3-preview", "0.4.3-preview.2", "0.4.3-preview.10", "0.4.3-rc", "0.4.3", "0.4.4-preview", "0.4.4", "0.5"];
+        for (at, earlier) in order.iter().enumerate() {
+            assert!(!newer(earlier, earlier), "{earlier}");
+            for later in &order[at + 1..] {
+                assert!(newer(later, earlier), "{later} after {earlier}");
+                assert!(!newer(earlier, later), "{earlier} before {later}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_is_not_a_version_comes_after_nothing() {
+        for not_one in ["", "preview", "0.4.x", "0.4.3-", "0.4.3-preview..2", "0.4.3-预览"] {
+            assert!(!newer(not_one, "0.1"), "{not_one}");
+            assert!(!newer("0.1", not_one), "{not_one}");
+        }
+    }
+
+    /// Glance from 0.4.2 and before, as it compares (its code, kept here): a preview is no version to it, and is never
+    /// offered. What it is told of a later release stands.
+    #[test]
+    fn an_older_glance_is_offered_no_preview() {
+        let older_newer = |a: &str, b: &str| {
+            let numbers = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|part| part.parse().ok()).collect() };
+            let (Some(mut a), Some(mut b)) = (numbers(a), numbers(b)) else { return false };
+            let length = a.len().max(b.len());
+            a.resize(length, 0);
+            b.resize(length, 0);
+            a > b
+        };
+        assert!(!older_newer("0.4.3-preview", "0.4.2"));
+        assert!(!older_newer("0.4.4-preview.2", "0.4.0"));
+        assert!(older_newer("0.4.3", "0.4.2"));
+    }
+
+    /// Every place a version is written says this one: nothing else ties the installer's to the program's.
+    #[test]
+    fn the_installer_and_the_remote_are_of_this_version() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(include_str!("../installer/glance.nsi").contains(&format!("!define VERSION \"{version}\"")));
+        assert!(include_str!("../remote/Cargo.toml").contains(&format!("\nversion = \"{version}\"")));
     }
 }

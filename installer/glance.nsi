@@ -16,7 +16,9 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.4.3"
+!define VERSION "0.4.3-preview"
+; Its numbers alone, all a version resource may hold.
+!searchparse "${VERSION}-" "" NUMBERS "-"
 !define PUBLISHER "lulu-loopp"
 !define EXE "glance.exe"
 !define SENSORS "glance-sensors.exe"
@@ -39,7 +41,7 @@ SetCompressor /SOLID lzma
 ManifestDPIAware true
 BrandingText "${NAME} ${VERSION}"
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUMBERS}.0"
 VIAddVersionKey "ProductName" "${NAME}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"

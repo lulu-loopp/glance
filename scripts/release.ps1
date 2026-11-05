@@ -7,10 +7,13 @@
 .DESCRIPTION
     Needs an `az login` session allowed to sign with the account sign.ps1
     names. Without -Sign it builds the same files unsigned, as anyone can.
-    The installer lands in target\Glance_<version>_x64-setup.exe.
+    The installer lands in target\Glance_<version>_x64-setup.exe. With
+    -UpdateSignature it gets Glance's own signature beside it, which every
+    release must carry (see update-signature.ps1): only the one who holds the
+    key can.
 #>
 [CmdletBinding()]
-param([switch] $Sign)
+param([switch] $Sign, [switch] $UpdateSignature)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -38,6 +41,9 @@ else {
 }
 if ($LASTEXITCODE -ne 0) { throw "makensis exited $LASTEXITCODE" }
 
-Get-ChildItem -LiteralPath (Join-Path $root 'target') -Filter 'Glance_*_x64-setup.exe' |
-    Sort-Object LastWriteTime -Descending | Select-Object -First 1 |
-    ForEach-Object { Write-Host "installer: $($_.FullName)" }
+$version = [regex]::Match((Get-Content -Raw Cargo.toml), '(?m)^version = "([^"]+)"').Groups[1].Value
+$installer = Join-Path $root "target\Glance_${version}_x64-setup.exe"
+Write-Host "installer: $installer"
+if ($UpdateSignature) {
+    & (Join-Path $PSScriptRoot 'update-signature.ps1') -Installer $installer -Version $version
+}

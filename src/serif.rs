@@ -78,13 +78,13 @@ fn is_it(bytes: &[u8]) -> bool {
     sha256(bytes).is_some_and(|digest| hex(&digest) == DIGEST)
 }
 
-fn sha256(bytes: &[u8]) -> Option<[u8; 32]> {
+pub(crate) fn sha256(bytes: &[u8]) -> Option<[u8; 32]> {
     let mut digest = [0u8; 32];
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, bytes, &mut digest) }.ok().ok()?;
     Some(digest)
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

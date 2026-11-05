@@ -108,6 +108,8 @@ mod sensing;
 #[cfg(windows)]
 mod source;
 #[cfg(windows)]
+mod own_signature;
+#[cfg(windows)]
 mod update;
 #[cfg(windows)]
 mod reports;
