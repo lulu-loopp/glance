@@ -462,8 +462,13 @@ fn fetch_and_run(release: &Release) -> State {
         let carried = installer_version(&installer);
         let numbers = version.split(['-', '+']).next().unwrap_or(version);
         let announced = own || carried.as_deref().is_some_and(|carried| !newer(carried, numbers) && !newer(numbers, carried));
-        if !announced || !newer(version, env!("CARGO_PKG_VERSION")) {
+        if !announced {
             note(&format!("the installer from {host} is version {}, not {version}; not run", carried.as_deref().unwrap_or("unknown")));
+            outcome = State::Rejected;
+            continue;
+        }
+        if !newer(version, env!("CARGO_PKG_VERSION")) {
+            note(&format!("the installer from {host} is version {version}, not newer than this one; not run"));
             outcome = State::Rejected;
             continue;
         }
