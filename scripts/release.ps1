@@ -7,18 +7,23 @@
 .DESCRIPTION
     Needs an `az login` session allowed to sign with the account sign.ps1
     names. Without -Sign it builds the same files unsigned, as anyone can.
-    The installer lands in target\Glance_<version>_x64-setup.exe. With
-    -UpdateSignature it gets Glance's own signature beside it, which every
-    release must carry (see update-signature.ps1): only the one who holds the
-    key can.
+    The installer lands in target\Glance_<version>_x64-setup.exe, with Glance's
+    own signature beside it, which every release must carry (see
+    update-signature.ps1): only the one who holds the key can, and without the
+    key this stops before it builds. -WithoutUpdateSignature is for a build that
+    will not be released: installed copies will not take it as an update.
 #>
 [CmdletBinding()]
-param([switch] $Sign, [switch] $UpdateSignature)
+param([switch] $Sign, [switch] $WithoutUpdateSignature)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $root
+
+if (-not $WithoutUpdateSignature -and -not [Environment]::GetEnvironmentVariable('GLANCE_UPDATE_KEY', 'User')) {
+    throw 'GLANCE_UPDATE_KEY is not set: every release carries Glance''s own signature (for a build not to be released, -WithoutUpdateSignature)'
+}
 
 cargo build --release
 if ($LASTEXITCODE -ne 0) { throw "cargo build exited $LASTEXITCODE" }
@@ -44,6 +49,7 @@ if ($LASTEXITCODE -ne 0) { throw "makensis exited $LASTEXITCODE" }
 $version = [regex]::Match((Get-Content -Raw Cargo.toml), '(?m)^version = "([^"]+)"').Groups[1].Value
 $installer = Join-Path $root "target\Glance_${version}_x64-setup.exe"
 Write-Host "installer: $installer"
-if ($UpdateSignature) {
+if (-not $WithoutUpdateSignature) {
     & (Join-Path $PSScriptRoot 'update-signature.ps1') -Installer $installer -Version $version
+    & (Join-Path $PSScriptRoot 'update-signature.ps1') -Installer $installer -Version $version -Check
 }
