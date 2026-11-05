@@ -197,6 +197,10 @@ pub fn run() {
         register_hotkey(hwnd);
         // A first start since an update says so, from the icon now there.
         crate::update::tell_if_updated();
+        // The guide to Glance, shown once (see `settings_window::guide`).
+        if !crate::app().settings.lock().unwrap().guided {
+            crate::ui::settings_window::open_guide();
+        }
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             DispatchMessageW(&msg);

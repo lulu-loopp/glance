@@ -237,6 +237,7 @@ const TOLD_FOR: Duration = Duration::from_millis(900);
 
 /// The thing `opening` asks for looked at (one up goes to it), on its thread (started when first asked).
 pub fn open(opening: Opening) {
+    super::settings_window::guide::saw(super::settings_window::guide::Saw::Looked);
     ask(Asked::Open(opening));
 }
 

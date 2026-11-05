@@ -46,6 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_DPICHANGED, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_ENTERSIZEMOVE, WM_EXITSIZEMOVE, WM_SETCURSOR, WM_SIZE, WNDCLASSEXW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
+use windows::Win32::System::Threading::{CreateWaitableTimerExW, SetWaitableTimer, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::backdrop::Capture;
@@ -67,6 +68,7 @@ use crate::elevation;
 use crate::metrics;
 use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitivity, Settings, Shortcut, EDGES};
 
+pub(crate) mod guide;
 mod layout_page;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
@@ -151,6 +153,8 @@ const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0
 /// A frame that takes longer than this shows as a stutter: noted.
 const SLOW_FRAME: Duration = Duration::from_millis(33);
 const DEVICE_RETRY: Duration = Duration::from_millis(250);
+/// How often the window, hidden (made for the guide, till it shows it), looks again at what it shows.
+const HIDDEN_LOOKED_AT: Duration = Duration::from_millis(250);
 /// The pen of the preview's charts runs this far behind the newest sample
 /// beyond one interval, as the panel's does.
 const PEN_LAG_MS: f64 = 100.0;
@@ -313,6 +317,9 @@ const PERF_LIVE: u32 = WM_APP + 91;
 const TO_WORKBENCH: u32 = WM_APP + 42;
 /// Asked to turn to the page of the reports sent.
 const TO_REPORTS: u32 = WM_APP + 44;
+/// Asked to begin the guide; told that what a step of it asks was done elsewhere (see `guide::saw`).
+const TO_GUIDE: u32 = WM_APP + 46;
+const GUIDE_TOLD: u32 = WM_APP + 47;
 /// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there,
 /// closed the report or opened it again, or closed the window. Kept as told (`THREAD_SEND`, `THREAD_TURN`,
 /// `THREAD_CLOSE`), and seen to as the window is next looked at (see `tick`), outside whatever holds its state then.
@@ -329,7 +336,8 @@ thread_local! {
 /// Whether it is open and not minimized: what it shows can be seen.
 pub fn is_seen() -> bool {
     let hwnd = WINDOW.load(Ordering::Relaxed);
-    hwnd != 0 && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
+    // (Hidden while made for the guide, till it shows it: see `guide`.)
+    hwnd != 0 && unsafe { IsWindowVisible(HWND(hwnd as *mut _)) }.as_bool() && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Brings the settings window up, from any thread: raised if it is open, else made, by the panel's thread, poured
@@ -379,12 +387,20 @@ pub fn open_at_reports(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Reports), place });
 }
 
+/// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
+/// and shown by the guide as it comes up.
+pub fn open_guide() {
+    open_at(Asked { to: Some(To::Guide), place: None });
+}
+
 /// A page the window is opened at, other than the one last shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum To {
     Overlay,
     Workbench,
     Reports,
+    /// The guide begun (see `guide`).
+    Guide,
 }
 
 impl Asked {
@@ -402,6 +418,7 @@ impl To {
             Some(To::Overlay) => 1,
             Some(To::Workbench) => 2,
             Some(To::Reports) => 3,
+            Some(To::Guide) => 4,
         }
     }
 
@@ -410,6 +427,7 @@ impl To {
             1 => Some(To::Overlay),
             2 => Some(To::Workbench),
             3 => Some(To::Reports),
+            4 => Some(To::Guide),
             _ => None,
         }
     }
@@ -423,10 +441,15 @@ fn open_at(asked: Asked) {
             Some(To::Overlay) => Some(TO_OVERLAY),
             Some(To::Workbench) => Some(TO_WORKBENCH),
             Some(To::Reports) => Some(TO_REPORTS),
+            Some(To::Guide) => Some(TO_GUIDE),
             None => None,
         };
         if let Some(message) = message {
             let _ = unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) };
+        }
+        // (The guide brings the window up itself as it comes up, under its dialog.)
+        if to == Some(To::Guide) {
+            return;
         }
         return show(None);
     }
@@ -572,6 +595,14 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     made?;
     let mut msg = MSG::default();
     let mut again = None;
+    // What the next frame is waited on with, to the moment it is due: a wait of whole milliseconds rounds to the
+    // system's tick (15.6 ms), and a frame asked for every 15 ms came every 31.
+    let frame_timer = unsafe {
+        CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0)
+            .or_else(|_| CreateWaitableTimerExW(None, None, 0, TIMER_ALL_ACCESS.0))
+            .ok()
+            .map(|timer| windows_core::Owned::new(timer))
+    };
     loop {
         while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
             if msg.message == WM_QUIT {
@@ -591,7 +622,15 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
         let Some(due) = tick(Instant::now()) else { return Some(again) };
         if !due.is_zero() {
             let ms = due.as_micros().div_ceil(1000).min(u32::MAX as u128) as u32;
-            unsafe { MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT) };
+            match frame_timer.as_deref().copied().filter(|_| due < Duration::from_secs(1)) {
+                Some(timer) => unsafe {
+                    let _ = SetWaitableTimer(timer, &-((due.as_nanos() / 100) as i64).max(1), 0, None, None, false);
+                    MsgWaitForMultipleObjects(Some(&[timer]), false, ms, QS_ALLINPUT);
+                },
+                None => unsafe {
+                    MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
+                },
+            }
         }
     }
 }
@@ -744,10 +783,16 @@ fn tick(now: Instant) -> Option<Duration> {
             ui.relabel();
         }
         ui.follow_when_free();
-        if now >= ui.next_frame {
+        // (The window left as it is under the guide's dialog, the guide alone drawn.)
+        ui.take_in();
+        let held = ui.guide_holds_window();
+        if now >= ui.next_frame && !held {
             ui.draw(now);
+        } else if now >= ui.guide_frame {
+            ui.draw_guide(now);
         }
-        ui.next_frame.saturating_duration_since(now)
+        let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
+        next.saturating_duration_since(now)
     })
 }
 
@@ -1099,6 +1144,9 @@ enum Field {
     StationKeep,
     StationCopy,
     StationAfterDrag,
+    /// What Recent files lists from: the drives, each on or off, or only the folders chosen, whatever drive they are
+    /// on (see `Settings::recent_only`). Each kept as the other is chosen.
+    RecentScope,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
@@ -1240,8 +1288,6 @@ enum Switch {
     HeatAlert,
     /// The phone remote.
     Remote,
-    /// Whether Recent files lists only the files in the folders chosen (see `Settings::recent_only`).
-    RecentOnly,
     /// Whether the remote sets the lights: the program that does, fetched or not.
     RemoteLights,
     /// Whether the remote's lights are set with an administrator's rights (what the memory's need).
@@ -1318,6 +1364,7 @@ enum Target {
     More,
     /// Asks for a newer release now.
     CheckNow,
+    Guide,
     Diagnostics,
     Update,
     Uninstall,
@@ -1391,6 +1438,8 @@ enum Row {
     Shortcut(Keys),
     /// This Glance's version, how the last asking went, and asking now.
     Version,
+    /// Shows the guide again (see `guide`).
+    Guide,
     Diagnostics,
     /// The reports this PC sent, how many and with how much unread: opens their page.
     MyReports,
@@ -1745,11 +1794,21 @@ struct Ui {
     layers: PanelLayers,
     last_frame: Instant,
     next_frame: Instant,
+    /// When the guide is next drawn, apart from the window (see `guide`).
+    guide_frame: Instant,
     /// The client size it was last drawn at (physical pixels), if it has been drawn.
     drawn_size: Option<(u32, u32)>,
+    /// Something it shows taken in since it was last drawn (see `take_in`).
+    taken_unseen: bool,
     /// The largest panel size at which the panel still grows on the screen the preview shows (see
     /// `arrange::largest`): past it a larger size changed the figure and nothing else.
     largest: f32,
+    /// The guide to Glance, while it is up (see `guide`).
+    guide: Option<guide::Guide>,
+    /// Where the layout's editor was last drawn (window DIPs), for the guide's step on it to point at.
+    editor_at: Option<Rect>,
+    /// Where the layout's components were last drawn (window DIPs), for the guide's tip to stay off them.
+    library_at: Option<Rect>,
 }
 
 impl Lives for Ui {
@@ -1989,8 +2048,13 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
+            guide_frame: Instant::now(),
             drawn_size: None,
+            taken_unseen: false,
             largest: SIZES.1,
+            guide: None,
+            editor_at: None,
+            library_at: None,
         };
         crate::perf::mark(|| "settings state".into());
         ui.raise_more();
@@ -2007,7 +2071,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         ui.draw(Instant::now());
         let gfx = ui.gfx.clone();
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
-        if shown.is_none() {
+        // (Made for the guide: shown by it as it comes up, see `guide`.)
+        if shown.is_none() || to == Some(To::Guide) {
             return Some(hwnd);
         }
         // Poured out of its place: hidden as it is shown, then pictured (see `genie`).
@@ -2090,6 +2155,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         TO_REPORTS => {
             to_reports();
+            LRESULT(0)
+        }
+        TO_GUIDE => {
+            with_ui(|ui| ui.turn_as_asked(To::Guide));
+            LRESULT(0)
+        }
+        GUIDE_TOLD => {
+            with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
         }
         THREAD_TOLD => {
@@ -2402,21 +2475,23 @@ impl Ui {
             (Page::Layout, _) => rows.extend([
                 Row::Library,
                 Row::Group(pick(self.lang, "呼出方式", "How it opens")),
-                Row::Choice(Field::Anchor),
                 Row::Choice(Field::Push),
                 Row::Choice(Field::CloseDelay),
+                Row::Choice(Field::Anchor),
+                Row::Choice(Field::OverFullscreen),
+                Row::Switch(Switch::TearOff),
+                Row::Group(pick(self.lang, "快捷键", "Shortcuts")),
                 Row::Shortcut(Keys::Panel),
                 Row::Shortcut(Keys::Search),
                 Row::Shortcut(Keys::Preview),
-                Row::Choice(Field::OverFullscreen),
-                Row::Switch(Switch::TearOff),
             ]),
             (Page::Look, _) => {
-                rows.extend([Row::Skins, Row::Slider(Field::PanelSize), Row::Choice(Field::Theme)]);
+                rows.extend([Row::Skins, Row::Choice(Field::Theme)]);
                 // (Only a skin that shows what is behind it has it to show live.)
                 if Skin::named(&self.settings.skin).sees_backdrop() {
                     rows.push(Row::Switch(Switch::Live));
                 }
+                rows.push(Row::Slider(Field::PanelSize));
             }
             (Page::Monitor, tab) => {
                 rows.push(Row::Tabs);
@@ -2437,12 +2512,16 @@ impl Ui {
             }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
-                rows.extend(super::prefs::items("lyrics").iter().map(|item| Row::Element(item.name)));
-                rows.push(Row::Choice(Field::MusicGround));
                 // (Only where NetEase is installed.)
                 if self.netease.is_some() {
                     rows.push(Row::NetEase);
                 }
+                rows.push(Row::Group(pick(self.lang, "显示内容", "What it shows")));
+                rows.push(Row::Choice(Field::MusicGround));
+                // (Its elements as they stand in the widget, top to bottom.)
+                let mut elements: Vec<&'static str> = super::prefs::items("lyrics").iter().map(|item| item.name).collect();
+                elements.sort_by_key(|name| ["cover", "title", "translation", "spectrum", "controls"].iter().position(|at| at == name));
+                rows.extend(elements.into_iter().map(Row::Element));
                 rows.push(Row::Note(pick(
                     self.lang,
                     "在线查找歌词时，会将歌名发送至网易云音乐、QQ 音乐、酷狗或 LRCLIB。本地歌曲优先使用文件内嵌的歌词。同步歌词需要播放器提供播放进度。",
@@ -2461,17 +2540,24 @@ impl Ui {
             (Page::General, _) => {
                 rows.push(Row::Choice(Field::Language));
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
-                // The switches together, then the buttons.
-                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden), Row::Switch(Switch::Updates), Row::Version]);
+                rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden)]);
+                rows.push(Row::Group(pick(self.lang, "更新", "Updates")));
+                rows.push(Row::Version);
                 if update::available().is_some() {
                     rows.push(Row::Update);
                 }
+                rows.push(Row::Switch(Switch::Updates));
+                rows.push(Row::Group(pick(self.lang, "帮助与反馈", "Help and feedback")));
+                rows.push(Row::Guide);
                 rows.push(Row::Diagnostics);
                 if !self.followed.is_empty() {
                     rows.push(Row::MyReports);
                 }
                 if self.uninstaller.is_some() {
+                    rows.push(Row::Group(pick(self.lang, "卸载与退出", "Uninstall and quit")));
                     rows.push(Row::Uninstall);
+                } else {
+                    rows.push(Row::Group(pick(self.lang, "退出", "Quit")));
                 }
                 rows.push(Row::Quit);
             }
@@ -2507,16 +2593,12 @@ impl Ui {
                 }
             }
             Tab::Overlay => {
-                rows.extend([
-                    Row::Choice(Field::OverlayShow),
-                    Row::Slider(Field::OverlaySize),
-                    Row::Slider(Field::OverlayClear),
-                    Row::Choice(Field::OverlayLayout),
-                ]);
+                rows.extend([Row::Choice(Field::OverlayShow), Row::Choice(Field::OverlayLayout)]);
                 // Rows only for a strip.
                 if self.settings.overlay.layout == Layout::Strip {
                     rows.push(Row::Choice(Field::OverlayRows));
                 }
+                rows.extend([Row::Slider(Field::OverlaySize), Row::Slider(Field::OverlayClear)]);
                 // What it shows, group by group, as the panel's modules are.
                 // (A battery's only on a machine that has shown one.)
                 let battery = crate::app().controller.seen.lock().unwrap().battery;
@@ -2532,16 +2614,17 @@ impl Ui {
         }
     }
 
-    /// Recent files' rows, while it is on: each drive it reads (listed or left out), whether it lists only the folders
-    /// chosen, and while it does, those folders and the row that adds more, and the folders not listed, while there
-    /// are any.
+    /// Recent files' rows, while it is on: what it lists from (see `Field::RecentScope`), and by drive, each drive it
+    /// reads (listed or left out), else the folders chosen and the row that adds more; then the folders not listed,
+    /// while there are any.
     fn recent_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Group(pick(self.lang, "最近文件", "Recent files")));
-        rows.extend(drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().map(|drive| Row::Drive(drive.volume)));
-        rows.push(Row::Switch(Switch::RecentOnly));
+        rows.push(Row::Choice(Field::RecentScope));
         if self.settings.recent_only {
             rows.extend(self.settings.recent_folders.iter().cloned().map(Row::RecentFolder));
             rows.push(Row::AddRecentFolder);
+        } else {
+            rows.extend(drives_offered(&self.drives, &self.settings.recent_hidden_drives).into_iter().map(|drive| Row::Drive(drive.volume)));
         }
         if !self.settings.recent_hidden.is_empty() {
             rows.push(Row::Choice(Field::StationHidden));
@@ -2628,6 +2711,7 @@ impl Ui {
                 self.followed = crate::reports::list();
                 self.turn_to(Page::Reports);
             }
+            To::Guide => self.begin_guide(),
         }
     }
 
@@ -3031,9 +3115,9 @@ impl Ui {
             }
             &Row::Shortcut(which) => {
                 let (name, what, taken) = match which {
-                    Keys::Panel => (p("快捷键", "Shortcut"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
-                    Keys::Search => (p("搜索快捷键", "Search shortcut"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
-                    Keys::Preview => (p("预览快捷键", "Preview shortcut"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
+                    Keys::Panel => (p("面板", "Panel"), p("打开或收起面板", "Opens and closes the panel"), crate::tray::hotkey_taken()),
+                    Keys::Search => (p("搜索", "Search"), p("在任意位置打开全局搜索", "Opens search from anywhere"), crate::tray::search_hotkey_taken()),
+                    Keys::Preview => (p("预览", "Preview"), p("预览指针所指的项目或搜索中选中的结果", "Previews the item under the pointer, or the result picked in search"), crate::ui::look::key_taken()),
                 };
                 let recording = self.recording == Some(which);
                 let shortcut = self.shortcut(which);
@@ -3181,6 +3265,11 @@ impl Ui {
                 p("所选文件夹的子文件夹一并列出，不列出的文件夹除外", "Their subfolders are listed too, but for folders not listed"),
                 vec![(if self.choosing_folders.is_some() { (p("选择中", "Choosing"), Target::AddRecentFolder, Button::Quiet) } else { (p("选择", "Choose"), Target::AddRecentFolder, Button::Plain) })],
             ),
+            Row::Guide => (
+                p("使用引导", "Guide"),
+                p("再次查看如何呼出面板、调整布局与使用快捷键", "Shows again how to open panels, arrange them and use the shortcuts"),
+                vec![(p("查看", "Show"), Target::Guide, Button::Plain)],
+            ),
             Row::Quit => (
                 p("退出 Glance", "Quit Glance"),
                 p("面板与托盘图标将一并关闭", "Closes the panels and the tray icon"),
@@ -3319,6 +3408,7 @@ impl Ui {
             ),
             Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
             Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
+            Field::RecentScope => (pick(lang, "列出范围", "Listed from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
                 vec!["75 °C".into(), "85 °C".into(), "95 °C".into()],
@@ -3356,6 +3446,7 @@ impl Ui {
             Field::StationKeep => settings.station.keep_days = STATION_DAYS[index],
             Field::StationCopy => settings.station.always_copy = index == 1,
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
+            Field::RecentScope => settings.recent_only = index == 1,
         }
         self.save();
         match field {
@@ -3511,6 +3602,11 @@ impl Ui {
                 "封面为模糊的专辑封面，跟随外观时与其他组件的底色、文字颜色一致，无背景时文字加描边",
                 "The cover blurred, the skin's ground and ink as every other widget has, or none with its words edged",
             )),
+            Field::RecentScope => Some(pick(
+                self.lang,
+                "选择指定文件夹时，仅列出下列文件夹及其子文件夹中的文件",
+                "Chosen folders lists only the files in the folders below and their subfolders",
+            )),
             Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
             Field::OverFullscreen => Some(pick(
                 self.lang,
@@ -3586,11 +3682,6 @@ impl Ui {
                 )),
                 self.remote_screens,
             ),
-            Switch::RecentOnly => (
-                p("仅列出指定文件夹", "Only these folders"),
-                Some(p("开启后，仅列出下列文件夹及其子文件夹中的文件", "When on, only files in the folders below and their subfolders are listed")),
-                self.settings.recent_only,
-            ),
             Switch::Remote => {
                 let hint = if self.remote_there {
                     p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
@@ -3635,7 +3726,6 @@ impl Ui {
             Switch::Updates => settings.check_updates ^= true,
             Switch::HeatAlert => settings.heat_alert ^= true,
             Switch::TrayHidden => settings.tray_hidden ^= true,
-            Switch::RecentOnly => settings.recent_only ^= true,
             Switch::Startup if !self.may_autostart && !self.autostart => {
                 self.explain_no_autostart();
                 return;
@@ -4251,6 +4341,7 @@ impl Ui {
     }
 
     fn press(&mut self, x: f32, y: f32) {
+        self.stop_drag();
         self.pointer = Some((x, y));
         if self.page == Page::Phone && self.press_phone(x, y) {
             return;
@@ -4467,6 +4558,7 @@ impl Ui {
             Target::Diagnostics if self.reporting.is_none() => self.reporting = Some((ReportFor::Copy, std::thread::spawn(crate::diagnostics::report))),
             Target::Diagnostics => {}
             Target::Quit => crate::quit(),
+            Target::Guide => self.begin_guide(),
             // Put together first (see `tick`), then shown whole: nothing leaves this PC that was not read and agreed to.
             Target::SendReport if self.sending.is_none() && self.reporting.is_none() => self.reporting = Some((ReportFor::Send, std::thread::spawn(crate::diagnostics::report))),
             Target::SendReport => {}
@@ -4551,6 +4643,7 @@ impl Ui {
                     (None, crate::netease::Installed::No) => vec![Target::NetEase(NetEaseWork::Install)],
                 },
                 Row::Quit => vec![Target::Quit],
+                Row::Guide => vec![Target::Guide],
                 Row::Pair => vec![Target::Pair(false), Target::Pair(true), Target::GetApp],
                 Row::WebPage => vec![Target::OpenPage],
                 Row::Phone(id, _) => vec![Target::Unpair(id)],
@@ -4574,6 +4667,7 @@ impl Ui {
     /// module, Escape closes the window. Returns whether the key was used;
     /// any other combination with Alt is left to the system.
     fn key(&mut self, key: VIRTUAL_KEY, shift: bool, alt: bool, repeat: bool) -> bool {
+        self.stop_drag();
         if let Some(which) = self.recording {
             self.take_shortcut(which, key);
             return true;
@@ -4692,7 +4786,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
@@ -4836,11 +4930,15 @@ impl Ui {
         true
     }
 
-    fn draw(&mut self, now: Instant) {
-        let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
-        // Desktops read meanwhile: the one shown, if it waited for it; else kept (unless kept already); the map's in
-        // place, if it is still of that screen as it is.
+    /// What has come in since it last looked, taken in: desktops read meanwhile (the one shown, if it waited for it;
+    /// else kept, unless kept already; the map's in place, if it is still of that screen as it is), and the screen the
+    /// preview shows, as it is now. On every turn of the loop, the window drawn or not (held under the guide, whose
+    /// small desktops are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
+    fn take_in(&mut self) {
         while let Ok(read) = self.read.1.try_recv() {
+            // (Drawn with it now, as far as it is drawn: see `guide_holds_window`.)
+            self.taken_unseen = true;
+            self.next_frame = Instant::now();
             match read {
                 Read::Stage(stage) => {
                     let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
@@ -4869,6 +4967,12 @@ impl Ui {
         if let Some(screen) = self.stage_screen() {
             self.show_screen(&screen);
         }
+    }
+
+    fn draw(&mut self, now: Instant) {
+        let _timed = crate::perf::Timed::start("settings frame", || format!("{:?} {:?}", self.page, self.tab));
+        self.take_in();
+        self.taken_unseen = false;
         crate::playing::show_in_settings(matches!(self.page, Page::Music | Page::Layout));
         self.sources = crate::playing::music_players();
         if let Some(chosen) = self.settings.music_source.as_ref().filter(|chosen| !self.sources.iter().any(|(id, _)| *id == chosen.id)) {
@@ -4887,6 +4991,12 @@ impl Ui {
         let size = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
         if !self.follow_device() {
             self.next_frame = now + DEVICE_RETRY;
+            return;
+        }
+        // Hidden (made for the guide, about to be shown by it): only the guide drawn (see `guide`).
+        if !unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            self.next_frame = now + HIDDEN_LOOKED_AT;
+            self.draw_guide(now);
             return;
         }
         self.shown();
@@ -4918,6 +5028,7 @@ impl Ui {
             return;
         }
         self.gfx.sweep();
+        self.guide_saw_window_drawn();
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if self.by_hand {
             self.was_sized = true;
@@ -4933,11 +5044,14 @@ impl Ui {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
         };
+        self.draw_guide(now);
     }
 
     /// Draws everything, and returns how fast the preview's charts move
     /// (physical pixels a second).
     fn paint(&mut self, frame: &Frame, now: Instant) -> Option<f32> {
+        // (The guide's demonstration on the layout page moved on, where what it moves to is as last drawn.)
+        self.play_drag(now);
         let palette = self.palette.clone();
         let (width, height) = self.client();
         if !self.mica {
@@ -4960,6 +5074,7 @@ impl Ui {
             self.paint_list(frame, &palette, now, height);
         }
         unsafe { frame.dc.PopAxisAlignedClip() };
+        self.paint_played_pointer(frame);
         creep
     }
 
@@ -5474,7 +5589,7 @@ impl Ui {
 
                     }
                 }
-                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -6141,7 +6256,7 @@ impl Ui {
         // open from.
         let prefs = self.prefs.clone().holding(self.previewed());
         let edge = self.preview_edge();
-        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false).0
+        self.panel_on_stage(frame, area, Some(edge), Some(&prefs), false, 1.0).0
     }
 
     /// How the stage is shown in `area` with a panel `pw` wide (stage DIPs) slid out from `edge`: how large a stage
@@ -6191,11 +6306,12 @@ impl Ui {
         Rect { x: left, y: top, w: right - left, h: bottom - top }
     }
 
-    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it, running
-    /// live: the whole screen (`whole`), else the whole height of it
+    /// The stage's desktop in `area` and, where `edge` is one, the panel showing `prefs` slid out from it (as far as
+    /// `out`: 1 all the way, 0 just past the edge), running live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
-    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool) -> (Option<f32>, Rect) {
+    #[allow(clippy::too_many_arguments)]
+    fn panel_on_stage(&mut self, frame: &Frame, area: Rect, edge: Option<Edge>, prefs: Option<&Prefs>, whole: bool, out: f32) -> (Option<f32>, Rect) {
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
@@ -6233,10 +6349,12 @@ impl Ui {
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
+        // (Slid in, as far past the edge as its shadow reaches.)
+        let away = 1.0 - out;
         let pos = match edge {
-            Edge::Left => (inset, along(sh / 2.0, ph, sh)),
-            Edge::Right => (sw - inset - pw, along(sh / 2.0, ph, sh)),
-            Edge::Top => (along(sw / 2.0, pw, sw), inset),
+            Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+            Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+            Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
         };
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.

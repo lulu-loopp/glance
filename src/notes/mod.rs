@@ -33,8 +33,21 @@ struct Event(windows::Win32::Foundation::HANDLE);
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
+impl Event {
+    /// One unset, set again as it is waited on.
+    fn new() -> Event {
+        Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event"))
+    }
+}
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
 fn again() -> &'static Event {
-    AGAIN.get_or_init(|| Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event")))
+    AGAIN.get_or_init(Event::new)
 }
 
 /// A note's link followed, `to` where it goes, in the note's folder `folder`: a web address (or an e-mail's) in what
@@ -255,7 +268,7 @@ fn follow() {
         }
         // Read again as the folder changes (by Glance, another program, a sync), or as Glance asks.
         if let Some(watch) = &mut watched {
-            if !watch.wait() {
+            if !watch.wait(again()) {
                 watched = None;
             }
         } else {
@@ -410,7 +423,7 @@ impl Watch {
         let wide = windows::core::HSTRING::from(path.as_os_str());
         let changed = unsafe { FindFirstChangeNotificationW(&wide, false, what) }.ok()?;
         let above = path.parent().filter(|_| path == notes).and_then(|above| unsafe { FindFirstChangeNotificationW(&windows::core::HSTRING::from(above.as_os_str()), false, FILE_NOTIFY_CHANGE_DIR_NAME) }.ok());
-        let asked = Event(unsafe { windows::Win32::System::Threading::CreateEventW(None, false, false, None) }.expect("an event"));
+        let asked = Event::new();
         let holding = Holding { changed, above, folder: None };
         let leaving = Box::new(Leaving { asked, now: Mutex::new(Now { holding: Some(holding), waiting: false, stage: Stage::Held }), moved: std::sync::Condvar::new() });
         let heard = hear_removal(&wide, &leaving);
@@ -422,17 +435,17 @@ impl Watch {
         self.path == path && self.id.is_some() && crate::elevation::folder_id(path) == self.id
     }
 
-    /// Till the folder changes, or Glance asks for it to be read again, or its drive is asked to be taken out; whether
-    /// it is still followed (followed again before it is read, see `follow`: one gone, or renamed and another made in
+    /// Till the folder changes, or `asked` is set (Glance asks for it to be read again: see `again`), or its drive is
+    /// asked to be taken out; whether it is still followed (followed again before it is read, see `follow`: one gone, or renamed and another made in
     /// its place, is not). Its drive asked to be taken out (now, or as the notes were read): let go of, and not
     /// followed, once Windows has taken it out or given up (it stays, to be followed again).
-    fn wait(&mut self) -> bool {
+    fn wait(&mut self, asked: &Event) -> bool {
         use windows::Win32::Foundation::WAIT_OBJECT_0;
         use windows::Win32::System::Threading::{WaitForMultipleObjects, INFINITE};
         let handles = {
             let mut now = self.leaving.now.lock().unwrap();
             let Some(holding) = &now.holding else { return self.settled(now) };
-            let mut handles = vec![again().0, self.leaving.asked.0, holding.changed];
+            let mut handles = vec![asked.0, self.leaving.asked.0, holding.changed];
             handles.extend(holding.above);
             now.waiting = true;
             handles
@@ -516,15 +529,21 @@ mod tests {
         let notes = root.join("Glance Notes");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
+        // Waited on as Glance's notes' own thread waits, asked only by this test: Glance's notes asked to be read again
+        // meanwhile (as other tests do, all at once) tells nothing of this folder.
+        let asked = Event::new();
         let told_within = |watch: &mut Watch, change: Box<dyn FnOnce() + Send>| {
             let changing = std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(150));
                 change();
             });
+            read_again();
             let began = std::time::Instant::now();
-            assert!(watch.wait(), "followed still");
+            assert!(watch.wait(&asked), "followed still");
+            // (Timed as the wait ends, not as the change is over.)
+            let told = began.elapsed();
             changing.join().unwrap();
-            began.elapsed()
+            told
         };
         // Not there: the folder above it followed, for it to come.
         let mut above = Watch::start(root.clone(), &notes).expect("followed");
@@ -576,8 +595,11 @@ mod tests {
                 std::fs::write(elsewhere.join("a.md"), "a note").unwrap();
             }
         });
+        // (Asked only by this test, as above: Glance's notes asked to be read again meanwhile tell nothing of it.)
+        let asked = Event::new();
+        read_again();
         let began = std::time::Instant::now();
-        watch.wait();
+        watch.wait(&asked);
         let told = began.elapsed();
         changing.join().unwrap();
         drop(watch);
@@ -601,7 +623,8 @@ mod tests {
             let (ended, end) = std::sync::mpsc::channel();
             let leaving = &*watch.leaving as *const Leaving as usize;
             std::thread::spawn(move || {
-                while watch.wait() {}
+                let asked = Event::new();
+                while watch.wait(&asked) {}
                 let _ = ended.send(watch.leaving.now.lock().unwrap().holding.is_none());
                 drop(watch);
             });
@@ -637,7 +660,7 @@ mod tests {
             assert!(now.holding.is_none() && now.stage == Stage::LetGo);
         }
         tell(leaving, CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED);
-        assert!(!watch.wait());
+        assert!(!watch.wait(&Event::new()));
         drop(watch);
         let _ = std::fs::remove_dir_all(&notes);
     }
@@ -657,7 +680,8 @@ mod tests {
         assert!(watch.heard.is_some(), "its drive's removal heard");
         let (ended, end) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            while watch.wait() {}
+            let asked = Event::new();
+            while watch.wait(&asked) {}
             let _ = ended.send(());
         });
         std::thread::sleep(Duration::from_millis(300));
