@@ -31,7 +31,10 @@ pub const UNREAD: &str = "settings.unread.json";
 /// reads whole. Where it does not, every part that does is kept (see `salvaged`).
 fn read(text: &str) -> (Settings, Vec<String>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else { return (Settings::default(), vec!["all of it (not JSON)".to_string()]) };
-    read_value(value, &Settings::default())
+    // What a file that does not say reads as, not the defaults of one not there: not saying is how settings from before
+    // are known (see `carry_over`), in a file that does not read whole too.
+    let unsaid = serde_json::from_value(serde_json::json!({})).unwrap_or_default();
+    read_value(value, &unsaid)
 }
 
 /// The settings `value` holds, and the parts of it left out (see `salvaged`), each as `from` has it.
@@ -1383,6 +1386,27 @@ mod tests {
         assert_eq!(wide.save(&dir).unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
         assert!(!saved(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Settings from before the workbench had columns of its own, with a part that does not read: what does read is
+    /// carried over as it is from a whole file, the workbench keeping the columns it showed, on the second start too;
+    /// and a file written since is not carried over again.
+    #[test]
+    fn a_damaged_file_from_before_is_carried_over_too() {
+        let (mut first, left_out) = read(r#"{ "columns": 3, "interval_ms": "not a number" }"#);
+        assert_eq!(left_out, ["interval_ms"]);
+        first.carry_over();
+        assert_eq!((first.columns, first.workbench_columns), (Some(3), Some(3)));
+        assert!(first.places.is_some());
+        first.set_columns(Part::Workbench, Some(1));
+        let (mut second, left_out) = read(&serde_json::to_string(&first).unwrap());
+        assert!(left_out.is_empty(), "{left_out:?}");
+        second.carry_over();
+        assert_eq!((second.columns, second.workbench_columns), (Some(3), Some(1)));
+        // One of today's, damaged, is not taken to be from before.
+        let (mut today, _) = read(r#"{ "columns": 3, "workbench_columns": 2, "columns_apart": true, "interval_ms": "not a number" }"#);
+        today.carry_over();
+        assert_eq!((today.columns, today.workbench_columns), (Some(3), Some(2)));
     }
 
     /// What Recent files lists, from settings kept before it could be told (0.4's: folders not listed alone) and as
