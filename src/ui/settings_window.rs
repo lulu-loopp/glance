@@ -2378,11 +2378,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
-/// Sets `field`, a slider's, to `value` in `settings`: the panel's size, on the screen named `screen` (see
+/// Sets `field`, a slider's, to `value` in `settings`: `part`'s panel's size, on the screen named `screen` (see
 /// `Settings::size_panel`).
-fn put_slider(settings: &mut Settings, field: Field, value: f32, screen: Option<&str>) {
+fn put_slider(settings: &mut Settings, field: Field, value: f32, part: Part, screen: Option<&str>) {
     match field {
-        Field::PanelSize => settings.size_panel(screen, value),
+        Field::PanelSize => settings.size_panel(part, screen, value),
         Field::OverlayClear => settings.overlay.clear = value,
         _ => settings.overlay.size = value,
     }
@@ -2491,13 +2491,14 @@ impl Ui {
                 if Skin::named(&self.settings.skin).sees_backdrop() {
                     rows.push(Row::Switch(Switch::Live));
                 }
-                rows.push(Row::Slider(Field::PanelSize));
             }
             (Page::Monitor, tab) => {
                 rows.push(Row::Tabs);
                 self.monitor_rows(&mut rows, tab);
             }
             (Page::Workbench, _) => {
+                rows.push(Row::Choice(Field::Columns));
+                rows.push(Row::Slider(Field::PanelSize));
                 for entry in &self.prefs.workbench {
                     let id = format!("{WORKBENCH}{}", entry.id);
                     rows.push(Row::Module(id.clone()));
@@ -2570,6 +2571,7 @@ impl Ui {
         match tab {
             Tab::Shown => {
                 rows.push(Row::Choice(Field::Columns));
+                rows.push(Row::Slider(Field::PanelSize));
                 let module = |rows: &mut Vec<Row>, id: &str| {
                     rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
@@ -3357,7 +3359,7 @@ impl Ui {
             Field::Columns => (
                 pick(lang, "面板列数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
-                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns),
+                [None, Some(1), Some(2), Some(3), Some(4)].iter().position(|&c| c == settings.columns_of(self.previewed())),
             ),
             Field::Push => (
                 pick(lang, "推边缘呼出", "Push into the edge"),
@@ -3418,6 +3420,7 @@ impl Ui {
     }
 
     fn choose(&mut self, field: Field, index: usize) {
+        let part = self.previewed();
         let (settings, prefs) = (&mut self.settings, &mut self.prefs);
         match field {
             Field::Theme => prefs.theme = [ThemePref::System, ThemePref::Light, ThemePref::Dark, ThemePref::Backdrop][index],
@@ -3429,7 +3432,7 @@ impl Ui {
             Field::MusicSource => {
                 settings.music_source = index.checked_sub(1).and_then(|at| self.sources.get(at)).map(|(id, name)| crate::settings::MusicSource { id: id.clone(), name: name.clone() });
             }
-            Field::Columns => settings.columns = [None, Some(1), Some(2), Some(3), Some(4)][index],
+            Field::Columns => settings.set_columns(part, [None, Some(1), Some(2), Some(3), Some(4)][index]),
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
@@ -3519,9 +3522,10 @@ impl Ui {
         self.set_shortcut(which, Some(shortcut));
     }
 
-    /// How large the panel is drawn on the screen the window shows (see `Settings::panel_size_on`).
+    /// How large the panel of what the preview shows is drawn on the screen the window shows (see
+    /// `Settings::panel_size_on`).
     fn panel_size(&self) -> f32 {
-        self.settings.panel_size_on(self.stage.screen.as_deref())
+        self.settings.panel_size_on(self.previewed(), self.stage.screen.as_deref())
     }
 
     /// A slider's name, its least and most values, its step, and its value.
@@ -3562,9 +3566,9 @@ impl Ui {
         if value == now {
             return;
         }
-        let screen = self.stage.screen.clone();
-        put_slider(&mut self.settings, field, value, screen.as_deref());
-        crate::app().preview(|live| put_slider(live, field, value, screen.as_deref()));
+        let (part, screen) = (self.previewed(), self.stage.screen.clone());
+        put_slider(&mut self.settings, field, value, part, screen.as_deref());
+        crate::app().preview(|live| put_slider(live, field, value, part, screen.as_deref()));
         self.next_frame = Instant::now();
     }
 
@@ -3573,9 +3577,9 @@ impl Ui {
     fn keep_slider(&mut self, field: Field) {
         let value = self.slider(field).4;
         let mut now = None;
-        let screen = self.stage.screen.clone();
+        let (part, screen) = (self.previewed(), self.stage.screen.clone());
         crate::app().change(|held| {
-            put_slider(held, field, value, screen.as_deref());
+            put_slider(held, field, value, part, screen.as_deref());
             now = Some(held.clone());
         });
         self.take(now.unwrap());
@@ -6343,9 +6347,10 @@ impl Ui {
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
-        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), self.settings.columns, SIZES.1, rail);
+        let columns = self.settings.columns_of(self.previewed());
+        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), columns, SIZES.1, rail);
         let size = self.panel_size().clamp(SIZES.0, SIZES.1);
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), self.settings.columns, size, rail);
+        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);

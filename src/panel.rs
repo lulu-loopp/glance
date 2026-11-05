@@ -43,7 +43,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::mouse::{cursor_position, cursor_showing, monitor_at, read_mouse, Contact, CORNER_EXCLUSION};
 use crate::reading::{Sample, StaticInfo};
 use crate::overlay::{Choice as OverlayChoice, Overlay};
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, Part, Settings, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlaySettings, PanelAt, PanelSizes, Part, Settings, EDGES};
 use crate::ui::backdrop::Capture;
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::arrange::{self, Form, GAP};
@@ -163,10 +163,13 @@ struct Config {
     live: bool,
     tear_off: bool,
     anchor: Anchor,
+    /// The readings' panel's columns and the workbench's.
     columns: Option<usize>,
-    /// How large the panel is drawn on a screen not sized apart, and on each sized apart (see `Settings::panel_sizes`).
+    workbench_columns: Option<usize>,
+    /// How large a panel is drawn where it was not sized, and each component's on each screen it was (see
+    /// `Settings::part_sizes`).
     size: f32,
-    sizes: std::collections::BTreeMap<String, f32>,
+    sizes: PanelSizes,
     overlay: OverlaySettings,
     panel_at: Option<PanelAt>,
     /// The panels pinned open at their edges (see `Settings::panels_pinned`).
@@ -182,10 +185,10 @@ struct Config {
 }
 
 impl Config {
-    /// How large the panel is drawn on the screen named `screen` (see `Settings::panel_size_on`): as far as the
+    /// How large `part`'s panel is drawn on the screen named `screen` (see `Settings::panel_size_on`): as far as the
     /// settings offer (the file may say anything).
-    fn size_on(&self, screen: Option<&str>) -> f32 {
-        screen.and_then(|screen| self.sizes.get(screen)).copied().unwrap_or(self.size).clamp(SIZES.0, SIZES.1)
+    fn size_on(&self, part: Part, screen: Option<&str>) -> f32 {
+        self.sizes.on(part, screen, self.size).clamp(SIZES.0, SIZES.1)
     }
 }
 
@@ -196,9 +199,10 @@ fn config_from(settings: &Settings) -> Config {
         live: settings.live_backdrop,
         tear_off: settings.tear_off,
         anchor: settings.anchor,
-        columns: settings.columns,
+        columns: settings.columns_of(Part::Monitor),
+        workbench_columns: settings.columns_of(Part::Workbench),
         size: settings.panel_size,
-        sizes: settings.panel_sizes.clone(),
+        sizes: settings.part_sizes.clone(),
         overlay: settings.overlay.clone(),
         panel_at: settings.panel_at,
         panels_pinned: settings.panels_pinned.clone(),
@@ -1410,8 +1414,8 @@ impl Controller {
                         panel.screens_changed(0, now);
                     }
                     if let Some((at, size)) = kept.filter(|(at, size)| !matches!(at, Kept::Unchanged) || size.is_some()) {
-                        // (Sized: for the screen it is on.)
-                        let screen = panel.screen.clone();
+                        // (Sized: for what it shows, on the screen it is on.)
+                        let (part, screen) = (panel.part, panel.screen.clone());
                         crate::app().change(|settings| {
                             match at {
                                 Kept::At(at) => settings.panel_at = Some(at),
@@ -1419,7 +1423,7 @@ impl Controller {
                                 Kept::Unchanged => {}
                             }
                             if let Some(size) = size {
-                                settings.size_panel(screen.as_deref(), size);
+                                settings.size_panel(part, screen.as_deref(), size);
                             }
                         });
                     }
@@ -2499,10 +2503,10 @@ impl<'a> Panel<'a> {
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.drawn = self.prefs.clone().holding(self.part);
-        self.columns = config.columns;
+        self.columns = if self.part == Part::Workbench { config.workbench_columns } else { config.columns };
         // Mid-drag, the size is the drag's.
         if self.drag.is_none() {
-            self.size = config.size_on(self.screen.as_deref());
+            self.size = config.size_on(self.part, self.screen.as_deref());
         }
         let skin = Skin::named(&config.skin);
         // Up, and now a skin that sees the desktop: it is taken behind the
@@ -3699,7 +3703,7 @@ impl<'a> Panel<'a> {
     fn moved_to(&mut self, monitor: RECT, sized: bool) {
         self.screen = crate::screens::id_of(monitor);
         if !sized {
-            self.size = self.controller.config.lock().unwrap().size_on(self.screen.as_deref());
+            self.size = self.controller.config.lock().unwrap().size_on(self.part, self.screen.as_deref());
         }
     }
 
@@ -4971,6 +4975,24 @@ fn let_go(message: &MSG) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panel opens as large as what it shows was made on its screen, and dealt into its own columns, however the other
+    /// component's are: as far as the settings offer, what the file says aside. What plays, drawn as designed (made larger
+    /// or smaller by its edges).
+    #[test]
+    fn a_panel_is_as_large_as_its_component_was_made() {
+        let mut settings = Settings::default();
+        settings.panel_size = 1.25;
+        settings.size_panel(Part::Workbench, Some("a"), 0.8);
+        settings.size_panel(Part::Monitor, Some("a"), 9.0);
+        settings.set_columns(Part::Workbench, Some(3));
+        let config = config_from(&settings);
+        assert_eq!(config.size_on(Part::Workbench, Some("a")), 0.8);
+        assert_eq!(config.size_on(Part::Monitor, Some("a")), SIZES.1);
+        assert_eq!(config.size_on(Part::Workbench, Some("b")), 1.25);
+        assert_eq!(config.size_on(Part::Music, Some("a")), 1.0);
+        assert_eq!((config.columns, config.workbench_columns), (None, Some(3)));
+    }
 
     /// The pointer that went past the seam a little and came back has not come across from the screen it went
     /// onto: it was making for its own screen's edge (the owner's portrait screen at 200 % left of the wide one at

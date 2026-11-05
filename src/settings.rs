@@ -1,5 +1,5 @@
-#[cfg(windows)]
 use std::collections::BTreeMap;
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -682,6 +682,30 @@ impl MusicRooms {
     }
 }
 
+/// How large each component's panel is drawn on each screen it was sized on, by the name that stays the screen's own
+/// (see `screens`), one known by no name of its own under none (""). What plays has no size of this kind: it is made
+/// larger or smaller by its edges, as a widget is (see `MusicRooms`). (Both written even while empty, so that two
+/// screens sized at once from two places each stand: see `merged`.)
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelSizes {
+    monitor: BTreeMap<String, f32>,
+    workbench: BTreeMap<String, f32>,
+}
+
+impl PanelSizes {
+    /// How large `part`'s panel is drawn on the screen named `screen`: `otherwise`, where it was not sized there; what
+    /// plays, as designed.
+    pub fn on(&self, part: Part, screen: Option<&str>, otherwise: f32) -> f32 {
+        let sized = match part {
+            Part::Monitor => &self.monitor,
+            Part::Workbench => &self.workbench,
+            Part::Music => return 1.0,
+        };
+        sized.get(screen.unwrap_or_default()).copied().unwrap_or(otherwise)
+    }
+}
+
 /// Everything the backend acts on, plus the page's own preferences, which it
 /// stores without looking inside.
 #[derive(Clone, Serialize, Deserialize)]
@@ -703,17 +727,23 @@ pub struct Settings {
     screens: Vec<ScreenEdges>,
     pub skin: String,
     pub anchor: Anchor,
-    /// How many columns the panel's lanes are dealt into; none chosen, as
-    /// few as fit the screen's height.
+    /// How many columns the readings' panel's lanes are dealt into; none chosen, as few as fit the screen's height.
     pub columns: Option<usize>,
-    /// How large the panel is drawn, 1 as designed (0.75 to 2), on a screen not in `panel_sizes`. Up to 0.4.3, on
-    /// every screen.
-    pub panel_size: f32,
-    /// How large the panel is drawn on each screen sized since, by the name that stays its own (see `screens`):
-    /// a large screen kept as designed, a small one made smaller. (Written even while empty, so that two screens
-    /// sized at once from two places each stand: see `merged`.)
+    /// And the workbench's. Up to 0.4.3 it had the readings' (chosen on their page, it was dealt into as many unasked):
+    /// settings from then, whose `columns_apart` is not set, keep what it showed (see `carry_over`).
+    pub workbench_columns: Option<usize>,
     #[serde(default)]
-    pub panel_sizes: BTreeMap<String, f32>,
+    columns_apart: bool,
+    /// How large a panel is drawn, 1 as designed (0.75 to 2), where it was not sized (see `part_sizes`). Up to 0.4.3,
+    /// every panel on every screen.
+    pub panel_size: f32,
+    /// How large each component's panel is drawn on each screen sized since: a large screen kept as designed, a small
+    /// one made smaller, the readings at one edge and the workbench at another each as large as it was made.
+    #[serde(default)]
+    pub part_sizes: PanelSizes,
+    /// On the way to 0.4.3, each screen's one size for all it opened. Read once (see `carry_over`), not written again.
+    #[serde(default, skip_serializing)]
+    panel_sizes: BTreeMap<String, f32>,
     pub sensitivity: Sensitivity,
     pub close_delay_ms: u64,
     pub interval_ms: u64,
@@ -925,7 +955,10 @@ impl Default for Settings {
             skin: "paper".into(),
             anchor: Anchor::default(),
             columns: None,
+            workbench_columns: None,
+            columns_apart: true,
             panel_size: 1.0,
+            part_sizes: PanelSizes::default(),
             panel_sizes: BTreeMap::new(),
             sensitivity: Sensitivity::default(),
             close_delay_ms: 200,
@@ -982,19 +1015,35 @@ impl Settings {
         self.places.as_mut().expect("places carried over as the settings were read")
     }
 
-    /// How large the panel is drawn on the screen named `screen` (none: a screen not known by a name of its own).
-    pub fn panel_size_on(&self, screen: Option<&str>) -> f32 {
-        screen.and_then(|screen| self.panel_sizes.get(screen)).copied().unwrap_or(self.panel_size)
+    /// How large `part`'s panel is drawn on the screen named `screen` (none: a screen not known by a name of its own).
+    pub fn panel_size_on(&self, part: Part, screen: Option<&str>) -> f32 {
+        self.part_sizes.on(part, screen, self.panel_size)
     }
 
-    /// The panel sized `size` on the screen named `screen` (none: one not known by a name of its own, sized as every
-    /// screen not sized apart), the others as they are.
-    pub fn size_panel(&mut self, screen: Option<&str>, size: f32) {
-        match screen {
-            Some(screen) => {
-                self.panel_sizes.insert(screen.to_string(), size);
-            }
-            None => self.panel_size = size,
+    /// `part`'s panel sized `size` on the screen named `screen` (none: one not known by a name of its own), other
+    /// screens and other components' panels as they are. (What plays is not sized so: see `PanelSizes`.)
+    pub fn size_panel(&mut self, part: Part, screen: Option<&str>, size: f32) {
+        let sized = match part {
+            Part::Monitor => &mut self.part_sizes.monitor,
+            Part::Workbench => &mut self.part_sizes.workbench,
+            Part::Music => return,
+        };
+        sized.insert(screen.unwrap_or_default().to_string(), size);
+    }
+
+    /// How many columns `part`'s panel's lanes are dealt into; none chosen, as few as fit.
+    pub fn columns_of(&self, part: Part) -> Option<usize> {
+        match part {
+            Part::Workbench => self.workbench_columns,
+            Part::Monitor | Part::Music => self.columns,
+        }
+    }
+
+    /// `part`'s panel's lanes dealt into `columns`, the other's as they are.
+    pub fn set_columns(&mut self, part: Part, columns: Option<usize>) {
+        match part {
+            Part::Workbench => self.workbench_columns = columns,
+            Part::Monitor | Part::Music => self.columns = columns,
         }
     }
 
@@ -1085,6 +1134,14 @@ impl Settings {
     /// Settings from before, in today's terms; a shortcut that cannot be one
     /// (a file not written by Glance) is the default.
     fn carry_over(&mut self) {
+        if !self.columns_apart {
+            self.workbench_columns = self.columns;
+            self.columns_apart = true;
+        }
+        for (screen, size) in std::mem::take(&mut self.panel_sizes) {
+            self.part_sizes.monitor.entry(screen.clone()).or_insert(size);
+            self.part_sizes.workbench.entry(screen).or_insert(size);
+        }
         if let Some(items) = self.overlay.items.take() {
             self.overlay.groups = crate::ui::overlay::carried_over(&items);
         }
@@ -1363,29 +1420,87 @@ mod tests {
         assert_eq!(left_out, vec!["panel_size".to_string()]);
     }
 
-    /// Each screen keeps the panel's size as it was made there: sized on the small one, the large one stays as it was.
+    /// Each screen keeps a panel's size as it was made there: sized on the small one, the large one stays as it was.
     /// Settings from before have every screen at their one size, and so has a screen not sized apart.
     #[test]
     fn each_screen_keeps_its_own_panel_size() {
+        let on = |settings: &Settings, screen| settings.panel_size_on(Part::Monitor, screen);
         let mut settings: Settings = serde_json::from_str(r#"{ "panel_size": 1.25 }"#).unwrap();
-        assert_eq!((settings.panel_size_on(Some("large")), settings.panel_size_on(Some("small")), settings.panel_size_on(None)), (1.25, 1.25, 1.25));
-        settings.size_panel(Some("small"), 0.8);
-        assert_eq!((settings.panel_size_on(Some("large")), settings.panel_size_on(Some("small")), settings.panel_size_on(Some("new"))), (1.25, 0.8, 1.25));
-        settings.size_panel(Some("large"), 1.0);
+        assert_eq!((on(&settings, Some("large")), on(&settings, Some("small")), on(&settings, None)), (1.25, 1.25, 1.25));
+        settings.size_panel(Part::Monitor, Some("small"), 0.8);
+        assert_eq!((on(&settings, Some("large")), on(&settings, Some("small")), on(&settings, Some("new"))), (1.25, 0.8, 1.25));
+        settings.size_panel(Part::Monitor, Some("large"), 1.0);
         let read: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-        assert_eq!((read.panel_size_on(Some("large")), read.panel_size_on(Some("small")), read.panel_size_on(Some("new"))), (1.0, 0.8, 1.25));
+        assert_eq!((on(&read, Some("large")), on(&read, Some("small")), on(&read, Some("new"))), (1.0, 0.8, 1.25));
     }
 
-    /// Two screens sized at once from two places (the panel by its corner, the settings window's slider): both stand.
+    /// On one screen the readings and the workbench are each as large as they were made: one sized, the other stays as
+    /// it was (on a screen known by no name of its own too). What plays is made larger or smaller by its edges, and has
+    /// no such size, whatever the others'.
     #[test]
-    fn sizes_made_on_two_screens_at_once_both_stand() {
+    fn each_component_keeps_its_own_size_on_a_screen() {
+        let mut settings: Settings = serde_json::from_str(r#"{ "panel_size": 1.25 }"#).unwrap();
+        for screen in [Some("a"), None] {
+            settings.size_panel(Part::Workbench, screen, 0.8);
+            assert_eq!((settings.panel_size_on(Part::Workbench, screen), settings.panel_size_on(Part::Monitor, screen)), (0.8, 1.25));
+            settings.size_panel(Part::Monitor, screen, 1.5);
+            assert_eq!((settings.panel_size_on(Part::Workbench, screen), settings.panel_size_on(Part::Monitor, screen)), (0.8, 1.5));
+        }
+        settings.size_panel(Part::Music, Some("a"), 1.5);
+        assert_eq!(settings.panel_size_on(Part::Music, Some("a")), 1.0);
+        let read: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!((read.panel_size_on(Part::Workbench, Some("a")), read.panel_size_on(Part::Monitor, Some("a")), read.panel_size_on(Part::Workbench, None)), (0.8, 1.5, 0.8));
+    }
+
+    /// A screen's one size for all it opened (on the way to 0.4.3) is both components' there till each is sized.
+    #[test]
+    fn a_screens_one_size_is_each_components_till_sized() {
+        let mut settings: Settings = serde_json::from_str(r#"{ "panel_size": 1.25, "panel_sizes": { "a": 0.8 } }"#).unwrap();
+        settings.carry_over();
+        assert_eq!((settings.panel_size_on(Part::Monitor, Some("a")), settings.panel_size_on(Part::Workbench, Some("a")), settings.panel_size_on(Part::Workbench, Some("b"))), (0.8, 0.8, 1.25));
+        settings.size_panel(Part::Workbench, Some("a"), 1.5);
+        let mut read: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        read.carry_over();
+        assert_eq!((read.panel_size_on(Part::Monitor, Some("a")), read.panel_size_on(Part::Workbench, Some("a"))), (0.8, 1.5));
+    }
+
+    /// Two screens sized at once from two places (the panel by its corner, the settings window's slider), or two
+    /// components on one: all stand.
+    #[test]
+    fn sizes_made_at_once_all_stand() {
         let base = Settings::default();
         let mut held = base.clone();
-        held.size_panel(Some("a"), 0.8);
+        held.size_panel(Part::Workbench, Some("a"), 0.8);
+        held.size_panel(Part::Monitor, Some("a"), 0.9);
         let mut mine = base.clone();
-        mine.size_panel(Some("b"), 1.5);
+        mine.size_panel(Part::Workbench, Some("b"), 1.5);
         let merged = merged(&held, &base, &mine);
-        assert_eq!((merged.panel_size_on(Some("a")), merged.panel_size_on(Some("b"))), (0.8, 1.5));
+        assert_eq!((merged.panel_size_on(Part::Workbench, Some("a")), merged.panel_size_on(Part::Workbench, Some("b")), merged.panel_size_on(Part::Monitor, Some("a"))), (0.8, 1.5, 0.9));
+    }
+
+    /// The readings and the workbench are each dealt into the columns chosen for them: the readings' no longer deal the
+    /// workbench's unasked. Settings from before have the workbench as it showed, and that once: chosen apart since,
+    /// "automatic" among them, it stands.
+    #[test]
+    fn each_component_keeps_its_own_columns() {
+        let mut settings = Settings::default();
+        settings.set_columns(Part::Monitor, Some(2));
+        assert_eq!((settings.columns_of(Part::Monitor), settings.columns_of(Part::Workbench)), (Some(2), None));
+        settings.set_columns(Part::Workbench, Some(3));
+        assert_eq!((settings.columns_of(Part::Monitor), settings.columns_of(Part::Workbench)), (Some(2), Some(3)));
+        let mut before: Settings = serde_json::from_str(r#"{ "columns": 2 }"#).unwrap();
+        before.carry_over();
+        assert_eq!(before.columns_of(Part::Workbench), Some(2));
+        before.set_columns(Part::Workbench, None);
+        let mut read: Settings = serde_json::from_str(&serde_json::to_string(&before).unwrap()).unwrap();
+        read.carry_over();
+        assert_eq!((read.columns_of(Part::Monitor), read.columns_of(Part::Workbench)), (Some(2), None));
+        // (New settings, the readings' chosen and read again: not taken for settings from before.)
+        let mut new = Settings::default();
+        new.set_columns(Part::Monitor, Some(2));
+        let mut read: Settings = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        read.carry_over();
+        assert_eq!(read.columns_of(Part::Workbench), None);
     }
 
     #[test]
