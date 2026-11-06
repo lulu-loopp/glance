@@ -526,9 +526,9 @@ fn hold(file: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(file)
 }
 
-/// Whether two versions are one, by the order versions go in.
+/// Whether two versions are one, by the order versions go in (see `order`): never what is not a version.
 fn same_version(a: &str, b: &str) -> bool {
-    !newer(a, b) && !newer(b, a)
+    order(a, b) == Some(Ordering::Equal)
 }
 
 /// The product version an installer carries in its version resource, as it was
@@ -664,16 +664,22 @@ fn release(body: &[u8]) -> Option<(String, String)> {
 /// Glance before 0.4.3-preview read numbers alone and took a version with a dash for no version: such a release is
 /// never offered to it (`an_older_glance_is_offered_no_preview`).
 pub(crate) fn newer(a: &str, b: &str) -> bool {
-    let (Some((mut numbers_a, preview_a)), Some((mut numbers_b, preview_b))) = (version_parts(a), version_parts(b)) else { return false };
+    order(a, b) == Some(Ordering::Greater)
+}
+
+/// How version `a` stands to `b` (see `newer`): nothing where either is not a version, which is neither before, after
+/// nor the same as any.
+fn order(a: &str, b: &str) -> Option<Ordering> {
+    let ((mut numbers_a, preview_a), (mut numbers_b, preview_b)) = (version_parts(a)?, version_parts(b)?);
     let length = numbers_a.len().max(numbers_b.len());
     numbers_a.resize(length, 0);
     numbers_b.resize(length, 0);
-    numbers_a.cmp(&numbers_b).then_with(|| match (preview_a.is_empty(), preview_b.is_empty()) {
+    Some(numbers_a.cmp(&numbers_b).then_with(|| match (preview_a.is_empty(), preview_b.is_empty()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
         (false, false) => preview_order(&preview_a, &preview_b),
-    }) == Ordering::Greater
+    }))
 }
 
 /// A version's numbers, and what follows its dash, field by field (none for a release): nothing, if it is not one.
@@ -1003,6 +1009,12 @@ mod tests {
         assert!(!same_version("0.4.3-preview", "0.4.3"));
         assert!(!same_version("0.4.3", "0.4.3-preview"));
         assert!(!same_version("0.4.3", "0.4.4"));
+        // What is not a version is the same as none: neither newer nor older is not the same.
+        for not_one in ["", "garbage", "0.4.2+build", "0.4.4-", "v0.4.4"] {
+            assert!(!same_version(not_one, "0.4.4"), "{not_one}");
+            assert!(!same_version("0.4.4", not_one), "{not_one}");
+            assert!(!same_version(not_one, not_one), "{not_one}");
+        }
     }
 
     /// The version an installer (`GLANCE_INSTALLER`, a released one) carries.
