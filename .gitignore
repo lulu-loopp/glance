@@ -1,4 +1,6 @@
 target/
+# Each release's programs and PDBs (scripts\release.ps1), kept for reading hangs written down
+symbols/
 __pycache__/
 
 # Wrangler's local state (the site's count, run here)

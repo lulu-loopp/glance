@@ -27,6 +27,8 @@ mod elevation;
 #[cfg(windows)]
 mod gpu_power;
 #[cfg(windows)]
+mod hang;
+#[cfg(windows)]
 mod journal;
 #[cfg(windows)]
 mod metrics;
@@ -527,6 +529,8 @@ pub fn run() {
         move || controller.run()
     }).expect("a thread started");
     thread::Builder::new().name("glance: updates".into()).spawn(update::watch).expect("a thread started");
+    // Its windows watched for a thread that stops answering (see `hang`).
+    thread::Builder::new().name("glance: hangs watched".into()).spawn(hang::watch).expect("a thread started");
     // The reports still talked over, asked about each hour (see `reports::follow`).
     thread::Builder::new().name("glance: reports".into()).spawn(reports::follow).expect("a thread started");
     // NetEase's icon row put in where InfLink-rs was installed without it (see `netease::mend`).

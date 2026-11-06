@@ -1131,6 +1131,11 @@ pub fn remove_in_place(folder: &Path, name: &str) -> bool {
 /// replaced, never written through).
 pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    write_in_place_by(folder, name, |file| file.write_all(contents))
+}
+
+/// Writes `name` in `folder` as `write_in_place` does, what it holds written by `write` into the new file.
+pub fn write_in_place_by(folder: &Path, name: &str, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<()> {
     use std::os::windows::fs::OpenOptionsExt;
     let refused = || std::io::Error::new(std::io::ErrorKind::PermissionDenied, "not where its path says");
     let held = held_where_it_says(folder).ok_or_else(refused)?;
@@ -1151,7 +1156,7 @@ pub fn write_in_place(folder: &Path, name: &str, contents: &[u8]) -> std::io::Re
     }
     // On the disk before it takes the name's place: a power cut or a stop of the system just after would otherwise
     // leave the name on an empty file (the settings then read as none).
-    if let Err(error) = file.0.write_all(contents).and_then(|()| file.0.sync_all()) {
+    if let Err(error) = write(&mut file.0).and_then(|()| file.0.sync_all()) {
         file.delete();
         return Err(error);
     }
@@ -1188,6 +1193,8 @@ pub fn remove_settings() -> bool {
     let remote = std::env::var_os("APPDATA").map(|roaming| where_it_is(Path::new(&roaming)).join("dev.weiyi.glance.remote"));
     // (The reports sent, and the pictures kept of them, first: their folder is in its own.)
     let reports = remove_all_kept(&crate::settings::config_dir().join(crate::reports::PICTURES));
+    // (What Glance's threads stood at as one hung, see `hang`: in its own folder too.)
+    let hangs = remove_all_kept(&crate::settings::config_dir().join(crate::hang::FOLDER));
     let own = remove_kept(&crate::settings::config_dir(), &["settings.json", crate::settings::UNREAD, crate::journal::FILE, crate::reports::FILE]);
     let remotes = remote.is_none_or(|folder| remove_kept(&folder, &["config.json", "config.json.new", "remote.log"]));
     // And what it fetched and kept (the lyrics found), its index of the music on this PC, the station (what was copied
@@ -1198,7 +1205,7 @@ pub fn remove_settings() -> bool {
     let station = remove_all_kept(&local.join(crate::station::folder::OWN));
     let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>())
         && remove_kept(&local, &[crate::library::INDEX_FILE, crate::serif::FILE, crate::station::recent::FILE]);
-    reports && own && remotes && station && fetched
+    reports && hangs && own && remotes && station && fetched
 }
 
 /// Takes all that is in `folder` out of it, the folders in it each so too, then `folder`: as `remove_kept` takes each

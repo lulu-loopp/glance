@@ -49,6 +49,16 @@ if ($LASTEXITCODE -ne 0) { throw "makensis exited $LASTEXITCODE" }
 $version = [regex]::Match((Get-Content -Raw Cargo.toml), '(?m)^version = "([^"]+)"').Groups[1].Value
 $installer = Join-Path $root "target\Glance_${version}_x64-setup.exe"
 Write-Host "installer: $installer"
+# The programs released and their PDBs, kept here by version (never shipped): what a hang written down on a user's PC
+# holds is read back with them (see src/hang.rs). A build of the same version again replaces them.
+$symbols = Join-Path $root "symbols\$version"
+New-Item -ItemType Directory -Force -Path $symbols | Out-Null
+foreach ($name in 'glance', 'glance-sensors') {
+    foreach ($kind in 'exe', 'pdb') {
+        Copy-Item -LiteralPath (Join-Path $root "target\release\$name.$kind") -Destination $symbols -Force
+    }
+}
+Write-Host "symbols: $symbols"
 if (-not $WithoutUpdateSignature) {
     & (Join-Path $PSScriptRoot 'update-signature.ps1') -Installer $installer -Version $version
     & (Join-Path $PSScriptRoot 'update-signature.ps1') -Installer $installer -Version $version -Check
