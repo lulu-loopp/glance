@@ -3745,7 +3745,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let said = format!("{level}%");
                 let said_width = frame.measure("100%", theme.small);
                 let mute = left + width - MEDIA_ROW;
-                let track = (mute - 6.0 - said_width - LABEL_GAP - plot_left).max(0.0);
+                // (Room past its end for its knob, at the full level.)
+                let track = (mute - 6.0 - said_width - LABEL_GAP - knob_reach(theme) - plot_left).max(0.0);
                 part("track");
                 slider(frame, theme, if *muted { theme.text3 } else { ink.trace }, plot_left, middle, track, *level as f32 / 100.0, Some(scene.thumbs.of(Hit::Volume)));
                 hits.push((plot_left, row, track, MEDIA_ROW, Hit::Volume));
@@ -3762,7 +3763,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 frame.text(&text::clock(*at), theme.small, theme.text2, left, frame.line_top(theme.small, middle), LABEL, Align::Start);
                 let long = text::clock(*length);
                 let long_width = frame.measure(&long, theme.small);
-                let track = (left + width - long_width - LABEL_GAP - plot_left).max(0.0);
+                let reach = if *seekable { knob_reach(theme) } else { 0.0 };
+                let track = (left + width - long_width - LABEL_GAP - reach - plot_left).max(0.0);
                 part("track");
                 let fraction = if *length > 0 { *at as f32 / *length as f32 } else { 0.0 };
                 slider(frame, theme, ink.trace, plot_left, middle, track, fraction, seekable.then(|| scene.thumbs.of(Hit::Seek(crate::playing::Follow::Any))));
@@ -5026,6 +5028,26 @@ fn paint_plot(frame: &dyn Canvas, scene: &Scene, ink: Ink, plot: &Plot, left: f3
     frame.fill_circle(color, Point { x: right, y: y(value) }, 2.5);
 }
 
+/// How large a slider's knob is (see `slider`): its radius in the Windows 11 look, a capsule's width in the frosted
+/// glass's, and as much more of it as it grows under the pointer, its radius in the others.
+const FLUENT_KNOB: f32 = 8.0;
+const GLASS_KNOB: f32 = 24.0;
+const GLASS_KNOB_HOVERED: f32 = 0.1;
+const GLASS_RIM: f32 = 1.0;
+const KNOB: f32 = 5.0;
+
+/// How far a slider's knob reaches past its track's end, its filling all the way (half the knob, under the pointer as
+/// large as it is there): the room to leave past it, before what is beside it, for the knob to stand as far from that
+/// as a meter's end does.
+fn knob_reach(theme: &Theme) -> f32 {
+    match theme.skin {
+        Skin::Fluent => FLUENT_KNOB,
+        // (And half its rim, drawn about its edge.)
+        Skin::Glass => GLASS_KNOB * (1.0 + GLASS_KNOB_HOVERED) / 2.0 + GLASS_RIM / 2.0,
+        _ => KNOB,
+    }
+}
+
 /// A track `track` wide from `from` along `middle`, filled `fraction` of the way in `colour`; with a knob where
 /// the filling ends, where it is dragged along (`knob`: its dot's radius in the Windows 11 look, see `thumb`). In
 /// that look the knob is Windows 11's own (see `thumb`); in the others, one shape with what is filled. What is filled,
@@ -5048,7 +5070,7 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         frame.unclip();
         let (face, edge) = if theme.dark { (Color::hex(0x454545, 1.0), Color::hex(0xffffff, 0.09)) } else { (Color::hex(0xffffff, 1.0), Color::hex(0x000000, 0.10)) };
         // (Smaller than Windows' own and the settings': the panel's track is thinner.)
-        super::thumb::draw(frame, Point { x: from + filled, y: middle }, 8.0, dot, face, edge, colour);
+        super::thumb::draw(frame, Point { x: from + filled, y: middle }, FLUENT_KNOB, dot, face, edge, colour);
         return;
     }
     // The frosted glass's: a capsule of glass across the end of what is filled, as the system's liquid glass draws its
@@ -5065,8 +5087,8 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         // lens larger again, the bar through it and light along its rim (`dot` past 1 under the pointer, under 1 held).
         let hover = ((dot - 1.0) / 0.4).clamp(0.0, 1.0);
         let lens = ((1.0 - dot) / 0.15).clamp(0.0, 1.0);
-        let grown = 1.0 + 0.1 * hover + 0.3 * lens;
-        let (w, h) = (24.0 * grown, 14.0 * grown);
+        let grown = 1.0 + GLASS_KNOB_HOVERED * hover + 0.3 * lens;
+        let (w, h) = (GLASS_KNOB * grown, 14.0 * grown);
         let (x, y) = (from + filled - w / 2.0, middle - h / 2.0);
         frame.shadow(Color::hex(0x000000, (if theme.dark { 0.4 } else { 0.2 }) * (1.0 - 0.6 * lens)), x, y, w, h, h / 2.0, 5.0, 1.5);
         if lens > 0.0 {
@@ -5080,7 +5102,7 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         }
         frame.fill_rounded(Color::hex(0xFFFFFF, 1.0 - 0.88 * lens), x, y, w, h, h / 2.0);
         let rim = Fill::Down { top: y, from: Color::hex(0xFFFFFF, 0.25 + 0.6 * lens), bottom: y + h, to: Color::hex(0xFFFFFF, 0.1 + 0.25 * lens) };
-        frame.stroke_rounded(rim, x, y, w, h, h / 2.0, 1.0);
+        frame.stroke_rounded(rim, x, y, w, h, h / 2.0, GLASS_RIM);
         if lens > 0.0 {
             // (Its far side's light, inside it below.)
             let inner = Fill::Down { top: y, from: Color::hex(0xFFFFFF, 0.0), bottom: y + h, to: Color::hex(0xFFFFFF, 0.45 * lens) };
@@ -5097,7 +5119,7 @@ fn slider(frame: &dyn Canvas, theme: &Theme, colour: Color, from: f32, middle: f
         }
         return;
     }
-    let knob = 5.0;
+    let knob = KNOB;
     // What is filled and its knob are one shape, drawn once: from the track's rounded end along it, round the
     // knob, and back.
     let centre = Point { x: from + filled, y: middle };
@@ -6151,6 +6173,35 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The volume and what plays's track, both all the way, in each skin, dark (as the knob stands off the figure past
+    /// it): `cargo test --features studio --lib -- --ignored sliders_full` writes `target/sliders/<skin>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn sliders_full() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/sliders", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
+            let theme = Theme::new(skin, true);
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 225, length: 225, seekable: true }], ink: theme.ink("time") };
+            let (w, h) = (COLUMN_WIDTH, lane.height(&theme) + 16.0);
+            let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                frame.fill(Color::hex(0x202124, 1.0), 0.0, 0.0, w, h);
+                paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w, h }, 0.0, Pass::Content, &mut Vec::new());
+            }).expect("drawn");
+            crate::studio::save_png(&out.join(format!("{skin:?}.png")), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+        }
+    }
+
     /// The notes' lane as a deck, cards and a list (the columns) in each skin, light and dark (the rows):
     /// `cargo test --features studio --lib -- --ignored notes_lanes` writes `target/notes/<row>-<column>.png`.
     #[test]
@@ -6770,6 +6821,10 @@ seven".into()));
         reach: std::cell::Cell<Option<(f32, f32, f32, f32)>>,
         /// What it was given to write.
         said: std::cell::RefCell<Vec<String>>,
+        /// Where each was written from (its left).
+        said_at: std::cell::RefCell<Vec<(String, f32)>>,
+        /// Shadows left out of the reach (soft, they reach past what casts them).
+        shadows_left_out: bool,
     }
 
     impl Reach {
@@ -6803,6 +6858,7 @@ seven".into()));
                 Align::Start => x,
                 Align::End => x + width - wide,
             };
+            self.said_at.borrow_mut().push((text.to_string(), from));
             if !text.trim().is_empty() {
                 self.drew_box(from, y, wide, font.size * 1.3);
             }
@@ -6852,6 +6908,9 @@ seven".into()));
             self.drew_box(x - line / 2.0, y - line / 2.0, w + line, h + line);
         }
         fn shadow(&self, _: Color, x: f32, y: f32, w: f32, h: f32, _: f32, blur: f32, drop: f32) {
+            if self.shadows_left_out {
+                return;
+            }
             self.drew_box(x - 2.0 * blur, y - 2.0 * blur + drop, w + 4.0 * blur, h + 4.0 * blur);
         }
         fn frosted(&self, x: f32, y: f32, w: f32, h: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {
@@ -7621,6 +7680,34 @@ seven".into()));
         let (said, pressed_there) = lately();
         carry_tile(None);
         assert!(!said.contains(&"Lately".to_string()) && pressed_there, "{said:?}");
+    }
+
+    /// A slider's knob, its filling all the way and the pointer on it, reaches past its track's end no further than
+    /// `knob_reach` says, in each skin; and the volume's and what plays's tracks end that far and a meter's gap again
+    /// before the figure beside them. (The frosted glass's knob, 24 wide, touched "100%" beside it.)
+    #[test]
+    fn a_sliders_knob_stands_off_the_figure_beside_it() {
+        for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
+            let theme = Theme::new(skin, true);
+            let reach = Reach { shadows_left_out: true, ..Default::default() };
+            slider(&reach, &theme, theme.text, 100.0, 50.0, 120.0, 1.0, Some(1.4));
+            let right = reach.reach.get().unwrap().2;
+            assert!(right <= 220.0 + knob_reach(&theme) + 0.01 && right > 220.0 + knob_reach(&theme) - 1.0, "{skin:?}: the knob reaches {right}, said {}", knob_reach(&theme));
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
+            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 3725, length: 3725, seekable: true }], ink: theme.ink("time") };
+            let (reach, mut hits) = (Reach::default(), Vec::new());
+            paint_lane(&reach, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: 200.0 }, 0.0, Pass::Content, &mut hits);
+            let said_at = reach.said_at.take();
+            let written = |text: &str| said_at.iter().filter(|(said, _)| said == text).map(|(_, at)| *at).fold(f32::MIN, f32::max);
+            for (hit, figure) in [(Hit::Volume, "100%"), (Hit::Seek(crate::playing::Follow::Any), "1:02:05")] {
+                let track = hits.iter().find(|one| one.4 == hit).unwrap();
+                let gap = written(figure) - (track.0 + track.2 + knob_reach(&theme));
+                assert!(gap >= LABEL_GAP - 0.01, "{skin:?}: {figure} {gap} past the knob");
+            }
+        }
     }
 
     /// A lane given more room than its blocks take (its column taller): the notes' list at its foot goes down to the
