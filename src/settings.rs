@@ -797,6 +797,12 @@ pub struct Settings {
     /// The version that last asked Glance's site for a newer one and was
     /// answered: the next to ask says which it came from, where another.
     pub asked_as: Option<String>,
+    /// The notices of Glance's site told in a notification (see `notice`): each is, once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_told: Vec<String>,
+    /// The notices read ("Got it" pressed): no longer shown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notices_read: Vec<String>,
     pub overlay: OverlaySettings,
     /// See `PanelAt`; none while the panel opens from the edge.
     pub panel_at: Option<PanelAt>,
@@ -983,6 +989,8 @@ impl Default for Settings {
             guided: false,
             began: None,
             asked_as: None,
+            notices_told: Vec::new(),
+            notices_read: Vec::new(),
             overlay: OverlaySettings::default(),
             panel_at: None,
             panel_pinned: None,

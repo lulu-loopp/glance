@@ -4,7 +4,7 @@
 //! (`NIS_HIDDEN`): the notifications it shows still show, and clicked open
 //! the settings, as starting Glance again does.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use windows::core::{w, PCWSTR};
@@ -115,10 +115,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                 WM_LBUTTONUP => crate::app().controller.open_from_tray(),
                 // Version 4: where to put the menu, in the WPARAM.
                 WM_CONTEXTMENU => menu(hwnd, (wparam.0 & 0xFFFF) as u16 as i16 as i32, ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32),
-                // A notification of ours clicked: the settings, at the reports' page for news of a report, poured out
-                // of the icon.
-                NIN_BALLOONUSERCLICK if OF_REPORTS.load(Ordering::Relaxed) => crate::show_reports(icon_on_screen(hwnd)),
-                NIN_BALLOONUSERCLICK => crate::show_settings(icon_on_screen(hwnd)),
+                // A notification of ours clicked: the settings, at what it was about, poured out of the icon.
+                NIN_BALLOONUSERCLICK => match TOLD.load(Ordering::Relaxed) {
+                    OF_REPORTS => crate::show_reports(icon_on_screen(hwnd)),
+                    OF_UPDATES => crate::show_updates(icon_on_screen(hwnd)),
+                    _ => crate::show_settings(icon_on_screen(hwnd)),
+                },
                 _ => {}
             }
             LRESULT(0)
@@ -221,19 +223,29 @@ pub fn ask_for_settings() {
 /// Shows a notification from the icon, from any thread; clicking it opens
 /// the settings.
 pub fn notify(title: &str, text: &str) {
-    show_notice(title, text, false);
+    show_notice(title, text, OF_SETTINGS);
 }
 
-/// The last notification shown was news of a report the user sent: clicked, it opens the reports' page.
-static OF_REPORTS: AtomicBool = AtomicBool::new(false);
+/// What the last notification shown was about, which a click on it opens the settings at: anything (`OF_SETTINGS`),
+/// news of a report the user sent (`OF_REPORTS`), or updates (`OF_UPDATES`: a release found, a notice of Glance's
+/// site).
+static TOLD: AtomicU8 = AtomicU8::new(OF_SETTINGS);
+const OF_SETTINGS: u8 = 0;
+const OF_REPORTS: u8 = 1;
+const OF_UPDATES: u8 = 2;
 
 /// Shows news of a report the user sent, as `notify` does: clicked, it opens the settings at the reports' page.
 pub fn notify_reports(title: &str, text: &str) {
-    show_notice(title, text, true);
+    show_notice(title, text, OF_REPORTS);
 }
 
-fn show_notice(title: &str, text: &str, of_reports: bool) {
-    OF_REPORTS.store(of_reports, Ordering::Relaxed);
+/// Shows what is about updates, as `notify` does: clicked, it opens the settings at them.
+pub fn notify_updates(title: &str, text: &str) {
+    show_notice(title, text, OF_UPDATES);
+}
+
+fn show_notice(title: &str, text: &str, of: u8) {
+    TOLD.store(of, Ordering::Relaxed);
     let hwnd = WINDOW.load(Ordering::Acquire);
     if hwnd == 0 {
         return;

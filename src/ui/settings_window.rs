@@ -149,6 +149,9 @@ const SLIDE: (Duration, Easing) = (Duration::from_millis(240), Easing(0.16, 1.0,
 const FLIP: (Duration, Easing) = (Duration::from_millis(160), Easing(0.16, 1.0, 0.3, 1.0));
 const GLIDE: (Duration, Easing) = (Duration::from_millis(200), Easing(0.16, 1.0, 0.3, 1.0));
 const SETTLE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.16, 1.0, 0.3, 1.0));
+/// How the site's notice, opened at from its notification, is marked: tinted in the accent, the tint held a moment and
+/// let go.
+const FLASH: (Duration, Easing) = (Duration::from_millis(1300), Easing(0.7, 0.0, 0.9, 0.6));
 /// How soon to try again when drawing failed for want of a device.
 /// A frame that takes longer than this shows as a stutter: noted.
 const SLOW_FRAME: Duration = Duration::from_millis(33);
@@ -319,6 +322,8 @@ const TO_WORKBENCH: u32 = WM_APP + 42;
 const TO_REPORTS: u32 = WM_APP + 44;
 /// Asked to begin the guide; told that what a step of it asks was done elsewhere (see `guide::saw`).
 const TO_GUIDE: u32 = WM_APP + 46;
+/// Asked to turn to the updates (the general page's): from a notification of a release found or of a notice.
+const TO_UPDATES: u32 = WM_APP + 48;
 const GUIDE_TOLD: u32 = WM_APP + 47;
 /// What the window of a report's thread tells it (see `ask::thread::open`): the user sent what they wrote there,
 /// closed the report or opened it again, or closed the window. Kept as told (`THREAD_SEND`, `THREAD_TURN`,
@@ -387,6 +392,12 @@ pub fn open_at_reports(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Reports), place });
 }
 
+/// Opens the window (as `open`) at the updates, on the general page: from a notification of a release found or of a
+/// notice of Glance's site (which is marked as it is shown).
+pub fn open_at_updates(place: Option<RECT>) {
+    open_at(Asked { to: Some(To::Updates), place });
+}
+
 /// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
 /// and shown by the guide as it comes up.
 pub fn open_guide() {
@@ -401,6 +412,7 @@ enum To {
     Reports,
     /// The guide begun (see `guide`).
     Guide,
+    Updates,
 }
 
 impl Asked {
@@ -419,6 +431,7 @@ impl To {
             Some(To::Workbench) => 2,
             Some(To::Reports) => 3,
             Some(To::Guide) => 4,
+            Some(To::Updates) => 5,
         }
     }
 
@@ -428,6 +441,7 @@ impl To {
             2 => Some(To::Workbench),
             3 => Some(To::Reports),
             4 => Some(To::Guide),
+            5 => Some(To::Updates),
             _ => None,
         }
     }
@@ -442,6 +456,7 @@ fn open_at(asked: Asked) {
             Some(To::Workbench) => Some(TO_WORKBENCH),
             Some(To::Reports) => Some(TO_REPORTS),
             Some(To::Guide) => Some(TO_GUIDE),
+            Some(To::Updates) => Some(TO_UPDATES),
             None => None,
         };
         if let Some(message) = message {
@@ -1366,6 +1381,9 @@ enum Target {
     CheckNow,
     /// Opens the site's download page (see `update::download_page`).
     Download,
+    /// The site's notice (see `notice`): read, and the page of the site it links to opened.
+    NoticeRead,
+    NoticeLink,
     Guide,
     Diagnostics,
     Update,
@@ -1448,6 +1466,8 @@ enum Row {
     /// A report sent, by its id, on their page.
     Report(String),
     Update,
+    /// What Glance's site has to tell, till it is read (see `notice`).
+    Notice,
     Uninstall,
     Quit,
     /// The phone remote's: pairing a phone (and where the app is to be had), the code last asked for, and each phone
@@ -1466,6 +1486,9 @@ enum Row {
 
 /// How tall a group's name is, above its rows.
 const GROUP: f32 = 28.0;
+/// The room the site's notice's icon takes left of its words: the icon, and as far again as a row's controls are
+/// apart.
+const NOTICE_ICON_ROOM: f32 = 28.0;
 /// How tall the monitor's tabs are, and how far below their names their marker is.
 const TABS_ROW: f32 = 48.0;
 /// How wide the bar under the tab shown is (as Windows' own), and how its ends move to another chosen: the end toward
@@ -2163,6 +2186,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.turn_as_asked(To::Guide));
             LRESULT(0)
         }
+        TO_UPDATES => {
+            with_ui(|ui| ui.turn_as_asked(To::Updates));
+            LRESULT(0)
+        }
         GUIDE_TOLD => {
             with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
@@ -2566,6 +2593,9 @@ impl Ui {
                 rows.push(Row::Group(pick(self.lang, "系统", "System")));
                 rows.extend([Row::Switch(Switch::Startup), Row::Switch(Switch::TrayHidden)]);
                 rows.push(Row::Group(pick(self.lang, "更新", "Updates")));
+                if crate::notice::unread().is_some() {
+                    rows.push(Row::Notice);
+                }
                 rows.push(Row::Version);
                 if update::available().is_some() {
                     rows.push(Row::Update);
@@ -2737,6 +2767,13 @@ impl Ui {
                 self.turn_to(Page::Reports);
             }
             To::Guide => self.begin_guide(),
+            // The notice there, if there is one, marked: what the notification was of.
+            To::Updates => {
+                self.turn_to(Page::General);
+                let mut flash = Transition::settled(1.0);
+                flash.retarget(0.0, FLASH.0, FLASH.1, Instant::now());
+                self.motion.insert("flash:notice".into(), flash);
+            }
         }
     }
 
@@ -3030,7 +3067,8 @@ impl Ui {
             _ => match self.button_row(row, Instant::now()) {
                 Some((_, word, buttons)) => {
                     let taken: f32 = buttons.iter().map(|(text, ..)| button(text) + 8.0).sum();
-                    (Cow::Owned(word), width - 2.0 * ROW_SIDE - taken - 8.0)
+                    let icon = if matches!(row, Row::Notice) { NOTICE_ICON_ROOM } else { 0.0 };
+                    (Cow::Owned(word), width - 2.0 * ROW_SIDE - taken - 8.0 - icon)
                 }
                 None => return 0.0,
             },
@@ -3096,6 +3134,12 @@ impl Ui {
         self.choices_room() + 2.0 * ROW_SIDE - ITEM_INSET - ROW_SIDE - CHEVRON_ROOM
     }
 
+    /// Whether the general page has what the user has not seen: a newer Glance, a notice of the site unread, news of a
+    /// report sent (marked by a dot beside the page's name).
+    fn general_has_news(&self) -> bool {
+        update::available().is_some() || crate::notice::unread().is_some() || self.followed.iter().any(crate::reports::Report::unread)
+    }
+
     /// What a row of buttons says, its word, and its buttons, right to left:
     /// each one's text, what it does, and how it looks. None for a row of
     /// another kind, or an update row with no update.
@@ -3103,6 +3147,15 @@ impl Ui {
         let lang = self.lang;
         let p = |zh, en| pick(lang, zh, en).to_string();
         Some(match row {
+            Row::Notice => {
+                let notice = crate::notice::unread()?;
+                let (title, text) = notice.words(lang);
+                let mut buttons = vec![(p("知道了", "Got it"), Target::NoticeRead, Button::Accent)];
+                if notice.link.is_some() {
+                    buttons.push((p("了解详情", "Learn more"), Target::NoticeLink, Button::Plain));
+                }
+                (title.to_string(), text.to_string(), buttons)
+            }
             Row::Update => {
                 let (version, state) = update::available()?;
                 let name = match lang {
@@ -4572,6 +4625,18 @@ impl Ui {
                 let page = HSTRING::from(update::download_page(self.lang));
                 unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &page, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
             }
+            Target::NoticeRead => {
+                if let Some(notice) = crate::notice::unread() {
+                    crate::notice::read(&notice.id);
+                }
+                self.focus = None;
+            }
+            Target::NoticeLink => {
+                if let Some(link) = crate::notice::unread().and_then(|notice| notice.link) {
+                    let link = HSTRING::from(link);
+                    unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &link, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+                }
+            }
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
             Target::NetEase(_) => {}
             Target::NetEaseRestart => {
@@ -4655,6 +4720,7 @@ impl Ui {
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => update::available().map_or(Vec::new(), |(_, state)| update_offer(state, self.lang).1.into_iter().map(|(_, target, _)| target).collect()),
+                Row::Notice => self.button_row(&Row::Notice, Instant::now()).map_or(Vec::new(), |(_, _, buttons)| buttons.into_iter().map(|(_, target, _)| target).collect()),
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
                 Row::MyReports => vec![Target::MyReports],
                 Row::Report(id) => vec![Target::Thread(id)],
@@ -4811,7 +4877,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Notice, Target::NoticeRead | Target::NoticeLink) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
@@ -5145,8 +5211,9 @@ impl Ui {
             let cy = r.y + r.h / 2.0;
             frame.icon(page.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
             text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
-            // A newer Glance is out, or a report sent has news unread: a dot on the page they are seen from.
-            if page == Page::General && (update::available().is_some() || self.followed.iter().any(crate::reports::Report::unread)) {
+            // A newer Glance is out, the site has a notice unread, or a report sent has news unread: a dot on the page
+            // they are seen from.
+            if page == Page::General && self.general_has_news() {
                 fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
             }
             self.targets.push((r, target));
@@ -5613,6 +5680,22 @@ impl Ui {
                         field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, self.code_words_room());
 
                     }
+                }
+                Row::Notice => {
+                    let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
+                    // Tinted in the accent a moment, opened at from its notification.
+                    let flash = self.motion.get("flash:notice").map_or(0.0, |flash| flash.value(now));
+                    card(frame, palette, left, y, width, row_height, view::over(palette.card, palette.selection.alpha(0.14 * flash)));
+                    let mut right = left + width - ROW_SIDE;
+                    for (text, target, kind) in buttons {
+                        right = self.button(frame, palette, &text, right, y + row_height / 2.0, target, kind, &hovered) - 8.0;
+                    }
+                    // Its icon in the accent, beside its title (the first line of its words: see `field_label`).
+                    let words_left = left + ROW_SIDE + NOTICE_ICON_ROOM;
+                    let room = (right - 8.0 - words_left).max(40.0);
+                    let top = y + row_height / 2.0 - (22.0 + frame.gfx.wrapped_height(&detail, hint, room)) / 2.0;
+                    frame.icon(Icon::Megaphone, Point { x: left + ROW_SIDE + 8.0, y: top + 10.0 }, 16.0, palette.selection);
+                    field_label(frame, palette, &name, Some(&detail), Font::new(Family::Segoe, 14.0, 600.0), hint, words_left, y + row_height / 2.0, room);
                 }
                 Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
@@ -6745,6 +6828,31 @@ mod pictures {
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
             }
             update::pretend(None);
+            // A notice of Glance's site, at the top of the updates, with its link and without.
+            for (name, link) in [("general-notice", Some("https://glancepc.com/#download")), ("general-notice-plain", None)] {
+                crate::notice::pretend(Some((
+                    "pictured",
+                    ("更新方式变更", "Glance 0.5.0 改用新的签名证书，当前版本无法自动更新到该版本。请从官网下载安装一次，之后的更新将恢复自动进行。"),
+                    ("A change to updating", "Glance 0.5.0 is signed with a new certificate, which this version cannot check. Download it once from the website. Later updates will be automatic again."),
+                    link,
+                )));
+                with_ui(|ui| ui.turn_to(Page::General));
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            }
+            crate::notice::pretend(None);
             // Recent files' group, scrolled to: only some folders (one chosen), a drive left out and away, a folder
             // not listed (the window's own settings, not kept).
             with_ui(|ui| {
@@ -6886,20 +6994,86 @@ mod pictures {
         }
     }
 
-    /// Asked for at a page (the overlay's, the workbench's), the window is at it as it is first drawn: it pours out
-    /// showing that page, not the one shown last.
+    /// Asked for at a page (the overlay's, the workbench's, the reports', the updates'), the window is at it as it is
+    /// made, before it is first drawn: it pours out showing that page, not the one shown last. (Made unseen here, it is
+    /// not drawn till shown: see `draw`.)
     #[test]
     fn the_settings_are_at_the_page_asked_for_from_their_first_frame() {
         let (gfx, hwnd) = pretended();
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
-        for (to, page) in [(To::Overlay, Page::Monitor), (To::Workbench, Page::Workbench), (To::Reports, Page::Reports)] {
+        for (to, page) in [(To::Overlay, Page::Monitor), (To::Workbench, Page::Workbench), (To::Reports, Page::Reports), (To::Updates, Page::General)] {
             let hwnd = make(gfx.clone(), None, Some(to)).unwrap();
-            assert!(with_ui(|ui| ui.page == page && ui.drawn_size.is_some()).unwrap());
+            let at = with_ui(|ui| ui.page).unwrap();
+            // (Closed before what is asserted: a window left open as the test thread ends gives its device back as the
+            // thread's own data goes, under the loader's lock, where the graphics driver may wait for ever.)
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
             }
+            assert_eq!(at, page);
+        }
+    }
+
+    /// A notice of Glance's site is shown at the top of the updates, a dot beside the general page's name, till it is
+    /// read: told in a notification once, and not again once read. Its link, where it has one, offered beside reading
+    /// it. Opened at from its notification, the window is at the updates, the notice marked.
+    #[test]
+    fn a_notice_is_shown_till_read() {
+        let (_gfx, hwnd) = pretended();
+        // (The window closed before what failed is told: see `the_settings_are_at_the_page_asked_for_from_their_first_frame`.)
+        let outcome = std::panic::catch_unwind(|| {
+            let app = crate::app();
+            app.change(|settings| {
+                settings.notices_told.clear();
+                settings.notices_read.clear();
+            });
+            // No other news on the page: the dot the notice's alone.
+            with_ui(|ui| {
+                ui.followed.clear();
+                ui.turn_to(Page::General);
+            });
+            crate::notice::pretend(None);
+            assert!(!with_ui(|ui| ui.rows().iter().any(|row| matches!(row, Row::Notice)) || ui.general_has_news()).unwrap());
+            assert!(!crate::notice::tell(Lang::Zh));
+            crate::notice::pretend(Some(("test-notice", ("更新方式变更", "请从官网下载安装一次。"), ("A change to updating", "Download it once."), Some("https://glancepc.com/#download"))));
+            with_ui(|ui| {
+                let rows = ui.rows();
+                let at = rows.iter().position(|row| matches!(row, Row::Notice)).expect("the notice shown");
+                assert!(matches!(rows[at - 1], Row::Group(_)) && matches!(rows[at + 1], Row::Version), "first of the updates");
+                assert!(ui.general_has_news());
+                let (title, text, buttons) = ui.button_row(&Row::Notice, Instant::now()).unwrap();
+                assert_eq!((title.as_str(), text.as_str()), ("更新方式变更", "请从官网下载安装一次。"));
+                assert_eq!(buttons.into_iter().map(|(_, target, _)| target).collect::<Vec<_>>(), vec![Target::NoticeRead, Target::NoticeLink]);
+            })
+            .unwrap();
+            // Told once.
+            assert!(crate::notice::tell(Lang::Zh));
+            assert!(!crate::notice::tell(Lang::Zh));
+            // Opened at from it: the general page, the notice marked.
+            with_ui(|ui| {
+                ui.turn_to(Page::Look);
+                ui.turn_as_asked(To::Updates);
+                assert_eq!(ui.page, Page::General);
+                assert!(ui.motion.get("flash:notice").is_some_and(|flash| flash.value(Instant::now()) > 0.5));
+            })
+            .unwrap();
+            // Read: gone, and the dot with it, and not told again.
+            with_ui(|ui| ui.activate(Target::NoticeRead));
+            assert!(!with_ui(|ui| ui.rows().iter().any(|row| matches!(row, Row::Notice)) || ui.general_has_news()).unwrap());
+            assert!(app.settings.lock().unwrap().notices_read.contains(&"test-notice".to_string()));
+            assert!(!crate::notice::tell(Lang::Zh));
+            // Without a link, reading it alone is offered.
+            crate::notice::pretend(Some(("test-notice-2", ("维护", "官网维护。"), ("Maintenance", "The site is down."), None)));
+            let targets = with_ui(|ui| ui.button_row(&Row::Notice, Instant::now()).unwrap().2.into_iter().map(|(_, target, _)| target).collect::<Vec<_>>()).unwrap();
+            assert_eq!(targets, vec![Target::NoticeRead]);
+        });
+        crate::notice::pretend(None);
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+        if let Err(failed) = outcome {
+            std::panic::resume_unwind(failed);
         }
     }
 

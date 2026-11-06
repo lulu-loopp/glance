@@ -31,6 +31,8 @@ mod hang;
 #[cfg(windows)]
 mod journal;
 #[cfg(windows)]
+mod notice;
+#[cfg(windows)]
 mod metrics;
 #[cfg(windows)]
 mod mic;
@@ -325,6 +327,13 @@ pub(crate) fn show_settings(place: Option<windows::Win32::Foundation::RECT>) {
 pub(crate) fn show_reports(place: Option<windows::Win32::Foundation::RECT>) {
     app().controller.dismiss();
     ui::settings_window::open_at_reports(place);
+}
+
+/// The settings shown at their updates (the general page), poured out of `place`: from a notification of a release
+/// found or of a notice of Glance's site.
+pub(crate) fn show_updates(place: Option<windows::Win32::Foundation::RECT>) {
+    app().controller.dismiss();
+    ui::settings_window::open_at_updates(place);
 }
 
 /// The settings shown at the workbench's page (the station's choices are there), poured out of `place`.

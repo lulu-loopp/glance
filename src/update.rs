@@ -213,7 +213,12 @@ pub fn watch() {
         };
         // What is new in the reports this PC sent, asked of Glance's site as it is asked for the latest release.
         thread::spawn(crate::reports::ask);
+        let asked = Instant::now();
         let answer = latest();
+        let lang = language();
+        // A notice of the site's not told before, told as it came or now: told in place of the release found (clicked,
+        // it opens the settings at it, where the release is too).
+        let told = crate::notice::tell(lang) || crate::notice::told_since(asked);
         if answer.is_some() {
             unanswered = 0;
             due = Instant::now() + EVERY;
@@ -228,7 +233,6 @@ pub fn watch() {
             if std::mem::take(&mut asking.tray_waits) { Some(Asker::Tray) } else { asker }
         };
         let newer_release = answer.filter(|release| newer(&release.version, env!("CARGO_PKG_VERSION")));
-        let lang = language();
         if let Some(release) = newer_release {
             let mut found = FOUND.lock().unwrap();
             let new = found.as_ref().is_none_or(|(known, _)| known.version != release.version);
@@ -238,15 +242,15 @@ pub fn watch() {
                 *found = Some((release, State::Ready));
                 drop(found);
                 // Asked from the settings, the settings show it.
-                if asker != Some(Asker::Settings) {
+                if asker != Some(Asker::Settings) && !told {
                     let (title, text) = match lang {
                         Lang::Zh => (format!("Glance {version} 可用"), "点这里，在设置中更新。".to_string()),
                         Lang::En => (format!("Glance {version} is available"), "Click here to update from the settings.".to_string()),
                     };
-                    crate::tray::notify(&title, &text);
+                    crate::tray::notify_updates(&title, &text);
                 }
             }
-        } else if asker == Some(Asker::Tray) {
+        } else if asker == Some(Asker::Tray) && !told {
             // Asked from the tray: the answer, either way.
             let version = env!("CARGO_PKG_VERSION");
             let (title, text) = match (lang, answered) {
@@ -255,7 +259,7 @@ pub fn watch() {
                 (Lang::Zh, false) => ("没能检查更新".to_string(), "GitHub 和 Gitee 都没有回应，请稍后再试。".to_string()),
                 (Lang::En, false) => ("Couldn't check for updates".to_string(), "Neither GitHub nor Gitee answered; try again later.".to_string()),
             };
-            crate::tray::notify(&title, &text);
+            crate::tray::notify_updates(&title, &text);
         }
     }
 }
@@ -629,11 +633,17 @@ fn latest() -> Option<Release> {
     for url in sources {
         let sender = sender.clone();
         thread::spawn(move || {
-            let answer = get(&url).and_then(|body| release(&body));
+            let body = get(&url);
+            // Glance's own site answered: what it has to tell besides (see `notice`).
+            let own_site = url.starts_with(&format!("{}{LATEST}", own_site()));
+            if let Some(body) = body.as_deref().filter(|_| own_site) {
+                crate::notice::heard(body);
+            }
+            let answer = body.and_then(|body| release(&body));
             if answer.is_none() {
                 let host = url.trim_start_matches("https://").split('/').next().unwrap_or(&url);
                 crate::journal::note(format!("update check: no answer from {host}"));
-            } else if url.starts_with(&format!("{}{LATEST}", own_site())) {
+            } else if own_site {
                 // Answered: the next asking is this version's, not a new Glance's nor one just updated.
                 crate::app().change(|settings| settings.asked_as = Some(env!("CARGO_PKG_VERSION").to_string()));
             }
