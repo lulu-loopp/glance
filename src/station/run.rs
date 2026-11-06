@@ -259,7 +259,7 @@ pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
 }
 
 /// For pictures: what is pretended (see `pretend`) with Recently copied shown as `copies` and Recent files as `recent`.
-#[cfg(any(test, feature = "studio"))]
+#[cfg(feature = "studio")]
 pub fn pretend_pages(copies: crate::settings::ShelfView, recent: crate::settings::ShelfView) {
     PRETENDED.with(|pretended| {
         if let Some(shown) = pretended.borrow_mut().as_mut() {

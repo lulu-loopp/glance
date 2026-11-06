@@ -181,7 +181,7 @@ pub fn available() -> Option<(String, State)> {
 }
 
 /// A release found, `version`, its taking standing as `state` (none: none found), for pictures of the settings.
-#[cfg(any(test, feature = "studio"))]
+#[cfg(all(test, feature = "studio"))]
 pub fn pretend(found: Option<(&str, State)>) {
     *FOUND.lock().unwrap() = found.map(|(version, state)| (Release { version: version.to_string(), installers: Vec::new() }, state));
 }
