@@ -54,8 +54,9 @@ Write-Host "installer: $installer"
 $symbols = Join-Path $root "symbols\$version"
 New-Item -ItemType Directory -Force -Path $symbols | Out-Null
 foreach ($name in 'glance', 'glance-sensors') {
-    foreach ($kind in 'exe', 'pdb') {
-        Copy-Item -LiteralPath (Join-Path $root "target\release\$name.$kind") -Destination $symbols -Force
+    # (A program's PDB is named as its crate is, with _ for -.)
+    foreach ($file in "$name.exe", "$($name.Replace('-', '_')).pdb") {
+        Copy-Item -LiteralPath (Join-Path $root "target\release\$file") -Destination $symbols -Force
     }
 }
 Write-Host "symbols: $symbols"
