@@ -1364,6 +1364,8 @@ enum Target {
     More,
     /// Asks for a newer release now.
     CheckNow,
+    /// Opens the site's download page (see `update::download_page`).
+    Download,
     Guide,
     Diagnostics,
     Update,
@@ -2389,6 +2391,27 @@ fn put_slider(settings: &mut Settings, field: Field, value: f32, part: Part, scr
 }
 
 /// The text of the window in both languages.
+/// What the update row says under its name as taking the update stands, and its buttons, right to left. Where it cannot
+/// be taken here (its installer not downloaded, or not passing its check: signed otherwise than this Glance trusts, as
+/// after a change of certificate), the site's download page is offered too, so that it is still had: first where
+/// trying again will not help.
+fn update_offer(state: update::State, lang: Lang) -> (String, Vec<(String, Target, Button)>) {
+    let p = |zh, en| pick(lang, zh, en).to_string();
+    let download = |kind| (p("前往下载", "Download"), Target::Download, kind);
+    match state {
+        update::State::Ready => (p("下载并运行安装程序", "Downloads and runs the installer"), vec![(p("更新", "Update"), Target::Update, Button::Accent)]),
+        update::State::Downloading => (p("正在下载安装程序…", "Downloading the installer…"), vec![(p("下载中", "Downloading"), Target::Update, Button::Quiet)]),
+        update::State::Failed => (
+            p("下载失败，请重试或从官网下载", "The download failed. Retry, or download it from the website"),
+            vec![(p("重试", "Retry"), Target::Update, Button::Accent), download(Button::Plain)],
+        ),
+        update::State::Rejected => (
+            p("安装程序未通过验证，请从官网下载", "The installer did not pass its check. Download it from the website"),
+            vec![download(Button::Accent), (p("重试", "Retry"), Target::Update, Button::Plain)],
+        ),
+    }
+}
+
 fn pick(lang: Lang, zh: &'static str, en: &'static str) -> &'static str {
     lang.pick(zh, en)
 }
@@ -3086,14 +3109,8 @@ impl Ui {
                     Lang::Zh => format!("Glance {version} 可用"),
                     Lang::En => format!("Glance {version} is available"),
                 };
-                let (detail, action) = match state {
-                    update::State::Ready => (p("下载并运行安装程序", "Downloads and runs the installer"), p("更新", "Update")),
-                    update::State::Downloading => (p("正在下载安装程序…", "Downloading the installer…"), p("下载中", "Downloading")),
-                    update::State::Failed => (p("下载失败，请稍后重试", "The download failed. Try again later"), p("重试", "Retry")),
-                    update::State::Rejected => (p("安装程序未通过验证，未运行", "The installer did not pass its check and was not run"), p("重试", "Retry")),
-                };
-                let kind = if state == update::State::Downloading { Button::Quiet } else { Button::Accent };
-                (name, detail, vec![(action, Target::Update, kind)])
+                let (detail, buttons) = update_offer(state, lang);
+                (name, detail, buttons)
             }
             Row::Version => {
                 let version = env!("CARGO_PKG_VERSION");
@@ -4551,6 +4568,10 @@ impl Ui {
                 }
             }
             Target::Update => update::install(),
+            Target::Download => {
+                let page = HSTRING::from(update::download_page(self.lang));
+                unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &page, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
+            }
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
             Target::NetEase(_) => {}
             Target::NetEaseRestart => {
@@ -4633,7 +4654,7 @@ impl Ui {
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
-                Row::Update => vec![Target::Update],
+                Row::Update => update::available().map_or(Vec::new(), |(_, state)| update_offer(state, self.lang).1.into_iter().map(|(_, target, _)| target).collect()),
                 Row::Diagnostics => vec![Target::SendReport, Target::Diagnostics],
                 Row::MyReports => vec![Target::MyReports],
                 Row::Report(id) => vec![Target::Thread(id)],
@@ -4790,7 +4811,7 @@ impl Ui {
     fn reveal_focus(&mut self) {
         let Some(focus) = self.focus.clone() else { return };
         let row = self.layout().into_iter().find(|(row, ..)| match (row, &focus) {
-            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
+            (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
@@ -6703,6 +6724,27 @@ mod pictures {
                 .unwrap();
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
             }
+            // A release found whose installer did not pass its check, and one not downloaded: each with the site's
+            // download page beside trying again.
+            for (state, name) in [(update::State::Rejected, "general-update-rejected"), (update::State::Failed, "general-update-failed")] {
+                update::pretend(Some(("0.4.4", state)));
+                with_ui(|ui| ui.turn_to(Page::General));
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            }
+            update::pretend(None);
             // Recent files' group, scrolled to: only some folders (one chosen), a drive left out and away, a folder
             // not listed (the window's own settings, not kept).
             with_ui(|ui| {
@@ -7007,6 +7049,22 @@ mod pictures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An update that cannot be taken here, its installer not downloaded or not passing its check, is offered from
+    /// the site's download page as well (a release Glance cannot check, whatever its signature, is still had so):
+    /// first where trying again will not help. One that can be taken, or is being, is not.
+    #[test]
+    fn an_update_not_taken_here_is_offered_from_the_site() {
+        for lang in [Lang::Zh, Lang::En] {
+            let targets = |state| update_offer(state, lang).1.into_iter().map(|(_, target, _)| target).collect::<Vec<_>>();
+            assert_eq!(targets(update::State::Rejected), vec![Target::Download, Target::Update]);
+            assert_eq!(targets(update::State::Failed), vec![Target::Update, Target::Download]);
+            assert_eq!(targets(update::State::Ready), vec![Target::Update]);
+            assert_eq!(targets(update::State::Downloading), vec![Target::Update]);
+        }
+        assert_eq!(update::download_page(Lang::Zh), "https://glancepc.com/#download");
+        assert_eq!(update::download_page(Lang::En), "https://glancepc.com/en/#download");
+    }
 
     /// Recent files' drives: those it reads now and those left out that are away (as last seen), by their letters,
     /// none twice. One left out by its volume, kept with its label and letter, and listed again (a drive left out

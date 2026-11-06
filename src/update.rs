@@ -180,6 +180,12 @@ pub fn available() -> Option<(String, State)> {
     FOUND.lock().unwrap().as_ref().map(|(release, state)| (release.version.clone(), *state))
 }
 
+/// A release found, `version`, its taking standing as `state` (none: none found), for pictures of the settings.
+#[cfg(any(test, feature = "studio"))]
+pub fn pretend(found: Option<(&str, State)>) {
+    *FOUND.lock().unwrap() = found.map(|(version, state)| (Release { version: version.to_string(), installers: Vec::new() }, state));
+}
+
 /// Asks for the latest release now and then, for as long as Glance runs,
 /// and whenever asked to.
 pub fn watch() {
@@ -524,6 +530,14 @@ fn own_signature_on(url: &str, version: &str, held: &std::fs::File) -> bool {
 fn hold(file: &Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(file)
+}
+
+/// Glance's download page on its site, in `lang`: where a release is had whatever this Glance can check of it.
+pub fn download_page(lang: Lang) -> String {
+    match lang {
+        Lang::Zh => format!("{}/#download", own_site()),
+        Lang::En => format!("{}/en/#download", own_site()),
+    }
 }
 
 /// Whether two versions are one, by the order versions go in (see `order`): never what is not a version.
