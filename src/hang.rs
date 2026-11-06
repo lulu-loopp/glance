@@ -1,6 +1,6 @@
-//! Glance's own windows watched for a thread of theirs that stops answering, as the user sees it: the window greyed,
-//! "not responding" (Windows' own test, `IsHungAppWindow`: no message taken in five seconds). Five seconds more of it
-//! and where each of Glance's threads stands is written down where Glance keeps its settings (`FOLDER`: the threads'
+//! Glance's own windows (of the kinds Glance made) watched for a thread of theirs that stops answering, as the user
+//! sees it: the window greyed, "not responding" (Windows' own test, `IsHungAppWindow`: no message taken in five
+//! seconds). Five seconds more of it and where each of Glance's threads stands is written down where Glance keeps its settings (`FOLDER`: the threads'
 //! stacks, handles and the modules loaded, not the rest of what Glance holds; never sent anywhere), the newest few
 //! kept; and the journal says which thread it was and how the PC's memory stood (a PC out of memory stalls every
 //! program, Glance with it), and again as it answers once more. Nothing of Windows' is set or changed: it is a thread
@@ -23,7 +23,8 @@ use windows::Win32::System::Diagnostics::Debug::{MiniDumpWithHandleData, MiniDum
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows::Win32::System::SystemInformation::{GetLocalTime, GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetThreadDescription, OpenProcess, OpenThread, CREATE_NO_WINDOW, PROCESS_DUP_HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, THREAD_QUERY_LIMITED_INFORMATION};
-use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowExW, GetClassNameW, GetWindowThreadProcessId, IsHungAppWindow, HWND_MESSAGE};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, FindWindowExW, GetClassLongPtrW, GetClassNameW, GetWindowThreadProcessId, IsHungAppWindow, GCLP_HMODULE, HWND_MESSAGE};
 
 /// Where what the threads stood at is written, in the settings' folder.
 pub const FOLDER: &str = "hangs";
@@ -133,13 +134,21 @@ fn own_threads() -> HashMap<u32, HWND> {
     found
 }
 
-/// `window` put in `found` by its thread, if it is this process's (the first of its thread's to come).
+/// `window` put in `found` by its thread, if it is this process's and of a kind Glance made (the first of its thread's to
+/// come). Not one Windows' own parts make for a thread of Glance's, as COM's for a thread that uses it: a thread that
+/// waits for work leaves that unanswered, keeping nobody waiting (Glance's thread that pictures files, 2026-11-06).
 fn own(window: HWND, found: &mut HashMap<u32, HWND>) {
     let mut process = 0;
     let thread = unsafe { GetWindowThreadProcessId(window, Some(&mut process)) };
-    if thread != 0 && process == unsafe { GetCurrentProcessId() } {
+    if thread != 0 && process == unsafe { GetCurrentProcessId() } && made_by_glance(window) {
         found.entry(thread).or_insert(window);
     }
+}
+
+/// Whether `window` is of a kind (a class) Glance made: one made by Glance's own program, not by a library of Windows'.
+fn made_by_glance(window: HWND) -> bool {
+    let Ok(program) = (unsafe { GetModuleHandleW(PCWSTR::null()) }) else { return false };
+    (unsafe { GetClassLongPtrW(window, GCLP_HMODULE) }) == program.0 as usize
 }
 
 /// A thread by the name it was given (Glance names its threads), quoted, and its number; its number alone without.
@@ -268,7 +277,10 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use windows::core::w;
-    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, DispatchMessageW, PeekMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE};
+    use windows::Win32::Foundation::{LRESULT, WPARAM};
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW, RegisterClassW, MSG, PM_REMOVE, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW};
 
     /// A thread of Glance's with a window, one shown at the top and one that only takes messages, that stops taking
     /// them a while: it is written down once, by its name, with how memory stood, what every thread stood at in a
@@ -285,8 +297,9 @@ mod tests {
             .spawn({
                 let (stall, done) = (stall.clone(), done.clone());
                 move || unsafe {
-                    let shown = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, 0, 10, 10, None, None, None, None).unwrap();
-                    let messages = CreateWindowExW(WINDOW_EX_STYLE(0), w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None).unwrap();
+                    let class = test_class();
+                    let shown = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!(""), WINDOW_STYLE(0), 0, 0, 10, 10, None, None, None, None).unwrap();
+                    let messages = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!(""), WINDOW_STYLE(0), 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None).unwrap();
                     told.send((shown.0 as isize, messages.0 as isize)).unwrap();
                     let mut message = MSG::default();
                     while !done.load(Ordering::Acquire) {
@@ -329,6 +342,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// A kind of window of the tests' own (as Glance makes its own), registered once.
+    fn test_class() -> PCWSTR {
+        unsafe extern "system" fn procedure(window: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            unsafe { DefWindowProcW(window, message, w, l) }
+        }
+        static REGISTERED: std::sync::Once = std::sync::Once::new();
+        let class = w!("GlanceHangTest");
+        REGISTERED.call_once(|| unsafe {
+            let program = GetModuleHandleW(PCWSTR::null()).unwrap();
+            RegisterClassW(&WNDCLASSW { lpfnWndProc: Some(procedure), hInstance: program.into(), lpszClassName: class, ..Default::default() });
+        });
+        class
+    }
+
+    /// A thread of Glance's that uses COM and waits for work, taking no message meanwhile: Windows calls the window COM
+    /// made for it hung, but it keeps nobody waiting, and nothing is written down. (The thread that pictures files was
+    /// told as hung through a night, 2026-11-06.)
+    #[test]
+    fn a_thread_waiting_for_work_is_not_written_down() {
+        let folder = std::env::temp_dir().join(format!("glance-hang-waiting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let (told, window) = std::sync::mpsc::channel();
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let waiting = std::thread::Builder::new()
+            .name("hang test: waits for work".into())
+            .spawn(move || unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                // COM's window for this thread, among those that only take messages.
+                let (mut after, mut com) = (None, None);
+                while let Ok(window) = FindWindowExW(Some(HWND_MESSAGE), after, w!("OleMainThreadWndClass"), PCWSTR::null()) {
+                    if GetWindowThreadProcessId(window, None) == GetCurrentThreadId() {
+                        com = Some(window.0 as isize);
+                        break;
+                    }
+                    after = Some(window);
+                }
+                // What came taken once, as a picture made takes it, then work waited for.
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&message);
+                }
+                told.send(com).unwrap();
+                let _ = stopped.recv_timeout(Duration::from_secs(30));
+                CoUninitialize();
+            })
+            .unwrap();
+        let com = window.recv().unwrap().map(|window| HWND(window as *mut _));
+        let mut watcher = Watcher::new(folder.clone(), Duration::from_secs(1), test_writes);
+        let mut said = Vec::new();
+        let began = Instant::now();
+        let mut hung = false;
+        while com.is_some() && began.elapsed() < Duration::from_secs(12) {
+            std::thread::sleep(Duration::from_millis(250));
+            hung |= com.is_some_and(|com| unsafe { IsHungAppWindow(com) }.as_bool());
+            watcher.look(Instant::now(), &mut |line| said.push(line));
+        }
+        let _ = stop.send(());
+        waiting.join().unwrap();
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(com.is_some(), "COM made its window for the thread");
+        assert!(hung, "Windows called COM's window hung");
+        let ours: Vec<&String> = said.iter().filter(|line| line.contains("hang test: waits for work")).collect();
+        assert!(ours.is_empty(), "{ours:?}");
+    }
+
     /// How the tests run the process that writes: this test program, at `writes_as_asked`, told what to write.
     fn test_writes(process: u32, file: usize) -> Command {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -347,9 +425,26 @@ mod tests {
 
     /// Written while another thread holds the loader's lock, as one stuck in a graphics driver's loading did
     /// (2026-11-06): written still, and nothing held still for it. (Written from inside, every thread was held still
-    /// and the writing waited on the lock for good.)
+    /// and the writing waited on the lock for good.) Held in a process of its own: the other tests' threads, begun and
+    /// ended meanwhile, wait on the lock, holding what they hold (as what running a process waits for) all the while.
     #[test]
     fn written_while_the_loader_is_held() {
+        let ran = Command::new(std::env::current_exe().unwrap())
+            .args(["hang::tests::written_while_the_loader_is_held_apart", "--exact", "--ignored", "--test-threads=1", "--nocapture"])
+            .env("GLANCE_HANG_HELD", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout).into_owned() + &String::from_utf8_lossy(&ran.stderr);
+        assert!(ran.status.success() && said.contains("1 passed"), "{said}");
+    }
+
+    /// `written_while_the_loader_is_held`, in the process run for it.
+    #[test]
+    #[ignore = "run by written_while_the_loader_is_held in a process of its own"]
+    fn written_while_the_loader_is_held_apart() {
+        if std::env::var_os("GLANCE_HANG_HELD").is_none() {
+            return;
+        }
         type Lock = unsafe extern "system" fn(u32, *mut u32, *mut usize) -> i32;
         type Unlock = unsafe extern "system" fn(u32, usize) -> i32;
         use windows::core::s;
