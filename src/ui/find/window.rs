@@ -1703,12 +1703,18 @@ fn standing_said(lang: Lang) -> (String, bool) {
         };
         return (said, true);
     }
-    let drives = standing.iter().map(|standing| standing.root.trim_end_matches('\\')).collect::<Vec<_>>().join(" ");
-    let said = match lang {
+    let roots = standing.iter().map(|standing| standing.root.as_str()).collect::<Vec<_>>();
+    (ready_said(lang, &roots, names), false)
+}
+
+/// What the foot says of the drives indexed once all are ready: their names as Windows writes them (C: D:, each root
+/// without its backslash, its colon its own), and how many entries they hold.
+fn ready_said(lang: Lang, roots: &[&str], names: usize) -> String {
+    let drives = roots.iter().map(|root| root.trim_end_matches('\\')).collect::<Vec<_>>().join(" ");
+    match lang {
         Lang::Zh => format!("{drives} 已索引 {} 项 · 实时更新", count_said(names)),
-        Lang::En => format!("{drives}: {} indexed, kept current", count_said(names)),
-    };
-    (said, false)
+        Lang::En => format!("{} indexed on {drives}, kept current", count_said(names)),
+    }
 }
 
 /// A count with its thousands set apart: 2,914,305.
@@ -1984,6 +1990,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drives are named as Windows writes them, each with its one colon, in both languages: the English foot put a
+    /// colon after them all, and the last drive's doubled ("C: D:: 1,284,503 indexed").
+    #[test]
+    fn the_drives_indexed_are_named_with_one_colon_each() {
+        assert_eq!(ready_said(Lang::En, &["C:\\", "D:\\"], 1_284_503), "1,284,503 indexed on C: D:, kept current");
+        assert_eq!(ready_said(Lang::Zh, &["C:\\", "D:\\"], 1_284_503), "C: D: 已索引 1,284,503 项 · 实时更新");
+        assert!(!ready_said(Lang::En, &["C:\\"], 7).contains("::"));
+    }
 
     /// What is told of the files found for the last asking, before what was found for it is shown (an older telling
     /// taking it in first), is kept till it is, and taken in then; what is told of an asking before is let go of.
