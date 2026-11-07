@@ -52,12 +52,34 @@ blocks out for the room.
   click, and the marks show only on the line you are writing. A note can be
   stuck on the desktop and written in right there. What another program
   changes in a note is read in, and nothing is written over unread.
+- **To-dos**: kept in the note `待办.md` (`To-do.md` in English) as Markdown
+  task lines. Type at the top to add one, with a time after @, and finished
+  ones sink to the end.
 - **Quick launch**: programs, files, folders and web links side by side, a
   click away, picked from every program in the Start menu, from what you used
   lately, or dragged in.
 - **Time and media**: the time and the date, and what is playing.
 
+- **Search**: a box that opens search where it is pressed (see [Search and quick look](#search-and-quick-look)).
+
 ![The workbench at the screen's left edge in the frosted-glass look: the time, the station with files and a link, notes, and quick launch's rail](docs/images/workbench-en.webp)
+
+## Search and quick look
+
+- **Search**: press **Win+Alt+Space** anywhere (or keys of your own, or none)
+  and a search sheet comes up on the screen the pointer is on, in the panel's
+  look, with results as you type: apps, Windows settings and tools, folders
+  and files, and Glance's own notes, to-dos, station and recently copied
+  things. Files are found by name on every NTFS drive, from the drive's
+  change journal, as Everything reads it, opened read-only and kept current
+  from the moment Glance starts. A USB drive being searched can still be
+  ejected safely.
+- **Quick look**: press **Ctrl+Q** with the pointer over something on the
+  station, in Recently copied or Recent files, or with a search result
+  picked, and it is shown larger without opening a program. Pictures show
+  whole, videos and sounds play in place, PDF, Word, Excel, PowerPoint and
+  mail are shown by the previewers Explorer's preview pane uses, a folder
+  shows what it holds, and several files show side by side.
 
 ## Music
 
@@ -173,14 +195,16 @@ or following the brightness of your wallpaper. Chinese or English.
 
 ## Small and quiet
 
-One executable of about 2 MB, drawn natively with Direct2D and
+A program of about 6 MB, drawn natively with Direct2D and
 DirectComposition. About 55 MB of memory and well under 1% of a CPU core
 while the panel is hidden. No account, no ads, and no network access but
 one daily question about a newer version (to Glance's own site, and to
-GitHub and Gitee), which the settings can turn off; the diagnostics you choose to send from the
-settings (shown to you whole first, with a few words of your own and
-screenshots if you like); and the phone remote, if you turn it
-on.
+GitHub and Gitee), which the settings can turn off, lyrics looked up while
+music plays, files fetched when first needed (such as the full screen's
+typeface), the diagnostics you choose to send from the settings (shown to
+you whole first, with a few words of your own and screenshots if you like,
+and followed as a conversation with the author's replies), and the phone
+remote, if you turn it on.
 
 ## Install
 
@@ -188,9 +212,12 @@ on.
    [latest release](https://github.com/lulu-loopp/glance/releases/latest) and run it
    (the same installer is mirrored on [Gitee](https://gitee.com/lulu-loopp/glance/releases)
    for mainland China).
-2. The installer is signed (publisher: Weiyi Shi). As the signature is new,
-   Windows SmartScreen may still say "Windows protected your PC" for the first
-   downloads; choose **More info → Run anyway**.
+2. 0.4.3-preview carries no Microsoft signature for now (the signing service
+   is under review), so Windows shows its publisher as unknown, and
+   SmartScreen may say "Windows protected your PC": choose **More info → Run
+   anyway**. `SHA256SUMS.txt` on the release lists each file's checksum.
+   Glance 0.4.0 to 0.4.2 cannot update to it by themselves: install it once
+   over them, and settings, notes and layouts are kept.
 3. Glance asks for administrator rights once, on its first start: reading
    temperatures, power and fans needs them, through the signed
    [PawnIO](https://github.com/namazso/PawnIO) driver the installer sets up.
@@ -214,7 +241,11 @@ for administrator rights at every start and cannot start with Windows.
   as they are arranged: click an edge of any of them, left, top or right, for
   the panel to open from it, and again to turn it off. Where an edge leads on
   to another screen, rest the pointer on it for half a second instead. Or press **Ctrl+Alt+G** (or a shortcut of your own),
-  which opens it at the pointer and closes it again.
+  which opens it at the pointer and closes it again. A short guide shows
+  this on the first start, and the General page shows it again.
+- **Search**: **Win+Alt+Space** opens search, and **Ctrl+Q** looks at the
+  thing under the pointer or the result picked (see
+  [Search and quick look](#search-and-quick-look)).
 - **Games**: while a fullscreen game runs, a Game lane comes at the top of
   the panel; for its frame rate over the game itself, turn on "Show while
   playing" on the settings' Overlay page. Over a fullscreen game, borderless
@@ -246,8 +277,8 @@ for administrator rights at every start and cannot start with Windows.
   weeks it has been on this PC; the site counts those, to know how many
   copies run and are kept up to date. Nothing tells one PC from another:
   no name or number is sent, and the site keeps no address. When one is out, the tray says
-  so and the settings offer it. Glance downloads the installer and runs it only if it is signed
-  by the same publisher as the Glance you have.
+  so and the settings offer it. Glance downloads the installer and runs it only if it carries
+  Glance's own signature (the `.sig` beside it on the release) or is signed by its publisher.
 - **Uninstall**: from Windows' Apps list, or from the settings. It removes
   Glance, its scheduled tasks and its settings, and asks whether to remove the
   PawnIO driver too (other monitoring tools may use it).
