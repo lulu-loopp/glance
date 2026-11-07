@@ -106,6 +106,9 @@ fn add_icon(hwnd: HWND) {
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
         added
     };
+    if !added {
+        crate::journal::note("tray: the icon not added (no taskbar yet?): added as the taskbar comes".to_string());
+    }
     // What was to be told before the icon was there, told from it now.
     if added {
         show_waiting(&mut WAITING.lock().unwrap(), hwnd.0 as isize, |data| unsafe { Shell_NotifyIconW(NIM_MODIFY, data) }.as_bool());
@@ -280,8 +283,11 @@ fn show_waiting(waiting: &mut Option<Waiting>, window: isize, shell: impl FnOnce
     put(&mut data.szInfoTitle, &notice.title);
     put(&mut data.szInfo, &notice.text);
     if shell(&data) {
+        crate::journal::note(format!("tray: notification shown: {}", notice.title));
         TOLD.store(notice.of, Ordering::Relaxed);
         *waiting = None;
+    } else {
+        crate::journal::note(format!("tray: notification not taken by the shell, kept for the icon: {}", notice.title));
     }
 }
 
