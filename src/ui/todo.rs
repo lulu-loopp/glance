@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT};
-use windows::Win32::UI::WindowsAndMessaging::{WM_APP, WM_CHAR, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP};
+use windows::Win32::UI::WindowsAndMessaging::{WM_APP, WM_CHAR, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP};
 
 use super::typing::Typing;
 use super::view::todo::{self as lane, key_of, Field, TodoHit};
@@ -103,6 +103,9 @@ struct Writing {
     at: Option<(RECT, f32)>,
     /// The window in front before its window took the keys, given the front back as they are given back by Esc.
     before: isize,
+    /// Whether the input method is putting words together for it (between its composition's start and end): words on
+    /// their way into the field, not in its text yet.
+    composing: bool,
 }
 
 thread_local! {
@@ -121,7 +124,7 @@ pub fn write_in(owner: HWND) -> super::keys::Answer {
                     writing.at = None;
                 }
             }
-            None => *writing = Some(Writing { owner: owner.0 as isize, taking: true, typing: Typing::most(MOST), due: None, blink_from: now, at: None, before: 0 }),
+            None => *writing = Some(Writing { owner: owner.0 as isize, taking: true, typing: Typing::most(MOST), due: None, blink_from: now, at: None, before: 0, composing: false }),
         }
     });
     Rc::new(answer)
@@ -188,9 +191,26 @@ pub fn writing(owner: HWND) -> bool {
     WRITING.with_borrow(|writing| writing.as_ref().is_some_and(|writing| writing.taking && writing.owner == owner.0 as isize))
 }
 
-/// Whether the window `owner` is to stay as it is for the to-dos: its field written in, or the picker opened from it up.
+/// Whether the window `owner` is to stay as it is for the to-dos: its field written in and holding what is not kept yet
+/// (words, a time set, or words the input method is putting together), or the picker opened from it up. A field taking
+/// the keys with nothing in it holds nothing: once Enter has added what was written, the panel goes as the pointer
+/// leaves it, as it would have before the field was pressed (going, it gives the keys back: see `went`).
 pub fn holds(owner: HWND) -> bool {
-    writing(owner) || pick::up_for(owner)
+    pick::up_for(owner) || WRITING.with_borrow(|writing| writing.as_ref().is_some_and(|writing| writing.owner == owner.0 as isize && unkept(writing)))
+}
+
+/// Whether the field takes the keys and holds what would be lost if it went now.
+fn unkept(writing: &Writing) -> bool {
+    writing.taking && (!writing.typing.text.is_empty() || writing.due.is_some() || writing.composing)
+}
+
+/// The input method begins (`true`) or ends putting words together for the field.
+fn composing(now: bool) {
+    WRITING.with_borrow_mut(|writing| {
+        if let Some(writing) = writing.as_mut() {
+            writing.composing = now;
+        }
+    });
 }
 
 /// The field as the window `owner` shows it at `now`, and when it is next to be drawn for its caret: what is written
@@ -228,7 +248,7 @@ pub fn placed(owner: HWND, field: RECT, scale: f32) {
 /// The time set for the item being written (from the picker).
 pub fn set_field_due(due: Option<Due>) {
     WRITING.with_borrow_mut(|writing| {
-        let writing = writing.get_or_insert_with(|| Writing { owner: 0, taking: false, typing: Typing::most(MOST), due: None, blink_from: Instant::now(), at: None, before: 0 });
+        let writing = writing.get_or_insert_with(|| Writing { owner: 0, taking: false, typing: Typing::most(MOST), due: None, blink_from: Instant::now(), at: None, before: 0, composing: false });
         writing.due = due;
     });
 }
@@ -256,7 +276,12 @@ fn answer(hwnd: HWND, message: u32, wparam: WPARAM, _lparam: LPARAM) -> Option<O
         }
         WM_KEYUP => Some(Some(LRESULT(0))),
         WM_IME_STARTCOMPOSITION => {
+            composing(true);
             place_ime(hwnd);
+            Some(None)
+        }
+        WM_IME_ENDCOMPOSITION => {
+            composing(false);
             Some(None)
         }
         _ => None,
@@ -329,4 +354,34 @@ fn place_ime(hwnd: HWND) {
     let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut corner) };
     let px = |dips: f32| (dips * scale).round() as i32;
     super::typing::place_ime(hwnd, POINT { x: corner.x + px(x), y: corner.y + px(y) }, px(y + tall) - px(y), "Microsoft YaHei UI", px(size));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The field holds the panel only while it holds what is not kept: pressed and empty, or emptied by Enter, it holds
+    /// nothing (the panel went only after a press elsewhere); words written, a time set, or words the input method is
+    /// putting together, it holds; given back its keys, it holds nothing.
+    #[test]
+    fn the_field_holds_the_panel_only_while_it_holds_what_is_not_kept() {
+        let owner = HWND(0x5151 as *mut _);
+        WRITING.with_borrow_mut(|writing| *writing = None);
+        let _ = write_in(owner);
+        assert!(writing(owner));
+        assert!(!holds(owner), "a field pressed with nothing in it");
+        WRITING.with_borrow_mut(|writing| writing.as_mut().unwrap().typing.put(&"买猫粮".encode_utf16().collect::<Vec<_>>()));
+        assert!(holds(owner), "words written");
+        WRITING.with_borrow_mut(|writing| writing.as_mut().unwrap().typing = Typing::most(MOST));
+        assert!(!holds(owner), "emptied, as Enter leaves it");
+        composing(true);
+        assert!(holds(owner), "words the input method is putting together");
+        composing(false);
+        assert!(!holds(owner));
+        WRITING.with_borrow_mut(|writing| writing.as_mut().unwrap().typing.put(&"预约体检".encode_utf16().collect::<Vec<_>>()));
+        stop(owner);
+        assert!(!holds(owner), "its keys given back");
+        assert!(!holds(HWND(0x5252 as *mut _)), "another window's");
+        WRITING.with_borrow_mut(|writing| *writing = None);
+    }
 }
