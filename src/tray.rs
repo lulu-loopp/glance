@@ -101,9 +101,14 @@ fn add_icon(hwnd: HWND) {
     let tip = TIP.lock().unwrap();
     put(&mut data.szTip, if tip.is_empty() { "Glance" } else { &tip });
     let data = with_state(data);
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_ADD, &data);
+    let added = unsafe {
+        let added = Shell_NotifyIconW(NIM_ADD, &data).as_bool();
         let _ = Shell_NotifyIconW(NIM_SETVERSION, &data);
+        added
+    };
+    // What was to be told before the icon was there, told from it now.
+    if added {
+        show_waiting(&mut WAITING.lock().unwrap(), hwnd.0 as isize, |data| unsafe { Shell_NotifyIconW(NIM_MODIFY, data) }.as_bool());
     }
 }
 
@@ -244,18 +249,40 @@ pub fn notify_updates(title: &str, text: &str) {
     show_notice(title, text, OF_UPDATES);
 }
 
+/// A notification not shown yet: asked for before the icon was there (Glance asks for the latest release, and hears
+/// the site's notice, as it starts, before its icon is added), or not taken while the taskbar was not there (as at
+/// sign-in, or as Explorer starts again). Shown as the icon is next added. A newer one takes its place.
+static WAITING: Mutex<Option<Waiting>> = Mutex::new(None);
+
+struct Waiting {
+    title: String,
+    text: String,
+    /// What it is about (`OF_SETTINGS`, `OF_REPORTS`, `OF_UPDATES`).
+    of: u8,
+}
+
 fn show_notice(title: &str, text: &str, of: u8) {
-    TOLD.store(of, Ordering::Relaxed);
-    let hwnd = WINDOW.load(Ordering::Acquire);
-    if hwnd == 0 {
+    let mut waiting = WAITING.lock().unwrap();
+    *waiting = Some(Waiting { title: title.to_string(), text: text.to_string(), of });
+    show_waiting(&mut waiting, WINDOW.load(Ordering::Acquire), |data| unsafe { Shell_NotifyIconW(NIM_MODIFY, data) }.as_bool());
+}
+
+/// Shows the notification waiting, if any, from the icon of `window` (0: none yet) through `shell`: it waits on unless
+/// the shell took it.
+fn show_waiting(waiting: &mut Option<Waiting>, window: isize, shell: impl FnOnce(&NOTIFYICONDATAW) -> bool) {
+    let Some(notice) = waiting.as_ref() else { return };
+    if window == 0 {
         return;
     }
-    let mut data = icon_data(HWND(hwnd as *mut _));
+    let mut data = icon_data(HWND(window as *mut _));
     data.uFlags = NIF_INFO;
     data.dwInfoFlags = NIIF_INFO;
-    put(&mut data.szInfoTitle, title);
-    put(&mut data.szInfo, text);
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+    put(&mut data.szInfoTitle, &notice.title);
+    put(&mut data.szInfo, &notice.text);
+    if shell(&data) {
+        TOLD.store(notice.of, Ordering::Relaxed);
+        *waiting = None;
+    }
 }
 
 /// `text` in a fixed buffer, cut to fit, a terminating nul left in place.
@@ -481,5 +508,34 @@ mod tests {
         assert_eq!(keys(true, false, false, true, b'S'), "Win+Shift+S");
         assert_eq!(keys(true, true, true, true, b'K'), "Win+Ctrl+Alt+Shift+K");
         assert_eq!(keys(false, true, true, false, b'G'), "Ctrl+Alt+G");
+    }
+
+    /// A notification asked for before the icon is there, or not taken by the shell, waits for the icon: it is shown
+    /// from it as it comes, once, and not lost (the site's notice heard as Glance started was noted as told and never shown).
+    #[test]
+    fn a_notification_waits_for_the_icon() {
+        let words = |data: &NOTIFYICONDATAW| String::from_utf16_lossy(&data.szInfoTitle).trim_end_matches('\0').to_string();
+        let mut waiting = Some(Waiting { title: "A notice".into(), text: "Its words".into(), of: OF_UPDATES });
+        let mut asked = 0;
+        show_waiting(&mut waiting, 0, |_| {
+            asked += 1;
+            true
+        });
+        assert_eq!(asked, 0, "no icon to show it from");
+        assert!(waiting.is_some(), "kept for the icon");
+        show_waiting(&mut waiting, 1, |_| false);
+        assert!(waiting.is_some(), "kept while the shell does not take it");
+        let mut shown = Vec::new();
+        show_waiting(&mut waiting, 1, |data| {
+            shown.push(words(data));
+            true
+        });
+        assert_eq!(shown, vec!["A notice".to_string()]);
+        assert!(waiting.is_none(), "shown once");
+        show_waiting(&mut waiting, 1, |data| {
+            shown.push(words(data));
+            true
+        });
+        assert_eq!(shown.len(), 1, "nothing left to show");
     }
 }
