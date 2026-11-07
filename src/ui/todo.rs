@@ -119,10 +119,13 @@ pub fn write_in(owner: HWND) -> super::keys::Answer {
         let now = Instant::now();
         match writing {
             Some(writing) => {
-                (writing.owner, writing.taking, writing.blink_from) = (owner.0 as isize, true, now);
+                // (Carried from another window: where it was drawn there is no longer where it is. Words the input
+                // method was putting together, there or here before the keys were given back, are over: their end is
+                // heard by the window they were put together for, if at all.)
                 if writing.owner != owner.0 as isize {
                     writing.at = None;
                 }
+                (writing.owner, writing.taking, writing.blink_from, writing.composing) = (owner.0 as isize, true, now, false);
             }
             None => *writing = Some(Writing { owner: owner.0 as isize, taking: true, typing: Typing::most(MOST), due: None, blink_from: now, at: None, before: 0, composing: false }),
         }
@@ -382,6 +385,34 @@ mod tests {
         stop(owner);
         assert!(!holds(owner), "its keys given back");
         assert!(!holds(HWND(0x5252 as *mut _)), "another window's");
+        WRITING.with_borrow_mut(|writing| *writing = None);
+    }
+
+    /// Carried to another window, the field keeps its words but not where it was drawn in the window it left (the
+    /// input method's words are put at its caret where it is next drawn), nor words the input method was putting
+    /// together there (that window hears their end, not this one). Taken up again in the same window after its keys
+    /// were given back, no words are being put together either.
+    #[test]
+    fn the_field_carried_to_another_window_leaves_its_place_and_composition_behind() {
+        let (a, b) = (HWND(0x6161 as *mut _), HWND(0x6262 as *mut _));
+        WRITING.with_borrow_mut(|writing| *writing = None);
+        let _ = write_in(a);
+        placed(a, RECT { left: 10, top: 20, right: 300, bottom: 52 }, 1.5);
+        WRITING.with_borrow_mut(|writing| writing.as_mut().unwrap().typing.put(&"交房租".encode_utf16().collect::<Vec<_>>()));
+        composing(true);
+        let _ = write_in(b);
+        WRITING.with_borrow(|writing| {
+            let writing = writing.as_ref().unwrap();
+            assert_eq!(writing.typing.string(), "交房租", "its words carried");
+            assert!(writing.at.is_none(), "where it was drawn in the window it left");
+            assert!(!writing.composing, "words being put together in the window it left");
+        });
+        WRITING.with_borrow_mut(|writing| writing.as_mut().unwrap().typing = Typing::most(MOST));
+        assert!(!holds(b), "empty in its new window, it holds nothing");
+        composing(true);
+        stop(b);
+        let _ = write_in(b);
+        assert!(!holds(b), "taken up again with no words being put together");
         WRITING.with_borrow_mut(|writing| *writing = None);
     }
 }
