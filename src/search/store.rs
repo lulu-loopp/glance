@@ -21,12 +21,14 @@ const VERSION: u32 = 3;
 /// How long what is kept before the index is (bytes).
 const HEADER: usize = 48;
 
-/// What the index was kept with: the drive it is of, and its journal and where it had come to (the changes before
-/// that are in it), where it has one.
+/// What the index was kept with: the drive it is of, its journal and where it had come to (the changes before that
+/// are in it, or its folders they changed marked to be listed), where it has one, and whether every folder was listed
+/// at least once (else its first listing was under way: the folders not yet listed are marked to be).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kept {
     pub serial: u32,
     pub journal: Option<Cursor>,
+    pub whole: bool,
 }
 
 /// A drive's change journal (by its id), and where in it changes are read from next.
@@ -195,7 +197,7 @@ pub fn keep(index: &Index, kept: Kept) -> io::Result<Index> {
     keep_in(&folder(), index, kept)
 }
 
-fn keep_in(folder: &Path, index: &Index, kept: Kept) -> io::Result<Index> {
+pub(super) fn keep_in(folder: &Path, index: &Index, kept: Kept) -> io::Result<Index> {
     std::fs::create_dir_all(folder)?;
     let (kept_numbers, _) = numbers(folder, kept.serial);
     let number = kept_numbers.first().map_or(1, |last| last + 1);
@@ -204,7 +206,7 @@ fn keep_in(folder: &Path, index: &Index, kept: Kept) -> io::Result<Index> {
         let mut out = Summed { out: BufWriter::with_capacity(1 << 20, std::fs::File::create(&new)?), sum: Sum::new() };
         out.write_all(MAGIC)?;
         out.write_all(&VERSION.to_le_bytes())?;
-        let flags = u32::from(index.by_id()) | u32::from(kept.journal.is_some()) << 1;
+        let flags = u32::from(index.by_id()) | u32::from(kept.journal.is_some()) << 1 | u32::from(!kept.whole) << 2;
         out.write_all(&flags.to_le_bytes())?;
         out.write_all(&kept.serial.to_le_bytes())?;
         out.write_all(&0u32.to_le_bytes())?;
@@ -255,7 +257,7 @@ pub fn kept(serial: u32) -> Option<(Index, Kept)> {
     kept_in(&folder(), serial)
 }
 
-fn kept_in(folder: &Path, serial: u32) -> Option<(Index, Kept)> {
+pub(super) fn kept_in(folder: &Path, serial: u32) -> Option<(Index, Kept)> {
     numbers(folder, serial).0.into_iter().find_map(|number| read(&file(folder, serial, number), serial))
 }
 
@@ -272,11 +274,11 @@ fn read(path: &std::path::Path, serial: u32) -> Option<(Index, Kept)> {
         let u32_at = |at: usize| Some(u32::from_le_bytes(body.get(at..at + 4)?.try_into().ok()?));
         let u64_at = |at: usize| Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?));
         let flags = u32_at(12)?;
-        if u32_at(8)? != VERSION || u32_at(16)? != serial || flags & !3 != 0 {
+        if u32_at(8)? != VERSION || u32_at(16)? != serial || flags & !7 != 0 {
             return None;
         }
         let journal = (flags & 2 != 0).then(|| Some(Cursor { journal: u64_at(24)?, next: u64_at(32)? as i64 })).flatten();
-        (flags & 1 != 0, Kept { serial, journal }, u64_at(40)?, body.len())
+        (flags & 1 != 0, Kept { serial, journal, whole: flags & 4 == 0 }, u64_at(40)?, body.len())
     };
     Some((Index::read(bytes, HEADER, end, by_id, made)?, kept))
 }
@@ -305,7 +307,7 @@ mod tests {
     fn indexes_are_kept_one_after_another() {
         let folder = std::env::temp_dir().join(format!("glance-search-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&folder);
-        let kept = Kept { serial: 0xABCD, journal: Some(Cursor { journal: 7, next: 99 }) };
+        let kept = Kept { serial: 0xABCD, journal: Some(Cursor { journal: 7, next: 99 }), whole: true };
         let first = keep_in(&folder, &index(&["a.txt"]), kept).unwrap();
         assert_eq!(names(&first), ["a.txt"]);
         let (read, read_kept) = kept_in(&folder, 0xABCD).unwrap();
@@ -315,7 +317,8 @@ mod tests {
         drop((first, read));
 
         let second = keep_in(&folder, &index(&["b.txt"]), Kept { journal: None, ..kept }).unwrap();
-        let third = keep_in(&folder, &index(&["c.txt"]), kept).unwrap();
+        let third = keep_in(&folder, &index(&["c.txt"]), Kept { whole: false, ..kept }).unwrap();
+        assert!(!kept_in(&folder, 0xABCD).unwrap().1.whole, "kept as listed in part");
         drop(second);
         let_go_in(&folder, 0xABCD);
         assert_eq!(numbers(&folder, 0xABCD).0, [3, 2]);

@@ -2079,7 +2079,11 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     blocks.push(match tab {
         Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
         Tab::Copies(filter) => Block::Copies { rows: copied_lately(&shown.items, filter).map(|item| Tile::of(item, &folder, lang, now)).collect(), filter, view, tall: STATION_TALL },
-        Tab::Recent(filter) => Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() },
+        Tab::Recent(filter) => {
+            // (Looked at: the journals read from now, the machine settled or not.)
+            crate::settle::want(crate::settle::Work::Recent);
+            Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() }
+        }
     });
     blocks
 }

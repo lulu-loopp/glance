@@ -960,7 +960,7 @@ fn processor_groups() -> (Vec<usize>, usize) {
 /// All processors' idle time, and their busy (kernel and user, less idle)
 /// time, since boot, in 100 ns units: every processor group's, where
 /// GetSystemTimes would count only one group's beyond 64 processors.
-fn system_times() -> Option<(u64, u64)> {
+pub(crate) fn system_times() -> Option<(u64, u64)> {
     use windows::Win32::System::Threading::{GetActiveProcessorCount, GetActiveProcessorGroupCount};
     let (mut idle, mut busy) = (0u64, 0u64);
     for group in 0..unsafe { GetActiveProcessorGroupCount() } {

@@ -61,6 +61,8 @@ mod reading;
 mod remote;
 #[cfg(windows)]
 pub mod search;
+#[cfg(windows)]
+mod settle;
 // (What a touch of the PC said: read the same way by Glance and by its remote, of which this file is a part too.)
 #[cfg(windows)]
 #[path = "../remote/src/touch.rs"]
@@ -609,8 +611,9 @@ pub fn run() {
             }
         }
     }).expect("a thread started");
-    // Every drive's names found, and kept current, from the start: search is ready as it is called up, and a drive's
-    // journal read on while Glance runs does not go past what was kept (that drive then listed again).
+    // Every drive's names found, and kept current, once the machine has settled after it started (see `settle`): search
+    // is ready as it is called up, and a drive's journal read on while Glance runs does not go past what was kept (that
+    // drive then listed again).
     search::start();
     // The desktops the settings' preview shows, read once Glance has settled: the settings open on them.
     thread::Builder::new()
