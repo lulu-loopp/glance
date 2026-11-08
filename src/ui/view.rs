@@ -4202,12 +4202,24 @@ pub(crate) fn choice_mark(frame: &dyn Canvas, theme: &Theme, boxes: &[(f32, f32)
 }
 
 /// The mark of a thing on a station's lane chosen with others (see `station::select`), under it in the box the plate
-/// under the pointer takes, rounded by `radius`, `lit` as the pointer is over it: on glass a pane of its glass, lit along
-/// its top, as its pages' chosen one is, on chart paper its ink washed in faintly, ruled round in its pencil line (in
+/// under the pointer takes, rounded by `radius`, `lit` as the pointer is over it: on glass its blue washed in under a
+/// hairline of it, as what was copied is marked, on chart paper its ink washed in faintly, ruled round in its pencil line (in
 /// ink under the pointer), on Windows 11 its accent washed in under a hairline of it, as Explorer marks what is chosen.
 fn chosen_plate(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool) {
     match theme.skin {
-        Skin::Glass => glass_pill(frame, theme, (x, y, w, h), radius, lit),
+        // (Glass's blue, as what was copied is marked, washed in and edged: glass's own white, as its pages' chosen
+        // tab is drawn, was white on white as the plate under the pointer is, and what was chosen looked pointed at.)
+        Skin::Glass => {
+            let blue = theme.ink("station").trace;
+            let wash = match (theme.dark, lit) {
+                (true, false) => 0.22,
+                (true, true) => 0.28,
+                (false, false) => 0.14,
+                (false, true) => 0.19,
+            };
+            frame.fill_rounded(blue.alpha(wash), x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(blue.alpha(0.45)), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+        }
         Skin::Paper => {
             frame.fill_rounded(theme.text.alpha(if lit { 0.13 } else { 0.09 }), x, y, w, h, radius);
             frame.stroke_rounded(Fill::Solid(if lit { theme.text } else { theme.text2 }), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
@@ -7915,7 +7927,7 @@ seven".into()));
     }
 
     /// A thing on a station's lane chosen with others is marked by a plate under it in every skin and view: glass's
-    /// own pane, chart paper's ink washed in faintly, Windows 11's accent washed in, on the station, copied lately and
+    /// blue washed in, chart paper's ink washed in faintly, Windows 11's accent washed in, on the station, copied lately and
     /// files come lately alike. Not chosen, no such plate.
     #[test]
     fn what_is_chosen_is_marked_by_its_plate_in_every_skin() {
@@ -7941,7 +7953,7 @@ seven".into()));
                 let scene = &scene;
                 let ink = theme.ink("station");
                 let mark = match skin {
-                    Skin::Glass => Color::hex(0xFFFFFF, if dark { 0.12 } else { 0.62 }),
+                    Skin::Glass => ink.trace.alpha(if dark { 0.22 } else { 0.14 }),
                     Skin::Paper => theme.text.alpha(0.09),
                     Skin::Fluent => super::super::theme::accent(dark).alpha(0.13),
                 };
@@ -7950,7 +7962,6 @@ seven".into()));
                     paint(&recorder);
                     recorder.parts().into_iter().flat_map(|part| part.ops).filter(|op| matches!(op, Op::Rounded { color, .. } if *color == mark)).count()
                 };
-                // (Glass's pane marks what else is chosen there too, as a page's filter: one more for each chosen.)
                 for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
                     let shelf = |thumbs| move |frame: &dyn Canvas| paint_shelf(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, shows, STATION_TALL, None, false, &mut Vec::new());
                     let unmarked = marked(&shelf(none));
@@ -7962,6 +7973,44 @@ seven".into()));
                 let recent = |thumbs| move |frame: &dyn Canvas| paint_recent(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut Vec::new());
                 let unmarked = (marked(&copies(none)), marked(&recent(none)));
                 assert_eq!((marked(&copies(in_lists)), marked(&recent(in_lists))), (unmarked.0 + 1, unmarked.1 + 1), "{skin:?} {dark}");
+            }
+        }
+    }
+
+    /// What is chosen is told at a glance from what is under the pointer, in every skin, light and dark: on glass and
+    /// Windows 11 its plate is washed in the skin's own mark (glass's blue, as what was copied is marked, Windows 11's
+    /// accent), where the plate under the pointer is the sheet's own grey or white, on chart paper it is edged in the
+    /// ink, which the plate under the pointer never is. (On light glass a plate of glass's white was drawn, white on
+    /// white as the plate under the pointer is: the owner's chosen things looked only pointed at.)
+    #[test]
+    fn what_is_chosen_is_told_from_what_is_under_the_pointer() {
+        use crate::ui::morph::{Op, Recorder};
+        let drawn = |paint: &dyn Fn(&dyn Canvas)| -> Vec<Op> {
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            paint(&recorder);
+            recorder.parts().into_iter().flat_map(|part| part.ops).collect()
+        };
+        let room = (0.0, 0.0, 120.0, 60.0);
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            for dark in [true, false] {
+                let theme = Theme::new(skin, dark);
+                let mark = match skin {
+                    Skin::Glass => Some(theme.ink("station").trace),
+                    Skin::Fluent => Some(super::super::theme::accent(dark)),
+                    Skin::Paper => None,
+                };
+                let hovered = drawn(&|frame| tile_plate(frame, &theme, room, 8.0, true, false));
+                for lit in [false, true] {
+                    let chosen = drawn(&|frame| tile_plate(frame, &theme, room, 8.0, lit, true));
+                    assert!(chosen.iter().all(|op| !hovered.contains(op)), "{skin:?} {dark} {lit}: drawn as under the pointer");
+                    match mark {
+                        Some(mark) => {
+                            let hue = |color: &Color| (color.r, color.g, color.b) == (mark.r, mark.g, mark.b);
+                            assert!(chosen.iter().any(|op| matches!(op, Op::Rounded { color, .. } if hue(color))), "{skin:?} {dark} {lit}: not washed in its mark");
+                        }
+                        None => assert!(chosen.iter().any(|op| matches!(op, Op::Outline { .. })) && !hovered.iter().any(|op| matches!(op, Op::Outline { .. })), "{skin:?} {dark} {lit}: not edged"),
+                    }
+                }
             }
         }
     }
