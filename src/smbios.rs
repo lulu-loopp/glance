@@ -1,7 +1,7 @@
-//! The installed memory modules, and whether the machine is a laptop, from
-//! the hardware inventory the firmware hands Windows (SMBIOS). Readable
-//! without administrator rights, and read from what Windows keeps of it: no
-//! device is asked anything.
+//! The installed memory modules, and whether the machine's enclosure is a
+//! laptop's, from the hardware inventory the firmware hands Windows (SMBIOS).
+//! Readable without administrator rights, and read from what Windows keeps of
+//! it: no device is asked anything.
 
 use windows::Win32::System::SystemInformation::{GetSystemFirmwareTable, RSMB};
 

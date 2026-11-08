@@ -8,6 +8,7 @@
 use crate::pawnio::Module;
 use crate::sensors::{NamedLock, LOCK_WAIT};
 
+use windows::Win32::System::Power::POWER_PLATFORM_ROLE;
 use windows::core::w;
 
 /// The chipset's SMBus controller: AMD's (PIIX4-compatible) or Intel's.
@@ -53,13 +54,13 @@ struct LookedFor {
     jc42: bool,
 }
 
-/// Which modules' sensors are looked for on the machine whose firmware's table is `table`: the sensors of the kinds
-/// of module in its slots (DDR5's hubs, DDR4's sensors), none where it has none of either, and none on a laptop,
-/// whatever it has. A laptop's SMBus is its embedded controller's too (its battery, its charger), whose firmware
+/// Which modules' sensors are looked for on the machine whose firmware's table is `table` and whose power role is
+/// `role`: the sensors of the kinds of module in its slots (DDR5's hubs, DDR4's sensors), none where it has none of
+/// either, and none on a laptop (see `laptop::laptop`), whatever it has. A laptop's SMBus is its embedded controller's too (its battery, its charger), whose firmware
 /// need not take the lock programs take around the bus, and a transfer that meets one of the firmware's may leave
 /// the bus stuck till the power is cut (as PawnIO's own module for AMD's chipsets warns).
-fn looked_for(table: &[u8]) -> Result<LookedFor, Missing> {
-    if crate::smbios::portable(&crate::smbios::chassis(table)) {
+fn looked_for(table: &[u8], role: POWER_PLATFORM_ROLE) -> Result<LookedFor, Missing> {
+    if crate::laptop::laptop(&crate::smbios::chassis(table), role) {
         return Err(Missing::Laptop);
     }
     let modules = crate::smbios::modules(table);
@@ -131,7 +132,7 @@ impl Dimms {
     /// Finds the modules' sensors, if the chipset's SMBus can be reached and there are any to look for (see
     /// `looked_for`), or else says why not.
     pub fn open() -> Result<Self, Missing> {
-        let looked = looked_for(&crate::smbios::table())?;
+        let looked = looked_for(&crate::smbios::table(), crate::laptop::role())?;
         let module = Module::load(SMBUS_PIIX4).or_else(|_| Module::load(SMBUS_I801)).map_err(|_| Missing::NoDriver)?;
         let _lock = NamedLock::acquire(SMBUS_LOCK, 1000).ok_or(Missing::BusHeld)?;
         let byte = |address, register| transfer(&module, address, register, BYTE_DATA);
@@ -235,20 +236,23 @@ mod tests {
     }
 
     /// The bus is looked at for the sensors of the modules in the slots alone: DDR5's hubs on a desktop of DDR5
-    /// DIMMs, DDR4's sensors on one of DDR4, and nothing on a laptop, soldered memory (the G14's) or a slot of an
-    /// SO-DIMM alike.
+    /// DIMMs, DDR4's sensors on one of DDR4, and nothing on a laptop (by its enclosure or by its power role),
+    /// soldered memory (the G14's) or a slot of an SO-DIMM alike.
     #[test]
     fn looks_for_the_sensors_of_the_modules_there_are() {
         use crate::smbios::examples;
-        assert_eq!(looked_for(&examples::desktop()), Ok(LookedFor { spd5118: true, jc42: false }));
-        assert_eq!(looked_for(&examples::ddr4_desktop()), Ok(LookedFor { spd5118: false, jc42: true }));
-        assert_eq!(looked_for(&examples::g14()), Err(Missing::Laptop));
-        assert_eq!(looked_for(&examples::so_dimm_laptop()), Err(Missing::Laptop));
+        use windows::Win32::System::Power::{PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleWorkstation};
+        assert_eq!(looked_for(&examples::desktop(), PlatformRoleDesktop), Ok(LookedFor { spd5118: true, jc42: false }));
+        assert_eq!(looked_for(&examples::ddr4_desktop(), PlatformRoleWorkstation), Ok(LookedFor { spd5118: false, jc42: true }));
+        assert_eq!(looked_for(&examples::g14(), PlatformRoleMobile), Err(Missing::Laptop));
+        assert_eq!(looked_for(&examples::so_dimm_laptop(), PlatformRoleDesktop), Err(Missing::Laptop));
+        // A desktop's enclosure, but a mobile role: a laptop all the same.
+        assert_eq!(looked_for(&examples::desktop(), PlatformRoleMobile), Err(Missing::Laptop));
         // A desktop whose firmware lists no module in a slot (soldered memory, a mini PC's): nothing.
         let mut soldered = examples::g14();
         soldered[5] = 0x03;
-        assert_eq!(looked_for(&soldered), Err(Missing::NoModules));
-        assert_eq!(looked_for(&[]), Err(Missing::NoModules));
+        assert_eq!(looked_for(&soldered, PlatformRoleDesktop), Err(Missing::NoModules));
+        assert_eq!(looked_for(&[], PlatformRoleDesktop), Err(Missing::NoModules));
     }
 
     /// Run as administrator with `cargo test reads_these_modules -- --nocapture`.

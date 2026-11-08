@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::sensors::{NamedLock, LOCK_WAIT};
+use windows::Win32::System::Power::POWER_PLATFORM_ROLE;
 
 const LPC_IO: &[u8] = include_bytes!("../pawnio-modules/LpcIO.bin");
 
@@ -238,7 +239,7 @@ impl SuperIo {
     /// stood in the way, for a report (what each port showed).
     /// `vendor` and `board` are the board's maker and its name for it, which decide what the inputs are named.
     pub fn open(vendor: &str, board: &str) -> Result<Self, String> {
-        if !probed(&crate::smbios::table()) {
+        if !probed(&crate::smbios::table(), crate::laptop::role()) {
             return Err(ON_A_LAPTOP.into());
         }
         let mut module = Module::load(LPC_IO).map_err(|_| "PawnIO driver not available".to_string())?;
@@ -547,13 +548,14 @@ pub fn say_later(what: String) {
     *LATER.lock().unwrap() = Some(what);
 }
 
-/// Whether the configuration ports are probed on the machine whose firmware's table is `table`: not on a laptop. A
+/// Whether the configuration ports are probed on the machine whose firmware's table is `table` and whose power role
+/// is `role`: not on a laptop (see `laptop::laptop`). A
 /// laptop's embedded controller (ITE's, as a rule) answers at those ports, and the keys written there to put a chip
 /// into its configuration mode (and to take it out, found or not) reach it. Its firmware runs the keyboard, the fans
 /// and the power through it, and a write it does not look for may leave it stuck till the power is cut. A laptop's
 /// fans are had from its maker's firmware instead (see `asus`, `lenovo`).
-fn probed(table: &[u8]) -> bool {
-    !crate::smbios::portable(&crate::smbios::chassis(table))
+fn probed(table: &[u8], role: POWER_PLATFORM_ROLE) -> bool {
+    !crate::laptop::laptop(&crate::smbios::chassis(table), role)
 }
 
 /// How it is said that the chip was not looked for, on a laptop.
@@ -739,15 +741,18 @@ mod tests {
         assert!(!super::waits_for_the_bus("0x2E: nothing; 0x4E: chip 5509, not supported"));
     }
 
-    /// Not a key is written to the configuration ports of a laptop (the G14's, a notebook's), and a desktop's are
-    /// probed as they were.
+    /// Not a key is written to the configuration ports of a laptop (the G14's, a notebook's, or one whose firmware
+    /// lists a desktop's enclosure but gives it a mobile role), and a desktop's are probed as they were.
     #[test]
     fn no_laptops_ports_are_probed() {
-        assert!(!super::probed(&crate::smbios::examples::g14()));
-        assert!(!super::probed(&crate::smbios::examples::so_dimm_laptop()));
-        assert!(!super::probed(&crate::smbios::examples::in_enclosure(0x1F)));
-        assert!(super::probed(&crate::smbios::examples::desktop()));
-        assert!(super::probed(&crate::smbios::examples::in_enclosure(0x07)));
+        use crate::smbios::examples;
+        use windows::Win32::System::Power::{PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleWorkstation};
+        assert!(!super::probed(&examples::g14(), PlatformRoleMobile));
+        assert!(!super::probed(&examples::so_dimm_laptop(), PlatformRoleDesktop));
+        assert!(!super::probed(&examples::in_enclosure(0x1F), PlatformRoleDesktop));
+        assert!(!super::probed(&examples::desktop(), PlatformRoleMobile));
+        assert!(super::probed(&examples::desktop(), PlatformRoleDesktop));
+        assert!(super::probed(&examples::in_enclosure(0x07), PlatformRoleWorkstation));
         // Not looked for again later, either: that is for a bus another program had.
         assert!(!super::waits_for_the_bus(super::ON_A_LAPTOP));
     }
