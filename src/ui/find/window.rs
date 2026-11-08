@@ -484,8 +484,9 @@ impl Finder {
             self.drawn = None;
         }
         (self.skin, self.lang) = (skin, lang);
-        // The drives indexed (once), and the Start menu read again (as programs come and go).
-        crate::search::start();
+        // The drives indexed (once, from now, the machine settled or not), and the Start menu read again (as programs
+        // come and go).
+        crate::search::asked();
         let hwnd = self.hwnd.0 as isize;
         crate::station::found::look(move || {
             let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), LISTED, WPARAM(0), LPARAM(0)) };

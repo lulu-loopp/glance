@@ -45,8 +45,9 @@ pub mod flag {
     pub const CHINESE: u16 = 16;
     pub const HIDDEN: u16 = 32;
     pub const SYSTEM: u16 = 64;
-    /// A folder that changed and is to be listed again (put off, or its listing failed): kept with the index, so that
-    /// it is listed as Glance starts again, if not before.
+    /// A folder to be listed: found and not yet listed, changed and put off, or its listing failed. Kept with the
+    /// index, so that it is listed as Glance starts again, if not before (a drive's first listing, cut short, goes on
+    /// from there: see `super::super::sweep`).
     pub const STALE: u16 = 128;
     /// All there are.
     pub const ALL: u16 = 255;
@@ -272,10 +273,10 @@ impl Index {
     }
 
     /// An index of a drive whose root folder has `root_id` (a drive whose folders are known `by_id`, else by their
-    /// names), with nothing in it yet.
+    /// names), with nothing in it yet: its root to be listed.
     pub fn new(root_id: u64, by_id: bool) -> Self {
         let mut index = Index::empty(by_id);
-        index.add(NONE, &[], flag::FOLDER);
+        index.add(NONE, &[], flag::FOLDER | flag::STALE);
         index.set_id(ROOT, root_id);
         index
     }
@@ -510,7 +511,7 @@ impl Index {
 
     /// `folder` as it is listed now, against `before`, its entries when the round began: names gone marked dead
     /// (a folder only once the round is finished, as it may have moved), new ones added, folders found that are to
-    /// be listed noted in `changes`.
+    /// be listed noted in `changes` (and marked so till they are).
     pub fn list(&mut self, folder: u32, items: &[Item], before: &[u32], changes: &mut Changes) {
         let mut by_name: HashMap<OsString, u32> = before.iter().filter(|&&place| self.entry(place).alive()).map(|&place| (self.name(place).into_owned(), place)).collect();
         for item in items {
@@ -532,6 +533,7 @@ impl Index {
                     }
                     // (A link before, its names are listed now.)
                     if was.flags & flag::LINK != 0 && item.followed() {
+                        self.set_flag(child, flag::STALE, true);
                         changes.to_list.push((child, id));
                     }
                     continue;
@@ -552,7 +554,7 @@ impl Index {
                     continue;
                 }
             }
-            let place = self.add(folder, &item.name, flags);
+            let place = self.add(folder, &item.name, if item.followed() { flags | flag::STALE } else { flags });
             if item.folder() {
                 self.set_id(place, id);
                 if item.followed() {

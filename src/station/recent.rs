@@ -5,7 +5,9 @@
 //! lets anyone read it (`FSCTL_READ_UNPRIVILEGED_USN_JOURNAL`, through the drive's root folder). Its records name no
 //! files there, so each file come is opened by its number (`OpenFileById`) and its path asked of it: a file the user
 //! may not open is not opened, and so never listed. The journal keeps what changed while Glance was not running: where
-//! it was last read up to is kept, and read on from there, a batch at a time (the list shown and kept between them).
+//! it was last read up to is kept, and read on from there, a batch at a time (the list shown and kept between them),
+//! with a pause after each (see `pause`), in the background, and only once the machine has settled after it started
+//! (see `settle`) or the list is looked at: days of history read back at sign-in were one burst of file opens.
 //! A file's number is its drive's own: a file is known by its drive and its number together.
 //!
 //! Only what a person keeps: the folders of Windows, programs, programs' own data and tools' (`AppData`, `.git`,
@@ -100,6 +102,8 @@ const KEEP_MS: u64 = 7 * 24 * 3_600_000;
 const MOST: usize = 300;
 /// How often the journals are read (with nothing left to read on).
 const EVERY: Duration = Duration::from_secs(2);
+/// The shortest pause between batches while a journal has more to read on.
+const CATCHING_UP_PAUSE: Duration = Duration::from_secs(1);
 /// How often where the journals were read up to is kept, with nothing else changed.
 const SAVE_EVERY: Duration = Duration::from_secs(60);
 /// How often each file listed is looked for where it was (and at once when a folder was renamed).
@@ -717,6 +721,7 @@ pub const FILE: &str = "recent.json";
 
 #[cfg(windows)]
 fn follow() {
+    crate::settle::background("recent files");
     let folder = crate::settings::local_dir();
     let mut kept: Kept = std::fs::read(folder.join(FILE)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
     let places = windows_places();
@@ -748,6 +753,17 @@ fn follow() {
             drop(WANTED.1.wait_while(WANTED.0.lock().unwrap(), |wanted| wanted.is_none()).unwrap());
             continue;
         };
+        // (Nothing read till the machine has settled after it started, or the list is looked at: what was kept shown
+        // meanwhile.)
+        if !crate::settle::ready(crate::settle::Work::Recent) {
+            if shown_scope.as_ref() != Some(&scope) {
+                publish(kept.shown(&scope));
+                shown_scope = Some(scope);
+            }
+            std::thread::sleep(EVERY);
+            continue;
+        }
+        let turn = Instant::now();
         // The drives looked for again now and then (one put in, or formatted), and the volume at each letter kept;
         // what was listed from a drive plugged in from outside let go of (listed before such drives were left alone).
         let mut let_go = false;
@@ -868,11 +884,15 @@ fn follow() {
                 saved = Instant::now();
             }
         }
-        // (Read on at once while a journal has more: the list shown and kept between its batches.)
-        if !more {
-            std::thread::sleep(EVERY);
-        }
+        std::thread::sleep(pause(turn.elapsed(), more));
     }
+}
+
+/// The pause after a turn that took `took`, a journal having `more` to read on or not: as long as the turn took at
+/// least (the disk and the processors never given more than half their time to it), and, while catching up, at least
+/// `CATCHING_UP_PAUSE`, and else `EVERY`.
+fn pause(took: Duration, more: bool) -> Duration {
+    took.max(if more { CATCHING_UP_PAUSE } else { EVERY })
 }
 
 fn publish(files: Vec<Came>) {
@@ -1213,6 +1233,16 @@ mod tests {
         assert!(!kept.take('D', Change { attributes: 0x2, ..change(5, 0x8000_0100) }, now, &places, &out, open(r"D:\Documents\y.pdf", now), |_| None));
         // A change older than the days kept: its file never opened.
         assert!(!kept.take('D', Change { at_ms: now - KEEP_MS - 1, ..change(6, 0x8000_0100) }, now, &places, &out, |_| panic!("opened"), |_| None));
+    }
+
+    /// A journal caught up on (days of history read back) is read a batch at a time with a pause after each, as long as
+    /// the batch took and a second at least, not one batch after another at once. Caught up, every two seconds.
+    #[test]
+    fn a_journal_is_caught_up_on_in_batches_with_pauses() {
+        assert_eq!(pause(Duration::from_millis(30), true), CATCHING_UP_PAUSE);
+        assert_eq!(pause(Duration::from_secs(4), true), Duration::from_secs(4));
+        assert_eq!(pause(Duration::from_millis(30), false), EVERY);
+        assert_eq!(pause(Duration::from_secs(5), false), Duration::from_secs(5));
     }
 
     /// The same number on two drives: two files, one deleted leaving the other listed.
