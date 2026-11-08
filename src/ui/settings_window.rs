@@ -532,7 +532,8 @@ fn run(mut asked: Option<Asked>) {
         *kept = Kept::Running(unsafe { windows::Win32::System::Threading::GetCurrentThreadId() });
     }
     crate::perf::mark(|| "settings thread".into());
-    let _ = gfx::current();
+    // (The device for the screen the window is to open on, at the pointer, made meanwhile.)
+    let _ = crate::panel::work_area_at_cursor().map(|(work, _)| gfx::for_area(work));
     crate::perf::mark(|| "settings device".into());
     loop {
         let to = match asked.take() {
@@ -545,7 +546,9 @@ fn run(mut asked: Option<Asked>) {
         let Some(again) = up(to) else { return };
         // Closed: what its device holds given back, and given back again once the card is done with what the window
         // let go of (see `Gfx::trim_when_idle`, on the timer its thread keeps while it is kept).
-        if let Ok(gfx) = gfx::current() {
+        // (Its devices kept only where a screen would be drawn on with one: see `gfx::let_go_of_strays`.)
+        gfx::let_go_of_strays();
+        for gfx in gfx::of_thread() {
             gfx.trim_now_and_again();
         }
         crate::perf::mark(|| "settings gone".into());
@@ -595,7 +598,8 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     crate::perf::mark(|| "settings to make".into());
     // (Before the window is: shown, it tells the widgets, and the one it was asked from shows so at once.)
     *ASKED_FROM.lock().unwrap() = asked.place;
-    let made = gfx::current().ok().and_then(|gfx| make(gfx, Some(asked.place), asked.to));
+    // (Drawn with the device for the screen it opens on, at the pointer: see `make`.)
+    let made = crate::panel::work_area_at_cursor().and_then(|(work, _)| gfx::for_area(work).ok()).and_then(|gfx| make(gfx, Some(asked.place), asked.to));
     crate::perf::mark(|| "settings made".into());
     if made.is_none() {
         *ASKED_FROM.lock().unwrap() = None;
@@ -747,7 +751,7 @@ fn tick(now: Instant) -> Option<Duration> {
     // it has poured in (outside its state, which its closing takes).
     let poured = with_ui(|ui| {
         let genie = ui.genie.as_mut()?;
-        if genie.draw(&ui.gfx, now) {
+        if genie.draw(now) {
             return Some(None);
         }
         let opened = genie.opening();
@@ -1845,9 +1849,12 @@ impl Lives for Ui {
         &mut self.showing
     }
 
-    /// Its surface, its preview's layers, and the desktops it shows made bitmaps.
+    /// Its surface and its guide's, its preview's layers, and the desktops it shows made bitmaps.
     fn let_go_of_shown(&mut self) {
         self.surface = None;
+        if let Some(guide) = &mut self.guide {
+            guide.let_go_of_surfaces();
+        }
         self.layers.release();
         self.stage.bitmap = None;
         for stage in &mut self.kept_stages {
@@ -2094,7 +2101,6 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         }
         crate::perf::mark(|| "settings dressed".into());
         ui.draw(Instant::now());
-        let gfx = ui.gfx.clone();
         UI.with(|cell| *cell.borrow_mut() = Some(ui));
         // (Made for the guide: shown by it as it comes up, see `guide`.)
         if shown.is_none() || to == Some(To::Guide) {
@@ -2115,7 +2121,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         let _ = SetForegroundWindow(hwnd);
         crate::perf::mark(|| "settings in front".into());
         if let Some(place) = pours {
-            match super::genie::opening(&gfx, hwnd, place) {
+            match super::genie::opening(hwnd, place) {
                 Some(genie) => {
                     with_ui(|ui| ui.genie = Some(genie));
                 }
@@ -2226,6 +2232,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // The screens changed: this thread asks for them anew too (see `screens::changed`).
         WM_DISPLAYCHANGE => {
             crate::screens::changed();
+            gfx::screens_changed();
             SCREENS_OWED.store(true, Ordering::Release);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
@@ -2466,7 +2473,7 @@ impl Ui {
             POURING.store(pouring.0 as isize, Ordering::Release);
             crate::app().controller.settings_front(Some(pouring));
         };
-        let Some(genie) = super::genie::closing(&self.gfx, self.hwnd, place, told) else { return false };
+        let Some(genie) = super::genie::closing(self.hwnd, place, told) else { return false };
         self.genie = Some(genie);
         WINDOW.store(0, Ordering::Release);
         true
@@ -4999,10 +5006,11 @@ impl Ui {
 
     // ---- Drawing ----
 
-    /// Takes up the thread's current graphics device if it is a new one,
-    /// making the window's surface and the preview's bitmaps again on it.
+    /// Takes up the thread's graphics device for the screen the window is on if it is another (the last was lost, or
+    /// the window was moved to a screen another adapter drives: see `gfx::on_screen`), making the window's surface and
+    /// the preview's bitmaps again on it.
     fn follow_device(&mut self) -> bool {
-        let Ok(current) = gfx::current() else { return false };
+        let Ok(current) = gfx::for_window(self.hwnd) else { return false };
         if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
@@ -5012,7 +5020,7 @@ impl Ui {
         let surface = match Surface::new(&current, self.hwnd) {
             Ok(surface) => surface,
             Err(error) => {
-                gfx::failed("settings", Some(&error));
+                gfx::failed("settings", &current, Some(&error));
                 return false;
             }
         };
@@ -5114,7 +5122,7 @@ impl Ui {
         self.drawn_size = drawn.is_ok().then_some(size);
         // Not drawn: drawn again shortly (the device gone, on a new one).
         if let Err(error) = &drawn {
-            gfx::failed("settings", Some(error));
+            gfx::failed("settings", &self.gfx, Some(error));
             self.next_frame = now + DEVICE_RETRY;
             return;
         }

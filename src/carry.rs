@@ -82,7 +82,8 @@ struct Carry {
     last: Instant,
 }
 
-/// What `lifted` is carried off its lane from here (one carried still, put back first), drawn on `gfx`'s device.
+/// What `lifted` is carried off its lane from here (one carried still, put back first), drawn on `gfx`'s device (that
+/// of what it is lifted off) till it is carried onto a screen another adapter drives.
 pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
     CARRIED.with_borrow_mut(|carried| {
         if let Some(was) = carried.take() {
@@ -246,6 +247,15 @@ impl Carry {
             self.window.raise();
         }
         self.window.place_keeping(rect);
+        // On the device for the screen it is carried onto (see `gfx::on_screen`): what is drawn of it is no device's,
+        // and its surface is made anew there as it crosses onto a screen another adapter drives.
+        if let Ok(gfx) = crate::ui::gfx::for_area(rect) {
+            if !Rc::ptr_eq(&gfx, &self.gfx) {
+                self.surface = None;
+                self.surface = Surface::new(&gfx, self.window.hwnd).ok();
+                self.gfx = gfx;
+            }
+        }
         let Some(surface) = self.surface.as_mut() else { return };
         let pixels = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
         // Held where it was pressed: lifted larger and leaning about there.

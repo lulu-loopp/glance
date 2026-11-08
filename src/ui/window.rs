@@ -108,6 +108,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_DISPLAYCHANGE => {
+            // (Which adapter drives which screen seen again as a device is next asked for: see `gfx::on_screen`.)
+            super::gfx::screens_changed();
             let _ = unsafe { PostMessageW(Some(hwnd), SCREENS_CHANGED, WPARAM(0), LPARAM(0)) };
             LRESULT(0)
         }

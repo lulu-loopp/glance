@@ -2402,7 +2402,8 @@ struct Panel<'a> {
 
 impl<'a> Panel<'a> {
     fn new(controller: &'a Controller) -> windows::core::Result<Self> {
-        let gfx = gfx::current()?;
+        // (Drawn first on the main screen's device: it takes up its own screen's as it opens, see `follow_device`.)
+        let gfx = gfx::for_main_screen()?;
         let window = Window::new()?;
         // Its window holds its screen (see `Placement::window`): not a program in full screen there, which the shell
         // would make way for (the taskbar hidden).
@@ -2777,6 +2778,12 @@ impl<'a> Panel<'a> {
     ///
     /// Open at an edge, it is to open again where it was (see `Reopen`): what is told back.
     fn screens_changed(&mut self, dpi: u32, now: Instant) -> Option<Reopen> {
+        // Hidden, on the device of the screen its window is on now: one on a card that no longer drives it (a monitor
+        // on the discrete card's port unplugged) is let go of, which would keep that card awake till it next opened.
+        if !self.is_shown() && dpi == 0 {
+            self.follow_device();
+            gfx::let_go_of_strays();
+        }
         // Dragged onto another screen, it is laid out for it as it is let
         // go; the screens themselves changing, seen to then.
         if self.drag.is_some() {
@@ -3839,11 +3846,17 @@ impl<'a> Panel<'a> {
         (lanes, layout)
     }
 
-    /// Takes up this thread's current graphics device if it is a new one (the
-    /// last was lost), making the window's surface and layers again on it.
-    /// False while there is no device to be had.
+    /// Takes up this thread's graphics device for the screen it is drawn on if it is another (the last was lost, or the
+    /// panel is on a screen another adapter drives: see `gfx::on_screen`), making the window's surface and layers
+    /// again on it. False while there is no device to be had.
     fn follow_device(&mut self) -> bool {
-        let Ok(current) = gfx::current() else { return false };
+        // (Where it is drawn: its window may hold the whole desktop, see `Placement::window`. Hidden, where its window
+        // is.)
+        let current = match &self.placement {
+            Some(placement) => gfx::for_area(placement.painted),
+            None => gfx::for_window(self.window.hwnd),
+        };
+        let Ok(current) = current else { return false };
         if Rc::ptr_eq(&current, &self.gfx) && self.surface.is_some() {
             return true;
         }
@@ -3858,7 +3871,7 @@ impl<'a> Panel<'a> {
         let surface = match Surface::new(&current, self.window.hwnd) {
             Ok(surface) => surface.clipped(),
             Err(error) => {
-                gfx::failed("panel", Some(&error));
+                gfx::failed("panel", &current, Some(&error));
                 return false;
             }
         };
@@ -4060,7 +4073,7 @@ impl<'a> Panel<'a> {
             (Ok(()), Some(Ok(drawn))) => drawn,
             // Not drawn: drawn again shortly (the device gone, on a new one).
             (painted, drawn) => {
-                gfx::failed("panel", painted.as_ref().err().or(drawn.as_ref().and_then(|drawn| drawn.as_ref().err())));
+                gfx::failed("panel", &self.gfx, painted.as_ref().err().or(drawn.as_ref().and_then(|drawn| drawn.as_ref().err())));
                 self.next_frame = now + DEVICE_RETRY;
                 return;
             }
@@ -4247,7 +4260,7 @@ impl<'a> Panel<'a> {
         });
         let Some(painted) = painted.filter(|_| drawn.is_ok()) else {
             // Not drawn: drawn again shortly (the device gone, on a new one).
-            gfx::failed("panel", drawn.as_ref().err());
+            gfx::failed("panel", &self.gfx, drawn.as_ref().err());
             self.next_frame = now + DEVICE_RETRY;
             return;
         };

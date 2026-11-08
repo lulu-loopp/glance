@@ -200,9 +200,9 @@ impl FullMusic {
         let length = heard_now.as_ref().and_then(|playing| playing.timeline).map(|timeline| (timeline.length, timeline.seekable));
         let (w, h) = self.size();
         let pixels = ((self.screen.right - self.screen.left).max(1) as u32, (self.screen.bottom - self.screen.top).max(1) as u32);
-        // On the device that draws now, if it is not (a driver reset, a device lost): made anew on it. (A window has
-        // one composition target: the old one goes first.)
-        if let Ok(current) = crate::ui::gfx::current() {
+        // On the device for its screen, if it is not on it (a driver reset, a device lost: see `gfx::on_screen`): made
+        // anew on it. (A window has one composition target: the old one goes first.)
+        if let Ok(current) = crate::ui::gfx::for_area(self.screen) {
             if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
                 self.surface = None;
                 self.surface = Surface::new(&current, self.window.hwnd).ok();
@@ -238,7 +238,7 @@ impl FullMusic {
         });
         // Not drawn: drawn again as it next draws; the device gone, on the one made in its place (above).
         if let Err(error) = &drawn {
-            if crate::ui::gfx::failed("music full screen", Some(error)) {
+            if crate::ui::gfx::failed("music full screen", &gfx, Some(error)) {
                 self.surface = None;
             }
         }

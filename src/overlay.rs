@@ -231,7 +231,8 @@ fn cursor() -> Option<POINT> {
 
 impl Overlay {
     pub fn new() -> windows::core::Result<Self> {
-        let gfx = gfx::current()?;
+        // (Drawn first on the main screen's device: it takes up its game's screen's as it draws, see `draw`.)
+        let gfx = gfx::for_main_screen()?;
         let window = Window::see_through()?;
         let mut stage = match Window::see_through() {
             Ok(stage) => stage,
@@ -473,8 +474,9 @@ impl Overlay {
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
     fn draw(&mut self) {
-        // This thread's device: a new one after the last was lost.
-        let Ok(gfx) = gfx::current() else { return };
+        // This thread's device for the screen its glass is on: a new one after the last was lost, or on another
+        // adapter's screen (see `gfx::on_screen`).
+        let Ok(gfx) = gfx::for_area(self.rect) else { return };
         // (What it drew with on another device goes with it: see `life`.)
         if !Rc::ptr_eq(&gfx, &self.gfx) {
             self.gone();
@@ -512,7 +514,7 @@ impl Overlay {
         });
         if let Err(error) = &painted {
             // Drawn again at the next sample (the device gone, on a new one).
-            gfx::failed("overlay", Some(error));
+            gfx::failed("overlay", &self.gfx, Some(error));
             return;
         }
         self.gfx.sweep();
@@ -593,7 +595,7 @@ impl Overlay {
         });
         self.bar_surface = Some((self.gfx.clone(), surface));
         if let Err(error) = &drawn {
-            gfx::failed("overlay", Some(error));
+            gfx::failed("overlay", &self.gfx, Some(error));
             return;
         }
         self.bar.place_under(rect, self.beneath);
