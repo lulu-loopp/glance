@@ -337,6 +337,9 @@ struct Finder {
     hwnd: HWND,
     gfx: Rc<Gfx>,
     drawn: Option<Drawn>,
+    /// Where its window takes the pointer: its sheet as tall as it is drawn, and the room for its shadow round it (the
+    /// window is as tall as the sheet's tallest).
+    footprint: gfx::Footprint,
     showing: Option<crate::ui::life::Showing>,
     skin: Skin,
     /// Dark or light, and how frosted its glass is (0–1), as the panel's would be over what is behind it (see `dress`).
@@ -402,6 +405,7 @@ impl Finder {
             hwnd,
             gfx,
             drawn: None,
+            footprint: gfx::Footprint::of(hwnd),
             showing: None,
             skin: Skin::Fluent,
             dark: false,
@@ -711,6 +715,8 @@ impl Finder {
                 Skin::Fluent => Some((ACRYLIC_BLUR, ACRYLIC_SATURATION)),
                 Skin::Paper => None,
             };
+            // (Nothing shows of what it drew before, till it is drawn on that.)
+            self.footprint.hidden();
             self.drawn = match frosting.and_then(|frosting| crate::ui::glass::Frosted::new(&self.gfx, self.hwnd, frosting).ok()) {
                 Some(frosted) => Some(Drawn::Frosted(frosted)),
                 None => Surface::new(&self.gfx, self.hwnd).ok().map(Drawn::Plain),
@@ -723,7 +729,12 @@ impl Finder {
         let gfx = self.gfx.clone();
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let (scale, room) = (self.scale, self.room);
-        let done = match &mut drawn {
+        let showing = RECT { left: 0, top: 0, right: size.0 as i32, bottom: (((self.height + 2.0 * room) * scale).ceil() as i32).min(size.1 as i32) };
+        // (The compositor having taken what was drawn last: the frosted sheet is put together by Windows' own, whose
+        // frame is waited for.)
+        let frosted = matches!(drawn, Drawn::Frosted(_));
+        let taken = self.footprint.take(showing, || if frosted { unsafe { windows::Win32::Graphics::Dwm::DwmFlush() } } else { unsafe { gfx.dcomp.WaitForCommitCompletion() } });
+        let done = taken.and_then(|_| match &mut drawn {
             Drawn::Plain(surface) => surface.draw(&gfx, size, scale, |frame| {
                 self.paint(frame, false, (room, room));
             }),
@@ -734,7 +745,10 @@ impl Finder {
                 let pane = (room * scale, room * scale, WIDTH * scale, self.height * scale, radius * scale);
                 frosted.draw(&gfx, size, scale, pane, |frame| self.paint(frame, true, (room, room)))
             }
-        };
+        });
+        if done.is_ok() {
+            self.footprint.shown(showing);
+        }
         // (Not drawn, it keeps what it draws on, and draws on it again; the device gone, it makes all anew.)
         match done {
             Err(error) if gfx::failed("search", &gfx, Some(&error)) => {}
@@ -2120,5 +2134,35 @@ mod tests {
         let out = std::path::PathBuf::from(format!("{}/target/looks", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         crate::studio::save_png(&out.join("search.png"), w, h, &pixels).unwrap();
+    }
+
+    /// The search's window is as tall as its tallest sheet, above all: it takes the pointer only where its sheet (and
+    /// the room for its shadow round it) is drawn, not over the screen under a short sheet, nor anywhere before it is
+    /// first drawn (see `gfx::Footprint`).
+    #[test]
+    fn the_search_takes_the_pointer_only_where_its_sheet_is() {
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetAncestor, WindowFromPoint, GA_ROOT};
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
+        let hwnd = unsafe { make_window() }.expect("a window");
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let mut finder = Finder::new(hwnd, gfx, asks);
+        (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
+        finder.rect = RECT { left: 100, top: 100, right: 100 + (WIDTH + 40.0) as i32, bottom: 800 };
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), finder.rect.left, finder.rect.top, finder.rect.right - finder.rect.left, finder.rect.bottom - finder.rect.top, SWP_NOACTIVATE);
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
+        }
+        let over = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(POINT { x: 100 + x, y: 100 + y }), GA_ROOT) } == hwnd;
+        assert!(!over(200, 60), "it takes the pointer before its sheet is drawn");
+        finder.draw();
+        let tall = (finder.height + 2.0 * finder.room) as i32;
+        assert!(tall < 600, "the sheet with nothing found is short ({tall} px)");
+        assert!(over(200, 60), "it takes no pointer over its sheet");
+        assert!(!over(200, tall + 40), "it takes the pointer under its sheet");
+        drop(finder);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
     }
 }

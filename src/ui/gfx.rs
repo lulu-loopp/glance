@@ -2720,6 +2720,62 @@ pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
     Some((made(want.0), made(want.1)))
 }
 
+/// Where a window larger than what it draws takes the pointer: only where it shows what it draws (its region kept to
+/// that). With the window's thread held up (in a driver's call, say) while the pointer is over what it draws, its
+/// clicks not let through past that meanwhile, the rest of its screen still takes them: a panel's window holds its
+/// whole screen, and the screen took no click till the thread came back, as if the machine had hung.
+pub struct Footprint {
+    hwnd: HWND,
+    /// What of the window shows, as last committed (physical px in the window, None for nothing), and the window's
+    /// region as it was last set.
+    shows: Option<RECT>,
+    region: Option<RECT>,
+}
+
+impl Footprint {
+    /// For `hwnd`, which takes the pointer nowhere from now till it shows something (see `take`).
+    pub fn of(hwnd: HWND) -> Footprint {
+        let nowhere = RECT::default();
+        unsafe {
+            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+            SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
+        }
+        Footprint { hwnd, shows: None, region: Some(nowhere) }
+    }
+
+    /// The window is to show `showing` (physical px in it), committed next: what showed till now and that taken, till
+    /// that alone shows (see `shown`). The region and what is drawn come to the compositor apart, either first: the
+    /// region holds both meanwhile, so that neither is cut, and is made smaller only once the compositor has taken
+    /// what was committed last (`settled` waits for it: done in all but a moment of its own held up, a frame having
+    /// passed since).
+    pub fn take(&mut self, showing: RECT, settled: impl FnOnce() -> Result<()>) -> Result<()> {
+        let wanted = self.shows.map_or(showing, |shown| bounds(shown, showing));
+        if self.region == Some(wanted) {
+            return Ok(());
+        }
+        if self.shows.is_some() && self.region.is_some_and(|region| bounds(region, wanted) != wanted) {
+            settled()?;
+        }
+        unsafe {
+            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+            // (The system's from here on: not to be let go of here.)
+            SetWindowRgn(self.hwnd, Some(CreateRectRgn(wanted.left, wanted.top, wanted.right, wanted.bottom)), false);
+        }
+        self.region = Some(wanted);
+        Ok(())
+    }
+
+    /// The window shows `showing` (committed).
+    pub fn shown(&mut self, showing: RECT) {
+        self.shows = Some(showing);
+    }
+
+    /// The window shows nothing (its content let go of).
+    pub fn hidden(&mut self) {
+        self.shows = None;
+    }
+}
+
 /// A window's content: a composition surface the size of the window, or of
 /// the part of it drawn in (see `offset`).
 pub struct Surface {
@@ -2733,9 +2789,10 @@ pub struct Surface {
     at: (i32, i32),
     placed: (i32, i32),
     /// Shown no further than the size it is drawn at, where its window is larger than that (see `clipped`): the size
-    /// it was last cut to.
-    clips: bool,
+    /// it was last cut to, and where its window takes the pointer then (only where it shows).
     clipped_to: (u32, u32),
+    footprint: Option<Footprint>,
+    hwnd: HWND,
     /// How long the last frame drawn on it took, part by part.
     pub took: Took,
 }
@@ -2755,13 +2812,14 @@ impl Surface {
         let target = unsafe { gfx.dcomp.CreateTargetForHwnd(hwnd, true)? };
         let visual: IDCompositionVisual2 = unsafe { gfx.dcomp.CreateVisual()? };
         unsafe { target.SetRoot(&visual)? };
-        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), shown: false, at: (0, 0), placed: (0, 0), clips: false, clipped_to: (0, 0), took: Default::default() })
+        Ok(Surface { _target: target, visual, surface: None, size: (0, 0), shown: false, at: (0, 0), placed: (0, 0), clipped_to: (0, 0), footprint: None, hwnd, took: Default::default() })
     }
 
     /// Shown no further than the size each frame is drawn at, for a window larger than what is drawn in it (the
-    /// panel's): the room a surface is made with past that, and anything drawn into it, is not shown.
+    /// panel's): the room a surface is made with past that, and anything drawn into it, is not shown. Its window takes
+    /// the pointer only where it shows (see `Footprint`).
     pub fn clipped(mut self) -> Self {
-        self.clips = true;
+        self.footprint = Some(Footprint::of(self.hwnd));
         self
     }
 
@@ -2795,10 +2853,14 @@ impl Surface {
             }
             self.placed = self.at;
         }
-        if self.clips && self.clipped_to != size {
-            let clip = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
-            unsafe { self.visual.SetClip2(&clip)? };
-            self.clipped_to = size;
+        let showing = RECT { left: self.at.0, top: self.at.1, right: self.at.0 + size.0 as i32, bottom: self.at.1 + size.1 as i32 };
+        if let Some(footprint) = &mut self.footprint {
+            if self.clipped_to != size {
+                let clip = D2D_RECT_F { left: 0.0, top: 0.0, right: size.0 as f32, bottom: size.1 as f32 };
+                unsafe { self.visual.SetClip2(&clip)? };
+                self.clipped_to = size;
+            }
+            footprint.take(showing, || unsafe { gfx.dcomp.WaitForCommitCompletion() })?;
         }
         gfx.last_drawn.set(Some(Instant::now()));
         gfx.trimmed.set(false);
@@ -2826,6 +2888,9 @@ impl Surface {
             }
             gfx.dcomp.Commit()?;
         }
+        if let Some(footprint) = &mut self.footprint {
+            footprint.shown(showing);
+        }
         self.took = Took { given, painted: painted - given, handed: began.elapsed() - painted };
         Ok(())
     }
@@ -2836,6 +2901,9 @@ impl Surface {
             unsafe {
                 let _ = self.visual.SetContent(None);
                 let _ = gfx.dcomp.Commit();
+            }
+            if let Some(footprint) = &mut self.footprint {
+                footprint.hidden();
             }
         }
     }
@@ -3076,6 +3144,10 @@ pub fn effect_input(dc: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> Result<ID
 }
 
 /// The least rectangle holding both `a` and `b`.
+fn bounds(a: RECT, b: RECT) -> RECT {
+    RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) }
+}
+
 pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right: left + width, bottom: top + height }
 }
@@ -3595,6 +3667,38 @@ mod tests {
         // No card at all: none.
         assert_eq!(chosen(&[renderer(&[own])], own), None);
         assert_eq!(chosen(&[], own), None);
+    }
+
+    /// A window larger than what it draws (the panel's holds its whole screen, above all) takes the pointer only where
+    /// it shows what it draws, nowhere before it first draws, and, drawing less, no longer where it showed more once
+    /// the frame after is drawn: with its thread held up (in a driver's call, say), the rest of the screen still takes
+    /// its clicks, where it took none till the thread came back, the machine seeming hung.
+    #[test]
+    fn a_window_larger_than_it_draws_takes_the_pointer_only_where_it_shows() {
+        use windows::Win32::Foundation::{POINT, RECT};
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+        let _device = super::held().unwrap();
+        let gfx = super::for_main_screen().expect("graphics");
+        let window = crate::ui::window::Window::new().expect("a window");
+        let at = RECT { left: 100, top: 100, right: 900, bottom: 700 };
+        window.place(at);
+        window.show();
+        let over = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(POINT { x: at.left + x, y: at.top + y }), GA_ROOT) } == window.hwnd;
+        let mut surface = super::Surface::new(&gfx, window.hwnd).expect("a surface").clipped();
+        assert!(!over(400, 300), "it takes the pointer before it draws anything");
+        // Drawn at 200,150 in the window, 400 by 300.
+        surface.offset((200, 150));
+        surface.draw(&gfx, (400, 300), 1.0, |_| {}).expect("drawn");
+        assert!(over(400, 300), "it takes no pointer where it shows");
+        assert!(!over(50, 50), "it takes the pointer above and left of what it shows");
+        assert!(!over(700, 550), "it takes the pointer below and right of what it shows");
+        // Drawn smaller: what showed and what shows taken as the frame comes, then only what shows.
+        surface.draw(&gfx, (100, 100), 1.0, |_| {}).expect("drawn");
+        surface.draw(&gfx, (100, 100), 1.0, |_| {}).expect("drawn");
+        assert!(over(250, 200), "it takes no pointer where it shows, drawn smaller");
+        assert!(!over(500, 400), "it takes the pointer where it showed, drawn smaller");
+        drop(surface);
+        drop(window);
     }
 
     /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.

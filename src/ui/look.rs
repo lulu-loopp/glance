@@ -384,6 +384,9 @@ unsafe fn make_window() -> Option<HWND> {
         let hwnd = CreateWindowExW(style, class, w!("Glance"), WS_POPUP, 0, 0, 1, 1, None, None, Some(module.into()), None).ok()?;
         let disabled = windows::core::BOOL::from(true);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<windows::core::BOOL>() as u32);
+        // Its clicks nowhere till its sheet is drawn (see `Looker::take_clicks`): its sheet not drawn as it opens, it
+        // would be its whole screen's, above all, showing nothing.
+        SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         Some(hwnd)
     }
 }
@@ -1290,7 +1293,10 @@ impl Looker {
             let _ = KillTimer(Some(self.hwnd), FRAME);
             let _ = KillTimer(Some(self.hwnd), WATCH);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+            // (Its clicks nowhere again till its sheet is next drawn: see `make_window`.)
+            SetWindowRgn(self.hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         }
+        self.region = RECT::default();
         crate::widget::own_window_changed(self.monitor);
         if let Some(pane) = &mut self.pane {
             pane.unload();
@@ -4041,5 +4047,22 @@ mod tests {
         assert_eq!(between(a, b, 1.0), b);
         assert_eq!(between(a, b, 0.5), Rect { x: 50.0, y: 25.0, w: 110.0, h: 60.0 });
         assert_eq!(shrunk(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 }, 0.5), Rect { x: 25.0, y: 12.5, w: 50.0, h: 25.0 });
+    }
+
+    /// The look's window is its whole screen's, above all: shown before its sheet is first drawn (its drawing failed,
+    /// or its thread was held up), it takes the pointer nowhere, not over all the screen.
+    #[test]
+    fn the_look_takes_the_pointer_nowhere_before_its_sheet_is_drawn() {
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        let hwnd = unsafe { make_window() }.expect("a window");
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 100, 100, 800, 600, SWP_NOACTIVATE);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        let over = unsafe { GetAncestor(WindowFromPoint(POINT { x: 500, y: 400 }), GA_ROOT) } == hwnd;
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+        assert!(!over, "it takes the pointer over its screen before its sheet is drawn");
     }
 }
