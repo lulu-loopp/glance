@@ -9,6 +9,11 @@
 //!
 //! Glance may run elevated, so the libraries are loaded from System32 only,
 //! where the drivers put them and no ordinary program can.
+//!
+//! A library is opened, and a card found through it, only once a card of its
+//! maker is awake (see `GpuPower::reader`): a laptop's discrete GPU sleeps
+//! while nothing draws on it, and finding it through its maker's library
+//! starts it up (NVML's finding a card does, as NVIDIA documents).
 
 use std::ffi::c_void;
 
@@ -51,28 +56,66 @@ impl Reader {
     }
 }
 
-/// The vendors' libraries, those the machine has.
+/// The vendors' libraries: each none till a card of its maker is first looked up (see `reader`), then whether the
+/// machine has it.
 pub struct GpuPower {
-    nvml: Option<Nvml>,
-    nvapi: Option<Nvapi>,
-    adl: Option<Adl>,
-    igcl: Option<Igcl>,
+    nvml: Option<Option<Nvml>>,
+    nvapi: Option<Option<Nvapi>>,
+    adl: Option<Option<Adl>>,
+    igcl: Option<Option<Igcl>>,
 }
 
 // The libraries' handles are used from one thread at a time (the sampler's).
 unsafe impl Send for GpuPower {}
 
+/// The makers' PCI vendor ids (Intel's is `INTEL_VENDOR`).
+const NVIDIA_VENDOR: u32 = 0x10DE;
+const AMD_PCI_VENDOR: u32 = 0x1002;
+
+/// The library `library`, opened by `open` the first time it is asked for.
+fn opened<T>(library: &mut Option<Option<T>>, open: fn() -> Option<T>) -> Option<&mut T> {
+    library.get_or_insert_with(open).as_mut()
+}
+
 impl GpuPower {
-    pub fn open() -> Self {
-        GpuPower { nvml: Nvml::open(), nvapi: Nvapi::open(), adl: Adl::open(), igcl: Igcl::open() }
+    /// None of the libraries opened yet: each is as a card of its maker is first looked up.
+    pub fn new() -> Self {
+        GpuPower { nvml: None, nvapi: None, adl: None, igcl: None }
     }
 
-    /// How to read the discrete card at `address`, if its driver says.
-    pub fn reader(&self, address: PciAddress) -> Option<Reader> {
-        let nvidia = self.nvml.as_ref().and_then(|nvml| nvml.devices.iter().position(|(at, _)| *at == address));
-        let amd = || self.adl.as_ref().and_then(|adl| adl.adapters.iter().position(|(at, _)| *at == address));
-        let intel = || self.igcl.as_ref().and_then(|igcl| igcl.devices.iter().position(|device| device.at == address));
-        nvidia.map(Reader::Nvidia).or_else(|| amd().map(Reader::Amd)).or_else(|| intel().map(Reader::Intel))
+    fn nvml(&self) -> Option<&Nvml> {
+        self.nvml.as_ref()?.as_ref()
+    }
+
+    fn nvapi(&self) -> Option<&Nvapi> {
+        self.nvapi.as_ref()?.as_ref()
+    }
+
+    fn adl(&self) -> Option<&Adl> {
+        self.adl.as_ref()?.as_ref()
+    }
+
+    fn igcl(&self) -> Option<&Igcl> {
+        self.igcl.as_ref()?.as_ref()
+    }
+
+    /// How to read the discrete card made by `vendor` (its PCI vendor id) at `address`, if its maker's library says:
+    /// that library opened first, if it is not yet, and the card found through it by where it sits (no other card
+    /// is found meanwhile). Asked only of a card awake (see the module's note).
+    pub fn reader(&mut self, vendor: u32, address: PciAddress) -> Option<Reader> {
+        match vendor {
+            NVIDIA_VENDOR => {
+                let index = opened(&mut self.nvml, Nvml::open)?.device(address)?;
+                // (And its hot spot, if NVAPI tells it: see `more`.)
+                if let Some(nvapi) = opened(&mut self.nvapi, Nvapi::open) {
+                    nvapi.find(address);
+                }
+                Some(Reader::Nvidia(index))
+            }
+            AMD_PCI_VENDOR => opened(&mut self.adl, Adl::open)?.adapter(address).map(Reader::Amd),
+            INTEL_VENDOR => opened(&mut self.igcl, Igcl::open)?.device(address).map(Reader::Intel),
+            _ => None,
+        }
     }
 
     /// What else the card's maker's library says of it now: Intel's, all
@@ -81,21 +124,22 @@ impl GpuPower {
     /// fans stand still (AMD's, their speed).
     pub fn more(&self, reader: Reader) -> Option<More> {
         match reader {
-            Reader::Intel(index) => self.igcl.as_ref()?.more(index),
+            Reader::Intel(index) => self.igcl()?.more(index),
             Reader::Nvidia(index) => {
-                let nvml = self.nvml.as_ref()?;
+                let nvml = self.nvml()?;
                 let at = nvml.devices.get(index)?.0;
                 // Its fans standing still: none turning, not unread (Windows' adapter data has no word for that).
                 let fan_rpm = nvml.fans_still(index).filter(|still| *still).map(|_| 0);
-                Some(More { hot_spot: self.nvapi.as_ref().and_then(|nvapi| nvapi.hot_spot(at)), fan_rpm, ..More::default() })
+                Some(More { hot_spot: self.nvapi().and_then(|nvapi| nvapi.hot_spot(at)), fan_rpm, ..More::default() })
             }
-            Reader::Amd(index) => self.adl.as_ref()?.more(index),
+            Reader::Amd(index) => self.adl()?.more(index),
         }
     }
 
-    /// What Intel's library found, for a report: each of its graphics, where it sits, and what it reads of it.
+    /// What Intel's library found, for a report: each of its graphics looked up, where it sits, and what it reads
+    /// of it.
     pub fn describe_intel(&self) -> Option<String> {
-        let igcl = self.igcl.as_ref()?;
+        let igcl = self.igcl()?;
         Some(igcl.devices.iter().enumerate().map(|(index, device)| format!("{:?}: {}", device.at, igcl.told(index))).collect::<Vec<_>>().join("; "))
     }
 
@@ -103,7 +147,7 @@ impl GpuPower {
     /// `CpuSensors::graphics_power`).
     pub fn intel_integrated(&self, reader: Reader) -> bool {
         match reader {
-            Reader::Intel(index) => self.igcl.as_ref().and_then(|igcl| igcl.devices.get(index)).is_some_and(|device| device.integrated),
+            Reader::Intel(index) => self.igcl().and_then(|igcl| igcl.devices.get(index)).is_some_and(|device| device.integrated),
             Reader::Nvidia(_) | Reader::Amd(_) => false,
         }
     }
@@ -111,9 +155,9 @@ impl GpuPower {
     /// The card's power now, in watts.
     pub fn read(&self, reader: Reader) -> Option<f32> {
         match reader {
-            Reader::Nvidia(index) => self.nvml.as_ref()?.power(index),
-            Reader::Amd(index) => self.adl.as_ref()?.power(index),
-            Reader::Intel(index) => self.igcl.as_ref()?.power(index),
+            Reader::Nvidia(index) => self.nvml()?.power(index),
+            Reader::Amd(index) => self.adl()?.power(index),
+            Reader::Intel(index) => self.igcl()?.power(index),
         }
     }
 
@@ -121,7 +165,7 @@ impl GpuPower {
     /// NVIDIA's does).
     pub fn limit(&self, reader: Reader) -> Option<GpuLimit> {
         match reader {
-            Reader::Nvidia(index) => self.nvml.as_ref()?.limit(index),
+            Reader::Nvidia(index) => self.nvml()?.limit(index),
             Reader::Amd(_) | Reader::Intel(_) => None,
         }
     }
@@ -165,22 +209,12 @@ fn limit_of(reasons: u64) -> GpuLimit {
     }
 }
 
-/// nvmlPciInfo_t.
-#[repr(C)]
-struct NvmlPciInfo {
-    bus_id_legacy: [u8; 16],
-    domain: u32,
-    bus: u32,
-    device: u32,
-    pci_device_id: u32,
-    pci_sub_system_id: u32,
-    bus_id: [u8; 32],
-}
-
 type NvmlDevice = *mut c_void;
 
 struct Nvml {
     library: HMODULE,
+    /// Finds a card by where it sits (and starts it up, as every way NVML has of finding one does).
+    by_bus_id: unsafe extern "C" fn(*const u8, *mut NvmlDevice) -> i32,
     power_usage: unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32,
     /// The reasons the clock is held back; absent from drivers before NVML
     /// had them.
@@ -189,7 +223,7 @@ struct Nvml {
     /// them.
     fans: Option<(unsafe extern "C" fn(NvmlDevice, *mut u32) -> i32, unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> i32)>,
     shutdown: unsafe extern "C" fn() -> i32,
-    /// Every card, by where it sits (a card's GPU is function 0).
+    /// The cards found, by where each sits.
     devices: Vec<(PciAddress, NvmlDevice)>,
 }
 
@@ -206,29 +240,32 @@ impl Nvml {
     unsafe fn start(library: HMODULE) -> Option<Self> {
         let init: unsafe extern "C" fn() -> i32 = unsafe { export(library, s!("nvmlInit_v2")) }?;
         let shutdown: unsafe extern "C" fn() -> i32 = unsafe { export(library, s!("nvmlShutdown")) }?;
-        let count: unsafe extern "C" fn(*mut u32) -> i32 = unsafe { export(library, s!("nvmlDeviceGetCount_v2")) }?;
-        let handle: unsafe extern "C" fn(u32, *mut NvmlDevice) -> i32 = unsafe { export(library, s!("nvmlDeviceGetHandleByIndex_v2")) }?;
-        let pci: unsafe extern "C" fn(NvmlDevice, *mut NvmlPciInfo) -> i32 = unsafe { export(library, s!("nvmlDeviceGetPciInfo_v3")) }?;
+        let by_bus_id = unsafe { export(library, s!("nvmlDeviceGetHandleByPciBusId_v2")) }?;
         let power_usage = unsafe { export(library, s!("nvmlDeviceGetPowerUsage")) }?;
         // Named "throttle" reasons before driver 535 ("clocks event" since).
         let clock_reasons = unsafe { export(library, s!("nvmlDeviceGetCurrentClocksEventReasons")) }
             .or_else(|| unsafe { export(library, s!("nvmlDeviceGetCurrentClocksThrottleReasons")) });
         let fans = unsafe { export(library, s!("nvmlDeviceGetNumFans")) }.zip(unsafe { export(library, s!("nvmlDeviceGetFanSpeed_v2")) });
+        // (Which starts no card up, as NVIDIA documents it: each is, as it is found.)
         if unsafe { init() } != NVML_SUCCESS {
             return None;
         }
-        let mut devices = Vec::new();
-        let mut n = 0u32;
-        if unsafe { count(&mut n) } == NVML_SUCCESS {
-            for index in 0..n {
-                let mut device = std::ptr::null_mut();
-                let mut info: NvmlPciInfo = unsafe { std::mem::zeroed() };
-                if unsafe { handle(index, &mut device) } == NVML_SUCCESS && unsafe { pci(device, &mut info) } == NVML_SUCCESS {
-                    devices.push(((info.bus, info.device, 0), device));
-                }
-            }
+        Some(Nvml { library, by_bus_id, power_usage, clock_reasons, fans, shutdown, devices: Vec::new() })
+    }
+
+    /// The card at `at`, by its index among those found: found the first time it is asked for.
+    fn device(&mut self, at: PciAddress) -> Option<usize> {
+        if let Some(index) = self.devices.iter().position(|(known, _)| *known == at) {
+            return Some(index);
         }
-        Some(Nvml { library, power_usage, clock_reasons, fans, shutdown, devices })
+        // Its bus id as NVML takes one, bus:device.function in hex (in the first PCI domain, as Windows' own
+        // account of where an adapter sits has it).
+        let bus_id = format!("{:x}:{:x}.{:x}\0", at.0, at.1, at.2);
+        let mut device = std::ptr::null_mut();
+        (unsafe { (self.by_bus_id)(bus_id.as_ptr(), &mut device) } == NVML_SUCCESS).then(|| {
+            self.devices.push((at, device));
+            self.devices.len() - 1
+        })
     }
 
     fn power(&self, index: usize) -> Option<f32> {
@@ -307,9 +344,17 @@ struct NvArchitecture {
     revision: u32,
 }
 
+/// What NVAPI is asked of a card: its handle, and where to put the answer.
+type NvCardQuery<T> = unsafe extern "C" fn(*mut c_void, *mut T) -> i32;
+
 struct Nvapi {
-    sensors: unsafe extern "C" fn(*mut c_void, *mut NvThermalSensors) -> i32,
-    /// The cards that tell their hot spot, by where each sits.
+    sensors: NvCardQuery<NvThermalSensors>,
+    bus: NvCardQuery<u32>,
+    slot: NvCardQuery<u32>,
+    architecture: NvCardQuery<NvArchitecture>,
+    /// Every card NVAPI has.
+    cards: Vec<*mut c_void>,
+    /// The cards found that tell their hot spot, by where each sits.
     devices: Vec<(PciAddress, *mut c_void)>,
 }
 
@@ -332,27 +377,34 @@ impl Nvapi {
         }
         let initialize: unsafe extern "C" fn() -> i32 = unsafe { had(query, 0x0150_E828) }?;
         let enumerate: unsafe extern "C" fn(*mut [*mut c_void; 64], *mut u32) -> i32 = unsafe { had(query, 0xE5AC_921F) }?;
-        let bus: unsafe extern "C" fn(*mut c_void, *mut u32) -> i32 = unsafe { had(query, 0x1BE0_B8E5) }?;
-        let slot: unsafe extern "C" fn(*mut c_void, *mut u32) -> i32 = unsafe { had(query, 0x2A0A_350F) }?;
-        let architecture: unsafe extern "C" fn(*mut c_void, *mut NvArchitecture) -> i32 = unsafe { had(query, 0xD826_5D24) }?;
+        let bus = unsafe { had(query, 0x1BE0_B8E5) }?;
+        let slot = unsafe { had(query, 0x2A0A_350F) }?;
+        let architecture = unsafe { had(query, 0xD826_5D24) }?;
         let sensors = unsafe { had(query, 0x65FE_3AAD) }?;
         if unsafe { initialize() } != NVAPI_OK {
             return None;
         }
-        let mut found = Nvapi { sensors, devices: Vec::new() };
         let (mut cards, mut count) = ([std::ptr::null_mut(); 64], 0u32);
-        if unsafe { enumerate(&mut cards, &mut count) } != NVAPI_OK {
-            return Some(found);
-        }
-        for card in cards.into_iter().take(count as usize) {
-            let mut about = NvArchitecture { version: size_of::<NvArchitecture>() as u32 | 2 << 16, architecture: 0, implementation: 0, revision: 0 };
+        let listed = unsafe { enumerate(&mut cards, &mut count) } == NVAPI_OK;
+        let cards = if listed { cards.into_iter().take(count as usize).collect() } else { Vec::new() };
+        Some(Nvapi { sensors, bus, slot, architecture, cards, devices: Vec::new() })
+    }
+
+    /// Finds the card at `at`, kept if it is one that tells its hot spot: the cards asked where each sits till it is
+    /// found, and that one alone what it is.
+    fn find(&mut self, at: PciAddress) {
+        for &card in &self.cards {
             let (mut on_bus, mut in_slot) = (0u32, 0u32);
-            let known = unsafe { architecture(card, &mut about) == NVAPI_OK && bus(card, &mut on_bus) == NVAPI_OK && slot(card, &mut in_slot) == NVAPI_OK };
-            if known && about.architecture < NV_ARCHITECTURE_UNTOLD_FROM {
-                found.devices.push(((on_bus, in_slot, 0), card));
+            let placed = unsafe { (self.bus)(card, &mut on_bus) == NVAPI_OK && (self.slot)(card, &mut in_slot) == NVAPI_OK };
+            if !placed || (on_bus, in_slot, 0) != at {
+                continue;
             }
+            let mut about = NvArchitecture { version: size_of::<NvArchitecture>() as u32 | 2 << 16, architecture: 0, implementation: 0, revision: 0 };
+            if unsafe { (self.architecture)(card, &mut about) } == NVAPI_OK && about.architecture < NV_ARCHITECTURE_UNTOLD_FROM {
+                self.devices.push((at, card));
+            }
+            return;
         }
-        Some(found)
     }
 
     /// The warmest point of the chip of the card at `at` (°C), if it is one that tells it.
@@ -418,7 +470,10 @@ struct Adl {
     context: AdlContext,
     query: unsafe extern "C" fn(AdlContext, i32, *mut PmLogData) -> i32,
     destroy: unsafe extern "C" fn(AdlContext) -> i32,
-    /// Every discrete AMD card, by where it sits, with ADL's index for it.
+    asic: unsafe extern "C" fn(AdlContext, i32, *mut i32, *mut i32) -> i32,
+    /// Every AMD adapter ADL lists, by where it sits, with ADL's index for it.
+    listed: Vec<(PciAddress, i32)>,
+    /// The discrete cards found, likewise.
     adapters: Vec<(PciAddress, i32)>,
 }
 
@@ -444,15 +499,14 @@ impl Adl {
         let destroy: unsafe extern "C" fn(AdlContext) -> i32 = unsafe { export(library, s!("ADL2_Main_Control_Destroy")) }?;
         let count: unsafe extern "C" fn(AdlContext, *mut i32) -> i32 = unsafe { export(library, s!("ADL2_Adapter_NumberOfAdapters_Get")) }?;
         let infos: unsafe extern "C" fn(AdlContext, *mut AdapterInfo, i32) -> i32 = unsafe { export(library, s!("ADL2_Adapter_AdapterInfo_Get")) }?;
-        let asic: unsafe extern "C" fn(AdlContext, i32, *mut i32, *mut i32) -> i32 =
-            unsafe { export(library, s!("ADL2_Adapter_ASICFamilyType_Get")) }?;
+        let asic = unsafe { export(library, s!("ADL2_Adapter_ASICFamilyType_Get")) }?;
         let query = unsafe { export(library, s!("ADL2_New_QueryPMLogData_Get")) }?;
         let mut context = std::ptr::null_mut();
         // Only the adapters that are there.
         if unsafe { create(adl_allocate, 1, &mut context) } != ADL_OK {
             return None;
         }
-        let mut adapters = Vec::new();
+        let mut listed = Vec::new();
         let mut n = 0;
         if unsafe { count(context, &mut n) } == ADL_OK && n > 0 {
             let mut list: Vec<AdapterInfo> = (0..n).map(|_| unsafe { std::mem::zeroed() }).collect();
@@ -461,18 +515,28 @@ impl Adl {
                 for info in &list {
                     let address = (info.bus_number as u32, info.device_number as u32, info.function_number as u32);
                     // ADL lists a card once for each of its outputs.
-                    if info.vendor_id != AMD_VENDOR || adapters.iter().any(|(at, _)| *at == address) {
-                        continue;
-                    }
-                    let (mut types, mut valid) = (0, 0);
-                    let read = unsafe { asic(context, info.adapter_index, &mut types, &mut valid) };
-                    if read == ADL_OK && valid & ADL_ASIC_DISCRETE != 0 && types & ADL_ASIC_DISCRETE != 0 {
-                        adapters.push((address, info.adapter_index));
+                    if info.vendor_id == AMD_VENDOR && !listed.iter().any(|(at, _)| *at == address) {
+                        listed.push((address, info.adapter_index));
                     }
                 }
             }
         }
-        Some(Adl { library, context, query, destroy, adapters })
+        Some(Adl { library, context, query, destroy, asic, listed, adapters: Vec::new() })
+    }
+
+    /// The discrete card at `at`, by its index among those found: found (and asked what it is) the first time it is
+    /// asked for. None for graphics built into the CPU.
+    fn adapter(&mut self, at: PciAddress) -> Option<usize> {
+        if let Some(index) = self.adapters.iter().position(|(known, _)| *known == at) {
+            return Some(index);
+        }
+        let &(_, adapter) = self.listed.iter().find(|(known, _)| *known == at)?;
+        let (mut types, mut valid) = (0, 0);
+        let read = unsafe { (self.asic)(self.context, adapter, &mut types, &mut valid) };
+        (read == ADL_OK && valid & ADL_ASIC_DISCRETE != 0 && types & ADL_ASIC_DISCRETE != 0).then(|| {
+            self.adapters.push((at, adapter));
+            self.adapters.len() - 1
+        })
     }
 
     fn power(&self, index: usize) -> Option<f32> {
@@ -654,7 +718,10 @@ struct Igcl {
     api: CtlHandle,
     close: unsafe extern "C" fn(CtlHandle) -> u32,
     telemetry: unsafe extern "C" fn(CtlHandle, *mut CtlTelemetry) -> u32,
-    /// Intel's graphics, by where each sits.
+    properties: unsafe extern "C" fn(CtlHandle, *mut CtlAdapterProperties) -> u32,
+    /// Every device the library has.
+    handles: Vec<CtlHandle>,
+    /// Intel's graphics found, by where each sits.
     devices: Vec<IntelDevice>,
 }
 
@@ -672,23 +739,32 @@ impl Igcl {
         let init: unsafe extern "C" fn(*mut CtlInitArgs, *mut CtlHandle) -> u32 = unsafe { export(library, s!("ctlInit")) }?;
         let close: unsafe extern "C" fn(CtlHandle) -> u32 = unsafe { export(library, s!("ctlClose")) }?;
         let enumerate: unsafe extern "C" fn(CtlHandle, *mut u32, *mut CtlHandle) -> u32 = unsafe { export(library, s!("ctlEnumerateDevices")) }?;
-        let properties: unsafe extern "C" fn(CtlHandle, *mut CtlAdapterProperties) -> u32 = unsafe { export(library, s!("ctlGetDeviceProperties")) }?;
+        let properties = unsafe { export(library, s!("ctlGetDeviceProperties")) }?;
         let telemetry = unsafe { export(library, s!("ctlPowerTelemetryGet")) }?;
         let mut args = CtlInitArgs { size: size_of::<CtlInitArgs>() as u32, version: 0, app_version: CTL_VERSION, flags: 0, supported_version: 0, application: [0; 4] };
         let mut api: CtlHandle = std::ptr::null_mut();
         if unsafe { init(&mut args, &mut api) } != CTL_SUCCESS || api.is_null() {
             return None;
         }
-        let mut found = Igcl { library, api, close, telemetry, devices: Vec::new() };
+        let mut found = Igcl { library, api, close, telemetry, properties, handles: Vec::new(), devices: Vec::new() };
         let mut count = 0u32;
         if unsafe { enumerate(api, &mut count, std::ptr::null_mut()) } != CTL_SUCCESS || count == 0 {
             return Some(found);
         }
         let mut handles = vec![std::ptr::null_mut(); count as usize];
-        if unsafe { enumerate(api, &mut count, handles.as_mut_ptr()) } != CTL_SUCCESS {
-            return Some(found);
+        if unsafe { enumerate(api, &mut count, handles.as_mut_ptr()) } == CTL_SUCCESS {
+            found.handles = handles.into_iter().take(count as usize).collect();
         }
-        for handle in handles.into_iter().take(count as usize) {
+        Some(found)
+    }
+
+    /// Intel's graphics at `at`, by its index among those found: the devices asked what each is till it is found,
+    /// the first time it is asked for.
+    fn device(&mut self, at: PciAddress) -> Option<usize> {
+        if let Some(index) = self.devices.iter().position(|device| device.at == at) {
+            return Some(index);
+        }
+        for &handle in &self.handles {
             // (The adapter's own identifier, as Windows has it, is asked for with the rest: 8 bytes for it.)
             let mut luid = [0u8; 8];
             let mut about: CtlAdapterProperties = unsafe { std::mem::zeroed() };
@@ -696,12 +772,14 @@ impl Igcl {
             about.version = 2;
             about.device_id = luid.as_mut_ptr().cast();
             about.device_id_size = luid.len() as u32;
-            if unsafe { properties(handle, &mut about) } == CTL_SUCCESS && about.pci_vendor_id == INTEL_VENDOR {
+            let told = unsafe { (self.properties)(handle, &mut about) } == CTL_SUCCESS && about.pci_vendor_id == INTEL_VENDOR;
+            if told && (about.bdf[0] as u32, about.bdf[1] as u32, about.bdf[2] as u32) == at {
                 let integrated = about.graphics_adapter_properties & CTL_ADAPTER_PROPERTIES_FLAG_INTEGRATED != 0;
-                found.devices.push(IntelDevice { at: (about.bdf[0] as u32, about.bdf[1] as u32, about.bdf[2] as u32), integrated, handle, last: std::cell::Cell::new(None) });
+                self.devices.push(IntelDevice { at, integrated, handle, last: std::cell::Cell::new(None) });
+                return Some(self.devices.len() - 1);
             }
         }
-        Some(found)
+        None
     }
 
     fn read(&self, index: usize) -> Option<CtlTelemetry> {
@@ -752,14 +830,11 @@ impl Drop for Igcl {
 
 #[cfg(test)]
 mod tests {
-    /// What NVML says of this PC's cards' fans: `cargo test --lib -- --ignored says_the_fans --nocapture`.
+    /// Made, it has opened none of the libraries: each waits for a card of its maker found awake.
     #[test]
-    #[ignore = "asks this PC's driver"]
-    fn says_the_fans() {
-        let Some(nvml) = super::Nvml::open() else { return println!("no NVML") };
-        for index in 0..nvml.devices.len() {
-            println!("card {index}: fans still {:?}", nvml.fans_still(index));
-        }
+    fn opens_no_library_till_a_card_is_looked_up() {
+        let power = super::GpuPower::new();
+        assert!(power.nvml.is_none() && power.nvapi.is_none() && power.adl.is_none() && power.igcl.is_none());
     }
 
     #[test]
@@ -791,7 +866,6 @@ mod tests {
     #[test]
     fn lays_out_the_vendors_structures() {
         // As their headers lay them out, on 64-bit Windows.
-        assert_eq!(size_of::<super::NvmlPciInfo>(), 16 + 5 * 4 + 32);
         assert_eq!(size_of::<super::AdapterInfo>(), 4 * 2 + 256 + 4 * 4 + 256 * 2 + 4 * 2 + 256 * 3 + 4);
         assert_eq!(size_of::<super::PmLogData>(), 4 + 256 * 8);
     }
@@ -807,23 +881,5 @@ mod tests {
         assert_eq!(limit_of(HW_SLOWDOWN | HW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
         assert_eq!(limit_of(SW_POWER_CAP | SW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
         assert_eq!(limit_of(HW_SLOWDOWN), GpuLimit::Hardware);
-    }
-
-    /// Prints what this machine's cards draw.
-    #[test]
-    fn reads_this_machines_cards() {
-        let power = super::GpuPower::open();
-        if let Some(nvml) = &power.nvml {
-            for (index, (at, _)) in nvml.devices.iter().enumerate() {
-                println!("NVIDIA at {at:?}: {:?} W, held back by {:?}", nvml.power(index), nvml.limit(index));
-            }
-        }
-        match &power.nvapi {
-            Some(nvapi) => println!("NVIDIA cards that tell their hot spot: {:?}", nvapi.devices.iter().map(|(at, _)| (at, nvapi.hot_spot(*at))).collect::<Vec<_>>()),
-            None => println!("NVAPI: not there"),
-        }
-        if let Some(adl) = &power.adl {
-            println!("AMD discrete cards: {:?}", adl.adapters.iter().map(|(at, _)| at).collect::<Vec<_>>());
-        }
     }
 }

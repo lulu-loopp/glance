@@ -199,6 +199,10 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
         format!("CPU chiplet temperatures: {}", cpu.ccds.len()),
     ];
     for (reading, gpu) in sample.gpus.iter().zip(&info.gpus) {
+        if reading.asleep {
+            lines.push(format!("{}: asleep (powered down), its driver not asked", gpu.name));
+            continue;
+        }
         lines.push(format!(
             "{}: temperature {}, hot spot {}, clock {}, fan {}, power {}",
             gpu.name,

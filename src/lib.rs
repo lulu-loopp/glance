@@ -5,6 +5,8 @@
 #[cfg(windows)]
 mod asus;
 #[cfg(windows)]
+mod laptop;
+#[cfg(windows)]
 mod lenovo;
 #[cfg(windows)]
 mod battery;
