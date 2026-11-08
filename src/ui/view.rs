@@ -846,6 +846,14 @@ pub fn land_tiles(hits: Vec<Hit>, at: std::time::Instant) {
     tile_changed(true);
 }
 
+/// Things carried off a station's lane put back in their rooms as they were drawn coming there (each flown back, drawn
+/// as its room draws it): no longer carried, drawn full at once, the others carried still.
+pub fn settle_tiles(hits: &[Hit]) {
+    AWAY_TILES.lock().unwrap().retain(|away| !hits.contains(away));
+    LANDED_TILES.lock().unwrap().retain(|(hit, _)| !hits.contains(hit));
+    tile_changed(true);
+}
+
 /// When the thing on a station's lane pressed as `hit` was last put back in its room, while it springs back to its size.
 fn tile_landed(hit: Hit) -> Option<std::time::Instant> {
     LANDED_TILES.lock().unwrap().iter().find(|(landed, at)| *landed == hit && at.elapsed() < LANDED_FOR).map(|(_, at)| *at)
@@ -8073,6 +8081,25 @@ seven".into()));
         // (Sprung back by now: none is put back any more.)
         land_tiles(vec![one, two, three], std::time::Instant::now() - LANDED_FOR);
         assert!([one, two, three].iter().all(|hit| tile_landed(*hit).is_none()));
+    }
+
+    /// A thing flown back into its room as its room draws it is put back as it came: drawn full at once, not
+    /// springing back from smaller as one put back otherwise does, the others carried still outlined.
+    #[test]
+    fn a_thing_flown_back_is_put_back_as_it_came() {
+        let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (one, two) = (Hit::Shelf(0x5EED_0051), Hit::Copied(0x5EED_0052));
+        let face = (10.0, 20.0, 80.0, 60.0);
+        carry_tiles(vec![one, two]);
+        settle_tiles(&[one]);
+        assert!(matches!(tile_held(one), Held::Not) && tile_landed(one).is_none());
+        assert_eq!(tile_face(one, face), face);
+        assert!(matches!(tile_held(two), Held::Away));
+        // (Put back otherwise, it springs back from smaller.)
+        land_tiles(vec![two], std::time::Instant::now());
+        assert_ne!(tile_face(two, face), face);
+        settle_tiles(&[two]);
+        assert_eq!(tile_face(two, face), face);
     }
 
     /// A slider's knob, its filling all the way and the pointer on it, reaches past its track's end no further than

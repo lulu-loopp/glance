@@ -269,17 +269,35 @@ impl Away {
     }
 }
 
-/// What a thing on a station's lane (pressed as `hit`) draws, at rest (not lit, nor pressed: as it is lifted off its
-/// room, see `carry`), recorded as `record` does; none where it is not drawn.
+/// A thing on a station's lane where it is drawn: what it is pressed as, and its box's corner.
+pub type TileBox = (view::Hit, (f32, f32));
+
+/// What a thing on a station's lane draws (see `record_tiles`): what it is pressed as, what it draws at rest from its
+/// box's corner, and what its room draws of it where that is otherwise.
+pub type Recorded = (view::Hit, Vec<Part>, Option<Vec<Part>>);
+
+/// What each of the things on a station's lane in `boxes` (each pressed as it is, and its box's corner as drawn) draws,
+/// recorded as `record` does, from its own box's corner: at rest (not lit, nor pressed, nor marked chosen: as it is
+/// lifted off its room, see `carry`), and as its room draws it where that is otherwise (its mark chosen with others:
+/// as it lands back there). Those not drawn, none.
 #[allow(clippy::too_many_arguments)]
-pub fn record_tiles(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), boxes: &[(view::Hit, (f32, f32))]) -> Vec<(view::Hit, Vec<Part>)> {
+pub fn record_tiles(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), boxes: &[TileBox]) -> Vec<Recorded> {
     let at_rest = Scene { hover: None, hint: None, thumbs: &view::RESTING, ..*scene };
+    let marked = scene.thumbs.chosen_alone();
+    let in_room = Scene { hover: None, hint: None, thumbs: &marked, ..*scene };
+    let homes = tiles_of(&record(frame, &in_room, lanes, layout, small, scale, at), boxes);
     tiles_of(&record(frame, &at_rest, lanes, layout, small, scale, at), boxes)
+        .into_iter()
+        .map(|(hit, parts)| {
+            let home = homes.iter().find(|(one, _)| *one == hit).map(|(_, home)| home).filter(|home| **home != parts).cloned();
+            (hit, parts, home)
+        })
+        .collect()
 }
 
 /// What each of `boxes` (each a thing on a station's lane, and its box's corner in what was drawn) drew in `parts`, from
 /// its own box's corner: those that drew anything, in their order.
-fn tiles_of(parts: &[Part], boxes: &[(view::Hit, (f32, f32))]) -> Vec<(view::Hit, Vec<Part>)> {
+fn tiles_of(parts: &[Part], boxes: &[TileBox]) -> Vec<(view::Hit, Vec<Part>)> {
     boxes
         .iter()
         .map(|&(hit, (x, y))| {

@@ -1170,7 +1170,7 @@ impl Merged {
 /// each with where its room is, from its corner, the one pressed first): what each draws recorded into `lifted` from
 /// its own room's corner (see `carry`), their rooms left to be drawn empty.
 #[allow(clippy::too_many_arguments)]
-fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(&[view::Hit], &[(view::Hit, (f32, f32))])>, lifted: &mut Option<Vec<(view::Hit, Vec<Part>)>>, field: &view::todo::Field) -> (Vec<view::HitBox>, bool) {
+fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(&[view::Hit], &[render::TileBox])>, lifted: &mut Option<Vec<render::Recorded>>, field: &view::todo::Field) -> (Vec<view::HitBox>, bool) {
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
@@ -1247,7 +1247,7 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 frame.place(Matrix3x2::scale(z, z) * Matrix3x2::translation(rx, ry) * shift * local);
                 let halo = (theme.skin == Skin::Glass && (!host_plays || on_skin)).then_some(theme.legibility);
                 if let Some((carried, boxes)) = lifting.filter(|_| lifted.is_none()) {
-                    *lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, z, (rx, ry), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| first == &boxes[0].0));
+                    *lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, z, (rx, ry), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, ..)| first == &boxes[0].0));
                     if lifted.is_some() {
                         view::carry_tiles(carried.to_vec());
                     }
@@ -2023,6 +2023,9 @@ impl Widgets {
                     return;
                 }
                 let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from
+                // here, and the widget hears no more of it to take it away.)
+                widget.unsay();
                 // (With what is chosen with it.)
                 let carried = crate::station::select::drag(press);
                 if let Some(drag) = crate::station::drag_off(&carried, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
@@ -2066,10 +2069,11 @@ impl Widgets {
         let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
         let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.takes_press());
         if hit != widget.hit_hover {
-            // What a press does, said under what says so (a drive's row, the line that switches players; its buttons'
-            // own said over it).
+            // What a press does, said under what says so (a drive's row, the line that switches players, its buttons'
+            // own said over it). Nothing while a thing is dragged off a station's lane: the pointer is the drag's, and
+            // nothing here would hear it go to take it away.
             match hit.and_then(|hit| Some((hit, crate::panel::says(hit, lang, &widget.hits)?))) {
-                Some((hit, said)) if over.is_none() => {
+                Some((hit, said)) if over.is_none() && !crate::station::drag::under_way() => {
                     if let Some((hx, hy, hw, hh)) = widget.hits.iter().find(|one| one.4 == hit).map(|one| (one.0, one.1, one.2, one.3)) {
                         let on_screen = |dx: f32, dy: f32| {
                             // (Its surface's corner is at `at`; the window's margin is before it.)
@@ -4881,7 +4885,7 @@ impl Widget {
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
         // (With what is carried with it, those of them whose rooms show, each from its own room: see `carry::Tile`.)
         let lifting = self.lifting.take().filter(|(hit, ..)| self.hits.iter().any(|one| one.4 == *hit)).map(|(_, carried, drag, from)| {
-            let boxes: Vec<(view::Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).collect();
+            let boxes: Vec<(view::Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).take(crate::carry::FLOWN).collect();
             (carried, drag, from, boxes)
         });
         let mut lifted = None;
@@ -4921,7 +4925,7 @@ impl Widget {
                     let layout = shown.drawn_at(size, carried.is_some_and(|(card, ..)| card.is_some()));
                     let picture = render::Picture { scene, lanes: &lanes, layout: &layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
                     if let Some((carried, _, _, boxes)) = &lifting {
-                        lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| *first == boxes[0].0));
+                        lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, ..)| *first == boxes[0].0));
                         if lifted.is_some() {
                             view::carry_tiles(carried.clone());
                         }
@@ -5068,10 +5072,10 @@ impl Widget {
             // the window's margin before it.)
             let tiles: Vec<crate::carry::Tile> = recorded
                 .into_iter()
-                .filter_map(|(hit, parts)| {
+                .filter_map(|(hit, parts, home)| {
                     let &(hx, hy, hw, hh, _) = self.hits.iter().find(|one| one.4 == hit)?;
                     let at = POINT { x: (self.at.x as f32 + (self.hits_from.0 + hx) * px).round() as i32, y: (self.at.y as f32 + (self.hits_from.1 + hy) * px).round() as i32 };
-                    Some(crate::carry::Tile { hit, parts, size: (hw, hh), at })
+                    Some(crate::carry::Tile { hit, parts, home, size: (hw, hh), at })
                 })
                 .collect();
             if !tiles.is_empty() {

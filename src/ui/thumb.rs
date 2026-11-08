@@ -138,6 +138,12 @@ impl<K: Copy + PartialEq> Dots<K> {
         self.chosen = chosen;
     }
 
+    /// These at rest (as `view::RESTING` is), only what is chosen together marked: how what is chosen is drawn with
+    /// nothing else under way.
+    pub fn chosen_alone(&self) -> Dots<K> {
+        Dots { chosen: self.chosen.clone(), ..Dots::new() }
+    }
+
     /// Whether `key` is chosen together with others (see `mark_chosen`).
     pub fn chosen(&self, key: K) -> bool {
         self.chosen.contains(&key)

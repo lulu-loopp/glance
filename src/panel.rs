@@ -3508,6 +3508,9 @@ impl<'a> Panel<'a> {
         if crate::station::run::drag_begins(press.from, now) {
             self.shelf_press = None;
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from here,
+            // and the panel hears no more of it to take it away.)
+            self.unsay();
             let carried = crate::station::select::drag(press);
             if let Some(drag) = crate::station::drag_off(&carried, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
                 self.lifting = Some((press.hit, carried, drag, press.from));
@@ -4099,7 +4102,7 @@ impl<'a> Panel<'a> {
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
         // (With what is carried with it, those of them whose rooms show, each from its own room: see `carry::Tile`.)
         let lifting = self.lifting.take().filter(|(hit, ..)| self.hits.iter().any(|box_| box_.4 == *hit)).map(|(hit, carried, drag, from)| {
-            let boxes: Vec<(Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).collect();
+            let boxes: Vec<(Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).take(crate::carry::FLOWN).collect();
             (hit, carried, drag, from, boxes)
         });
         let mut lifted = None;
@@ -4109,7 +4112,7 @@ impl<'a> Panel<'a> {
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if let Some((hit, carried, _, _, boxes)) = &lifting {
-                lifted = Some(render::record_tiles(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| first == hit));
+                lifted = Some(render::record_tiles(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, ..)| first == hit));
                 if lifted.is_some() {
                     crate::ui::view::carry_tiles(carried.clone());
                 }
@@ -4188,10 +4191,10 @@ impl<'a> Panel<'a> {
             // (Each in its room on the screen, its box as large as it is drawn there.)
             let tiles: Vec<crate::carry::Tile> = recorded
                 .into_iter()
-                .filter_map(|(hit, parts)| {
+                .filter_map(|(hit, parts, home)| {
                     let (.., w, h, _) = *self.hits.iter().find(|box_| box_.4 == hit)?;
                     let at = self.hit_on_screen(hit)?;
-                    Some(crate::carry::Tile { hit, parts, size: (w, h), at: POINT { x: at.left, y: at.top } })
+                    Some(crate::carry::Tile { hit, parts, home, size: (w, h), at: POINT { x: at.left, y: at.top } })
                 })
                 .collect();
             if !tiles.is_empty() {
@@ -4522,9 +4525,11 @@ impl<'a> Panel<'a> {
         }
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         if hover != self.hover {
-            // What a press does, said under what says so (a drive's row, the line that switches players).
+            // What a press does, said under what says so (a drive's row, the line that switches players). Nothing while
+            // a thing is dragged off a station's lane: the pointer is the drag's, and nothing here would hear it go
+            // to take it away.
             match (hover.and_then(|hit| Some((hit, says(hit, self.lang, &self.hits)?))), self.placement.as_ref()) {
-                (Some((hit, said)), Some(placement)) => {
+                (Some((hit, said)), Some(placement)) if !crate::station::drag::under_way() => {
                     if let Some(&(x, y, w, h, _)) = self.hits.iter().find(|one| one.4 == hit) {
                         let on_screen = |dx: f32, dy: f32| ((placement.window.left as f32 + (self.corner.0 + dx) * placement.px).round() as i32, (placement.window.top as f32 + (self.corner.1 + dy) * placement.px).round() as i32);
                         let ((left, top), (right, bottom)) = (on_screen(x, y), on_screen(x + w, y + h));

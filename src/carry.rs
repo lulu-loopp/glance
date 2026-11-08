@@ -8,7 +8,8 @@
 //! Things chosen together and dragged off together (see `station::select`) are carried as one stack: each flies from its
 //! own room into its place, the one pressed on top and up to two others behind it, each a little up, to the right and
 //! turned, and on their corner how many files land where they are let go (see `paint_stack`). Let go where nothing takes
-//! them, each flies back apart into its own room and lands there (see `Flight`). Taken, they go in together.
+//! them, each flies back apart into its own room, one after another, drawn as its room draws it by the time it lands
+//! there (see `Flight`, `paint_tile`). Taken, they go in together.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,11 +27,13 @@ use crate::ui::view::Hit;
 use crate::ui::window::Window;
 use crate::widget::{faded, lifted_shadow, GOING_BACK, LEANING, LEAN_PULLED, LEAN_SPAN, LIFTED_BY, LIFTING};
 
-/// A thing carried as it was drawn on its lane: what it is pressed as, what is drawn of it there (from its box's
-/// corner, DIPs), its box's size, and its box's corner on the screen as it was lifted (physical px): its room.
+/// A thing carried as it was drawn on its lane: what it is pressed as, what is drawn of it there at rest (from its
+/// box's corner, DIPs), what its room draws of it where that is otherwise (its mark chosen with others), its box's size,
+/// and its box's corner on the screen as it was lifted (physical px): its room.
 pub struct Tile {
     pub hit: Hit,
     pub parts: Vec<Part>,
+    pub home: Option<Vec<Part>>,
     pub size: (f32, f32),
     pub at: POINT,
 }
@@ -38,7 +41,7 @@ pub struct Tile {
 /// What is lifted off a station's lane to be carried: all that is carried (the one pressed first, then what is chosen
 /// with it: see `station::select`), how many files land where they are let go, the drag that carries them off (see
 /// `station::drag::announce`), those of them drawn there as they were (`tiles`: the one pressed first, then those of
-/// the others whose rooms show, in that order), where it was pressed (physical px, `px` a DIP), what it was lifted off
+/// the others whose rooms show, in that order, `FLOWN` at most), where it was pressed (physical px, `px` a DIP), what it was lifted off
 /// (the panel, a widget: let go over it, it goes back) and that window, and the look of what it was lifted off (its
 /// plates').
 pub struct Lifted {
@@ -75,8 +78,17 @@ const COUNT_AT: (f32, f32) = (12.0, 10.0);
 const COUNT_PAD: f32 = 7.0;
 /// How many of the things carried together show in the stack: the one on top and those behind it.
 const SHOWN: usize = BEHIND_MOST + 1;
-/// How near its room a thing flying back is (DIPs) as it lands there, and its room is drawn full again.
-const LANDS_NEAR: f32 = 0.5;
+/// How many of the things carried together fly from their rooms and back at most: the rest are outlined there while
+/// they are carried, and drawn full again as the last lands.
+pub const FLOWN: usize = 30;
+/// How near its room a thing flying back is (DIPs) as it lands there, and its room is drawn full again, and how much of
+/// its way it has left at most then (of its lift, larger, turned, its shadow and plate: none of it seen).
+const LANDS_NEAR: f32 = 0.2;
+const LANDS_LIFTED: f32 = 0.005;
+/// Let go where nothing takes them, how long after the one before it each sets off back (seconds), and how long after
+/// the first the last sets off at most (closer together where there are many).
+const STAGGER: f32 = 0.03;
+const STAGGER_ALL: f32 = 0.15;
 /// How it fades as the program under it changes, and what a drop does comes and goes (stiffness, damping: see `Spring`).
 const FADING: (f32, f32) = (400.0, 36.0);
 /// Given over where it is let go: how long it takes, and how large it is by its end.
@@ -131,6 +143,8 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
         let mut lift = Spring::at(0.0, LIFTING.0, LIFTING.1);
         lift.target = 1.0;
         let flight = Flight::lifted(lifted.tiles.len());
+        // (How far each is from its room is known as it is drawn: till then, none lands.)
+        let apart = vec![f32::INFINITY; lifted.tiles.len()];
         *carried = Some(Carry {
             lifted,
             window,
@@ -144,7 +158,7 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
             trail: Vec::new(),
             corner,
             flight,
-            apart: Vec::new(),
+            apart,
             given: None,
             last: Instant::now(),
         });
@@ -186,13 +200,16 @@ fn lean_of(trail: &[(Instant, POINT)], px: f32, now: Instant) -> f32 {
 }
 
 /// Things carried together on their way, each between its own room (0) and its place in the stack (1): lifted, each
-/// flies from its room to its place. Let go where nothing takes them, those shown in the stack (see `SHOWN`) fly back,
-/// each to its own room, and land there one by one (those not shown flew in and faded, see `seen_of`: theirs are
-/// full again as the last lands).
+/// flies from its room to its place (those not shown in the stack, see `SHOWN`, to where the backmost is, fading as
+/// they come, see `seen_of`). Let go where nothing takes them, each flies back to its own room, one setting off after
+/// another in their order (see `stagger`), those not shown coming out from behind the backmost, and lands there.
 struct Flight {
     ways: Vec<Spring>,
+    /// Each set off back yet, and landed in its room.
+    turned: Vec<bool>,
     landed: Vec<bool>,
-    back: bool,
+    /// Let go where nothing takes them: how long since (seconds).
+    back: Option<f32>,
 }
 
 impl Flight {
@@ -203,47 +220,68 @@ impl Flight {
             way.target = 1.0;
             way
         };
-        Flight { ways: (0..tiles).map(|_| way()).collect(), landed: vec![false; tiles], back: false }
+        Flight { ways: (0..tiles).map(|_| way()).collect(), turned: vec![false; tiles], landed: vec![false; tiles], back: None }
     }
 
-    /// Let go where nothing takes them: those shown flying back from where they are, each to its room, as a thing
+    /// Let go where nothing takes them: each flying back from where it is to its room as its turn comes, as a thing
     /// alone goes back to its own.
     fn go_back(&mut self) {
-        self.back = true;
-        for way in self.ways.iter_mut().take(SHOWN) {
-            let speed = way.speed;
-            *way = Spring::at(way.value, GOING_BACK.0, GOING_BACK.1);
-            (way.speed, way.target) = (speed, 0.0);
+        self.back = Some(0.0);
+        self.turn();
+    }
+
+    /// Those whose turn has come set off back, from where they are and as fast as they go.
+    fn turn(&mut self) {
+        let Some(since) = self.back else { return };
+        let tiles = self.ways.len();
+        for (at, way) in self.ways.iter_mut().enumerate() {
+            if !self.turned[at] && since >= stagger(at, tiles) {
+                let speed = way.speed;
+                *way = Spring::at(way.value, GOING_BACK.0, GOING_BACK.1);
+                (way.speed, way.target) = (speed, 0.0);
+                self.turned[at] = true;
+            }
         }
     }
 
     /// `seconds` on, each `apart` from its room in its place (DIPs, as it was last drawn): those come back to their
-    /// rooms now (by their order), each landing once, as near as `LANDS_NEAR`.
+    /// rooms now (by their order), each landing once, as near as `LANDS_NEAR` and `LANDS_LIFTED`.
     fn step(&mut self, seconds: f32, apart: &[f32]) -> Vec<usize> {
+        if let Some(since) = &mut self.back {
+            *since += seconds;
+        }
+        self.turn();
         for way in &mut self.ways {
             way.step(seconds);
         }
-        if !self.back {
-            return Vec::new();
-        }
-        let shown = self.ways.len().min(SHOWN);
-        let near = |at: usize| LANDS_NEAR / apart.get(at).copied().unwrap_or(1.0).max(LANDS_NEAR);
-        let come: Vec<usize> = (0..shown).filter(|&at| !self.landed[at] && self.ways[at].rests(near(at))).collect();
+        let near = |at: usize| (LANDS_NEAR / apart[at]).min(LANDS_LIFTED);
+        let come: Vec<usize> = (0..self.ways.len()).filter(|&at| self.turned[at] && !self.landed[at] && self.ways[at].rests(near(at))).collect();
         for &at in &come {
             self.landed[at] = true;
         }
         come
     }
 
-    /// Whether all shown are back in their rooms.
+    /// Whether they are on their way back.
+    fn going_back(&self) -> bool {
+        self.back.is_some()
+    }
+
+    /// Whether all are back in their rooms.
     fn home(&self) -> bool {
-        self.back && self.landed.iter().take(SHOWN).all(|landed| *landed)
+        self.back.is_some() && self.landed.iter().all(|landed| *landed)
     }
 
     /// How far each is on its way.
     fn ways(&self) -> Vec<f32> {
         self.ways.iter().map(|way| way.value).collect()
     }
+}
+
+/// How long after they are let go the `at`th of `tiles` things flying back sets off (seconds): one after another in
+/// their order, a `STAGGER` apart, closer where there are many, the last `STAGGER_ALL` after the first at most.
+fn stagger(at: usize, tiles: usize) -> f32 {
+    at as f32 * STAGGER.min(STAGGER_ALL / tiles.saturating_sub(1).max(1) as f32)
 }
 
 /// Where a plate is drawn: its middle, how far turned (degrees) and how large (DIPs, see `between`).
@@ -294,11 +332,27 @@ fn seen_of(at: usize, shown: usize, way: f32) -> f32 {
     1.0 + (there - 1.0) * way.clamp(0.0, 1.0)
 }
 
-/// Where each of the things carried together is drawn (on the screen, DIPs), how much of it shows, and how far its
-/// place is from its room, `tiles` (each its
-/// plate's size, and its plate's corner in its room) each `ways` of the way from its room to its place in the stack,
-/// the one on top placed by `held` (see `slot`).
-fn placements(tiles: &[((f32, f32), (f32, f32))], held: Matrix3x2, ways: &[f32]) -> Vec<(Matrix3x2, f32, f32)> {
+/// How a thing carried with others is drawn: where (on the screen, DIPs), how much of it shows, how lifted it looks (0
+/// as its room draws it, 1 in hand: see `paint_tile`), and how far its place in the stack is from its room (DIPs).
+#[derive(Clone, Copy, Debug)]
+struct Drawn {
+    placed: Matrix3x2,
+    seen: f32,
+    lifted: f32,
+    apart: f32,
+}
+
+/// A thing carried, as it is placed in its room: its plate's size, and its plate's corner there (DIPs).
+type Room = ((f32, f32), (f32, f32));
+
+/// A box placed: where (what places it), and its size (DIPs).
+type Boxed = (Matrix3x2, (f32, f32));
+
+/// How each of the things carried together is drawn, `tiles` (each its plate's size, and its plate's corner in its
+/// room) each `ways` of the way from its room to its place in the stack, the one on top placed by `held` (see `slot`),
+/// `seen` of them shown in hand (see `REFUSED`): each moved, turned, made larger, lifted and faded by its own way, so
+/// that in its room it is drawn just as its room draws it.
+fn placements(tiles: &[Room], held: Matrix3x2, ways: &[f32], seen: f32) -> Vec<Drawn> {
     let shown = tiles.len().min(SHOWN);
     tiles
         .iter()
@@ -307,15 +361,35 @@ fn placements(tiles: &[((f32, f32), (f32, f32))], held: Matrix3x2, ways: &[f32])
         .map(|(at, (&(plate, room), &way))| {
             let home = placed_of(&Matrix3x2::translation(room.0, room.1), plate);
             let there = placed_of(&slot(at, shown, plate, held), plate);
-            let apart = (there.centre.0 - home.centre.0).hypot(there.centre.1 - home.centre.1);
-            (matrix_of(between(home, there, way), plate), seen_of(at, shown, way), apart)
+            let lifted = way.clamp(0.0, 1.0);
+            Drawn {
+                placed: matrix_of(between(home, there, way), plate),
+                seen: seen_of(at, shown, way) * (1.0 - (1.0 - seen) * lifted),
+                lifted,
+                apart: (there.centre.0 - home.centre.0).hypot(there.centre.1 - home.centre.1),
+            }
         })
         .collect()
 }
 
+/// The plate under a thing carried (from its plate's corner, `plate` large, DIPs), `lifted` of the way from its room:
+/// in hand all of it, the room round what it is (`PAD`) round that, drawn in to the thing's own box as it comes to its
+/// room.
+fn plate_of(plate: (f32, f32), lifted: f32) -> (f32, f32, f32, f32) {
+    let inset = PAD * (1.0 - lifted);
+    (inset, inset, plate.0 - 2.0 * inset, plate.1 - 2.0 * inset)
+}
+
+/// How much shows of what was drawn of a thing as it was lifted, and of what its room draws of it (its mark chosen with
+/// others), `lifted` of the way from its room: in hand the one, in its room the other, both whole half way (so what is
+/// whole in both never shows through).
+fn looks_of(lifted: f32) -> (f32, f32) {
+    ((2.0 * lifted).min(1.0), (2.0 * (1.0 - lifted)).min(1.0))
+}
+
 /// The box (left, top, right, bottom) boxes `boxes` (each where it is placed, and its size) reach over, turned as
 /// they may be.
-fn reach_of(boxes: &[(Matrix3x2, (f32, f32))]) -> (f32, f32, f32, f32) {
+fn reach_of(boxes: &[Boxed]) -> (f32, f32, f32, f32) {
     boxes.iter().fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(left, top, right, bottom), (placed, size)| {
         [(0.0, 0.0), (size.0, 0.0), (0.0, size.1), (size.0, size.1)].into_iter().fold((left, top, right, bottom), |(left, top, right, bottom), (x, y)| {
             let (x, y) = (x * placed.M11 + y * placed.M21 + placed.M31, x * placed.M12 + y * placed.M22 + placed.M32);
@@ -365,7 +439,7 @@ impl Carry {
         let px = self.lifted.px;
         let pressed = self.lifted.tiles[0].at;
         let grab = ((self.lifted.from.x - pressed.x) as f32, (self.lifted.from.y - pressed.y) as f32);
-        if self.given.is_none() && !self.flight.back {
+        if self.given.is_none() && !self.flight.going_back() {
             match ended {
                 None => {
                     if let Some(cursor) = crate::mouse::cursor_position() {
@@ -389,11 +463,10 @@ impl Carry {
                     self.saying.target = 0.0;
                     crate::ui::view::land_tiles(self.lifted.carried.clone(), now);
                 }
-                // Not taken, or given up: each back into its room, where what it was lifted off is still shown. Else
-                // gone where it is.
+                // Not taken, or given up: each back into its room, where what it was lifted off is still shown, its
+                // lift eased away on its own way there (see `placements`). Else gone where it is.
                 Some(Dragged::Not) => {
                     self.saying.target = 0.0;
-                    self.lift.target = 0.0;
                     self.lean.target = 0.0;
                     self.seen.target = 1.0;
                     if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.lifted.window) }.as_bool() {
@@ -408,12 +481,15 @@ impl Carry {
         for spring in [&mut self.lift, &mut self.lean, &mut self.seen, &mut self.saying] {
             spring.step(seconds);
         }
-        // Each back in its room: put down there, its room drawn full again and springing back to its size.
+        // Each back in its room: put down there, its room drawn full again as it was drawn coming (and no longer drawn
+        // here).
         for at in self.flight.step(seconds, &self.apart) {
-            crate::ui::view::land_tiles(vec![self.lifted.tiles[at].hit], now);
+            crate::ui::view::settle_tiles(&[self.lifted.tiles[at].hit]);
         }
-        if self.flight.home() && self.lift.rests(0.05) {
-            crate::ui::view::land_tiles(self.lifted.carried.clone(), now);
+        // All back: the rooms of those that did not fly drawn full again.
+        if self.flight.home() {
+            let flown: Vec<Hit> = self.lifted.tiles.iter().map(|tile| tile.hit).collect();
+            crate::ui::view::land_tiles(self.lifted.carried.iter().copied().filter(|hit| !flown.contains(hit)).collect(), now);
             return false;
         }
         let given = self.given.map(|since| (now.saturating_duration_since(since).as_secs_f32() / GIVEN.as_secs_f32()).min(1.0));
@@ -438,10 +514,12 @@ impl Carry {
         let grown = (1.0 + LIFTED_BY * self.lift.value.max(0.0)) * (1.0 - (1.0 - GIVEN_TO) * eased);
         let corner = (self.corner.0 / px - PAD, self.corner.1 / px - PAD);
         let held = Matrix3x2::translation(-about.0, -about.1) * Matrix3x2::scale(grown, grown) * Matrix3x2::rotation(self.lean.value) * Matrix3x2::translation(about.0 + corner.0, about.1 + corner.1);
-        let rooms: Vec<((f32, f32), (f32, f32))> = tiles.iter().zip(&plates).map(|(tile, plate)| (*plate, (tile.at.x as f32 / px - PAD, tile.at.y as f32 / px - PAD))).collect();
+        let rooms: Vec<Room> = tiles.iter().zip(&plates).map(|(tile, plate)| (*plate, (tile.at.x as f32 / px - PAD, tile.at.y as f32 / px - PAD))).collect();
         let ways = self.flight.ways();
-        let placed = placements(&rooms, held, &ways);
-        self.apart = placed.iter().map(|(.., apart)| *apart).collect();
+        let drawn = placements(&rooms, held, &ways, self.seen.value);
+        self.apart = drawn.iter().map(|drawn| drawn.apart).collect();
+        // (Those landed are drawn by their rooms.)
+        let shows = |at: usize| drawn[at].seen > 0.0 && !self.flight.landed[at];
         // The count on the stack's corner, there as they all are in their places.
         let count = (self.lifted.carried.len() > 1).then(|| {
             let figure = self.lifted.count.to_string();
@@ -455,7 +533,7 @@ impl Carry {
         let says = &self.says;
         let says_at = (corner.0 + 2.0, corner.1 + about.1 + (plates[0].1 - about.1) * grown + SAYS_GAP);
         let says_wide = if saying > 0.01 && !says.is_empty() { self.gfx.measure(says, theme.small) + 34.0 } else { 0.0 };
-        let mut boxes: Vec<(Matrix3x2, (f32, f32))> = placed.iter().zip(&plates).filter(|((_, shows, _), _)| *shows > 0.0).map(|((placed, ..), plate)| (*placed, *plate)).collect();
+        let mut boxes: Vec<Boxed> = (0..tiles.len()).filter(|at| shows(*at)).map(|at| (drawn[at].placed, plates[at])).collect();
         boxes.extend(count.map(|(placed, wide, _)| (placed, (wide, COUNT_TALL))));
         if says_wide > 0.0 {
             boxes.push((Matrix3x2::translation(says_at.0, says_at.1), (says_wide, SAYS_TALL)));
@@ -473,17 +551,15 @@ impl Carry {
         // (What is on the screen at its window's corner, drawn at its frame's.)
         let origin = Matrix3x2::translation(-rect.left as f32 / px, -rect.top as f32 / px);
         let _ = surface.draw(&self.gfx, pixels, px, |frame| {
-            faded(frame, seen, || {
+            faded(frame, 1.0 - eased, || {
                 // The backmost first, the one on top last.
-                for ((placed, shows, _), (tile, plate)) in placed.iter().zip(tiles.iter().zip(&plates)).rev() {
-                    if *shows > 0.0 {
-                        frame.place(*placed * origin);
-                        faded(frame, *shows, || paint_tile(frame, look, &tile.parts, *plate, lift));
-                    }
+                for at in (0..tiles.len()).rev().filter(|at| shows(*at)) {
+                    frame.place(drawn[at].placed * origin);
+                    faded(frame, drawn[at].seen, || paint_tile(frame, look, &tiles[at].parts, tiles[at].home.as_deref(), plates[at], lift, drawn[at].lifted));
                 }
                 if let Some((placed, _, shows)) = count.filter(|count| count.2 > 0.0) {
                     frame.place(placed * origin);
-                    faded(frame, shows, || paint_count(frame, look, self.lifted.count, (0.0, 0.0)));
+                    faded(frame, shows * self.seen.value, || paint_count(frame, look, self.lifted.count, (0.0, 0.0)));
                 }
             });
             if says_wide > 0.0 {
@@ -496,33 +572,52 @@ impl Carry {
     }
 }
 
-/// A thing carried, its plate `plate` large (DIPs) from where the frame is placed: lifted `lift` of the way, its shadow
-/// under it, its plate in the look of what it was lifted off, and on it what was drawn of it there (`parts`).
-fn paint_tile(frame: &Frame, look: crate::ui::menu::Look, parts: &[Part], plate: (f32, f32), lift: f32) {
-    let shadow = lifted_shadow(lift);
+/// A thing carried, its plate `plate` large (DIPs) from where the frame is placed, `lifted` of the way from its room
+/// (see `placements`): its shadow under it as lifted as it is (`lift` in hand), its plate in the look of what it was
+/// lifted off, drawn in to its own box and fading as it comes to its room, and on it what was drawn of it there
+/// (`parts`), turning into what its room draws of it (`home`, where that is otherwise: see `looks_of`). In its room,
+/// just what its room draws.
+fn paint_tile(frame: &Frame, look: crate::ui::menu::Look, parts: &[Part], home: Option<&[Part]>, plate: (f32, f32), lift: f32, lifted: f32) {
+    let (x, y, w, h) = plate_of(plate, lifted);
+    let shadow = lifted_shadow(lift * lifted);
     if shadow.dark > 0.0 {
-        let radius = look_theme(look).radius.min(plate.1 / 2.0);
-        frame.shadow(Color::hex(0, shadow.dark), 0.0, 0.0, plate.0, plate.1, radius, shadow.blur, shadow.drop);
+        let radius = look_theme(look).radius.min(h / 2.0);
+        frame.shadow(Color::hex(0, shadow.dark), x, y, w, h, radius, shadow.blur, shadow.drop);
     }
-    crate::ui::menu::plate(frame, look, (0.0, 0.0, plate.0, plate.1));
+    if lifted > 0.0 {
+        faded(frame, lifted, || {
+            crate::ui::menu::plate(frame, look, (x, y, w, h));
+        });
+    }
     let mut placed = Matrix3x2::default();
     unsafe { frame.dc.GetTransform(&mut placed) };
     unsafe { frame.dc.SetTransform(&(Matrix3x2::translation(PAD, PAD) * placed)) };
-    crate::ui::morph::draw(frame, parts);
+    match home {
+        Some(home) => {
+            let (as_lifted, as_home) = looks_of(lifted);
+            if as_lifted > 0.0 {
+                faded(frame, as_lifted, || crate::ui::morph::draw(frame, parts));
+            }
+            if as_home > 0.0 {
+                faded(frame, as_home, || crate::ui::morph::draw(frame, home));
+            }
+        }
+        None => crate::ui::morph::draw(frame, parts),
+    }
     unsafe { frame.dc.SetTransform(&placed) };
 }
 
 /// Things carried together, all in their places, the one on top from where the frame is placed (`tiles`: what was drawn
 /// of each and its plate's size, the one on top first): lifted `lift` of the way, those behind it drawn first, each
 /// with what it is, fainter, and on their corner `count` (where more than one is carried, how many files land).
-#[cfg(any(test, feature = "studio"))]
+#[cfg(test)]
 pub(crate) fn paint_stack(frame: &Frame, look: crate::ui::menu::Look, tiles: &[(&[Part], (f32, f32))], lift: f32, count: Option<usize>) {
     let shown = tiles.len().min(SHOWN);
     let mut placed = Matrix3x2::default();
     unsafe { frame.dc.GetTransform(&mut placed) };
     for (at, (parts, plate)) in tiles.iter().enumerate().take(shown).rev() {
         unsafe { frame.dc.SetTransform(&(slot(at, shown, *plate, Matrix3x2::identity()) * placed)) };
-        faded(frame, seen_of(at, shown, 1.0), || paint_tile(frame, look, parts, *plate, lift));
+        faded(frame, seen_of(at, shown, 1.0), || paint_tile(frame, look, parts, None, *plate, lift, 1.0));
     }
     unsafe { frame.dc.SetTransform(&placed) };
     if let Some(count) = count {
@@ -658,12 +753,13 @@ mod tests {
         let plate = (100.0, 80.0);
         let rooms = [(plate, (40.0, 400.0)), (plate, (40.0, 300.0)), (plate, (160.0, 300.0)), (plate, (280.0, 300.0))];
         let held = Matrix3x2::scale(1.04, 1.04) * Matrix3x2::rotation(3.0) * Matrix3x2::translation(700.0, 120.0);
-        for (at, (placed, seen, _)) in placements(&rooms, held, &[0.0; 4]).into_iter().enumerate() {
-            assert!(near(&placed, &Matrix3x2::translation(rooms[at].1 .0, rooms[at].1 .1)), "{at}: {placed:?}");
-            assert_eq!(seen, 1.0);
+        for (at, drawn) in placements(&rooms, held, &[0.0; 4], 1.0).into_iter().enumerate() {
+            assert!(near(&drawn.placed, &Matrix3x2::translation(rooms[at].1 .0, rooms[at].1 .1)), "{at}: {drawn:?}");
+            assert_eq!((drawn.seen, drawn.lifted), (1.0, 0.0));
         }
-        for (at, (placed, ..)) in placements(&rooms, held, &[1.0; 4]).into_iter().enumerate() {
-            assert!(near(&placed, &slot(at, 3, plate, held)), "{at}: {placed:?}");
+        for (at, drawn) in placements(&rooms, held, &[1.0; 4], 1.0).into_iter().enumerate() {
+            assert!(near(&drawn.placed, &slot(at, 3, plate, held)), "{at}: {drawn:?}");
+            assert_eq!(drawn.lifted, 1.0);
         }
     }
 
@@ -672,37 +768,122 @@ mod tests {
         [(one.M11, other.M11), (one.M12, other.M12), (one.M21, other.M21), (one.M22, other.M22)].iter().all(|(a, b)| (a - b).abs() < 1e-4) && (one.M31 - other.M31).abs() < 0.01 && (one.M32 - other.M32).abs() < 0.01
     }
 
-    /// Let go where nothing takes them, those shown fly back apart, each to its own room, and land there, each once, as
-    /// it comes: where it lands, its plate's corner is its room's. Those not shown stay where they faded. Lifted, none
-    /// lands.
-    #[test]
-    fn each_flies_back_apart_and_lands_in_its_own_room() {
+    /// Six chosen and carried, three shown in the stack: their rooms (plates' sizes and corners), and where the one on
+    /// top is held, larger and turned about its middle just over its own room (so it is no way off, but lifted).
+    fn six_rooms() -> ([Room; 6], Matrix3x2) {
         let plate = (100.0, 80.0);
-        let rooms = [(plate, (40.0, 400.0)), (plate, (40.0, 300.0)), (plate, (160.0, 300.0)), (plate, (280.0, 300.0))];
-        let held = Matrix3x2::translation(700.0, 120.0);
+        let rooms = [(plate, (40.0, 400.0)), (plate, (40.0, 300.0)), (plate, (160.0, 300.0)), (plate, (280.0, 300.0)), (plate, (40.0, 500.0)), (plate, (160.0, 500.0))];
+        let middle = (plate.0 / 2.0, plate.1 / 2.0);
+        let held = Matrix3x2::translation(-middle.0, -middle.1) * Matrix3x2::scale(1.04, 1.04) * Matrix3x2::rotation(6.0) * Matrix3x2::translation(middle.0 + 40.0, middle.1 + 400.0);
+        (rooms, held)
+    }
+
+    /// Gathered into the stack, then let go where nothing takes them: `landed` told of each as it lands (its place in
+    /// their order, how it is drawn then), its rooms `rooms` as `six_rooms` has them, `seen` of them shown in hand.
+    fn fly_back(seen: f32, mut landed: impl FnMut(usize, Drawn)) -> Flight {
+        let (rooms, held) = six_rooms();
         let mut flight = Flight::lifted(rooms.len());
-        let apart: Vec<f32> = placements(&rooms, held, &flight.ways()).iter().map(|(.., apart)| *apart).collect();
+        let apart: Vec<f32> = placements(&rooms, held, &flight.ways(), seen).iter().map(|drawn| drawn.apart).collect();
         for _ in 0..60 {
             assert!(flight.step(1.0 / 60.0, &apart).is_empty());
         }
         assert!(flight.ways().iter().all(|way| (way - 1.0).abs() < 0.01), "{:?}", flight.ways());
         flight.go_back();
-        let mut landed = Vec::new();
         for _ in 0..120 {
             for at in flight.step(1.0 / 60.0, &apart) {
-                let (placed, ..) = placements(&rooms, held, &flight.ways())[at];
-                let room = Matrix3x2::translation(rooms[at].1 .0, rooms[at].1 .1);
-                assert!((placed.M31 - room.M31).abs() <= LANDS_NEAR && (placed.M32 - room.M32).abs() <= LANDS_NEAR, "{at} lands at {placed:?}");
-                landed.push(at);
+                landed(at, placements(&rooms, held, &flight.ways(), seen)[at]);
             }
         }
+        flight
+    }
+
+    /// Let go where nothing takes them, all six chosen fly back apart, those shown and those not, each to its own room,
+    /// and land there, each once, as it comes: where it lands, its plate's corner is its room's. Lifted, none lands.
+    #[test]
+    fn each_flies_back_apart_and_lands_in_its_own_room() {
+        let (rooms, _) = six_rooms();
+        let mut landed = Vec::new();
+        let flight = fly_back(1.0, |at, drawn| {
+            let room = rooms[at].1;
+            assert!((drawn.placed.M31 - room.0).abs() <= LANDS_NEAR && (drawn.placed.M32 - room.1).abs() <= LANDS_NEAR, "{at} lands at {drawn:?}");
+            landed.push(at);
+        });
         landed.sort_unstable();
-        assert_eq!(landed, [0, 1, 2]);
+        assert_eq!(landed, [0, 1, 2, 3, 4, 5]);
         assert!(flight.home());
-        assert!((flight.ways()[3] - 1.0).abs() < 0.01);
-        // Home, each is just where its room is.
-        for (at, (placed, ..)) in placements(&rooms, held, &flight.ways()).into_iter().enumerate().take(3) {
-            assert!(near(&placed, &Matrix3x2::translation(rooms[at].1 .0, rooms[at].1 .1)), "{at}: {placed:?}");
+    }
+
+    /// Landing, each is drawn just as its room draws it, so that its room drawn in its stead shows nothing new: where
+    /// its room is, as large, unturned, all of it showing (though it showed less over a program that would not take
+    /// it), no shadow, no plate under it but its own box, drawn as its room draws it (none of it as it was lifted).
+    /// The one pressed too, held just over its room, no way off but lifted.
+    #[test]
+    fn what_lands_is_drawn_as_its_room_draws_it() {
+        let (rooms, _) = six_rooms();
+        let mut landed = 0;
+        fly_back(REFUSED, |at, drawn| {
+            let (placed, plate) = (drawn.placed, rooms[at].0);
+            assert!((placed.M11.hypot(placed.M12) - 1.0).abs() < 1e-3 && placed.M12.atan2(placed.M11).to_degrees().abs() < 0.05, "{at}: {drawn:?}");
+            assert!((placed.M31 - rooms[at].1 .0).abs() <= LANDS_NEAR && (placed.M32 - rooms[at].1 .1).abs() <= LANDS_NEAR, "{at}: {drawn:?}");
+            assert!(drawn.seen > 0.995 && drawn.lifted < 0.01, "{at}: {drawn:?}");
+            assert!(lifted_shadow(drawn.lifted).dark < 0.003, "{at}: {drawn:?}");
+            let (x, y, w, h) = plate_of(plate, drawn.lifted);
+            assert!((x - PAD).abs() < 0.1 && (y - PAD).abs() < 0.1 && (w - (plate.0 - 2.0 * PAD)).abs() < 0.2 && (h - (plate.1 - 2.0 * PAD)).abs() < 0.2, "{at}: {drawn:?}");
+            let (as_lifted, as_home) = looks_of(drawn.lifted);
+            assert!(as_lifted < 0.02 && as_home == 1.0, "{at}: {drawn:?}");
+            landed += 1;
+        });
+        assert_eq!(landed, 6);
+        // In hand all of it lifted, its plate all of it, as it was lifted.
+        assert_eq!((plate_of((100.0, 80.0), 1.0), looks_of(1.0), looks_of(0.5), looks_of(0.0)), ((0.0, 0.0, 100.0, 80.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)));
+    }
+
+    /// Those chosen but not shown in the stack wait where the backmost is, as it is placed, turned and large, not
+    /// shown, and set off back from there, coming out from behind it as they leave.
+    #[test]
+    fn those_not_shown_set_off_from_behind_the_backmost() {
+        let (rooms, held) = six_rooms();
+        let carried = placements(&rooms, held, &[1.0; 6], 1.0);
+        for (at, drawn) in carried.iter().enumerate().skip(3) {
+            assert!(near(&drawn.placed, &slot(2, 3, rooms[at].0, held)) && near(&drawn.placed, &carried[2].placed), "{at}: {drawn:?}");
+            assert_eq!(drawn.seen, 0.0);
+        }
+        let leaving = placements(&rooms, held, &[1.0, 1.0, 1.0, 0.9, 0.97, 1.0], 1.0);
+        assert!(leaving[3].seen > leaving[4].seen && leaving[4].seen > 0.0 && leaving[5].seen == 0.0, "{leaving:?}");
+    }
+
+    /// Let go where nothing takes them, they set off back one after another in their order, a `STAGGER` apart, closer
+    /// where there are many, so that the last sets off `STAGGER_ALL` after the first at most.
+    #[test]
+    fn they_set_off_back_one_after_another() {
+        let six: Vec<f32> = (0..6).map(|at| stagger(at, 6)).collect();
+        for (at, after) in six.iter().enumerate() {
+            assert!((after - at as f32 * STAGGER).abs() < 1e-6, "{six:?}");
+        }
+        assert!((stagger(29, 30) - STAGGER_ALL).abs() < 1e-6 && stagger(1, 30) < STAGGER);
+        assert!((1..30).all(|at| stagger(at, 30) > stagger(at - 1, 30)));
+        assert_eq!(stagger(0, 1), 0.0);
+        // As flown: each sets off as its turn comes, not before.
+        let mut flight = Flight::lifted(6);
+        let apart = [500.0; 6];
+        for _ in 0..60 {
+            flight.step(1.0 / 60.0, &apart);
+        }
+        flight.go_back();
+        let mut set_off = [None; 6];
+        set_off[0] = flight.turned[0].then_some(0.0);
+        let frame = 1.0 / 240.0;
+        for step in 1..=60 {
+            flight.step(frame, &apart);
+            for (when, turned) in set_off.iter_mut().zip(&flight.turned) {
+                if when.is_none() && *turned {
+                    *when = Some(step as f32 * frame);
+                }
+            }
+        }
+        for (at, when) in set_off.iter().enumerate() {
+            let when = when.unwrap();
+            assert!(when >= stagger(at, 6) - 1e-4 && when < stagger(at, 6) + frame + 1e-4, "{at}: {set_off:?}");
         }
     }
 
