@@ -93,7 +93,7 @@ fn drag_and_drop_across_threads() {
             std::thread::sleep(Duration::from_millis(10));
         }
         DRAG_FROM.store(1, Ordering::Release);
-        let dragged = super::drag::drag(&super::clipboard::Content::Text("across threads".into()), false, pressed_on);
+        let dragged = super::drag::drag(&[super::clipboard::Content::Text("across threads".into())], false, pressed_on);
         println!("the drag ended: {dragged:?}");
         let _ = windows::Win32::System::Ole::RevokeDragDrop(to);
         dragged

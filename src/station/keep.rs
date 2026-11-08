@@ -198,7 +198,7 @@ impl Keep {
 }
 
 /// Whether `text` is a web address alone (one, nothing round it).
-fn is_link(text: &str) -> bool {
+pub(super) fn is_link(text: &str) -> bool {
     (text.starts_with("https://") || text.starts_with("http://")) && text.len() > "https://".len() && !text.chars().any(char::is_whitespace)
 }
 

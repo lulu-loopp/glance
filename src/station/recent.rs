@@ -265,6 +265,17 @@ pub enum Entry {
     Burst(Filter, Key),
 }
 
+impl Entry {
+    /// The entry of a row the page `filter` shows (see `listed`): a file alone, or the files come together, by their
+    /// newest.
+    pub fn of_row(row: &[&Came], filter: Filter) -> Entry {
+        match row {
+            [came] => Entry::File(came.key),
+            together => Entry::Burst(filter, together[0].key),
+        }
+    }
+}
+
 /// Where the files of `entry` are, as the list is now: the newest first.
 pub fn paths_of(entry: Entry) -> Option<Vec<PathBuf>> {
     let shown = shown();

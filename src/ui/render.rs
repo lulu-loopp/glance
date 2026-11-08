@@ -242,30 +242,30 @@ pub fn record(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout
     recorder.parts()
 }
 
-/// What shows a station's lane, as a thing is carried off it (see `carry`): what it drew meanwhile, kept, and the thing.
+/// What shows a station's lane, as things are carried off it (see `carry`): what it drew meanwhile, kept, and those of
+/// them it drew.
 #[derive(Default)]
-pub struct Away(Option<(view::Hit, Vec<Part>)>);
+pub struct Away(Option<(Vec<view::Hit>, Vec<Part>)>);
 
 impl Away {
-    /// What it draws now recorded by `record` (as it turns, see `morph`): kept while a thing is carried off the lane
-    /// in it; that thing put down and gone from it (taken off the station, as its settings may say), what it drew
-    /// while it was carried, for it to turn from into what it draws now (the room left closing, the rest moving up).
+    /// What it draws now recorded by `record` (as it turns, see `morph`): kept while things are carried off the lane
+    /// in it, those put down and gone from it (taken off the station, as its settings may say), what it drew while
+    /// they were carried, for it to turn from into what it draws now (the rooms left closing, the rest moving up).
     pub fn follow(&mut self, record: impl Fn() -> Vec<Part>) -> Option<Vec<Part>> {
         let drawn = |parts: &[Part], hit: view::Hit| {
             let key = format!("tile.{hit:?}");
             parts.iter().any(|part| part.key.as_deref() == Some(key.as_str()))
         };
-        match view::away_tile() {
-            Some(hit) => {
-                let parts = record();
-                self.0 = drawn(&parts, hit).then_some((hit, parts));
-                None
-            }
-            None => {
-                let (hit, parts) = self.0.take()?;
-                (!drawn(&record(), hit)).then_some(parts)
-            }
+        let away = view::away_tiles();
+        if !away.is_empty() {
+            let parts = record();
+            let shown: Vec<view::Hit> = away.into_iter().filter(|hit| drawn(&parts, *hit)).collect();
+            self.0 = (!shown.is_empty()).then_some((shown, parts));
+            return None;
         }
+        let (shown, parts) = self.0.take()?;
+        let now = record();
+        shown.iter().any(|hit| !drawn(&now, *hit)).then_some(parts)
     }
 }
 
@@ -285,7 +285,8 @@ mod tests {
     use super::Away;
 
     /// What shows a station's lane, a thing carried off it: put back, nothing turns; taken off the station, what was
-    /// drawn as it was carried is turned from, once; none of it drawn there, nothing kept.
+    /// drawn as it was carried is turned from, once, none of it drawn there, nothing kept. Things carried off it
+    /// together alike: any of them taken off, it turns.
     #[test]
     fn what_shows_a_thing_carried_off_turns_as_it_is_taken_off() {
         let _holding = view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -293,17 +294,31 @@ mod tests {
         let (one, two) = (Hit::Shelf(0x5EED_0011), Hit::Shelf(0x5EED_0012));
         let both = || vec![part(&format!("tile.{one:?}"), 0.0), part(&format!("tile.{two:?}"), 20.0)];
         let (mut away, mut elsewhere) = (Away::default(), Away::default());
-        view::carry_tile(Some(one));
+        view::carry_tiles(vec![one]);
         assert_eq!(away.follow(both), None);
         assert_eq!(elsewhere.follow(|| vec![part("cpu", 0.0)]), None);
-        view::carry_tile(None);
+        view::carry_tiles(Vec::new());
         assert_eq!(away.follow(both), None);
         assert_eq!(elsewhere.follow(|| vec![part("cpu", 0.0)]), None);
-        view::carry_tile(Some(one));
+        view::carry_tiles(vec![one]);
         assert_eq!(away.follow(both), None);
-        view::carry_tile(None);
+        view::carry_tiles(Vec::new());
         let after = || vec![part(&format!("tile.{two:?}"), 0.0)];
         assert_eq!(away.follow(after), Some(both()));
         assert_eq!(away.follow(after), None);
+        // Both carried, both put back: nothing turns, both taken off: what was drawn is turned from.
+        view::carry_tiles(vec![one, two]);
+        assert_eq!(away.follow(both), None);
+        view::carry_tiles(Vec::new());
+        assert_eq!(away.follow(both), None);
+        view::carry_tiles(vec![two, one]);
+        assert_eq!(away.follow(both), None);
+        view::carry_tiles(Vec::new());
+        assert_eq!(away.follow(|| vec![part("cpu", 0.0)]), Some(both()));
+        // Both carried, the one pressed first, the other alone taken off: it turns.
+        view::carry_tiles(vec![two, one]);
+        assert_eq!(away.follow(both), None);
+        view::carry_tiles(Vec::new());
+        assert_eq!(away.follow(|| vec![part(&format!("tile.{two:?}"), 0.0)]), Some(both()));
     }
 }

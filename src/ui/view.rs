@@ -790,11 +790,11 @@ fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, 
 const PRESSED_IN: f32 = 0.97;
 
 /// A thing on a station's lane (a thing on it, copied lately, a file come lately) as it is held to be dragged off it:
-/// pressed; carried off it by Glance (see `carry`), its room outlined; put back in it, springing back to its size
-/// from a little smaller (since when). One at a time, as the pointer holds one.
+/// pressed, one at a time, as the pointer holds one. Carried off it by Glance (see `carry`), with what is chosen with
+/// it: their rooms outlined. Put back in them: springing back to their size from a little smaller (since when).
 static PRESSED_TILE: std::sync::Mutex<Option<Hit>> = std::sync::Mutex::new(None);
-static AWAY_TILE: std::sync::Mutex<Option<Hit>> = std::sync::Mutex::new(None);
-static LANDED_TILE: std::sync::Mutex<Option<(Hit, std::time::Instant)>> = std::sync::Mutex::new(None);
+static AWAY_TILES: std::sync::Mutex<Vec<Hit>> = std::sync::Mutex::new(Vec::new());
+static LANDED_TILES: std::sync::Mutex<Option<(Vec<Hit>, std::time::Instant)>> = std::sync::Mutex::new(None);
 
 /// How a thing put back in its room springs back to its size (stiffness, damping: see `Spring`; a little past it as
 /// it comes, about a third of a second), from how large, and how long it is drawn on for.
@@ -817,47 +817,57 @@ fn tile_changed(changed: bool) -> bool {
     changed
 }
 
+/// What is chosen on a station's lane changed (see `station::select`): what shows it is drawn again.
+pub fn tiles_chosen() {
+    tile_changed(true);
+}
+
 /// The thing on a station's lane pressed to be dragged off it, or none; whether that changed.
 pub fn press_tile(hit: Option<Hit>) -> bool {
     tile_changed(std::mem::replace(&mut *PRESSED_TILE.lock().unwrap(), hit) != hit)
 }
 
-/// The thing carried off a station's lane, or none (put back as it is said so: see `land_tile`); whether that changed.
-pub fn carry_tile(hit: Option<Hit>) -> bool {
-    tile_changed(std::mem::replace(&mut *AWAY_TILE.lock().unwrap(), hit) != hit)
+/// The things carried off a station's lane together, or none (put back as it is said so: see `land_tiles`), whether
+/// that changed.
+pub fn carry_tiles(hits: Vec<Hit>) -> bool {
+    let mut away = AWAY_TILES.lock().unwrap();
+    let changed = *away != hits;
+    *away = hits;
+    tile_changed(changed)
 }
 
-/// The thing carried off a station's lane put back in its room at `at`: no longer carried, springing back to its size.
-pub fn land_tile(hit: Hit, at: std::time::Instant) {
-    carry_tile(None);
-    *LANDED_TILE.lock().unwrap() = Some((hit, at));
+/// The things carried off a station's lane put back in their rooms at `at`: no longer carried, springing back to their
+/// size.
+pub fn land_tiles(hits: Vec<Hit>, at: std::time::Instant) {
+    carry_tiles(Vec::new());
+    *LANDED_TILES.lock().unwrap() = Some((hits, at));
     tile_changed(true);
 }
 
-/// Whether a thing put back on a station's lane is springing back to its size still (what shows it is drawn on).
+/// Whether things put back on a station's lane are springing back to their size still (what shows them is drawn on).
 pub fn tile_landing() -> bool {
-    LANDED_TILE.lock().unwrap().is_some_and(|(_, at)| at.elapsed() < LANDED_FOR)
+    LANDED_TILES.lock().unwrap().as_ref().is_some_and(|(_, at)| at.elapsed() < LANDED_FOR)
 }
 
 /// How the things on a station's lane are held as they are drawn now: what was drawn of them serves again while it is
-/// the same (see `render::PanelLayers::draw_on`), drawn anew as one is held otherwise and as one springs back.
+/// the same (see `render::PanelLayers::draw_on`), drawn anew as one is held otherwise and as they spring back.
 pub fn tiles_drawn() -> (u64, Option<std::time::Duration>) {
-    let landed = *LANDED_TILE.lock().unwrap();
-    (tile_changes(), landed.map(|(_, at)| at.elapsed()).filter(|since| *since < LANDED_FOR))
+    let landed = LANDED_TILES.lock().unwrap().as_ref().map(|(_, at)| at.elapsed());
+    (tile_changes(), landed.filter(|since| *since < LANDED_FOR))
 }
 
 /// Held by a test that holds a thing on a station's lane: one at a time, as the pointer holds one.
 #[cfg(test)]
 pub static HOLDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The thing carried off a station's lane, if one is.
-pub fn away_tile() -> Option<Hit> {
-    *AWAY_TILE.lock().unwrap()
+/// The things carried off a station's lane, if any are.
+pub fn away_tiles() -> Vec<Hit> {
+    AWAY_TILES.lock().unwrap().clone()
 }
 
 /// How the thing on a station's lane pressed as `hit` is held to be dragged off it.
 fn tile_held(hit: Hit) -> Held {
-    if *AWAY_TILE.lock().unwrap() == Some(hit) {
+    if AWAY_TILES.lock().unwrap().contains(&hit) {
         Held::Away
     } else if *PRESSED_TILE.lock().unwrap() == Some(hit) {
         Held::Pressed
@@ -870,9 +880,10 @@ fn tile_held(hit: Hit) -> Held {
 /// put back lately, as large as it has sprung back to by now, about its middle.
 fn tile_face(hit: Hit, face: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = face;
-    let k = match (tile_held(hit), *LANDED_TILE.lock().unwrap()) {
+    let landed = LANDED_TILES.lock().unwrap().as_ref().filter(|(landed, _)| landed.contains(&hit)).map(|(_, at)| *at);
+    let k = match (tile_held(hit), landed) {
         (Held::Pressed, _) => PRESSED_IN,
-        (_, Some((landed, at))) if landed == hit && at.elapsed() < LANDED_FOR => {
+        (_, Some(at)) if at.elapsed() < LANDED_FOR => {
             let mut spring = crate::ui::motion::Spring::at(LANDED_FROM, LANDING.0, LANDING.1);
             spring.target = 1.0;
             spring.step(at.elapsed().as_secs_f32());
@@ -943,7 +954,7 @@ impl Lately {
         let label = format!("{} {} · {name}", files.len(), lang.pick("个文件", "files"));
         let bytes: u64 = files.iter().map(|came| came.bytes).sum();
         Lately {
-            entry: crate::station::recent::Entry::Burst(filter, newest.key),
+            entry: crate::station::recent::Entry::of_row(files, filter),
             day: text::day_of(newest.came_ms, now, lang),
             label,
             about: format!("{} · {}", folder_named(&newest.path), text::bytes(bytes as f64)),
@@ -2050,7 +2061,7 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
     let now = crate::station::now_ms();
-    let tiles: Vec<Tile> = shown.items.iter().rev().filter(|item| !item.copied).map(|item| Tile::of(item, &folder, lang, now)).collect();
+    let tiles: Vec<Tile> = put_on(&shown.items).map(|item| Tile::of(item, &folder, lang, now)).collect();
     use crate::station::keep::Refused;
     let said = if let Some(refused) = shown.refused {
         Some(match refused {
@@ -2082,6 +2093,41 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
         Tab::Recent(filter) => Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() },
     });
     blocks
+}
+
+/// What was put on the station of `items` (the station's), the newest first.
+fn put_on(items: &[crate::station::shelf::Item]) -> impl Iterator<Item = &crate::station::shelf::Item> {
+    items.iter().rev().filter(|item| !item.copied)
+}
+
+/// The things a page of the station's lane lists, in its order, each as a press on it finds it (where things are
+/// chosen together: see `station::select`).
+pub fn lane_order(page: Tab) -> Vec<Hit> {
+    let shown = crate::station::run::shown();
+    match page {
+        Tab::Shelf => put_on(&shown.items).map(|item| Hit::Shelf(item.id)).collect(),
+        Tab::Copies(filter) => copied_lately(&shown.items, filter).map(|item| Hit::Copied(item.id)).collect(),
+        Tab::Recent(filter) => crate::station::recent::listed(&crate::station::recent::shown(), filter).iter().map(|row| Hit::Recent(crate::station::recent::Entry::of_row(row, filter))).collect(),
+    }
+}
+
+/// Where in `hits` (as last drawn) the point (`x`, `y`) is on a list of things that may be chosen together (see
+/// `station::select`): over one of them, or between them (the room the things of one kind are laid out in: those on
+/// the station, those copied lately below them, files come lately), one of them there, by which the list is known.
+/// None elsewhere.
+pub fn list_at(hits: &[HitBox], x: f32, y: f32) -> Option<Hit> {
+    let kind = |hit: Hit| std::mem::discriminant(&hit);
+    let mut kinds: Vec<Hit> = Vec::new();
+    for hit in hits.iter().map(|hit| hit.4).filter(|hit| hit.drags()) {
+        if !kinds.iter().any(|one| kind(*one) == kind(hit)) {
+            kinds.push(hit);
+        }
+    }
+    kinds.into_iter().find(|first| {
+        let things = hits.iter().filter(|hit| kind(hit.4) == kind(*first));
+        let (left, top, right, bottom) = things.fold((f32::MAX, f32::MAX, f32::MIN, f32::MIN), |(l, t, r, b), hit| (l.min(hit.0), t.min(hit.1), r.max(hit.0 + hit.2), b.max(hit.1 + hit.3)));
+        x >= left && x < right && y >= top && y < bottom
+    })
 }
 
 /// What was copied lately of `items` (the station's), the newest first, of those `filter` takes.
@@ -4155,6 +4201,35 @@ pub(crate) fn choice_mark(frame: &dyn Canvas, theme: &Theme, boxes: &[(f32, f32)
     }
 }
 
+/// The mark of a thing on a station's lane chosen with others (see `station::select`), under it in the box the plate
+/// under the pointer takes, rounded by `radius`, `lit` as the pointer is over it: on glass a pane of its glass, lit along
+/// its top, as its pages' chosen one is, on chart paper its ink washed in faintly, ruled round in its pencil line (in
+/// ink under the pointer), on Windows 11 its accent washed in under a hairline of it, as Explorer marks what is chosen.
+fn chosen_plate(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32, f32), radius: f32, lit: bool) {
+    match theme.skin {
+        Skin::Glass => glass_pill(frame, theme, (x, y, w, h), radius, lit),
+        Skin::Paper => {
+            frame.fill_rounded(theme.text.alpha(if lit { 0.13 } else { 0.09 }), x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(if lit { theme.text } else { theme.text2 }), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+        }
+        Skin::Fluent => {
+            let accent = super::theme::accent(theme.dark);
+            frame.fill_rounded(accent.alpha(if lit { 0.18 } else { 0.13 }), x, y, w, h, radius);
+            frame.stroke_rounded(Fill::Solid(accent.alpha(0.42)), x + 0.5, y + 0.5, w - 1.0, h - 1.0, (radius - 0.5).max(0.0), 1.0);
+        }
+    }
+}
+
+/// Under a thing on a station's lane in the box `room`, rounded by `radius`: its mark chosen (see `chosen_plate`), else
+/// the plate under the pointer where it is `lit`, else nothing.
+fn tile_plate(frame: &dyn Canvas, theme: &Theme, room: (f32, f32, f32, f32), radius: f32, lit: bool, chosen: bool) {
+    if chosen {
+        chosen_plate(frame, theme, room, radius, lit);
+    } else if lit {
+        frame.fill_rounded(theme.hover, room.0, room.1, room.2, room.3, radius);
+    }
+}
+
 /// A pill of glass's glass at (x, y, w, h), its corners `radius` round, as the lanes lie on the sheet (whiter than what
 /// is round it, a rim lit along its top, fainter round its foot): what is chosen, a button; `lit` under the pointer.
 pub(crate) fn glass_pill(frame: &dyn Canvas, theme: &Theme, (x, py, w, ph): (f32, f32, f32, f32), radius: f32, lit: bool) {
@@ -4481,7 +4556,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         frame.key(&format!("tile.{pressed:?}"));
         let held = tile_held(pressed);
         let lit = scene.hover == Some(pressed) && held != Held::Away;
-        let words = if lit { theme.text } else { theme.text2 };
+        let chosen = scene.thumbs.chosen(pressed);
+        let words = if lit || chosen { theme.text } else { theme.text2 };
         let copied = scene.thumbs.copied(pressed);
         // Carried off it: the room it left, outlined (its picture's, or as a row, the row's), nothing of it there.
         if held == Held::Away {
@@ -4500,9 +4576,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
-                if lit {
-                    frame.fill_rounded(theme.hover, x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0, plate_round(theme, face_round(theme, place.w.min(plate)), 4.0));
-                }
+                tile_plate(frame, theme, (x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0), plate_round(theme, face_round(theme, place.w.min(plate)), 4.0), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
@@ -4516,9 +4590,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 shown
             }
             Shows::Row => {
-                if lit {
-                    frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0, 8.0);
-                }
+                tile_plate(frame, theme, (x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0), 8.0, lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
@@ -4530,9 +4602,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 shown
             }
             Shows::View(ShelfView::List) => {
-                if lit {
-                    frame.fill_rounded(theme.hover, x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
-                }
+                tile_plate(frame, theme, (x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0), plate_round(theme, face_round(theme, LIST_PICTURE), 4.0), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
@@ -4641,9 +4711,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
             continue;
         }
         let lit = scene.hover == Some(pressed);
-        if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, round);
-        }
+        tile_plate(frame, theme, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round, lit, scene.thumbs.chosen(pressed));
         let face = row.tile();
         let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
         paint_face(frame, theme, ink, &face, fx, fy, fw, fh);
@@ -4823,11 +4891,11 @@ fn copied_mark(frame: &dyn Canvas, theme: &Theme, lang: Lang, ink: Color, clear:
 /// pressed as (a thing on the station or copied lately as either, files come lately by their entry).
 pub fn copied() -> Option<(std::time::Instant, Vec<Hit>)> {
     use crate::station::run::Copied;
-    let (copied, at) = crate::station::run::shown().copied?;
-    Some((at, match copied {
+    let (copied, at) = crate::station::run::shown().copied.clone()?;
+    Some((at, copied.into_iter().flat_map(|copied| match copied {
         Copied::Item(id) => vec![Hit::Shelf(id), Hit::Copied(id)],
         Copied::Recent(entry) => vec![Hit::Recent(entry)],
-    }))
+    }).collect()))
 }
 
 /// A page's filter's choices: their height and the room round each name. A day's heading over its files.
@@ -4914,17 +4982,26 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         if y + LIST_ROW < top || y > top + tall {
             continue;
         }
-        let lit = scene.hover == Some(Hit::Copied(row.id));
-        if lit {
-            frame.fill_rounded(theme.hover, left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0, plate_round(theme, face_round(theme, LIST_PICTURE), 4.0));
+        let pressed = Hit::Copied(row.id);
+        // (Named, held and carried off as a thing on the station is: see `paint_tiles`.)
+        frame.key(&format!("tile.{pressed:?}"));
+        let round = plate_round(theme, face_round(theme, LIST_PICTURE), 4.0);
+        if tile_held(pressed) == Held::Away {
+            held_room(frame, theme, Held::Away, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round);
+            hits.extend(shown_in((left, y, width, LIST_ROW, pressed), (left - 4.0, top, width + 8.0, tall)));
+            continue;
         }
-        paint_face(frame, theme, ink, row, left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE);
+        let lit = scene.hover == Some(pressed);
+        tile_plate(frame, theme, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round, lit, scene.thumbs.chosen(pressed));
+        let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
+        paint_face(frame, theme, ink, row, fx, fy, fw, fh);
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
         copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(Hit::Copied(row.id)), Mark::Right(left + width, y + LIST_ROW / 2.0));
-        hits.extend(shown_in((left, y, width, LIST_ROW, Hit::Copied(row.id)), (left - 4.0, top, width + 8.0, tall)));
+        hits.extend(shown_in((left, y, width, LIST_ROW, pressed), (left - 4.0, top, width + 8.0, tall)));
     }
+    frame.key("");
     frame.unclip();
     // (After its rows: a press finds a row before the list it is on.)
     if most > 0.0 {
@@ -6366,6 +6443,118 @@ otepad.exe", "Notepad"),
         let pixels = draw();
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/station-pages.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
     }
+
+    /// Things chosen together on the station's lane in each skin, light and dark (a row each): on the station as cards
+    /// and as a list, copied lately, files come lately, each with some chosen and one under the pointer, and, carried
+    /// off together, a card and a row, the plates behind them and the count of files that land. Written to the folder
+    /// `GLANCE_SHOTS` names (else `target`), a picture for each skin:
+    /// `cargo test --features studio --lib -- --ignored chosen_together`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn chosen_together() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::*;
+        let _pretending = crate::pretending();
+        use crate::station::recent::{Came, Entry, Key, Kind};
+        use crate::station::shelf::{Item, What};
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
+        let now = crate::station::now_ms();
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let items = || vec![
+            item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
+            item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
+            item(12, What::Text { text: "cargo build --profile fast".into() }, true, 30),
+            item(13, What::Text { text: "会议改到周四下午三点".into() }, true, 50),
+            item(1, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, false, 400),
+            item(2, What::Text { text: "会议改到周四下午三点\n地点：二楼小会议室".into() }, false, 180),
+            item(3, What::Link { url: "https://github.com/lulu-loopp/glance/releases".into() }, false, 60),
+            item(4, What::Files { paths: vec![file("Cargo.toml"), file("README.md"), file("LICENSE")], kept: Vec::new() }, false, 20),
+            item(5, What::Files { paths: vec![file("docs/images")], kept: Vec::new() }, false, 3),
+            item(6, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, false, 1),
+        ];
+        crate::station::thumbs::start(|| {});
+        let came = |at: u128, name: &str, ago_min: u64, kind: Kind| Came { key: Key { drive: 'C', file: at }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 64_000, kind, downloaded: false, site: None };
+        crate::station::recent::pretend(vec![came(1, "docs/images/banner-zh.webp", 3, Kind::Screenshot), came(2, "Cargo.toml", 25, Kind::Archive), came(3, "README.zh-CN.md", 70, Kind::Document), came(4, "README.md", 200, Kind::Document)]);
+        let recent = |at: u128| Hit::Recent(Entry::File(Key { drive: 'C', file: at }));
+        // Each column: the page, how it shows, what is chosen on it, what is under the pointer, the last two, carried.
+        let columns = [
+            (Tab::Shelf, ShelfView::Cards, vec![Hit::Shelf(2), Hit::Shelf(3), Hit::Shelf(4)], Some(Hit::Shelf(3))),
+            (Tab::Shelf, ShelfView::List, vec![Hit::Shelf(4), Hit::Shelf(2)], Some(Hit::Shelf(5))),
+            (Tab::Copies(Default::default()), ShelfView::List, vec![Hit::Copied(11), Hit::Copied(12), Hit::Copied(13)], Some(Hit::Copied(12))),
+            (Tab::Recent(Default::default()), ShelfView::List, vec![recent(2), recent(3)], Some(recent(1))),
+        ];
+        let carried = [(ShelfView::Cards, Hit::Shelf(4), 3, 5), (ShelfView::List, Hit::Copied(11), 2, 2)];
+        let (lane_w, lane_h) = (COLUMN_WIDTH, 300.0);
+        let out = std::env::var("GLANCE_SHOTS").map_or_else(|_| std::path::PathBuf::from(format!("{}/target", env!("CARGO_MANIFEST_DIR"))), std::path::PathBuf::from);
+        let _ = std::fs::create_dir_all(&out);
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            let lanes = columns.len() + carried.len();
+            // (Room past the last for its plates behind it and its count.)
+            let (w, h) = (lanes as f32 * (lane_w + 24.0) + 72.0, 2.0 * (lane_h + 24.0) + 12.0);
+            let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+            let draw = || gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                frame.fill(Color::hex(0x7A8CA6, 1.0), 0.0, 0.0, w, h);
+                for (row, dark) in [false, true].into_iter().enumerate() {
+                    let theme = Theme::new(skin, dark);
+                    let ground = match skin {
+                        Skin::Paper => theme.paper,
+                        Skin::Fluent => if dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
+                        Skin::Glass => if dark { Color::hex(0x2A3550, 0.92) } else { Color::hex(0xE4EAF2, 0.9) },
+                    };
+                    let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                    let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                    let seen = Seen::of(history);
+                    let y = row as f32 * (lane_h + 24.0) + 12.0;
+                    for (column, (tab, view, chosen, hover)) in columns.iter().enumerate() {
+                        let x = column as f32 * (lane_w + 24.0) + 12.0;
+                        crate::station::run::pretend(items(), *view);
+                        let mut dots = super::super::thumb::Dots::new();
+                        dots.mark_chosen(chosen.clone());
+                        frame.fill_rounded(ground, x, y, lane_w, lane_h, theme.radius);
+                        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: *tab, hover: *hover, thumbs: &dots, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                        let lane = Lane { id: "station".into(), blocks: station_lane(true, *tab, Lang::Zh), ink: theme.ink("station") };
+                        frame.clip(x, y, lane_w, lane_h);
+                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, 0.0, Pass::Content, &mut Vec::new());
+                        frame.unclip();
+                    }
+                    // Carried together: what is drawn of the one pressed, on its plate, the others behind it.
+                    for (at, (view, hit, together, count)) in carried.iter().enumerate() {
+                        let x = (columns.len() + at) as f32 * (lane_w + 24.0) + 12.0;
+                        crate::station::run::pretend(items(), *view);
+                        let tab = if matches!(hit, Hit::Copied(_)) { Tab::Copies(Default::default()) } else { Tab::Shelf };
+                        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                        let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
+                        let mut hits = Vec::new();
+                        let area = Rect { x: 0.0, y: 0.0, w: lane_w, h: lane.height(&theme) };
+                        paint_lane(&super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0)), &scene, &lane, area, 0.0, Pass::Content, &mut hits);
+                        let Some(&(hx, hy, hw, hh, _)) = hits.iter().find(|one| one.4 == *hit) else { continue };
+                        let recorder = super::super::morph::Recorder::new(frame, 1.0, (-hx, -hy));
+                        paint_lane(&recorder, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
+                        let key = format!("tile.{hit:?}");
+                        let parts: Vec<_> = recorder.parts().into_iter().filter(|part| part.key.as_deref() == Some(key.as_str())).collect();
+                        let pad = crate::carry::PAD;
+                        frame.origin(x + 12.0, y + 80.0);
+                        crate::carry::paint_lifted(frame, crate::ui::menu::Look::of(skin, dark), &parts, (hw + 2.0 * pad, hh + 2.0 * pad), 1.0, Some(((*together - 1).min(2), *count)));
+                        frame.origin(0.0, 0.0);
+                    }
+                }
+            }).expect("drawn");
+            // (The pictures made meanwhile, on the station's own thread: drawn again with them.)
+            let _ = draw();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let pixels = draw();
+            let name = match skin {
+                Skin::Glass => "chosen-glass.png",
+                Skin::Fluent => "chosen-windows11.png",
+                Skin::Paper => "chosen-paper.png",
+            };
+            crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+        }
+    }
     use super::*;
 
     #[test]
@@ -7047,6 +7236,49 @@ seven".into()));
         }
     }
 
+    /// The things a page of the station's lane lists, in its order: those put on it the newest first, those copied
+    /// lately of the filter shown the newest first, what was put on the clipboard together, each marked copied.
+    #[test]
+    fn a_pages_things_are_in_its_order() {
+        use crate::station::shelf::{Filter, Item, What};
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let words = |text: &str| What::Text { text: text.into() };
+        let items = vec![
+            item(1, words("a"), false),
+            item(2, words("b"), true),
+            item(3, What::Link { url: "https://a.b".into() }, true),
+            item(4, What::Picture { file: "4.png".into() }, true),
+            item(5, words("c"), false),
+        ];
+        crate::station::run::pretend(items, crate::settings::ShelfView::Cards);
+        assert_eq!(lane_order(Tab::Shelf), [Hit::Shelf(5), Hit::Shelf(1)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::All)), [Hit::Copied(4), Hit::Copied(3), Hit::Copied(2)]);
+        assert_eq!(lane_order(Tab::Copies(Filter::Words)), [Hit::Copied(3), Hit::Copied(2)]);
+        crate::station::run::pretend_copied(vec![crate::station::run::Copied::Item(2), crate::station::run::Copied::Item(5)]);
+        assert_eq!(copied().map(|(_, hits)| hits), Some(vec![Hit::Shelf(2), Hit::Copied(2), Hit::Shelf(5), Hit::Copied(5)]));
+    }
+
+    /// The pointer is on a list of things that may be chosen together over one of them or between them, the list
+    /// known by one of its things, those on the station and those copied lately below them each a list of their own.
+    #[test]
+    fn the_list_under_the_pointer_is_found_by_its_room() {
+        let hits: Vec<HitBox> = vec![
+            (0.0, 0.0, 300.0, 30.0, Hit::Tab(Tab::Shelf)),
+            (10.0, 40.0, 60.0, 60.0, Hit::Shelf(1)),
+            (80.0, 40.0, 60.0, 60.0, Hit::Shelf(2)),
+            (10.0, 110.0, 60.0, 60.0, Hit::Shelf(3)),
+            (10.0, 200.0, 280.0, 30.0, Hit::Copied(7)),
+            (10.0, 240.0, 280.0, 30.0, Hit::Copied(8)),
+        ];
+        assert_eq!(list_at(&hits, 100.0, 140.0), Some(Hit::Shelf(1)));
+        assert_eq!(list_at(&hits, 20.0, 50.0), Some(Hit::Shelf(1)));
+        assert_eq!(list_at(&hits, 200.0, 235.0), Some(Hit::Copied(7)));
+        assert_eq!(list_at(&hits, 200.0, 50.0), None);
+        assert_eq!(list_at(&hits, 100.0, 10.0), None);
+        assert_eq!(list_at(&hits, 100.0, 185.0), None);
+        assert_eq!(list_at(&hits[..1], 10.0, 10.0), None);
+    }
+
     /// Files come together on Recent files' page: one row, "N files · folder", in the folder (and how large together),
     /// with the newest's time and picture and how many more, as a list and as cards. A press on it finds them as the
     /// page's filter shows them. A file come alone is its own row.
@@ -7651,9 +7883,9 @@ seven".into()));
         };
         let (whole, said, pressed_there) = drawn();
         assert!(said.contains(&"Held".to_string()) && pressed_there, "{said:?}");
-        carry_tile(Some(hit));
+        carry_tiles(vec![hit]);
         let (away, said, pressed_there) = drawn();
-        carry_tile(None);
+        carry_tiles(Vec::new());
         assert!(!said.contains(&"Held".to_string()) && pressed_there, "{said:?}");
         assert!((away.0 - whole.0).abs() < 1.0 && (away.1 - whole.1).abs() < 1.0, "{away:?} of {whole:?}");
         press_tile(Some(hit));
@@ -7661,10 +7893,10 @@ seven".into()));
         press_tile(None);
         let plate = (324.0 - SHELF_GAP * 2.0) / 3.0 * PLATE;
         assert!(pressed.1 > whole.1 + plate * (1.0 - PRESSED_IN) / 2.0 * 0.5 && pressed.0 > whole.0, "{pressed:?} of {whole:?}");
-        land_tile(hit, std::time::Instant::now());
+        land_tiles(vec![hit], std::time::Instant::now());
         let (landed, ..) = drawn();
         assert!(landed.1 > whole.1 + plate * (1.0 - LANDED_FROM) / 2.0 * 0.5, "{landed:?} of {whole:?}");
-        land_tile(hit, std::time::Instant::now() - LANDED_FOR);
+        land_tiles(vec![hit], std::time::Instant::now() - LANDED_FOR);
         let (rested, ..) = drawn();
         assert_eq!(rested, whole);
         // A file come lately, carried off its row.
@@ -7676,10 +7908,89 @@ seven".into()));
             (reach.said.take(), hits.iter().any(|one| one.4 == Hit::Recent(entry)))
         };
         assert!(lately().0.contains(&"Lately".to_string()));
-        carry_tile(Some(Hit::Recent(entry)));
+        carry_tiles(vec![Hit::Recent(entry)]);
         let (said, pressed_there) = lately();
-        carry_tile(None);
+        carry_tiles(Vec::new());
         assert!(!said.contains(&"Lately".to_string()) && pressed_there, "{said:?}");
+    }
+
+    /// A thing on a station's lane chosen with others is marked by a plate under it in every skin and view: glass's
+    /// own pane, chart paper's ink washed in faintly, Windows 11's accent washed in, on the station, copied lately and
+    /// files come lately alike. Not chosen, no such plate.
+    #[test]
+    fn what_is_chosen_is_marked_by_its_plate_in_every_skin() {
+        use crate::ui::morph::{Op, Recorder};
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let (one, two) = (0x5EED_0021, 0x5EED_0022);
+        let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'Q', file: one as u128 });
+        let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }];
+        let dots = |hits: Vec<Hit>| -> &'static super::super::thumb::Dots<Hit> {
+            let mut dots = super::super::thumb::Dots::new();
+            dots.mark_chosen(hits);
+            Box::leak(Box::new(dots))
+        };
+        let (tiles, rows) = (&tiles, &rows);
+        let (none, on_shelf, in_lists) = (dots(Vec::new()), dots(vec![Hit::Shelf(one), Hit::Shelf(two)]), dots(vec![Hit::Copied(two), Hit::Recent(entry)]));
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            for dark in [true, false] {
+                let theme = Theme::new(skin, dark);
+                let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let scene = &scene;
+                let ink = theme.ink("station");
+                let mark = match skin {
+                    Skin::Glass => Color::hex(0xFFFFFF, if dark { 0.12 } else { 0.62 }),
+                    Skin::Paper => theme.text.alpha(0.09),
+                    Skin::Fluent => super::super::theme::accent(dark).alpha(0.13),
+                };
+                let marked = |paint: &dyn Fn(&dyn Canvas)| {
+                    let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                    paint(&recorder);
+                    recorder.parts().into_iter().flat_map(|part| part.ops).filter(|op| matches!(op, Op::Rounded { color, .. } if *color == mark)).count()
+                };
+                // (Glass's pane marks what else is chosen there too, as a page's filter: one more for each chosen.)
+                for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large), Shows::Row] {
+                    let shelf = |thumbs| move |frame: &dyn Canvas| paint_shelf(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, shows, STATION_TALL, None, false, &mut Vec::new());
+                    let unmarked = marked(&shelf(none));
+                    assert_eq!(marked(&shelf(on_shelf)), unmarked + 2, "{skin:?} {dark} {shows:?}");
+                    // Drawn at rest (as what is carried off is lifted, see `render::record_tile`), not marked.
+                    assert_eq!(marked(&shelf(&RESTING)), unmarked, "{skin:?} {dark} {shows:?}");
+                }
+                let copies = |thumbs| move |frame: &dyn Canvas| paint_copies(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), tiles, Default::default(), ShelfView::List, STATION_TALL, &mut Vec::new());
+                let recent = |thumbs| move |frame: &dyn Canvas| paint_recent(frame, &scene(thumbs), ink, (0.0, 0.0, 324.0), rows, Default::default(), ShelfView::List, STATION_TALL, false, &mut Vec::new());
+                let unmarked = (marked(&copies(none)), marked(&recent(none)));
+                assert_eq!((marked(&copies(in_lists)), marked(&recent(in_lists))), (unmarked.0 + 1, unmarked.1 + 1), "{skin:?} {dark}");
+            }
+        }
+    }
+
+    /// What a row copied lately draws is named after it, as what is drawn of the others on the lane is (see
+    /// `render::record_tile`): dragged off, it is lifted off its row as it was drawn there, and carried off, its room
+    /// is left outlined, nothing of it written.
+    #[test]
+    fn a_row_copied_lately_is_lifted_off_as_it_was_drawn() {
+        use crate::ui::morph::Recorder;
+        let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let theme = Theme::new(Skin::Paper, false);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let id = 0x5EED_0031;
+        let rows = [Tile { id, label: "Copied".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let drawn = || {
+            let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+            paint_copies(&recorder, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, &mut Vec::new());
+            recorder.parts().into_iter().find(|part| part.key.as_deref() == Some(format!("tile.{:?}", Hit::Copied(id)).as_str()))
+        };
+        let said = |part: &crate::ui::morph::Part| part.ops.iter().any(|op| matches!(op, crate::ui::morph::Op::Text { text, .. } if text == "Copied"));
+        assert!(drawn().is_some_and(|part| said(&part)));
+        carry_tiles(vec![Hit::Copied(id)]);
+        let away = drawn();
+        carry_tiles(Vec::new());
+        assert!(away.is_some_and(|part| !said(&part)));
     }
 
     /// A slider's knob, its filling all the way and the pointer on it, reaches past its track's end no further than

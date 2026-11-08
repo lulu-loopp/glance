@@ -45,13 +45,14 @@ pub enum Ask {
     /// Something dragged is over a station now, or no longer.
     Over(bool),
     AppsOver(bool),
-    /// What `id` holds dragged off it (pressed on it and moved: see `drag_begins`), pressed on a window of the
+    /// What is given dragged off it as one (pressed on it and moved: see `drag_begins`), pressed on a window of the
     /// thread numbered so.
-    DragOut(u64, u32),
-    /// Files not on it (Recent files'): put on the clipboard, opened, shown in Explorer; dragged off (pressed on a
-    /// window of the thread numbered so).
+    DragOut(Vec<Given>, u32),
+    /// What is given (chosen together: see `select`) put on the clipboard as one, or shown in Explorer, those of it
+    /// that are files.
+    Together(Vec<Given>, Together),
+    /// Files not on it (Recent files'): put on the clipboard, opened, shown in Explorer.
     Files(Vec<std::path::PathBuf>, FilesAct),
-    DragFiles(Vec<std::path::PathBuf>, u32),
     /// Text put on the clipboard (a file's path), and what it was copied from, to be marked copied.
     CopyText(String, Option<Copied>),
     /// What is kept at hand opened, as the shell opens it (see `apps`).
@@ -67,6 +68,13 @@ pub enum FilesAct {
     Show,
 }
 
+/// What is done with things chosen together (see `Ask::Together`): put on the clipboard as one, or shown in Explorer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Together {
+    Copy,
+    Show,
+}
+
 /// What was put on the clipboard from where it shows (marked copied there a moment: see `Shown::copied`): a thing on
 /// the station or copied lately, by its number, or files come lately, by their entry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -78,10 +86,21 @@ pub enum Copied {
 /// How long what was copied is marked so (see `Shown::copied`).
 pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
 
-/// What is to be dragged off the station: a thing on it, by its number, or files not on it.
-enum Leaving {
+/// What the station is asked to give (dragged off, copied, shown together): a thing on it, by its number, or files
+/// not on it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Given {
     Item(u64),
     Files(Vec<std::path::PathBuf>),
+}
+
+/// What leaves the station as it is dragged off (see `drag_off`): the thing on it it is (none: files not on it), what
+/// it gives, whether it is never to leave this PC, and the files of its own it holds meanwhile.
+struct Leaving {
+    id: Option<u64>,
+    content: Content,
+    stays_here: bool,
+    held: Vec<String>,
 }
 
 /// What the station shows: what it holds, oldest first, and how it stands.
@@ -99,9 +118,9 @@ pub struct Shown {
     /// Something is dragged over a station, to be dropped; over what is kept at hand, to be kept there.
     pub over: bool,
     pub apps_over: bool,
-    /// What was last put on the clipboard from where it shows, and when (the clipboard took it): marked copied there
-    /// for `COPIED_FOR`.
-    pub copied: Option<(Copied, std::time::Instant)>,
+    /// What was last put on the clipboard from where it shows (several, put there together), and when (the clipboard
+    /// took it): marked copied there for `COPIED_FOR`.
+    pub copied: Option<(Vec<Copied>, std::time::Instant)>,
 }
 
 /// Its window's message: asked something (see `ask`).
@@ -258,6 +277,16 @@ pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None })));
 }
 
+/// For tests: what is pretended (see `pretend`) just put on the clipboard as `copied` (see `Shown::copied`).
+#[cfg(test)]
+pub fn pretend_copied(copied: Vec<Copied>) {
+    PRETENDED.with(|pretended| {
+        if let Some(shown) = pretended.borrow_mut().as_mut() {
+            Arc::make_mut(shown).copied = Some((copied, std::time::Instant::now()));
+        }
+    });
+}
+
 /// For pictures: what is pretended (see `pretend`) with Recently copied shown as `copies` and Recent files as `recent`.
 #[cfg(feature = "studio")]
 pub fn pretend_pages(copies: crate::settings::ShelfView, recent: crate::settings::ShelfView) {
@@ -405,12 +434,12 @@ struct Station {
     over: bool,
     apps_over: bool,
     /// What was last put on the clipboard from where it shows, and when (see `Shown::copied`).
-    copied: Option<(Copied, std::time::Instant)>,
+    copied: Option<(Vec<Copied>, std::time::Instant)>,
     /// Where drops are caught while something is dragged (see `catch`).
     catchers: super::catch::Catchers,
     /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
     /// `drag_off`).
-    dragging: Option<(Leaving, u32)>,
+    dragging: Option<(Vec<Given>, u32)>,
 }
 
 thread_local! {
@@ -447,37 +476,31 @@ fn run(asks: Receiver<Ask>) {
     }
 }
 
-/// What was asked to be dragged off the station, dragged (outside `with_station`: the drag's own loop passes the
-/// station's messages on meanwhile, which find it free); its own files held meanwhile, and taken off after, where the
-/// settings say so. Called after each of the station's messages (those the drag's own loop passes on among them):
-/// nothing asked, nothing done.
+/// What was asked to be dragged off the station, dragged as one (outside `with_station`: the drag's own loop passes the
+/// station's messages on meanwhile, which find it free), its own files held meanwhile, and what of it is on it taken
+/// off after, where the settings say so. Called after each of the station's messages (those the drag's own loop passes
+/// on among them): nothing asked, nothing done.
 fn drag_off() {
-    let mut given = None;
-    let mut thread = 0;
-    with_station(|station| {
-        given = station.dragging.take().map(|(dragged, pressed_on)| {
-            thread = pressed_on;
-            match dragged {
-                Leaving::Item(id) => station.drag_given(id).map(|(id, content, stays_here, held)| (Some(id), content, stays_here, held)),
-                // (Files not its own: given where they are, never taken off anything.)
-                Leaving::Files(paths) => Some((None, Content::Files(paths), false, Vec::new())),
-            }
-        })
-    });
-    // (Asked, and not given: the drag asked for is over, as given up; one under way, or none, is left as it is.)
-    let Some(given) = given else { return };
-    let Some((id, content, stays_here, held)) = given else {
+    let mut asked = None;
+    with_station(|station| asked = station.dragging.take().map(|(given, pressed_on)| (given.into_iter().filter_map(|given| station.leaving(given)).collect::<Vec<Leaving>>(), pressed_on)));
+    // (Asked, and nothing of it there to give: the drag asked for is over, as given up, one under way, or none, is
+    // left as it is.)
+    let Some((leaving, thread)) = asked else { return };
+    if leaving.is_empty() {
         super::drag::ended(super::drag::Dragged::Not);
         return;
-    };
-    let dragged = super::drag::drag(&content, stays_here, thread);
+    }
+    let contents: Vec<Content> = leaving.iter().map(|one| one.content.clone()).collect();
+    let dragged = super::drag::drag(&contents, leaving.iter().any(|one| one.stays_here), thread);
     with_station(|station| {
-        for name in &held {
+        for name in leaving.iter().flat_map(|one| &one.held) {
             station.keep.folder.let_go(name);
         }
         let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
-        if let (true, Some(id), Some(super::drag::Dragged::Taken)) = (remove, id, dragged) {
-            station.keep.remove(id);
+        if remove && dragged == Some(super::drag::Dragged::Taken) {
+            for id in leaving.iter().filter_map(|one| one.id) {
+                station.keep.remove(id);
+            }
         }
         station.show();
     });
@@ -557,7 +580,7 @@ impl Station {
                 Ask::Copy(id) | Ask::PasteOut(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
-                        if self.copy(&content, stays_here, Some(Copied::Item(id))) && matches!(ask, Ask::PasteOut(_)) {
+                        if self.copy(&content, stays_here, vec![Copied::Item(id)]) && matches!(ask, Ask::PasteOut(_)) {
                             paste_in_front();
                         }
                     }
@@ -575,11 +598,10 @@ impl Station {
                 Ask::Settings => self.follow_settings(),
                 Ask::Over(over) => self.over = over,
                 Ask::AppsOver(over) => self.apps_over = over,
-                Ask::DragOut(id, thread) => self.dragging = Some((Leaving::Item(id), thread)),
-                Ask::DragFiles(paths, thread) => self.dragging = Some((Leaving::Files(paths), thread)),
+                Ask::DragOut(given, thread) => self.dragging = Some((given, thread)),
                 Ask::Files(paths, act) => match act {
                     FilesAct::Copy(entry) => {
-                        self.copy(&Content::Files(paths), false, entry.map(Copied::Recent));
+                        self.copy(&Content::Files(paths), false, entry.map(Copied::Recent).into_iter().collect());
                     }
                     FilesAct::Open => by_the_shell(move || open(&Content::Files(paths))),
                     FilesAct::Show => by_the_shell(move || show_in_explorer(&paths)),
@@ -596,7 +618,34 @@ impl Station {
                     }
                 }),
                 Ask::CopyText(text, from) => {
-                    self.copy(&Content::Text(text), false, from);
+                    self.copy(&Content::Text(text), false, from.into_iter().collect());
+                }
+                Ask::Together(given, Together::Copy) => {
+                    let marks: Vec<Copied> = given.iter().filter_map(|given| if let Given::Item(id) = given { Some(Copied::Item(*id)) } else { None }).collect();
+                    let leaving: Vec<Leaving> = given.into_iter().filter_map(|given| self.leaving(given)).collect();
+                    let contents: Vec<Content> = leaving.iter().map(|one| one.content.clone()).collect();
+                    let stays_here = leaving.iter().any(|one| one.stays_here);
+                    for name in leaving.iter().flat_map(|one| &one.held) {
+                        self.keep.folder.let_go(name);
+                    }
+                    if let Some(one) = super::drag::as_one(&contents) {
+                        self.copy(&one, stays_here, marks);
+                    }
+                }
+                Ask::Together(given, Together::Show) => {
+                    let paths: Vec<std::path::PathBuf> = given
+                        .into_iter()
+                        .flat_map(|given| match given {
+                            Given::Item(id) => match self.opened(id) {
+                                Some(Content::Files(paths)) => paths,
+                                _ => Vec::new(),
+                            },
+                            Given::Files(paths) => paths,
+                        })
+                        .collect();
+                    if !paths.is_empty() {
+                        by_the_shell(move || show_in_explorer(&paths));
+                    }
                 }
             }
         }
@@ -614,16 +663,20 @@ impl Station {
         }
     }
 
-    /// What a drag off it of `id` gives (see `drag_off`): its number, what it gives, whether it stays on this PC, and
-    /// the files of its own it holds meanwhile.
-    fn drag_given(&mut self, id: u64) -> Option<(u64, Content, bool, Vec<String>)> {
+    /// What `given` dragged off it gives (see `drag_off`), its own files held meanwhile: none where it is no longer
+    /// on it. (Files not its own: given where they are, never taken off anything.)
+    fn leaving(&mut self, given: Given) -> Option<Leaving> {
+        let id = match given {
+            Given::Item(id) => id,
+            Given::Files(paths) => return Some(Leaving { id: None, content: Content::Files(paths), stays_here: false, held: Vec::new() }),
+        };
         let item = self.keep.shelf.get(id)?.clone();
         let content = self.opened(id)?;
         let held: Vec<String> = item.what.own_files().into_iter().map(str::to_string).collect();
         for name in &held {
             self.keep.folder.hold(name);
         }
-        Some((id, content, item.stays_here, held))
+        Some(Leaving { id: Some(id), content, stays_here: item.stays_here, held })
     }
 
     /// The settings as they are now: the shelf's rules, and the clipboard listened to while Recently copied is on.
@@ -681,16 +734,16 @@ impl Station {
     /// from marked copied.
     /// `content` put on the clipboard (`from` what was copied, marked so): whether it was (another program may hold the
     /// clipboard).
-    fn copy(&mut self, content: &Content, stays_here: bool, from: Option<Copied>) -> bool {
+    fn copy(&mut self, content: &Content, stays_here: bool, from: Vec<Copied>) -> bool {
         let Some(sequence) = clipboard::put(self.window, content, stays_here) else { return false };
         self.ours = sequence;
-        self.copied = from.map(|from| (from, std::time::Instant::now()));
+        self.copied = (!from.is_empty()).then(|| (from, std::time::Instant::now()));
         true
     }
 
     fn show(&self) {
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();

@@ -1163,7 +1163,7 @@ impl Finder {
                         let _ = ReleaseCapture();
                     }
                     crate::station::drag::announce();
-                    run::ask(Ask::DragFiles(vec![path], unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
+                    run::ask(Ask::DragOut(vec![run::Given::Files(vec![path])], unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
                 }
                 return;
             }

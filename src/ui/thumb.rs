@@ -41,6 +41,8 @@ pub struct Dots<K> {
     apps: Apps,
     /// What was just copied, marked so (see `copied`): by the keys it shows as, and how clear the mark is.
     copied: Option<(Vec<K>, f32)>,
+    /// What is chosen together, marked so (see `chosen`), by the keys it shows as.
+    chosen: Vec<K>,
 }
 
 /// What is kept at hand moving among itself (one dragged along the others, or their order changed): the order they
@@ -127,7 +129,18 @@ pub struct Slid<K> {
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
-        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None }, copied: None }
+        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None }, copied: None, chosen: Vec::new() }
+    }
+
+    /// What is chosen together now (see `station::select`), by the keys it shows as: each marked so as it is drawn.
+    /// (What is drawn at rest, as `view::RESTING` has it, nothing.)
+    pub fn mark_chosen(&mut self, chosen: Vec<K>) {
+        self.chosen = chosen;
+    }
+
+    /// Whether `key` is chosen together with others (see `mark_chosen`).
+    pub fn chosen(&self, key: K) -> bool {
+        self.chosen.contains(&key)
     }
 
     /// What was just copied as of `now` (`copied`: when, and the keys it shows as), marked so for `lasts`: the mark

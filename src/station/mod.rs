@@ -11,6 +11,7 @@ pub mod folder;
 pub mod keep;
 pub mod recent;
 pub mod run;
+pub mod select;
 pub mod shelf;
 pub mod thumbs;
 #[cfg(test)]
@@ -115,19 +116,111 @@ pub fn chose(id: u64, choice: Choice) {
     });
 }
 
-/// What a thing pressed on a station's lane and moved far enough (see `run::drag_begins`) drags off: a thing on it, or
-/// copied lately, as the station gives it, or a file come lately (or files come together), where it is (pressed on a
-/// window of the thread numbered `thread`). The drag's number, as it is followed (see `drag::going`), where it is one.
-pub fn drag_off(hit: crate::ui::view::Hit, thread: u32) -> Option<u64> {
-    use crate::ui::view::Hit;
-    let ask = match hit {
-        Hit::Shelf(id) | Hit::Copied(id) => run::Ask::DragOut(id, thread),
-        Hit::Recent(entry) => run::Ask::DragFiles(recent::paths_of(entry)?, thread),
-        _ => return None,
-    };
+/// What things pressed on a station's lane and moved far enough (see `run::drag_begins`) drag off, as one (the thing
+/// pressed, and what is chosen with it: see `select`): things on it, or copied lately, as the station gives them, or
+/// files come lately (or files come together), where they are (pressed on a window of the thread numbered `thread`).
+/// The drag's number, as it is followed (see `drag::going`), where it is one.
+pub fn drag_off(hits: &[crate::ui::view::Hit], thread: u32) -> Option<u64> {
+    let given = given(hits);
+    if given.is_empty() {
+        return None;
+    }
     let drag = drag::announce();
-    run::ask(ask);
+    run::ask(run::Ask::DragOut(given, thread));
     Some(drag)
+}
+
+/// What the station is asked to give of `hits` (see `run::Given`): things on it, or copied lately, by their numbers,
+/// files come lately where they are (those no longer listed, nothing).
+fn given(hits: &[crate::ui::view::Hit]) -> Vec<run::Given> {
+    use crate::ui::view::Hit;
+    hits.iter()
+        .filter_map(|hit| match *hit {
+            Hit::Shelf(id) | Hit::Copied(id) => Some(run::Given::Item(id)),
+            Hit::Recent(entry) => recent::paths_of(entry).map(run::Given::Files),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the menu of things chosen together does with all of them (see `select`): puts them on the clipboard as one,
+/// shows those that are files in Explorer, puts files come lately on the station, pins them on it or not, takes them
+/// off it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ManyChoice {
+    Copy,
+    Show,
+    Station,
+    Pin(bool),
+    Remove,
+}
+
+/// What the menu of `hits`, chosen together, offers, as the station holds `items`: putting them on the clipboard,
+/// showing them in Explorer, where any is a file (files come lately are), files come lately put on the station, things
+/// on it, or copied lately, pinned (unpinned, where all are) and taken off.
+pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec<ManyChoice> {
+    use crate::ui::view::Hit;
+    let item = |id: u64| items.iter().find(|item| item.id == id);
+    let ids: Vec<u64> = hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None }).collect();
+    let recent = hits.iter().any(|hit| matches!(hit, Hit::Recent(_)));
+    let files = recent || ids.iter().filter_map(|id| item(*id)).any(|item| matches!(item.what, shelf::What::Files { .. } | shelf::What::Picture { .. } | shelf::What::Saved { words: false, .. }));
+    let mut choices = vec![ManyChoice::Copy];
+    if files {
+        choices.push(ManyChoice::Show);
+    }
+    if recent {
+        choices.push(ManyChoice::Station);
+    }
+    if !ids.is_empty() {
+        let pinned = ids.iter().all(|id| item(*id).is_some_and(|item| item.pinned));
+        choices.extend([ManyChoice::Pin(!pinned), ManyChoice::Remove]);
+    }
+    choices
+}
+
+/// The menu of `hits`, chosen together (a right click on one of them), at `at` on the screen (`over_the_panel`: as
+/// `Menu::open_at` says): up, with what its rows do (see `many_choices`).
+pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<ManyChoice>)> {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Menu};
+    let lang = crate::update::language();
+    let choices = many_choices(hits, &run::shown().items);
+    let rows: Vec<(&str, Icon, bool)> = choices
+        .iter()
+        .map(|choice| match choice {
+            ManyChoice::Copy => (lang.pick("全部复制", "Copy all"), Icon::Clipboard, false),
+            ManyChoice::Show => (lang.pick("在资源管理器中显示", "Show in Explorer"), Icon::Panel, false),
+            ManyChoice::Station => (lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
+            ManyChoice::Pin(true) => (lang.pick("全部固定", "Pin all"), Icon::Pin, false),
+            ManyChoice::Pin(false) => (lang.pick("全部取消固定", "Unpin all"), Icon::Pin, false),
+            ManyChoice::Remove => (lang.pick("全部移除", "Remove all"), Icon::Trash, true),
+        })
+        .collect();
+    let items = rows.iter().map(|(label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
+    let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
+    Some((menu, choices))
+}
+
+/// `choice` made in the menu of `hits`, chosen together (see `many_menu`): done for all of them. Taken off, nothing is
+/// chosen any more.
+pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
+    use crate::ui::view::Hit;
+    let ids = || hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None });
+    match choice {
+        ManyChoice::Copy => run::ask(run::Ask::Together(given(hits), run::Together::Copy)),
+        ManyChoice::Show => run::ask(run::Ask::Together(given(hits), run::Together::Show)),
+        // (Each its own thing on the station, as each is put there from its own menu.)
+        ManyChoice::Station => {
+            for paths in hits.iter().filter_map(|hit| if let Hit::Recent(entry) = hit { recent::paths_of(*entry) } else { None }) {
+                run::ask(run::Ask::Take(clipboard::Content::Files(paths)));
+            }
+        }
+        ManyChoice::Pin(pinned) => ids().for_each(|id| run::ask(run::Ask::Pin(id, pinned))),
+        ManyChoice::Remove => {
+            ids().for_each(|id| run::ask(run::Ask::Remove(id)));
+            select::change(select::Chosen::clear);
+        }
+    }
 }
 
 /// What a file come lately's menu does: opens it, shows it in Explorer, puts it on the station, copies its path, lists
@@ -329,4 +422,31 @@ pub fn head_chose(choice: HeadChoice, place: Option<windows::Win32::Foundation::
 /// Now, in ms since 1970 (as the shelf keeps when things were put on it).
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::view::Hit;
+
+    /// The menu of things chosen together offers what may be done with all of them: put on the clipboard ever, shown
+    /// in Explorer where any is a file, files come lately put on the station, things on it pinned (unpinned where all
+    /// are) and taken off.
+    #[test]
+    fn the_menu_of_things_chosen_together_offers_what_all_may_do() {
+        use shelf::{Item, What};
+        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0 };
+        let items = vec![
+            item(1, What::Text { text: "a".into() }, true),
+            item(2, What::Link { url: "https://a.b".into() }, false),
+            item(3, What::Picture { file: "3.png".into() }, true),
+            item(4, What::Saved { file: "4".into(), name: "a.txt".into(), words: true }, false),
+        ];
+        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(2)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Remove]);
+        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Copied(4)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Remove]);
+        assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(3)], &items), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Pin(false), ManyChoice::Remove]);
+        let entry = recent::Entry::File(recent::Key { drive: 'C', file: 1 });
+        let other = recent::Entry::File(recent::Key { drive: 'C', file: 2 });
+        assert_eq!(many_choices(&[Hit::Recent(entry), Hit::Recent(other)], &items), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Station]);
+    }
 }

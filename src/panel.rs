@@ -152,6 +152,9 @@ const LOOK_KEYS: [(i32, crate::ui::look::Key, bool, u16); 6] = [
 ];
 /// Backspace, while a look up from here shows a file of a group by itself: back to the group (see `ui::look::inside`).
 const LOOK_BACK_HOTKEY: i32 = 10;
+/// Ctrl+A, while the pointer is over a list of things that may be chosen together and nothing of Glance's that is
+/// written in has the keys: all of that list chosen (see `station::select`).
+const CHOOSE_ALL_HOTKEY: i32 = 12;
 /// Space, while a look up from here shows what plays: played or paused (see `ui::look::plays`).
 const LOOK_PLAY_HOTKEY: i32 = 11;
 
@@ -598,6 +601,8 @@ impl Controller {
         let mut escape = false;
         // Ctrl+V taken (see `PASTE_HOTKEY`).
         let mut paste = false;
+        // Ctrl+A taken (see `CHOOSE_ALL_HOTKEY`).
+        let mut choose_all = false;
         // The preview's shortcut taken, as it was (see `PREVIEW_HOTKEY`), and the look's keys (see `LOOK_KEYS`); what a
         // look up from here shows, and from what, as that was last drawn.
         let mut preview: Option<crate::settings::Shortcut> = None;
@@ -739,7 +744,7 @@ impl Controller {
                     if let Some(due) = crate::carry::tick(now) {
                         wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                     }
-                    let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|(hit, _)| hit)).or_else(|| widgets.shelf_pressed());
+                    let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|press| press.hit)).or_else(|| widgets.shelf_pressed());
                     crate::ui::view::press_tile(pressed);
                     let tiles = crate::ui::view::tile_changes();
                     if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() {
@@ -1006,7 +1011,7 @@ impl Controller {
                     if looking_here(&panels, &widgets) {
                         crate::ui::look::key(crate::ui::look::Key::Close);
                     } else if let Some((window, hit)) = looked_under(&panels, &widgets) {
-                        look_at(&panels, &widgets, window, hit);
+                        look_at(&panels, &widgets, window, hit, true);
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && LOOK_KEYS.iter().any(|(id, ..)| msg.wParam.0 == *id as usize) => {
@@ -1015,6 +1020,12 @@ impl Controller {
                     }
                 }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_BACK_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Back),
+                // Ctrl+A: all of the list under the pointer chosen.
+                WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == CHOOSE_ALL_HOTKEY as usize => {
+                    if let Some((window, hit, shown)) = list_under(&panels, &widgets) {
+                        crate::station::select::all(window.0 as isize, hit, shown);
+                    }
+                }
                 WM_HOTKEY if msg.hwnd.is_invalid() && msg.wParam.0 == LOOK_PLAY_HOTKEY as usize => crate::ui::look::key(crate::ui::look::Key::Toggle),
                 // Esc: the music full screen left, over all else (and nothing more); a thing kept at hand dragged put
                 // back where it was (and nothing more); else the panels that go, gone.
@@ -1036,6 +1047,9 @@ impl Controller {
                             panel.next_frame = now;
                         }
                         let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    } else if crate::station::select::window().is_some() {
+                        // Things chosen together: nothing chosen, and nothing more.
+                        crate::station::select::change(crate::station::select::Chosen::clear);
                     } else {
                         for panel in panels.iter_mut().filter(|panel| panel.is_open() && !panel.stays()) {
                             panel.begin_close(now);
@@ -1063,6 +1077,7 @@ impl Controller {
                     let panel = &mut panels[owner.unwrap()];
                     if let Some(page) = view::Tab::numbered(msg.wParam.0).filter(|page| *page != panel.tab.page()) {
                         panel.tab = page;
+                        crate::station::select::turned(panel.window.hwnd.0 as isize, page);
                         panel.next_frame = now;
                     }
                 }
@@ -1169,7 +1184,7 @@ impl Controller {
                     if looking_here(&panels, &widgets) {
                         match panel.hit_at(lparam_point(msg.lParam)).filter(|hit| hit.looks()) {
                             Some(hit) => {
-                                look_at(&panels, &widgets, window, hit);
+                                look_at(&panels, &widgets, window, hit, false);
                                 closing_press.closed_by(msg.message);
                                 continue;
                             }
@@ -1179,7 +1194,7 @@ impl Controller {
                     }
                     let panel = &mut panels[owner.unwrap()];
                     panel.forward = true;
-                    panel.press(lparam_point(msg.lParam));
+                    panel.press(lparam_point(msg.lParam), crate::station::select::Keys::of(msg.wParam.0));
                 }
                 // A thing on its station, or a note, pressed: followed as the pointer moves over the panel, and wherever it
                 // goes as it is followed (see `Panel::follow_press`).
@@ -1306,7 +1321,7 @@ impl Controller {
                 // the look up from it closed.
                 WM_LBUTTONDOWN if widgets.owns(msg.hwnd) && looking_here(&panels, &widgets) && widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)).is_some_and(|hit| hit.looks()) => {
                     if let Some(hit) = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
-                        look_at(&panels, &widgets, msg.hwnd, hit);
+                        look_at(&panels, &widgets, msg.hwnd, hit, false);
                         closing_press.closed_by(msg.message);
                     }
                 }
@@ -1321,7 +1336,7 @@ impl Controller {
                 }
                 // The desktop widgets: pressed, let go (or found let go as the pointer moves: the button up unheard,
                 // let go before it was torn off), their menu.
-                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam)),
+                WM_LBUTTONDOWN if widgets.owns(msg.hwnd) => widgets.press(msg.hwnd, lparam_point(msg.lParam), crate::station::select::Keys::of(msg.wParam.0)),
                 WM_LBUTTONUP if widgets.owns(msg.hwnd) => {
                     widgets.release(msg.hwnd, now, false);
                     // A button of its station's head: its menu.
@@ -1340,7 +1355,11 @@ impl Controller {
                     self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                     // On a thing on the station, its menu; else the widget's.
                     let panel_shown = panels.iter().any(Panel::is_shown);
-                    menu = match widgets.hit_at(msg.hwnd, lparam_point(msg.lParam)) {
+                    let hit = widgets.hit_at(msg.hwnd, lparam_point(msg.lParam));
+                    // (On one of several chosen together: their menu.)
+                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(msg.hwnd.0 as isize, hit, widgets.page_of(msg.hwnd)));
+                    menu = match hit {
+                        Some(_) if !together.is_empty() => cursor_position().and_then(|at| crate::station::many_menu(&together, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Many(together, choices))),
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => cursor_position().and_then(|at| crate::station::menu(id, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Station(id, choices, Some(msg.hwnd)))),
                         Some(Hit::Recent(file)) => cursor_position().and_then(|at| crate::station::recent_menu(file, at, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices)| (open, MenuFor::Recent(file, choices))),
                         Some(Hit::App(at)) => cursor_position().and_then(|point| crate::station::app_menu(at, point, panel_shown, widgets.look_of(msg.hwnd))).map(|(open, choices, app)| (open, MenuFor::App(app, choices))),
@@ -1359,7 +1378,14 @@ impl Controller {
                         self.end_menu(&mut menu, None, &mut panels, &mut menu_of, &mut widgets, &mut overlay);
                         menu_of = owner;
                     }
+                    let panel = &panels[owner.unwrap()];
+                    let together = hit.filter(|hit| matches!(hit, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_))).map_or_else(Vec::new, |hit| crate::station::select::menu_on(panel.window.hwnd.0 as isize, hit, panel.tab));
                     match hit {
+                        // On one of several chosen together: their menu.
+                        Some(_) if !together.is_empty() => {
+                            menu = cursor_position().and_then(|at| crate::station::many_menu(&together, at, true, look)).map(|(open, choices)| (open, MenuFor::Many(together, choices)));
+                            keep_menu_above(&menu, &mut overlay);
+                        }
                         Some(Hit::Shelf(id) | Hit::Copied(id)) => {
                             menu = cursor_position().and_then(|at| crate::station::menu(id, at, true, look)).map(|(open, choices)| (open, MenuFor::Station(id, choices, None)));
                             keep_menu_above(&menu, &mut overlay);
@@ -1567,7 +1593,21 @@ impl Controller {
             // (A look up from here takes Esc too: see `ui::look`. None while another program drags something: Esc is
             // its, to call the drag off, over the panel too.)
             let looking = looking_here(&panels, &widgets);
-            let wanted = !crate::station::catch::dragging() && (looking || panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app()));
+            // Things chosen together in a window gone from sight (the panel closed, a widget hidden): nothing chosen.
+            if let Some(window) = crate::station::select::window() {
+                let seen = match panels.iter().find(|panel| panel.window.hwnd.0 as isize == window) {
+                    Some(panel) => panel.is_shown(),
+                    None => unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(HWND(window as *mut _)) }.as_bool(),
+                };
+                if !seen {
+                    crate::station::select::leave(window);
+                }
+            }
+            // (Things chosen together: Esc taken while the pointer is over the window they are in, to leave them.)
+            let chosen_under = crate::station::select::window().is_some_and(|window| {
+                cursor_position().is_some_and(|at| unsafe { windows::Win32::UI::WindowsAndMessaging::GetAncestor(windows::Win32::UI::WindowsAndMessaging::WindowFromPoint(at), windows::Win32::UI::WindowsAndMessaging::GA_ROOT) }.0 as isize == window)
+            });
+            let wanted = !crate::station::catch::dragging() && (looking || chosen_under || panels.iter().any(|panel| (panel.is_open() && !panel.stays()) || panel.dragging_app()));
             if wanted != escape {
                 escape = wanted;
                 unsafe {
@@ -1593,6 +1633,21 @@ impl Controller {
                         let _ = RegisterHotKey(None, PASTE_HOTKEY, windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL | MOD_NOREPEAT, u32::from(b'V'));
                     } else {
                         let _ = UnregisterHotKey(None, PASTE_HOTKEY);
+                    }
+                }
+            }
+            // Ctrl+A taken while the pointer is over a list of things that may be chosen together, and only then, nothing
+            // of Glance's that is written in having the keys (a note written in where it is, a to-do, a window of its
+            // own in front): else it is every program's, and that one's own select-all.
+            let writing = widgets.writing() || panels.iter().any(|panel| crate::ui::todo::writing(panel.window.hwnd)) || own_window_in_front(&panels, &widgets);
+            let all_wanted = !writing && !crate::station::catch::dragging() && list_under(&panels, &widgets).is_some();
+            if all_wanted != choose_all {
+                choose_all = all_wanted;
+                unsafe {
+                    if all_wanted {
+                        let _ = RegisterHotKey(None, CHOOSE_ALL_HOTKEY, windows::Win32::UI::Input::KeyboardAndMouse::MOD_CONTROL | MOD_NOREPEAT, u32::from(b'A'));
+                    } else {
+                        let _ = UnregisterHotKey(None, CHOOSE_ALL_HOTKEY);
                     }
                 }
             }
@@ -1724,6 +1779,8 @@ enum MenuFor {
     App(crate::station::apps::App, Vec<crate::station::AppChoice>),
     /// A note stuck on the desktop, by its name, and what each row does (see `Widgets::note_menu`).
     Note(String, Vec<crate::ui::note::Choice>),
+    /// Things on a station's lane chosen together, and what each row does (see `station::many_menu`).
+    Many(Vec<Hit>, Vec<crate::station::ManyChoice>),
 }
 
 impl Controller {
@@ -1797,7 +1854,7 @@ impl Controller {
                             None => widgets.looks(window),
                         };
                         if let Some(&(hit, _)) = looks.iter().find(|(hit, _)| matches!(hit, Hit::Shelf(of) | Hit::Copied(of) if *of == id)) {
-                            look_at(panels, widgets, window, hit);
+                            look_at(panels, widgets, window, hit, false);
                         }
                     }
                 }
@@ -1824,6 +1881,11 @@ impl Controller {
                     crate::station::recent_chose(file, *choice);
                 }
             }
+            MenuFor::Many(hits, choices) => {
+                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
+                    crate::station::many_chose(&hits, *choice);
+                }
+            }
             MenuFor::StationHead(choices, widget) => match choice.and_then(|row| choices.get(row)) {
                 // A page chosen: shown on what the menu was opened on.
                 Some(crate::station::HeadChoice::Page(page)) => match (widget, menu_panel) {
@@ -1831,6 +1893,7 @@ impl Controller {
                     (None, Some(at)) => {
                         if let Some(panel) = panels.get_mut(at) {
                             panel.tab = *page;
+                            crate::station::select::turned(panel.window.hwnd.0 as isize, *page);
                             panel.next_frame = Instant::now();
                         }
                     }
@@ -1953,16 +2016,50 @@ fn looked_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(H
     hit.looks().then_some((under, hit))
 }
 
+/// The list of things that may be chosen together under the pointer (see `station::select`), where the pointer is
+/// over one: the window it is on (the panel's, a widget's), one of its things, and the page that window shows.
+fn list_under(panels: &[Panel], widgets: &crate::widget::Widgets) -> Option<(HWND, Hit, view::Tab)> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, WindowFromPoint, GA_ROOT};
+    let at = cursor_position()?;
+    let under = unsafe { GetAncestor(WindowFromPoint(at), GA_ROOT) };
+    let mut client = at;
+    let _ = unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(under, &mut client) };
+    match panels.iter().find(|panel| panel.window.hwnd == under) {
+        Some(panel) => panel.is_shown().then(|| panel.choosing_at(client)).flatten().map(|hit| (under, hit, panel.tab)),
+        None if widgets.owns(under) => widgets.list_at(under, client).map(|hit| (under, hit, widgets.page_of(under))),
+        None => None,
+    }
+}
+
+/// Whether a window of Glance's own other than the panels and widgets is in front (the settings, search, a note open
+/// beside the panel): what is typed is its own.
+fn own_window_in_front(panels: &[Panel], widgets: &crate::widget::Widgets) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let front = unsafe { GetForegroundWindow() };
+    let mut process = 0;
+    unsafe { GetWindowThreadProcessId(front, Some(&mut process)) };
+    process == std::process::id() && !panels.iter().any(|panel| panel.window.hwnd == front) && !widgets.owns(front)
+}
+
 /// `hit` on the window `window` (the panel's, a widget's) looked at larger (see `ui::look`), beside it and in its skin,
 /// with the others there that may be, had by the arrows: a look up from it shows it, those others had by the arrows as
-/// they show now (scrolled to, of another list).
-fn look_at(panels: &[Panel], widgets: &crate::widget::Widgets, window: HWND, hit: Hit) {
+/// they show now (scrolled to, of another list). `among_chosen`, with things chosen together there (see
+/// `station::select`): those alone had by the arrows, in their list's order, from it where it is among them, else from
+/// the first of them.
+fn look_at(panels: &[Panel], widgets: &crate::widget::Widgets, window: HWND, hit: Hit, among_chosen: bool) {
     let (looks, beside, look) = match panels.iter().find(|panel| panel.window.hwnd == window) {
         Some(panel) => (panel.looks(), panel.placement.as_ref().map(|placement| placement.panel), panel.menu_look()),
         None => (widgets.looks(window), widgets.rect_of(window), widgets.look_of(window)),
     };
     let lang = panels[0].lang;
-    let items: Vec<crate::ui::look::Item> = looks.iter().filter_map(|&(hit, rect)| view::looked_at(hit, Some(rect), lang)).collect();
+    let chosen = if among_chosen { crate::station::select::in_window(window.0 as isize) } else { Vec::new() };
+    let (items, hit): (Vec<crate::ui::look::Item>, Hit) = match chosen.first() {
+        Some(&first) => {
+            let rect = |one: Hit| looks.iter().find(|(shown, _)| *shown == one).map(|(_, rect)| *rect);
+            (chosen.iter().filter_map(|&one| view::looked_at(one, rect(one), lang)).collect(), if chosen.contains(&hit) { hit } else { first })
+        }
+        None => (looks.iter().filter_map(|&(hit, rect)| view::looked_at(hit, Some(rect), lang)).collect(), hit),
+    };
     let Some(at) = items.iter().position(|item| item.key == hit.key()) else { return };
     if crate::ui::look::up_for(window) {
         return crate::ui::look::show_among(items, hit.key());
@@ -2343,12 +2440,12 @@ struct Panel<'a> {
     /// What plays let go after it was sized: settling from the room the hand gave it to the room its layout is right
     /// in, its edges held as the drag held them (see `music_sized_to`): since when, the drag, from, to.
     music_settle: Option<(Instant, PanelDrag, (f32, f32), (f32, f32))>,
-    /// A thing on its station pressed, and where the pointer was: dragged off it once moved far enough (see
+    /// A thing on its station pressed (see `station::select::Press`): dragged off it once moved far enough (see
     /// `shelf_moved`), else pressed as it is let go.
-    shelf_press: Option<(Hit, POINT)>,
+    shelf_press: Option<crate::station::select::Press>,
     /// A thing on its station dragged off it, to be lifted off its room as the panel is next drawn (see `carry`): it,
-    /// the drag's number, and where it was pressed.
-    lifting: Option<(Hit, u64, POINT)>,
+    /// all that goes with it (it first: what is chosen with it), the drag's number, and where it was pressed.
+    lifting: Option<(Hit, Vec<Hit>, u64, POINT)>,
     /// A thing kept at hand pressed (its place), where the pointer was, and whether it has been moved far enough to
     /// be put elsewhere among them: let go on another, it goes there; else it is opened as it is let go.
     /// (By what opens it, as shown as it was pressed: what is kept may change meanwhile, and its place with it.)
@@ -3280,13 +3377,17 @@ impl<'a> Panel<'a> {
         x >= bar.x && x < bar.x + bar.w && y >= bar.y && y < bar.y + bar.h
     }
 
-    /// A press on the panel at `client` (physical px in the window): unless
+    /// A press on the panel at `client` (physical px in the window), `keys` held: unless
     /// it is pinned, on its edges it begins to size it, elsewhere (see
     /// `grip_at`) to move it.
-    fn press(&mut self, client: POINT) {
+    fn press(&mut self, client: POINT, keys: crate::station::select::Keys) {
         // (Off the panel, in its window before it was told to let clicks through there: nothing of the panel's.)
         if !self.on_panel(client) {
             return;
+        }
+        // Where nothing may be chosen, pressed alone: nothing chosen here any more.
+        if keys.none() && !self.hit_at(client).is_some_and(Hit::drags) {
+            crate::station::select::leave(self.window.hwnd.0 as isize);
         }
         // On a note: pulled off, stuck on the desktop; else opened as it is let go (see `note_press`).
         if let (Some(Hit::Note(number)), Some(from)) = (self.hit_at(client), cursor_position()) {
@@ -3306,7 +3407,7 @@ impl<'a> Panel<'a> {
         }
         // On a thing on its station: dragged off it, or pressed (see `shelf_press`).
         if let (Some(hit), Some(from)) = (self.hit_at(client).filter(|hit| hit.drags()), cursor_position()) {
-            self.shelf_press = Some((hit, from));
+            self.shelf_press = Some(crate::station::select::press(self.window.hwnd.0 as isize, hit, self.tab, keys, from));
             self.follow_pointer();
             return;
         }
@@ -3384,6 +3485,13 @@ impl<'a> Panel<'a> {
         Some(crate::widget::NotePulled { name, card, from, over: placement.panel, px: placement.px })
     }
 
+    /// Where `client` (physical px in the window) is on a list of things that may be chosen together, one of them there
+    /// (see `view::list_at`).
+    fn choosing_at(&self, client: POINT) -> Option<Hit> {
+        let px = self.placement.as_ref()?.px;
+        view::list_at(&self.hits, client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1)
+    }
+
     /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
     fn hit_on_screen(&self, hit: Hit) -> Option<RECT> {
         let placement = self.placement.as_ref()?;
@@ -3394,14 +3502,15 @@ impl<'a> Panel<'a> {
     }
 
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
-    /// takes the pointer from here).
+    /// takes the pointer from here), with what is chosen with it.
     fn shelf_moved(&mut self) {
-        let (Some((hit, from)), Some(now)) = (self.shelf_press, cursor_position()) else { return };
-        if crate::station::run::drag_begins(from, now) {
+        let (Some(press), Some(now)) = (self.shelf_press, cursor_position()) else { return };
+        if crate::station::run::drag_begins(press.from, now) {
             self.shelf_press = None;
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
-            if let Some(drag) = crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
-                self.lifting = Some((hit, drag, from));
+            let carried = crate::station::select::drag(press);
+            if let Some(drag) = crate::station::drag_off(&carried, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
+                self.lifting = Some((press.hit, carried, drag, press.from));
                 self.next_frame = Instant::now();
             }
         }
@@ -3955,6 +4064,8 @@ impl<'a> Panel<'a> {
         let thumbs_moving = self.thumbs.choose(now, &view::choices(self.tab)) | thumbs_moving;
         // (What was just copied from it, marked so a moment.)
         let thumbs_moving = self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR) | thumbs_moving;
+        // (What is chosen together on it, marked so.)
+        self.thumbs.mark_chosen(crate::station::select::now().hits);
         // What is kept at hand: the one held where it would go, the others making room; one let go, kept where it went
         // till the order comes so.
         let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
@@ -3986,17 +4097,17 @@ impl<'a> Panel<'a> {
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
-        let lifting = self.lifting.take().and_then(|(hit, drag, from)| self.hits.iter().find(|box_| box_.4 == hit).map(|&(hx, hy, hw, hh, _)| (hit, drag, from, (hx, hy, hw, hh))));
+        let lifting = self.lifting.take().and_then(|(hit, carried, drag, from)| self.hits.iter().find(|box_| box_.4 == hit).map(|&(hx, hy, hw, hh, _)| (hit, carried, drag, from, (hx, hy, hw, hh))));
         let mut lifted = None;
         let (away, mut taken_off) = (&mut self.away, None);
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
-            if let Some((hit, _, _, (hx, hy, ..))) = lifting {
-                lifted = Some(render::record_tile(frame, &scene, &lanes, &layout, None, 1.0, (-hx, -hy), hit)).filter(|parts| !parts.is_empty());
+            if let Some((hit, carried, _, _, (hx, hy, ..))) = &lifting {
+                lifted = Some(render::record_tile(frame, &scene, &lanes, &layout, None, 1.0, (-hx, -hy), *hit)).filter(|parts| !parts.is_empty());
                 if lifted.is_some() {
-                    crate::ui::view::carry_tile(Some(hit));
+                    crate::ui::view::carry_tiles(carried.clone());
                 }
             }
             if opacity < 1.0 {
@@ -4069,9 +4180,12 @@ impl<'a> Panel<'a> {
         if let Some(from) = taken_off {
             self.turning = Some((now, from));
         }
-        if let (Some((hit, drag, from, (_, _, hw, hh))), Some(parts), Some(at)) = (lifting, lifted, lifting.and_then(|(hit, ..)| self.hit_on_screen(hit))) {
-            let lifted = crate::carry::Lifted { hit, drag, parts, size: (hw, hh), at: POINT { x: at.left, y: at.top }, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
-            crate::carry::begin(&self.gfx, lifted);
+        if let (Some((hit, carried, drag, from, (_, _, hw, hh))), Some(parts)) = (lifting, lifted) {
+            if let Some(at) = self.hit_on_screen(hit) {
+                let count = crate::station::select::landing(&carried);
+                let lifted = crate::carry::Lifted { carried, count, drag, parts, size: (hw, hh), at: POINT { x: at.left, y: at.top }, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
+                crate::carry::begin(&self.gfx, lifted);
+            }
         }
         self.gfx.sweep();
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
@@ -4418,13 +4532,20 @@ impl<'a> Panel<'a> {
 
     fn click(&mut self, client: POINT) {
         self.next_frame = Instant::now();
-        if self.shelf_press.take().is_some() {
+        let hit = self.hit_at(client);
+        let pressed = self.shelf_press.take();
+        if pressed.is_some() {
             let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
         }
-        let hit = self.hit_at(client);
         // A to-do being written: a press away from its field gives back the keys.
         if !matches!(hit, Some(Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
             self.stop_todo(false);
+        }
+        // Let go on what was pressed with Ctrl or Shift: chosen, and nothing more.
+        if let Some(press) = pressed.filter(|press| hit == Some(press.hit)) {
+            if !crate::station::select::release(press) {
+                return;
+            }
         }
         match hit {
             Some(Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
@@ -4473,7 +4594,10 @@ impl<'a> Panel<'a> {
             }
             Some(Hit::Drive(letter)) => open_drive(letter),
             Some(hit) if crate::station::pressed(hit) => {}
-            Some(Hit::Tab(tab)) => self.tab = tab,
+            Some(Hit::Tab(tab)) => {
+                self.tab = tab;
+                crate::station::select::turned(self.window.hwnd.0 as isize, tab);
+            }
             Some(Hit::AddApp) => self.open_beside(crate::ui::beside::Page::Picker),
             Some(Hit::NewNote) => self.open_beside(crate::ui::beside::Page::Note(None)),
             Some(Hit::Search) => crate::ui::find::toggle(),
