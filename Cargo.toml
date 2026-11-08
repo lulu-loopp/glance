@@ -64,6 +64,7 @@ features = [
     "UI_Composition",
     "UI_Composition_Desktop",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "UI_ViewManagement",
     "Win32_Foundation",
     "Win32_Globalization",

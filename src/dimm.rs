@@ -1,7 +1,9 @@
 //! The memory modules' own temperature sensors, on the SMBus: the SPD5118
 //! hub of each DDR5 module, or the JC-42.4 sensor of a DDR4 one. Read
 //! through PawnIO's SMBus modules, the way Linux's spd5118 and jc42 drivers
-//! read them; nothing is ever written to a module.
+//! read them, and nothing is ever written to a module. Only where the firmware
+//! lists modules that carry such a sensor, and never on a laptop (see
+//! `looked_for`).
 
 use crate::pawnio::Module;
 use crate::sensors::{NamedLock, LOCK_WAIT};
@@ -35,6 +37,40 @@ const JC42_CONFIG: u64 = 0x01;
 const JC42_TEMP: u64 = 0x05;
 const JC42_MANUFACTURER: u64 = 0x06;
 
+/// Forms of module put into a slot, as SMBIOS numbers them (a DIMM, an SO-DIMM, a CAMM), and the memory types whose
+/// modules carry a sensor (a DDR5 module's SPD hub, a DDR4 one's where it has one). Soldered memory (LPDDR, chips on
+/// the board) has none.
+const DIMM: u8 = 0x09;
+const SO_DIMM: u8 = 0x0D;
+const CAMM: u8 = 0x11;
+const DDR4: u8 = 0x1A;
+const DDR5: u8 = 0x22;
+
+/// Which modules' sensors are looked for on the bus.
+#[derive(Debug, PartialEq)]
+struct LookedFor {
+    spd5118: bool,
+    jc42: bool,
+}
+
+/// Which modules' sensors are looked for on the machine whose firmware's table is `table`: the sensors of the kinds
+/// of module in its slots (DDR5's hubs, DDR4's sensors), none where it has none of either, and none on a laptop,
+/// whatever it has. A laptop's SMBus is its embedded controller's too (its battery, its charger), whose firmware
+/// need not take the lock programs take around the bus, and a transfer that meets one of the firmware's may leave
+/// the bus stuck till the power is cut (as PawnIO's own module for AMD's chipsets warns).
+fn looked_for(table: &[u8]) -> Result<LookedFor, Missing> {
+    if crate::smbios::portable(&crate::smbios::chassis(table)) {
+        return Err(Missing::Laptop);
+    }
+    let modules = crate::smbios::modules(table);
+    let in_a_slot = |memory_type| modules.iter().any(|module| matches!(module.form_factor, DIMM | SO_DIMM | CAMM) && module.memory_type == memory_type);
+    let looked = LookedFor { spd5118: in_a_slot(DDR5), jc42: in_a_slot(DDR4) };
+    if !looked.spd5118 && !looked.jc42 {
+        return Err(Missing::NoModules);
+    }
+    Ok(looked)
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
     Spd5118,
@@ -64,6 +100,10 @@ pub enum Missing {
     BusHeld,
     /// None answered as a module's sensor.
     None,
+    /// Not looked for: a laptop (see `looked_for`).
+    Laptop,
+    /// Not looked for: no DDR4 or DDR5 module in a slot, as the firmware lists them.
+    NoModules,
 }
 
 impl Missing {
@@ -72,6 +112,8 @@ impl Missing {
             Missing::NoDriver => "not found (the SMBus driver not available)",
             Missing::BusHeld => "not found yet (another program had the SMBus; looked for again)",
             Missing::None => "not found",
+            Missing::Laptop => "not looked for on a laptop (its SMBus is its embedded controller's too)",
+            Missing::NoModules => "not looked for (no DDR4 or DDR5 module in a slot)",
         }
     }
 }
@@ -86,14 +128,17 @@ impl Dimms {
         format!("{} {kind} sensor(s)", self.sensors.len())
     }
 
-    /// Finds the modules' sensors, if the chipset's SMBus can be reached; else says why not.
+    /// Finds the modules' sensors, if the chipset's SMBus can be reached and there are any to look for (see
+    /// `looked_for`), or else says why not.
     pub fn open() -> Result<Self, Missing> {
+        let looked = looked_for(&crate::smbios::table())?;
         let module = Module::load(SMBUS_PIIX4).or_else(|_| Module::load(SMBUS_I801)).map_err(|_| Missing::NoDriver)?;
         let _lock = NamedLock::acquire(SMBUS_LOCK, 1000).ok_or(Missing::BusHeld)?;
         let byte = |address, register| transfer(&module, address, register, BYTE_DATA);
         // A DDR5 hub names its type in its first two registers, and its
         // sensor is in use only when not switched off.
         let spd5118: Vec<u64> = SPD5118_ADDRESSES
+            .filter(|_| looked.spd5118)
             .filter(|&address| byte(address, SPD5118_TYPE.0) == Some(0x51) && byte(address, SPD5118_TYPE.1) == Some(0x18))
             .filter(|&address| byte(address, SPD5118_TEMP_CONFIG).is_some_and(|config| config & 1 == 0))
             .collect();
@@ -104,6 +149,7 @@ impl Dimms {
         // manufacturer set.
         let word = |address, register| transfer(&module, address, register, WORD_DATA).map(|w| (w as u16).swap_bytes());
         let jc42: Vec<u64> = JC42_ADDRESSES
+            .filter(|_| looked.jc42)
             .filter(|&address| {
                 let (Some(capability), Some(config), Some(maker)) =
                     (word(address, JC42_CAPABILITY), word(address, JC42_CONFIG), word(address, JC42_MANUFACTURER))
@@ -186,6 +232,23 @@ mod tests {
         // JC-42: 0x01A2 is 26.125 °C; the top three bits are flags.
         assert_eq!(jc42_celsius(0xE1A2), 26.125);
         assert_eq!(jc42_celsius(0x1FF0), -1.0);
+    }
+
+    /// The bus is looked at for the sensors of the modules in the slots alone: DDR5's hubs on a desktop of DDR5
+    /// DIMMs, DDR4's sensors on one of DDR4, and nothing on a laptop, soldered memory (the G14's) or a slot of an
+    /// SO-DIMM alike.
+    #[test]
+    fn looks_for_the_sensors_of_the_modules_there_are() {
+        use crate::smbios::examples;
+        assert_eq!(looked_for(&examples::desktop()), Ok(LookedFor { spd5118: true, jc42: false }));
+        assert_eq!(looked_for(&examples::ddr4_desktop()), Ok(LookedFor { spd5118: false, jc42: true }));
+        assert_eq!(looked_for(&examples::g14()), Err(Missing::Laptop));
+        assert_eq!(looked_for(&examples::so_dimm_laptop()), Err(Missing::Laptop));
+        // A desktop whose firmware lists no module in a slot (soldered memory, a mini PC's): nothing.
+        let mut soldered = examples::g14();
+        soldered[5] = 0x03;
+        assert_eq!(looked_for(&soldered), Err(Missing::NoModules));
+        assert_eq!(looked_for(&[]), Err(Missing::NoModules));
     }
 
     /// Run as administrator with `cargo test reads_these_modules -- --nocapture`.

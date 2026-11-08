@@ -338,6 +338,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
         let reading = s.gpus.get(index);
         let usage = reading.and_then(|g| g.usage);
         let temp = reading.and_then(|g| g.temp).filter(|_| prefs.shows(&id, "temp"));
+        // (Asleep, it says so where its temperature goes.)
+        let asleep = reading.is_some_and(|g| g.asleep).then(|| super::view::sleeping(lang).to_string());
         readings.push(Reading {
             kind: Kind::Gpu(index),
             id,
@@ -347,8 +349,8 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             share: usage.map(|v| v / 100.0),
             figure: percent(usage),
             unit: "%".into(),
-            beside: celsius(temp),
-            detail: temp.map(|t| format!("{t:.0} °C")).unwrap_or_default(),
+            beside: asleep.clone().unwrap_or_else(|| celsius(temp)),
+            detail: asleep.unwrap_or_else(|| temp.map(|t| format!("{t:.0} °C")).unwrap_or_default()),
             hot: usage.is_some_and(|v| v > super::prefs::HOT_LOAD),
             warm: temp.is_some_and(|t| t > prefs.hot_temp),
             hot_at: Some(super::prefs::HOT_LOAD as f64),

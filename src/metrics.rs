@@ -14,10 +14,17 @@ use crate::mic::Microphone;
 use crate::superio::SuperIo;
 use windows::core::{w, PCWSTR};
 use windows::Wdk::Graphics::Direct3D::{
-    D3DKMTCloseAdapter, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA, D3DKMT_CLOSEADAPTER,
-    D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO,
-    KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERTYPE, KMTQAITYPE_NODEPERFDATA,
+    D3DKMTCloseAdapter, D3DKMTOpenAdapterFromDeviceName, D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo, D3DKMT_ADAPTER_PERFDATA,
+    D3DKMT_CLOSEADAPTER, D3DKMT_ADAPTERADDRESS, D3DKMT_ADAPTERTYPE, D3DKMT_NODE_PERFDATA, D3DKMT_OPENADAPTERFROMDEVICENAME,
+    D3DKMT_OPENADAPTERFROMLUID, D3DKMT_QUERYADAPTERINFO, KMTQAITYPE_ADAPTERADDRESS, KMTQAITYPE_ADAPTERPERFDATA, KMTQAITYPE_ADAPTERTYPE,
+    KMTQAITYPE_NODEPERFDATA,
 };
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeW, CM_Get_Device_Interface_PropertyW, CM_Locate_DevNodeW,
+    CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
+};
+use windows::Win32::Devices::Properties::{DEVPKEY_Device_InstanceId, DEVPKEY_Device_PowerData, DEVPROPTYPE};
+use windows::Win32::System::Power::{CM_POWER_DATA, DEVICE_POWER_STATE, PowerDeviceD1, PowerDeviceD2, PowerDeviceD3};
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, LUID, UNICODE_STRING};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -52,8 +59,38 @@ const PLAY_BREAK: Duration = Duration::from_secs(5 * 60);
 struct Adapter {
     luid: (u32, i32),
     kmt_handle: u32,
-    /// How its maker's driver gives its power, if it does.
-    power: Option<gpu_power::Reader>,
+    /// Its maker (its PCI vendor id), and where it sits on the PCI bus: which of the makers' libraries reads it, and
+    /// which of that library's cards it is.
+    vendor: u32,
+    address: Option<gpu_power::PciAddress>,
+    /// Its device, as Windows' device manager has it: whose power state says whether it sleeps (none where it is not
+    /// found).
+    device: Option<u32>,
+    /// Whether it slept at the last sample (see `asleep`).
+    asleep: bool,
+    /// How its maker's library gives its power, if it does: looked for as it is first seen awake (none: not yet).
+    power: Option<Option<gpu_power::Reader>>,
+}
+
+impl Adapter {
+    /// How its maker's library gives its power, where it has been looked for and does.
+    fn reader(&self) -> Option<gpu_power::Reader> {
+        self.power.flatten()
+    }
+
+    /// Looks for how its maker's library gives its power (that library opened, if it is not yet): once, and only
+    /// while it is awake (see `asleep`).
+    fn look_up(&mut self, libraries: &mut GpuPower) {
+        self.power = Some(self.address.and_then(|address| libraries.reader(self.vendor, address)));
+    }
+
+    /// How its power is read, for a report.
+    fn describe(&self) -> &'static str {
+        match self.power {
+            Some(reader) => reader.map_or("not available", gpu_power::Reader::describe),
+            None => "looked for once it wakes (asleep)",
+        }
+    }
 }
 
 /// What is read less often than every sample (see `Sampler::sample`).
@@ -67,6 +104,9 @@ struct Slow {
 /// too old for the GPU ones) are absent here; what they measure then goes
 /// unreported, rather than everything else with it.
 pub struct Sampler {
+    /// Whether the hardware is read: its sensors (through the driver), its makers' libraries and drivers, and its
+    /// firmware's readings. Not by a sampler of the meanwhile (see `meanwhile`).
+    hardware: bool,
     /// When the system last started (see `Started`).
     started: Started,
     /// WSL, while its module is on.
@@ -147,7 +187,21 @@ impl Drop for Sampler {
 }
 
 impl Sampler {
+    /// A sampler of everything it can read.
     pub fn new() -> Self {
+        Self::reading(true)
+    }
+
+    /// A sampler for the meanwhile, while the sensors' process is on its way: of the processors' and the memory's
+    /// use, the network's and the drives' (and the GPUs' as Windows counts it), nothing that asks the hardware. That
+    /// process looks at all of it as it starts, and the two are not to go through the same drivers at once (as they
+    /// did at a sign-in on a laptop, both in its discrete GPU's).
+    pub fn meanwhile() -> Self {
+        Self::reading(false)
+    }
+
+    /// A sampler, of the `hardware` too or not (see `hardware`).
+    fn reading(hardware: bool) -> Self {
         let mut query = PDH_HQUERY::default();
         // Without a query no counter can be added, and every sample fails.
         let _ = unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) };
@@ -174,29 +228,40 @@ impl Sampler {
         let mut processes = ProcessTable::default();
         processes.sample(1, None);
 
-        let gpu_power = GpuPower::open();
-        let (adapters, gpus) = enumerate_gpus(&gpu_power);
+        let mut gpu_power = GpuPower::new();
+        let (mut adapters, gpus) = enumerate_gpus();
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
-        let cpu_sensors = CpuReader::open();
-        let super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
-        let dimms = Dimms::open();
-        let dimms_awaited = (dimms.as_ref().err() == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now);
-        let laptop_fans = LaptopFans::open();
-        let missing = || "not found".to_string();
-        let mut found = vec![
-            format!("CPU sensors: {}", cpu_sensors.as_ref().map_or_else(missing, |cpu| cpu.describe().to_string())),
-            format!("Motherboard chip: {}", super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
-            format!("Memory sensors: {}", dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
-            format!("Laptop fans: {}", laptop_fans.as_ref().map_or_else(Clone::clone, LaptopFans::describe)),
-        ];
-        if let Some(failed) = crate::pawnio::last_failure() {
-            found.push(format!("PawnIO, the last that failed: {failed}"));
-        }
-        found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| {
-            format!("GPU power, {}: {}", gpu.name, adapter.power.map_or("not available", gpu_power::Reader::describe))
-        }));
-        if let Some(intel) = gpu_power.describe_intel() {
-            found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
+        let mut found = Vec::new();
+        // (Each none for a sampler of the meanwhile.)
+        let (mut cpu_sensors, mut super_io, mut dimms, mut laptop_fans) = (None, None, None, None);
+        if hardware {
+            // Each GPU awake now looked up at once (a desktop's all are), and one asleep as it wakes (see `sample_gpus`).
+            for adapter in &mut adapters {
+                adapter.asleep = asleep(adapter.device.and_then(power_state));
+                if !adapter.asleep {
+                    adapter.look_up(&mut gpu_power);
+                }
+            }
+            cpu_sensors = CpuReader::open();
+            let found_super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
+            let found_dimms = Dimms::open();
+            let found_fans = LaptopFans::open();
+            found = vec![
+                format!("CPU sensors: {}", cpu_sensors.as_ref().map_or("not found", CpuReader::describe)),
+                format!("Motherboard chip: {}", found_super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
+                format!("Memory sensors: {}", found_dimms.as_ref().map_or_else(|why| why.describe().to_string(), Dimms::describe)),
+                format!("Laptop fans: {}", found_fans.as_ref().map_or_else(Clone::clone, LaptopFans::describe)),
+            ];
+            if let Some(failed) = crate::pawnio::last_failure() {
+                found.push(format!("PawnIO, the last that failed: {failed}"));
+            }
+            found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| format!("GPU power, {}: {}", gpu.name, adapter.describe())));
+            if let Some(intel) = gpu_power.describe_intel() {
+                found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
+            }
+            (super_io, dimms, laptop_fans) = (Some(found_super_io), Some(found_dimms), Some(found_fans));
+        } else {
+            found.push("Sensors: not looked at yet (the sensors' process looks at them as it starts)".to_string());
         }
         let modules = crate::smbios::memory_modules();
         let drives = crate::drives::models();
@@ -214,6 +279,7 @@ impl Sampler {
             found,
         };
         Sampler {
+            hardware,
             query,
             cpu_time,
             cpu_performance,
@@ -233,11 +299,11 @@ impl Sampler {
             net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
             cpu_sensors,
             graphics_power: None,
-            super_io_awaited: super_io.as_ref().err().filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
-            super_io: super_io.ok().map(crate::superio::Watched::new),
-            laptop_fans: laptop_fans.ok(),
-            dimms: dimms.ok(),
-            dimms_awaited,
+            super_io_awaited: super_io.as_ref().and_then(|found| found.as_ref().err()).filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
+            dimms_awaited: (dimms.as_ref().and_then(|found| found.as_ref().err()) == Some(&crate::dimm::Missing::BusHeld)).then(Instant::now),
+            super_io: super_io.and_then(Result::ok).map(crate::superio::Watched::new),
+            laptop_fans: laptop_fans.and_then(Result::ok),
+            dimms: dimms.and_then(Result::ok),
             mic: Microphone::open(),
             gpu_by_pid: None,
             engines_read: HashSet::new(),
@@ -306,7 +372,7 @@ impl Sampler {
         let playing_s = now.duration_since(start).as_secs();
         let usage = self.processes.usage_of(pid);
         let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
-        let gpu_limit = adapter.and_then(|a| a.power).and_then(|reader| self.gpu_power.limit(reader));
+        let gpu_limit = adapter.filter(|a| driver_asked(self.hardware, a.asleep)).and_then(Adapter::reader).and_then(|reader| self.gpu_power.limit(reader));
         // Its memory on the card it uses most (or on every card, while it
         // uses none); unread where an instance of it is.
         let card = self.adapter_by_pid.get(&pid).copied();
@@ -399,7 +465,7 @@ impl Sampler {
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
 
         // The driver installed meanwhile: what reads through it, not had without it, opened now.
-        if crate::pawnio::arrived() {
+        if self.hardware && crate::pawnio::arrived() {
             self.driver_arrived();
         }
         // (Read before the GPUs: Intel's graphics built into the CPU take their power from it.)
@@ -474,10 +540,10 @@ impl Sampler {
                 threads: perf.ThreadCount,
                 handles: perf.HandleCount,
             },
-            battery: battery(),
+            battery: battery(self.hardware),
             cpu_sensors,
             board: self.board(),
-            drive_temps: crate::drives::temperatures(),
+            drive_temps: if self.hardware { crate::drives::temperatures() } else { Vec::new() },
             dimm_temps: self.dimms().map(Dimms::read).unwrap_or_default(),
             mic_muted: self.mic.as_ref().and_then(Microphone::muted),
             wsl: self.wsl.as_mut().map(|wsl| wsl.read(self.gpu_by_pid.as_ref(), &self.processes.names)),
@@ -510,6 +576,15 @@ impl Sampler {
             Some(per_adapter)
         };
         let (dedicated, shared) = if collected { (memory(self.gpu_dedicated), memory(self.gpu_shared)) } else { (None, None) };
+        // Whether each sleeps now, and for one awake for the first time, how its power is read looked for (it could
+        // not be while it slept, see `GpuPower::reader`).
+        for (adapter, gpu) in self.adapters.iter_mut().zip(&self.info.gpus) {
+            adapter.asleep = asleep(adapter.device.and_then(power_state));
+            if driver_asked(self.hardware, adapter.asleep) && adapter.power.is_none() {
+                adapter.look_up(&mut self.gpu_power);
+                crate::journal::note(format!("GPU power, {}, looked for as it woke: {}", gpu.name, adapter.describe()));
+            }
+        }
         self.adapters
             .iter()
             .map(|adapter| {
@@ -540,8 +615,9 @@ impl Sampler {
                     fan_rpm: None,
                     clock_mhz: None,
                     power: None,
+                    asleep: adapter.asleep,
                 };
-                self.from_driver(adapter, counted)
+                if driver_asked(self.hardware, adapter.asleep) { self.from_driver(adapter, counted) } else { counted }
             })
             .collect()
     }
@@ -598,11 +674,11 @@ impl Sampler {
     }
 
     /// `gpu` with what the adapter's driver gives now: its temperature,
-    /// fan, clock and power.
+    /// fan, clock and power. (Asked only of an adapter awake: see `driver_asked`.)
     fn from_driver(&self, adapter: &Adapter, gpu: GpuSample) -> GpuSample {
         let perf = adapter_perf(adapter.kmt_handle);
         // (What Windows does not have of it, its maker's library may: Intel's graphics', so.)
-        let more = adapter.power.and_then(|reader| self.gpu_power.more(reader)).unwrap_or_default();
+        let more = adapter.reader().and_then(|reader| self.gpu_power.more(reader)).unwrap_or_default();
         GpuSample {
             temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)).or(more.temp),
             hot_spot: more.hot_spot,
@@ -611,13 +687,75 @@ impl Sampler {
             // Intel's graphics built into the CPU: what the CPU counts its graphics' plane drew, where it counts it (its
             // library said, of older ones, what the whole CPU drew); else what the library says.
             power: adapter
-                .power
+                .reader()
                 .filter(|reader| self.gpu_power.intel_integrated(*reader))
                 .and(self.graphics_power)
-                .or_else(|| adapter.power.and_then(|reader| self.gpu_power.read(reader))),
+                .or_else(|| adapter.reader().and_then(|reader| self.gpu_power.read(reader))),
             ..gpu
         }
     }
+}
+
+/// Whether an adapter whose device Windows has in the power state `state` (none: not known) sleeps: in any state
+/// below D0, as a laptop's discrete GPU is (D3) while nothing draws on it. The state is the one Windows' power manager
+/// last set (see `power_state`).
+fn asleep(state: Option<DEVICE_POWER_STATE>) -> bool {
+    state.is_some_and(|state| [PowerDeviceD1, PowerDeviceD2, PowerDeviceD3].contains(&state))
+}
+
+/// Whether an adapter's driver and its maker's library are asked for its readings (its temperature, clock, fan,
+/// power): only by a sampler of the `hardware`, and never of an adapter `asleep`. Asked, a GPU asleep may be woken
+/// to answer (NVML's finding one is, as NVIDIA documents), and asked every second it is kept from sleeping. Asleep,
+/// it has no readings but what Windows counts of it (its use, its memory), and is shown asleep.
+fn driver_asked(hardware: bool, asleep: bool) -> bool {
+    hardware && !asleep
+}
+
+/// The device's power state, as Windows' device manager keeps it (`DEVPKEY_Device_PowerData`, which Device Manager
+/// shows): the one the power manager last set. Read from what the device manager keeps, not asked of the device or
+/// its driver.
+fn power_state(device: u32) -> Option<DEVICE_POWER_STATE> {
+    let mut data = CM_POWER_DATA::default();
+    let (mut kind, mut size) = (DEVPROPTYPE::default(), size_of::<CM_POWER_DATA>() as u32);
+    let read = unsafe { CM_Get_DevNode_PropertyW(device, &DEVPKEY_Device_PowerData, &mut kind, Some((&mut data as *mut CM_POWER_DATA).cast()), &mut size, 0) };
+    (read == CR_SUCCESS).then_some(data.PD_MostRecentPowerState)
+}
+
+/// The device interface class of display adapters (`GUID_DISPLAY_DEVICE_ARRIVAL`, ntddvdeo.h).
+const DISPLAY_ADAPTERS: windows::core::GUID = windows::core::GUID::from_u128(0x1ca05180_a699_450a_9a0c_de4fbe3ddd89);
+
+/// The device of each display adapter there is, by the adapter's LUID: each adapter's device interface opened as an
+/// adapter (by its name, as Windows' kernel graphics opens one: which tells its LUID, and asks its driver nothing), and
+/// its device found by the interface's.
+fn adapter_devices() -> HashMap<(u32, i32), u32> {
+    let mut devices = HashMap::new();
+    let mut length = 0u32;
+    if unsafe { CM_Get_Device_Interface_List_SizeW(&mut length, &DISPLAY_ADAPTERS, PCWSTR::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } != CR_SUCCESS {
+        return devices;
+    }
+    let mut list = vec![0u16; length as usize];
+    if unsafe { CM_Get_Device_Interface_ListW(&DISPLAY_ADAPTERS, PCWSTR::null(), &mut list, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } != CR_SUCCESS {
+        return devices;
+    }
+    // Each interface's name, ended by a zero, and the list by another.
+    for name in list.split(|&c| c == 0).filter(|name| !name.is_empty()) {
+        let name: Vec<u16> = name.iter().copied().chain([0]).collect();
+        let interface = PCWSTR(name.as_ptr());
+        let mut open = D3DKMT_OPENADAPTERFROMDEVICENAME { pDeviceName: interface, ..Default::default() };
+        if unsafe { D3DKMTOpenAdapterFromDeviceName(&mut open) }.is_err() {
+            continue;
+        }
+        let _ = unsafe { D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER { hAdapter: open.hAdapter }) };
+        let mut id = [0u16; 256];
+        let (mut kind, mut size) = (DEVPROPTYPE::default(), size_of_val(&id) as u32);
+        let mut device = 0u32;
+        let found = unsafe { CM_Get_Device_Interface_PropertyW(interface, &DEVPKEY_Device_InstanceId, &mut kind, Some(id.as_mut_ptr().cast()), &mut size, 0) } == CR_SUCCESS
+            && unsafe { CM_Locate_DevNodeW(&mut device, PCWSTR(id.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) } == CR_SUCCESS;
+        if found {
+            devices.insert((open.AdapterLuid.LowPart, open.AdapterLuid.HighPart), device);
+        }
+    }
+    devices
 }
 
 /// Whether the engine counter's instance `name`, read as `value`, is one new since the reading before (`before`, its
@@ -1177,10 +1315,13 @@ fn parse_kind(instance: &str) -> Option<String> {
     Some(kind.replace(' ', ""))
 }
 
-fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
+/// Each GPU there is: how it is read, and what it is. Its driver is asked nothing (what the kernel is asked of each,
+/// it says itself), nor its maker's library: a GPU asleep stays so.
+fn enumerate_gpus() -> (Vec<Adapter>, Vec<GpuInfo>) {
     let mut adapters = Vec::new();
     let mut infos = Vec::new();
     let Ok(factory) = (unsafe { CreateDXGIFactory1::<IDXGIFactory1>() }) else { return (adapters, infos) };
+    let devices = adapter_devices();
     let mut index = 0;
     // Each adapter's number, as Glance has counted them since its first
     // version: those the kernel opens, whether or not they render.
@@ -1208,10 +1349,9 @@ fn enumerate_gpus(power: &GpuPower) -> (Vec<Adapter>, Vec<GpuInfo>) {
         }
         let LUID { LowPart, HighPart } = desc.AdapterLuid;
         let address = adapter_address(open.hAdapter);
-        let power = address.and_then(|address| power.reader(address));
         let identity = format!("{:04X}:{:04X}:{:08X}:{:02X}", desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision)
             + &address.map_or(String::new(), |(bus, device, function)| format!("@{bus}.{device}.{function}"));
-        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, power });
+        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, vendor: desc.VendorId, address, device: devices.get(&(LowPart, HighPart)).copied(), asleep: false, power: None });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
             slot,
@@ -1497,8 +1637,9 @@ impl Sampler {
     }
 }
 
-/// `None` on machines without a battery.
-fn battery() -> Option<BatterySample> {
+/// `None` on machines without a battery. What it draws and its health are read of it only with the `hardware` (its
+/// firmware is asked them).
+fn battery(hardware: bool) -> Option<BatterySample> {
     let mut status = SYSTEM_POWER_STATUS::default();
     unsafe { GetSystemPowerStatus(&mut status) }.ok()?;
     const NO_BATTERY: u8 = 128;
@@ -1507,7 +1648,7 @@ fn battery() -> Option<BatterySample> {
     if status.BatteryFlag & NO_BATTERY != 0 || status.BatteryLifePercent == UNKNOWN {
         return None;
     }
-    let figures = crate::battery::read();
+    let figures = if hardware { crate::battery::read() } else { Default::default() };
     Some(BatterySample {
         percent: status.BatteryLifePercent,
         // (Charging, as the system says it apart from being plugged in.)
@@ -1575,6 +1716,54 @@ mod tests {
     }
 
     use super::*;
+
+    /// A GPU asleep (D3, as a laptop's discrete GPU is while nothing draws on it, and D1 and D2 alike) is asked
+    /// nothing, by its driver or its maker's library. One awake (D0), or one whose state Windows does not say, is, as
+    /// it always was. A sampler of the meanwhile asks none.
+    #[test]
+    fn a_gpu_asleep_is_not_woken() {
+        use windows::Win32::System::Power::{PowerDeviceD0, PowerDeviceUnspecified};
+        for state in [PowerDeviceD1, PowerDeviceD2, PowerDeviceD3] {
+            assert!(asleep(Some(state)), "{state:?}");
+            assert!(!driver_asked(true, asleep(Some(state))), "{state:?}");
+        }
+        for state in [Some(PowerDeviceD0), Some(PowerDeviceUnspecified), None] {
+            assert!(!asleep(state), "{state:?}");
+            assert!(driver_asked(true, asleep(state)), "{state:?}");
+        }
+        assert!(!driver_asked(false, false));
+    }
+
+    /// This PC's GPUs, and the power state Windows has each one's device in (no driver asked):
+    /// `cargo test --lib -- --ignored says_how_this_machines_gpus_are --nocapture`.
+    #[test]
+    #[ignore = "lists this PC's GPUs"]
+    fn says_how_this_machines_gpus_are() {
+        let (adapters, gpus) = enumerate_gpus();
+        assert!(!adapters.is_empty());
+        for (adapter, gpu) in adapters.iter().zip(&gpus) {
+            println!("{} ({}): device {:?}, {:?}", gpu.name, gpu.identity, adapter.device, adapter.device.and_then(power_state));
+            assert!(adapter.device.and_then(power_state).is_some(), "{} has its power state", gpu.name);
+        }
+    }
+
+    /// What this PC's GPUs awake read, through their drivers and their makers' libraries:
+    /// `cargo test --lib -- --ignored reads_this_machines_gpus --nocapture`.
+    #[test]
+    #[ignore = "asks this PC's GPU drivers and their makers' libraries"]
+    fn reads_this_machines_gpus() {
+        let (mut adapters, gpus) = enumerate_gpus();
+        let mut libraries = GpuPower::new();
+        for (adapter, gpu) in adapters.iter_mut().zip(&gpus) {
+            if asleep(adapter.device.and_then(power_state)) {
+                println!("{}: asleep", gpu.name);
+                continue;
+            }
+            adapter.look_up(&mut libraries);
+            let reader = adapter.reader();
+            println!("{}: {}, {:?} W, {:?}, held back by {:?}", gpu.name, adapter.describe(), reader.and_then(|r| libraries.read(r)), reader.and_then(|r| libraries.more(r)), reader.and_then(|r| libraries.limit(r)));
+        }
+    }
 
     #[test]
     fn counts_every_processors_time() {

@@ -243,6 +243,10 @@ pub struct GpuSample {
     pub fan_rpm: Option<u32>,
     /// Watts, as a discrete card's driver reports them.
     pub power: Option<f32>,
+    /// Whether it sleeps (powered down, as a laptop's discrete GPU is while nothing draws on it): its driver is not
+    /// asked anything then, and it has no readings but its use and its memory, as Windows counts them.
+    #[serde(default)]
+    pub asleep: bool,
 }
 
 /// One program: every process sharing an executable name, added together.

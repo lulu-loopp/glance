@@ -508,6 +508,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
                 clock_mhz: None,
                 fan_rpm: None,
                 power: None,
+                asleep: false,
             };
             Some((accelerator.id(), info, reading))
         })
@@ -518,7 +519,7 @@ fn graphics() -> Vec<(u64, GpuInfo, GpuSample)> {
 
 /// The readings of a GPU that is not there to read: none.
 fn unread_gpu() -> GpuSample {
-    GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, hot_spot: None, clock_mhz: None, fan_rpm: None, power: None }
+    GpuSample { usage: None, engines: None, mem_used: None, shared_used: None, temp: None, hot_spot: None, clock_mhz: None, fan_rpm: None, power: None, asleep: false }
 }
 
 /// Bytes read and written by every drive, from their drivers' statistics;
