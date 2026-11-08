@@ -4097,15 +4097,19 @@ impl<'a> Panel<'a> {
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
-        let lifting = self.lifting.take().and_then(|(hit, carried, drag, from)| self.hits.iter().find(|box_| box_.4 == hit).map(|&(hx, hy, hw, hh, _)| (hit, carried, drag, from, (hx, hy, hw, hh))));
+        // (With what is carried with it, those of them whose rooms show, each from its own room: see `carry::Tile`.)
+        let lifting = self.lifting.take().filter(|(hit, ..)| self.hits.iter().any(|box_| box_.4 == *hit)).map(|(hit, carried, drag, from)| {
+            let boxes: Vec<(Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).collect();
+            (hit, carried, drag, from, boxes)
+        });
         let mut lifted = None;
         let (away, mut taken_off) = (&mut self.away, None);
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
-            if let Some((hit, carried, _, _, (hx, hy, ..))) = &lifting {
-                lifted = Some(render::record_tile(frame, &scene, &lanes, &layout, None, 1.0, (-hx, -hy), *hit)).filter(|parts| !parts.is_empty());
+            if let Some((hit, carried, _, _, boxes)) = &lifting {
+                lifted = Some(render::record_tiles(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| first == hit));
                 if lifted.is_some() {
                     crate::ui::view::carry_tiles(carried.clone());
                 }
@@ -4180,10 +4184,19 @@ impl<'a> Panel<'a> {
         if let Some(from) = taken_off {
             self.turning = Some((now, from));
         }
-        if let (Some((hit, carried, drag, from, (_, _, hw, hh))), Some(parts)) = (lifting, lifted) {
-            if let Some(at) = self.hit_on_screen(hit) {
+        if let (Some((_, carried, drag, from, _)), Some(recorded)) = (lifting, lifted) {
+            // (Each in its room on the screen, its box as large as it is drawn there.)
+            let tiles: Vec<crate::carry::Tile> = recorded
+                .into_iter()
+                .filter_map(|(hit, parts)| {
+                    let (.., w, h, _) = *self.hits.iter().find(|box_| box_.4 == hit)?;
+                    let at = self.hit_on_screen(hit)?;
+                    Some(crate::carry::Tile { hit, parts, size: (w, h), at: POINT { x: at.left, y: at.top } })
+                })
+                .collect();
+            if !tiles.is_empty() {
                 let count = crate::station::select::landing(&carried);
-                let lifted = crate::carry::Lifted { carried, count, drag, parts, size: (hw, hh), at: POINT { x: at.left, y: at.top }, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
+                let lifted = crate::carry::Lifted { carried, count, drag, tiles, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
                 crate::carry::begin(&self.gfx, lifted);
             }
         }

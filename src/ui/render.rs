@@ -272,10 +272,22 @@ impl Away {
 /// What a thing on a station's lane (pressed as `hit`) draws, at rest (not lit, nor pressed: as it is lifted off its
 /// room, see `carry`), recorded as `record` does; none where it is not drawn.
 #[allow(clippy::too_many_arguments)]
-pub fn record_tile(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), hit: view::Hit) -> Vec<Part> {
+pub fn record_tiles(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32), boxes: &[(view::Hit, (f32, f32))]) -> Vec<(view::Hit, Vec<Part>)> {
     let at_rest = Scene { hover: None, hint: None, thumbs: &view::RESTING, ..*scene };
-    let key = format!("tile.{hit:?}");
-    record(frame, &at_rest, lanes, layout, small, scale, at).into_iter().filter(|part| part.key.as_deref() == Some(key.as_str())).collect()
+    tiles_of(&record(frame, &at_rest, lanes, layout, small, scale, at), boxes)
+}
+
+/// What each of `boxes` (each a thing on a station's lane, and its box's corner in what was drawn) drew in `parts`, from
+/// its own box's corner: those that drew anything, in their order.
+fn tiles_of(parts: &[Part], boxes: &[(view::Hit, (f32, f32))]) -> Vec<(view::Hit, Vec<Part>)> {
+    boxes
+        .iter()
+        .map(|&(hit, (x, y))| {
+            let key = format!("tile.{hit:?}");
+            (hit, parts.iter().filter(|part| part.key.as_deref() == Some(key.as_str())).map(|part| part.moved((-x, -y))).collect::<Vec<Part>>())
+        })
+        .filter(|(_, parts)| !parts.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -283,6 +295,23 @@ mod tests {
     use super::super::morph::{Op, Part};
     use super::super::view::{self, Hit};
     use super::Away;
+
+    /// What each thing carried together drew is taken from what was drawn by its name, from its own box's corner: each
+    /// from its own, those that drew nothing left out.
+    #[test]
+    fn each_thing_carried_is_taken_from_its_own_room() {
+        let fill = |x: f32, y: f32| Op::Fill { color: super::super::canvas::Color::hex(0, 1.0), x, y, w: 10.0, h: 10.0 };
+        let (one, two, gone) = (Hit::Shelf(1), Hit::Copied(2), Hit::Shelf(3));
+        let drawn = vec![
+            Part { key: Some(format!("tile.{one:?}")), ops: vec![fill(104.0, 52.0)] },
+            Part { key: Some("cpu".into()), ops: vec![fill(0.0, 0.0)] },
+            Part { key: Some(format!("tile.{two:?}")), ops: vec![fill(14.0, 302.0), fill(30.0, 310.0)] },
+        ];
+        let tiles = super::tiles_of(&drawn, &[(one, (100.0, 50.0)), (gone, (0.0, 0.0)), (two, (10.0, 300.0))]);
+        assert_eq!(tiles.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [one, two]);
+        assert_eq!(tiles[0].1[0].ops, [fill(4.0, 2.0)]);
+        assert_eq!(tiles[1].1[0].ops, [fill(4.0, 2.0), fill(20.0, 10.0)]);
+    }
 
     /// What shows a station's lane, a thing carried off it: put back, nothing turns; taken off the station, what was
     /// drawn as it was carried is turned from, once, none of it drawn there, nothing kept. Things carried off it

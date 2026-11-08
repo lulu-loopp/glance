@@ -409,6 +409,11 @@ impl Part {
         Part { key: self.key.clone(), ops: self.ops.iter().map(|op| op.mapped(map)).collect() }
     }
 
+    /// It drawn `by` (across, down) from where it is.
+    pub fn moved(&self, by: (f32, f32)) -> Part {
+        self.mapped(&Map { from: Bounds { x: 0.0, y: 0.0, w: 1.0, h: 1.0 }, to: Bounds { x: by.0, y: by.1, w: 1.0, h: 1.0 }, sizes: 1.0 })
+    }
+
     /// Between `self` (at 0) and `to` (at 1): thing by thing where the two
     /// are drawn alike; else the whole of each on its way from its box to
     /// the other's, the one fading out as the other fades in.

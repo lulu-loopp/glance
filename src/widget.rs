@@ -1166,10 +1166,11 @@ impl Merged {
 /// one's type and ink (moving there from where it was, merged or torn apart just now). Where a press does something
 /// in each, from its corner; whether all of it was drawn.
 ///
-/// A thing on a station's lane in it lifted off its room (`lifting`: it, and where its room is, from its corner): what
-/// it draws recorded into `lifted` from its room's corner (see `carry`), its room left to be drawn empty.
+/// A thing on a station's lane in it lifted off its room (`lifting`: all carried, and those of them whose rooms show,
+/// each with where its room is, from its corner, the one pressed first): what each draws recorded into `lifted` from
+/// its own room's corner (see `carry`), their rooms left to be drawn empty.
 #[allow(clippy::too_many_arguments)]
-fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(view::Hit, &[view::Hit], (f32, f32))>, lifted: &mut Option<Vec<Part>>, field: &view::todo::Field) -> (Vec<view::HitBox>, bool) {
+fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Matrix3x2, px: f32, backdrop: Option<(&ID2D1Bitmap1, Vector2, u64, f32)>, frost: f32, rough: bool, pointer: Option<(f32, f32)>, shows: &Shows, now: Instant, lifting: Option<(&[view::Hit], &[(view::Hit, (f32, f32))])>, lifted: &mut Option<Vec<(view::Hit, Vec<Part>)>>, field: &view::todo::Field) -> (Vec<view::HitBox>, bool) {
     let theme = scene.theme;
     let size = merged.size;
     let host_plays = merged.host_plays();
@@ -1245,8 +1246,8 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 // onto the frame each frame, alike.)
                 frame.place(Matrix3x2::scale(z, z) * Matrix3x2::translation(rx, ry) * shift * local);
                 let halo = (theme.skin == Skin::Glass && (!host_plays || on_skin)).then_some(theme.legibility);
-                if let Some((hit, carried, (hx, hy))) = lifting.filter(|_| lifted.is_none()) {
-                    *lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, z, (rx - hx, ry - hy), hit)).filter(|parts| !parts.is_empty());
+                if let Some((carried, boxes)) = lifting.filter(|_| lifted.is_none()) {
+                    *lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, z, (rx, ry), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| first == &boxes[0].0));
                     if lifted.is_some() {
                         view::carry_tiles(carried.to_vec());
                     }
@@ -4878,7 +4879,11 @@ impl Widget {
         // A note written in where it is: its card where it was last drawn, should none be drawn now.
         let was_card = self.in_place.as_ref().and_then(|in_place| card_in(&self.hits, self.hits_from, in_place.number, margin));
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
-        let lifting = self.lifting.take().and_then(|(hit, carried, drag, from)| self.hits.iter().find(|one| one.4 == hit).map(|&(hx, hy, ..)| (hit, carried, drag, from, (hx, hy))));
+        // (With what is carried with it, those of them whose rooms show, each from its own room: see `carry::Tile`.)
+        let lifting = self.lifting.take().filter(|(hit, ..)| self.hits.iter().any(|one| one.4 == *hit)).map(|(_, carried, drag, from)| {
+            let boxes: Vec<(view::Hit, (f32, f32))> = carried.iter().filter_map(|one| self.hits.iter().find(|box_| box_.4 == *one).map(|&(hx, hy, ..)| (*one, (hx, hy)))).collect();
+            (carried, drag, from, boxes)
+        });
         let mut lifted = None;
         let in_place = self.in_place.as_mut();
         let mut card_gone = false;
@@ -4915,8 +4920,8 @@ impl Widget {
                     let at = (if keeps_to.0 { size.0 - shown.size.0 } else { 0.0 }, if keeps_to.1 { size.1 - shown.size.1 } else { 0.0 });
                     let layout = shown.drawn_at(size, carried.is_some_and(|(card, ..)| card.is_some()));
                     let picture = render::Picture { scene, lanes: &lanes, layout: &layout, small: shown.small.map(|small| (small, shown.size)), size, at, edge: None, backdrop, frost, rough };
-                    if let Some((hit, carried, _, _, (hx, hy))) = &lifting {
-                        lifted = Some(render::record_tile(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (-hx, -hy), *hit)).filter(|parts| !parts.is_empty());
+                    if let Some((carried, _, _, boxes)) = &lifting {
+                        lifted = Some(render::record_tiles(frame, scene, &lanes, &shown.layout, picture.small, 1.0, (0.0, 0.0), boxes)).filter(|tiles| tiles.first().is_some_and(|(first, _)| *first == boxes[0].0));
                         if lifted.is_some() {
                             view::carry_tiles(carried.clone());
                         }
@@ -4986,7 +4991,7 @@ impl Widget {
                 Content::Merged(merged) => {
                     let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, contact_scale, window, px, margin));
                     let shows = shows.unwrap_or_else(|| Shows::from(&serde_json::Value::Null));
-                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.as_ref().map(|(hit, carried, _, _, at)| (*hit, carried.as_slice(), *at)), &mut lifted, &field);
+                    let (hits, drawn_whole) = draw_merged(frame, merged, scene, local, px, backdrop, frost, rough, pointer, &shows, now, lifting.as_ref().map(|(carried, _, _, boxes)| (carried.as_slice(), boxes.as_slice())), &mut lifted, &field);
                     whole &= drawn_whole;
                     pressed = Some((hits, (0.0, 0.0)));
                 }
@@ -5058,12 +5063,20 @@ impl Widget {
             (self.hits, self.hits_from) = (hits, from);
             self.show_stations();
         }
-        if let (Some((hit, carried, drag, from, _)), Some(parts)) = (lifting, lifted) {
-            if let Some(&(hx, hy, hw, hh, _)) = self.hits.iter().find(|one| one.4 == hit) {
-                // (Its surface's corner is at `at`; the window's margin is before it.)
-                let at = POINT { x: (self.at.x as f32 + (self.hits_from.0 + hx) * px).round() as i32, y: (self.at.y as f32 + (self.hits_from.1 + hy) * px).round() as i32 };
+        if let (Some((carried, drag, from, _)), Some(recorded)) = (lifting, lifted) {
+            // (Each in its room on the screen, its box as large as it is drawn there. Its surface's corner is at `at`,
+            // the window's margin before it.)
+            let tiles: Vec<crate::carry::Tile> = recorded
+                .into_iter()
+                .filter_map(|(hit, parts)| {
+                    let &(hx, hy, hw, hh, _) = self.hits.iter().find(|one| one.4 == hit)?;
+                    let at = POINT { x: (self.at.x as f32 + (self.hits_from.0 + hx) * px).round() as i32, y: (self.at.y as f32 + (self.hits_from.1 + hy) * px).round() as i32 };
+                    Some(crate::carry::Tile { hit, parts, size: (hw, hh), at })
+                })
+                .collect();
+            if !tiles.is_empty() {
                 let count = crate::station::select::landing(&carried);
-                let lifted = crate::carry::Lifted { carried, count, drag, parts, size: (hw, hh), at, from, px, over: self.rect(), window: self.window.hwnd, look: self.menu_look() };
+                let lifted = crate::carry::Lifted { carried, count, drag, tiles, from, px, over: self.rect(), window: self.window.hwnd, look: self.menu_look() };
                 crate::carry::begin(&self.gfx, lifted);
             }
         }

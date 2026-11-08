@@ -794,7 +794,7 @@ const PRESSED_IN: f32 = 0.97;
 /// it: their rooms outlined. Put back in them: springing back to their size from a little smaller (since when).
 static PRESSED_TILE: std::sync::Mutex<Option<Hit>> = std::sync::Mutex::new(None);
 static AWAY_TILES: std::sync::Mutex<Vec<Hit>> = std::sync::Mutex::new(Vec::new());
-static LANDED_TILES: std::sync::Mutex<Option<(Vec<Hit>, std::time::Instant)>> = std::sync::Mutex::new(None);
+static LANDED_TILES: std::sync::Mutex<Vec<(Hit, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
 
 /// How a thing put back in its room springs back to its size (stiffness, damping: see `Spring`; a little past it as
 /// it comes, about a third of a second), from how large, and how long it is drawn on for.
@@ -836,23 +836,31 @@ pub fn carry_tiles(hits: Vec<Hit>) -> bool {
     tile_changed(changed)
 }
 
-/// The things carried off a station's lane put back in their rooms at `at`: no longer carried, springing back to their
-/// size.
+/// Things carried off a station's lane put back in their rooms at `at` (each as it comes back, or all at once): no
+/// longer carried, springing back to their size, the others carried still.
 pub fn land_tiles(hits: Vec<Hit>, at: std::time::Instant) {
-    carry_tiles(Vec::new());
-    *LANDED_TILES.lock().unwrap() = Some((hits, at));
+    AWAY_TILES.lock().unwrap().retain(|away| !hits.contains(away));
+    let mut landed = LANDED_TILES.lock().unwrap();
+    landed.retain(|(hit, when)| !hits.contains(hit) && when.elapsed() < LANDED_FOR);
+    landed.extend(hits.into_iter().map(|hit| (hit, at)));
     tile_changed(true);
+}
+
+/// When the thing on a station's lane pressed as `hit` was last put back in its room, while it springs back to its size.
+fn tile_landed(hit: Hit) -> Option<std::time::Instant> {
+    LANDED_TILES.lock().unwrap().iter().find(|(landed, at)| *landed == hit && at.elapsed() < LANDED_FOR).map(|(_, at)| *at)
 }
 
 /// Whether things put back on a station's lane are springing back to their size still (what shows them is drawn on).
 pub fn tile_landing() -> bool {
-    LANDED_TILES.lock().unwrap().as_ref().is_some_and(|(_, at)| at.elapsed() < LANDED_FOR)
+    LANDED_TILES.lock().unwrap().iter().any(|(_, at)| at.elapsed() < LANDED_FOR)
 }
 
 /// How the things on a station's lane are held as they are drawn now: what was drawn of them serves again while it is
-/// the same (see `render::PanelLayers::draw_on`), drawn anew as one is held otherwise and as they spring back.
+/// the same (see `render::PanelLayers::draw_on`), drawn anew as one is held otherwise and as they spring back (since
+/// the last was put back).
 pub fn tiles_drawn() -> (u64, Option<std::time::Duration>) {
-    let landed = LANDED_TILES.lock().unwrap().as_ref().map(|(_, at)| at.elapsed());
+    let landed = LANDED_TILES.lock().unwrap().iter().map(|(_, at)| at.elapsed()).min();
     (tile_changes(), landed.filter(|since| *since < LANDED_FOR))
 }
 
@@ -880,10 +888,9 @@ fn tile_held(hit: Hit) -> Held {
 /// put back lately, as large as it has sprung back to by now, about its middle.
 fn tile_face(hit: Hit, face: (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = face;
-    let landed = LANDED_TILES.lock().unwrap().as_ref().filter(|(landed, _)| landed.contains(&hit)).map(|(_, at)| *at);
-    let k = match (tile_held(hit), landed) {
+    let k = match (tile_held(hit), tile_landed(hit)) {
         (Held::Pressed, _) => PRESSED_IN,
-        (_, Some(at)) if at.elapsed() < LANDED_FOR => {
+        (_, Some(at)) => {
             let mut spring = crate::ui::motion::Spring::at(LANDED_FROM, LANDING.0, LANDING.1);
             spring.target = 1.0;
             spring.step(at.elapsed().as_secs_f32());
@@ -6499,7 +6506,7 @@ otepad.exe", "Notepad"),
             (Tab::Copies(Default::default()), ShelfView::List, vec![Hit::Copied(11), Hit::Copied(12), Hit::Copied(13)], Some(Hit::Copied(12))),
             (Tab::Recent(Default::default()), ShelfView::List, vec![recent(2), recent(3)], Some(recent(1))),
         ];
-        let carried = [(ShelfView::Cards, Hit::Shelf(4), 3, 5), (ShelfView::List, Hit::Copied(11), 2, 2)];
+        let carried = [(ShelfView::Cards, vec![Hit::Shelf(4), Hit::Shelf(2), Hit::Shelf(3)], 5), (ShelfView::List, vec![Hit::Copied(11), Hit::Copied(13)], 2)];
         let (lane_w, lane_h) = (COLUMN_WIDTH, 300.0);
         let out = std::env::var("GLANCE_SHOTS").map_or_else(|_| std::path::PathBuf::from(format!("{}/target", env!("CARGO_MANIFEST_DIR"))), std::path::PathBuf::from);
         let _ = std::fs::create_dir_all(&out);
@@ -6533,24 +6540,31 @@ otepad.exe", "Notepad"),
                         paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: lane.height(&theme) }, 0.0, Pass::Content, &mut Vec::new());
                         frame.unclip();
                     }
-                    // Carried together: what is drawn of the one pressed, on its plate, the others behind it.
-                    for (at, (view, hit, together, count)) in carried.iter().enumerate() {
+                    // Carried together: what is drawn of the one pressed, on its plate, the others behind it, each what it is.
+                    for (at, (view, together, count)) in carried.iter().enumerate() {
                         let x = (columns.len() + at) as f32 * (lane_w + 24.0) + 12.0;
                         crate::station::run::pretend(items(), *view);
-                        let tab = if matches!(hit, Hit::Copied(_)) { Tab::Copies(Default::default()) } else { Tab::Shelf };
+                        let tab = if matches!(together[0], Hit::Copied(_)) { Tab::Copies(Default::default()) } else { Tab::Shelf };
                         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                         let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                         let mut hits = Vec::new();
                         let area = Rect { x: 0.0, y: 0.0, w: lane_w, h: lane.height(&theme) };
                         paint_lane(&super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0)), &scene, &lane, area, 0.0, Pass::Content, &mut hits);
-                        let Some(&(hx, hy, hw, hh, _)) = hits.iter().find(|one| one.4 == *hit) else { continue };
-                        let recorder = super::super::morph::Recorder::new(frame, 1.0, (-hx, -hy));
+                        let recorder = super::super::morph::Recorder::new(frame, 1.0, (0.0, 0.0));
                         paint_lane(&recorder, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());
-                        let key = format!("tile.{hit:?}");
-                        let parts: Vec<_> = recorder.parts().into_iter().filter(|part| part.key.as_deref() == Some(key.as_str())).collect();
+                        let recorded = recorder.parts();
                         let pad = crate::carry::PAD;
+                        let tiles: Vec<(Vec<super::super::morph::Part>, (f32, f32))> = together
+                            .iter()
+                            .filter_map(|hit| {
+                                let &(hx, hy, hw, hh, _) = hits.iter().find(|one| one.4 == *hit)?;
+                                let key = format!("tile.{hit:?}");
+                                Some((recorded.iter().filter(|part| part.key.as_deref() == Some(key.as_str())).map(|part| part.moved((-hx, -hy))).collect(), (hw + 2.0 * pad, hh + 2.0 * pad)))
+                            })
+                            .collect();
+                        let tiles: Vec<(&[super::super::morph::Part], (f32, f32))> = tiles.iter().map(|(parts, plate)| (parts.as_slice(), *plate)).collect();
                         frame.origin(x + 12.0, y + 80.0);
-                        crate::carry::paint_lifted(frame, crate::ui::menu::Look::of(skin, dark), &parts, (hw + 2.0 * pad, hh + 2.0 * pad), 1.0, Some(((*together - 1).min(2), *count)));
+                        crate::carry::paint_stack(frame, crate::ui::menu::Look::of(skin, dark), &tiles, 1.0, Some(*count));
                         frame.origin(0.0, 0.0);
                     }
                 }
@@ -8040,6 +8054,25 @@ seven".into()));
         let away = drawn();
         carry_tiles(Vec::new());
         assert!(away.is_some_and(|part| !said(&part)));
+    }
+
+    /// Things carried off together are put back each as it comes: one put back, its room is drawn full again and
+    /// springs back to its size, the others' outlined still, then the rest, and none is carried.
+    #[test]
+    fn things_carried_together_are_put_back_one_by_one() {
+        let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (one, two, three) = (Hit::Shelf(0x5EED_0041), Hit::Shelf(0x5EED_0042), Hit::Copied(0x5EED_0043));
+        carry_tiles(vec![one, two, three]);
+        land_tiles(vec![two], std::time::Instant::now());
+        assert!(matches!(tile_held(two), Held::Not) && tile_landed(two).is_some());
+        assert!(matches!(tile_held(one), Held::Away) && matches!(tile_held(three), Held::Away) && tile_landed(one).is_none());
+        assert_eq!(away_tiles(), [one, three]);
+        land_tiles(vec![one, three], std::time::Instant::now());
+        assert!(away_tiles().is_empty());
+        assert!([one, two, three].iter().all(|hit| matches!(tile_held(*hit), Held::Not) && tile_landed(*hit).is_some()));
+        // (Sprung back by now: none is put back any more.)
+        land_tiles(vec![one, two, three], std::time::Instant::now() - LANDED_FOR);
+        assert!([one, two, three].iter().all(|hit| tile_landed(*hit).is_none()));
     }
 
     /// A slider's knob, its filling all the way and the pointer on it, reaches past its track's end no further than
