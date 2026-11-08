@@ -462,7 +462,9 @@ enum Before {
 /// over the widget, shown while it is near an edge.
 struct Hint {
     window: Window,
+    /// Its surface, on the device its widget drew with as it was made (made anew with the widget's next).
     surface: Option<Surface>,
+    gfx: Rc<Gfx>,
     /// Where and how it was last drawn: drawn again only when that changes.
     drawn: Option<(RECT, bool, u32, Option<Ground>)>,
 }
@@ -2421,7 +2423,8 @@ impl Widgets {
 
     /// The music shown over the whole of the screen `monitor` (physical px) at `scale`.
     pub fn open_full(&mut self, monitor: RECT, scale: f32) {
-        match gfx::current().ok().and_then(|gfx| crate::fullscreen::FullMusic::open(gfx, monitor, scale)) {
+        // (On the device of that screen's adapter: see `gfx::on_screen`.)
+        match gfx::for_area(monitor).ok().and_then(|gfx| crate::fullscreen::FullMusic::open(gfx, monitor, scale)) {
             Some(full) => self.full = Some(full),
             None => note("music full screen: its window could not be made"),
         }
@@ -2528,9 +2531,10 @@ impl Widgets {
 
     fn tick_widgets(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
         if !self.restored {
-            if gfx::current().is_err() {
-                return None;
-            }
+            // Restored once each screen they are on can be drawn on (else they would be lost, not made): the devices
+            // asked for held as they are made, each on its own.
+            let at = |kept: &WidgetAt| RECT { left: kept.at.0, top: kept.at.1, right: kept.at.0 + 1, bottom: kept.at.1 + 1 };
+            let Ok(_devices) = kept.iter().map(|kept| gfx::for_area(at(kept))).collect::<windows::core::Result<Vec<_>>>() else { return None };
             self.restore(kept);
         }
         if self.list.is_empty() {
@@ -3166,7 +3170,8 @@ impl Widget {
     }
 
     fn new(contact: Contact, at: POINT, content: Content) -> Option<Self> {
-        let gfx = gfx::current().ok()?;
+        // (On the device of its screen's adapter: see `gfx::on_screen`.)
+        let gfx = gfx::for_area(contact.monitor).ok()?;
         let window = Window::new().ok()?;
         window.under_the_panel();
         let surface = Surface::new(&gfx, window.hwnd).ok();
@@ -4093,6 +4098,10 @@ impl Widget {
     /// px), firmer once letting go would stick it there, `strength` as
     /// strong.
     fn show_hint(&mut self, rect: RECT, firm: bool, strength: f32, theme: &Theme, ground: Option<Ground>) {
+        // (Its widget gone onto another device, a screen another adapter drives: made again on that one.)
+        if self.hint.as_ref().is_some_and(|hint| !Rc::ptr_eq(&hint.gfx, &self.gfx)) {
+            self.hide_hint();
+        }
         if self.hint.is_none() {
             let Ok(mut window) = Window::new() else { return };
             window.set_click_through(true);
@@ -4100,7 +4109,7 @@ impl Widget {
             // would go, not part of the desktop.
             crate::ui::scene::leave_out(window.hwnd, true);
             let surface = Surface::new(&self.gfx, window.hwnd).ok();
-            self.hint = Some(Hint { window, surface, drawn: None });
+            self.hint = Some(Hint { window, surface, gfx: self.gfx.clone(), drawn: None });
         }
         let Some(hint) = self.hint.as_mut() else { return };
         let this = (rect, firm, strength.to_bits(), ground);
@@ -4776,11 +4785,11 @@ impl Widget {
         if moving || easing || turning || crate::ui::view::gliding_drawn() { Frame::Moving } else { Frame::Rest }
     }
 
-    /// On the device that draws now, if it is not (a driver reset, a device lost): its surface made anew, what it
-    /// kept on the one before let go of, the desktop behind taken again (what is behind put together on the new
-    /// one). Whether it has a surface.
+    /// On the device for the screen it is on, if it is not on it (a driver reset, a device lost, or it was moved to a
+    /// screen another adapter drives: see `gfx::on_screen`): its surface made anew, what it kept on the one before let
+    /// go of, the desktop behind taken again (what is behind put together on the new one). Whether it has a surface.
     fn follow_device(&mut self) -> bool {
-        let Ok(current) = gfx::current() else { return false };
+        let Ok(current) = gfx::for_area(self.rect()) else { return false };
         if !Rc::ptr_eq(&current, &self.gfx) || self.surface.is_none() {
             if self.behind.is_some() {
                 note("widget: the drawing device changed; the desktop taken again");
@@ -4791,7 +4800,7 @@ impl Widget {
             self.surface = match Surface::new(&current, self.window.hwnd) {
                 Ok(surface) => Some(surface),
                 Err(error) => {
-                    gfx::failed("widget", Some(&error));
+                    gfx::failed("widget", &current, Some(&error));
                     None
                 }
             };
@@ -5042,7 +5051,7 @@ impl Widget {
         }
         // (Not drawn: drawn again on its surface; the device gone, on one made anew on the next.)
         if let Err(error) = &drawn {
-            if gfx::failed("widget", Some(error)) {
+            if gfx::failed("widget", &self.gfx, Some(error)) {
                 self.surface = None;
             }
         }

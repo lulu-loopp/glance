@@ -123,7 +123,7 @@ impl Drawn {
                         Some(theme) => {
                             let piece = super::view::Rect { x: 0.0, y: 0.0, w: width, h: height };
                             if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
-                                gfx::failed("menu", Some(&error));
+                                gfx::failed("menu", gfx, Some(&error));
                             }
                             frame.origin(room, room);
                         }
@@ -135,7 +135,7 @@ impl Drawn {
                         Ok(())
                     });
                     if let Err(error) = laid {
-                        gfx::failed("menu", Some(&error));
+                        gfx::failed("menu", gfx, Some(&error));
                     }
                 })
             }
@@ -250,14 +250,15 @@ impl Menu {
     /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
     pub fn open_at(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
         let contact = crate::mouse::monitor_at(at)?;
-        let gfx = gfx::current().ok()?;
+        // (On the device for its screen: see `gfx::on_screen`.)
+        let gfx = gfx::for_area(contact.monitor).ok()?;
         let showing = super::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
         let surface = match Drawn::new(&gfx, window.hwnd, look) {
             Ok(surface) => surface,
             Err(error) => {
                 window.destroy();
-                gfx::failed("menu", Some(&error));
+                gfx::failed("menu", &gfx, Some(&error));
                 return None;
             }
         };
@@ -395,7 +396,7 @@ impl Menu {
         // (Its choices' words are as they were whichever is lit.)
         let drawn = self.surface.draw(&self.gfx, size, self.scale, look, self.room, (sheet.width, sheet.height), &mut self.choices, 0, |frame, frosted| sheet.paint_rows(frame, items, look, lit, frosted), |frame, frosted| sheet.paint_choices(frame, items, look, frosted));
         if let Err(error) = &drawn {
-            gfx::failed("menu", Some(error));
+            gfx::failed("menu", &self.gfx, Some(error));
         }
         drawn.is_ok()
     }

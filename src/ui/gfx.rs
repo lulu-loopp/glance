@@ -13,7 +13,8 @@ const TEXT_KEPT: Duration = Duration::from_secs(2);
 const PICTURE_KEPT: Duration = Duration::from_secs(10);
 
 use windows::core::{w, Interface, Result, HSTRING, PCWSTR};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, LPARAM, LUID, POINT, RECT};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
@@ -24,7 +25,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_PROPERTY_TYPE_FLOAT, D2D1_PROPERTY_TYPE_VECTOR4, D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, D2D1_SHADOW_PROP_COLOR, D2D1_DRAW_TEXT_OPTIONS_CLIP,
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_MULTI_THREADED, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_DRIVER_TYPE_WARP};
 use windows::Win32::Graphics::Direct3D11::{D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION};
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDesktopDevice, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual2,
@@ -40,7 +41,10 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_LINE_SPACING_METHOD_UNIFORM, DWRITE_LINE_SPACING_METHOD_DEFAULT, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM};
-use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIDevice3};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIDevice3, IDXGIFactory6, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
+    DXGI_GPU_PREFERENCE_MINIMUM_POWER,
+};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
 };
@@ -74,6 +78,9 @@ impl Color {
 
 /// Devices and factories shared by every surface.
 pub struct Gfx {
+    /// The adapter it draws on (None: there is no card, and it draws in software), the one a thread's windows on the
+    /// screens it drives share (see `on_screen`). One drawing in software for a card's moment's failure is that card's.
+    pub adapter: Option<Luid>,
     /// Whether its device's immediate context may be used from several threads (see `new`).
     pub guarded: bool,
     /// Drawn with Windows' software renderer, the graphics card having failed to make a device as it was made: when
@@ -172,23 +179,26 @@ impl Drop for Gfx {
 }
 
 thread_local! {
-    static CURRENT: RefCell<Option<Rc<Gfx>>> = const { RefCell::new(None) };
+    /// This thread's devices: one an adapter its windows draw on (see `on_screen`), its windows there sharing it.
+    static DEVICES: RefCell<Vec<Rc<Gfx>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// What the device last made (on any thread) draws on: for a report (see `drawn_on`).
-static DRAWN_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// What the devices made (on any thread) draw on, each adapter's as its last device made says it: for a report (see
+/// `drawn_on`).
+static DRAWN_ON: std::sync::Mutex<Vec<(Option<Luid>, String)>> = std::sync::Mutex::new(Vec::new());
 
-/// What Glance draws on, as its last device made does: the adapter, its driver's version, and whether in software
-/// (none made yet).
+/// What Glance draws on, as its devices made do: each adapter, its driver's version, and whether in software, one
+/// after another (none made yet: nothing).
 pub fn drawn_on() -> Option<String> {
-    DRAWN_ON.lock().unwrap().clone()
+    let drawn = DRAWN_ON.lock().unwrap();
+    (!drawn.is_empty()).then(|| drawn.iter().map(|(_, said)| said.as_str()).collect::<Vec<_>>().join(" | "))
 }
 
 /// The adapter `dxgi` is a device of, as a report says it: its name and its driver's version (the user-mode
 /// driver's, as DXGI gives it: four parts of 16 bits).
-fn adapter(dxgi: &IDXGIDevice, software: bool) -> String {
+fn described(dxgi: &IDXGIDevice, software: bool) -> String {
     let Ok(adapter) = (unsafe { dxgi.GetAdapter() }) else { return "an adapter not asked".into() };
-    let name = unsafe { adapter.GetDesc() }.map_or_else(|_| "an adapter not named".to_string(), |desc| String::from_utf16_lossy(desc.Description.split(|unit| *unit == 0).next().unwrap_or_default()));
+    let name = unsafe { adapter.GetDesc() }.map_or_else(|_| "an adapter not named".to_string(), |desc| named(&desc.Description));
     let driver = unsafe { adapter.CheckInterfaceSupport(&IDXGIDevice::IID) }.map_or_else(|_| "not said".to_string(), |version| {
         let version = version as u64;
         format!("{}.{}.{}.{}", version >> 48, (version >> 32) & 0xFFFF, (version >> 16) & 0xFFFF, version & 0xFFFF)
@@ -196,25 +206,201 @@ fn adapter(dxgi: &IDXGIDevice, software: bool) -> String {
     format!("{name} (driver {driver}){}", if software { ", in software" } else { "" })
 }
 
+/// A name as DXGI or the system gives it, as far as its first nul.
+fn named(units: &[u16]) -> String {
+    String::from_utf16_lossy(units.split(|unit| *unit == 0).next().unwrap_or_default())
+}
+
+/// An adapter's number for as long as the machine runs (its LUID): what a thread's devices are told apart by, one an
+/// adapter (see `on_screen`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Luid {
+    pub high: i32,
+    pub low: u32,
+}
+
+impl Luid {
+    fn of(luid: LUID) -> Luid {
+        Luid { high: luid.HighPart, low: luid.LowPart }
+    }
+
+    fn luid(self) -> LUID {
+        LUID { HighPart: self.high, LowPart: self.low }
+    }
+}
+
+impl std::fmt::Display for Luid {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:08X}:{:08X}", self.high, self.low)
+    }
+}
+
+/// The adapter the device `d3d` was made on (None: not to be asked).
+pub fn adapter_of(d3d: &ID3D11Device) -> Option<Luid> {
+    let dxgi: IDXGIDevice = d3d.cast().ok()?;
+    let adapter = unsafe { dxgi.GetAdapter() }.ok()?;
+    unsafe { adapter.GetDesc() }.ok().map(|desc| Luid::of(desc.AdapterLuid))
+}
+
+/// An adapter as DXGI shows it: its number, its name, whether it is Windows' own renderer in software, and the screens
+/// its outputs show the desktop on (their monitors' handles).
+#[derive(Clone, Debug)]
+pub struct Shown {
+    pub luid: Luid,
+    pub name: String,
+    pub software: bool,
+    pub screens: Vec<isize>,
+}
+
+/// The adapter a window on `screen` draws on, of `adapters` as Windows ranks them, the one taking least power first:
+/// the one driving that screen (one of its outputs shows it, and of more than one listing it, as a card drawing for
+/// another's screens may, the one taking least power), or where none drives it (a virtual display's, which no adapter
+/// lists), the one taking least power. A screen the integrated card drives is never drawn for on the discrete one, and
+/// one the discrete card drives (its MUX switched to it, a desktop's card) is drawn for on it. Windows' renderer in
+/// software is no card, and never chosen: with no card at all, none is, and what is drawn is drawn in software (see
+/// `Gfx::on_adapter`).
+pub fn chosen(adapters: &[Shown], screen: isize) -> Option<&Shown> {
+    let cards = || adapters.iter().filter(|adapter| !adapter.software);
+    cards().find(|adapter| adapter.screens.contains(&screen)).or_else(|| cards().next())
+}
+
+/// The adapters as they were last seen (see `adapter_for`): the screens there were then, the adapters, the one taking
+/// least power first, and how many times the screens had changed then (see `screens_changed`).
+struct Seen {
+    changes: u64,
+    screens: Vec<isize>,
+    adapters: Vec<Shown>,
+}
+
+static SEEN: std::sync::Mutex<Option<Seen>> = std::sync::Mutex::new(None);
+
+/// How many times the screens have changed (see `screens_changed`).
+static SCREENS_CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The screens changed (a monitor come or gone, the desktop set out anew, a card's MUX switched), or an adapter may
+/// have (a device lost): which adapter drives which screen is seen again as it is next asked (see `on_screen`).
+pub fn screens_changed() {
+    SCREENS_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The screens there are now (their monitors' handles).
+fn screens_now() -> Vec<isize> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+    unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> windows::core::BOOL {
+        unsafe { (*(found.0 as *mut Vec<isize>)).push(monitor.0 as isize) };
+        true.into()
+    }
+    let mut found = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut found as *mut Vec<isize> as isize));
+    }
+    found
+}
+
+/// The adapters there are now, as Windows ranks them, the one taking least power first, each with the screens its
+/// outputs show the desktop on. (Asked of the system only: no device is made on any, nor is any card woken.)
+fn adapters_now() -> Result<Vec<Shown>> {
+    let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory1()? };
+    let mut adapters = Vec::new();
+    for index in 0.. {
+        let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_MINIMUM_POWER) } {
+            Ok(adapter) => adapter,
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(error),
+        };
+        let description = unsafe { adapter.GetDesc1()? };
+        let mut screens = Vec::new();
+        for output in 0.. {
+            let Ok(output) = (unsafe { adapter.EnumOutputs(output) }) else { break };
+            if let Ok(description) = unsafe { output.GetDesc() } {
+                if description.AttachedToDesktop.as_bool() {
+                    screens.push(description.Monitor.0 as isize);
+                }
+            }
+        }
+        adapters.push(Shown {
+            luid: Luid::of(description.AdapterLuid),
+            name: named(&description.Description),
+            software: description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0,
+            screens,
+        });
+    }
+    Ok(adapters)
+}
+
+/// The adapter a window on `screen` draws on (see `chosen`), as the adapters were last seen: seen again where the
+/// screens have changed since, or `screen` is one not there then. None: no card to draw on.
+fn adapter_for(screen: isize) -> Result<Option<Shown>> {
+    seen(Some(screen), |seen| chosen(&seen.adapters, screen).cloned())
+}
+
+/// What `read` reads of the adapters as they were last seen: seen again where the screens have changed since, or
+/// `screen` (where one is asked of) is one not there then.
+fn seen<R>(screen: Option<isize>, read: impl FnOnce(&Seen) -> R) -> Result<R> {
+    let changes = SCREENS_CHANGED.load(std::sync::atomic::Ordering::Relaxed);
+    let mut held = SEEN.lock().unwrap();
+    let seen = match &mut *held {
+        Some(seen) if seen.changes == changes && screen.is_none_or(|screen| seen.screens.contains(&screen)) => seen,
+        stale => stale.insert(Seen { changes, screens: screens_now(), adapters: adapters_now()? }),
+    };
+    Ok(read(seen))
+}
+
+/// This thread's devices that no window of it holds and that no screen there is now would be drawn for (see
+/// `chosen`), let go of: for a thread whose windows were moved to screens another adapter drives, or whose screens
+/// changed, and that draws nothing for a while (its windows hidden), whose devices would else be let go of only as it
+/// next asked for one (see `on_screen`), a card no screen needs kept awake meanwhile (a laptop's discrete card, its
+/// screen unplugged). One that a screen would be drawn for is kept, to draw on at once as the thread next shows.
+pub fn let_go_of_strays() {
+    let Ok(wanted) = seen(None, |seen| seen.screens.iter().map(|screen| chosen(&seen.adapters, *screen).map(|adapter| adapter.luid)).collect::<Vec<_>>()) else { return };
+    let strays: Vec<Rc<Gfx>> = DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let (kept, strays) = std::mem::take(&mut *devices).into_iter().partition(|gfx| Rc::strong_count(gfx) > 1 || wanted.contains(&gfx.adapter));
+        *devices = kept;
+        strays
+    });
+    drop(strays);
+}
+
+/// How a report names `screen`: its display's name, how large it is and where (physical px).
+fn screen_said(screen: HMONITOR) -> String {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO, MONITORINFOEXW};
+    let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(screen, &mut info.monitorInfo) }.as_bool() {
+        return format!("a screen no longer there ({:?})", screen.0);
+    }
+    let at = info.monitorInfo.rcMonitor;
+    format!("{} ({}x{} at {},{})", named(&info.szDevice), at.right - at.left, at.bottom - at.top, at.left, at.top)
+}
+
 /// How often a device drawn in software for a card's moment's failure asks the card again.
 const CARD_ASKED_AGAIN: Duration = Duration::from_secs(2);
 
-/// This thread's graphics device, which its windows share; made when first asked for, and again after it was lost.
-/// One drawn in software for a card's moment's failure (see `software_instead`) gives way to one on the card as soon
-/// as the card makes one: each window, seeing it, makes its surfaces again on it, as after a loss.
-pub fn current() -> Result<Rc<Gfx>> {
-    CURRENT.with(|cell| {
-        let held = cell.borrow().clone();
+/// This thread's graphics device for windows on `screen`: on the adapter driving it (see `chosen`), which its windows
+/// there share, made when first asked for, and again after it was lost. One drawn in software for a card's moment's
+/// failure (see `software_instead`) gives way to one on the card as soon as the card makes one: each window, seeing
+/// it, makes its surfaces again on it, as after a loss. A window moved to a screen another adapter drives takes up
+/// that adapter's device as it next draws, as after a loss, and the device it left goes once no window of the thread
+/// holds it (each holds the one it draws with): asked for another, the thread lets go of each device only it holds,
+/// one left behind keeping its card awake. The one asked for last is kept while no window holds it.
+pub fn on_screen(screen: HMONITOR) -> Result<Rc<Gfx>> {
+    let adapter = adapter_for(screen.0 as isize)?;
+    let wanted = adapter.as_ref().map(|adapter| adapter.luid);
+    DEVICES.with(|devices| {
+        devices.borrow_mut().retain(|gfx| gfx.adapter == wanted || Rc::strong_count(gfx) > 1);
+        let held = devices.borrow().iter().find(|gfx| gfx.adapter == wanted).cloned();
         if let Some(gfx) = held {
             let asked = gfx.software.as_ref().and_then(Cell::get);
             if asked.is_none_or(|at| Instant::now() < at) {
                 return Ok(gfx);
             }
-            match Gfx::new() {
+            match Gfx::on_adapter(adapter.as_ref(), Some(screen)) {
                 Ok(made) if made.software.is_none() => {
                     crate::journal::note("drawing on the graphics card again, not in software");
                     let made = Rc::new(made);
-                    *cell.borrow_mut() = Some(made.clone());
+                    let mut devices = devices.borrow_mut();
+                    devices.retain(|kept| !Rc::ptr_eq(kept, &gfx));
+                    devices.push(made.clone());
                     return Ok(made);
                 }
                 // (Not yet: asked again later.)
@@ -226,33 +412,73 @@ pub fn current() -> Result<Rc<Gfx>> {
                 }
             }
         }
-        let gfx = Rc::new(Gfx::new()?);
-        *cell.borrow_mut() = Some(gfx.clone());
+        let gfx = Rc::new(Gfx::on_adapter(adapter.as_ref(), Some(screen))?);
+        devices.borrow_mut().push(gfx.clone());
         Ok(gfx)
     })
 }
 
-/// This thread's graphics device (see `current`), let go of as what is given is: before the thread ends, not as its
-/// own storage is let go of after (on Windows, under the loader's lock, where the device let go of waits on threads
-/// of its own that wait on that lock, and the thread never ends). For a thread of its own that draws a while and ends
-/// (a test's; one that asks something, see `station::run`).
+/// This thread's devices now (see `on_screen`).
+pub fn of_thread() -> Vec<Rc<Gfx>> {
+    DEVICES.with(|devices| devices.borrow().clone())
+}
+
+/// This thread's device for the window `hwnd`, on the screen holding the most of it (see `on_screen`).
+pub fn for_window(hwnd: HWND) -> Result<Rc<Gfx>> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+    on_screen(unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// This thread's device for a window at `area` (physical screen px), on the screen holding the most of it (see
+/// `on_screen`): for one not placed there yet, or larger than what it draws (the panel's).
+pub fn for_area(area: RECT) -> Result<Rc<Gfx>> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONEAREST};
+    on_screen(unsafe { MonitorFromRect(&area, MONITOR_DEFAULTTONEAREST) })
+}
+
+/// This thread's device for a window on the screen the pointer is on (see `on_screen`): for one to open there.
+pub fn at_pointer() -> Result<Rc<Gfx>> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+    let mut pointer = POINT::default();
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pointer)? };
+    on_screen(unsafe { MonitorFromPoint(pointer, MONITOR_DEFAULTTOPRIMARY) })
+}
+
+/// This thread's device for the main screen's windows (see `on_screen`): for a window not anywhere yet, which takes
+/// up the device of its own screen as it is placed and drawn.
+pub fn for_main_screen() -> Result<Rc<Gfx>> {
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+    on_screen(unsafe { MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY) })
+}
+
+/// This thread's devices let go of as what is given is: before the thread ends, not as its own storage is let go of
+/// after (on Windows, under the loader's lock, where a device let go of waits on threads of its own that wait on that
+/// lock, and the thread never ends). For a thread of its own that draws a while and ends (one that asks something,
+/// see `station::run`).
+pub fn held_till_done() -> Held {
+    Held(None)
+}
+
+/// As `held_till_done`, with the device for the main screen's windows (see `for_main_screen`): for a test's thread.
+#[cfg(test)]
 pub fn held() -> Result<Held> {
-    current().map(Held)
+    for_main_screen().map(|gfx| Held(Some(gfx)))
 }
 
 /// See `held`.
-pub struct Held(Rc<Gfx>);
+pub struct Held(Option<Rc<Gfx>>);
 
 impl std::ops::Deref for Held {
     type Target = Rc<Gfx>;
     fn deref(&self) -> &Rc<Gfx> {
-        &self.0
+        self.0.as_ref().expect("held with a device")
     }
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        CURRENT.with(|cell| cell.borrow_mut().take());
+        drop(self.0.take());
+        let_go();
     }
 }
 
@@ -264,22 +490,23 @@ thread_local! {
 /// How often a window failing to draw with the device still there is noted.
 const FAILED_NOTED_EVERY: Duration = Duration::from_secs(60);
 
-/// This thread's device let go of now, by a thread that drew and is to end (once what it drew with is let go of: its
-/// windows' surfaces). Left to the thread's end, it would be let go of as the thread's own are, under the loader's
-/// lock, where the driver's threads it waits on cannot end: the thread hung there, and the device stayed with all it
-/// held.
+/// This thread's devices let go of now, by a thread that drew and is to end (once what it drew with is let go of: its
+/// windows' surfaces). Left to the thread's end, they would be let go of as the thread's own are, under the loader's
+/// lock, where the driver's threads they wait on cannot end: the thread hung there, and the devices stayed with all
+/// they held.
 pub fn let_go() {
-    drop(CURRENT.with(|cell| cell.borrow_mut().take()));
+    drop(DEVICES.with(|devices| std::mem::take(&mut *devices.borrow_mut())));
 }
-/// Drawing failed for `what` (a window's name), with `error` where it is had. Only where the device is gone (a
-/// driver update, a graphics reset: removed, as it says; or the compositor's device no longer valid) is it let go
-/// of: the next `current` makes a new one, and each window, seeing it, makes its surfaces again. Drawing that failed
-/// on a device still there (short of memory for a moment, a window's sized) is drawn again on it as the window next
-/// draws: the frame not shown meanwhile (see `Frame::apart`), and the window left as it showed, not emptied as its
-/// surfaces are made anew. Either is noted, the reason a device was removed with it. Whether the device is gone (a
-/// window that keeps its surfaces till then makes them anew).
-pub fn failed(what: &'static str, error: Option<&windows::core::Error>) -> bool {
-    let Some(gfx) = CURRENT.with(|cell| cell.borrow().clone()) else { return true };
+
+/// Drawing with `gfx` failed for `what` (a window's name), with `error` where it is had. Only where the device is gone
+/// (a driver update, a graphics reset: removed, as it says, or the compositor's device no longer valid) is it let go
+/// of: the next asked for its screens (see `on_screen`) is a new one, the adapters seen again (one may be gone, or
+/// come), and each window, seeing it, makes its surfaces again. Drawing that failed on a device still there (short of
+/// memory for a moment, a window's sized) is drawn again on it as the window next draws: the frame not shown meanwhile
+/// (see `Frame::apart`), and the window left as it showed, not emptied as its surfaces are made anew. Either is noted,
+/// the reason a device was removed with it. Whether the device is gone (a window that keeps its surfaces till then
+/// makes them anew).
+pub fn failed(what: &'static str, gfx: &Gfx, error: Option<&windows::core::Error>) -> bool {
     let kind = if gfx.software.is_some() { "in software" } else { "on the graphics card" };
     let said = error.map_or_else(String::new, |error| format!(" ({error}, {:#010X})", error.code().0));
     let removed = gfx.d3d().ok().and_then(|d3d| unsafe { d3d.GetDeviceRemovedReason() }.err());
@@ -303,7 +530,12 @@ pub fn failed(what: &'static str, error: Option<&windows::core::Error>) -> bool 
         }
         return false;
     }
-    CURRENT.with(|cell| cell.borrow_mut().take());
+    drop(DEVICES.with(|devices| {
+        let mut devices = devices.borrow_mut();
+        let lost = devices.iter().position(|held| std::ptr::eq(&**held, gfx));
+        lost.map(|lost| devices.remove(lost))
+    }));
+    screens_changed();
     crate::journal::note(match removed {
         Some(why) => format!("{what}: the graphics device ({kind}) was lost{said}: {why} ({:#010X}); drawing on a new one", why.code().0),
         None => format!("{what}: the compositor's device is no longer valid{said}; drawing on a new one"),
@@ -311,39 +543,60 @@ pub fn failed(what: &'static str, error: Option<&windows::core::Error>) -> bool 
     true
 }
 
-/// Whether hardware failing to make a device with `error` leaves Windows' software renderer to draw on: only where
-/// no graphics card can (none there, or none that does Direct3D 11). Any other failure is the card's for the moment
-/// (being reset, out of memory): the device is asked for again shortly (see `current`), on the card; drawn in
-/// software meanwhile, everything would be drawn slowly on the processor till Glance started again.
+/// Whether the adapter failing to make a device with `error` leaves Windows' software renderer to draw on: only where
+/// it cannot (it does no Direct3D 11). Any other failure is the card's for the moment (being reset, out of memory):
+/// the device is asked for again shortly (see `on_screen`), on the card. Drawn in software meanwhile for good,
+/// everything would be drawn slowly on the processor till Glance started again.
 fn software_instead(error: windows::core::HRESULT) -> bool {
     error == windows::Win32::Graphics::Dxgi::DXGI_ERROR_UNSUPPORTED
 }
 
 impl Gfx {
+    /// A device for drawing shown on no screen (off screen, for a picture), on the adapter Windows ranks as taking
+    /// least power (see `chosen`): the studio's and the tests' (each window's is its screen's, see `on_screen`).
+    #[cfg(any(test, feature = "studio"))]
     pub fn new() -> Result<Self> {
-        // The graphics card; without a working one, Windows' software renderer.
-        let create = |kind| {
+        let adapter = adapters_now()?.iter().find(|adapter| !adapter.software).cloned();
+        Gfx::on_adapter(adapter.as_ref(), None)
+    }
+
+    /// A device on `adapter` (None: there is no card, and it is drawn in software), for windows on `screen`, where
+    /// they are on one.
+    fn on_adapter(adapter: Option<&Shown>, screen: Option<HMONITOR>) -> Result<Self> {
+        // The card, and without a working one, Windows' software renderer.
+        let create = |on: Option<&IDXGIAdapter>, kind| {
             let mut d3d: Option<ID3D11Device> = None;
-            unsafe {
-                D3D11CreateDevice(None, kind, Default::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d), None, None)
-            }
-            .map(|_| d3d.unwrap())
+            unsafe { D3D11CreateDevice(on, kind, Default::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut d3d), None, None) }.map(|_| d3d.unwrap())
+        };
+        let card = |adapter: &Shown| -> Result<ID3D11Device> {
+            let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory1()? };
+            let on: IDXGIAdapter = unsafe { factory.EnumAdapterByLuid(adapter.luid.luid())? };
+            create(Some(&on), D3D_DRIVER_TYPE_UNKNOWN)
         };
         // A card that failed for a moment (as it is reset) is drawn on in software meanwhile, and asked again (see
-        // `current`): its windows are not left undrawn, nor drawn slowly for good.
+        // `on_screen`): its windows are not left undrawn, nor drawn slowly for good.
         let made = Instant::now();
-        let (d3d, software) = match create(D3D_DRIVER_TYPE_HARDWARE) {
-            Ok(d3d) => (d3d, None),
-            Err(error) => {
+        let (d3d, software) = match adapter.map(card) {
+            Some(Ok(d3d)) => (d3d, None),
+            Some(Err(error)) => {
                 let again = (!software_instead(error.code())).then(|| Instant::now() + CARD_ASKED_AGAIN);
                 crate::journal::note(format!("the graphics card made no device ({error}); drawing in software{}", if again.is_some() { " till it does" } else { "" }));
-                (create(D3D_DRIVER_TYPE_WARP)?, Some(Cell::new(again)))
+                (create(None, D3D_DRIVER_TYPE_WARP)?, Some(Cell::new(again)))
+            }
+            None => {
+                crate::journal::note("no graphics card to draw on, drawing in software");
+                (create(None, D3D_DRIVER_TYPE_WARP)?, Some(Cell::new(None)))
             }
         };
         let took = made.elapsed();
-        if took > Duration::from_millis(500) {
-            crate::journal::note(format!("a graphics device took {} ms to make", took.as_millis()));
-        }
+        // Once for each device made: what it is made on, for what screen, and how long that took (a card asleep as
+        // Glance starts may take seconds).
+        crate::journal::note(format!(
+            "a graphics device made on {} in {} ms, for {}",
+            adapter.map_or_else(|| "no card".to_string(), |adapter| format!("{} ({})", adapter.name, adapter.luid)),
+            took.as_millis(),
+            screen.map_or_else(|| "no screen".to_string(), screen_said),
+        ));
         // Its immediate context guarded (the context, not the device, answers for that): the frames of what is
         // behind are read back on it from other threads (see `scene`), which they are not unless it is.
         let guarded = unsafe { d3d.GetImmediateContext() }
@@ -353,7 +606,13 @@ impl Gfx {
                 guard.GetMultithreadProtected().as_bool()
             });
         let dxgi: IDXGIDevice = d3d.cast()?;
-        *DRAWN_ON.lock().unwrap() = Some(adapter(&dxgi, software.is_some()));
+        {
+            let key = adapter.map(|adapter| adapter.luid);
+            let said = described(&dxgi, software.is_some());
+            let mut drawn = DRAWN_ON.lock().unwrap();
+            drawn.retain(|(on, _)| *on != key);
+            drawn.push((key, said));
+        }
         let factory: ID2D1Factory1 = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, None)? };
         let device: ID2D1Device = unsafe { factory.CreateDevice(&dxgi)? };
         // What Direct2D keeps of the textures its effects draw through (the frost's blur, shadows), past which it
@@ -389,6 +648,7 @@ impl Gfx {
         };
         ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Gfx {
+            adapter: adapter.map(|adapter| adapter.luid),
             software,
             scratch: RefCell::new(None),
             scratch_context: RefCell::new(None),
@@ -2385,7 +2645,7 @@ const TEND_EVERY: Duration = Duration::from_secs(1);
 /// The thread's timer (see `Gfx::tend`): what is due given back, and the timer stopped once nothing more is.
 unsafe extern "system" fn tended(_: HWND, _: u32, timer: usize, _: u32) {
     // (A device lost and made anew has a timer of its own, if any.)
-    let Some(gfx) = CURRENT.with(|cell| cell.borrow().clone()).filter(|gfx| gfx.tending.get() == timer) else {
+    let Some(gfx) = DEVICES.with(|devices| devices.borrow().iter().find(|gfx| gfx.tending.get() == timer).cloned()) else {
         let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::KillTimer(None, timer) };
         return;
     };
@@ -2815,6 +3075,7 @@ pub fn effect_input(dc: &ID2D1DeviceContext, bitmap: &ID2D1Bitmap1) -> Result<ID
     }
 }
 
+/// The least rectangle holding both `a` and `b`.
 pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right: left + width, bottom: top + height }
 }
@@ -3065,7 +3326,7 @@ mod tests {
                 unsafe {
                     let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
                 }
-                let gfx = super::current().expect("graphics");
+                let gfx = super::for_main_screen().expect("graphics");
                 let window = crate::ui::window::Window::new().expect("a window");
                 let mut surface = super::Surface::new(&gfx, window.hwnd).expect("a surface");
                 surface.draw(&gfx, (200, 100), 1.0, |frame| frame.fill_rounded(super::Color::hex(0xFF0000, 1.0), 0.0, 0.0, 200.0, 100.0, 4.0)).expect("drawn");
@@ -3291,6 +3552,96 @@ mod tests {
         let fallen = super::fallen_back(&words, std::slice::from_ref(&(0..11)), "Microsoft YaHei UI", super::super::canvas::CODE_FACE);
         assert_eq!(fallen.iter().map(|(range, _)| range.clone()).collect::<Vec<_>>(), vec![9..11]);
         assert!(!fallen[0].1.eq_ignore_ascii_case(super::super::canvas::CODE_FACE));
+    }
+
+    /// An adapter as DXGI lists it, a card (not Windows' renderer in software), its outputs showing `screens`.
+    fn card(name: &str, low: u32, screens: &[isize]) -> super::Shown {
+        super::Shown { luid: super::Luid { high: 0, low }, name: name.into(), software: false, screens: screens.to_vec() }
+    }
+
+    /// A window draws on the adapter driving its screen, of the adapters listed as Windows ranks them (the one taking
+    /// least power first): a laptop's own screen the integrated card drives is never drawn for on the discrete card
+    /// (drawn there, the discrete card stayed awake for Glance alone, and its fan with it), one the discrete card
+    /// drives (its MUX switched to it, a screen on its own port, a desktop's card) is drawn for on that card, and a
+    /// virtual display no adapter lists is drawn for on the one taking least power. Windows' renderer in software is
+    /// never chosen: with no card at all, none is (drawn in software then, see `Gfx::on_adapter`).
+    #[test]
+    fn a_window_draws_on_the_adapter_driving_its_screen() {
+        let (own, plugged, virtual_display) = (11, 22, 33);
+        let renderer = |screens: &[isize]| super::Shown { software: true, ..card("Microsoft Basic Render Driver", 9, screens) };
+        let chosen = |adapters: &[super::Shown], screen| super::chosen(adapters, screen).map(|adapter| adapter.name.clone());
+        let name = |name: &str| Some(name.to_string());
+        // Hybrid (Optimus): the integrated card drives the laptop's screen, the discrete one no screen at all.
+        let hybrid = [card("Radeon 780M", 1, &[own]), card("GeForce RTX 4060 Laptop", 2, &[]), renderer(&[])];
+        assert_eq!(chosen(&hybrid, own), name("Radeon 780M"));
+        // A screen plugged into the discrete card's own port, the laptop's still the integrated card's.
+        let plugged_in = [card("Radeon 780M", 1, &[own]), card("GeForce RTX 4060 Laptop", 2, &[plugged]), renderer(&[])];
+        assert_eq!(chosen(&plugged_in, own), name("Radeon 780M"));
+        assert_eq!(chosen(&plugged_in, plugged), name("GeForce RTX 4060 Laptop"));
+        // The MUX switched to the discrete card (direct mode): it drives the laptop's screen, the integrated none.
+        let direct = [card("Radeon 780M", 1, &[]), card("GeForce RTX 4060 Laptop", 2, &[own])];
+        assert_eq!(chosen(&direct, own), name("GeForce RTX 4060 Laptop"));
+        // A desktop's card, alone, driving both screens.
+        let desktop = [card("GeForce RTX 5070 Ti", 3, &[own, plugged]), renderer(&[])];
+        assert_eq!(chosen(&desktop, plugged), name("GeForce RTX 5070 Ti"));
+        // Listed by both (a card drawing for the other's outputs lists them): the one taking least power.
+        let both = [card("Radeon 780M", 1, &[own]), card("GeForce RTX 4060 Laptop", 2, &[own])];
+        assert_eq!(chosen(&both, own), name("Radeon 780M"));
+        // A virtual display (a remote desktop's, an indirect display's) no adapter lists: the one taking least power.
+        assert_eq!(chosen(&plugged_in, virtual_display), name("Radeon 780M"));
+        // Windows' renderer listing the screen (as on a machine with no card's driver), with a card there: the card.
+        let rendered = [renderer(&[own]), card("Radeon 780M", 1, &[])];
+        assert_eq!(chosen(&rendered, own), name("Radeon 780M"));
+        // No card at all: none.
+        assert_eq!(chosen(&[renderer(&[own])], own), None);
+        assert_eq!(chosen(&[], own), None);
+    }
+
+    /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.
+    fn in_thread() -> std::rc::Weak<super::Gfx> {
+        let gfx = std::rc::Rc::new(super::Gfx::on_adapter(None, None).expect("drawn in software"));
+        super::DEVICES.with(|devices| devices.borrow_mut().push(gfx.clone()));
+        std::rc::Rc::downgrade(&gfx)
+    }
+
+    /// Whether this thread holds `gfx` among its devices (see `on_screen`).
+    fn kept(gfx: &std::rc::Weak<super::Gfx>) -> bool {
+        super::DEVICES.with(|devices| devices.borrow().iter().any(|held| std::ptr::eq(std::rc::Rc::as_ptr(held), gfx.as_ptr())))
+    }
+
+    /// A device of another adapter than the one a screen is now asked for, that no window of the thread holds (its
+    /// windows moved to screens another adapter drives), is let go of as that one is asked for: left, it kept its card
+    /// awake. One a window still holds is kept. (Windows' renderer in software stands for the other adapter: it is no
+    /// screen's while there is a card.)
+    #[test]
+    fn a_device_no_window_holds_goes_as_another_adapters_is_asked_for() {
+        let _device = super::held().unwrap();
+        let other = in_thread();
+        let held_too = in_thread();
+        let held = held_too.upgrade();
+        let main = super::for_main_screen().expect("graphics");
+        assert!(main.software.is_none(), "no card here to draw the main screen on");
+        assert!(!kept(&other), "a device no window holds, of another adapter, kept as another's is asked for");
+        assert!(kept(&held_too), "a device a window holds let go of");
+        drop(held);
+        drop(main);
+    }
+
+    /// A thread drawing nothing for a while (its windows hidden) lets go of each device of its that no window of it
+    /// holds and that no screen there is would be drawn for (a card whose screen was unplugged), and keeps the one a
+    /// screen would be, and one a window holds.
+    #[test]
+    fn a_resting_thread_lets_go_of_devices_no_screen_needs() {
+        let _device = super::held().unwrap();
+        let main = std::rc::Rc::downgrade(&super::for_main_screen().expect("graphics"));
+        let stray = in_thread();
+        let held_too = in_thread();
+        let held = held_too.upgrade();
+        super::let_go_of_strays();
+        assert!(!kept(&stray), "a device no screen needs and no window holds kept");
+        assert!(kept(&main), "the main screen's device, no window holding it, let go of");
+        assert!(kept(&held_too), "a device a window holds let go of");
+        drop(held);
     }
 }
 

@@ -350,7 +350,9 @@ fn run(made: Sender<Option<isize>>) {
     // (The shell, which opens what is looked at, expects a single-threaded apartment.)
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
     let hwnd = unsafe { make_window() };
-    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::current()) else {
+    // (Drawn first on the main screen's device: it takes up the screen's it opens on as it is drawn, see
+    // `Looker::draw`.)
+    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::for_main_screen()) else {
         let _ = made.send(None);
         return;
     };
@@ -2044,10 +2046,16 @@ impl Looker {
         if !self.up() {
             return;
         }
-        if self.drawn.is_none() {
-            if let Ok(gfx) = gfx::current() {
+        // On the device for the screen it opens on (see `gfx::on_screen`): what it draws on made anew on it as it
+        // opens on a screen another adapter drives, or its device was lost.
+        if let Ok(gfx) = gfx::for_area(self.monitor) {
+            if !Rc::ptr_eq(&gfx, &self.gfx) {
+                self.drawn = None;
+                self.showing = None;
                 self.gfx = gfx;
             }
+        }
+        if self.drawn.is_none() {
             use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
             let frosting = match self.skin {
                 Skin::Glass => Some((FROST_BLUR, GLASS_SATURATION)),
@@ -2082,7 +2090,7 @@ impl Looker {
             }
         };
         match done {
-            Err(error) if gfx::failed("look", Some(&error)) => {}
+            Err(error) if gfx::failed("look", &gfx, Some(&error)) => {}
             _ => self.drawn = Some(drawn),
         }
         self.place_pane(shape);
@@ -2225,7 +2233,7 @@ impl Looker {
         if self.skin == Skin::Glass && frosted {
             let theme = Theme::new(Skin::Glass, self.dark);
             if let Err(error) = super::skins::glass_sheet(frame, &theme, Rect { x: 0.0, y: 0.0, w, h }, c.radius, self.frost) {
-                gfx::failed("look", Some(&error));
+                gfx::failed("look", frame.gfx, Some(&error));
             }
             frame.place(placed);
         } else {
@@ -3607,7 +3615,7 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let file = |name: &str| PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<PathBuf>();
         let words = "40分钟精讲：为什么说宋仁宗时代，是中国文人的黄金时代？ #历史#宋仁宗 #狸猫换太子 #人文创作焕新计划
@@ -3657,7 +3665,7 @@ mod tests {
     #[ignore = "writes a picture to look at"]
     fn folder_looks() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let now = crate::station::now_ms();
         let member = |name: &str, folder: bool, size: u64, ago: u64| Member { path: PathBuf::from(format!(r"C:\site\{name}")), name: name.into(), seen: None, folder, size: Some(size), written: Some(now - ago * 60_000) };
@@ -3779,7 +3787,7 @@ mod tests {
     #[test]
     fn a_page_keeps_a_page_shape() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = Item { key: 1, title: "a.pdf".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:.pdf")), from: None, open: None, copy: None, pastes: false };
         let mut looker = Looker::new(HWND::default(), gfx, reads);
@@ -3796,7 +3804,7 @@ mod tests {
     #[test]
     fn a_sheet_keeps_its_size_as_what_it_shows_is_read() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = |name: &str| Item { key: 1, title: name.into(), about: String::new(), shows: Shows::File(PathBuf::from(format!(r"C:\a\{name}"))), from: None, open: None, copy: None, pastes: false };
         let picture = |size: (u32, u32)| Picture { key: 1, size, pixels: std::sync::Arc::new(Vec::new()) };
@@ -3822,7 +3830,7 @@ mod tests {
     #[test]
     fn a_video_with_nothing_to_show_is_as_large_as_what_has_no_preview() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = Item { key: 1, title: "broken.mp4".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a\broken.mp4")), from: None, open: None, copy: None, pastes: false };
         let most = (1400.0, 900.0);
@@ -3939,7 +3947,7 @@ mod tests {
     #[test]
     fn a_folder_gone_into_is_what_shows() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None };
         let outer = (0..30).map(|place| member(&format!("{place}"), place == 0)).collect::<Vec<_>>();

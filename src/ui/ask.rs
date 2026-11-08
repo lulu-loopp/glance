@@ -726,10 +726,15 @@ impl Dialog {
         if size.0 == 0 || size.1 == 0 {
             return;
         }
-        if self.surface.is_none() {
-            if let Ok(gfx) = gfx::current() {
+        // On the device for its screen (see `gfx::on_screen`): its surface made anew on it as it is moved onto a
+        // screen another adapter drives, or its device was lost.
+        if let Ok(gfx) = gfx::for_window(self.hwnd) {
+            if !Rc::ptr_eq(&gfx, &self.gfx) {
+                self.surface = None;
                 self.gfx = gfx;
             }
+        }
+        if self.surface.is_none() {
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return };
@@ -737,7 +742,7 @@ impl Dialog {
         let (scale, area) = (self.scale, (size.0 as f32 / self.scale, size.1 as f32 / self.scale));
         // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
         match surface.draw(&gfx, size, scale, |frame| self.paint(frame, area)) {
-            Err(error) if gfx::failed("dialog", Some(&error)) => {}
+            Err(error) if gfx::failed("dialog", &gfx, Some(&error)) => {}
             _ => self.surface = Some(surface),
         }
         if self.focus == Hit::Words {
@@ -1174,13 +1179,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
+/// The device for a dialog over `owner` (see `gfx::on_screen`): on its screen, or with none, the pointer's (where it
+/// opens then).
+pub(super) fn device_over(owner: HWND) -> windows::core::Result<Rc<Gfx>> {
+    if owner.is_invalid() {
+        gfx::at_pointer()
+    } else {
+        gfx::for_window(owner)
+    }
+}
+
 /// Asks `asked` in a window over `owner`: what the reader gave of their
 /// own (nothing, where they were not asked for it), if the answer was its
 /// `yes`; none, if not. With no `owner` (asked from a thread of its own, for
 /// what was pressed on the panel or a widget), it is at the pointer, over the
 /// windows kept above others as the panel is.
 pub fn show(owner: HWND, asked: &Asked) -> Option<Said> {
-    let gfx = gfx::current().ok()?;
+    let gfx = device_over(owner).ok()?;
     // Shown till it returns (see `life`).
     let _showing = super::life::Showing::of(&gfx);
     let own = asked.own.as_ref().map(|own| OwnText {

@@ -250,7 +250,8 @@ fn run(made: Sender<Option<isize>>) {
     // (The shell, which opens what is chosen, expects a single-threaded apartment.)
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
     let hwnd = unsafe { make_window() };
-    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::current()) else {
+    // (Drawn first on the main screen's device: it takes up its own screen's as it is drawn, see `Finder::draw`.)
+    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::for_main_screen()) else {
         let _ = made.send(None);
         return;
     };
@@ -694,10 +695,16 @@ impl Finder {
             return;
         }
         self.height = self.sheet_height();
-        if self.drawn.is_none() {
-            if let Ok(gfx) = gfx::current() {
+        // On the device for the screen it is on (see `gfx::on_screen`): what it draws on made anew on it as it opens on
+        // a screen another adapter drives, or its device was lost.
+        if let Ok(gfx) = gfx::for_area(self.rect) {
+            if !Rc::ptr_eq(&gfx, &self.gfx) {
+                self.drawn = None;
+                self.showing = None;
                 self.gfx = gfx;
             }
+        }
+        if self.drawn.is_none() {
             use crate::ui::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
             let frosting = match self.skin {
                 Skin::Glass => Some((FROST_BLUR, GLASS_SATURATION)),
@@ -730,7 +737,7 @@ impl Finder {
         };
         // (Not drawn, it keeps what it draws on, and draws on it again; the device gone, it makes all anew.)
         match done {
-            Err(error) if gfx::failed("search", Some(&error)) => {}
+            Err(error) if gfx::failed("search", &gfx, Some(&error)) => {}
             _ => self.drawn = Some(drawn),
         }
         self.place_ime();
@@ -755,7 +762,7 @@ impl Finder {
         if self.skin == Skin::Glass && frosted {
             let theme = Theme::new(Skin::Glass, self.dark);
             if let Err(error) = crate::ui::skins::glass_sheet(frame, &theme, Rect { x: 0.0, y: 0.0, w: WIDTH, h: height }, c.radius, self.frost) {
-                gfx::failed("search", Some(&error));
+                gfx::failed("search", frame.gfx, Some(&error));
             }
             frame.origin(x, y);
         } else {
@@ -2057,7 +2064,7 @@ mod tests {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let (asks, _asked) = std::sync::mpsc::channel();
         let now = SystemTime::now();
         let row = |kind: Kind, name: &str, marks: Vec<(usize, usize)>, detail: &str, what: What, bytes: Option<u64>, ago: Option<u64>| Row {
