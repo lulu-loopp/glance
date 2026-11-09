@@ -1,16 +1,20 @@
 //! Folders listed again, and every folder found new in them listed in turn, by several threads at once in the
-//! background, what they find put in the index by one, as each folder is listed, for it to be searched meanwhile.
+//! background, what they find put in the index by one, as each part of a folder is listed, for it to be searched
+//! meanwhile.
 //!
 //! The machine's whole share of listing is one `Pool`: however many drives are listed at once, and however many of
-//! them lie on one disk, no more folders are listed at once than its lanes (half the processors), and no more of what
-//! was listed waits to be put in the indexes than its bytes (a thread that listed a folder waits for room before it
-//! hands it on, as the one putting names in falls behind).
+//! them lie on one disk, no more folders are begun to be listed at once than its lanes (half the processors), split
+//! evenly between the rounds listing (see `Using::may_take`), so that a drive whose calls hang holds no more than its
+//! own share of them, and no more of what was listed waits to be put in the indexes than its bytes. A folder's names
+//! are handed on part by part as they are read (see `drive::Names`), each only once there is room for it (a thread
+//! waits for room before it makes the part, as the one putting names in falls behind), so that a folder larger than
+//! all the room is put in part by part, all that is held of it counted.
 //!
 //! A round may end at a time set (`until`): the folders not listed by then are left marked to be listed
 //! (`flag::STALE`, as every folder found is marked till it is listed), for a round after (see `super::sweep`).
 
 use super::drive::{self, Drive, Folder, Listing};
-use super::index::{flag, Changes, Index, Item};
+use super::index::{flag, Changes, Index, Item, Relisting};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex, OnceLock, RwLock};
@@ -57,13 +61,45 @@ pub struct Pool {
     freed: Condvar,
 }
 
-/// What is taken of a pool now: folders being listed, bytes listed waiting to be put in, and the most of each yet.
-#[derive(Default, Clone, Copy, Debug)]
+/// What is taken of a pool now: how many lanes each round listing holds (by its number, in the order they began),
+/// how many rounds were begun, bytes listed waiting to be put in, and the most lanes held at once and bytes waiting
+/// yet.
+#[derive(Default, Clone, Debug)]
 struct Using {
-    listing: usize,
+    holding: Vec<(u64, usize)>,
+    begun: u64,
     queued: usize,
     most_listing: usize,
     most_queued: usize,
+}
+
+impl Using {
+    /// How many lanes of `lanes` the round at `at` (in the order they began) may hold: as many as each round, split
+    /// evenly, those begun first given each one more of the lanes that do not split (none for a round begun once
+    /// there are more rounds than lanes, till one ends).
+    fn share(&self, at: usize, lanes: usize) -> usize {
+        let rounds = self.holding.len();
+        lanes / rounds + usize::from(at < lanes % rounds)
+    }
+
+    /// Whether the round numbered `round` may take another lane of `lanes`: while it holds fewer than its share. Its
+    /// own lanes alone are counted (a round holding more than its share, taken while there were fewer rounds, takes
+    /// no more till it holds fewer, each listing it holds ending as it may): so no more folders are begun at once than
+    /// the lanes, and a round whose listings do not end (a drive that answers nothing, or one taken out as it was
+    /// listed, its calls not ending though cancelled) holds the others to no fewer than their own shares.
+    fn may_take(&self, round: u64, lanes: usize) -> bool {
+        let at = self.at(round);
+        self.holding[at].1 < self.share(at, lanes)
+    }
+
+    fn at(&self, round: u64) -> usize {
+        self.holding.iter().position(|&(number, _)| number == round).unwrap()
+    }
+
+    /// How many lanes are held, all rounds' together.
+    fn listing(&self) -> usize {
+        self.holding.iter().map(|&(_, held)| held).sum()
+    }
 }
 
 /// The machine's pool.
@@ -77,16 +113,17 @@ impl Pool {
         Pool { lanes, queued_most, using: Mutex::new(Using::default()), freed: Condvar::new() }
     }
 
-    /// A lane taken to list a folder through (waited for while all are taken), given back as it is dropped.
-    fn lane(&self) -> Lane<'_> {
-        let mut using = self.freed.wait_while(self.using.lock().unwrap(), |using| using.listing >= self.lanes).unwrap();
-        using.listing += 1;
-        using.most_listing = using.most_listing.max(using.listing);
-        Lane { pool: self }
+    /// A round's share of the lanes (see `Using::may_take`), the others' made smaller, till it is dropped.
+    fn share(&self) -> Share<'_> {
+        let mut using = self.using.lock().unwrap();
+        using.begun += 1;
+        let round = using.begun;
+        using.holding.push((round, 0));
+        Share { pool: self, round }
     }
 
     /// Room for `bytes` more of what was listed to wait (waited for while what waits would hold more than the pool's
-    /// bytes, one larger than all of them waiting for none to be waiting).
+    /// bytes, a part larger than all of them waiting for none to be waiting, and then waiting alone).
     fn room(&self, bytes: usize) {
         let mut using = self.freed.wait_while(self.using.lock().unwrap(), |using| using.queued > 0 && using.queued + bytes > self.queued_most).unwrap();
         using.queued += bytes;
@@ -101,42 +138,84 @@ impl Pool {
 
     #[cfg(test)]
     fn using(&self) -> Using {
-        *self.using.lock().unwrap()
+        self.using.lock().unwrap().clone()
     }
 }
 
-/// A lane of a pool, taken (see `Pool::lane`).
-struct Lane<'a> {
+/// A round's share of a pool's lanes, taken (see `Pool::share`), given back as it is dropped (once the round's
+/// listings have ended).
+struct Share<'a> {
     pool: &'a Pool,
+    round: u64,
 }
 
-impl Drop for Lane<'_> {
+impl Share<'_> {
+    /// A lane taken to list a folder through (waited for while the round holds its share), given back as it is
+    /// dropped.
+    fn lane(&self) -> Lane<'_> {
+        let pool = self.pool;
+        let mut using = pool.freed.wait_while(pool.using.lock().unwrap(), |using| !using.may_take(self.round, pool.lanes)).unwrap();
+        let at = using.at(self.round);
+        using.holding[at].1 += 1;
+        using.most_listing = using.most_listing.max(using.listing());
+        Lane { share: self }
+    }
+}
+
+impl Drop for Share<'_> {
     fn drop(&mut self) {
-        self.pool.using.lock().unwrap().listing -= 1;
+        let mut using = self.pool.using.lock().unwrap();
+        let at = using.at(self.round);
+        using.holding.remove(at);
+        // (The others' shares made larger.)
         self.pool.freed.notify_all();
     }
 }
 
-/// How much memory a folder's listing holds, as it waits.
-fn bytes(listing: &Listing) -> usize {
-    size_of::<(u64, Listing)>()
-        + match listing {
-            Listing::Items(items) => items.capacity() * size_of::<Item>() + items.iter().map(|item| item.name.capacity() * 2).sum::<usize>(),
-            _ => 0,
-        }
+/// A lane of a pool, taken (see `Share::lane`).
+struct Lane<'a> {
+    share: &'a Share<'a>,
 }
 
-/// The folders listed, as they wait to be put in (each with how much it holds), and how many threads list still.
+impl Drop for Lane<'_> {
+    fn drop(&mut self) {
+        let pool = self.share.pool;
+        let mut using = pool.using.lock().unwrap();
+        let at = using.at(self.share.round);
+        using.holding[at].1 -= 1;
+        pool.freed.notify_all();
+    }
+}
+
+/// What a thread listing a folder hands on: a part of its names, as they were read, or how its listing ended.
+enum Handed {
+    Names(Vec<Item>),
+    Ended(Listing),
+}
+
+/// How much memory what is handed on holds as it waits, but its names' (see `drive::Names::held`).
+const HANDED: usize = size_of::<Handing>();
+
+/// What was handed on of a folder, as it waits to be put in: the folder's id, and how much it holds.
+type Handing = (u64, Handed, usize);
+
+/// What was handed on, as it waits to be put in, and how many threads list still.
 struct Waiting {
-    listed: Mutex<(VecDeque<(u64, Listing, usize)>, usize)>,
+    listed: Mutex<(VecDeque<Handing>, usize)>,
     came: Condvar,
 }
 
 impl Waiting {
-    /// The next listed, waited for (none once no thread lists any more and none waits).
-    fn next(&self) -> Option<(u64, Listing, usize)> {
+    /// What was handed on next, waited for (none once no thread lists any more and none waits).
+    fn next(&self) -> Option<Handing> {
         let mut listed = self.came.wait_while(self.listed.lock().unwrap(), |(listed, listing)| listed.is_empty() && *listing > 0).unwrap();
         listed.0.pop_front()
+    }
+
+    /// `handed` of the folder `id`, holding `held` (room made for it in the pool), handed on.
+    fn hand_on(&self, id: u64, handed: Handed, held: usize) {
+        self.listed.lock().unwrap().0.push_back((id, handed, held));
+        self.came.notify_one();
     }
 }
 
@@ -172,9 +251,12 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], pool: &Pool,
     let more = Condvar::new();
     let waiting = Waiting { listed: Mutex::new((VecDeque::new(), pool.lanes)), came: Condvar::new() };
     let mut changes = Changes::default();
+    // The folders being put in part by part, by their ids, with how many names each was found to hold yet.
+    let mut relisting: HashMap<u64, (Relisting, usize)> = HashMap::new();
+    let share = pool.share();
     std::thread::scope(|scope| {
         for _ in 0..pool.lanes {
-            let (jobs, more, waiting) = (&jobs, &more, &waiting);
+            let (jobs, more, waiting, share) = (&jobs, &more, &waiting, &share);
             scope.spawn(move || {
                 let _lister = Lister { waiting };
                 crate::settle::background("search: listing");
@@ -194,44 +276,61 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], pool: &Pool,
                     };
                     let Some((id, path)) = job else { break };
                     let folder = path.map_or(Folder::Id(id), Folder::Path);
-                    let listing = {
-                        let _lane = pool.lane();
-                        drive.list(&folder, &mut buffer)
-                    };
-                    let held = bytes(&listing);
-                    pool.room(held);
-                    waiting.listed.lock().unwrap().0.push_back((id, listing, held));
-                    waiting.came.notify_one();
+                    // (Its lane held till it is listed whole, as it waits for room: what waits is put in whatever lanes
+                    // are held, which makes room.)
+                    let _lane = share.lane();
+                    let ended = drive.list(&folder, &mut buffer, |names| {
+                        let held = HANDED + names.held();
+                        pool.room(held);
+                        waiting.hand_on(id, Handed::Names(names.items()), held);
+                    });
+                    pool.room(HANDED);
+                    waiting.hand_on(id, Handed::Ended(ended), HANDED);
                 }
             });
         }
         while pending > 0 {
-            let Some((id, listing, held)) = waiting.next() else { break };
-            pending -= 1;
-            listed.folders += 1;
+            let Some((id, handed, held)) = waiting.next() else { break };
             let mut index = index.write().unwrap();
-            if let Some(place) = index.folder(id) {
-                let before = before.remove(&id).unwrap_or_default();
-                match listing {
-                    Listing::Items(items) => {
-                        if items.len() >= LARGE {
-                            listed.large.push((id, items.len()));
+            match handed {
+                Handed::Names(items) => {
+                    if let Some(place) = index.folder(id) {
+                        let (folder, names) = relisting.entry(id).or_insert_with(|| (index.relisting(place, &before.remove(&id).unwrap_or_default()), 0));
+                        *names += items.len();
+                        index.list_part(folder, &items, &mut changes);
+                    }
+                }
+                Handed::Ended(listing) => {
+                    pending -= 1;
+                    listed.folders += 1;
+                    let begun = relisting.remove(&id);
+                    if let Some(place) = index.folder(id) {
+                        let before = before.remove(&id).unwrap_or_default();
+                        match listing {
+                            Listing::Listed => {
+                                let (folder, names) = begun.unwrap_or_else(|| (index.relisting(place, &before), 0));
+                                if names >= LARGE {
+                                    listed.large.push((id, names));
+                                }
+                                index.listed(folder, &mut changes);
+                                index.set_flag(place, flag::UNREAD | flag::STALE, false);
+                            }
+                            Listing::Denied => {
+                                listed.denied += 1;
+                                index.denied(place, &before);
+                                index.set_flag(place, flag::STALE, false);
+                            }
+                            // (What was put in of it before it failed stays, the rest as it was, till it is listed
+                            // again.)
+                            Listing::Failed(_) => {
+                                listed.failed.push(id);
+                                index.set_flag(place, flag::UNREAD | flag::STALE, true);
+                            }
+                            // (Gone since it was found: taken out as the folder it was in is listed again, which its
+                            // going changed.)
+                            Listing::Gone => index.set_flag(place, flag::STALE, false),
                         }
-                        index.list(place, &items, &before, &mut changes);
-                        index.set_flag(place, flag::UNREAD | flag::STALE, false);
                     }
-                    Listing::Denied => {
-                        listed.denied += 1;
-                        index.denied(place, &before);
-                        index.set_flag(place, flag::STALE, false);
-                    }
-                    Listing::Failed(_) => {
-                        listed.failed.push(id);
-                        index.set_flag(place, flag::UNREAD | flag::STALE, true);
-                    }
-                    // (Gone since it was found: taken out as the folder it was in is listed again, which its going
-                    // changed.)
-                    Listing::Gone => index.set_flag(place, flag::STALE, false),
                 }
             }
             pool.put_in(held);
@@ -254,6 +353,7 @@ pub fn round(index: &RwLock<Index>, drive: &Drive, folders: &[u32], pool: &Pool,
         jobs.lock().unwrap().over = true;
         more.notify_all();
     });
+    drop(share);
     index.write().unwrap().finish(changes);
     listed
 }
@@ -313,11 +413,12 @@ pub(crate) mod tests {
     #[test]
     fn no_more_folders_are_listed_at_once_than_the_pool_has_lanes() {
         let pool = Pool::new(2, 1 << 20);
+        let share = pool.share();
         let held = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..4 {
                 scope.spawn(|| {
-                    let _lane = pool.lane();
+                    let _lane = share.lane();
                     held.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(400));
                 });
@@ -351,8 +452,8 @@ pub(crate) mod tests {
         assert_eq!(pool.using().queued, 5000, "one larger than all, with none waiting");
     }
 
-    /// Two drives listed at once share the machine's lanes and its room (one lane, room for one listing): each listed
-    /// whole, never more folders at once than the lanes, never more than one listing waiting.
+    /// Two drives listed at once share the machine's lanes and its room (one lane, room for one part of a folder's
+    /// names): each listed whole, never more folders at once than the lanes, never more than one part waiting.
     #[test]
     fn two_drives_listed_at_once_share_the_machines_pool() {
         let pool = Pool::new(1, 1);
@@ -370,11 +471,89 @@ pub(crate) mod tests {
         }
         let using = pool.using();
         assert_eq!(using.most_listing, 1, "the lane shared");
-        let largest = size_of::<(u64, Listing)>() + 8 * (size_of::<Item>() + 32);
-        assert!(using.most_queued <= largest, "one listing waiting at a time: {}", using.most_queued);
+        let largest = HANDED + 8 * (size_of::<Item>() + 32);
+        assert!(using.most_queued <= largest, "one part waiting at a time: {}", using.most_queued);
         drop(drives);
         for root in roots {
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    /// The lanes are split evenly between the rounds listing (those begun first given what does not split, none for
+    /// a round begun once there are more rounds than lanes), each round taking up to its own share whatever the
+    /// others hold: one holding all of them, taken alone, holds another to no fewer than its own share, and takes no
+    /// more itself till it holds fewer than its own, where the others waited till it gave one back.
+    #[test]
+    fn the_lanes_are_split_evenly_between_the_rounds() {
+        let using = |holding: &[usize]| Using { holding: holding.iter().enumerate().map(|(at, &held)| (at as u64 + 1, held)).collect(), ..Using::default() };
+        assert!(using(&[3]).may_take(1, 4) && !using(&[4]).may_take(1, 4), "alone, all of them");
+        let hung = using(&[4, 0]);
+        assert!(hung.may_take(2, 4) && !hung.may_take(1, 4), "the other its share, the one holding all no more");
+        assert!(using(&[4, 1]).may_take(2, 4) && !using(&[4, 2]).may_take(2, 4), "its own share, no more");
+        assert!(using(&[1, 2]).may_take(1, 4) && !using(&[1, 2]).may_take(2, 4));
+        let shares = |rounds: usize, lanes: usize| (0..rounds).map(|at| using(&vec![0; rounds]).share(at, lanes)).collect::<Vec<_>>();
+        assert_eq!(shares(3, 5), [2, 2, 1]);
+        assert_eq!(shares(3, 2), [1, 1, 0], "more rounds than lanes: the last waits for one to end");
+    }
+
+    /// A drive whose listings hang (a USB drive that answers nothing), all the lanes taken by them as it was listed
+    /// alone, holds another drive listed meanwhile to no fewer than its share: that one is listed whole while they
+    /// hang, where it waited for them to end.
+    #[test]
+    fn a_drive_whose_listings_hang_does_not_hold_another() {
+        let pool = Pool::new(2, 1 << 20);
+        let root = tree("hung", 2, 2, 2);
+        let drive = Drive::open(&format!("{}\\", root.display())).unwrap();
+        let index = RwLock::new(Index::new(drive.root_id, drive.by_id()));
+        let hung = pool.share();
+        let gate = Mutex::new(());
+        let shut = gate.lock().unwrap();
+        let (took, taken) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                let (hung, gate, took) = (&hung, &gate, took.clone());
+                scope.spawn(move || {
+                    let _lane = hung.lane();
+                    took.send(()).unwrap();
+                    drop(gate.lock().unwrap());
+                });
+            }
+            for _ in 0..2 {
+                taken.recv().unwrap();
+            }
+            let (done, listed) = std::sync::mpsc::channel();
+            let (index, drive, pool) = (&index, &drive, &pool);
+            scope.spawn(move || {
+                round(index, drive, &[super::super::index::ROOT], pool, None);
+                done.send(()).unwrap();
+            });
+            let in_time = listed.recv_timeout(Duration::from_secs(10)).is_ok();
+            let hung_holds = pool.using().holding[0].1;
+            drop(shut);
+            assert!(in_time, "listed while the other's listings hang");
+            assert_eq!(hung_holds, 2);
+        });
+        assert_eq!(indexed(&index.read().unwrap()), on_disk(&root));
+        drop(hung);
+        drop(drive);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A folder holding more than all the room is put in part by part, never more of it made and waiting than the room
+    /// (a part of it at a time here), where it was held whole as it waited: listed whole all the same.
+    #[test]
+    fn a_folder_larger_than_all_the_room_is_put_in_part_by_part() {
+        let root = tree("parts", 0, 3000, 0);
+        let drive = Drive::open(&format!("{}\\", root.display())).unwrap();
+        let index = RwLock::new(Index::new(drive.root_id, drive.by_id()));
+        let room = 48 << 10;
+        let pool = Pool::new(2, room);
+        round(&index, &drive, &[super::super::index::ROOT], &pool, None);
+        assert_eq!(indexed(&index.read().unwrap()), on_disk(&root));
+        let whole = 3000 * (size_of::<Item>() + 2 * "file 0000.txt".len());
+        let most = pool.using().most_queued;
+        assert!(most <= room && most < whole, "{most} waiting at most, of {whole}");
+        drop(drive);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
