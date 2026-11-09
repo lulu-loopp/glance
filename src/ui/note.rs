@@ -968,7 +968,7 @@ impl Writing {
         let bounds = self.editor.bounds();
         // (The device asked for only where there is a table to lay out: made on a thread, it is that thread's to let go.)
         let tables: Vec<_> = shown.tables.iter().collect();
-        self.laid = match (!tables.is_empty()).then(super::gfx::current) {
+        self.laid = match (!tables.is_empty()).then(|| super::gfx::for_window(self.editor.window())) {
             Some(Ok(gfx)) => tables.into_iter().map(|table| (table.clone(), gfx.table_laid(table, TABLE_FAMILY, pixels, per, (bounds.right - bounds.left) as f32))).collect(),
             _ => Vec::new(),
         };
@@ -1993,7 +1993,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let gfx = super::super::gfx::current().unwrap();
+        let gfx = super::super::gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let folder = std::env::temp_dir().join(format!("glance-note-alike-{name}-{}", std::process::id()));
@@ -2095,7 +2095,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let gfx = super::super::gfx::current().unwrap();
+        let gfx = super::super::gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let folder = std::env::temp_dir().join(format!("glance-note-typed-code-{}", std::process::id()));
@@ -2141,7 +2141,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let gfx = super::super::gfx::current().unwrap();
+        let gfx = super::super::gfx::for_main_screen().unwrap();
         let text = format!(
             "## 很长的便签\n{}- 苹果\n  - 红的\n- [ ] 买牛奶\n> 引用的话，很长很长很长很长很长很长很长很长很长很长很长很长\n| 名称 | 说明 |\n| - | - |\n| 苹果 | 红的，很甜 |\n```rust\nlet a = 1;\n```\n{}最后一行",
             "第一段很长很长很长很长很长很长很长很长很长很长很长很长很长的字\n".repeat(6),
@@ -2247,7 +2247,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let gfx = super::super::gfx::current().unwrap();
+        let gfx = super::super::gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let folder = std::env::temp_dir().join(format!("glance-note-link-pictures-{}", std::process::id()));
@@ -2321,7 +2321,7 @@ mod pictures {
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
         }
-        let gfx = super::super::gfx::current().unwrap();
+        let gfx = super::super::gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let folder = std::env::temp_dir().join(format!("glance-note-pictures-{}", std::process::id()));

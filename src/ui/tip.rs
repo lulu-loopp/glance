@@ -96,7 +96,8 @@ pub fn went(hwnd: HWND) {
 /// as far from it, wherever on it the pointer is.
 pub fn show(owner: HWND, text: &str, about: RECT, dark: bool) {
     let at = POINT { x: (about.left + about.right) / 2, y: (about.top + about.bottom) / 2 };
-    let Ok(gfx) = gfx::current() else { return };
+    // (On the device for the screen it shows on: see `gfx::on_screen`.)
+    let Ok(gfx) = gfx::for_area(about) else { return };
     TIP.with(|kept| {
         let mut kept = kept.borrow_mut();
         if kept.is_none() {
@@ -154,7 +155,7 @@ pub fn show(owner: HWND, text: &str, about: RECT, dark: bool) {
         });
         // (The device gone, its surface is made anew on the next.)
         if let Err(error) = &drawn {
-            if !gfx::failed("tip", Some(error)) {
+            if !gfx::failed("tip", &tip.gfx, Some(error)) {
                 tip.surface = Some(surface);
             }
             return;

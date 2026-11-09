@@ -513,10 +513,11 @@ fn show(opening: Opening) {
         return;
     }
     crate::perf::mark(|| "beside thread".into());
-    let Ok(gfx) = gfx::current() else { return };
+    let (page, scale) = placed(&opening);
+    // (On the device for the screen it opens on: see `gfx::on_screen`.)
+    let Ok(gfx) = gfx::for_area(page) else { return };
     crate::perf::mark(|| "beside device".into());
     let showing = super::life::Showing::of(&gfx);
-    let (page, scale) = placed(&opening);
     let (x, y, wide, tall) = (page.left, page.top, page.right - page.left, page.bottom - page.top);
     unsafe {
         // In the skin, a note's page too (as its card on the panel is): its window larger by its shadow's room each
@@ -624,6 +625,11 @@ thread_local! {
     /// (and its bitmap, made as it is drawn), and when it was last asked for.
     #[allow(clippy::type_complexity)]
     static BEHIND: RefCell<(Option<super::scene::Scene>, Option<(super::backdrop::Capture, Option<windows::Win32::Graphics::Direct2D::ID2D1Bitmap1>)>, Option<std::time::Instant>)> = const { RefCell::new((None, None, None)) };
+}
+
+thread_local! {
+    /// The device what is behind the page was put together on (see `BEHIND`).
+    static BEHIND_ON: RefCell<Option<std::rc::Weak<super::gfx::Gfx>>> = const { RefCell::new(None) };
 }
 
 thread_local! {
@@ -1364,10 +1370,15 @@ impl Beside {
         if size.0 == 0 || size.1 == 0 {
             return;
         }
-        if self.surface.is_none() {
-            if let Ok(gfx) = gfx::current() {
+        // On the device for its screen (see `gfx::on_screen`): its surface made anew on it as it comes onto a screen
+        // another adapter drives, or its device was lost.
+        if let Ok(gfx) = gfx::for_window(self.hwnd) {
+            if !Rc::ptr_eq(&gfx, &self.gfx) {
+                self.surface = None;
                 self.gfx = gfx;
             }
+        }
+        if self.surface.is_none() {
             self.surface = Surface::new(&self.gfx, self.hwnd).ok();
         }
         let Some(mut surface) = self.surface.take() else { return };
@@ -1400,7 +1411,7 @@ impl Beside {
             }
         } else if let Err(error) = &drawn {
             // (Not drawn, it keeps its surface, and draws again on it; the device gone, it makes one anew on the next.)
-            if !gfx::failed("page beside", Some(error)) {
+            if !gfx::failed("page beside", &gfx, Some(error)) {
                 self.surface = Some(surface);
             }
         }
@@ -1428,7 +1439,15 @@ impl Beside {
         BEHIND.with(|held| {
             let mut held = held.borrow_mut();
             let (scene, taken, asked) = &mut *held;
+            // (Put together and taken on the device the page draws with: one of another, its scene's and what it took,
+            // made again on this one.)
+            let on = BEHIND_ON.with(|on| on.borrow().as_ref().is_some_and(|on| std::ptr::eq(on.as_ptr(), Rc::as_ptr(&self.gfx))));
+            if !on {
+                *scene = None;
+                *taken = None;
+            }
             if scene.is_none() {
+                BEHIND_ON.with(|on| *on.borrow_mut() = Some(Rc::downgrade(&self.gfx)));
                 // (The page up as a frame comes, not the one it was made for: kept from page to page, it told the
                 // first, gone, and the next was drawn with what is behind it only as it was drawn again anyway.)
                 let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| {
@@ -1922,7 +1941,7 @@ otepad.exe"),
             let came = |id: u128, name: &str, ago_min: u64| Came { key: Key { drive: 'D', file: id }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 1000, kind: Kind::Document, downloaded: false, site: None };
             crate::station::recent::pretend(vec![came(1, "Cargo.toml", 3), came(2, "README.md", 30), came(3, "docs/station-and-notes.md", 90), came(4, "website/apple-touch-icon.png", 600), came(5, "scripts/release.ps1", 2000)]);
         }
-        let gfx = gfx::current().unwrap();
+        let gfx = gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/beside", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let (w, h) = (WIDTH, 560.0);

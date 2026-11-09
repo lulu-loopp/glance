@@ -374,8 +374,8 @@ fn ask_gone(app: &super::apps::App) {
         no: lang.pick("取消", "Cancel"),
         dark: crate::os::apps_dark(),
     };
-    // (Its graphics let go of before the thread ends: see `gfx::held`.)
-    let Ok(_held) = crate::ui::gfx::held() else { return };
+    // (Its graphics, made for the screen it is asked on, let go of before the thread ends: see `gfx::held_till_done`.)
+    let _held = crate::ui::gfx::held_till_done();
     if crate::ui::ask::show(windows::Win32::Foundation::HWND::default(), &asked).is_some() {
         let gone = app.clone();
         super::apps::change(move |apps| apps.retain(|kept| *kept != gone));

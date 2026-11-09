@@ -2105,7 +2105,11 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     blocks.push(match tab {
         Tab::Shelf => Block::Shelf { tiles, shows: Shows::View(view), tall: STATION_TALL, said, over: shown.over },
         Tab::Copies(filter) => Block::Copies { rows: copied_lately(&shown.items, filter).map(|item| Tile::of(item, &folder, lang, now)).collect(), filter, view, tall: STATION_TALL },
-        Tab::Recent(filter) => Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() },
+        Tab::Recent(filter) => {
+            // (Looked at: the journals read from now, the machine settled or not.)
+            crate::settle::want(crate::settle::Work::Recent);
+            Block::Recent { rows: Lately::rows(&crate::station::recent::shown(), filter, lang, now), filter, view, tall: STATION_TALL, nowhere: crate::station::recent::nowhere() }
+        }
     });
     blocks
 }
@@ -2367,6 +2371,12 @@ pub fn shows_module(entry: &super::prefs::ModuleEntry) -> bool {
     entry.on || (entry.id == "game" && front_is_game())
 }
 
+/// What a GPU asleep says in place of its temperature (see `GpuSample::asleep`): it has none to read, and it is not
+/// woken to read one.
+pub fn sleeping(lang: Lang) -> &'static str {
+    lang.pick("已休眠", "Sleeping")
+}
+
 /// What a game asked for by hand says before its first frames.
 pub fn waiting(lang: Lang) -> String {
     if front_is_game() { lang.pick("等待画面", "No frames yet").into() } else { String::new() }
@@ -2594,7 +2604,13 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             let reading = s.gpus.get(index);
             let shows_temp = on("temp") && had.temp;
             let temp = reading.and_then(|g| g.temp).filter(|_| shows_temp);
-            let aside = if shows_temp { shown(temp, celsius) } else { String::new() };
+            let aside = if reading.is_some_and(|g| g.asleep) {
+                sleeping(lang).into()
+            } else if shows_temp {
+                shown(temp, celsius)
+            } else {
+                String::new()
+            };
             let usage = reading.and_then(|g| g.usage);
             let mut blocks = vec![
                 head("GPU", &gpu.name, aside, temp.is_some_and(|t| t > hot_temp)),
@@ -6646,7 +6662,7 @@ otepad.exe", "Notepad"),
             kinds_ghz: Vec::new(),
             threads_ghz: Vec::new(),
             memory: MemorySample { used: 1 << 30, committed: 1 << 30, commit_limit: 1 << 31, cached: 0 },
-            gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), hot_spot: None, clock_mhz: clock, fan_rpm: None, power: None }],
+            gpus: vec![GpuSample { usage: Some(5.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), temp: Some(50.0), hot_spot: None, clock_mhz: clock, fan_rpm: None, power: None, asleep: false }],
             net_down: Some(0.0),
             net_up: Some(0.0),
             net_total_down: 0,
@@ -6749,6 +6765,30 @@ otepad.exe", "Notepad"),
         assert!(!facts(&lane(&scene(history), "gpu:0", Detail::Full).unwrap()).iter().any(|(label, _)| label == "Clock"));
         assert!(lane(&scene(history), "battery", Detail::Full).is_none());
         assert!(lane(&scene(history), "board", Detail::Full).is_none());
+    }
+
+    /// A GPU asleep says so where its temperature goes, not that its temperature is missing. Awake again,
+    /// its temperature is there again.
+    #[test]
+    fn a_gpu_asleep_says_so() {
+        let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
+        let scene = |history: &'static [Sample], lang| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let asleep = || {
+            let mut read = sample(Some(1350.0), None, None);
+            read.gpus[0] = crate::reading::GpuSample { usage: Some(0.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), asleep: true, ..Default::default() };
+            read
+        };
+        let corner = |history, lang| match lane(&scene(history, lang), "gpu:0", Detail::Full).unwrap().remove(0) {
+            Block::Head { aside, .. } => aside,
+            _ => unreachable!("a lane begins with its head"),
+        };
+        let history = leak(vec![sample(Some(1350.0), None, None), asleep()]);
+        assert_eq!(corner(history, Lang::En), "Sleeping");
+        assert_eq!(corner(history, Lang::Zh), "已休眠");
+        // Asleep since it was first seen: so all the same.
+        assert_eq!(corner(leak(vec![asleep()]), Lang::En), "Sleeping");
+        assert_eq!(corner(leak(vec![asleep(), sample(Some(1350.0), None, None)]), Lang::En), "50 °C");
     }
 
     #[test]

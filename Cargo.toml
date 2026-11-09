@@ -1,6 +1,6 @@
 [package]
 name = "glance"
-version = "0.4.3-preview"
+version = "0.4.4-preview"
 license = "MIT"
 edition = "2021"
 # `cargo run` runs Glance itself; its sensors (src/bin/glance-sensors.rs) are started by it.
@@ -64,6 +64,7 @@ features = [
     "UI_Composition",
     "UI_Composition_Desktop",
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Properties",
     "UI_ViewManagement",
     "Win32_Foundation",
     "Win32_Globalization",

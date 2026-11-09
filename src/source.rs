@@ -284,6 +284,23 @@ fn heard_what_was_left() {
     }
 }
 
+/// Whether Glance's own sampler reads the hardware (see `Sampler::meanwhile`), the sensors' process being on its way
+/// (`coming`: started, or being tried for) or not. Not while it is: that process looks at all of it as it starts,
+/// and the two are not to go through the same drivers at once (as they did at a sign-in on a laptop). Once it is not
+/// to be had (no rights, the user would not, it failed for good), all it can without it, as it always did.
+fn reads_the_hardware(coming: bool) -> bool {
+    !coming
+}
+
+/// Glance's own sampler, the sensors' process being on its way (`coming`) or not (see `reads_the_hardware`).
+fn own_sampler(coming: bool) -> Sampler {
+    if reads_the_hardware(coming) {
+        Sampler::new()
+    } else {
+        Sampler::meanwhile()
+    }
+}
+
 /// The readings' source, and what the machine is. Elevated already, Glance reads the sensors itself; else the sensors
 /// are reached for (see `reach`), and if they have not answered in a while it reads what it can itself till they do.
 pub fn open() -> (StaticInfo, Source) {
@@ -298,7 +315,7 @@ pub fn open() -> (StaticInfo, Source) {
         crate::journal::note("readings: Glance's own for now, without administrator rights");
         reaching = Some(arriving);
     }
-    let sampler = Sampler::new();
+    let sampler = own_sampler(reaching.is_some());
     crate::presents::start();
     (sampler.info.clone(), Source::Own { sampler, next: Instant::now(), tick: 0, reaching })
 }
@@ -471,7 +488,7 @@ impl Source {
                             crate::presents::forget_mirrored();
                             crate::update::link_lost();
                             crate::app().controller.hearing_changed();
-                            let sampler = Sampler::new();
+                            let sampler = own_sampler(true);
                             gpus_found(&sampler.info);
                             *FOUND.lock().unwrap() = Some(sampler.info.found.clone());
                             crate::presents::start();
@@ -494,7 +511,13 @@ impl Source {
                         *self = Source::Linked(Some(link));
                         return None;
                     }
-                    Some(Err(TryRecvError::Disconnected)) => *reaching = None,
+                    // Not to be had: all Glance can read itself from now (see `reads_the_hardware`).
+                    Some(Err(TryRecvError::Disconnected)) => {
+                        *reaching = None;
+                        *sampler = own_sampler(false);
+                        gpus_found(&sampler.info);
+                        *FOUND.lock().unwrap() = Some(sampler.info.found.clone());
+                    }
                     Some(Err(TryRecvError::Empty)) | None => {}
                 }
                 let interval = Duration::from_millis(want.interval_ms as u64);
@@ -671,6 +694,14 @@ mod tests {
         assert_eq!(pause_before(TRIES), None);
         assert_eq!(pause_before(1), Some(PAUSES[PAUSES.len() - 1]));
         assert_eq!(pause_before(0), None);
+    }
+
+    /// While the sensors' process is on its way, Glance's own sampler asks the hardware nothing (that process is
+    /// looking at it all). Once the process is not to be had, the sampler reads all it can.
+    #[test]
+    fn reads_no_hardware_while_the_sensors_are_coming() {
+        assert!(!reads_the_hardware(true));
+        assert!(reads_the_hardware(false));
     }
 
     /// What is waited for on Glance's side outlasts what the sensors' side allows itself: they are given up on because

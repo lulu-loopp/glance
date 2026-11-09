@@ -1147,6 +1147,7 @@ pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: 
                 // keeps its rows through a shot.
                 fan_rpm: Some((780.0 + 1100.0 * g) as u32),
                 power: (i == 0).then_some(18.0 + 255.0 * g + 12.0 * wave(4.0, 0.7) * g + 2.0 * noise()),
+                asleep: false,
             }
         })
         .collect();

@@ -29,8 +29,9 @@ pub struct Journal {
 
 /// What reading on from a point found.
 pub enum Read {
-    /// The folders the changes were in (by their ids, each once), and where to read on from.
-    Changed { folders: Vec<u64>, next: i64 },
+    /// The folders the changes were in (by their ids, each once), where to read on from, and whether there may be
+    /// more (what was read reached `read`'s most).
+    Changed { folders: Vec<u64>, next: i64, more: bool },
     /// What was asked from is no longer kept (or the journal is another): the drive must be listed whole again.
     Lost,
 }
@@ -46,21 +47,18 @@ pub fn query(drive: &Drive) -> Result<Journal> {
     Ok(Journal { id: journal.UsnJournalID, first: journal.FirstUsn, next: journal.NextUsn })
 }
 
-/// The changes since `from` in journal `id`, all there are now.
-pub fn read(drive: &Drive, id: u64, from: i64) -> Result<Read> {
+/// The changes since `from` in journal `id`: all there are now, or as many as `most` bytes of records (a journal
+/// gone far on is read a part at a time, the rest after).
+pub fn read(drive: &Drive, id: u64, from: i64, most: usize) -> Result<Read> {
     match query(drive) {
         Ok(now) if now.id != id || from < now.first => return Ok(Read::Lost),
         Ok(_) => {}
         Err(error) => return Err(error),
     }
-    let mut folders = Vec::new();
-    // (u64s, that the records in it, each on an 8-byte boundary, are read where they are.)
-    let mut buffer = vec![0u64; CHUNK / 8];
-    let mut at_usn = from;
-    loop {
-        let asked = READ_USN_JOURNAL_DATA_V0 { StartUsn: at_usn, ReasonMask: NAMED, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: id };
+    gather(from, most, |at, buffer| {
+        let asked = READ_USN_JOURNAL_DATA_V0 { StartUsn: at, ReasonMask: NAMED, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: id };
         let mut got = 0u32;
-        let read = drive
+        drive
             .with_root(|root| unsafe {
                 DeviceIoControl(
                     root,
@@ -73,13 +71,26 @@ pub fn read(drive: &Drive, id: u64, from: i64) -> Result<Read> {
                     None,
                 )
             })
-            .unwrap_or_else(|| Err(Error::from(ERROR_DEVICE_REMOVED)));
-        if let Err(error) = read {
-            if error.code() == windows::core::HRESULT::from_win32(ENTRY_DELETED) {
-                return Ok(Read::Lost);
-            }
-            return Err(error);
-        }
+            .unwrap_or_else(|| Err(Error::from(ERROR_DEVICE_REMOVED)))
+            .map(|()| got)
+    })
+}
+
+/// The changes from `from` on, as `chunk` reads them (from a place, into a buffer of `CHUNK` bytes: how many it
+/// read), till there are no more or `most` bytes were read.
+fn gather(from: i64, most: usize, mut chunk: impl FnMut(i64, &mut [u64]) -> Result<u32>) -> Result<Read> {
+    let mut folders = Vec::new();
+    // (u64s, that the records in it, each on an 8-byte boundary, are read where they are.)
+    let mut buffer = vec![0u64; CHUNK / 8];
+    let mut at_usn = from;
+    let mut read = 0usize;
+    let mut more = false;
+    loop {
+        let got = match chunk(at_usn, &mut buffer) {
+            Ok(got) => got,
+            Err(error) if error.code() == windows::core::HRESULT::from_win32(ENTRY_DELETED) => return Ok(Read::Lost),
+            Err(error) => return Err(error),
+        };
         let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, (got as usize).min(CHUNK)) };
         if bytes.len() < 8 {
             break;
@@ -90,10 +101,15 @@ pub fn read(drive: &Drive, id: u64, from: i64) -> Result<Read> {
             break;
         }
         at_usn = next;
+        read += bytes.len();
+        if read >= most {
+            more = true;
+            break;
+        }
     }
     folders.sort_unstable();
     folders.dedup();
-    Ok(Read::Changed { folders, next: at_usn })
+    Ok(Read::Changed { folders, next: at_usn, more })
 }
 
 /// The folders the records in `bytes` were in: version 2's and 3's (its ids 128 bits, of which an NTFS drive's are
@@ -142,5 +158,40 @@ mod tests {
         long[..4].copy_from_slice(&4096u32.to_le_bytes());
         bytes.extend(&long);
         assert_eq!(parents(&bytes), [7, 9]);
+    }
+
+    /// A journal gone far on is read a part at a time (as much as is asked at most), each read going on where the one
+    /// before stopped, till all is read: never all of it at once.
+    #[test]
+    fn a_journal_gone_far_on_is_read_a_part_at_a_time() {
+        // 100 changes, one at each place from 0, in folder 1000 and its place, each read giving one.
+        let journal = |at: i64, buffer: &mut [u64]| -> Result<u32> {
+            let bytes = unsafe { std::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, CHUNK) };
+            if at >= 100 {
+                bytes[..8].copy_from_slice(&at.to_le_bytes());
+                return Ok(8);
+            }
+            bytes[..8].copy_from_slice(&(at + 1).to_le_bytes());
+            bytes[8..72].fill(0);
+            bytes[8..12].copy_from_slice(&64u32.to_le_bytes());
+            bytes[12..14].copy_from_slice(&2u16.to_le_bytes());
+            bytes[24..32].copy_from_slice(&(1000 + at as u64).to_le_bytes());
+            Ok(72)
+        };
+        let mut from = 0;
+        let mut reads = 0;
+        let mut all = Vec::new();
+        loop {
+            let Read::Changed { folders, next, more } = gather(from, 10 * 72, journal).unwrap() else { panic!("lost") };
+            reads += 1;
+            assert!(folders.len() <= 10, "a part at a time: {}", folders.len());
+            all.extend(folders);
+            from = next;
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(all, (1000..1100).collect::<Vec<u64>>());
+        assert_eq!((from, reads), (100, 11));
     }
 }

@@ -211,6 +211,16 @@ impl Drop for Popup {
     }
 }
 
+impl Guide {
+    /// What its popups draw on let go of, with the window's (see `Ui::let_go_of_shown`): made again on the device the
+    /// window draws with next.
+    pub(super) fn let_go_of_surfaces(&mut self) {
+        for popup in [&mut self.dialog, &mut self.tip].into_iter().flatten() {
+            popup.surface = None;
+        }
+    }
+}
+
 pub(super) struct Guide {
     step: Step,
     /// Each step done by the user themselves.
@@ -1339,7 +1349,8 @@ impl Ui {
 
     /// `popup` drawn by `paint` (at its own scale: what is drawn as the window's is drawn at the popup's meanwhile).
     fn draw_popup(&mut self, gfx: &Rc<Gfx>, popup: &mut Popup, paint: impl FnOnce(&mut Self, &Frame, &mut Popup)) {
-        let Some(mut surface) = popup.surface.take() else { return };
+        // (Its surface let go of with the window's, the window on another device: made again on that one.)
+        let Some(mut surface) = popup.surface.take().or_else(|| Surface::new(gfx, popup.hwnd).ok()) else { return };
         let mut client = RECT::default();
         unsafe {
             let _ = GetClientRect(popup.hwnd, &mut client);
@@ -1353,7 +1364,7 @@ impl Ui {
         });
         self.scale = window_scale;
         if let Err(error) = &drawn {
-            gfx::failed("guide", Some(error));
+            gfx::failed("guide", gfx, Some(error));
         }
         popup.surface = Some(surface);
     }

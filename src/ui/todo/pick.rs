@@ -184,7 +184,8 @@ pub fn close(asked: bool) {
 impl Picker {
     fn new(owner: HWND, of: PickFor, due: Option<Due>, anchor: RECT, look: Look, lang: Lang) -> Option<Picker> {
         let contact = crate::mouse::monitor_at(POINT { x: anchor.left, y: anchor.top })?;
-        let gfx = gfx::current().ok()?;
+        // (On the device for its screen: see `gfx::on_screen`.)
+        let gfx = gfx::for_area(contact.monitor).ok()?;
         let showing = crate::ui::life::Showing::of(&gfx);
         let window = Window::activating().ok()?;
         // (As frosted as glass is at its most, whatever the glass it is opened from is drawn as: it lies over that
@@ -194,7 +195,7 @@ impl Picker {
             Ok(surface) => surface,
             Err(error) => {
                 window.destroy();
-                gfx::failed("to-do picker", Some(&error));
+                gfx::failed("to-do picker", &gfx, Some(&error));
                 return None;
             }
         };
@@ -555,7 +556,7 @@ impl Picker {
         (self.surface, self.words) = (Some(surface), words);
         self.hits = hits;
         if let Err(error) = &drawn {
-            gfx::failed("to-do picker", Some(error));
+            gfx::failed("to-do picker", &self.gfx, Some(error));
         }
         drawn.is_ok()
     }

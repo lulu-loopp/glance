@@ -5,6 +5,7 @@
 //! where it is, and gone past the place's far side. Drawn on a window of its own over everything, which lets the
 //! pointer through, for as long as it lasts (see `Genie`). The window it pictures is hidden meanwhile.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, Result};
@@ -273,7 +274,7 @@ pub fn hide_to_open(window: HWND) {
 
 /// `window`, hidden by `hide_to_open` and shown, its first frame drawn, poured out of `place` from now on. None where
 /// it could not be, or `place` is out of its reach (see `reachable`): shown at once then (see `reveal`).
-pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
+pub fn opening(window: HWND, place: RECT) -> Option<Genie> {
     // (Pictured at once: the picture is the window's whole look as soon as it is shown, cloaked; waiting for the
     // compositor's next frame first gave the same picture a tenth of a second and more later. See
     // `settings_window::pictures::how_soon_it_is_pictured`.)
@@ -282,7 +283,7 @@ pub fn opening(gfx: &Gfx, window: HWND, place: RECT) -> Option<Genie> {
         return None;
     }
     crate::perf::mark(|| format!("genie pictured {}x{}", picture.size.0, picture.size.1));
-    let genie = Genie::start(gfx, picture, shows, place, true);
+    let genie = Genie::start(picture, shows, place, true);
     crate::perf::mark(|| "genie started".into());
     genie
 }
@@ -416,11 +417,11 @@ pub fn reveal(window: HWND) {
 /// `window`, shown, poured into `place` from now on, and hidden meanwhile, the front given to what was behind it
 /// (closed by its owner once it is done), `told` the window it pours on as it shows. None where it could not be (left
 /// as it was).
-pub fn closing(gfx: &Gfx, window: HWND, place: RECT, told: impl FnOnce(HWND)) -> Option<Genie> {
+pub fn closing(window: HWND, place: RECT, told: impl FnOnce(HWND)) -> Option<Genie> {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
     let (picture, shows) = picture_of(window)?;
-    let genie = Genie::start(gfx, picture, shows, place, false)?;
+    let genie = Genie::start(picture, shows, place, false)?;
     // (What pours told of before the window is hidden: what gave way to the window gives way to it, as the window, gone
     // from the front as it is hidden, gives way no more.)
     told(genie.window.hwnd);
@@ -452,6 +453,9 @@ fn cloak(window: HWND, on: bool) {
 
 /// A window poured out of its place, or into it, drawn on a window of its own till it is done.
 pub struct Genie {
+    /// The device it draws with: for the screen holding the most of its window (see `gfx::for_area`), whatever the
+    /// window it pictures draws with.
+    gfx: Rc<Gfx>,
     window: Window,
     surface: Surface,
     picture: Picture,
@@ -467,16 +471,17 @@ pub struct Genie {
 impl Genie {
     /// The window pictured in `picture` (showing on the screen at `shows`) poured out of `place` (`opening`) or into
     /// it, from now on: its first frame drawn, over everything. None where it could not be drawn.
-    pub fn start(gfx: &Gfx, picture: Picture, shows: RECT, place: RECT, opening: bool) -> Option<Genie> {
+    pub fn start(picture: Picture, shows: RECT, place: RECT, opening: bool) -> Option<Genie> {
         let way = Way::between(shows, place);
         crate::perf::mark(|| format!("genie {} place {},{},{},{} window {},{},{},{} {:?}", if opening { "opening" } else { "closing" }, place.left, place.top, place.right, place.bottom, shows.left, shows.top, shows.right, shows.bottom, way.side));
         let area = RECT { left: shows.left.min(place.left), top: shows.top.min(place.top), right: shows.right.max(place.right), bottom: shows.bottom.max(place.bottom) };
+        let gfx = super::gfx::for_area(area).ok()?;
         let mut window = Window::new().ok()?;
         window.set_click_through(true);
-        let surface = Surface::new(gfx, window.hwnd).ok()?;
-        let mut genie = Genie { window, surface, picture, bitmap: None, way, area, place, opening, began: Instant::now() };
+        let surface = Surface::new(&gfx, window.hwnd).ok()?;
+        let mut genie = Genie { gfx, window, surface, picture, bitmap: None, way, area, place, opening, began: Instant::now() };
         genie.window.place(area);
-        if !genie.draw_at(gfx, if opening { 1.0 } else { 0.0 }) {
+        if !genie.draw_at(if opening { 1.0 } else { 0.0 }) {
             return None;
         }
         genie.window.show();
@@ -486,11 +491,11 @@ impl Genie {
     /// Its next frame drawn, as far as it has gone by `now`, and the compositor's next frame waited for (one frame of
     /// it for each of the screen's): whether it is still going (done, its last frame drawn, the window whole where it
     /// is, or gone into its place).
-    pub fn draw(&mut self, gfx: &Gfx, now: Instant) -> bool {
+    pub fn draw(&mut self, now: Instant) -> bool {
         let t = (now.duration_since(self.began).as_secs_f32() / LASTS.as_secs_f32()).min(1.0);
         let p = if self.opening { 1.0 - t } else { t };
         let began = Instant::now();
-        let going = self.draw_at(gfx, p) && t < 1.0;
+        let going = self.draw_at(p) && t < 1.0;
         let drawn = began.elapsed();
         if going {
             let _ = unsafe { windows::Win32::Graphics::Dwm::DwmFlush() };
@@ -509,13 +514,13 @@ impl Genie {
         self.place
     }
 
-    fn draw_at(&mut self, gfx: &Gfx, p: f32) -> bool {
+    fn draw_at(&mut self, p: f32) -> bool {
         let size = ((self.area.right - self.area.left).max(1) as u32, (self.area.bottom - self.area.top).max(1) as u32);
         let lines = lines(&self.way, self.picture.size, p);
         let (left, top) = (self.area.left as f32, self.area.top as f32);
         let (picture, bitmap) = (&self.picture, &mut self.bitmap);
         let mut failed = None;
-        let drawn = self.surface.draw(gfx, size, 1.0, |frame| {
+        let drawn = self.surface.draw(&self.gfx, size, 1.0, |frame| {
             if let Err(error) = paint(frame, picture, bitmap, &lines, (left, top)) {
                 failed = Some(error);
             }

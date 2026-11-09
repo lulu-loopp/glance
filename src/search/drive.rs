@@ -7,7 +7,7 @@
 
 use super::index::Item;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 use windows::core::{Error, Result, HSTRING};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -45,12 +45,10 @@ pub struct Drive {
 
 /// What is held open of a drive, let go of as Windows asks to take the drive out.
 struct Held {
-    /// Its root folder: none once let go of. Held (read) through each use of it, a folder's listing whole, that it is
-    /// let go of between them.
-    root: RwLock<Option<HANDLE>>,
-    /// What is under way on it, to be cancelled as it is let go of; told as its watching ends.
+    /// Its root folder and what is under way on it, to be cancelled as it is let go of, and told as a use of its root,
+    /// or its watching, ends.
     busy: Mutex<Busy>,
-    unwatched: Condvar,
+    ended: Condvar,
     /// Let go of (Windows asked to take it out, or took it: set with `busy` held, which what begins on it looks at
     /// under the same), the asking failed since (the drive stays), and taken out.
     left: AtomicBool,
@@ -58,10 +56,12 @@ struct Held {
     removed: AtomicBool,
 }
 
-/// What is under way on a drive: its root (as a journal is read through it), each folder being listed, and its root
-/// opened again to be watched (see `Drive::watch`).
+/// What is under way on a drive: its root folder (none once closed) and how many calls use it now (a journal read
+/// through it, a folder listed: see `Drive::with_root`), each folder being listed, and its root opened again to be
+/// watched (see `Drive::watch`). A root let go of while it is used is closed by the last call using it, as it ends.
 struct Busy {
     root: Option<HANDLE>,
+    using: usize,
     listing: Vec<HANDLE>,
     watched: Option<HANDLE>,
 }
@@ -91,7 +91,7 @@ impl Drop for Drive {
                 let _ = CM_Unregister_Notification(removal);
             }
         }
-        if let Some(root) = self.held.root.write().unwrap().take() {
+        if let Some(root) = self.held.busy.lock().unwrap().root.take() {
             unsafe {
                 let _ = CloseHandle(root);
             }
@@ -99,34 +99,41 @@ impl Drop for Drive {
     }
 }
 
-/// How long letting go of a drive waits for its watching to end.
-const UNWATCH_WAIT: Duration = Duration::from_secs(5);
+/// How long letting go of a drive waits for what is under way on it to end.
+const LET_GO_WAIT: Duration = Duration::from_secs(5);
 
 impl Held {
-    /// All held of the drive let go of: what is under way on it cancelled (nothing begun after), its root closed once
-    /// what uses it now has ended, and its watching waited for (cancelled again as it waits, a watch asked again as
-    /// it was cancelled ended too), for `UNWATCH_WAIT` at most.
+    /// All held of the drive let go of (see `let_go_within`), waited for `LET_GO_WAIT` at most.
     fn let_go(&self) {
-        {
-            let busy = self.busy.lock().unwrap();
-            self.left.store(true, Ordering::SeqCst);
-            busy.cancel();
-        }
-        if let Some(root) = self.root.write().unwrap().take() {
-            self.busy.lock().unwrap().root = None;
-            unsafe {
-                let _ = CloseHandle(root);
-            }
-        }
-        let until = Instant::now() + UNWATCH_WAIT;
+        self.let_go_within(LET_GO_WAIT);
+    }
+
+    /// All held of the drive let go of: what is under way on it cancelled (nothing begun after), and cancelled again
+    /// as it is waited for (a watch asked again as it was cancelled, a folder opened as it was), its root closed as
+    /// soon as no call uses it, till that and its watching have ended, or for `wait` at most. What has not ended by
+    /// then (a call to a drive that answers nothing, cancelled or not) is not waited for: Windows' asking is answered,
+    /// and the root is closed by the last call using it, as that ends.
+    fn let_go_within(&self, wait: Duration) {
+        let until = Instant::now() + wait;
         let mut busy = self.busy.lock().unwrap();
-        while busy.watched.is_some() {
+        self.left.store(true, Ordering::SeqCst);
+        loop {
             busy.cancel();
+            if busy.using == 0 {
+                if let Some(root) = busy.root.take() {
+                    unsafe {
+                        let _ = CloseHandle(root);
+                    }
+                }
+                if busy.watched.is_none() {
+                    return;
+                }
+            }
             let now = Instant::now();
             if now >= until {
-                break;
+                return;
             }
-            busy = self.unwatched.wait_timeout(busy, (until - now).min(Duration::from_millis(100))).unwrap().0;
+            busy = self.ended.wait_timeout(busy, (until - now).min(Duration::from_millis(100))).unwrap().0;
         }
     }
 
@@ -181,9 +188,8 @@ impl Drive {
         let root = open_folder(path)?;
         // (Closed if what follows fails.)
         let held = Held {
-            root: RwLock::new(Some(root)),
-            busy: Mutex::new(Busy { root: Some(root), listing: Vec::new(), watched: None }),
-            unwatched: Condvar::new(),
+            busy: Mutex::new(Busy { root: Some(root), using: 0, listing: Vec::new(), watched: None }),
+            ended: Condvar::new(),
             left: AtomicBool::new(false),
             stays: AtomicBool::new(false),
             removed: AtomicBool::new(false),
@@ -201,7 +207,7 @@ impl Drive {
     /// Hears from now on as Windows asks to take the drive out (see `removal`), for a drive followed: what is held of
     /// it let go of then. Whether it is heard.
     pub fn hear_removal(&mut self) -> bool {
-        let Some(root) = *self.held.root.read().unwrap() else { return false };
+        let Some(root) = self.held.busy.lock().unwrap().root else { return false };
         let filter = CM_NOTIFY_FILTER {
             cbSize: size_of::<CM_NOTIFY_FILTER>() as u32,
             FilterType: CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE,
@@ -231,10 +237,20 @@ impl Drive {
         self.held.removed.load(Ordering::SeqCst)
     }
 
-    /// `asked` of its root folder, while it is held (none once let go of): it is not let go of meanwhile, and a call
-    /// on it then is cancelled.
+    /// `asked` of its root folder, while it is held (none once let go of): a call on it as it is let go of is
+    /// cancelled, and it is closed once the call ends.
     pub fn with_root<T>(&self, asked: impl FnOnce(HANDLE) -> T) -> Option<T> {
-        self.held.root.read().unwrap().map(asked)
+        let root = {
+            let mut busy = self.held.busy.lock().unwrap();
+            if self.held.left() {
+                return None;
+            }
+            let root = busy.root?;
+            busy.using += 1;
+            root
+        };
+        let _using = Using { held: &self.held };
+        Some(asked(root))
     }
 
     /// Its root opened again to be watched, kept to be let go of with the rest (none where it is let go of, or cannot
@@ -265,7 +281,7 @@ impl Drive {
                 let _ = CloseHandle(folder);
             }
         }
-        self.held.unwatched.notify_all();
+        self.held.ended.notify_all();
     }
 
     /// Whether its folders are found by their file ids (NTFS's, which stay with a file as it is renamed or moved);
@@ -275,12 +291,13 @@ impl Drive {
     }
 
     /// The names in `folder` (by its id where the drive's are kept, else by its path), `buffer` being where they are
-    /// read.
-    /// (The drive held through the listing whole: none is begun once it is let go of, and it is let go of after one
-    /// under way.)
+    /// read. (Its root used through the listing whole: none is begun once it is let go of, and one under way then is
+    /// cancelled.)
     pub fn list(&self, folder: &Folder, buffer: &mut [u64]) -> Listing {
-        let held = self.held.root.read().unwrap();
-        let Some(root) = *held else { return Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)) };
+        self.with_root(|root| self.list_from(root, folder, buffer)).unwrap_or_else(|| Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)))
+    }
+
+    fn list_from(&self, root: HANDLE, folder: &Folder, buffer: &mut [u64]) -> Listing {
         let opened = match folder {
             Folder::Id(id) => {
                 let described = FILE_ID_DESCRIPTOR { dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32, Type: FileIdType, Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: *id as i64 } };
@@ -332,6 +349,26 @@ pub fn serial(root: HANDLE) -> Option<u32> {
     let mut serial = 0u32;
     unsafe { GetVolumeInformationByHandleW(root, None, Some(&mut serial), None, None, None) }.ok()?;
     Some(serial)
+}
+
+/// A call using a drive's root (see `Drive::with_root`), counted till it ends: the last to end closes a root let go of.
+struct Using<'a> {
+    held: &'a Held,
+}
+
+impl Drop for Using<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.held.busy.lock().unwrap();
+        busy.using -= 1;
+        if busy.using == 0 && self.held.left() {
+            if let Some(root) = busy.root.take() {
+                unsafe {
+                    let _ = CloseHandle(root);
+                }
+            }
+        }
+        self.held.ended.notify_all();
+    }
 }
 
 /// A folder of a drive being listed, its handle kept among what is under way on the drive (see `Busy`) till it is
@@ -417,11 +454,52 @@ pub(crate) mod tests {
         assert!(drive.left() && !drive.stays());
         {
             let busy = drive.held.busy.lock().unwrap();
-            assert!(drive.held.root.read().unwrap().is_none() && busy.root.is_none() && busy.watched.is_none() && busy.listing.is_empty());
+            assert!(busy.root.is_none() && busy.using == 0 && busy.watched.is_none() && busy.listing.is_empty());
         }
         assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer()), Listing::Failed(_)));
         assert!(drive.watch().is_none() && drive.with_root(|_| ()).is_none());
         // (Nothing held: the folder can be removed.)
+        drop(drive);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// Let go of while a call on its root does not end (a card reader that answers nothing, cancelled or not), a drive
+    /// is let go of all the same within the time it waits: Windows' asking is answered (it waited on the call before,
+    /// for as long as the call took), nothing more is begun on it, and its root is closed as that call ends.
+    #[test]
+    fn a_call_that_does_not_end_does_not_hold_the_letting_go() {
+        let folder = std::env::temp_dir().join(format!("glance-let-go-stuck-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let drive = std::sync::Arc::new(Drive::open(&format!("{}\\", folder.display())).unwrap());
+        let (begun, using) = std::sync::mpsc::channel();
+        let (end, ended) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn({
+            let drive = drive.clone();
+            move || {
+                drive.with_root(|_| {
+                    let _ = begun.send(());
+                    let _ = ended.recv();
+                })
+            }
+        });
+        using.recv().unwrap();
+        let (gone, let_go) = std::sync::mpsc::channel();
+        std::thread::spawn({
+            let drive = drive.clone();
+            move || {
+                drive.held.let_go_within(Duration::from_millis(300));
+                let _ = gone.send(());
+            }
+        });
+        let answered = let_go.recv_timeout(Duration::from_secs(3)).is_ok();
+        let left = drive.left() && drive.with_root(|_| ()).is_none();
+        let still_open = drive.held.busy.lock().unwrap().root.is_some();
+        // (The call ended, whatever was found: no thread is left waiting.)
+        end.send(()).unwrap();
+        stuck.join().unwrap();
+        assert!(answered, "let go of within the time it waits");
+        assert!(left && still_open, "nothing more begun on it, its root still used");
+        assert!(drive.held.busy.lock().unwrap().root.is_none(), "closed as the call ended");
         drop(drive);
         std::fs::remove_dir_all(&folder).unwrap();
     }

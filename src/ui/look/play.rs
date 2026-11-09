@@ -349,7 +349,7 @@ mod tests {
     fn files_play() {
         let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = crate::ui::gfx::current().unwrap();
+        let gfx = crate::ui::gfx::for_main_screen().unwrap();
         let d3d = gfx.d3d().unwrap();
         let video = std::path::PathBuf::from(std::env::var("GLANCE_VIDEO").unwrap());
         let mut player = Player::new(&video, &d3d, 0.0, HWND::default(), 0).unwrap();

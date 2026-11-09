@@ -533,7 +533,7 @@ impl Dialog {
 /// they wrote (see `said`), 2 as they close the report or open it again (as `thread` says it may be), and 0 as they
 /// close the window, its LPARAM the window. The window, if it was made.
 pub fn open(owner: HWND, told: u32, thread: Thread, talk: &Talk) -> Option<HWND> {
-    let gfx = gfx::current().ok()?;
+    let gfx = super::device_over(owner).ok()?;
     let showing = super::super::life::Showing::of(&gfx);
     let own = OwnText {
         words: String::new(),
