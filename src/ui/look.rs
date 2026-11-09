@@ -1088,7 +1088,7 @@ struct Looker {
     held: bool,
     pictures: u64,
     /// Where on its window it takes clicks now (px), as its sheet is drawn: its region as it has it (None: none, one not
-    /// given it, so that it takes them all over).
+    /// given it, so that it would take them all over, and is not shown: see `appear`).
     region: Option<RECT>,
     /// The window a previewer shows in (made as one is first wanted), and whether one is being made for it.
     pane: Option<pane::Pane>,
@@ -1249,9 +1249,9 @@ impl Looker {
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), self.monitor.left, self.monitor.top, w, h, SWP_NOACTIVATE);
         }
+        // (Shown as it is drawn, once it takes clicks only where its sheet is: see `appear`.)
         self.draw();
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
             let _ = SetTimer(Some(self.hwnd), FRAME, FRAME_MS, None);
             let _ = SetTimer(Some(self.hwnd), WATCH, WATCH_MS, None);
         }
@@ -2107,6 +2107,7 @@ impl Looker {
             Err(error) if gfx::failed("look", &gfx, Some(&error)) => {}
             _ => self.drawn = Some(drawn),
         }
+        self.appear(shape.at);
         self.place_pane(shape);
         self.drawn_playing = (self.shown_at(), self.controls_clear(now), self.slider_open_now(now));
     }
@@ -2208,19 +2209,39 @@ impl Looker {
     /// they go to what is under it. (A region not given it is asked for again as it is next drawn: see
     /// `gfx::give_region`.)
     fn take_clicks(&mut self, at: Rect) {
-        let s = self.scale;
-        let region = RECT {
-            left: ((at.x - SHADOW) * s).floor() as i32,
-            top: ((at.y - SHADOW) * s).floor() as i32,
-            right: ((at.x + at.w + SHADOW) * s).ceil() as i32,
-            bottom: ((at.y + at.h + SHADOW) * s).ceil() as i32,
-        };
+        let region = self.clicks_at(at);
         if self.region == Some(region) {
             return;
         }
         if gfx::give_region(self.hwnd, unsafe { CreateRectRgn(region.left, region.top, region.right, region.bottom) }, false) {
             self.region = Some(region);
         }
+    }
+
+    /// Where on its window it takes clicks with its sheet drawn at `at` (DIPs): there, and the room for its shadow round
+    /// that (px).
+    fn clicks_at(&self, at: Rect) -> RECT {
+        let s = self.scale;
+        RECT {
+            left: ((at.x - SHADOW) * s).floor() as i32,
+            top: ((at.y - SHADOW) * s).floor() as i32,
+            right: ((at.x + at.w + SHADOW) * s).ceil() as i32,
+            bottom: ((at.y + at.h + SHADOW) * s).ceil() as i32,
+        }
+    }
+
+    /// Its window shown, where it is hidden, once it takes clicks only where its sheet is drawn, at `at` (DIPs: see
+    /// `take_clicks`). Its window is its whole screen's, above all: shown before, its region not given it (the system
+    /// out of room for GDI's objects), it took every click on that screen, showing nothing there. Till then it is drawn
+    /// as ever, hidden, its region asked for again each time.
+    fn appear(&self, at: Rect) {
+        if self.region != Some(self.clicks_at(at)) || unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
+            return;
+        }
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        crate::widget::own_window_changed(self.monitor);
     }
 
     /// The sheet drawn as `shape` says (over the screen frosted behind it, `frosted`).
@@ -4117,5 +4138,44 @@ mod tests {
             let _ = DestroyWindow(hwnd);
         }
         assert!(!over, "it takes the pointer over its screen before its sheet is drawn");
+    }
+
+    /// The look's window is not shown while it would take clicks where its sheet is not (its first region not given
+    /// it, the system out of room for GDI's objects): shown so, it took every click on its screen, showing nothing
+    /// there. Given the region its sheet is drawn in, it shows, and takes the pointer only there.
+    #[test]
+    fn the_look_is_shown_only_once_it_takes_clicks_only_where_its_sheet_is() {
+        use windows::Win32::Graphics::Gdi::SetWindowRgn;
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        /// The window gone as the test ends, failed or not: never left on the screen.
+        struct Made(HWND);
+        impl Drop for Made {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let made = Made(unsafe { make_window() }.expect("a window"));
+        let hwnd = made.0;
+        let (reads, _read) = std::sync::mpsc::channel();
+        let mut looker = Looker::new(hwnd, reads);
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 100, 100, 800, 600, SWP_NOACTIVATE);
+        }
+        // As it is made where its first region is not given it: none.
+        unsafe { SetWindowRgn(hwnd, None, false) };
+        looker.region = None;
+        let sheet = Rect { x: 100.0, y: 100.0, w: 200.0, h: 100.0 };
+        looker.appear(sheet);
+        let shown_without = unsafe { IsWindowVisible(hwnd) }.as_bool();
+        looker.take_clicks(sheet);
+        looker.appear(sheet);
+        let shown = unsafe { IsWindowVisible(hwnd) }.as_bool();
+        let over = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(POINT { x: 100 + x, y: 100 + y }), GA_ROOT) } == hwnd;
+        let off_sheet = over(600, 450);
+        drop(looker);
+        drop(made);
+        assert!(!shown_without, "shown while it would take clicks all over its screen");
+        assert!(shown, "not shown once it takes clicks only where its sheet is");
+        assert!(!off_sheet, "it takes the pointer off its sheet");
     }
 }

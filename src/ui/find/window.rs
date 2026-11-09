@@ -336,8 +336,8 @@ enum Act {
 
 struct Finder {
     hwnd: HWND,
-    /// Whether it is up: from `show` till `close`. Not up, it draws nothing: what comes for it meanwhile (what was
-    /// found, what is told of it, the look gone) is taken in for when it is next drawn.
+    /// Whether it is up: from `show` till `close`, shown once it can be (see `appear`). Not up, it draws nothing: what
+    /// comes for it meanwhile (what was found, what is told of it, the look gone) is taken in for when it is next drawn.
     up: bool,
     /// The device it draws with, its screen's, while it shows (none while it is hidden: see `close`).
     gfx: Option<Rc<Gfx>>,
@@ -534,17 +534,28 @@ impl Finder {
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), left, top, self.rect.right - left, self.rect.bottom - top, SWP_NOACTIVATE);
         }
+        // (Shown, and in front, as it is drawn: see `appear`.)
         self.up = true;
         self.draw();
+        unsafe {
+            let _ = SetTimer(Some(self.hwnd), CARET, GetCaretBlinkTime(), None);
+            let _ = SetTimer(Some(self.hwnd), WATCH, WATCH_EVERY, None);
+        }
+    }
+
+    /// Shown, in front, where it is hidden, once its window takes the pointer only where its sheet is drawn (`held`, see
+    /// `gfx::Footprint::holds`). Its window is as tall as its tallest sheet: shown before, its region not given it (the
+    /// system out of room for GDI's objects), it took the clicks under a short sheet, showing nothing there. Till then
+    /// it is drawn as ever, hidden, its region asked for again each time (as its caret blinks, at the least).
+    fn appear(&mut self, held: bool) {
+        if !held || self.visible() {
+            return;
+        }
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
         }
         crate::widget::own_window_changed(self.rect);
         self.come_forward();
-        unsafe {
-            let _ = SetTimer(Some(self.hwnd), CARET, GetCaretBlinkTime(), None);
-            let _ = SetTimer(Some(self.hwnd), WATCH, WATCH_EVERY, None);
-        }
     }
 
     /// In front, with the keyboard.
@@ -750,6 +761,7 @@ impl Finder {
         // frame is waited for.)
         let frosted = matches!(drawn, Drawn::Frosted(_));
         let taken = self.footprint.take(showing, || if frosted { unsafe { windows::Win32::Graphics::Dwm::DwmFlush() } } else { unsafe { gfx.dcomp.WaitForCommitCompletion() } });
+        let held = self.footprint.holds(showing);
         let done = taken.and_then(|_| match &mut drawn {
             Drawn::Plain(surface) => surface.draw(&gfx, size, scale, |frame| {
                 self.paint(frame, false, (room, room));
@@ -773,6 +785,7 @@ impl Finder {
         self.place_ime();
         // (Where each name shows now, told to the look at one: it goes back into its row where that is.)
         look::tiles(self.hwnd, self.rows_on_screen().into_iter().filter_map(|(at, rect)| Some((key_of(&self.shown.rows().nth(at)?.what), rect))).collect());
+        self.appear(held);
     }
 
     /// How tall the sheet is for what it shows (DIPs).

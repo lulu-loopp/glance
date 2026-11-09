@@ -2790,7 +2790,7 @@ impl Footprint {
     /// passed since). A region the window could not be given (see `give_region`) leaves it as it was, and is asked for
     /// again with the next frame.
     pub fn take(&mut self, showing: RECT, settled: impl FnOnce() -> Result<()>) -> Result<()> {
-        let wanted = self.shows.map_or(showing, |shown| bounds(shown, showing));
+        let wanted = self.wanted(showing);
         if self.region == Some(wanted) {
             return Ok(());
         }
@@ -2801,6 +2801,19 @@ impl Footprint {
             self.region = Some(wanted);
         }
         Ok(())
+    }
+
+    /// Whether the window takes the pointer only where it is to show `showing` and what showed till then, as `take`
+    /// asks: a window hidden till then is to be shown only once it does. Shown before, its region not given it (the
+    /// system out of room for GDI's objects), it would take the pointer over all of it, showing nothing there, or where
+    /// it showed something before, elsewhere.
+    pub fn holds(&self, showing: RECT) -> bool {
+        self.region == Some(self.wanted(showing))
+    }
+
+    /// The region that takes what showed and `showing` (see `take`).
+    fn wanted(&self, showing: RECT) -> RECT {
+        self.shows.map_or(showing, |shown| bounds(shown, showing))
     }
 
     /// The window shows `showing` (committed).
@@ -3759,6 +3772,30 @@ mod tests {
         let shows = RECT { left: 0, top: 0, right: 100, bottom: 100 };
         footprint.take(shows, || Ok(())).expect("taken");
         assert_eq!(footprint.region, None, "a region a window did not take counted as its, not asked for again");
+    }
+
+    /// A window larger than what it draws, hidden till it takes the pointer only where it shows (the search's), is told
+    /// it does once its region is given it, and while what it shows grows smaller, where it shows and showed. It is told
+    /// it does not while its region is not given it (here, as one gone takes none): shown so, it would take the pointer
+    /// all over.
+    #[test]
+    fn a_footprint_holds_only_a_region_given_it() {
+        use windows::Win32::Foundation::RECT;
+        let (large, small) = (RECT { left: 0, top: 0, right: 400, bottom: 300 }, RECT { left: 0, top: 0, right: 100, bottom: 100 });
+        let window = crate::ui::window::Window::new().expect("a window");
+        let mut footprint = super::Footprint::of(window.hwnd);
+        footprint.take(large, || Ok(())).expect("taken");
+        let held = footprint.holds(large);
+        footprint.shown(large);
+        footprint.take(small, || Ok(())).expect("taken");
+        let held_smaller = footprint.holds(small);
+        let gone = window.hwnd;
+        drop(window);
+        let mut footprint = super::Footprint::of(gone);
+        footprint.take(large, || Ok(())).expect("taken");
+        assert!(held, "a footprint given its region does not hold it");
+        assert!(held_smaller, "a footprint given its region does not hold it as what it shows grows smaller");
+        assert!(!footprint.holds(large), "a footprint whose region its window did not take holds it");
     }
 
     /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.
