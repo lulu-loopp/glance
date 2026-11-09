@@ -283,6 +283,12 @@ pub fn screens_changed() {
     SCREENS_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// How many times the screens or the adapters have changed (see `screens_changed`): what was found of them stands
+/// while it is the same.
+pub fn screens_changes() -> u64 {
+    SCREENS_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The screens there are now (their monitors' handles).
 fn screens_now() -> Vec<isize> {
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
@@ -337,7 +343,7 @@ fn adapter_for(screen: isize) -> Result<Option<Shown>> {
 /// What `read` reads of the adapters as they were last seen: seen again where the screens have changed since, or
 /// `screen` (where one is asked of) is one not there then.
 fn seen<R>(screen: Option<isize>, read: impl FnOnce(&Seen) -> R) -> Result<R> {
-    let changes = SCREENS_CHANGED.load(std::sync::atomic::Ordering::Relaxed);
+    let changes = screens_changes();
     let mut held = SEEN.lock().unwrap();
     let seen = match &mut *held {
         Some(seen) if seen.changes == changes && screen.is_none_or(|screen| seen.screens.contains(&screen)) => seen,

@@ -449,8 +449,33 @@ unsafe impl Send for LayerHeld {}
 static FEEDS: Mutex<Vec<Feed>> = Mutex::new(Vec::new());
 /// The number the next feed made takes.
 static NEXT_FEED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// The desktop's window a feed could not be made for (no borderless capture here, say): shown by its thumbnail.
-static REFUSED: Mutex<Option<isize>> = Mutex::new(None);
+/// The desktop's windows a feed could not be made for (no borderless capture here, say, or the card short of memory a
+/// moment), each on the adapter it was asked of: shown by their thumbnail (see `Refusals`).
+static REFUSED: Mutex<Refusals> = Mutex::new(Refusals(Vec::new()));
+
+/// The desktop's windows a feed could not be made for, each with the adapter it was asked of and how many times the
+/// screens or the adapters had changed then (see `gfx::screens_changes`). A refusal stands for that window on that
+/// adapter alone, the others' feeds made and kept as they are, and only till the screens or the adapters next change (a
+/// device lost among them), as a feed is itself made anew for a device lost: asked again then, as for a desktop's window
+/// that is another (Explorer started again), and not each time a scene is arranged meanwhile (each made and failed is
+/// some of the card's memory, see `Feed`).
+struct Refusals(Vec<(isize, Option<super::gfx::Luid>, u64)>);
+
+impl Refusals {
+    /// No feed could be made for the desktop's window `shell` on `adapter`, the screens and the adapters having changed
+    /// `changes` times.
+    fn refuse(&mut self, shell: HWND, adapter: Option<super::gfx::Luid>, changes: u64) {
+        self.0.retain(|(_, of, _)| *of != adapter);
+        self.0.push((shell.0 as isize, adapter, changes));
+    }
+
+    /// Whether a feed for the desktop's window `shell` on `adapter` is not to be asked for, the screens and the
+    /// adapters having changed `changes` times: one was refused since they last did.
+    fn refused(&mut self, shell: HWND, adapter: Option<super::gfx::Luid>, changes: u64) -> bool {
+        self.0.retain(|(_, _, then)| *then == changes);
+        self.0.iter().any(|(of, on, _)| *of == shell.0 as isize && *on == adapter)
+    }
+}
 
 /// Whether a thumbnail of the desktop's window `shell` leaves out what it shows: a window under it, shown, drawn
 /// through a surface of its own (a live wallpaper's), which its thumbnail does not hold.
@@ -666,14 +691,14 @@ impl Feed {
     }
 }
 
-/// A layer of the desktop for a scene's `window` at `area`, from the feed of `d3d`'s adapter for the desktop's window
-/// `shell` (made on `d3d` as first wanted, and made anew where it was another's, as Explorer started again, or its
-/// device was lost), and the feed's number. None where none can be made for it (it is not asked again for that window).
-fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> Option<(Arc<Layer>, u64)> {
-    if *REFUSED.lock().unwrap() == Some(shell.0 as isize) {
+/// A layer of the desktop for a scene's `window` at `area`, from the feed of `d3d`'s adapter (`adapter`) for the
+/// desktop's window `shell` (made on `d3d` as first wanted, and made anew where it was another's, as Explorer started
+/// again, or its device was lost), and the feed's number. None where none can be made for it (not asked again for that
+/// window on that adapter till the screens or the adapters change: see `Refusals`).
+fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device, adapter: Option<super::gfx::Luid>) -> Option<(Arc<Layer>, u64)> {
+    if feed_refused(shell, adapter) {
         return None;
     }
-    let adapter = super::gfx::adapter_of(d3d);
     let mut feeds = FEEDS.lock().unwrap();
     if let Some(stale) = feeds.iter().position(|feed| feed.adapter == adapter && (feed.shell != shell || feed.lost())) {
         feeds.swap_remove(stale).end();
@@ -682,7 +707,7 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device) -> O
         match Feed::new(shell, d3d) {
             Some(feed) => feeds.push(feed),
             None => {
-                *REFUSED.lock().unwrap() = Some(shell.0 as isize);
+                REFUSED.lock().unwrap().refuse(shell, adapter, super::gfx::screens_changes());
                 return None;
             }
         }
@@ -723,9 +748,10 @@ fn let_go_of_feed(id: u64) {
     }
 }
 
-/// Whether a feed may be made for the desktop's window `shell` (none could before).
-fn feed_refused(shell: HWND) -> bool {
-    *REFUSED.lock().unwrap() == Some(shell.0 as isize)
+/// Whether a feed is not to be asked for the desktop's window `shell` on `adapter` (one could not be made, the screens
+/// and the adapters as they are: see `Refusals`).
+fn feed_refused(shell: HWND, adapter: Option<super::gfx::Luid>) -> bool {
+    REFUSED.lock().unwrap().refused(shell, adapter, super::gfx::screens_changes())
 }
 
 /// `layer` (of the feed numbered `feed`) at `area` and shown (no longer resting): the newest frame put in it where it
@@ -796,9 +822,10 @@ pub struct Scene {
     shared: Arc<Shared>,
     /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
     /// what it shows (see `Feed`): the window it is put in, its layer, the desktop's window it is of and the feed's
-    /// number; the device to start that on.
+    /// number. The device to start that on, and its adapter.
     desktop: Option<(HWND, Arc<Layer>, HWND, u64)>,
     d3d: ID3D11Device,
+    adapter: Option<super::gfx::Luid>,
 }
 
 /// `frame` read on the thread frames are read on (see the top), then closed (one of what was there before is not
@@ -981,7 +1008,8 @@ impl Scene {
                 return None;
             };
             let d3d = shared.device.device.clone();
-            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, paced, shared, desktop: None, d3d })
+            let adapter = super::gfx::adapter_of(&d3d);
+            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, paced, shared, desktop: None, d3d, adapter })
         }
     }
 
@@ -1037,7 +1065,7 @@ impl Scene {
         // in this scene's own layer, not as a thumbnail.
         let shell = unsafe { GetShellWindow() };
         let desktop_at = behind.iter().find(|(window, _)| *window == shell).map(|(_, rect)| *rect);
-        let apart = desktop_at.is_some() && !feed_refused(shell) && drawn_apart(shell);
+        let apart = desktop_at.is_some() && !feed_refused(shell, self.adapter) && drawn_apart(shell);
         // Its layer, of the desktop's window as it is now (one of another, as Explorer started again, or of a feed
         // ended or whose device was lost, let go of: a feed made anew), put where it is to be before anything else is,
         // and its window in the desktop's place (the bottom); the desktop's own thumbnail where none could be made.
@@ -1052,7 +1080,7 @@ impl Scene {
                 move_layer(layer, *feed, area);
                 Some(*window)
             }
-            (None, true) => self.desktop_window(area).and_then(|window| match desktop_layer(shell, window, area, &self.d3d) {
+            (None, true) => self.desktop_window(area).and_then(|window| match desktop_layer(shell, window, area, &self.d3d, self.adapter) {
                 Some((layer, feed)) => {
                     self.desktop = Some((window, layer, shell, feed));
                     Some(window)
@@ -1303,6 +1331,25 @@ impl Drop for Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A feed of the desktop's window refused on one adapter (a card short of memory a moment, say) is asked for still
+    /// on the others, and on that one again once the screens or the adapters change (a device lost among them), as for
+    /// a desktop's window that is another (Explorer started again): refused for good on all, the scenes of a card whose
+    /// feed was made let theirs go and showed the desktop by its thumbnail, with no live wallpaper, till Glance started
+    /// again.
+    #[test]
+    fn a_feed_refused_on_one_adapter_is_refused_there_alone_till_the_adapters_change() {
+        use crate::ui::gfx::Luid;
+        let (shell, explorer_again) = (HWND(1 as *mut _), HWND(2 as *mut _));
+        let (integrated, discrete) = (Some(Luid { high: 0, low: 1 }), Some(Luid { high: 0, low: 2 }));
+        let mut refusals = Refusals(Vec::new());
+        refusals.refuse(shell, discrete, 7);
+        assert!(refusals.refused(shell, discrete, 7), "a feed refused asked for again at once");
+        assert!(!refusals.refused(shell, integrated, 7), "a feed refused on one adapter refused on another");
+        assert!(!refusals.refused(explorer_again, discrete, 7), "a feed refused for a desktop's window refused for the next");
+        assert!(!refusals.refused(shell, discrete, 8), "a feed refused not asked for again once the screens or the adapters changed");
+        assert!(refusals.0.is_empty(), "a refusal from before the screens or the adapters changed kept");
+    }
 
     /// A window over the desktop is in the first frame taken after a scene is arranged, as the desktop is (a frame of
     /// the desktop alone is not taken): a red window put up on the main screen a moment, a scene arranged over it and
