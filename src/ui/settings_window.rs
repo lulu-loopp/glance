@@ -6589,24 +6589,30 @@ impl Ui {
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
-        if let Some((_, bitmap)) = &self.stage.bitmap {
-            // (Inside the area's rounded corners.)
-            let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
-            let layer = D2D1_LAYER_PARAMETERS1 {
-                contentBounds: rect(area.x, area.y, area.w, area.h),
-                geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: Matrix3x2::identity(),
-                opacity: 1.0,
-                ..Default::default()
-            };
-            unsafe {
-                frame.dc.PushLayer(&layer, None);
-                frame.dc.DrawBitmap(bitmap, Some(&rect(at.0, at.1, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-                frame.dc.PopLayer();
-            }
-        }
+        let bitmap = self.stage.bitmap.as_ref().map(|(_, bitmap)| bitmap);
+        desktop_at(frame, bitmap, self.palette.switch_off, area, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
     }
+}
+
+/// A desktop drawn at `at`, clipped to `area` inside its rounded corners: `bitmap`, or where there is none (not read
+/// yet, or given up: see `reads`), `none` all over, as the layout's map shows a screen whose desktop it has not.
+fn desktop_at(frame: &Frame, bitmap: Option<&ID2D1Bitmap1>, none: Color, area: Rect, at: Rect) {
+    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
+    let layer = D2D1_LAYER_PARAMETERS1 {
+        contentBounds: rect(area.x, area.y, area.w, area.h),
+        geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: Matrix3x2::identity(),
+        opacity: 1.0,
+        ..Default::default()
+    };
+    unsafe { frame.dc.PushLayer(&layer, None) };
+    match bitmap {
+        Some(bitmap) => unsafe { frame.dc.DrawBitmap(bitmap, Some(&rect(at.x, at.y, at.w, at.h)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) },
+        None => fill(frame, none, at.x, at.y, at.w, at.h, 0.0),
+    }
+    unsafe { frame.dc.PopLayer() };
+    drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -7397,6 +7403,21 @@ mod tests {
         assert_eq!(read, [map(wide, (384, 216)), map(tall, (216, 384)), map(wide, (100, 56)), map(wide, (384, 216))]);
         assert_eq!(arts.iter().map(|art| (art.monitor, art.read_at)).collect::<Vec<_>>(), [(wide, Some((384, 216))), (tall, Some((216, 384)))]);
         assert!(arts.iter().all(|art| art.desktop.is_some()));
+    }
+
+    /// A screen whose desktop has not been read (or was given up) is drawn plain, as the layout's map draws it, in the
+    /// preview and the layout's one screen alike, inside its frame's rounded corners and nowhere else.
+    #[test]
+    fn a_desktop_not_read_is_drawn_plain() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Gfx::new().unwrap();
+        let pixels = gfx.draw_offscreen((100, 60), 1.0, |frame| desktop_at(frame, None, Color::hex(0xFF0000, 1.0), Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 }, Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 })).unwrap();
+        let at = |x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
+        assert_eq!(at(50, 30), [0, 0, 255, 255]);
+        assert_eq!(at(12, 30), [0, 0, 255, 255]);
+        // (Outside its frame, and in its rounded corner.)
+        assert_eq!(at(5, 30), [0, 0, 0, 0]);
+        assert_eq!(at(10, 10), [0, 0, 0, 0]);
     }
 
     /// Choices wider than their room go on as many lines as they take, each whole, in order.
