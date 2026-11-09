@@ -21,7 +21,7 @@ use windows::Wdk::Graphics::Direct3D::{
 };
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_ListW, CM_Get_Device_Interface_List_SizeW, CM_Get_Device_Interface_PropertyW, CM_Locate_DevNodeW,
-    CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_LOCATE_DEVNODE_NORMAL, CR_SUCCESS,
+    CM_GET_DEVICE_INTERFACE_LIST_PRESENT, CM_LOCATE_DEVNODE_NORMAL, CONFIGRET, CR_BUFFER_SMALL, CR_SUCCESS,
 };
 use windows::Win32::Devices::Properties::{DEVPKEY_Device_InstanceId, DEVPKEY_Device_PowerData, DEVPROPTYPE};
 use windows::Win32::System::Power::{CM_POWER_DATA, DEVICE_POWER_STATE, PowerDeviceD1, PowerDeviceD2, PowerDeviceD3};
@@ -729,14 +729,12 @@ const DISPLAY_ADAPTERS: windows::core::GUID = windows::core::GUID::from_u128(0x1
 /// its device found by the interface's.
 fn adapter_devices() -> HashMap<(u32, i32), u32> {
     let mut devices = HashMap::new();
-    let mut length = 0u32;
-    if unsafe { CM_Get_Device_Interface_List_SizeW(&mut length, &DISPLAY_ADAPTERS, PCWSTR::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } != CR_SUCCESS {
-        return devices;
-    }
-    let mut list = vec![0u16; length as usize];
-    if unsafe { CM_Get_Device_Interface_ListW(&DISPLAY_ADAPTERS, PCWSTR::null(), &mut list, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } != CR_SUCCESS {
-        return devices;
-    }
+    let size = || {
+        let mut length = 0u32;
+        (unsafe { CM_Get_Device_Interface_List_SizeW(&mut length, &DISPLAY_ADAPTERS, PCWSTR::null(), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) } == CR_SUCCESS).then_some(length)
+    };
+    let list = |into: &mut [u16]| unsafe { CM_Get_Device_Interface_ListW(&DISPLAY_ADAPTERS, PCWSTR::null(), into, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
+    let Some(list) = interface_list(size, list) else { return devices };
     // Each interface's name, ended by a zero, and the list by another.
     for name in list.split(|&c| c == 0).filter(|name| !name.is_empty()) {
         let name: Vec<u16> = name.iter().copied().chain([0]).collect();
@@ -756,6 +754,20 @@ fn adapter_devices() -> HashMap<(u32, i32), u32> {
         }
     }
     devices
+}
+
+/// A list of device interfaces, as `list` writes it into room of the length `size` says it needs, asked again from
+/// its size for as long as it comes to more than that: an interface that arrives between the two (a driver starting,
+/// a dock plugged in) makes the list longer than the room asked for, as Microsoft documents. None where either fails.
+fn interface_list(mut size: impl FnMut() -> Option<u32>, mut list: impl FnMut(&mut [u16]) -> CONFIGRET) -> Option<Vec<u16>> {
+    loop {
+        let mut room = vec![0u16; size()? as usize];
+        match list(&mut room) {
+            CR_SUCCESS => return Some(room),
+            CR_BUFFER_SMALL => continue,
+            _ => return None,
+        }
+    }
 }
 
 /// Whether the engine counter's instance `name`, read as `value`, is one new since the reading before (`before`, its
@@ -1713,6 +1725,33 @@ mod tests {
         assert!(super::not_yet_counted("pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D", None, &before));
         assert!(!super::not_yet_counted("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D", None, &before));
         assert!(!super::not_yet_counted("pid_2_luid_0x0_0x1_phys_0_eng_0_engtype_3D", Some(3.0), &before));
+    }
+
+    /// A display adapter's interface that arrives between the list's size being asked and the list itself (a driver
+    /// starting, a dock plugged in) has the list asked again from its size, till it fits: the adapters' devices are
+    /// found, not left unknown for as long as the sampler runs (each GPU then taken for awake, and its driver asked).
+    /// Either failing otherwise, there is none.
+    #[test]
+    fn a_list_of_interfaces_grown_meanwhile_is_asked_again() {
+        let mut sizes = vec![4u32, 6].into_iter();
+        // (The size says 4, and the list is 6 long by the time it is asked for.)
+        let mut there = vec![6usize, 6].into_iter();
+        let mut asked = 0;
+        let list = interface_list(
+            || sizes.next(),
+            |room: &mut [u16]| {
+                asked += 1;
+                if room.len() < there.next().unwrap() {
+                    return CR_BUFFER_SMALL;
+                }
+                room.fill(7);
+                CR_SUCCESS
+            },
+        );
+        assert_eq!(list, Some(vec![7; 6]));
+        assert_eq!(asked, 2);
+        assert_eq!(interface_list(|| None, |_: &mut [u16]| CR_SUCCESS), None);
+        assert_eq!(interface_list(|| Some(2), |_: &mut [u16]| windows::Win32::Devices::DeviceAndDriverInstallation::CR_FAILURE), None);
     }
 
     use super::*;
