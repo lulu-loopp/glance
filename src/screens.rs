@@ -27,7 +27,13 @@ const PRIMARY: u32 = 1;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Screen {
+    /// The name that stays its own, no other screen there is named so (see `told_apart`).
     pub id: String,
+    /// The output it is shown on (`\\.\DISPLAY1` and its like), and the display Windows names on that output: its
+    /// device interface path, or the output's own name for an output with no display device behind it (a remote
+    /// session's).
+    pub output: String,
+    pub display: String,
     /// Where it is on the desktop (physical px).
     pub monitor: RECT,
     pub primary: bool,
@@ -60,14 +66,55 @@ pub fn all() -> Vec<Screen> {
             // behind it (a remote session's) is known by its own name.
             let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
             let named = unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), 0, &mut device, INTERFACE_NAME) }.as_bool();
-            let id = Some(text(&device.DeviceID)).filter(|id| named && !id.is_empty()).unwrap_or_else(|| text(&info.szDevice));
-            found.push(Screen { id, monitor: info.monitorInfo.rcMonitor, primary: info.monitorInfo.dwFlags & PRIMARY != 0 });
+            let output = text(&info.szDevice);
+            let display = Some(text(&device.DeviceID)).filter(|id| named && !id.is_empty()).unwrap_or_else(|| output.clone());
+            found.push(Screen { id: display.clone(), output, display, monitor: info.monitorInfo.rcMonitor, primary: info.monitorInfo.dwFlags & PRIMARY != 0 });
         }
         true.into()
     }
     let mut found: Vec<Screen> = Vec::new();
     let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut found as *mut _ as isize)) };
+    told_apart(found)
+}
+
+/// `found`, each named by its display (see `Screen::display`), each given a name no other of them has. A device
+/// interface path is the display device's instance in the system (which the system gives no other device: a display's
+/// holds the connector it is on, so two alike on two connectors differ) joined to the interface, and stays the same
+/// for that display on that connector from one start to the next. Windows lists the displays it has known on an
+/// output, though, without promising that the first it lists is the one shown there: two outputs said to show the
+/// same display are told apart by their outputs, the first of them by its output's name keeping the display's name
+/// alone (what was kept under it stays that screen's) and each other named by it and its output.
+fn told_apart(mut found: Vec<Screen>) -> Vec<Screen> {
+    let ids: Vec<String> = found
+        .iter()
+        .map(|screen| {
+            let first = found.iter().filter(|other| other.display == screen.display).map(|other| &other.output).min();
+            if first == Some(&screen.output) { screen.display.clone() } else { format!("{} on {}", screen.display, screen.output) }
+        })
+        .collect();
+    for (screen, id) in found.iter_mut().zip(ids) {
+        screen.id = id;
+    }
     found
+}
+
+/// Each screen as Windows has it, for a report: the output it is on, the display named there, where it is (physical
+/// px), whether it is the main screen, and the name it goes by where that is not the display's alone.
+pub fn describe() -> Vec<String> {
+    described(&all())
+}
+
+/// `describe`, of `screens`.
+fn described(screens: &[Screen]) -> Vec<String> {
+    screens
+        .iter()
+        .map(|screen| {
+            let m = screen.monitor;
+            let main = if screen.primary { ", main" } else { "" };
+            let named = if screen.id == screen.display { String::new() } else { format!(", named {}", screen.id) };
+            format!("Screen on {}: {} at ({}, {}) to ({}, {}){main}{named}", screen.output, screen.display, m.left, m.top, m.right, m.bottom)
+        })
+        .collect()
 }
 
 /// The screens as they were last asked for, and each one's edges (left,
@@ -216,6 +263,29 @@ pub fn stretches(monitors: &[RECT], index: usize, edge: Edge, eased: bool) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two outputs said to show one display (two alike screens, as a report had them) are two screens of their own
+    /// names: the first by its output's name keeps the display's (what was kept under it stays its), the other is named
+    /// by its output as well, whichever order Windows lists them in. A screen whose display is its own alone keeps its
+    /// name as it was.
+    #[test]
+    fn screens_said_to_show_one_display_are_told_apart() {
+        let shared = r"\\?\DISPLAY#XMI3444#5&1a2b3c4d&0&UID4352#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        let own = r"\\?\DISPLAY#GSM77E8#5&1a2b3c4d&0&UID4353#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}";
+        let screen = |output: &str, display: &str, monitor: RECT, primary: bool| Screen { id: display.into(), output: output.into(), display: display.into(), monitor, primary };
+        let wide = screen(r"\\.\DISPLAY1", shared, RECT { left: 0, top: 0, right: 3840, bottom: 2160 }, true);
+        let tall = screen(r"\\.\DISPLAY2", shared, RECT { left: -2160, top: -1071, right: 0, bottom: 2769 }, false);
+        let third = screen(r"\\.\DISPLAY3", own, RECT { left: 3840, top: 0, right: 5760, bottom: 1080 }, false);
+        let names = |found: Vec<Screen>| told_apart(found).into_iter().map(|screen| (screen.output, screen.id)).collect::<Vec<_>>();
+        let told = names(vec![wide.clone(), tall.clone(), third.clone()]);
+        assert_eq!(told, [(r"\\.\DISPLAY1".to_string(), shared.to_string()), (r"\\.\DISPLAY2".into(), format!(r"{shared} on \\.\DISPLAY2")), (r"\\.\DISPLAY3".into(), own.into())]);
+        let mut listed = names(vec![third, tall, wide]);
+        listed.reverse();
+        assert_eq!(listed, told);
+        // (A report says what Windows named on each output, and the name each screen goes by where that differs.)
+        let shown = described(&told_apart(vec![screen(r"\\.\DISPLAY1", shared, RECT { left: 0, top: 0, right: 3840, bottom: 2160 }, true), screen(r"\\.\DISPLAY2", shared, RECT { left: -2160, top: -1071, right: 0, bottom: 2769 }, false)]));
+        assert_eq!(shown, [format!(r"Screen on \\.\DISPLAY1: {shared} at (0, 0) to (3840, 2160), main"), format!(r"Screen on \\.\DISPLAY2: {shared} at (-2160, -1071) to (0, 2769), named {shared} on \\.\DISPLAY2")]);
+    }
 
     #[test]
     fn an_edge_is_a_seam_where_another_screen_lies_against_it() {
