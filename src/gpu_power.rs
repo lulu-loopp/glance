@@ -15,7 +15,8 @@
 //! a laptop's discrete GPU sleeps while nothing draws on it, and finding it
 //! through its maker's library starts it up (NVML's finding a card does, as
 //! NVIDIA documents), as asking it what it is or where it sits may, which IGCL
-//! and NVAPI do of each card as they look for another.
+//! and NVAPI do of each card as they look for another. Nor is a card found
+//! asked anything once it sleeps (see `GpuPower::describe_intel`).
 
 use std::ffi::c_void;
 
@@ -150,10 +151,12 @@ impl GpuPower {
     }
 
     /// What Intel's library found, for a report: each of its graphics looked up, where it sits, and what it reads
-    /// of it.
-    pub fn describe_intel(&self) -> Option<String> {
+    /// of it, where `awake` says the graphics at that place are just before they are asked (found awake, they may
+    /// have gone to sleep since, a laptop's Arc card while the rest of the hardware was looked at).
+    pub fn describe_intel(&self, awake: impl Fn(PciAddress) -> bool) -> Option<String> {
         let igcl = self.igcl()?;
-        Some(igcl.devices.iter().enumerate().map(|(index, device)| format!("{:?}: {}", device.at, igcl.told(index))).collect::<Vec<_>>().join("; "))
+        let of = |(index, device): (usize, &IntelDevice)| format!("{:?}: {}", device.at, if awake(device.at) { igcl.told(index) } else { "asleep, not asked".into() });
+        Some(igcl.devices.iter().enumerate().map(of).collect::<Vec<_>>().join("; "))
     }
 
     /// Whether it is Intel's graphics built into the CPU (whose power the CPU may count apart: see
@@ -851,11 +854,13 @@ mod tests {
     }
 
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         /// What the libraries standing in for the makers' below were asked, in order.
         static ASKED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        /// Whether the Arc card standing in for one below has gone to sleep.
+        static ARC_ASLEEP: Cell<bool> = const { Cell::new(false) };
     }
 
     fn asked(what: &'static str) {
@@ -922,6 +927,35 @@ mod tests {
         }
         assert!(none_yet.nvml.is_none() && none_yet.nvapi.is_none() && none_yet.adl.is_none() && none_yet.igcl.is_none());
         assert_eq!(none_yet.reader(0x1AF4, at, &mut || false), Some(None));
+    }
+
+    // IGCL as it stands for Intel's below: each of its graphics' telemetry read takes long enough for the Arc card to
+    // go to sleep.
+    unsafe extern "C" fn igcl_telemetry(_: CtlHandle, read: *mut CtlTelemetry) -> u32 {
+        asked("IGCL: telemetry");
+        ARC_ASLEEP.set(true);
+        unsafe { (*read).gpu_temperature.supported = true };
+        CTL_SUCCESS
+    }
+    unsafe extern "C" fn igcl_properties(_: CtlHandle, _: *mut CtlAdapterProperties) -> u32 {
+        CTL_SUCCESS
+    }
+    unsafe extern "C" fn igcl_close(_: CtlHandle) -> u32 {
+        CTL_SUCCESS
+    }
+
+    /// Intel's graphics found are asked what they read, for a report, only where they are awake just before: an Arc
+    /// card found awake, gone to sleep since (as the graphics in the CPU before it were asked), is asked nothing.
+    #[test]
+    fn describes_intels_graphics_asking_none_asleep() {
+        let device = |at, handle: usize| IntelDevice { at, integrated: handle == 1, handle: handle as CtlHandle, last: Cell::new(None) };
+        let devices = vec![device((0, 2, 0), 1), device((3, 0, 0), 2)];
+        let igcl = Igcl { library: HMODULE::default(), api: std::ptr::null_mut(), close: igcl_close, telemetry: igcl_telemetry, properties: igcl_properties, handles: Vec::new(), devices };
+        let power = GpuPower { nvml: None, nvapi: None, adl: None, igcl: Some(Some(igcl)) };
+        let told = power.describe_intel(|at| at != (3, 0, 0) || !ARC_ASLEEP.get());
+        assert_eq!(taken(), ["IGCL: telemetry"]);
+        assert_eq!(told.as_deref(), Some("(0, 2, 0): temperature yes, clock no, energy no, fans 0; (3, 0, 0): asleep, not asked"));
+        std::mem::forget(power);
     }
 
     #[test]

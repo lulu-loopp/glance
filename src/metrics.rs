@@ -292,7 +292,10 @@ impl Sampler {
                 found.push(format!("PawnIO, the last that failed: {failed}"));
             }
             found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| format!("GPU power, {}: {}", gpu.name, adapter.describe())));
-            if let Some(intel) = gpu_power.describe_intel() {
+            // (Intel's graphics, found awake, are asked what they read only if they still are: the rest of the hardware
+            // has been looked at since.)
+            let awake = |at| adapters.iter().find(|adapter| adapter.address == Some(at)).is_some_and(|adapter| !DeviceManager.sleeps(adapter.device));
+            if let Some(intel) = gpu_power.describe_intel(awake) {
                 found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
             }
             (super_io, dimms, laptop_fans) = (Some(found_super_io), Some(found_dimms), Some(found_fans));
