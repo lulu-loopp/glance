@@ -63,7 +63,7 @@ const QUIT_WAIT: Duration = Duration::from_secs(3);
 
 /// A drive being searched.
 pub struct Volume {
-    pub drive: Drive,
+    pub drive: Arc<Drive>,
     index: RwLock<Index>,
     /// How many names it held as it was last asked (told while its index is being changed: see `standing`).
     names: AtomicUsize,
@@ -77,7 +77,7 @@ pub struct Volume {
 }
 
 impl Volume {
-    fn new(drive: Drive, index: Index) -> Volume {
+    fn new(drive: Arc<Drive>, index: Index) -> Volume {
         Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0) }
     }
 
@@ -165,7 +165,7 @@ fn drives() {
                 crate::journal::note(format!("search: {root} followed, its removal not heard (it may not be taken out safely while Glance runs)"));
             }
             let index = Index::new(drive.root_id, drive.by_id());
-            come.push(Arc::new(Volume::new(drive, index)));
+            come.push(Arc::new(Volume::new(Arc::new(drive), index)));
         }
         *VOLUMES.lock().unwrap() = staying.into_iter().chain(come.iter().cloned()).collect();
         for volume in come {
@@ -285,7 +285,7 @@ fn mark_all(volume: &Volume) {
 /// due). The journal is read after, not between rounds: a folder changing every second, listed again in each, would
 /// never let it end. Folders whose listing failed are not tried again in it (they are after: see `Pacing`). How many
 /// folders it listed.
-fn sweep(volume: &Volume, pool: &walk::Pool, keeping: &mut Keeping, whole: bool) -> usize {
+fn sweep(volume: &Volume, pool: &Arc<walk::Pool>, keeping: &mut Keeping, whole: bool) -> usize {
     let mut failed: HashSet<u64> = HashSet::new();
     let (mut spent, mut listed) = (Duration::ZERO, 0);
     loop {
@@ -392,7 +392,7 @@ impl Keeping {
 }
 
 /// A drive kept current as its journal says which folders changed.
-fn follow_journal(volume: &Volume, pool: &walk::Pool, mut keeping: Keeping) {
+fn follow_journal(volume: &Volume, pool: &Arc<walk::Pool>, mut keeping: Keeping) {
     let drive = &volume.drive;
     let mut pacing = Pacing::new(volume);
     while !volume.away() {
@@ -449,7 +449,7 @@ fn coalesce(seen: watch::Seen, told: &mpsc::Receiver<watch::Seen>) -> watch::See
 }
 
 /// A drive with no journal kept current as Windows tells of names changed in its folders.
-fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &walk::Pool, mut keeping: Keeping) {
+fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &Arc<walk::Pool>, mut keeping: Keeping) {
     let mut pacing = Pacing::new(volume);
     while !volume.away() {
         let changed = match told.recv_timeout(JOURNAL_EVERY).map(|seen| coalesce(seen, told)) {
@@ -526,7 +526,7 @@ impl Pacing {
 
     /// The folders that `changed` (by their ids) and those waiting listed, those that may be now: the rest left
     /// waiting, marked in the index (kept so, they are listed as Glance starts again). Whether the index changed.
-    fn list(&mut self, volume: &Volume, changed: Vec<u64>, pool: &walk::Pool) -> bool {
+    fn list(&mut self, volume: &Volume, changed: Vec<u64>, pool: &Arc<walk::Pool>) -> bool {
         let now = Instant::now();
         let (due, later) = self.take(changed, now);
         let mut marked = false;
@@ -669,7 +669,8 @@ mod tests {
         let mut drive = Drive::open(&format!("{}\\", root.display())).unwrap();
         // (A serial of its own: kept apart from any other test's.)
         drive.serial = 0x5E5E_0000 | (std::process::id() & 0xFFFF);
-        let pool = walk::Pool::new(2, 1 << 20);
+        let drive = Arc::new(drive);
+        let pool = Arc::new(walk::Pool::new(2, 1 << 20));
         let cursor = store::Cursor { journal: 7, next: 1000 };
 
         // Begun: one round, cut short at once (its time over as it began), kept with where the journal was before it.
