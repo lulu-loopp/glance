@@ -4099,11 +4099,15 @@ mod tests {
     }
 
     /// The look's window is its whole screen's, above all: shown before its sheet is first drawn (its drawing failed,
-    /// or its thread was held up), it takes the pointer nowhere, not over all the screen.
+    /// or its thread was held up), it takes the pointer nowhere, not over all the screen. (Made as its thread makes it,
+    /// its look made for it before it is told to anyone: see `run`.)
     #[test]
     fn the_look_takes_the_pointer_nowhere_before_its_sheet_is_drawn() {
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
         let hwnd = unsafe { make_window() }.expect("a window");
+        let (reads, _read) = std::sync::mpsc::channel();
+        let looker = Looker::new(hwnd, reads);
+        assert_eq!(looker.region, Some(RECT::default()), "its first region not counted as its");
         unsafe {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 100, 100, 800, 600, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
