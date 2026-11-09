@@ -16,7 +16,8 @@
 //! through its maker's library starts it up (NVML's finding a card does, as
 //! NVIDIA documents), as asking it what it is or where it sits may, which IGCL
 //! and NVAPI do of each card as they look for another. Nor is a card found
-//! asked anything once it sleeps (see `GpuPower::describe_intel`).
+//! asked anything once it sleeps: each of its readings' calls is made only as
+//! it is said awake just before (see `GpuPower::more`).
 
 use std::ffi::c_void;
 
@@ -60,16 +61,14 @@ impl Reader {
 }
 
 /// The vendors' libraries: each none till a card of its maker is first looked up (see `reader`), then whether the
-/// machine has it.
+/// machine has it. Made, used and dropped on the libraries' own thread alone (see `gpu_libraries`): their handles are
+/// not to be sent to another.
 pub struct GpuPower {
     nvml: Option<Option<Nvml>>,
     nvapi: Option<Option<Nvapi>>,
     adl: Option<Option<Adl>>,
     igcl: Option<Option<Igcl>>,
 }
-
-// The libraries' handles are used from one thread at a time (the sampler's).
-unsafe impl Send for GpuPower {}
 
 /// The makers' PCI vendor ids (Intel's is `INTEL_VENDOR`).
 const NVIDIA_VENDOR: u32 = 0x10DE;
@@ -135,18 +134,21 @@ impl GpuPower {
     /// What else the card's maker's library says of it now: Intel's, all
     /// that Windows does not have of its graphics; NVIDIA's and AMD's, the
     /// warmest point of the chip, on the cards that say it, and whether its
-    /// fans stand still (AMD's, their speed).
-    pub fn more(&self, reader: Reader) -> Option<More> {
+    /// fans stand still (AMD's, their speed). Each call into a library is
+    /// made only as `awake` says the card is just before it (a call before
+    /// it may have taken long), as with each of its readings (see `read`
+    /// and `limit`): what is not asked is unread.
+    pub fn more(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<More> {
         match reader {
-            Reader::Intel(index) => self.igcl()?.more(index),
+            Reader::Intel(index) => self.igcl()?.more(index, awake),
             Reader::Nvidia(index) => {
                 let nvml = self.nvml()?;
                 let at = nvml.devices.get(index)?.0;
                 // Its fans standing still: none turning, not unread (Windows' adapter data has no word for that).
-                let fan_rpm = nvml.fans_still(index).filter(|still| *still).map(|_| 0);
-                Some(More { hot_spot: self.nvapi().and_then(|nvapi| nvapi.hot_spot(at)), fan_rpm, ..More::default() })
+                let fan_rpm = nvml.fans_still(index, awake).filter(|still| *still).map(|_| 0);
+                Some(More { hot_spot: self.nvapi().and_then(|nvapi| nvapi.hot_spot(at, awake)), fan_rpm, ..More::default() })
             }
-            Reader::Amd(index) => self.adl()?.more(index),
+            Reader::Amd(index) => self.adl()?.more(index, awake),
         }
     }
 
@@ -155,7 +157,7 @@ impl GpuPower {
     /// have gone to sleep since, a laptop's Arc card while the rest of the hardware was looked at).
     pub fn describe_intel(&self, awake: impl Fn(PciAddress) -> bool) -> Option<String> {
         let igcl = self.igcl()?;
-        let of = |(index, device): (usize, &IntelDevice)| format!("{:?}: {}", device.at, if awake(device.at) { igcl.told(index) } else { "asleep, not asked".into() });
+        let of = |(index, device): (usize, &IntelDevice)| format!("{:?}: {}", device.at, igcl.told(index, &mut || awake(device.at)));
         Some(igcl.devices.iter().enumerate().map(of).collect::<Vec<_>>().join("; "))
     }
 
@@ -168,20 +170,20 @@ impl GpuPower {
         }
     }
 
-    /// The card's power now, in watts.
-    pub fn read(&self, reader: Reader) -> Option<f32> {
+    /// The card's power now, in watts, asked only as `awake` says the card is just before.
+    pub fn read(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
         match reader {
-            Reader::Nvidia(index) => self.nvml()?.power(index),
-            Reader::Amd(index) => self.adl()?.power(index),
-            Reader::Intel(index) => self.igcl()?.power(index),
+            Reader::Nvidia(index) => self.nvml()?.power(index, awake),
+            Reader::Amd(index) => self.adl()?.power(index, awake),
+            Reader::Intel(index) => self.igcl()?.power(index, awake),
         }
     }
 
     /// What holds the card's clock back now, where its driver says (only
-    /// NVIDIA's does).
-    pub fn limit(&self, reader: Reader) -> Option<GpuLimit> {
+    /// NVIDIA's does), asked only as `awake` says the card is just before.
+    pub fn limit(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<GpuLimit> {
         match reader {
-            Reader::Nvidia(index) => self.nvml()?.limit(index),
+            Reader::Nvidia(index) => self.nvml()?.limit(index, awake),
             Reader::Amd(_) | Reader::Intel(_) => None,
         }
     }
@@ -284,25 +286,29 @@ impl Nvml {
         })
     }
 
-    fn power(&self, index: usize) -> Option<f32> {
+    fn power(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
+        let device = self.devices.get(index)?.1;
+        if !awake() {
+            return None;
+        }
         let mut milliwatts = 0u32;
-        let read = unsafe { (self.power_usage)(self.devices.get(index)?.1, &mut milliwatts) };
+        let read = unsafe { (self.power_usage)(device, &mut milliwatts) };
         (read == NVML_SUCCESS).then(|| milliwatts as f32 / 1000.0)
     }
 
     /// Whether the card's fans are all standing still (as a card's do while it is cool, at rest), where it says it
-    /// has fans; none where it has none, or does not say.
-    fn fans_still(&self, index: usize) -> Option<bool> {
+    /// has fans, and none where it has none, or does not say, or is not said awake just before one is asked of.
+    fn fans_still(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<bool> {
         let (count, speed) = self.fans?;
         let device = self.devices.get(index)?.1;
         let mut fans = 0u32;
-        if unsafe { count(device, &mut fans) } != NVML_SUCCESS || fans == 0 {
+        if !awake() || unsafe { count(device, &mut fans) } != NVML_SUCCESS || fans == 0 {
             return None;
         }
         let mut still = true;
         for fan in 0..fans {
             let mut share = 0u32;
-            if unsafe { speed(device, fan, &mut share) } != NVML_SUCCESS {
+            if !awake() || unsafe { speed(device, fan, &mut share) } != NVML_SUCCESS {
                 return None;
             }
             still &= share == 0;
@@ -310,9 +316,13 @@ impl Nvml {
         Some(still)
     }
 
-    fn limit(&self, index: usize) -> Option<GpuLimit> {
+    fn limit(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<GpuLimit> {
+        let (reasons_of, device) = (self.clock_reasons?, self.devices.get(index)?.1);
+        if !awake() {
+            return None;
+        }
         let mut reasons = 0u64;
-        let read = unsafe { (self.clock_reasons?)(self.devices.get(index)?.1, &mut reasons) };
+        let read = unsafe { reasons_of(device, &mut reasons) };
         (read == NVML_SUCCESS).then(|| limit_of(reasons))
     }
 }
@@ -423,9 +433,13 @@ impl Nvapi {
         }
     }
 
-    /// The warmest point of the chip of the card at `at` (°C), if it is one that tells it.
-    fn hot_spot(&self, at: PciAddress) -> Option<f32> {
+    /// The warmest point of the chip of the card at `at` (°C), if it is one that tells it, asked only as `awake` says
+    /// it is just before.
+    fn hot_spot(&self, at: PciAddress, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
         let card = self.devices.iter().find(|(theirs, _)| *theirs == at)?.1;
+        if !awake() {
+            return None;
+        }
         let mut read = NvThermalSensors { version: size_of::<NvThermalSensors>() as u32 | 2 << 16, mask: 1 << NV_HOT_SPOT, reserved: [0; 8], temperatures: [0; 32] };
         let told = unsafe { (self.sensors)(card, &mut read) } == NVAPI_OK;
         let raw = read.temperatures[NV_HOT_SPOT];
@@ -555,8 +569,11 @@ impl Adl {
         })
     }
 
-    fn power(&self, index: usize) -> Option<f32> {
+    fn power(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
         let adapter = self.adapters.get(index)?.1;
+        if !awake() {
+            return None;
+        }
         let mut data = PmLogData { size: size_of::<PmLogData>() as i32, sensors: [(0, 0); ADL_PMLOG_MAX_SENSORS] };
         if unsafe { (self.query)(self.context, adapter, &mut data) } != ADL_OK {
             return None;
@@ -570,8 +587,11 @@ impl Adl {
 
     /// What its driver logs of the card now: the warmest point of its chip (°C), and its fans' speed (RPM: 0, its
     /// fans standing still, as a card's do while it is cool, at rest; not unread), each where it logs it.
-    fn more(&self, index: usize) -> Option<More> {
+    fn more(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<More> {
         let adapter = self.adapters.get(index)?.1;
+        if !awake() {
+            return None;
+        }
         let mut data = PmLogData { size: size_of::<PmLogData>() as i32, sensors: [(0, 0); ADL_PMLOG_MAX_SENSORS] };
         if unsafe { (self.query)(self.context, adapter, &mut data) } != ADL_OK {
             return None;
@@ -798,7 +818,16 @@ impl Igcl {
         None
     }
 
-    fn read(&self, index: usize) -> Option<CtlTelemetry> {
+    /// What the library reads of the graphics now, asked only as `awake` says they are just before.
+    fn read(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<CtlTelemetry> {
+        if !awake() {
+            return None;
+        }
+        self.telemetry_of(index)
+    }
+
+    /// What the library reads of the graphics now (whoever asks has said they are awake just before).
+    fn telemetry_of(&self, index: usize) -> Option<CtlTelemetry> {
         let mut read: CtlTelemetry = unsafe { std::mem::zeroed() };
         read.size = size_of::<CtlTelemetry>() as u32;
         read.version = 1;
@@ -806,16 +835,16 @@ impl Igcl {
     }
 
     /// The watts drawn since it was last asked: the energy counter's rise over the time between.
-    fn power(&self, index: usize) -> Option<f32> {
-        let read = self.read(index)?;
+    fn power(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
+        let read = self.read(index, awake)?;
         let now = (read.time_stamp.number()?, read.gpu_energy.number()?);
         let before = self.devices[index].last.replace(Some(now))?;
         let (seconds, joules) = (now.0 - before.0, now.1 - before.1);
         (seconds > 0.0 && joules >= 0.0).then(|| (joules / seconds) as f32)
     }
 
-    fn more(&self, index: usize) -> Option<More> {
-        let read = self.read(index)?;
+    fn more(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> Option<More> {
+        let read = self.read(index, awake)?;
         Some(More {
             // (The temperature it gives is its warmest sensor's: no other to tell apart from it.)
             hot_spot: None,
@@ -827,9 +856,13 @@ impl Igcl {
         })
     }
 
-    /// Which of its readings the library gives for a device, for a report.
-    fn told(&self, index: usize) -> String {
-        let Some(read) = self.read(index) else { return "telemetry not read".into() };
+    /// Which of its readings the library gives for a device, for a report, asked only as `awake` says it is just
+    /// before.
+    fn told(&self, index: usize, awake: &mut dyn FnMut() -> bool) -> String {
+        if !awake() {
+            return "asleep, not asked".into();
+        }
+        let Some(read) = self.telemetry_of(index) else { return "telemetry not read".into() };
         let has = |item: &CtlItem| if item.supported { "yes" } else { "no" };
         format!("temperature {}, clock {}, energy {}, fans {}", has(&read.gpu_temperature), has(&read.gpu_clock), has(&read.gpu_energy), read.fans.iter().filter(|fan| fan.supported).count())
     }
@@ -861,6 +894,8 @@ mod tests {
         static ASKED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
         /// Whether the Arc card standing in for one below has gone to sleep.
         static ARC_ASLEEP: Cell<bool> = const { Cell::new(false) };
+        /// Whether the NVIDIA card standing in for one below has gone to sleep.
+        static NVIDIA_ASLEEP: Cell<bool> = const { Cell::new(false) };
     }
 
     fn asked(what: &'static str) {
@@ -900,6 +935,67 @@ mod tests {
     }
     unsafe extern "C" fn nvapi_sensors(_: *mut c_void, _: *mut NvThermalSensors) -> i32 {
         NVAPI_OK
+    }
+
+    // NVML and NVAPI as they stand for NVIDIA's card being read below: each call takes long enough for the card to go
+    // to sleep, and it has a fan.
+    unsafe extern "C" fn nvml_power_meanwhile(_: NvmlDevice, _: *mut u32) -> i32 {
+        asked("NVML: power");
+        NVIDIA_ASLEEP.set(true);
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvml_fans_meanwhile(_: NvmlDevice, fans: *mut u32) -> i32 {
+        asked("NVML: fans");
+        NVIDIA_ASLEEP.set(true);
+        unsafe { *fans = 1 };
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvml_fan_speed(_: NvmlDevice, _: u32, _: *mut u32) -> i32 {
+        asked("NVML: fan speed");
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvml_reasons(_: NvmlDevice, _: *mut u64) -> i32 {
+        asked("NVML: reasons");
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvapi_sensors_asked(_: *mut c_void, _: *mut NvThermalSensors) -> i32 {
+        asked("NVAPI: sensors");
+        NVAPI_OK
+    }
+
+    /// Each call of a card's readings is made only as it is said awake just before it, not once for them all: an
+    /// NVIDIA card gone to sleep as its power was read is asked nothing more (neither its fans, nor its hot spot, nor
+    /// what holds its clock back), and one gone to sleep as its fans were counted has neither a fan's speed asked nor
+    /// its hot spot. Awake all the while, each is asked.
+    #[test]
+    fn asks_each_reading_only_as_its_card_is_awake() {
+        let at = (2, 0, 0);
+        let nvml = Nvml {
+            library: HMODULE::default(),
+            by_bus_id: nvml_by_bus_id,
+            power_usage: nvml_power_meanwhile,
+            clock_reasons: Some(nvml_reasons),
+            fans: Some((nvml_fans_meanwhile, nvml_fan_speed)),
+            shutdown: nvml_shutdown,
+            devices: vec![(at, 1 as NvmlDevice)],
+        };
+        let nvapi = Nvapi { sensors: nvapi_sensors_asked, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: Vec::new(), devices: vec![(at, 1 as *mut c_void)] };
+        let power = GpuPower { nvml: Some(Some(nvml)), nvapi: Some(Some(nvapi)), adl: None, igcl: None };
+        let card = Reader::Nvidia(0);
+        let mut awake = || !NVIDIA_ASLEEP.get();
+        assert!(power.read(card, &mut awake).is_some());
+        assert!(power.more(card, &mut awake).is_some_and(|more| more.hot_spot.is_none() && more.fan_rpm.is_none()));
+        assert_eq!(power.limit(card, &mut awake), None);
+        assert_eq!(taken(), ["NVML: power"]);
+        NVIDIA_ASLEEP.set(false);
+        power.more(card, &mut awake);
+        assert_eq!(taken(), ["NVML: fans"]);
+        NVIDIA_ASLEEP.set(false);
+        power.limit(card, &mut awake);
+        power.more(card, &mut || true);
+        assert_eq!(taken(), ["NVML: reasons", "NVML: fans", "NVML: fan speed", "NVAPI: sensors"]);
+        // (Its libraries stand in for the makers' and have none to close.)
+        std::mem::forget(power);
     }
 
     /// NVIDIA's card is looked up through NVML and then NVAPI, its maker's cards asked whether they are all awake just
