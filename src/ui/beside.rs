@@ -1232,9 +1232,7 @@ impl Beside {
     fn let_go(&mut self, x: f32) -> bool {
         let Some((moving, _, moved)) = self.holding.take() else { return false };
         self.pressed = None;
-        unsafe {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-        }
+        super::window::let_go_of_capture(self.hwnd);
         if moved {
             let shown = crate::station::apps::shown();
             let before = shown.get(self.gap_at(x, shown.len())).map(|app| app.target.clone());

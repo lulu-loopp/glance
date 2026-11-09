@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_BACK, VK_ESCAPE, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, PostMessageW, SetForegroundWindow, TranslateMessage, MSG, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
 };
@@ -166,9 +166,7 @@ pub fn handle(msg: &MSG) -> Handled {
 pub fn close(asked: bool) {
     let Some(picker) = PICK.with_borrow_mut(Option::take) else { return };
     let held = unsafe { GetForegroundWindow() } == picker.window.hwnd;
-    unsafe {
-        let _ = ReleaseCapture();
-    }
+    crate::ui::window::let_go_of_capture(picker.window.hwnd);
     let rect = picker.rect;
     let (owner, of, before) = (picker.owner, picker.of.clone(), picker.before);
     picker.window.destroy();

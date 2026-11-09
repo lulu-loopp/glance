@@ -32,7 +32,7 @@ use windows::Win32::UI::Input::Ime::{
     ImmAssociateContextEx, HIMC, IACE_DEFAULT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT,
+    EnableWindow, GetKeyState, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT,
     VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -1081,9 +1081,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_LBUTTONUP => {
             let (x, y) = point(lparam);
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            super::window::let_go_of_capture(hwnd);
             with(hwnd, |dialog| dialog.release(x / dialog.scale, y / dialog.scale));
             LRESULT(0)
         }

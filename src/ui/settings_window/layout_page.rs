@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use windows::Win32::Foundation::RECT;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 
 use super::*;
 use crate::settings::{Part, Places, PARTS};
@@ -566,9 +566,7 @@ impl Ui {
     /// the one it came from. Not carried (a press and no more): a pill pressed shows the panel its edge opens.
     pub(super) fn put_down(&mut self) {
         let Some(carry) = self.carry.take() else { return };
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        crate::ui::window::let_go_of_capture(self.hwnd);
         self.pressed = None;
         if !carry.moved {
             if let Some((screen, edge)) = carry.from {

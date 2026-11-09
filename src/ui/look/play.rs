@@ -24,7 +24,7 @@ use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIKeyedMutex, IDXGIResource
 use windows::Win32::Media::MediaFoundation::{
     IMFAttributes, IMFDXGIDeviceManager, IMFMediaEngine, IMFMediaEngineClassFactory, IMFMediaEngineNotify, IMFMediaEngineNotify_Impl, MFAudioFormat_Float, MFCreateAttributes, MFCreateDXGIDeviceManager,
     MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Audio, MFStartup, CLSID_MFMediaEngineClassFactory, MFSTARTUP_FULL, MF_MEDIA_ENGINE_CALLBACK, MF_MEDIA_ENGINE_DXGI_MANAGER,
-    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_MEDIA_ENGINE_EVENT_ERROR, MF_MEDIA_ENGINE_READY_HAVE_METADATA, MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT, MF_MT_AUDIO_NUM_CHANNELS, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_SOURCE_READERF_ENDOFSTREAM,
     MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_MEDIASOURCE, MF_VERSION,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
@@ -141,10 +141,13 @@ impl Player {
         Ok(())
     }
 
-    /// Whether it is a video whose frame for now has not been copied yet (see `advance`): to be advanced till it is,
-    /// paused or not.
+    /// Whether it is a video whose frame for now has not been copied yet (see `advance`), or may be one, its engine not
+    /// having read yet what it plays (one made anew, see `follow`): to be advanced till it is, paused or not. Taken for
+    /// none till its size was known, a paused video played anew on another card had its frame timer stopped as its
+    /// engine read, and its frame was never drawn. (One whose engine fails to read it is let go of as that is told.)
     pub fn owes_frame(&self) -> bool {
-        self.last.is_none() && self.video_size().is_some()
+        let read = unsafe { self.engine.GetReadyState() } >= MF_MEDIA_ENGINE_READY_HAVE_METADATA.0 as u16;
+        self.last.is_none() && (!read || self.video_size().is_some())
     }
 
     pub fn play(&self) {
@@ -500,6 +503,33 @@ mod tests {
         assert_eq!(frame_on(&mut player, &second_dc), Some(second), "a frame drawn as the device's left");
         drop(player);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A video made anew paused, as one is that the look takes onto another card (see `follow`), owes its frame from
+    /// the first, before its engine has read what it plays, till that frame is copied: taken for none till its size was
+    /// known, the look stopped its frame timer meanwhile, and the frame was never drawn.
+    #[test]
+    fn a_paused_video_made_anew_owes_its_frame_till_it_is_copied() {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+        let path = std::env::temp_dir().join(format!("glance-test-{}-anew.mp4", std::process::id()));
+        video(&path);
+        let card = cards().into_iter().next().expect("a graphics card");
+        let (device, _) = drawn_on(&card);
+        let mut player = Player::new(&path, &device, 0.0, HWND::default(), 0).expect("played");
+        player.seek(0.5);
+        let began = Instant::now();
+        let (mut owed, mut copied) = (true, false);
+        while !copied && began.elapsed() < Duration::from_secs(2) {
+            owed &= player.owes_frame();
+            copied = player.advance(&device);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let paid = !player.owes_frame();
+        drop(player);
+        let _ = std::fs::remove_file(&path);
+        assert!(owed, "a paused video made anew owed no frame before it was copied");
+        assert!(copied, "a paused video made anew never had its frame copied");
+        assert!(paid, "a frame copied still owed");
     }
 
     /// A video played, the look gone onto a screen another card drives (a laptop's own screen, its discrete card's

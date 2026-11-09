@@ -23,7 +23,7 @@ use std::time::Instant;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer, IDC_ARROW};
 
 use std::collections::VecDeque;
@@ -822,8 +822,8 @@ impl Overlay {
         self.grab.take()?;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), FOLLOW_TIMER);
-            let _ = ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         let glass = self.rect;
         let centre = POINT { x: (glass.left + glass.right) / 2, y: (glass.top + glass.bottom) / 2 };
         (self.screen, self.dpi) = monitor_info(unsafe { MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST) });
@@ -896,9 +896,7 @@ impl Overlay {
 
     fn hide(&mut self) {
         if self.grab.take().is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
         if !self.shown {
             return;

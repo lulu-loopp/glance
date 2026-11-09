@@ -1048,8 +1048,8 @@ impl Controller {
                             panel.app_press = None;
                             panel.app_over = None;
                             panel.next_frame = now;
+                            crate::ui::window::let_go_of_capture(panel.window.hwnd);
                         }
-                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                     } else {
                         for panel in panels.iter_mut().filter(|panel| panel.is_open() && !panel.stays()) {
                             panel.begin_close(now);
@@ -1239,7 +1239,7 @@ impl Controller {
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
                     let (moving, _, moved) = panel.app_press.take().unwrap();
-                    let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    crate::ui::window::let_go_of_capture(panel.window.hwnd);
                     if moved {
                         panel.held_at(lparam_point(msg.lParam));
                     }
@@ -1494,7 +1494,7 @@ impl Controller {
                     let panel = &mut panels[owner.unwrap()];
                     // (A note pressed and let go on the panel: opened, as a press on it is.)
                     if panel.note_press.take().is_some() {
-                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                        crate::ui::window::let_go_of_capture(panel.window.hwnd);
                     }
                     panel.click(lparam_point(msg.lParam));
                     // Its music asked to be shown over the whole of its screen.
@@ -3412,10 +3412,8 @@ impl<'a> Panel<'a> {
         if !self.pressed_to_pull() && !self.held() {
             unsafe {
                 let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-                if windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() == self.window.hwnd {
-                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-                }
             }
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
         pulled
     }
@@ -3448,7 +3446,7 @@ impl<'a> Panel<'a> {
         let (Some((hit, from)), Some(now)) = (self.shelf_press, cursor_position()) else { return };
         if crate::station::run::drag_begins(from, now) {
             self.shelf_press = None;
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
             if let Some(drag) = crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
                 self.lifting = Some((hit, drag, from));
                 self.next_frame = Instant::now();
@@ -3476,8 +3474,8 @@ impl<'a> Panel<'a> {
         self.scrolling = None;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
     }
 
     /// The track slid along as far as where `client` is along it (the pointer may have left the track: as far as it
@@ -3500,8 +3498,8 @@ impl<'a> Panel<'a> {
         let Some(slider) = self.sliding.take() else { return };
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         crate::playing::slid(slider, taken);
     }
 
@@ -3714,8 +3712,8 @@ impl<'a> Panel<'a> {
         let drag = self.drag.take()?;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         Some(drag)
     }
 
@@ -4495,7 +4493,7 @@ impl<'a> Panel<'a> {
     fn click(&mut self, client: POINT) {
         self.next_frame = Instant::now();
         if self.shelf_press.take().is_some() {
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
         let hit = self.hit_at(client);
         // A to-do being written: a press away from its field gives back the keys.
