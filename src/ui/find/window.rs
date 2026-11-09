@@ -26,7 +26,7 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCaretBlinkTime, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow, IsWindowVisible, KillTimer, LoadCursorW, PeekMessageW, PostMessageW,
     RegisterClassW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TranslateMessage, ASFW_ANY, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_IBEAM, MSG, PM_REMOVE, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
-    SW_SHOWNORMAL, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
+    SW_SHOWNORMAL, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CHAR, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT,
     WM_RBUTTONUP, WM_SETCURSOR, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -56,6 +56,8 @@ const LOOKED: u32 = WM_APP + 5;
 const TOLD: u32 = WM_APP + 6;
 /// It is shown, and the first name in it that may be looked at larger is (see `preview`).
 const PREVIEW: u32 = WM_APP + 7;
+/// The screens changed (told by the system: see `procedure`).
+const SCREENS: u32 = WM_APP + 8;
 
 /// Its timers: the caret's blinking; a look at what may have changed while it shows (the drives' indexing, the
 /// pictures made for its rows); a frame of the mark of the kind chosen sliding to it.
@@ -249,9 +251,8 @@ fn tell(asks: Receiver<(u64, Vec<(PathBuf, bool)>)>, hwnd: isize) {
 fn run(made: Sender<Option<isize>>) {
     // (The shell, which opens what is chosen, expects a single-threaded apartment.)
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
-    let hwnd = unsafe { make_window() };
-    // (Drawn first on the main screen's device: it takes up its own screen's as it is drawn, see `Finder::draw`.)
-    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::for_main_screen()) else {
+    // (Its device taken up as it is first drawn, its own screen's: see `Finder::draw`.)
+    let Some(hwnd) = (unsafe { make_window() }) else {
         let _ = made.send(None);
         return;
     };
@@ -264,7 +265,7 @@ fn run(made: Sender<Option<isize>>) {
         let _ = made.send(None);
         return;
     }
-    FINDER.with(|finder| *finder.borrow_mut() = Some(Finder::new(hwnd, gfx, asks)));
+    FINDER.with(|finder| *finder.borrow_mut() = Some(Finder::new(hwnd, asks)));
     let _ = made.send(Some(hwnd.0 as isize));
     let mut msg = MSG::default();
     unsafe {
@@ -335,7 +336,8 @@ enum Act {
 
 struct Finder {
     hwnd: HWND,
-    gfx: Rc<Gfx>,
+    /// The device it draws with, its screen's, while it shows (none while it is hidden: see `close`).
+    gfx: Option<Rc<Gfx>>,
     drawn: Option<Drawn>,
     /// Where its window takes the pointer: its sheet as tall as it is drawn, and the room for its shadow round it (the
     /// window is as tall as the sheet's tallest).
@@ -400,10 +402,10 @@ struct Finder {
 }
 
 impl Finder {
-    fn new(hwnd: HWND, gfx: Rc<Gfx>, asks: Sender<Asked>) -> Self {
+    fn new(hwnd: HWND, asks: Sender<Asked>) -> Self {
         Finder {
             hwnd,
-            gfx,
+            gfx: None,
             drawn: None,
             footprint: gfx::Footprint::of(hwnd),
             showing: None,
@@ -572,9 +574,13 @@ impl Finder {
         self.pressed = None;
         self.selecting = false;
         self.preview_owed = false;
-        // (What it draws with let go of while it is hidden.)
+        // (What it draws with let go of while it is hidden, and its device: one that no screen would be drawn for any
+        // longer (see `gfx::let_go_of_strays`) is let go of by its thread, which else kept that card awake for as long as
+        // it was hidden, and so is one that none would be once the screens change as it is hidden (see `SCREENS`).)
         self.drawn = None;
         self.showing = None;
+        self.gfx = None;
+        gfx::let_go_of_strays();
         if give_back && held && unsafe { IsWindow(Some(self.before)) }.as_bool() {
             unsafe {
                 let _ = SetForegroundWindow(self.before);
@@ -703,12 +709,13 @@ impl Finder {
         // On the device for the screen it is on (see `gfx::on_screen`): what it draws on made anew on it as it opens on
         // a screen another adapter drives, or its device was lost.
         if let Ok(gfx) = gfx::for_area(self.rect) {
-            if !Rc::ptr_eq(&gfx, &self.gfx) {
+            if self.gfx.as_ref().is_none_or(|held| !Rc::ptr_eq(held, &gfx)) {
                 self.drawn = None;
                 self.showing = None;
-                self.gfx = gfx;
+                self.gfx = Some(gfx);
             }
         }
+        let Some(gfx) = self.gfx.clone() else { return };
         if self.drawn.is_none() {
             use crate::ui::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
             let frosting = match self.skin {
@@ -718,16 +725,15 @@ impl Finder {
             };
             // (Nothing shows of what it drew before, till it is drawn on that.)
             self.footprint.hidden();
-            self.drawn = match frosting.and_then(|frosting| crate::ui::glass::Frosted::new(&self.gfx, self.hwnd, frosting).ok()) {
+            self.drawn = match frosting.and_then(|frosting| crate::ui::glass::Frosted::new(&gfx, self.hwnd, frosting).ok()) {
                 Some(frosted) => Some(Drawn::Frosted(frosted)),
-                None => Surface::new(&self.gfx, self.hwnd).ok().map(Drawn::Plain),
+                None => Surface::new(&gfx, self.hwnd).ok().map(Drawn::Plain),
             };
         }
         let Some(mut drawn) = self.drawn.take() else { return };
         if self.showing.is_none() {
-            self.showing = Some(crate::ui::life::Showing::of(&self.gfx));
+            self.showing = Some(crate::ui::life::Showing::of(&gfx));
         }
-        let gfx = self.gfx.clone();
         let size = ((self.rect.right - self.rect.left) as u32, (self.rect.bottom - self.rect.top) as u32);
         let (scale, room) = (self.scale, self.room);
         let showing = RECT { left: 0, top: 0, right: size.0 as i32, bottom: (((self.height + 2.0 * room) * scale).ceil() as i32).min(size.1 as i32) };
@@ -1153,9 +1159,11 @@ impl Finder {
         crate::ui::typing::place_ime(self.hwnd, POINT { x: px(caret.x), y: px(caret.y) }, px(caret.y + caret.h) - px(caret.y), "Segoe UI", (19.0 * self.scale).round() as i32);
     }
 
-    /// Where in the field's words a point on the sheet (DIPs) is, as a caret put there would be.
+    /// Where in the field's words a point on the sheet (DIPs) is, as a caret put there would be (with no device to lay
+    /// them out on, none having been had as it was drawn, where the caret is).
     fn words_at(&self, x: f32) -> usize {
-        let layout = self.gfx.layout(&self.typing.string(), self.font(19.0, 400.0), 100_000.0, Align::Start);
+        let Some(gfx) = &self.gfx else { return self.typing.caret };
+        let layout = gfx.layout(&self.typing.string(), self.font(19.0, 400.0), 100_000.0, Align::Start);
         at_point(&layout, x - self.words.x + self.shifted, 1.0)
     }
 
@@ -1881,6 +1889,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(Finder::told);
             LRESULT(0)
         }
+        // (Seen to once the system has told every window: which adapter drives which screen seen again as a device is
+        // next asked for, see `gfx::on_screen`.)
+        WM_DISPLAYCHANGE => {
+            gfx::screens_changed();
+            let _ = unsafe { PostMessageW(Some(hwnd), SCREENS, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        // A device of its thread's that no screen would be drawn for any longer (a laptop's discrete card, its screen
+        // unplugged as it was hidden) let go of (see `gfx::let_go_of_strays`). Shown, it holds the one it draws with,
+        // and takes up its screen's as it is next drawn.
+        SCREENS => {
+            gfx::let_go_of_strays();
+            LRESULT(0)
+        }
         LOOKED => {
             with(|finder| finder.looked_told(wparam.0));
             LRESULT(0)
@@ -2013,6 +2035,31 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 mod tests {
     use super::*;
 
+    /// The search closed holds no device, and its thread lets go of one no screen would be drawn for any longer (a
+    /// laptop's discrete card, its screen unplugged): it held the one it last drew with for as long as it was hidden,
+    /// which no screen changing could let go of, and kept that card awake.
+    #[test]
+    fn the_search_closed_holds_no_device() {
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        let _device = crate::ui::gfx::held().unwrap();
+        let hwnd = unsafe { make_window() }.expect("a window");
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let mut finder = Finder::new(hwnd, asks);
+        (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
+        finder.rect = RECT { left: 100, top: 100, right: 100 + (WIDTH + 40.0) as i32, bottom: 800 };
+        finder.draw();
+        let drew = Rc::downgrade(finder.gfx.as_ref().expect("drawn"));
+        let stray = Rc::downgrade(&gfx::in_software());
+        finder.close(false);
+        assert!(finder.gfx.is_none(), "the search closed holds a device");
+        assert_eq!(drew.strong_count(), 2, "the device it drew with held by more than its thread and this test");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept as it closed");
+        drop(finder);
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     /// The drives are named as Windows writes them, each with its one colon, in both languages: the English foot put a
     /// colon after them all, and the last drive's doubled ("C: D:: 1,284,503 indexed").
     #[test]
@@ -2111,7 +2158,7 @@ mod tests {
         let mut finders: Vec<Finder> = looks
             .iter()
             .map(|&(skin, dark)| {
-                let mut finder = Finder::new(HWND::default(), gfx.clone(), asks.clone());
+                let mut finder = Finder::new(HWND::default(), asks.clone());
                 (finder.skin, finder.dark, finder.lang, finder.room) = (skin, dark, Lang::Zh, room);
                 finder.typing.put(&"wei".encode_utf16().collect::<Vec<_>>());
                 finder.shown = Shown { lines: lines.clone(), total: 312 };
@@ -2144,10 +2191,9 @@ mod tests {
     fn the_search_takes_the_pointer_only_where_its_sheet_is() {
         use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, GetAncestor, WindowFromPoint, GA_ROOT};
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::for_main_screen().unwrap();
         let hwnd = unsafe { make_window() }.expect("a window");
         let (asks, _asked) = std::sync::mpsc::channel();
-        let mut finder = Finder::new(hwnd, gfx, asks);
+        let mut finder = Finder::new(hwnd, asks);
         (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
         finder.rect = RECT { left: 100, top: 100, right: 100 + (WIDTH + 40.0) as i32, bottom: 800 };
         unsafe {

@@ -887,6 +887,13 @@ impl Overlay {
         }
     }
 
+    /// Whether it is hidden on a device no screen would be drawn for any longer (see `gfx::needed`: a laptop's discrete
+    /// card, its screen unplugged as no game was played): let go of then, all it draws with going with it, and made
+    /// again as it is next wanted (as it is first), so that it keeps no card awake meanwhile.
+    pub fn hidden_on_a_card_not_needed(&self) -> bool {
+        !self.shown && !gfx::needed(&self.gfx)
+    }
+
     fn hide(&mut self) {
         if self.grab.take().is_some() {
             unsafe {

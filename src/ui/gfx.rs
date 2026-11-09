@@ -358,7 +358,7 @@ fn seen<R>(screen: Option<isize>, read: impl FnOnce(&Seen) -> R) -> Result<R> {
 /// next asked for one (see `on_screen`), a card no screen needs kept awake meanwhile (a laptop's discrete card, its
 /// screen unplugged). One that a screen would be drawn for is kept, to draw on at once as the thread next shows.
 pub fn let_go_of_strays() {
-    let Ok(wanted) = seen(None, |seen| seen.screens.iter().map(|screen| chosen(&seen.adapters, *screen).map(|adapter| adapter.luid)).collect::<Vec<_>>()) else { return };
+    let Ok(wanted) = wanted() else { return };
     let strays: Vec<Rc<Gfx>> = DEVICES.with(|devices| {
         let mut devices = devices.borrow_mut();
         let (kept, strays) = std::mem::take(&mut *devices).into_iter().partition(|gfx| Rc::strong_count(gfx) > 1 || wanted.contains(&gfx.adapter));
@@ -366,6 +366,18 @@ pub fn let_go_of_strays() {
         strays
     });
     drop(strays);
+}
+
+/// The adapters a screen there is now would be drawn for on (see `chosen`), one for each screen.
+fn wanted() -> Result<Vec<Option<Luid>>> {
+    seen(None, |seen| seen.screens.iter().map(|screen| chosen(&seen.adapters, *screen).map(|adapter| adapter.luid)).collect())
+}
+
+/// Whether a screen there is now would be drawn for on the adapter `gfx` is of (see `chosen`): one that none would be
+/// (a laptop's discrete card, its screen unplugged) is let go of by what keeps it for a window not shown, so that it
+/// keeps no card awake (see `let_go_of_strays`). Not to be told, it is taken as needed.
+pub fn needed(gfx: &Gfx) -> bool {
+    wanted().map_or(true, |wanted| wanted.contains(&gfx.adapter))
 }
 
 /// How a report names `screen`: its display's name, how large it is and where (physical px).
@@ -469,6 +481,15 @@ pub fn held_till_done() -> Held {
 #[cfg(test)]
 pub fn held() -> Result<Held> {
     for_main_screen().map(|gfx| Held(Some(gfx)))
+}
+
+/// (Tests: a device drawn in software among this thread's, standing for one of a card no screen would be drawn for any
+/// longer, as Windows' renderer is no screen's while there is a card: see `needed`.)
+#[cfg(test)]
+pub fn in_software() -> Rc<Gfx> {
+    let gfx = Rc::new(Gfx::on_adapter(None, None).expect("drawn in software"));
+    DEVICES.with(|devices| devices.borrow_mut().push(gfx.clone()));
+    gfx
 }
 
 /// See `held`.
@@ -3742,9 +3763,7 @@ mod tests {
 
     /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.
     fn in_thread() -> std::rc::Weak<super::Gfx> {
-        let gfx = std::rc::Rc::new(super::Gfx::on_adapter(None, None).expect("drawn in software"));
-        super::DEVICES.with(|devices| devices.borrow_mut().push(gfx.clone()));
-        std::rc::Rc::downgrade(&gfx)
+        std::rc::Rc::downgrade(&super::in_software())
     }
 
     /// Whether this thread holds `gfx` among its devices (see `on_screen`).

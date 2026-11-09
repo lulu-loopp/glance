@@ -1938,6 +1938,12 @@ impl Widgets {
             }
             widget.next_frame = Instant::now();
         }
+        // Each hidden on the device of its screen now, where no screen needs the one it held, and this thread's devices
+        // no window holds and no screen needs let go of: a card whose screen was unplugged is kept awake by none.
+        for widget in self.list.iter_mut().filter(|widget| !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(widget.window.hwnd) }.as_bool()) {
+            widget.follow_device_hidden();
+        }
+        gfx::let_go_of_strays();
     }
 
     /// A widget to add as the others are restored (a 0.2.3 panel left on
@@ -4810,6 +4816,19 @@ impl Widget {
         self.surface.is_some()
     }
 
+    /// Hidden (one shown only while a game is played, as none is), on a device no screen would be drawn for any longer
+    /// (see `gfx::needed`: a laptop's discrete card, its screen unplugged meanwhile): on the one for the screen it is on
+    /// now, all it held on the one before let go of (made again on this one as it shows), so that it keeps no card
+    /// awake. On one still needed, it stays as it is, to show at once (it follows its screen's as it next draws).
+    fn follow_device_hidden(&mut self) {
+        if gfx::needed(&self.gfx) {
+            return;
+        }
+        let Ok(current) = gfx::for_area(self.rect()) else { return };
+        self.gone();
+        self.gfx = current;
+    }
+
     fn draw(&mut self, theme: &Theme, scene: &Scene, music_ground: MusicGround, now: Instant) {
         // (A to-do written on it, as it is written.)
         let (field, _) = crate::ui::todo::field(self.window.hwnd, now);
@@ -5306,6 +5325,30 @@ mod tests {
         assert!((carried_reach(size, (0.0, 0.0), 1.1, 0.0, 0.0) - 20.0).abs() < 1e-3);
         // Turned a quarter about its middle: its long sides stand up, half of its width less half its height past.
         assert!((carried_reach(size, (100.0, 50.0), 1.0, 90.0, 0.0) - 50.0).abs() < 1e-3);
+    }
+
+    /// A widget hidden (shown only while a game is played) on a device no screen would be drawn for any longer (a
+    /// laptop's discrete card, its screen unplugged) goes onto its screen's as the screens change, all it held on that
+    /// card let go of, and the card's device can be: kept, it kept the card awake till a game was played. One on a
+    /// device a screen needs stays as it is, to show at once.
+    #[test]
+    fn a_hidden_widget_lets_go_of_a_card_no_screen_needs() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
+        let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, Content::Readings(Readings::new(choice))).unwrap();
+        let screens = Rc::downgrade(&widget.gfx);
+        widget.follow_device_hidden();
+        assert!(std::ptr::eq(Rc::as_ptr(&widget.gfx), screens.as_ptr()) && widget.surface.is_some(), "a hidden widget on a device a screen needs moved off it");
+        let held = gfx::in_software();
+        let stray = Rc::downgrade(&held);
+        widget.gone();
+        widget.gfx = held;
+        widget.follow_device_hidden();
+        gfx::let_go_of_strays();
+        assert!(gfx::needed(&widget.gfx), "a hidden widget left on a device no screen needs");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept");
+        drop(widget);
     }
 
     /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they
