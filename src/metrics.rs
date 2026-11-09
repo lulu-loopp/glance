@@ -186,9 +186,37 @@ impl Drop for Sampler {
     }
 }
 
+/// How long each part of making a sampler took, in the order they ran (see `Sampler::timed`).
+pub type Parts = Vec<(&'static str, Duration)>;
+
+/// The parts of making a sampler timed as they end, each from where the one before it ended, so that together they
+/// take as long as all of it.
+struct Timed {
+    since: Instant,
+    parts: Parts,
+}
+
+impl Timed {
+    fn new() -> Self {
+        Timed { since: Instant::now(), parts: Vec::new() }
+    }
+
+    /// `part` ended now.
+    fn ended(&mut self, part: &'static str) {
+        let now = Instant::now();
+        self.parts.push((part, now - self.since));
+        self.since = now;
+    }
+}
+
 impl Sampler {
     /// A sampler of everything it can read.
     pub fn new() -> Self {
+        Self::reading(true).0
+    }
+
+    /// A sampler of everything it can read, as `new`, with how long each part of making it took.
+    pub fn timed() -> (Self, Parts) {
         Self::reading(true)
     }
 
@@ -197,11 +225,12 @@ impl Sampler {
     /// drives' models among it (see `drive_models`). That process looks at all of it as it starts, and the two are
     /// not to go through the same drivers at once (as they did at a sign-in on a laptop, both in its discrete GPU's).
     pub fn meanwhile() -> Self {
-        Self::reading(false)
+        Self::reading(false).0
     }
 
-    /// A sampler, of the `hardware` too or not (see `hardware`).
-    fn reading(hardware: bool) -> Self {
+    /// A sampler, of the `hardware` too or not (see `hardware`), with how long each part of making it took.
+    fn reading(hardware: bool) -> (Self, Parts) {
+        let mut timed = Timed::new();
         let mut query = PDH_HQUERY::default();
         // Without a query no counter can be added, and every sample fails.
         let _ = unsafe { PdhOpenQueryW(PCWSTR::null(), 0, &mut query) };
@@ -225,11 +254,14 @@ impl Sampler {
         let disk_idle = add(w!(r"\PhysicalDisk(_Total)\% Idle Time"));
         // Rate counters need a first collection to diff against.
         unsafe { PdhCollectQueryData(query) };
+        timed.ended("counters");
         let mut processes = ProcessTable::default();
         processes.sample(1, None);
+        timed.ended("processes");
 
         let mut gpu_power = GpuPower::new();
         let (mut adapters, gpus) = enumerate_gpus();
+        timed.ended("GPUs");
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let mut found = Vec::new();
         // (Each none for a sampler of the meanwhile.)
@@ -240,15 +272,21 @@ impl Sampler {
             for adapter in &mut adapters {
                 adapter.asleep = asleep(adapter.device.and_then(power_state));
             }
+            timed.ended("GPUs' power states");
             for at in 0..adapters.len() {
                 if looked_up_now(hardware, &adapters, at) {
                     adapters[at].look_up(&mut gpu_power);
                 }
             }
+            timed.ended("GPU libraries");
             cpu_sensors = CpuReader::open();
+            timed.ended("CPU sensors");
             let found_super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
+            timed.ended("board chip");
             let found_dimms = Dimms::open();
+            timed.ended("memory sensors");
             let found_fans = LaptopFans::open();
+            timed.ended("laptop fans");
             found = vec![
                 format!("CPU sensors: {}", cpu_sensors.as_ref().map_or("not found", CpuReader::describe)),
                 format!("Motherboard chip: {}", found_super_io.as_ref().map_or_else(|why| format!("not found ({why})"), SuperIo::describe)),
@@ -263,25 +301,35 @@ impl Sampler {
                 found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
             }
             (super_io, dimms, laptop_fans) = (Some(found_super_io), Some(found_dimms), Some(found_fans));
+            timed.ended("descriptions");
         } else {
             found.push("Sensors: not looked at yet (the sensors' process looks at them as it starts)".to_string());
         }
         let modules = crate::smbios::memory_modules();
+        timed.ended("memory modules");
         let drives = drive_models(hardware, crate::drives::models);
+        timed.ended("drives");
+        let network_adapter = default_interface().map(|adapter| adapter.model);
+        let net_prev = net_octets().map(|adapters| (adapters, Instant::now()));
+        timed.ended("network");
+        let mic = Microphone::open();
+        timed.ended("microphone");
+        let started = Started::read();
+        timed.ended("system's start");
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&modules),
             memory_speed: crate::smbios::speed(&modules),
             drives: drives.iter().map(|(_, name)| name.clone()).collect(),
             drive_ids: drives.iter().map(|(id, _)| *id).collect(),
-            network_adapter: default_interface().map(|adapter| adapter.model),
+            network_adapter,
             board: reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")),
             threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
             mem_total: performance_info().PhysicalTotal as u64 * performance_info().PageSize as u64,
             gpus,
             found,
         };
-        Sampler {
+        let sampler = Sampler {
             hardware,
             query,
             cpu_time,
@@ -299,7 +347,7 @@ impl Sampler {
             base_mhz: Some(reg_dword(cpu_key, w!("~MHz")) as f64).filter(|mhz| *mhz > 0.0),
             adapters,
             gpu_power,
-            net_prev: net_octets().map(|adapters| (adapters, Instant::now())),
+            net_prev,
             cpu_sensors,
             graphics_power: None,
             super_io_awaited: super_io.as_ref().and_then(|found| found.as_ref().err()).filter(|why| crate::superio::waits_for_the_bus(why)).map(|_| Instant::now()),
@@ -307,7 +355,7 @@ impl Sampler {
             super_io: super_io.and_then(Result::ok).map(crate::superio::Watched::new),
             laptop_fans: laptop_fans.and_then(Result::ok),
             dimms: dimms.and_then(Result::ok),
-            mic: Microphone::open(),
+            mic,
             gpu_by_pid: None,
             engines_read: HashSet::new(),
             adapter_by_pid: HashMap::new(),
@@ -317,10 +365,12 @@ impl Sampler {
             buf: Vec::new(),
             spaces: Spaces::start(),
             info,
-            started: Started::read(),
+            started,
             wsl: None,
             docker: None,
-        }
+        };
+        timed.ended("the rest");
+        (sampler, timed.parts)
     }
 
     /// The game to show: of the programs presenting frames, the game in front,
