@@ -1064,6 +1064,16 @@ impl Controller {
                     let at = owner.unwrap();
                     if at == 0 {
                         crate::screens::changed();
+                        // (What is hidden on a card no screen needs any longer let go of, so that none keeps it awake:
+                        // the overlay and the tip made again as they are next shown, the widgets' and the panels' on
+                        // their screens' devices, the beside page's thread told.)
+                        if msg.wParam.0 == 0 {
+                            if overlay.as_ref().is_some_and(Overlay::hidden_on_a_card_not_needed) {
+                                overlay = None;
+                            }
+                            crate::ui::tip::screens_changed();
+                            crate::ui::beside::screens_changed();
+                        }
                         widgets.screens_changed();
                     }
                     if let Some(again) = panels[at].screens_changed(msg.wParam.0 as u32, now) {

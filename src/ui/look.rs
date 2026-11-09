@@ -28,13 +28,13 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn, ValidateRect};
+use windows::Win32::Graphics::Gdi::{CreateRectRgn, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetCursor,
     SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, ASFW_ANY, CS_DBLCLKS, GA_ROOT, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SW_HIDE,
-    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER,
+    SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_TIMER,
     WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows_numerics::Matrix3x2;
@@ -148,6 +148,8 @@ const PANE: u32 = WM_APP + 3;
 const PANE_MADE: u32 = WM_APP + 5;
 /// What plays told something of itself (see `play::Player`): WPARAM what.
 const PLAYED: u32 = WM_APP + 4;
+/// The screens changed (told by the system: see `procedure`).
+const SCREENS: u32 = WM_APP + 6;
 /// Its timers: each frame while it moves; a look at the buttons pressed elsewhere, and at what changed.
 const FRAME: usize = 1;
 const FRAME_MS: u32 = 10;
@@ -349,10 +351,8 @@ fn ask(asked: Asked) {
 fn run(made: Sender<Option<isize>>) {
     // (The shell, which opens what is looked at, expects a single-threaded apartment.)
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
-    let hwnd = unsafe { make_window() };
-    // (Drawn first on the main screen's device: it takes up the screen's it opens on as it is drawn, see
-    // `Looker::draw`.)
-    let (Some(hwnd), Ok(gfx)) = (hwnd, gfx::for_main_screen()) else {
+    // (Its device taken up as it is drawn, the screen's it opens on: see `Looker::draw`.)
+    let Some(hwnd) = (unsafe { make_window() }) else {
         let _ = made.send(None);
         return;
     };
@@ -362,7 +362,7 @@ fn run(made: Sender<Option<isize>>) {
         let _ = made.send(None);
         return;
     }
-    LOOKER.with(|looker| *looker.borrow_mut() = Some(Looker::new(hwnd, gfx, reads)));
+    LOOKER.with(|looker| *looker.borrow_mut() = Some(Looker::new(hwnd, reads)));
     let _ = made.send(Some(hwnd.0 as isize));
     let mut msg = MSG::default();
     unsafe {
@@ -384,9 +384,6 @@ unsafe fn make_window() -> Option<HWND> {
         let hwnd = CreateWindowExW(style, class, w!("Glance"), WS_POPUP, 0, 0, 1, 1, None, None, Some(module.into()), None).ok()?;
         let disabled = windows::core::BOOL::from(true);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<windows::core::BOOL>() as u32);
-        // Its clicks nowhere till its sheet is drawn (see `Looker::take_clicks`): its sheet not drawn as it opens, it
-        // would be its whole screen's, above all, showing nothing.
-        SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         Some(hwnd)
     }
 }
@@ -1035,7 +1032,8 @@ struct Listing {
 
 struct Looker {
     hwnd: HWND,
-    gfx: Rc<Gfx>,
+    /// The device it draws with, its screen's, while it is up (none while it is gone: see `gone`).
+    gfx: Option<Rc<Gfx>>,
     drawn: Option<Drawn>,
     showing: Option<super::life::Showing>,
     reads: Sender<Reading>,
@@ -1089,8 +1087,9 @@ struct Looker {
     /// The buttons held as they were last looked at (see `watch`), and how many pictures had been made (see `thumbs`).
     held: bool,
     pictures: u64,
-    /// Where on its window it takes clicks now (px), as its sheet is drawn.
-    region: RECT,
+    /// Where on its window it takes clicks now (px), as its sheet is drawn: its region as it has it (None: none, one not
+    /// given it, so that it takes them all over).
+    region: Option<RECT>,
     /// The window a previewer shows in (made as one is first wanted), and whether one is being made for it.
     pane: Option<pane::Pane>,
     pane_making: bool,
@@ -1115,10 +1114,10 @@ struct Looker {
 }
 
 impl Looker {
-    fn new(hwnd: HWND, gfx: Rc<Gfx>, reads: Sender<Reading>) -> Self {
+    fn new(hwnd: HWND, reads: Sender<Reading>) -> Self {
         Looker {
             hwnd,
-            gfx,
+            gfx: None,
             drawn: None,
             showing: None,
             reads,
@@ -1158,7 +1157,9 @@ impl Looker {
             told: None,
             held: false,
             pictures: 0,
-            region: RECT::default(),
+            // Its clicks nowhere till its sheet is drawn (see `take_clicks`): its sheet not drawn as it opens, it would
+            // be its whole screen's, above all, showing nothing.
+            region: gfx::give_region(hwnd, unsafe { CreateRectRgn(0, 0, 0, 0) }, false).then_some(RECT::default()),
             pane: None,
             pane_making: false,
             player: None,
@@ -1293,10 +1294,11 @@ impl Looker {
             let _ = KillTimer(Some(self.hwnd), FRAME);
             let _ = KillTimer(Some(self.hwnd), WATCH);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
-            // (Its clicks nowhere again till its sheet is next drawn: see `make_window`.)
-            SetWindowRgn(self.hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         }
-        self.region = RECT::default();
+        // (Its clicks nowhere again till its sheet is next drawn: see `new`.)
+        if gfx::give_region(self.hwnd, unsafe { CreateRectRgn(0, 0, 0, 0) }, false) {
+            self.region = Some(RECT::default());
+        }
         crate::widget::own_window_changed(self.monitor);
         if let Some(pane) = &mut self.pane {
             pane.unload();
@@ -1307,8 +1309,13 @@ impl Looker {
         self.measured.clear();
         self.asked.clear();
         self.out_of_group();
+        // (Its device too: one that no screen would be drawn for any longer (see `gfx::let_go_of_strays`) is let go of
+        // by its thread, which else kept that card awake for as long as it was gone, and so is one that none would be
+        // once the screens change meanwhile (see `SCREENS`).)
         self.drawn = None;
         self.showing = None;
+        self.gfx = None;
+        gfx::let_go_of_strays();
         self.motion = Motion::Resting;
         self.pointer = None;
         self.pressed = None;
@@ -2053,14 +2060,16 @@ impl Looker {
             return;
         }
         // On the device for the screen it opens on (see `gfx::on_screen`): what it draws on made anew on it as it
-        // opens on a screen another adapter drives, or its device was lost.
+        // opens on a screen another adapter drives, or its device was lost, and what plays read there too.
         if let Ok(gfx) = gfx::for_area(self.monitor) {
-            if !Rc::ptr_eq(&gfx, &self.gfx) {
+            if self.gfx.as_ref().is_none_or(|held| !Rc::ptr_eq(held, &gfx)) {
                 self.drawn = None;
                 self.showing = None;
-                self.gfx = gfx;
+                self.player_follows(&gfx);
+                self.gfx = Some(gfx);
             }
         }
+        let Some(gfx) = self.gfx.clone() else { return };
         if self.drawn.is_none() {
             use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
             let frosting = match self.skin {
@@ -2068,20 +2077,19 @@ impl Looker {
                 Skin::Fluent => Some((ACRYLIC_BLUR, ACRYLIC_SATURATION)),
                 Skin::Paper => None,
             };
-            self.drawn = match frosting.and_then(|frosting| super::glass::Frosted::new(&self.gfx, self.hwnd, frosting).ok()) {
+            self.drawn = match frosting.and_then(|frosting| super::glass::Frosted::new(&gfx, self.hwnd, frosting).ok()) {
                 Some(frosted) => Some(Drawn::Frosted(frosted)),
-                None => Surface::new(&self.gfx, self.hwnd).ok().map(Drawn::Plain),
+                None => Surface::new(&gfx, self.hwnd).ok().map(Drawn::Plain),
             };
         }
         AMONG.store(self.deeper() || self.members().is_some(), Ordering::Release);
         let Some(mut drawn) = self.drawn.take() else { return };
         if self.showing.is_none() {
-            self.showing = Some(super::life::Showing::of(&self.gfx));
+            self.showing = Some(super::life::Showing::of(&gfx));
         }
-        self.tend_player();
+        self.tend_player(&gfx);
         let shape = self.shape(now);
         self.take_clicks(shape.at);
-        let gfx = self.gfx.clone();
         let size = ((self.monitor.right - self.monitor.left) as u32, (self.monitor.bottom - self.monitor.top) as u32);
         let scale = self.scale;
         let done = match &mut drawn {
@@ -2197,7 +2205,8 @@ impl Looker {
     }
 
     /// Its clicks taken only where its sheet is drawn, `at` (DIPs), and the room for its shadow round that: elsewhere
-    /// they go to what is under it.
+    /// they go to what is under it. (A region not given it is asked for again as it is next drawn: see
+    /// `gfx::give_region`.)
     fn take_clicks(&mut self, at: Rect) {
         let s = self.scale;
         let region = RECT {
@@ -2206,14 +2215,11 @@ impl Looker {
             right: ((at.x + at.w + SHADOW) * s).ceil() as i32,
             bottom: ((at.y + at.h + SHADOW) * s).ceil() as i32,
         };
-        if region == self.region {
+        if self.region == Some(region) {
             return;
         }
-        self.region = region;
-        unsafe {
-            let shape = CreateRectRgn(region.left, region.top, region.right, region.bottom);
-            // (The region the system's from here on: not to be let go of here.)
-            SetWindowRgn(self.hwnd, Some(shape), false);
+        if gfx::give_region(self.hwnd, unsafe { CreateRectRgn(region.left, region.top, region.right, region.bottom) }, false) {
+            self.region = Some(region);
         }
     }
 
@@ -3080,14 +3086,15 @@ impl Looker {
         if self.muted { 0.0 } else { self.volume * self.volume }
     }
 
-    /// What plays the thing shown made, where it is a video or a sound, the sheet rests, and none is (it begins
-    /// playing as it is made). One that cannot be made: the thing shown as its picture, and said so.
-    fn tend_player(&mut self) {
+    /// What plays the thing shown made on `gfx`'s card (the device it draws with), where it is a video or a sound, the
+    /// sheet rests, and none is (it begins playing as it is made). One that cannot be made: the thing shown as its
+    /// picture, and said so.
+    fn tend_player(&mut self, gfx: &Gfx) {
         if self.player.is_some() || self.unplayable || !matches!(self.motion, Motion::Resting) || !matches!(self.body(), Some(Body::Played { .. })) {
             return;
         }
         let Some(path) = self.shown_path().map(Path::to_path_buf) else { return };
-        let made = self.gfx.d3d().and_then(|d3d| play::Player::new(&path, &d3d, self.loudness(), self.hwnd, PLAYED));
+        let made = gfx.d3d().and_then(|d3d| play::Player::new(&path, &d3d, self.loudness(), self.hwnd, PLAYED));
         match made {
             Ok(player) => {
                 player.play();
@@ -3101,6 +3108,20 @@ impl Looker {
                 crate::journal::note(format!("look: {} could not be played ({error})", path.display()));
                 self.unplayable = true;
                 self.refit();
+            }
+        }
+    }
+
+    /// What plays read on `gfx`, the device it draws with from now on, another than the one it read on (see
+    /// `play::Player::follow`), drawn on as it goes till its frame for now is copied there. One that cannot be: made
+    /// anew on it as the sheet next rests (see `tend_player`), from the beginning.
+    fn player_follows(&mut self, gfx: &Gfx) {
+        let Some(player) = &mut self.player else { return };
+        match gfx.d3d().and_then(|d3d| player.follow(&d3d)) {
+            Ok(()) => self.keep_drawing(),
+            Err(error) => {
+                crate::journal::note(format!("look: what plays could not go onto the device drawn with now ({error}); made anew"));
+                self.stop_playing();
             }
         }
     }
@@ -3160,11 +3181,12 @@ impl Looker {
         }
     }
 
-    /// Whether it is to be drawn on as time goes, at rest: what plays plays, or is dragged along, or its controls fade,
-    /// or its slider opens or closes.
+    /// Whether it is to be drawn on as time goes, at rest: what plays plays, or has its frame for now to be copied (a
+    /// paused video gone onto another device, see `player_follows`), or is dragged along, or its controls fade, or its
+    /// slider opens or closes.
     fn plays_on(&self, now: Instant) -> bool {
         let clear = self.controls_clear(now);
-        self.player.as_ref().is_some_and(play::Player::playing) || self.holding.is_some() || (clear > 0.0 && clear < 1.0) || self.slider_moving(now)
+        self.player.as_ref().is_some_and(|player| player.playing() || player.owes_frame()) || self.holding.is_some() || (clear > 0.0 && clear < 1.0) || self.slider_moving(now)
     }
 
     /// A frame's time: it drawn where it moves; at rest, where what plays has a new frame, or has gone on far enough to
@@ -3177,8 +3199,8 @@ impl Looker {
             return self.draw();
         }
         let now = Instant::now();
-        let fresh = match (self.player.as_mut(), self.gfx.d3d()) {
-            (Some(player), Ok(d3d)) => player.advance(&d3d),
+        let fresh = match (self.player.as_mut(), self.gfx.as_ref().map(|gfx| gfx.d3d())) {
+            (Some(player), Some(Ok(d3d))) => player.advance(&d3d),
             _ => false,
         };
         let (at, (drawn_at, drawn_clear, drawn_open)) = (self.shown_at(), self.drawn_playing);
@@ -3544,6 +3566,20 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with(Looker::pane_made);
             LRESULT(0)
         }
+        // (Seen to once the system has told every window: which adapter drives which screen seen again as a device is
+        // next asked for, see `gfx::on_screen`.)
+        WM_DISPLAYCHANGE => {
+            gfx::screens_changed();
+            let _ = unsafe { PostMessageW(Some(hwnd), SCREENS, WPARAM(0), LPARAM(0)) };
+            LRESULT(0)
+        }
+        // A device of its thread's that no screen would be drawn for any longer (a laptop's discrete card, its screen
+        // unplugged as it was gone) let go of (see `gfx::let_go_of_strays`). Up, it holds the one it draws with, and
+        // takes up its screen's as it is next drawn.
+        SCREENS => {
+            gfx::let_go_of_strays();
+            LRESULT(0)
+        }
         // A click on it leaves the keyboard where it was.
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
@@ -3610,6 +3646,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 mod tests {
     use super::*;
 
+    /// The look gone holds no device, and its thread lets go of one no screen would be drawn for any longer (a laptop's
+    /// discrete card, its screen unplugged): it held the one it last drew with for as long as it was gone, which no
+    /// screen changing could let go of, and kept that card awake.
+    #[test]
+    fn the_look_gone_holds_no_device() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let (reads, _read) = std::sync::mpsc::channel();
+        let mut looker = Looker::new(HWND::default(), reads);
+        looker.gfx = Some(gfx::for_main_screen().expect("graphics"));
+        let drew = Rc::downgrade(looker.gfx.as_ref().unwrap());
+        let stray = Rc::downgrade(&gfx::in_software());
+        looker.gone();
+        assert!(looker.gfx.is_none(), "the look gone holds a device");
+        assert_eq!(drew.strong_count(), 2, "the device it drew with held by more than its thread and this test");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept as it went");
+    }
+
     /// The look in each skin, light and dark (the rows), at words, a picture and what has no picture (the columns), as
     /// it rests (`cargo test --profile fast --features studio --lib -- --ignored look_looks` writes
     /// `target/looks/look.png`).
@@ -3648,7 +3701,7 @@ mod tests {
                         frame.fill(Color::hex(0x1B2433, 1.0), 0.0, row as f32 * cell.1, 3.0 * cell.0, cell.1);
                     }
                     for (column, (item, read, size)) in things.iter().enumerate() {
-                        let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+                        let mut looker = Looker::new(HWND::default(), reads.clone());
                         (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
                         looker.items = vec![item.clone(), item.clone(), item.clone(), item.clone()];
                         looker.read = vec![Some(read.clone()), None, None, None];
@@ -3682,7 +3735,7 @@ mod tests {
         let px = 1.5f32;
         let mut sizes = Vec::new();
         for &(skin, dark) in &looks {
-            let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+            let mut looker = Looker::new(HWND::default(), reads.clone());
             (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
             looker.items = vec![item.clone()];
             looker.read = vec![Some(read.clone())];
@@ -3699,7 +3752,7 @@ mod tests {
                     if dark {
                         frame.fill(Color::hex(0x1B2433, 1.0), column * cell.0, row * cell.1, cell.0, cell.1);
                     }
-                    let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+                    let mut looker = Looker::new(HWND::default(), reads.clone());
                     (looker.skin, looker.dark, looker.lang, looker.scale) = (skin, dark, Lang::Zh, px);
                     looker.items = vec![item.clone()];
                     looker.read = vec![Some(read.clone())];
@@ -3793,10 +3846,9 @@ mod tests {
     #[test]
     fn a_page_keeps_a_page_shape() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = Item { key: 1, title: "a.pdf".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:.pdf")), from: None, open: None, copy: None, pastes: false };
-        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        let mut looker = Looker::new(HWND::default(), reads);
         (looker.items, looker.read, looker.measured) = (vec![item], vec![None], vec![None]);
         let (top, pad) = (looker.body_top(), looker.inset());
         for most in [(1400.0, 900.0), (750.0, 1600.0)] {
@@ -3810,7 +3862,6 @@ mod tests {
     #[test]
     fn a_sheet_keeps_its_size_as_what_it_shows_is_read() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = |name: &str| Item { key: 1, title: name.into(), about: String::new(), shows: Shows::File(PathBuf::from(format!(r"C:\a\{name}"))), from: None, open: None, copy: None, pastes: false };
         let picture = |size: (u32, u32)| Picture { key: 1, size, pixels: std::sync::Arc::new(Vec::new()) };
@@ -3821,7 +3872,7 @@ mod tests {
             ("tall.mp4", (1080, 1920), Body::Live { picture: None, previewer: windows::core::GUID::zeroed() }),
             ("small.png", (300, 200), Body::Picture(picture((300, 200)), (300, 200))),
         ] {
-            let mut looker = Looker::new(HWND::default(), gfx.clone(), reads.clone());
+            let mut looker = Looker::new(HWND::default(), reads.clone());
             looker.scale = 1.5;
             looker.items = vec![item(name)];
             (looker.read, looker.measured) = (vec![None], vec![Some(size)]);
@@ -3836,11 +3887,10 @@ mod tests {
     #[test]
     fn a_video_with_nothing_to_show_is_as_large_as_what_has_no_preview() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let item = Item { key: 1, title: "broken.mp4".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a\broken.mp4")), from: None, open: None, copy: None, pastes: false };
         let most = (1400.0, 900.0);
-        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        let mut looker = Looker::new(HWND::default(), reads);
         looker.items = vec![item];
         (looker.read, looker.measured) = (vec![Some(Read { body: Body::Played { picture: None, sound: false, loudness: None }, about: None })], vec![None]);
         looker.unplayable = true;
@@ -3953,12 +4003,11 @@ mod tests {
     #[test]
     fn a_folder_gone_into_is_what_shows() {
         let _device = crate::ui::gfx::held().unwrap();
-        let gfx = gfx::for_main_screen().unwrap();
         let (reads, _read) = std::sync::mpsc::channel();
         let member = |name: &str, folder: bool| Member { path: PathBuf::from(format!(r"C:\a\{name}")), name: name.into(), seen: None, folder, size: None, written: None };
         let outer = (0..30).map(|place| member(&format!("{place}"), place == 0)).collect::<Vec<_>>();
         let inner = vec![member(r"0\x.txt", false), member(r"0\y.txt", false)];
-        let mut looker = Looker::new(HWND::default(), gfx, reads);
+        let mut looker = Looker::new(HWND::default(), reads);
         looker.scale = 1.0;
         looker.items = vec![Item { key: 1, title: "a".into(), about: String::new(), shows: Shows::File(PathBuf::from(r"C:\a")), from: None, open: None, copy: None, pastes: false }];
         (looker.read, looker.measured, looker.asked) = (vec![Some(Read { body: Body::Folder { members: outer, rows: true, readable: true }, about: None })], vec![None], vec![true]);
@@ -4050,11 +4099,15 @@ mod tests {
     }
 
     /// The look's window is its whole screen's, above all: shown before its sheet is first drawn (its drawing failed,
-    /// or its thread was held up), it takes the pointer nowhere, not over all the screen.
+    /// or its thread was held up), it takes the pointer nowhere, not over all the screen. (Made as its thread makes it,
+    /// its look made for it before it is told to anyone: see `run`.)
     #[test]
     fn the_look_takes_the_pointer_nowhere_before_its_sheet_is_drawn() {
         use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
         let hwnd = unsafe { make_window() }.expect("a window");
+        let (reads, _read) = std::sync::mpsc::channel();
+        let looker = Looker::new(hwnd, reads);
+        assert_eq!(looker.region, Some(RECT::default()), "its first region not counted as its");
         unsafe {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 100, 100, 800, 600, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);

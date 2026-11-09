@@ -57,11 +57,14 @@ pub fn failed_event(event: usize) -> bool {
 }
 
 /// A file played: its engine, the device it decodes on, and where its frames go (made once its frames' size is known).
+/// What it plays and where it tells what happens, for it to be played anew on another card (see `follow`).
 pub struct Player {
     engine: IMFMediaEngine,
     device: ID3D11Device,
     _manager: IMFDXGIDeviceManager,
     frames: Option<Frames>,
+    path: std::path::PathBuf,
+    told: (HWND, u32),
     /// The time of the frame last copied (100 ns), and whether one has been.
     last: Option<i64>,
 }
@@ -91,12 +94,7 @@ impl Player {
             return Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
         }
         unsafe {
-            let adapter = drawn_on.cast::<IDXGIDevice>()?.GetAdapter()?;
-            let mut device: Option<ID3D11Device> = None;
-            D3D11CreateDevice(&adapter, D3D_DRIVER_TYPE_UNKNOWN, Default::default(), D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, None)?;
-            let device = device.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
-            // (The engine decodes on it from threads of its own.)
-            let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
+            let device = decoding_on(drawn_on)?;
             let mut token = 0;
             let mut manager: Option<IMFDXGIDeviceManager> = None;
             MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
@@ -114,8 +112,39 @@ impl Player {
             engine.SetAutoPlay(false)?;
             engine.SetVolume(f64::from(volume))?;
             engine.SetSource(&BSTR::from(path.to_string_lossy().as_ref()))?;
-            Ok(Player { engine, device, _manager: manager, frames: None, last: None })
+            Ok(Player { engine, device, _manager: manager, frames: None, path: path.to_path_buf(), told: (hwnd, message), last: None })
         }
+    }
+
+    /// Its frames read from now on where the look's device `drawn_on` reads them, that device another than the one it
+    /// read them on (one made anew after that was lost, or another adapter's, the look moved onto a screen that one
+    /// drives), and its frame for now copied again there as it next advances, a paused one's too (one already copied
+    /// is not, see `advance`). Till then it has no frame to draw: the one before was copied for the device left, and
+    /// drawn as that device's. Decoded on another adapter, or on a device lost, it is played anew on `drawn_on`'s
+    /// adapter from where it was, as loud, playing or paused as it was: a frame of one adapter's is not to be opened on
+    /// another's, and an engine handed a device of another adapter as it plays decodes nothing more.
+    pub fn follow(&mut self, drawn_on: &ID3D11Device) -> windows::core::Result<()> {
+        let removed = unsafe { self.device.GetDeviceRemovedReason() }.is_err();
+        if removed || crate::ui::gfx::adapter_of(&self.device) != crate::ui::gfx::adapter_of(drawn_on) {
+            let (at, playing, volume) = (self.at(), self.playing(), unsafe { self.engine.GetVolume() });
+            let anew = Player::new(&self.path, drawn_on, volume as f32, self.told.0, self.told.1)?;
+            anew.seek(at);
+            if playing {
+                anew.play();
+            }
+            *self = anew;
+        }
+        if let Some(frames) = &mut self.frames {
+            frames.read = None;
+        }
+        self.last = None;
+        Ok(())
+    }
+
+    /// Whether it is a video whose frame for now has not been copied yet (see `advance`): to be advanced till it is,
+    /// paused or not.
+    pub fn owes_frame(&self) -> bool {
+        self.last.is_none() && self.video_size().is_some()
     }
 
     pub fn play(&self) {
@@ -257,6 +286,20 @@ impl Drop for Player {
     }
 }
 
+/// A device to decode on, made on the adapter the device `drawn_on` is of, with what decoding on the card asks for
+/// (which the look's own device is not made with).
+fn decoding_on(drawn_on: &ID3D11Device) -> windows::core::Result<ID3D11Device> {
+    unsafe {
+        let adapter = drawn_on.cast::<IDXGIDevice>()?.GetAdapter()?;
+        let mut device: Option<ID3D11Device> = None;
+        D3D11CreateDevice(&adapter, D3D_DRIVER_TYPE_UNKNOWN, Default::default(), D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, None)?;
+        let device = device.ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
+        // (The engine decodes on it from threads of its own.)
+        let _ = device.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
+        Ok(device)
+    }
+}
+
 /// The shared texture `shared` (`size` px) opened on the device `device`, and a texture of its own to copy it into.
 fn read_on(device: &ID3D11Device, shared: &ID3D11Texture2D, size: (u32, u32)) -> windows::core::Result<Read> {
     unsafe {
@@ -341,6 +384,159 @@ pub fn loudness(path: &Path, parts: usize, still: &dyn Fn() -> bool) -> Option<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+    use windows::Win32::Graphics::Direct2D::{D2D1CreateDevice, D2D1_DEVICE_CONTEXT_OPTIONS_NONE};
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory6, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_GPU_PREFERENCE_MINIMUM_POWER};
+    use windows::Win32::Media::MediaFoundation::{
+        IMFSinkWriter, MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_RGB32, MFVideoInterlace_Progressive, MF_MT_AVG_BITRATE,
+        MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_PIXEL_ASPECT_RATIO,
+    };
+
+    /// The graphics cards there are (Windows' renderer in software left out), the one taking least power first.
+    fn cards() -> Vec<IDXGIAdapter1> {
+        let factory: IDXGIFactory6 = unsafe { CreateDXGIFactory1() }.unwrap();
+        (0..)
+            .map_while(|index| unsafe { factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(index, DXGI_GPU_PREFERENCE_MINIMUM_POWER) }.ok())
+            .filter(|adapter| unsafe { adapter.GetDesc1() }.is_ok_and(|desc| desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0))
+            .collect()
+    }
+
+    /// A device on `adapter` as the look's is made (with what Direct2D asks for), and a Direct2D context drawing on it.
+    fn drawn_on(adapter: &IDXGIAdapter1) -> (ID3D11Device, ID2D1DeviceContext) {
+        let mut device = None;
+        unsafe { D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, Default::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut device), None, None) }.unwrap();
+        let device: ID3D11Device = device.unwrap();
+        let dc = unsafe { D2D1CreateDevice(&device.cast::<IDXGIDevice>().unwrap(), None) }.and_then(|d2d| unsafe { d2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE) }).unwrap();
+        (device, dc)
+    }
+
+    /// A video of two seconds written at `path`, 320 by 240, thirty frames a second, each a colour of its own.
+    fn video(path: &Path) {
+        const SIZE: (u32, u32) = (320, 240);
+        const FRAME: i64 = 10_000_000 / 30;
+        assert!(started(), "Media Foundation not started");
+        let framed = |kind: &windows::core::GUID| -> windows::core::Result<windows::Win32::Media::MediaFoundation::IMFMediaType> {
+            let made = unsafe { MFCreateMediaType()? };
+            unsafe {
+                made.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                made.SetGUID(&MF_MT_SUBTYPE, kind)?;
+                made.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+                made.SetUINT64(&MF_MT_FRAME_SIZE, (u64::from(SIZE.0) << 32) | u64::from(SIZE.1))?;
+                made.SetUINT64(&MF_MT_FRAME_RATE, (30 << 32) | 1)?;
+                made.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1)?;
+            }
+            Ok(made)
+        };
+        let written = (|| -> windows::core::Result<()> {
+            let writer: IMFSinkWriter = unsafe { MFCreateSinkWriterFromURL(&HSTRING::from(path.as_os_str()), None, None)? };
+            let out = framed(&MFVideoFormat_H264)?;
+            unsafe { out.SetUINT32(&MF_MT_AVG_BITRATE, 800_000)? };
+            let stream = unsafe { writer.AddStream(&out)? };
+            unsafe { writer.SetInputMediaType(stream, &framed(&MFVideoFormat_RGB32)?, None)? };
+            unsafe { writer.BeginWriting()? };
+            let length = SIZE.0 * SIZE.1 * 4;
+            for frame in 0..60u32 {
+                let buffer = unsafe { MFCreateMemoryBuffer(length)? };
+                let mut data = std::ptr::null_mut();
+                unsafe { buffer.Lock(&mut data, None, None)? };
+                let pixels = unsafe { std::slice::from_raw_parts_mut(data.cast::<u32>(), (SIZE.0 * SIZE.1) as usize) };
+                pixels.fill(0xFF00_0000 | (frame * 4) << 16 | (255 - frame * 4) << 8 | 0x80);
+                unsafe {
+                    buffer.Unlock()?;
+                    buffer.SetCurrentLength(length)?;
+                }
+                let sample = unsafe { MFCreateSample()? };
+                unsafe {
+                    sample.AddBuffer(&buffer)?;
+                    sample.SetSampleTime(i64::from(frame) * FRAME)?;
+                    sample.SetSampleDuration(FRAME)?;
+                    writer.WriteSample(stream, &sample)?;
+                }
+            }
+            unsafe { writer.Finalize() }
+        })();
+        written.expect("a video written");
+    }
+
+    /// Whether `player` copies a frame to where `drawn_on` reads it within two seconds.
+    fn copies(player: &mut Player, drawn_on: &ID3D11Device) -> bool {
+        let began = Instant::now();
+        while began.elapsed() < Duration::from_secs(2) {
+            if player.advance(drawn_on) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// The device the frame `player` gives to draw on `dc` is on (none: it gives none).
+    fn frame_on(player: &mut Player, dc: &ID2D1DeviceContext) -> Option<ID3D11Device> {
+        let (bitmap, _) = player.frame(dc)?;
+        let surface = unsafe { bitmap.GetSurface() }.ok()?;
+        unsafe { surface.cast::<ID3D11Texture2D>().ok()?.GetDevice() }.ok()
+    }
+
+    /// A video paused, the look gone onto another device of the same card (one made anew after the last was lost, say),
+    /// has its frame copied there and drawn as that device's: it was drawn from the bitmap made on the device left, and
+    /// copied again only as a new frame came, which none did while it was paused.
+    #[test]
+    fn a_paused_video_follows_the_looks_device() {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+        let path = std::env::temp_dir().join(format!("glance-test-{}-paused.mp4", std::process::id()));
+        video(&path);
+        let card = cards().into_iter().next().expect("a graphics card");
+        let (first, first_dc) = drawn_on(&card);
+        let mut player = Player::new(&path, &first, 0.0, HWND::default(), 0).expect("played");
+        player.play();
+        assert!(copies(&mut player, &first), "no frame copied");
+        player.pause();
+        while copies(&mut player, &first) {}
+        assert_eq!(frame_on(&mut player, &first_dc), Some(first.clone()), "a frame not drawn as the device's it was copied for");
+        let (second, second_dc) = drawn_on(&card);
+        player.follow(&second).expect("followed");
+        assert!(player.owes_frame(), "a paused video gone onto another device not drawn on till its frame is copied there");
+        assert!(copies(&mut player, &second), "a paused video's frame not copied to the device gone onto");
+        assert_eq!(frame_on(&mut player, &second_dc), Some(second), "a frame drawn as the device's left");
+        drop(player);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A video played, the look gone onto a screen another card drives (a laptop's own screen, its discrete card's
+    /// unplugged), is decoded on that card from then on and its frames copied there: decoded on the card left, a frame
+    /// of one card's could not be opened on the other's, and the video stood still as its sound played on.
+    #[test]
+    #[ignore = "needs two graphics cards"]
+    fn a_video_follows_the_look_onto_another_card() {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+        let path = std::env::temp_dir().join(format!("glance-test-{}-carded.mp4", std::process::id()));
+        video(&path);
+        let cards = cards();
+        assert!(cards.len() >= 2, "fewer than two graphics cards");
+        let (first, _) = drawn_on(&cards[0]);
+        let (second, second_dc) = drawn_on(&cards[1]);
+        let mut player = Player::new(&path, &first, 0.0, HWND::default(), 0).expect("played");
+        player.play();
+        assert!(copies(&mut player, &first), "no frame copied");
+        std::thread::sleep(Duration::from_millis(300));
+        player.follow(&second).expect("followed");
+        assert_eq!(crate::ui::gfx::adapter_of(&player.device), crate::ui::gfx::adapter_of(&second), "decoded on the card left");
+        let copied = (0..10).filter(|_| copies(&mut player, &second)).count();
+        assert_eq!(copied, 10, "frames not copied to the card gone onto");
+        assert!(player.playing() && player.at() > 0.3, "played from its beginning again ({:.2})", player.at());
+        assert_eq!(frame_on(&mut player, &second_dc), Some(second.clone()), "a frame drawn as the card's left");
+        // Paused, and gone back: its frame for now copied there, where it was.
+        player.pause();
+        while copies(&mut player, &second) {}
+        let at = player.at();
+        let (back, back_dc) = drawn_on(&cards[0]);
+        player.follow(&back).expect("followed");
+        assert!(copies(&mut player, &back), "a paused video's frame not copied to the card gone onto");
+        assert!(!player.playing() && (player.at() - at).abs() < 0.1, "not paused where it was ({:.2}, {at:.2})", player.at());
+        assert_eq!(frame_on(&mut player, &back_dc), Some(back), "a paused frame drawn as the card's left");
+        drop(player);
+        let _ = std::fs::remove_file(&path);
+    }
 
     /// A video is played on the graphics card and its frames are copied to where the look's device reads them; a
     /// sound is read through for how loud it is along it. (Files on the owner's machine: run by hand.)

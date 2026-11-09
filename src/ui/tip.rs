@@ -177,6 +177,14 @@ pub fn above() {
     });
 }
 
+/// The screens changed: a tip saying nothing on a device no screen would be drawn for any longer (see `gfx::needed`: a
+/// laptop's discrete card, its screen unplugged) let go of with all it draws with, and made again as one is next shown
+/// (as the first is), so that it keeps no card awake.
+pub fn screens_changed() {
+    let gone = TIP.with(|kept| kept.borrow_mut().take_if(|tip| tip.said.0.is_empty() && !gfx::needed(&tip.gfx)));
+    drop(gone);
+}
+
 /// Says nothing more.
 pub fn hide() {
     TIP.with(|kept| {
@@ -191,6 +199,38 @@ pub fn hide() {
 #[cfg(test)]
 mod tests {
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, IsWindowVisible};
+
+    /// The screens changed, a tip saying nothing on a device no screen would be drawn for any longer (a laptop's
+    /// discrete card, its screen unplugged) is let go of, and that device can be: kept, it kept the card awake. One on
+    /// a device a screen needs stays, to show again at once.
+    #[test]
+    fn a_tip_saying_nothing_lets_go_of_a_card_no_screen_needs() {
+        /// A tip left to the test's thread as it ends (the test failed) is not taken down with it: that waits on a
+        /// desktop that is gone.
+        struct Left;
+        impl Drop for Left {
+            fn drop(&mut self) {
+                super::TIP.with(|kept| std::mem::forget(kept.borrow_mut().take()));
+            }
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let _left = Left;
+        let kept = |gfx: std::rc::Rc<crate::ui::gfx::Gfx>| {
+            let window = crate::ui::window::Window::new().expect("a window");
+            let tip = super::Tip { window, gfx, surface: None, showing: None, said: (String::new(), windows::Win32::Foundation::RECT::default()) };
+            super::TIP.with(|kept| *kept.borrow_mut() = Some(tip));
+        };
+        kept(crate::ui::gfx::for_main_screen().expect("graphics"));
+        super::screens_changed();
+        assert!(super::TIP.with(|tip| tip.borrow().is_some()), "a tip on a device a screen needs let go of");
+        let held = crate::ui::gfx::in_software();
+        let stray = std::rc::Rc::downgrade(&held);
+        kept(held);
+        super::screens_changed();
+        crate::ui::gfx::let_go_of_strays();
+        assert!(super::TIP.with(|tip| tip.borrow().is_none()), "a tip saying nothing on a device no screen needs kept");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept");
+    }
 
     /// Words too many for a tip: as many as fit its tallest on its widest lines, "…" after them; a name that fits on
     /// its lines whole, whole.

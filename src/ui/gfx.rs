@@ -283,6 +283,12 @@ pub fn screens_changed() {
     SCREENS_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// How many times the screens or the adapters have changed (see `screens_changed`): what was found of them stands
+/// while it is the same.
+pub fn screens_changes() -> u64 {
+    SCREENS_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The screens there are now (their monitors' handles).
 fn screens_now() -> Vec<isize> {
     use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
@@ -337,7 +343,7 @@ fn adapter_for(screen: isize) -> Result<Option<Shown>> {
 /// What `read` reads of the adapters as they were last seen: seen again where the screens have changed since, or
 /// `screen` (where one is asked of) is one not there then.
 fn seen<R>(screen: Option<isize>, read: impl FnOnce(&Seen) -> R) -> Result<R> {
-    let changes = SCREENS_CHANGED.load(std::sync::atomic::Ordering::Relaxed);
+    let changes = screens_changes();
     let mut held = SEEN.lock().unwrap();
     let seen = match &mut *held {
         Some(seen) if seen.changes == changes && screen.is_none_or(|screen| seen.screens.contains(&screen)) => seen,
@@ -352,7 +358,7 @@ fn seen<R>(screen: Option<isize>, read: impl FnOnce(&Seen) -> R) -> Result<R> {
 /// next asked for one (see `on_screen`), a card no screen needs kept awake meanwhile (a laptop's discrete card, its
 /// screen unplugged). One that a screen would be drawn for is kept, to draw on at once as the thread next shows.
 pub fn let_go_of_strays() {
-    let Ok(wanted) = seen(None, |seen| seen.screens.iter().map(|screen| chosen(&seen.adapters, *screen).map(|adapter| adapter.luid)).collect::<Vec<_>>()) else { return };
+    let Ok(wanted) = wanted() else { return };
     let strays: Vec<Rc<Gfx>> = DEVICES.with(|devices| {
         let mut devices = devices.borrow_mut();
         let (kept, strays) = std::mem::take(&mut *devices).into_iter().partition(|gfx| Rc::strong_count(gfx) > 1 || wanted.contains(&gfx.adapter));
@@ -360,6 +366,18 @@ pub fn let_go_of_strays() {
         strays
     });
     drop(strays);
+}
+
+/// The adapters a screen there is now would be drawn for on (see `chosen`), one for each screen.
+fn wanted() -> Result<Vec<Option<Luid>>> {
+    seen(None, |seen| seen.screens.iter().map(|screen| chosen(&seen.adapters, *screen).map(|adapter| adapter.luid)).collect())
+}
+
+/// Whether a screen there is now would be drawn for on the adapter `gfx` is of (see `chosen`): one that none would be
+/// (a laptop's discrete card, its screen unplugged) is let go of by what keeps it for a window not shown, so that it
+/// keeps no card awake (see `let_go_of_strays`). Not to be told, it is taken as needed.
+pub fn needed(gfx: &Gfx) -> bool {
+    wanted().map_or(true, |wanted| wanted.contains(&gfx.adapter))
 }
 
 /// How a report names `screen`: its display's name, how large it is and where (physical px).
@@ -463,6 +481,15 @@ pub fn held_till_done() -> Held {
 #[cfg(test)]
 pub fn held() -> Result<Held> {
     for_main_screen().map(|gfx| Held(Some(gfx)))
+}
+
+/// (Tests: a device drawn in software among this thread's, standing for one of a card no screen would be drawn for any
+/// longer, as Windows' renderer is no screen's while there is a card: see `needed`.)
+#[cfg(test)]
+pub fn in_software() -> Rc<Gfx> {
+    let gfx = Rc::new(Gfx::on_adapter(None, None).expect("drawn in software"));
+    DEVICES.with(|devices| devices.borrow_mut().push(gfx.clone()));
+    gfx
 }
 
 /// See `held`.
@@ -2720,6 +2747,22 @@ pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
     Some((made(want.0), made(want.1)))
 }
 
+/// `region`, made for `hwnd` (none where the system could not make it, out of room for GDI's objects), given to it as
+/// where it shows and takes the pointer, drawn again at once where `redraw`: whether it was. One not made is not given
+/// (given none, the window would show and take the pointer all over), and one not taken is let go of here, the window's
+/// region left as it was. One taken is the system's from then on.
+pub fn give_region(hwnd: HWND, region: windows::Win32::Graphics::Gdi::HRGN, redraw: bool) -> bool {
+    use windows::Win32::Graphics::Gdi::{DeleteObject, SetWindowRgn};
+    if region.is_invalid() {
+        return false;
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(region), redraw) } != 0 {
+        return true;
+    }
+    let _ = unsafe { DeleteObject(region.into()) };
+    false
+}
+
 /// Where a window larger than what it draws takes the pointer: only where it shows what it draws (its region kept to
 /// that). With the window's thread held up (in a driver's call, say) while the pointer is over what it draws, its
 /// clicks not let through past that meanwhile, the rest of its screen still takes them: a panel's window holds its
@@ -2727,7 +2770,7 @@ pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
 pub struct Footprint {
     hwnd: HWND,
     /// What of the window shows, as last committed (physical px in the window, None for nothing), and the window's
-    /// region as it was last set.
+    /// region as it has it (None: none, its first not given it, so that it takes the pointer over all of it).
     shows: Option<RECT>,
     region: Option<RECT>,
 }
@@ -2736,32 +2779,27 @@ impl Footprint {
     /// For `hwnd`, which takes the pointer nowhere from now till it shows something (see `take`).
     pub fn of(hwnd: HWND) -> Footprint {
         let nowhere = RECT::default();
-        unsafe {
-            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-            SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
-        }
-        Footprint { hwnd, shows: None, region: Some(nowhere) }
+        let given = give_region(hwnd, unsafe { windows::Win32::Graphics::Gdi::CreateRectRgn(0, 0, 0, 0) }, false);
+        Footprint { hwnd, shows: None, region: given.then_some(nowhere) }
     }
 
     /// The window is to show `showing` (physical px in it), committed next: what showed till now and that taken, till
     /// that alone shows (see `shown`). The region and what is drawn come to the compositor apart, either first: the
     /// region holds both meanwhile, so that neither is cut, and is made smaller only once the compositor has taken
     /// what was committed last (`settled` waits for it: done in all but a moment of its own held up, a frame having
-    /// passed since).
+    /// passed since). A region the window could not be given (see `give_region`) leaves it as it was, and is asked for
+    /// again with the next frame.
     pub fn take(&mut self, showing: RECT, settled: impl FnOnce() -> Result<()>) -> Result<()> {
         let wanted = self.shows.map_or(showing, |shown| bounds(shown, showing));
         if self.region == Some(wanted) {
             return Ok(());
         }
-        if self.shows.is_some() && self.region.is_some_and(|region| bounds(region, wanted) != wanted) {
+        if self.shows.is_some() && self.region.is_none_or(|region| bounds(region, wanted) != wanted) {
             settled()?;
         }
-        unsafe {
-            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-            // (The system's from here on: not to be let go of here.)
-            SetWindowRgn(self.hwnd, Some(CreateRectRgn(wanted.left, wanted.top, wanted.right, wanted.bottom)), false);
+        if give_region(self.hwnd, unsafe { windows::Win32::Graphics::Gdi::CreateRectRgn(wanted.left, wanted.top, wanted.right, wanted.bottom) }, false) {
+            self.region = Some(wanted);
         }
-        self.region = Some(wanted);
         Ok(())
     }
 
@@ -3701,11 +3739,31 @@ mod tests {
         drop(window);
     }
 
+    /// A region not made (the system out of room for GDI's objects) is given no window, which keeps the one it has
+    /// (given none, it would take the pointer all over). A region a window does not take (here, as one gone takes
+    /// none) is not counted as its: what its footprint asks for is asked for again with the next frame.
+    #[test]
+    fn a_region_not_given_is_asked_for_again() {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, HRGN, NULLREGION};
+        let window = crate::ui::window::Window::new().expect("a window");
+        let footprint = super::Footprint::of(window.hwnd);
+        assert_eq!(footprint.region, Some(RECT::default()), "a window's first region, given it, not counted");
+        assert!(!super::give_region(window.hwnd, HRGN::default(), false), "a region not made counted as given");
+        let mut held = RECT::default();
+        assert_eq!(unsafe { GetWindowRgnBox(window.hwnd, &mut held) }, NULLREGION, "a region not made took the window's own away");
+        let gone = window.hwnd;
+        drop(window);
+        let mut footprint = super::Footprint::of(gone);
+        assert_eq!(footprint.region, None, "a region a window did not take counted as its");
+        let shows = RECT { left: 0, top: 0, right: 100, bottom: 100 };
+        footprint.take(shows, || Ok(())).expect("taken");
+        assert_eq!(footprint.region, None, "a region a window did not take counted as its, not asked for again");
+    }
+
     /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.
     fn in_thread() -> std::rc::Weak<super::Gfx> {
-        let gfx = std::rc::Rc::new(super::Gfx::on_adapter(None, None).expect("drawn in software"));
-        super::DEVICES.with(|devices| devices.borrow_mut().push(gfx.clone()));
-        std::rc::Rc::downgrade(&gfx)
+        std::rc::Rc::downgrade(&super::in_software())
     }
 
     /// Whether this thread holds `gfx` among its devices (see `on_screen`).
