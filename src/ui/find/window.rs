@@ -336,6 +336,9 @@ enum Act {
 
 struct Finder {
     hwnd: HWND,
+    /// Whether it is up: from `show` till `close`. Not up, it draws nothing: what comes for it meanwhile (what was
+    /// found, what is told of it, the look gone) is taken in for when it is next drawn.
+    up: bool,
     /// The device it draws with, its screen's, while it shows (none while it is hidden: see `close`).
     gfx: Option<Rc<Gfx>>,
     drawn: Option<Drawn>,
@@ -405,6 +408,7 @@ impl Finder {
     fn new(hwnd: HWND, asks: Sender<Asked>) -> Self {
         Finder {
             hwnd,
+            up: false,
             gfx: None,
             drawn: None,
             footprint: gfx::Footprint::of(hwnd),
@@ -530,6 +534,7 @@ impl Finder {
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), left, top, self.rect.right - left, self.rect.bottom - top, SWP_NOACTIVATE);
         }
+        self.up = true;
         self.draw();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
@@ -556,6 +561,7 @@ impl Finder {
 
     /// The window hidden; the front given back to what had it before, where it is closed by its key (`give_back`).
     fn close(&mut self, give_back: bool) {
+        self.up = false;
         if let Some((menu, ..)) = self.menu.take() {
             menu.close();
         }
@@ -702,7 +708,10 @@ impl Finder {
     }
 
     fn draw(&mut self) {
-        if !self.visible() && self.rect.right == self.rect.left {
+        // (Closed, it holds no device, and takes none up for what comes late: what was found for what it last asked,
+        // what is told of that, the look gone. Drawn then, it held its screen's for as long as it stayed hidden, which
+        // no screen changing could let go of, and kept a card awake whose screen was unplugged meanwhile.)
+        if !self.up {
             return;
         }
         self.height = self.sheet_height();
@@ -1923,7 +1932,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         LISTED => {
             with(|finder| {
-                if finder.visible() {
+                if finder.up {
                     finder.ask(false);
                 }
             });
@@ -2031,6 +2040,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 mod tests {
     use super::*;
 
+    /// `finder` up as `show` puts it up, its window shown by hand off every screen: `show` brings it to the front, which
+    /// would take the front from whatever has it as the tests run.
+    fn up_off_screen(finder: &mut Finder) {
+        (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
+        finder.rect = RECT { left: -20000, top: -20000, right: -20000 + (WIDTH + 40.0) as i32, bottom: -19300 };
+        unsafe {
+            let _ = SetWindowPos(finder.hwnd, Some(HWND_TOPMOST), finder.rect.left, finder.rect.top, finder.rect.right - finder.rect.left, finder.rect.bottom - finder.rect.top, SWP_NOACTIVATE);
+            let _ = ShowWindow(finder.hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
+        }
+        finder.up = true;
+    }
+
     /// The search closed holds no device, and its thread lets go of one no screen would be drawn for any longer (a
     /// laptop's discrete card, its screen unplugged): it held the one it last drew with for as long as it was hidden,
     /// which no screen changing could let go of, and kept that card awake.
@@ -2041,8 +2062,7 @@ mod tests {
         let hwnd = unsafe { make_window() }.expect("a window");
         let (asks, _asked) = std::sync::mpsc::channel();
         let mut finder = Finder::new(hwnd, asks);
-        (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
-        finder.rect = RECT { left: 100, top: 100, right: 100 + (WIDTH + 40.0) as i32, bottom: 800 };
+        up_off_screen(&mut finder);
         finder.draw();
         let drew = Rc::downgrade(finder.gfx.as_ref().expect("drawn"));
         let stray = Rc::downgrade(&gfx::in_software());
@@ -2054,6 +2074,35 @@ mod tests {
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
+    }
+
+    /// The search closed takes up no device again for what comes for it late (what was found for what it asked last,
+    /// what is told of that, the look gone, each drawn as it comes): drawn hidden, it held its screen's for as long as
+    /// it stayed hidden, which no screen changing could let go of, and kept a card awake whose screen was unplugged.
+    #[test]
+    fn the_search_closed_draws_nothing_for_what_comes_late() {
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        /// The window gone as the test ends, failed or not.
+        struct Made(HWND);
+        impl Drop for Made {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let made = Made(unsafe { make_window() }.expect("a window"));
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let mut finder = Finder::new(made.0, asks);
+        up_off_screen(&mut finder);
+        finder.draw();
+        assert!(finder.gfx.is_some(), "not drawn as it shows");
+        finder.close(false);
+        finder.draw();
+        finder.looked_told(usize::MAX);
+        let held = (finder.gfx.is_some(), finder.drawn.is_some(), finder.showing.is_some());
+        drop(finder);
+        drop(made);
+        assert_eq!(held, (false, false, false), "the search closed took up its device, what it draws on and its showing again");
     }
 
     /// The drives are named as Windows writes them, each with its one colon, in both languages: the English foot put a
@@ -2196,6 +2245,7 @@ mod tests {
             let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), finder.rect.left, finder.rect.top, finder.rect.right - finder.rect.left, finder.rect.bottom - finder.rect.top, SWP_NOACTIVATE);
             let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE);
         }
+        finder.up = true;
         let over = |x: i32, y: i32| unsafe { GetAncestor(WindowFromPoint(POINT { x: 100 + x, y: 100 + y }), GA_ROOT) } == hwnd;
         assert!(!over(200, 60), "it takes the pointer before its sheet is drawn");
         finder.draw();
