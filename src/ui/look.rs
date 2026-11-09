@@ -2054,12 +2054,13 @@ impl Looker {
             return;
         }
         // On the device for the screen it opens on (see `gfx::on_screen`): what it draws on made anew on it as it
-        // opens on a screen another adapter drives, or its device was lost.
+        // opens on a screen another adapter drives, or its device was lost, and what plays read there too.
         if let Ok(gfx) = gfx::for_area(self.monitor) {
             if !Rc::ptr_eq(&gfx, &self.gfx) {
                 self.drawn = None;
                 self.showing = None;
                 self.gfx = gfx;
+                self.player_follows();
             }
         }
         if self.drawn.is_none() {
@@ -3104,6 +3105,20 @@ impl Looker {
         }
     }
 
+    /// What plays read on the device it draws with now, another than the one it read on (see `play::Player::follow`),
+    /// drawn on as it goes till its frame for now is copied there. One that cannot be: made anew on it as the sheet next
+    /// rests (see `tend_player`), from the beginning.
+    fn player_follows(&mut self) {
+        let Some(player) = &mut self.player else { return };
+        match self.gfx.d3d().and_then(|d3d| player.follow(&d3d)) {
+            Ok(()) => self.keep_drawing(),
+            Err(error) => {
+                crate::journal::note(format!("look: what plays could not go onto the device drawn with now ({error}); made anew"));
+                self.stop_playing();
+            }
+        }
+    }
+
     /// What played the thing shown let go of (another to be shown, or it gone).
     fn stop_playing(&mut self) {
         let played = self.player.take().is_some();
@@ -3159,11 +3174,12 @@ impl Looker {
         }
     }
 
-    /// Whether it is to be drawn on as time goes, at rest: what plays plays, or is dragged along, or its controls fade,
-    /// or its slider opens or closes.
+    /// Whether it is to be drawn on as time goes, at rest: what plays plays, or has its frame for now to be copied (a
+    /// paused video gone onto another device, see `player_follows`), or is dragged along, or its controls fade, or its
+    /// slider opens or closes.
     fn plays_on(&self, now: Instant) -> bool {
         let clear = self.controls_clear(now);
-        self.player.as_ref().is_some_and(play::Player::playing) || self.holding.is_some() || (clear > 0.0 && clear < 1.0) || self.slider_moving(now)
+        self.player.as_ref().is_some_and(|player| player.playing() || player.owes_frame()) || self.holding.is_some() || (clear > 0.0 && clear < 1.0) || self.slider_moving(now)
     }
 
     /// A frame's time: it drawn where it moves; at rest, where what plays has a new frame, or has gone on far enough to
