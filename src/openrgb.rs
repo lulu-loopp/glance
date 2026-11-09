@@ -1,6 +1,7 @@
 //! OpenRGB with an administrator's rights, for the lights reached only over the board's SMBus (the memory's): run by
 //! the sensors, as the user asked it to be. The phone remote, which runs as the user, then asks that one as it would
-//! its own.
+//! its own. Never on a laptop (see `runs_on`): the remote sets the light under a laptop's keys its own way (its
+//! `keys`), and runs OpenRGB itself, without these rights, for the rest.
 //!
 //! What runs is the release Glance names, file by file: each is read from the user's folder (where the remote fetched
 //! it), checked, and written to a folder of administrators' alone, made new each time. It keeps its configuration
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Power::POWER_PLATFORM_ROLE;
 use windows::Win32::System::Registry::{RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegGetValueW, HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, RRF_RT_REG_DWORD};
 
 /// OpenRGB 1.0 for 64-bit Windows, as the remote unpacks it (see `fetch` there): each file and its SHA-256.
@@ -122,7 +124,7 @@ fn ended_by_itself() -> bool {
     RUNNING.lock().unwrap().as_mut().is_some_and(|running| !matches!(running.program.try_wait(), Ok(None)))
 }
 
-/// Ended, and started again from the folder it ran from, if it was run.
+/// Ended, and started again from the folder it ran from, if it was run (by `start`, which runs it on no laptop).
 fn afresh() {
     let mut running = RUNNING.lock().unwrap();
     let Some(mut was) = running.take() else { return };
@@ -171,6 +173,9 @@ fn start() -> bool {
 }
 
 fn started() -> Result<Running, String> {
+    if !runs_on(&crate::smbios::table(), crate::laptop::role()) {
+        return Err("not run on a laptop, whose SMBus is its embedded controller's too".into());
+    }
     let program_data = crate::update::program_data().ok_or("no ProgramData")?;
     // (What an earlier run left, gone: it ran from a folder of its own.)
     crate::elevation::remove_private_folders(&program_data, FOLDERS);
@@ -180,6 +185,16 @@ fn started() -> Result<Running, String> {
     put_in(&RELEASE, &fetched().ok_or("no folder of the user's")?, folder.path())?;
     let program = run_from(&folder)?;
     Ok(Running { program, folder })
+}
+
+/// Whether it is run, with the PawnIO modules that reach the board's SMBus and its LPC bus (`RELEASE`'s), on the
+/// machine whose firmware's table is `table` and whose power role is `role`: not on a laptop (see `laptop::laptop`),
+/// however it was asked for (as the sensors start, turned on, started again after a maker's program). As it starts it
+/// looks for every controller it knows of on those buses, and on a laptop they are its embedded controller's (its
+/// battery, its charger, its keyboard and its fans), which the sensors leave alone for that (see `superio::probed`,
+/// `dimm::looked_for`). A laptop's memory has no lights to set.
+fn runs_on(table: &[u8], role: POWER_PLATFORM_ROLE) -> bool {
+    !crate::laptop::laptop(&crate::smbios::chassis(table), role)
 }
 
 /// Where the remote unpacked the release, for this user.
@@ -372,6 +387,20 @@ mod tests {
         assert_eq!(said[host + 1], "127.0.0.1");
         let config = said.iter().position(|argument| argument == "--config").unwrap();
         assert_eq!(said[config + 1], r"C:\Kept\config");
+    }
+
+    /// Not run on a laptop (the G14, a notebook, or one whose firmware lists a desktop's enclosure but gives it a
+    /// mobile role), whatever asks for it: run on a desktop as it was.
+    #[test]
+    fn is_run_on_no_laptop() {
+        use crate::smbios::examples;
+        use windows::Win32::System::Power::{PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleSlate, PlatformRoleUnspecified};
+        assert!(!runs_on(&examples::g14(), PlatformRoleMobile));
+        assert!(!runs_on(&examples::so_dimm_laptop(), PlatformRoleUnspecified));
+        assert!(!runs_on(&examples::desktop(), PlatformRoleMobile));
+        assert!(!runs_on(&examples::desktop(), PlatformRoleSlate));
+        assert!(runs_on(&examples::desktop(), PlatformRoleDesktop));
+        assert!(runs_on(&examples::ddr4_desktop(), PlatformRoleUnspecified));
     }
 
     #[test]

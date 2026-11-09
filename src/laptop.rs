@@ -21,6 +21,11 @@ pub fn laptop(chassis: &[u8], role: POWER_PLATFORM_ROLE) -> bool {
     crate::smbios::portable(chassis) || CARRIED.contains(&role)
 }
 
+/// Whether this machine is a laptop (see `laptop`), as its firmware says.
+pub fn this_machine() -> bool {
+    laptop(&crate::smbios::chassis(&crate::smbios::table()), role())
+}
+
 /// The power role this machine's firmware gives it, as Windows reads it from the ACPI table (unspecified where the
 /// firmware gives none).
 pub fn role() -> POWER_PLATFORM_ROLE {

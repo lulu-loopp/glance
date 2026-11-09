@@ -1315,6 +1315,18 @@ enum Switch {
     RemoteScreens,
 }
 
+/// The remote's switches, the lights' program fetched (`lights`) or not, on a laptop or not: the lights set, the
+/// memory's with an administrator's rights while that program is there (on no laptop, where the sensors run no
+/// OpenRGB with those rights, see `openrgb::runs_on`, and a laptop's memory has no lights), and the screens put out.
+fn remote_switches(lights: bool, laptop: bool) -> Vec<Switch> {
+    let mut switches = vec![Switch::RemoteLights];
+    if lights && !laptop {
+        switches.push(Switch::RemoteRaised);
+    }
+    switches.push(Switch::RemoteScreens);
+    switches
+}
+
 /// What a QR code shown is for.
 #[derive(Clone, Copy, PartialEq)]
 enum CodeFor {
@@ -1721,6 +1733,8 @@ struct Ui {
     phones_at: Instant,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
+    /// Whether this machine is a laptop (see `laptop`), where no OpenRGB is run with an administrator's rights.
+    laptop: bool,
     /// The installer's uninstaller beside this executable, if it was
     /// installed somewhere ordinary programs cannot change.
     uninstaller: Option<std::path::PathBuf>,
@@ -2025,6 +2039,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             reading_drives: None,
             drives_at: None,
             choosing_folders: None,
+            laptop: crate::laptop::this_machine(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
@@ -2722,11 +2737,7 @@ impl Ui {
     fn remote_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Switch(Switch::Remote));
         if self.remote {
-            rows.push(Row::Switch(Switch::RemoteLights));
-            if self.remote_lights {
-                rows.push(Row::Switch(Switch::RemoteRaised));
-            }
-            rows.push(Row::Switch(Switch::RemoteScreens));
+            rows.extend(remote_switches(self.remote_lights, self.laptop).into_iter().map(Row::Switch));
             // A code shows under the row that asked for it.
             let shown = self.code.as_ref().map(|(_, what)| *what);
             rows.push(Row::Pair);
@@ -7246,6 +7257,17 @@ mod tests {
         }
         assert_eq!(update::download_page(Lang::Zh), "https://glancepc.com/#download");
         assert_eq!(update::download_page(Lang::En), "https://glancepc.com/en/#download");
+    }
+
+    /// The memory's lights are offered once the lights' program is there, on no laptop: there the sensors run no
+    /// OpenRGB with an administrator's rights, and the switch could only fail.
+    #[test]
+    fn offers_the_memorys_lights_on_no_laptop() {
+        use Switch::{RemoteLights, RemoteRaised, RemoteScreens};
+        assert_eq!(remote_switches(true, false), [RemoteLights, RemoteRaised, RemoteScreens]);
+        assert_eq!(remote_switches(false, false), [RemoteLights, RemoteScreens]);
+        assert_eq!(remote_switches(true, true), [RemoteLights, RemoteScreens]);
+        assert_eq!(remote_switches(false, true), [RemoteLights, RemoteScreens]);
     }
 
     /// Recent files' drives: those it reads now and those left out that are away (as last seen), by their letters,
