@@ -616,7 +616,7 @@ impl Sampler {
             Some(per_adapter)
         };
         let (dedicated, shared) = if collected { (memory(self.gpu_dedicated), memory(self.gpu_shared)) } else { (None, None) };
-        self.from_libraries = self.libraries.as_ref().and_then(|libraries| libraries.take(interval * FROM_LIBRARIES_FOR)).unwrap_or_default();
+        self.from_libraries = self.libraries.as_ref().map_or_else(Vec::new, |libraries| libraries.take(interval * FROM_LIBRARIES_FOR));
         if let Some(libraries) = &self.libraries {
             if let Some(found) = libraries.found() {
                 self.gpus_found = found;
@@ -2014,18 +2014,19 @@ mod tests {
         let (adapters, gpus) = enumerate_gpus();
         let libraries = GpuLibraries::start(adapters.iter().zip(&gpus).map(|(adapter, gpu)| gpu_libraries::Card::new(gpu.name.clone(), adapter.vendor, adapter.address, adapter.device)).collect());
         let began = Instant::now();
-        let found = loop {
-            if let Some(found) = libraries.found() {
-                break found;
-            }
+        // (Each card told as it is looked up, till none is still to be.)
+        let mut found = gpu_libraries::found_before(&[]);
+        while found.lines.len() < gpus.len() || found.lines.iter().any(|line| line.contains("not looked for yet")) {
+            found = libraries.found().unwrap_or(found);
             assert!(began.elapsed() < Duration::from_secs(60), "the GPUs looked up");
             std::thread::sleep(Duration::from_millis(50));
-        };
-        println!("looked up in {} ms:\n{}", began.elapsed().as_millis(), found.lines.join("\n"));
-        // (A reading asked, and taken once it is read.)
+        }
+        println!("looked up in {} ms", began.elapsed().as_millis());
+        // (A reading asked, and taken once it is read, Intel's library's line told meanwhile.)
         let _ = libraries.take(Duration::ZERO);
         std::thread::sleep(Duration::from_secs(1));
-        for (gpu, read) in gpus.iter().zip(libraries.take(Duration::from_secs(60)).unwrap_or_default()) {
+        println!("{}", libraries.found().unwrap_or(found).lines.join("\n"));
+        for (gpu, read) in gpus.iter().zip(libraries.take(Duration::from_secs(60))) {
             println!("{}: {read:?}", gpu.name);
         }
     }

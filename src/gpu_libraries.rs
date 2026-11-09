@@ -2,29 +2,34 @@
 //! each card looked up through its maker's library there, and read through it there, as the sampler asks, the sampler
 //! taking what was last read without waiting for it. Opening a library and finding the cards through it may take
 //! seconds while the drivers are still starting (5.5 s at a laptop's sign-in), and a driver's call may not come back
-//! at all: neither holds the first look at the hardware, nor any other reading.
+//! at all: neither holds the first look at the hardware, nor any other reading. What is known is told as it is known:
+//! each card's looking up as it is done, each of its readings as it is read (with when its reading began, so that one
+//! read before a call that did not come back is not taken for one read since).
 //!
 //! One thread for all of them, look-ups and readings alike: NVML is documented as safe to call from several threads,
 //! but NVAPI, ADL and IGCL say nothing of it, and a thread of its own each would still have a card's look-up and its
 //! readings, or two cards' of one maker, meet in one library. Nor is a library called from two threads by two samplers
-//! one after the other: a sampler's thread is the process's only one in them while it lasts (see `HELD`), one made
-//! while another's is still in a library waiting for it to end.
+//! one after the other: a sampler's thread is the process's only one in them while it lasts (see `InTheLibraries`),
+//! one made while another's is still in a library waiting for it to end, or for its own sampler to go.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::gpu_power::{GpuPower, More, PciAddress, Reader};
 use crate::metrics::PowerNow;
 use crate::reading::GpuLimit;
 
-/// What the makers' libraries are asked: `GpuPower`, or what stands for it in a test.
+/// What the makers' libraries are asked: `GpuPower`, or what stands for it in a test. Each reading's calls are made
+/// only as `awake` says the card is just before each of them (see `GpuPower::more`).
 pub trait Libraries {
     /// How to read the card made by `vendor` at `address`, as `GpuPower::reader` says.
     fn reader(&mut self, vendor: u32, address: PciAddress, awake: &mut dyn FnMut() -> bool) -> Option<Option<Reader>>;
-    fn power(&self, reader: Reader) -> Option<f32>;
-    fn more(&self, reader: Reader) -> Option<More>;
-    fn limit(&self, reader: Reader) -> Option<GpuLimit>;
+    fn power(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<f32>;
+    fn more(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<More>;
+    fn limit(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<GpuLimit>;
+    /// Whether it is Intel's graphics in the CPU, as its library said as it found it (nothing asked now).
     fn intel_integrated(&self, reader: Reader) -> bool;
     /// What Intel's library found, for a report, as `GpuPower::describe_intel` says.
     fn describe_intel(&self, awake: &dyn Fn(PciAddress) -> bool) -> Option<String>;
@@ -35,16 +40,16 @@ impl Libraries for GpuPower {
         GpuPower::reader(self, vendor, address, awake)
     }
 
-    fn power(&self, reader: Reader) -> Option<f32> {
-        self.read(reader)
+    fn power(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
+        self.read(reader, awake)
     }
 
-    fn more(&self, reader: Reader) -> Option<More> {
-        GpuPower::more(self, reader)
+    fn more(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<More> {
+        GpuPower::more(self, reader, awake)
     }
 
-    fn limit(&self, reader: Reader) -> Option<GpuLimit> {
-        GpuPower::limit(self, reader)
+    fn limit(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<GpuLimit> {
+        GpuPower::limit(self, reader, awake)
     }
 
     fn intel_integrated(&self, reader: Reader) -> bool {
@@ -98,7 +103,7 @@ impl Card {
     }
 }
 
-/// What a card's maker's library read of it.
+/// What a card's maker's library read of it lately (see `GpuLibraries::take`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Read {
     /// Its power, in watts.
@@ -106,6 +111,49 @@ pub struct Read {
     pub more: More,
     /// What holds its clock back (only NVIDIA's library says).
     pub limit: Option<GpuLimit>,
+}
+
+/// One of a card's readings through its maker's library, with when its reading began: it is as old as that, however
+/// long the library took to give it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Reading {
+    Power(Instant, Option<f32>),
+    More(Instant, More),
+    Limit(Instant, Option<GpuLimit>),
+    /// The card found asleep: none of what was read of it is so any longer.
+    Asleep,
+}
+
+/// What was last read of a card, each with when its reading began.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Readings {
+    power: Option<(Instant, Option<f32>)>,
+    more: Option<(Instant, More)>,
+    limit: Option<(Instant, Option<GpuLimit>)>,
+}
+
+impl Readings {
+    fn put(&mut self, reading: Reading) {
+        match reading {
+            Reading::Power(at, watts) => self.power = Some((at, watts)),
+            Reading::More(at, more) => self.more = Some((at, more)),
+            Reading::Limit(at, limit) => self.limit = Some((at, limit)),
+            Reading::Asleep => *self = Readings::default(),
+        }
+    }
+
+    /// Those whose reading began no longer than `within` before `now`, together (none: none did).
+    fn within(&self, within: Duration, now: Instant) -> Option<Read> {
+        let fresh = |at: Instant| now.saturating_duration_since(at) <= within;
+        let power = self.power.filter(|(at, _)| fresh(*at));
+        let more = self.more.filter(|(at, _)| fresh(*at));
+        let limit = self.limit.filter(|(at, _)| fresh(*at));
+        (power.is_some() || more.is_some() || limit.is_some()).then(|| Read {
+            power: power.and_then(|(_, watts)| watts),
+            more: more.map_or_else(More::default, |(_, more)| more),
+            limit: limit.and_then(|(_, limit)| limit),
+        })
+    }
 }
 
 /// What the cards' looking up came to: each card's line for a report (see `StaticInfo::found`), and whether each is
@@ -126,13 +174,19 @@ pub fn found_before(cards: &[Card]) -> Found {
     Found { lines: lines_of(cards), integrated: vec![false; cards.len()] }
 }
 
-/// What the libraries' thread works on: the libraries, and the cards.
+/// What the libraries' thread works on: the libraries, the cards, and Intel's library's line for a report, as last
+/// asked (none: not yet, or it found none).
 struct Work<L> {
     libraries: L,
     cards: Vec<Card>,
+    intel: Option<String>,
 }
 
 impl<L: Libraries> Work<L> {
+    fn new(libraries: L, cards: Vec<Card>) -> Self {
+        Work { libraries, cards, intel: None }
+    }
+
     /// Each card not looked up yet looked up through its maker's library (see `GpuPower::reader`): once, and only while
     /// neither it nor any other card of its maker sleeps, as `power` says just before each step of it, its own state
     /// asked again first (the cards before it have been looked up since, which may have taken long). Neither IGCL nor
@@ -141,60 +195,83 @@ impl<L: Libraries> Work<L> {
     /// they are opened: one asleep, an Intel or an AMD laptop's discrete GPU beside graphics of the same maker's in its
     /// CPU, would be asked along with the one awake. Its maker's cards are those there now (see
     /// `PowerNow::makers_awake`), not only those found as the sampler was made. One whose place on the bus is not known
-    /// is read by none. Each card's library asked, `calling` is told of it first. Returns those whose library was
-    /// asked, by their places among the cards, with how long it took.
-    fn look_up(&mut self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>)) -> Vec<(usize, Duration)> {
+    /// is read by none. Each card's library asked, `calling` is told of it first, and what the looking up has come to
+    /// is told to `told` as each card's changes (a call after it may not come back). None is asked once `wanted` says
+    /// the looking up is no longer wanted (its sampler gone). Returns those whose library was asked, by their places
+    /// among the cards, with how long it took.
+    fn look_up(&mut self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>), wanted: &dyn Fn() -> bool, told: &mut dyn FnMut(Found)) -> Vec<(usize, Duration)> {
         let mut asked = Vec::new();
-        for (at, card) in self.cards.iter_mut().enumerate().filter(|(_, card)| !matches!(card.lookup, Lookup::Done(_))) {
-            if power.sleeps(card.device) {
-                card.lookup = Lookup::PutOff;
+        for at in 0..self.cards.len() {
+            if matches!(self.cards[at].lookup, Lookup::Done(_)) {
                 continue;
             }
-            let Some(address) = card.address else {
-                card.lookup = Lookup::Done(None);
-                continue;
+            if !wanted() {
+                break;
+            }
+            let card = &self.cards[at];
+            let lookup = if power.sleeps(card.device) {
+                Lookup::PutOff
+            } else if let Some(address) = card.address {
+                calling(Some(format!("looking up {} through its maker's library", card.name)));
+                let began = Instant::now();
+                let vendor = card.vendor;
+                let lookup = self.libraries.reader(vendor, address, &mut || power.makers_awake(vendor)).map_or(Lookup::PutOff, Lookup::Done);
+                asked.push((at, began.elapsed()));
+                lookup
+            } else {
+                Lookup::Done(None)
             };
-            calling(Some(format!("looking up {} through its maker's library", card.name)));
-            let began = Instant::now();
-            let vendor = card.vendor;
-            card.lookup = self.libraries.reader(vendor, address, &mut || power.makers_awake(vendor)).map_or(Lookup::PutOff, Lookup::Done);
-            asked.push((at, began.elapsed()));
+            if std::mem::replace(&mut self.cards[at].lookup, lookup) != lookup {
+                told(self.found());
+            }
         }
         calling(None);
         asked
     }
 
-    /// Each card's readings through its maker's library, by its place among the cards: of a card looked up and awake,
-    /// as `power` says just before it is read (after the cards before it were, whose libraries may have taken a
-    /// while), and none of any other. Each card's library asked, `calling` is told of it first.
-    fn read(&self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>)) -> Vec<Option<Read>> {
-        let read = self
-            .cards
-            .iter()
-            .map(|card| {
-                let Lookup::Done(Some(reader)) = card.lookup else { return None };
-                if power.sleeps(card.device) {
-                    return None;
-                }
-                calling(Some(format!("reading {} through its maker's library", card.name)));
-                Some(Read { power: self.libraries.power(reader), more: self.libraries.more(reader).unwrap_or_default(), limit: self.libraries.limit(reader) })
-            })
-            .collect();
-        calling(None);
-        read
-    }
-
-    /// What the cards' looking up has come to, for a report: each card's line, and Intel's library's, its graphics
-    /// asked what they read only where `power` says they are awake just before (found awake, they may have gone to
-    /// sleep since), and which are Intel's graphics in the CPU.
-    fn found(&self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>)) -> Found {
-        let mut lines = lines_of(&self.cards);
-        let awake = |at| self.cards.iter().find(|card| card.address == Some(at)).is_some_and(|card| !power.sleeps(card.device));
-        calling(Some("asking Intel's library what it reads of its graphics".into()));
-        if let Some(intel) = self.libraries.describe_intel(&awake) {
-            lines.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
+    /// Each card's readings through its maker's library, by its place among the cards, put by `put` as each is read,
+    /// with when its reading began: of a card looked up, each only as `power` says the card is awake just before each
+    /// call of it (after the cards and the calls before it, which may have taken a while), what is not asked unread.
+    /// A card found asleep is put so, and asked nothing. Only the card's own state is asked: a reading asks the card
+    /// alone, by the handle its library gave as it found it (NVML's device, ADL's adapter, IGCL's device, NVAPI's GPU),
+    /// and lists or asks no other, as opening a library and finding a card through it do (see `look_up`). Each card's
+    /// library asked, `calling` is told of it first.
+    fn read(&self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>), put: &mut dyn FnMut(usize, Reading)) {
+        for (at, card) in self.cards.iter().enumerate() {
+            let Lookup::Done(Some(reader)) = card.lookup else { continue };
+            if power.sleeps(card.device) {
+                put(at, Reading::Asleep);
+                continue;
+            }
+            calling(Some(format!("reading {} through its maker's library", card.name)));
+            let mut awake = || !power.sleeps(card.device);
+            let began = Instant::now();
+            put(at, Reading::Power(began, self.libraries.power(reader, &mut awake)));
+            let began = Instant::now();
+            put(at, Reading::More(began, self.libraries.more(reader, &mut awake).unwrap_or_default()));
+            let began = Instant::now();
+            put(at, Reading::Limit(began, self.libraries.limit(reader, &mut awake)));
         }
         calling(None);
+    }
+
+    /// Intel's library's line for a report asked anew, its graphics asked what they read only where `power` says they
+    /// are awake just before (found awake, they may have gone to sleep since). `calling` is told of it first.
+    fn describe_intel(&mut self, power: &impl PowerNow, calling: &mut dyn FnMut(Option<String>)) {
+        let awake = |at: PciAddress| self.cards.iter().find(|card| card.address == Some(at)).is_some_and(|card| !power.sleeps(card.device));
+        calling(Some("asking Intel's library what it reads of its graphics".into()));
+        let intel = self.libraries.describe_intel(&awake);
+        calling(None);
+        if let Some(intel) = intel {
+            self.intel = Some(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
+        }
+    }
+
+    /// What the cards' looking up has come to, as it is known (no library asked): each card's line, Intel's library's
+    /// as last asked, and which are Intel's graphics in the CPU.
+    fn found(&self) -> Found {
+        let mut lines = lines_of(&self.cards);
+        lines.extend(self.intel.clone());
         let integrated = self.cards.iter().map(|card| matches!(card.lookup, Lookup::Done(Some(reader)) if self.libraries.intel_integrated(reader))).collect();
         Found { lines, integrated }
     }
@@ -226,19 +303,19 @@ struct Calling {
     noted: bool,
 }
 
-/// What the libraries' thread and the sampler share: what was last read, and when, what the cards' looking up came
+/// What the libraries' thread and the sampler share: what was last read of each card, what the cards' looking up came
 /// to as it changes (none: taken already), and the call into a library under way.
 #[derive(Default)]
 struct Shared {
-    read: Option<(Instant, Vec<Option<Read>>)>,
+    read: Vec<Readings>,
     found: Option<Found>,
     calling: Option<Calling>,
 }
 
 impl Shared {
-    /// What was read, if it was read no longer than `within` before `now`.
-    fn read_within(&self, within: Duration, now: Instant) -> Option<Vec<Option<Read>>> {
-        self.read.as_ref().filter(|(at, _)| now.saturating_duration_since(*at) <= within).map(|(_, read)| read.clone())
+    /// What was read of each card whose reading began no longer than `within` before `now`.
+    fn read_within(&self, within: Duration, now: Instant) -> Vec<Option<Read>> {
+        self.read.iter().map(|readings| readings.within(within, now)).collect()
     }
 
     /// The call under way, noted as stuck once it has been for longer than a reading may be (see `sensing::STUCK_AFTER`)
@@ -261,14 +338,48 @@ impl Shared {
     }
 }
 
-/// Held by the libraries' thread for as long as it lasts: one thread of the process in the libraries at a time.
-static HELD: Mutex<()> = Mutex::new(());
+/// Whether a libraries' thread of the process is in the libraries now, and what wakes those waiting to be: the one in
+/// them gone, or a sampler of theirs gone.
+static IN_THE_LIBRARIES: Mutex<bool> = Mutex::new(false);
+static FREED: Condvar = Condvar::new();
+
+/// A libraries' thread's place in the libraries, the process's only one there while it is held: given up as it is
+/// dropped, after the libraries opened under it are closed (dropped before it).
+struct InTheLibraries;
+
+impl InTheLibraries {
+    /// Taken once no other thread of the process is in the libraries, waited for till then while `gone` says the
+    /// sampler it is for has not gone (none: it has, and nothing is taken, so a thread whose sampler went while it
+    /// waited ends without opening any library).
+    fn taken(gone: &AtomicBool) -> Option<Self> {
+        let mut held = IN_THE_LIBRARIES.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if gone.load(Ordering::Relaxed) {
+                return None;
+            }
+            if !*held {
+                *held = true;
+                return Some(InTheLibraries);
+            }
+            held = FREED.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+impl Drop for InTheLibraries {
+    fn drop(&mut self) {
+        *IN_THE_LIBRARIES.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        FREED.notify_all();
+    }
+}
 
 /// The GPU makers' libraries, worked on a thread of their own, which ends once this is dropped (and any call it is in
 /// has come back).
 pub struct GpuLibraries {
     shared: Arc<Mutex<Shared>>,
     ask: SyncSender<()>,
+    /// Whether this has been dropped, for its thread waiting to be in the libraries (see `InTheLibraries::taken`).
+    gone: Arc<AtomicBool>,
 }
 
 impl GpuLibraries {
@@ -281,53 +392,58 @@ impl GpuLibraries {
     /// it is the process's only thread in the libraries, it looks the cards up, and then reads them each time it is
     /// asked (see `take`). Nothing here waits for it.
     fn working<L: Libraries, P: PowerNow + Send + 'static>(cards: Vec<Card>, power: P, open: impl FnOnce() -> L + Send + 'static) -> Self {
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared = Arc::new(Mutex::new(Shared { read: vec![Readings::default(); cards.len()], ..Shared::default() }));
+        let gone = Arc::new(AtomicBool::new(false));
         let (ask, asked) = mpsc::sync_channel::<()>(1);
         std::thread::Builder::new()
             .name("glance: GPU libraries".into())
             .spawn({
-                let shared = shared.clone();
+                let (shared, gone) = (shared.clone(), gone.clone());
                 move || {
-                    // (Held, poisoned or not, till the libraries are closed as this ends.)
-                    let _held = HELD.lock();
+                    let Some(_in_them) = InTheLibraries::taken(&gone) else { return };
+                    let wanted = || !gone.load(Ordering::Relaxed);
                     let mut calling = |what: Option<String>| {
                         let came_back = shared.lock().unwrap().calling(what, crate::sensing::awake());
                         if let Some(line) = came_back {
                             crate::journal::note(line);
                         }
                     };
-                    let mut work = Work { libraries: open(), cards };
+                    let mut told = |found: Found| shared.lock().unwrap().found = Some(found);
+                    let mut put = |at: usize, reading: Reading| shared.lock().unwrap().read[at].put(reading);
+                    let mut work = Work::new(open(), cards);
                     let began = Instant::now();
-                    let asked_of = work.look_up(&power, &mut calling);
+                    let asked_of = work.look_up(&power, &mut calling, &wanted, &mut told);
                     if began.elapsed() >= NOTED_FROM {
                         crate::journal::note(first_look_up_noted(began.elapsed(), &work.cards, &asked_of));
                     }
-                    let found = work.found(&power, &mut calling);
-                    shared.lock().unwrap().found = Some(found);
+                    if wanted() {
+                        work.describe_intel(&power, &mut calling);
+                        told(work.found());
+                    }
                     while asked.recv().is_ok() {
                         // A card put off looked up once it and its maker's other cards are all awake.
-                        let mut looked = work.look_up(&power, &mut calling);
+                        let mut looked = work.look_up(&power, &mut calling, &wanted, &mut told);
                         looked.retain(|(at, _)| matches!(work.cards[*at].lookup, Lookup::Done(_)));
                         for &(at, took) in &looked {
                             let card = &work.cards[at];
                             crate::journal::note(format!("GPU power, {}, looked for as it and its maker's other cards were awake: {} ({} ms)", card.name, card.lookup.describe(), took.as_millis()));
                         }
                         if !looked.is_empty() {
-                            let found = work.found(&power, &mut calling);
-                            shared.lock().unwrap().found = Some(found);
+                            work.describe_intel(&power, &mut calling);
+                            told(work.found());
                         }
-                        let read = work.read(&power, &mut calling);
-                        shared.lock().unwrap().read = Some((Instant::now(), read));
+                        work.read(&power, &mut calling, &mut put);
                     }
                 }
             })
             .expect("a thread started");
-        GpuLibraries { shared, ask }
+        GpuLibraries { shared, ask, gone }
     }
 
-    /// What was last read of each card, by its place among the cards, if it was read within `within`, another reading
-    /// asked (one asked and not yet begun is not asked twice). Never waited for.
-    pub fn take(&self, within: Duration) -> Option<Vec<Option<Read>>> {
+    /// What was read lately of each card, by its place among the cards: each reading whose reading began within
+    /// `within` (one older is not shown as now), another reading asked (one asked and not yet begun is not asked
+    /// twice). Never waited for.
+    pub fn take(&self, within: Duration) -> Vec<Option<Read>> {
         let _ = self.ask.try_send(());
         self.shared.lock().unwrap().read_within(within, Instant::now())
     }
@@ -343,10 +459,20 @@ impl GpuLibraries {
     }
 }
 
+impl Drop for GpuLibraries {
+    fn drop(&mut self) {
+        // (Said under the lock its thread looks at it under, as it waits to be in the libraries: it does not miss it.)
+        let held = IN_THE_LIBRARIES.lock().unwrap_or_else(PoisonError::into_inner);
+        self.gone.store(true, Ordering::Relaxed);
+        drop(held);
+        FREED.notify_all();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashSet;
 
     pub(crate) const INTEL: u32 = 0x8086;
@@ -402,17 +528,32 @@ pub(crate) mod tests {
         Card::new(format!("card {device}"), vendor, Some((device, 0, 0)), Some(device))
     }
 
-    /// Libraries standing in for the makers': each takes its step only as it is told its maker's cards are awake, as
-    /// `GpuPower::reader` does, and does `meanwhile` as it does (what goes to sleep as it takes its time), the devices
-    /// of the cards it was asked of (looked up, or read) written down in order. Each card is read as one of Intel's
-    /// library's, numbered by its device, and drawing as many watts: device 1's the graphics in the CPU.
+    /// Libraries standing in for the makers': each call made only as it is told the card is awake (or, looking one up,
+    /// its maker's cards), as `GpuPower`'s are, and doing `meanwhile` as it is made (what goes to sleep as it takes its
+    /// time), what each was asked of which card's device written down in order, with when. Each card is read as one of
+    /// Intel's library's, numbered by its device, and drawing as many watts: device 1's the graphics in the CPU.
     struct Standing<'a> {
         meanwhile: Box<dyn Fn(u32) + 'a>,
         asked: RefCell<Vec<(&'static str, u32)>>,
+        when: RefCell<Vec<Instant>>,
     }
 
     fn standing<'a>(meanwhile: impl Fn(u32) + 'a) -> Standing<'a> {
-        Standing { meanwhile: Box::new(meanwhile), asked: RefCell::new(Vec::new()) }
+        Standing { meanwhile: Box::new(meanwhile), asked: RefCell::new(Vec::new()), when: RefCell::new(Vec::new()) }
+    }
+
+    impl Standing<'_> {
+        /// `what` asked of the card read by `reader`, if `awake` says it is.
+        fn ask(&self, what: &'static str, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<u32> {
+            let Reader::Intel(device) = reader else { return None };
+            if !awake() {
+                return None;
+            }
+            self.asked.borrow_mut().push((what, device as u32));
+            self.when.borrow_mut().push(Instant::now());
+            (self.meanwhile)(device as u32);
+            Some(device as u32)
+        }
     }
 
     impl Libraries for Standing<'_> {
@@ -425,19 +566,16 @@ pub(crate) mod tests {
             Some(Some(Reader::Intel(address.0 as usize)))
         }
 
-        fn power(&self, reader: Reader) -> Option<f32> {
-            let Reader::Intel(device) = reader else { return None };
-            self.asked.borrow_mut().push(("read", device as u32));
-            (self.meanwhile)(device as u32);
-            Some(device as f32)
+        fn power(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
+            self.ask("power", reader, awake).map(|device| device as f32)
         }
 
-        fn more(&self, _: Reader) -> Option<More> {
-            None
+        fn more(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<More> {
+            self.ask("more", reader, awake).map(|device| More { fan_rpm: Some(device), ..More::default() })
         }
 
-        fn limit(&self, _: Reader) -> Option<GpuLimit> {
-            None
+        fn limit(&self, reader: Reader, awake: &mut dyn FnMut() -> bool) -> Option<GpuLimit> {
+            self.ask("limit", reader, awake).map(|_| GpuLimit::Free)
         }
 
         fn intel_integrated(&self, reader: Reader) -> bool {
@@ -452,16 +590,23 @@ pub(crate) mod tests {
     /// `cards` looked up on `machine` through libraries standing in for the makers', which do `meanwhile` as they do:
     /// the devices of those their library was asked of, in order.
     fn looked_up<'a>(cards: Vec<Card>, machine: &Machine, meanwhile: impl Fn(u32) + 'a) -> (Work<Standing<'a>>, Vec<u32>) {
-        let mut work = Work { libraries: standing(meanwhile), cards };
-        work.look_up(machine, &mut |_| {});
+        let mut work = Work::new(standing(meanwhile), cards);
+        work.look_up(machine, &mut |_| {}, &|| true, &mut |_| {});
         let asked = work.libraries.asked.take().into_iter().map(|(_, device)| device).collect();
         (work, asked)
     }
 
     /// Looked up again, on `machine`: the devices of those asked.
     fn again(work: &mut Work<Standing>, machine: &Machine) -> Vec<u32> {
-        work.look_up(machine, &mut |_| {});
+        work.look_up(machine, &mut |_| {}, &|| true, &mut |_| {});
         work.libraries.asked.take().into_iter().map(|(_, device)| device).collect()
+    }
+
+    /// `work`'s cards read on `machine`: what was read of each, as it was put (with when each reading began).
+    fn read_on<L: Libraries>(work: &Work<L>, machine: &Machine) -> Vec<Readings> {
+        let mut read = vec![Readings::default(); work.cards.len()];
+        work.read(machine, &mut |_| {}, &mut |at, reading| read[at].put(reading));
+        read
     }
 
     /// A GPU awake is looked up through its maker's library only while every other card of that maker is awake too:
@@ -522,18 +667,41 @@ pub(crate) mod tests {
         assert_eq!(again(&mut work, &docked), [2]);
     }
 
-    /// A card looked up is read through its maker's library only where it is awake just before, after the cards before
-    /// it were read: an NVIDIA card gone to sleep while Intel's graphics before it were read is asked nothing, and has
-    /// no readings. One not looked up has none, and is asked nothing.
+    /// A card looked up is read through its maker's library only where it is awake just before each call of it, after
+    /// the cards and the calls before it: an NVIDIA card gone to sleep while Intel's graphics before it were read is
+    /// asked nothing, and what was read of it before is so no longer, and a card gone to sleep as its power was read
+    /// is asked nothing more. One not looked up is asked nothing.
     #[test]
     fn a_card_gone_to_sleep_while_another_was_read_is_not_asked() {
         let laptop = Machine::new(&[(INTEL, 1), (NVIDIA, 2), (AMD, 3)], &[3]);
         let (mut work, _) = looked_up(vec![card(INTEL, 1), card(NVIDIA, 2), card(AMD, 3)], &laptop, |_| {});
         assert_eq!(work.cards[2].lookup, Lookup::PutOff);
+        let before = read_on(&work, &laptop);
+        assert!(before[1].power.is_some());
+        work.libraries.asked.take();
         work.libraries.meanwhile = Box::new(|device| if device == 1 { laptop.sleep(2) });
-        let read = work.read(&laptop, &mut |_| {});
-        assert_eq!(work.libraries.asked.take(), [("read", 1)]);
-        assert_eq!(read, [Some(Read { power: Some(1.0), ..Read::default() }), None, None]);
+        let read = read_on(&work, &laptop);
+        assert_eq!(work.libraries.asked.take(), [("power", 1), ("more", 1), ("limit", 1)]);
+        assert_eq!(read[1], Readings::default());
+        assert_eq!(read[0].power.map(|(_, watts)| watts), Some(Some(1.0)));
+        laptop.wake(2);
+        work.libraries.meanwhile = Box::new(|device| laptop.sleep(device));
+        let read = read_on(&work, &laptop);
+        assert_eq!(work.libraries.asked.take(), [("power", 1), ("power", 2)]);
+        assert_eq!((read[0].power.map(|(_, watts)| watts), read[0].more.map(|(_, more)| more), read[0].limit.map(|(_, limit)| limit)), (Some(Some(1.0)), Some(More::default()), Some(None)));
+    }
+
+    /// Each reading is as old as the moment its reading began: one read before a call that took long is not taken for
+    /// one read after it.
+    #[test]
+    fn each_reading_is_as_old_as_its_reading() {
+        let machine = Machine::new(&[(INTEL, 1)], &[]);
+        let (mut work, _) = looked_up(vec![card(INTEL, 1)], &machine, |_| {});
+        work.libraries.meanwhile = Box::new(|_| std::thread::sleep(Duration::from_millis(30)));
+        let read = read_on(&work, &machine);
+        let when = work.libraries.when.take();
+        let (power, more, limit) = (read[0].power.unwrap().0, read[0].more.unwrap().0, read[0].limit.unwrap().0);
+        assert!(power <= when[0] && when[0] < more && more <= when[1] && when[1] < limit && limit <= when[2]);
     }
 
     /// Before the libraries' thread has come to them, the cards are said not looked for yet. Once looked up, how each
@@ -550,9 +718,28 @@ pub(crate) mod tests {
         let machine = Machine::new(&[(INTEL, 1), (NVIDIA, 2), (AMD, 4)], &[2]);
         let (work, asked) = looked_up(cards, &machine, |_| {});
         assert_eq!(asked, [1]);
-        let found = work.found(&machine, &mut |_| {});
+        let found = work.found();
         assert_eq!(found.lines, ["GPU power, card 1: IGCL", "GPU power, card 2: looked for once it and its maker's other cards are awake (one asleep)", "GPU power, card 4: not available"]);
         assert_eq!(found.integrated, [true, false, false]);
+    }
+
+    /// What each card's looking up came to is told as it is known, before the next card's library is asked (whose
+    /// call may not come back): the graphics in the CPU said so, its line said, while the card after it is looked up.
+    #[test]
+    fn tells_each_card_as_it_is_looked_up() {
+        let machine = Machine::new(&[(INTEL, 1), (INTEL, 2)], &[]);
+        let told_before_the_second = Cell::new(None);
+        let told = RefCell::new(Vec::new());
+        let mut work = Work::new(standing(|device| if device == 2 { told_before_the_second.set(told.borrow().last().cloned()) }), vec![card(INTEL, 1), card(INTEL, 2)]);
+        work.look_up(&machine, &mut |_| {}, &|| true, &mut |found| told.borrow_mut().push(found));
+        let Some(Found { lines, integrated }) = told_before_the_second.take() else { panic!("told before the second card was looked up") };
+        assert_eq!(lines, ["GPU power, card 1: IGCL", "GPU power, card 2: not looked for yet (its maker's library is opened apart from the first look at the hardware)"]);
+        assert_eq!(integrated, [true, false]);
+        assert_eq!(told.borrow().len(), 2);
+        // No longer wanted, no card is looked up.
+        let mut work = Work::new(standing(|_| {}), vec![card(INTEL, 1)]);
+        assert!(work.look_up(&machine, &mut |_| {}, &|| false, &mut |_| {}).is_empty());
+        assert_eq!(work.cards[0].lookup, Lookup::NotYet);
     }
 
     /// A slow first looking up is noted with each card's part in it, in ms, and what came of each (of one asleep, its
@@ -567,16 +754,20 @@ pub(crate) mod tests {
         );
     }
 
-    /// What was read is taken only while it is recent: read longer ago than it may be (the libraries slow, or stuck),
-    /// none is, rather than what it was then shown as now.
+    /// What was read is taken only while it is recent, each reading by when its own reading began: one begun longer
+    /// ago than it may be (the libraries slow, or stuck) is not, rather than what it was then shown as now, while those
+    /// read since are. None recent, none of the card's is.
     #[test]
     fn takes_only_what_was_read_lately() {
         let now = Instant::now();
-        let read = vec![Some(Read { power: Some(3.0), ..Read::default() })];
-        let shared = Shared { read: Some((now, read.clone())), ..Shared::default() };
-        assert_eq!(shared.read_within(Duration::from_secs(2), now + Duration::from_secs(2)), Some(read));
-        assert_eq!(shared.read_within(Duration::from_secs(2), now + Duration::from_millis(2001)), None);
-        assert_eq!(Shared::default().read_within(Duration::from_secs(2), now), None);
+        let before = now - Duration::from_secs(3);
+        let more = More { fan_rpm: Some(900), ..More::default() };
+        let readings = Readings { power: Some((now, Some(3.0))), more: Some((before, more)), limit: Some((now, Some(GpuLimit::Power))) };
+        let shared = Shared { read: vec![readings, Readings { power: Some((before, Some(9.0))), ..Readings::default() }], ..Shared::default() };
+        let within = Duration::from_secs(2);
+        assert_eq!(shared.read_within(within, now + within), [Some(Read { power: Some(3.0), more: More::default(), limit: Some(GpuLimit::Power) }), None]);
+        assert_eq!(shared.read_within(within, now + Duration::from_millis(2001)), [None, None]);
+        assert_eq!(shared.read_within(Duration::from_secs(4), now), [Some(Read { power: Some(3.0), more, limit: Some(GpuLimit::Power) }), Some(Read { power: Some(9.0), ..Read::default() })]);
     }
 
     /// A call into a library under way for longer than a reading may be is noted once, by the time it has taken awake,
@@ -598,8 +789,8 @@ pub(crate) mod tests {
         assert_eq!(shared.calling(None, secs(402)), None);
     }
 
-    /// Libraries standing in for the makers' on a thread of their own: each step (a card's looking up, its reading)
-    /// waits for the test to let it go, at most a few seconds, and says it has begun.
+    /// Libraries standing in for the makers' on a thread of their own: each step (a card's looking up, Intel's library
+    /// asked of its graphics, a card's reading) waits for the test to let it go, at most a few seconds, and says it has begun. That they were opened is said too.
     struct Held {
         let_go: mpsc::Receiver<()>,
         begun: mpsc::Sender<&'static str>,
@@ -621,16 +812,16 @@ pub(crate) mod tests {
             Some(Some(Reader::Nvidia(0)))
         }
 
-        fn power(&self, _: Reader) -> Option<f32> {
+        fn power(&self, _: Reader, _: &mut dyn FnMut() -> bool) -> Option<f32> {
             self.step("read", self.hold_reads);
             Some(42.0)
         }
 
-        fn more(&self, _: Reader) -> Option<More> {
+        fn more(&self, _: Reader, _: &mut dyn FnMut() -> bool) -> Option<More> {
             None
         }
 
-        fn limit(&self, _: Reader) -> Option<GpuLimit> {
+        fn limit(&self, _: Reader, _: &mut dyn FnMut() -> bool) -> Option<GpuLimit> {
             Some(GpuLimit::Power)
         }
 
@@ -639,17 +830,27 @@ pub(crate) mod tests {
         }
 
         fn describe_intel(&self, _: &dyn Fn(PciAddress) -> bool) -> Option<String> {
-            None
+            self.step("asked Intel's", !self.hold_reads);
+            Some(String::new())
         }
     }
 
-    /// Libraries held, on a thread of their own, for `hold_reads` (their reads) or not (their looking up): what lets
-    /// them go, what says each step has begun, and the libraries.
+    /// Libraries held, on a thread of their own, for `hold_reads` (their reads) or not (their looking up, and Intel's
+    /// library asked of its graphics): what lets
+    /// them go, what says each step has begun (and "opened" as they are opened), and the libraries.
     fn held(hold_reads: bool) -> (mpsc::Sender<()>, mpsc::Receiver<&'static str>, GpuLibraries) {
         let (let_go, held) = mpsc::channel();
         let (begun, begins) = mpsc::channel();
-        let libraries = GpuLibraries::working(vec![card(NVIDIA, 2)], AllAwake, move || Held { let_go: held, begun, hold_reads });
+        let libraries = GpuLibraries::working(vec![card(NVIDIA, 2)], AllAwake, move || {
+            let _ = begun.send("opened");
+            Held { let_go: held, begun, hold_reads }
+        });
         (let_go, begins, libraries)
+    }
+
+    /// The next step begun, waited for up to 30 s (other tests may hold the libraries meanwhile), "opened" passed over.
+    fn next_step(begins: &mpsc::Receiver<&'static str>) -> Option<&'static str> {
+        std::iter::from_fn(|| begins.recv_timeout(Duration::from_secs(30)).ok()).find(|begun| *begun != "opened")
     }
 
     /// Waits up to 30 s (other tests may hold the libraries meanwhile) for `what` to come of `libraries`.
@@ -664,24 +865,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// What `libraries` read lately, if anything.
+    fn read_lately(libraries: &GpuLibraries) -> Option<Vec<Option<Read>>> {
+        Some(libraries.take(Duration::from_secs(60))).filter(|read| read.iter().any(Option::is_some))
+    }
+
     /// The libraries' looking up, however long it takes, holds nothing that starts them: they start, are asked to read
-    /// and are taken from at once, with nothing read yet. Looked up, what came of it is said, and once read, what they
-    /// read is taken.
+    /// and are taken from at once, with nothing read yet. A card looked up, what came of it is said, while Intel's
+    /// library is asked what it reads (which may not come back), and that once it is. Once read, what they read is
+    /// taken.
     #[test]
     fn a_slow_look_up_holds_nothing() {
         let made = Instant::now();
         let (let_go, begins, libraries) = held(false);
-        assert_eq!(libraries.take(Duration::from_secs(60)), None);
+        assert_eq!(read_lately(&libraries), None);
         assert!(made.elapsed() < Duration::from_secs(1), "not waited for: {:?}", made.elapsed());
-        assert!(begins.recv_timeout(Duration::from_secs(30)).is_ok_and(|begun| begun == "looked up"));
+        assert_eq!(next_step(&begins), Some("looked up"));
         // (The looking up under way, held.)
         let asked = Instant::now();
-        assert_eq!(libraries.take(Duration::from_secs(60)), None);
+        assert_eq!(read_lately(&libraries), None);
         assert!(libraries.found().is_none());
         assert!(asked.elapsed() < Duration::from_secs(1), "not waited for: {:?}", asked.elapsed());
         let_go.send(()).unwrap();
+        assert_eq!(next_step(&begins), Some("asked Intel's"));
+        // (Intel's library asked, held.)
         assert_eq!(awaited(&libraries, GpuLibraries::found).lines, ["GPU power, card 2: NVML"]);
-        let read = awaited(&libraries, |libraries| libraries.take(Duration::from_secs(60)));
+        let_go.send(()).unwrap();
+        assert_eq!(awaited(&libraries, GpuLibraries::found).lines, ["GPU power, card 2: NVML", "Intel's graphics library: no graphics of Intel's"]);
+        let read = awaited(&libraries, read_lately);
         assert_eq!(read, [Some(Read { power: Some(42.0), limit: Some(GpuLimit::Power), ..Read::default() })]);
     }
 
@@ -690,16 +901,17 @@ pub(crate) mod tests {
     #[test]
     fn a_slow_reading_holds_nothing() {
         let (let_go, begins, libraries) = held(true);
-        assert!(awaited(&libraries, GpuLibraries::found).lines == ["GPU power, card 2: NVML"]);
-        assert_eq!(libraries.take(Duration::from_secs(60)), None);
-        assert!(begins.recv_timeout(Duration::from_secs(30)).is_ok_and(|begun| begun == "looked up"));
-        assert!(begins.recv_timeout(Duration::from_secs(30)).is_ok_and(|begun| begun == "read"));
+        assert!(awaited(&libraries, GpuLibraries::found).lines[0] == "GPU power, card 2: NVML");
+        assert_eq!(read_lately(&libraries), None);
+        assert_eq!(next_step(&begins), Some("looked up"));
+        assert_eq!(next_step(&begins), Some("asked Intel's"));
+        assert_eq!(next_step(&begins), Some("read"));
         // (The reading under way, held.)
         let asked = Instant::now();
-        assert_eq!(libraries.take(Duration::from_secs(60)), None);
+        assert_eq!(read_lately(&libraries), None);
         assert!(asked.elapsed() < Duration::from_secs(1), "not waited for: {:?}", asked.elapsed());
         let_go.send(()).unwrap();
-        assert!(awaited(&libraries, |libraries| libraries.take(Duration::from_secs(60))).len() == 1);
+        assert!(awaited(&libraries, read_lately).len() == 1);
         // (A reading asked since is let go at once, the libraries' thread not left holding the other tests up.)
         drop(libraries);
         let _ = let_go.send(());
@@ -710,13 +922,35 @@ pub(crate) mod tests {
     #[test]
     fn one_thread_in_the_libraries_at_a_time() {
         let (let_go, begins, first) = held(false);
-        assert!(begins.recv_timeout(Duration::from_secs(30)).is_ok_and(|begun| begun == "looked up"));
+        assert_eq!(next_step(&begins), Some("looked up"));
         let (second_go, second_begins, second) = held(false);
         drop(first);
         assert!(second_begins.recv_timeout(Duration::from_millis(500)).is_err(), "the second asked nothing meanwhile");
         let_go.send(()).unwrap();
-        assert!(second_begins.recv_timeout(Duration::from_secs(30)).is_ok_and(|begun| begun == "looked up"));
+        assert_eq!(next_step(&second_begins), Some("looked up"));
+        // (Its looking up let go, and Intel's library asked after it.)
+        second_go.send(()).unwrap();
         second_go.send(()).unwrap();
         drop(second);
+    }
+
+    /// A sampler gone while its libraries' thread waits for another's to be out of the libraries ends that thread at
+    /// once, and its libraries are never opened: samplers made and let go of behind a call that does not come back
+    /// leave no thread behind, nor one that goes into the libraries once it does.
+    #[test]
+    fn a_sampler_gone_while_its_thread_waits_leaves_nothing() {
+        let (let_go, begins, first) = held(false);
+        assert_eq!(next_step(&begins), Some("looked up"));
+        let (_, waiting_begins, waiting) = held(false);
+        let thread = Arc::downgrade(&waiting.shared);
+        drop(waiting);
+        let until = Instant::now() + Duration::from_secs(30);
+        while thread.upgrade().is_some() {
+            assert!(Instant::now() < until, "its thread ended");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let_go.send(()).unwrap();
+        drop(first);
+        assert!(waiting_begins.recv_timeout(Duration::from_millis(500)).is_err(), "its libraries never opened");
     }
 }
