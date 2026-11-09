@@ -70,6 +70,7 @@ use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitiv
 
 pub(crate) mod guide;
 mod layout_page;
+mod reads;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
 use crate::update;
@@ -741,6 +742,8 @@ static WORKBENCH_OWED: AtomicBool = AtomicBool::new(false);
 /// The screens changed, to be read again by the window (see `tick`): told outside its state, which a dialog of it
 /// may hold.
 static SCREENS_OWED: AtomicBool = AtomicBool::new(false);
+/// The wallpaper changed, to be read again by the window: told as `SCREENS_OWED` is.
+static WALLPAPER_OWED: AtomicBool = AtomicBool::new(false);
 /// Whether the window was minimized as it was last sized (see WM_SIZE).
 static MINIMIZED: AtomicBool = AtomicBool::new(false);
 
@@ -777,10 +780,10 @@ fn tick(now: Instant) -> Option<Duration> {
         _ => {}
     }
     with_ui(|ui| {
-        // The screens changed (see WM_DISPLAYCHANGE): as they are now.
-        if SCREENS_OWED.swap(false, Ordering::AcqRel) {
-            ui.screens = crate::screens::all();
-            ui.next_frame = now;
+        // The screens or the wallpaper changed (see WM_DISPLAYCHANGE and WM_SETTINGCHANGE): as they are now.
+        let (screens, wallpaper) = (SCREENS_OWED.swap(false, Ordering::AcqRel), WALLPAPER_OWED.swap(false, Ordering::AcqRel));
+        if screens || wallpaper {
+            ui.desktops_changed(screens, wallpaper);
         }
         // What the window of a report's thread told.
         let told = THREAD_OWED.swap(0, Ordering::AcqRel);
@@ -810,6 +813,8 @@ fn tick(now: Instant) -> Option<Duration> {
         } else if now >= ui.guide_frame {
             ui.draw_guide(now);
         }
+        // (Drawn or not, the desktops wanted read: see `draw`.)
+        ui.read_wanted();
         let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
         next.saturating_duration_since(now)
     })
@@ -826,26 +831,29 @@ enum SwitchAsked {
     Remote,
 }
 
-/// The desktop inside `rect` as `wallpaper::desktop` reads it, `width` × `height` pixels, on a thread of the
-/// caller's (which joins the process's apartment for the decoders it uses).
-fn read_desktop(rect: RECT, width: u32, height: u32) -> Capture {
+/// Reads the desktops of lot `lot` (see `reads::Reads::lot`) as `wallpaper::desktops` reads them, a live wallpaper
+/// printed once for them all, the preview's kept (see `DESKTOPS`), and sends each as it is read, then that the lot has
+/// all come. On a thread of the caller's (which joins the process's apartment for the decoders it uses).
+fn read_lot(lot: u64, asks: Vec<reads::Ask>, send: std::sync::mpsc::Sender<Read>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
-    wallpaper::desktop(rect, width, height)
+    let areas: Vec<(RECT, u32, u32)> = asks.iter().map(reads::Ask::area).collect();
+    for (ask, desktop) in asks.into_iter().zip(wallpaper::desktops(areas)) {
+        if let reads::Ask::Stage { screen, work, size } = &ask {
+            keep_desktop(screen, *work, *size, &desktop);
+        }
+        if send.send(Read::Came { lot, ask, desktop }).is_err() {
+            return;
+        }
+    }
+    let _ = send.send(Read::Done(lot));
 }
 
 /// Each screen's desktop as the preview last read it (its name, its work area, the size it was read at): kept for
 /// as long as Glance runs, so that the settings open on the desktop as it was (read again as they open, and taken
 /// if it has changed), not on an empty stage while it is read. Small: read at the preview's size, in DIPs.
 static DESKTOPS: std::sync::Mutex<Vec<(String, RECT, (f32, f32), Capture)>> = std::sync::Mutex::new(Vec::new());
-
-/// Reads screen `screen`'s desktop for the preview (see `read_desktop`), and keeps it (see `DESKTOPS`).
-fn read_and_keep(screen: &str, work: RECT, size: (f32, f32)) -> Capture {
-    let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
-    keep_desktop(screen, work, size, &desktop);
-    desktop
-}
 
 /// Keeps `desktop`, screen `screen`'s as read at `work` and `size` (see `DESKTOPS`).
 fn keep_desktop(screen: &str, work: RECT, size: (f32, f32), desktop: &Capture) {
@@ -884,15 +892,16 @@ pub fn read_desktops_ahead() {
     // (A live wallpaper printed once for them all: see `wallpaper::desktops`.)
     let wanted = stages_wanted(&crate::screens::all());
     let asked: Vec<(RECT, u32, u32)> = wanted.iter().map(|(_, work, size)| (*work, size.0 as u32, size.1 as u32)).collect();
-    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(&asked)) {
+    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(asked)) {
         keep_desktop(screen, *work, *size, &desktop);
     }
 }
 
-/// A desktop read on another thread for the settings (see `Ui::read`): for the preview, or for the map.
+/// What a lot of desktops read on another thread for the settings brings (see `read_lot`): each desktop as it is read,
+/// for the preview or for the map, then that the lot has all come.
 enum Read {
-    Stage(Stage),
-    Map { id: String, monitor: RECT, size: (u32, u32), desktop: Capture },
+    Came { lot: u64, ask: reads::Ask, desktop: Capture },
+    Done(u64),
 }
 
 /// How the phone remote is, as its helper says (see `Ui::remote_asked`), a code asked of it with what for (none
@@ -1531,10 +1540,46 @@ struct MapArt {
     monitor: RECT,
     /// The size it was last asked for at (physical px): what it holds, or will once it is read.
     asked: (u32, u32),
-    /// The picture held: none till the first is read (on another thread: see `Ui::read`); the one before while
-    /// another is read.
+    /// The picture held: none till the first is read (on another thread: see `Ui::read_wanted`), the one before while
+    /// another is read. And the size it was read at, while it is the wallpaper's as it is now (none once that changed).
     desktop: Option<Capture>,
+    read_at: Option<(u32, u32)>,
     bitmap: Option<ID2D1Bitmap1>,
+}
+
+/// The map's picture of the screen named `id` at `monitor` (see `MapArt`), wanted `size` physical pixels large: made,
+/// where the map has none of it yet, and its desktop wanted of `reads` where it does not hold it as it is asked. The
+/// picture held is drawn smaller or larger to the size wanted, and asked again only where it is smaller than that, or
+/// more than twice as large, and not while the window is sized by hand (each size of it would read the desktop again):
+/// once it is let go. Another screen's picture is left as it is (those of screens no longer there go as the screens
+/// change: see `Ui::desktops_changed`).
+fn map_art_of<'a>(arts: &'a mut Vec<MapArt>, reads: &mut reads::Reads, id: &str, monitor: RECT, size: (u32, u32), by_hand: bool) -> &'a mut MapArt {
+    let holds = |asked: (u32, u32)| asked.0 >= size.0 && asked.1 >= size.1 && asked.0 <= size.0 * 2 && asked.1 <= size.1 * 2;
+    let at = match arts.iter().position(|art| art.id == id && art.monitor == monitor) {
+        Some(at) => at,
+        None => {
+            arts.push(MapArt { id: id.to_string(), monitor, asked: size, desktop: None, read_at: None, bitmap: None });
+            arts.len() - 1
+        }
+    };
+    let art = &mut arts[at];
+    if !holds(art.asked) && !by_hand {
+        art.asked = size;
+    }
+    if art.read_at != Some(art.asked) {
+        reads.want(reads::Ask::Map { id: id.to_string(), monitor, size: art.asked });
+    }
+    art
+}
+
+/// Screen `id`'s desktop at `monitor`, read `size` large, taken by the map's picture of it where that is still asked at
+/// that size (see `map_art_of`).
+fn map_art_came(arts: &mut [MapArt], id: &str, monitor: RECT, size: (u32, u32), desktop: Capture) {
+    if let Some(art) = arts.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.asked == size) {
+        art.desktop = Some(desktop);
+        art.read_at = Some(size);
+        art.bitmap = None;
+    }
 }
 
 /// The desktop the preview shows, at the size of the work area (DIPs).
@@ -1544,8 +1589,11 @@ struct Stage {
     /// was taken (physical px).
     screen: Option<String>,
     work: RECT,
-    /// None till it has been read (on another thread: see `Ui::read`).
+    /// None till it has been read (on another thread: see `Ui::read_wanted`). And whether it was read from the wallpaper
+    /// as it is now, since the window opened: one kept from before (see `DESKTOPS`), or read before the wallpaper
+    /// changed, is shown till it is read again (see `wanted`).
     desktop: Option<Capture>,
+    current: bool,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
     /// What was last measured of the desktop (see `tone` and `glass`): the same for as long as it is shown as it
@@ -1567,7 +1615,14 @@ struct Measured {
 
 impl Stage {
     fn new(size: (f32, f32), screen: Option<String>, work: RECT, desktop: Option<Capture>) -> Self {
-        Stage { size, screen, work, desktop, bitmap: None, measured: Measured::default() }
+        Stage { size, screen, work, desktop, current: false, bitmap: None, measured: Measured::default() }
+    }
+
+    /// Its desktop, as it is to be read (see `reads::Ask`): while it holds none read from the wallpaper as it is now,
+    /// and is a screen's.
+    fn wanted(&self) -> Option<reads::Ask> {
+        let screen = self.screen.clone().filter(|_| !self.current)?;
+        Some(reads::Ask::Stage { screen, work: self.work, size: self.size })
     }
 
     /// How light the desktop is behind `area` (mean and spread, one value a pixel); grey till it has been read.
@@ -1811,8 +1866,9 @@ struct Ui {
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
     kept_stages: Vec<Stage>,
-    /// The desktops read on other threads (every screen's for the preview as the window opens, and any one asked for
-    /// since: see `read`), come back: for the preview, or for the map.
+    /// The desktops read on other threads (every screen's for the preview as the window opens, and any one wanted
+    /// since: see `read_wanted`), each asked once, and what they bring as it comes: for the preview, or for the map.
+    reads: reads::Reads,
     read: (std::sync::mpsc::Sender<Read>, std::sync::mpsc::Receiver<Read>),
     /// The control the keyboard acts on, and whether the keyboard has been
     /// used since the last click (the focus is shown only then).
@@ -2078,6 +2134,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             library_layers: [PanelLayers::default(), PanelLayers::default()],
             map_art: Vec::new(),
             kept_stages: Vec::new(),
+            reads: reads::Reads::default(),
             read: std::sync::mpsc::channel(),
             focus: None,
             keyboard: false,
@@ -2249,6 +2306,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             crate::screens::changed();
             gfx::screens_changed();
             SCREENS_OWED.store(true, Ordering::Release);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // The wallpaper changed (as Windows tells every window when a picture or colour is set for it).
+        windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE if wparam.0 as u32 == windows::Win32::UI::WindowsAndMessaging::SPI_SETDESKWALLPAPER.0 => {
+            WALLPAPER_OWED.store(true, Ordering::Release);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_GETMINMAXINFO => {
@@ -2906,13 +2968,10 @@ impl Ui {
             return;
         }
         // Shown before, as it is now: taken as it was kept; else read from the wallpaper on another thread (shown
-        // without it meanwhile).
+        // without it meanwhile: see `take_in`).
         let next = match self.kept_stages.iter().position(is) {
             Some(at) => self.kept_stages.swap_remove(at),
-            None => {
-                self.read_stage(screen.to_string(), work, size);
-                Stage::new(size, Some(screen.to_string()), work, None)
-            }
+            None => Stage::new(size, Some(screen.to_string()), work, None),
         };
         let before = std::mem::replace(&mut self.stage, next);
         // One kept for each screen, as it last was.
@@ -2938,7 +2997,7 @@ impl Ui {
     }
 
     /// Reads every screen's desktop as the preview shows it (its wallpaper, at its work area's size), on another
-    /// thread: each kept as it comes (see `draw`).
+    /// thread (see `read_wanted`): each kept as it comes (see `take_in`).
     fn read_stages(&mut self) {
         let wanted = stages_wanted(&self.screens);
         // As they were last read, at once (read again below, and taken if changed).
@@ -2948,25 +3007,47 @@ impl Ui {
                 self.kept_stages.push(Stage::new(*size, Some(screen.clone()), *work, Some(desktop)));
             }
         }
-        let send = self.read.0.clone();
-        std::thread::spawn(move || {
-            for (screen, work, size) in wanted {
-                let desktop = read_and_keep(&screen, work, size);
-                let stage = Stage::new(size, Some(screen), work, Some(desktop));
-                if send.send(Read::Stage(stage)).is_err() {
-                    break;
-                }
-            }
-        });
+        for (screen, work, size) in wanted {
+            self.reads.want(reads::Ask::Stage { screen, work, size });
+        }
     }
 
-    /// Reads screen `screen`'s desktop for the preview (its work area `work`, `size` DIPs) on another thread.
-    fn read_stage(&self, screen: String, work: RECT, size: (f32, f32)) {
+    /// The desktops wanted since the last lot went (see `reads::Reads`), read together on another thread, once the lot
+    /// before has come or been given up (see `reads::GIVEN_UP_AFTER`: what it had yet to bring is then shown as a
+    /// desktop not read is, till the screens or the wallpaper change).
+    fn read_wanted(&mut self) {
+        let now = Instant::now();
+        if self.reads.give_up(now) {
+            crate::journal::note(format!("settings: the desktops being read had not come after {} s, given up", reads::GIVEN_UP_AFTER.as_secs()));
+        }
+        let Some((lot, asks)) = self.reads.lot(now) else { return };
         let send = self.read.0.clone();
-        std::thread::spawn(move || {
-            let desktop = read_and_keep(&screen, work, size);
-            let _ = send.send(Read::Stage(Stage::new(size, Some(screen), work, Some(desktop))));
-        });
+        std::thread::spawn(move || read_lot(lot, asks, send));
+    }
+
+    /// The screens or the wallpaper changed (see WM_DISPLAYCHANGE and WM_SETTINGCHANGE): the screens as they are now,
+    /// the map's pictures and the desktops kept of those no longer where and as large as they were let go, and every
+    /// desktop may be read again (one given up too). The wallpaper changed, each desktop shown or kept is read again,
+    /// shown as it was till it comes (wanted by what holds it till then: see `take_in` and `map_art_of`, so the screens
+    /// changing meanwhile does not lose it).
+    fn desktops_changed(&mut self, screens: bool, wallpaper: bool) {
+        if screens {
+            self.screens = crate::screens::all();
+            let present = &self.screens;
+            self.map_art.retain(|art| present.iter().any(|screen| screen.id == art.id && screen.monitor == art.monitor));
+            let wanted = stages_wanted(present);
+            self.kept_stages.retain(|kept| wanted.iter().any(|(screen, work, size)| kept.screen.as_ref() == Some(screen) && kept.work == *work && kept.size == *size));
+        }
+        self.reads.forget();
+        if wallpaper {
+            for art in &mut self.map_art {
+                art.read_at = None;
+            }
+            for stage in std::iter::once(&mut self.stage).chain(&mut self.kept_stages) {
+                stage.current = false;
+            }
+        }
+        self.next_frame = Instant::now();
     }
 
     /// The screen the preview shows, by its name: on the layout's page, the
@@ -3013,34 +3094,7 @@ impl Ui {
     /// pixels large, for the layout's editor: taken once, and again when its
     /// size changes.
     fn map_picture(&mut self, frame: &Frame, id: &str, monitor: RECT, size: (u32, u32)) -> Option<ID2D1Bitmap1> {
-        // The picture held is drawn smaller or larger to the size wanted. Read again (on another thread, the one held
-        // drawn meanwhile) only where it is smaller than that, or more than twice as large; and not while the window
-        // is sized by hand (each size of it would read the desktop again): once it is let go.
-        let holds = |asked: (u32, u32)| asked.0 >= size.0 && asked.1 >= size.1 && asked.0 <= size.0 * 2 && asked.1 <= size.1 * 2;
-        let found = self.map_art.iter().position(|art| art.id == id && art.monitor == monitor);
-        let at = match found {
-            Some(at) if holds(self.map_art[at].asked) || self.by_hand => at,
-            _ => {
-                let send = self.read.0.clone();
-                let of = id.to_string();
-                std::thread::spawn(move || {
-                    let desktop = read_desktop(monitor, size.0, size.1);
-                    let _ = send.send(Read::Map { id: of, monitor, size, desktop });
-                });
-                match found {
-                    Some(at) => {
-                        self.map_art[at].asked = size;
-                        at
-                    }
-                    None => {
-                        self.map_art.retain(|art| art.id != id);
-                        self.map_art.push(MapArt { id: id.to_string(), monitor, asked: size, desktop: None, bitmap: None });
-                        self.map_art.len() - 1
-                    }
-                }
-            }
-        };
-        let art = &mut self.map_art[at];
+        let art = map_art_of(&mut self.map_art, &mut self.reads, id, monitor, size, self.by_hand);
         if art.bitmap.is_none() {
             art.bitmap = art.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok());
         }
@@ -5040,40 +5094,48 @@ impl Ui {
 
     /// What has come in since it last looked, taken in: desktops read meanwhile (the one shown, if it waited for it;
     /// else kept, unless kept already; the map's in place, if it is still of that screen as it is), and the screen the
-    /// preview shows, as it is now. On every turn of the loop, the window drawn or not (held under the guide, whose
-    /// small desktops are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
+    /// preview shows, as it is now, its desktop and those kept wanted till each holds the wallpaper as it is now (read with
+    /// those the frame drawn next wants: see `read_wanted`). On every turn of the loop, the window drawn or not (held under the guide, whose small desktops
+    /// are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
     fn take_in(&mut self) {
         while let Ok(read) = self.read.1.try_recv() {
+            let (lot, ask, desktop) = match read {
+                Read::Came { lot, ask, desktop } => (lot, ask, desktop),
+                Read::Done(lot) => {
+                    self.reads.done(lot);
+                    continue;
+                }
+            };
+            if !self.reads.came(lot, &ask) {
+                continue;
+            }
             // (Drawn with it now, as far as it is drawn: see `guide_holds_window`.)
             self.taken_unseen = true;
             self.next_frame = Instant::now();
-            match read {
-                Read::Stage(stage) => {
+            match ask {
+                reads::Ask::Stage { screen, work, size } => {
+                    let stage = Stage { current: true, ..Stage::new(size, Some(screen), work, Some(desktop)) };
                     let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
-                    // (What was shown at once, as it was kept: taken again only if the desktop has changed since.)
+                    // (What was shown at once, as it was kept: taken again only if the desktop has changed since, and
+                    // known to be as it is now either way.)
                     let changed = |other: &Stage| other.desktop.as_ref().is_none_or(|was| stage.desktop.as_ref().is_some_and(|now| now.digest != was.digest));
-                    if same(&self.stage) {
-                        if changed(&self.stage) {
-                            self.stage = stage;
-                        }
-                    } else {
-                        match self.kept_stages.iter().position(same) {
-                            Some(at) if changed(&self.kept_stages[at]) => self.kept_stages[at] = stage,
-                            Some(_) => {}
-                            None => self.kept_stages.push(stage),
-                        }
+                    let held = if same(&self.stage) { Some(&mut self.stage) } else { self.kept_stages.iter_mut().find(|kept| same(kept)) };
+                    match held {
+                        Some(held) if changed(held) => *held = stage,
+                        Some(held) => held.current = true,
+                        None => self.kept_stages.push(stage),
                     }
                 }
-                Read::Map { id, monitor, size, desktop } => {
-                    if let Some(art) = self.map_art.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.asked == size) {
-                        art.desktop = Some(desktop);
-                        art.bitmap = None;
-                    }
-                }
+                reads::Ask::Map { id, monitor, size } => map_art_came(&mut self.map_art, &id, monitor, size, desktop),
             }
         }
         if let Some(screen) = self.stage_screen() {
             self.show_screen(&screen);
+        }
+        // (Each one shown or kept, till it holds the wallpaper as it is now: so a refresh asked for is not lost to the
+        // screens changing as it is read.)
+        for ask in std::iter::once(&self.stage).chain(&self.kept_stages).filter_map(Stage::wanted).collect::<Vec<_>>() {
+            self.reads.want(ask);
         }
     }
 
@@ -5152,6 +5214,8 @@ impl Ui {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
         };
+        // (The desktops wanted as it was drawn read together, those taken in before it was too: see `take_in`.)
+        self.read_wanted();
         self.draw_guide(now);
     }
 
@@ -6537,24 +6601,30 @@ impl Ui {
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
-        if let Some((_, bitmap)) = &self.stage.bitmap {
-            // (Inside the area's rounded corners.)
-            let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
-            let layer = D2D1_LAYER_PARAMETERS1 {
-                contentBounds: rect(area.x, area.y, area.w, area.h),
-                geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: Matrix3x2::identity(),
-                opacity: 1.0,
-                ..Default::default()
-            };
-            unsafe {
-                frame.dc.PushLayer(&layer, None);
-                frame.dc.DrawBitmap(bitmap, Some(&rect(at.0, at.1, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-                frame.dc.PopLayer();
-            }
-        }
+        let bitmap = self.stage.bitmap.as_ref().map(|(_, bitmap)| bitmap);
+        desktop_at(frame, bitmap, self.palette.switch_off, area, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
     }
+}
+
+/// A desktop drawn at `at`, clipped to `area` inside its rounded corners: `bitmap`, or where there is none (not read
+/// yet, or given up: see `reads`), `none` all over, as the layout's map shows a screen whose desktop it has not.
+fn desktop_at(frame: &Frame, bitmap: Option<&ID2D1Bitmap1>, none: Color, area: Rect, at: Rect) {
+    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
+    let layer = D2D1_LAYER_PARAMETERS1 {
+        contentBounds: rect(area.x, area.y, area.w, area.h),
+        geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: Matrix3x2::identity(),
+        opacity: 1.0,
+        ..Default::default()
+    };
+    unsafe { frame.dc.PushLayer(&layer, None) };
+    match bitmap {
+        Some(bitmap) => unsafe { frame.dc.DrawBitmap(bitmap, Some(&rect(at.x, at.y, at.w, at.h)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) },
+        None => fill(frame, none, at.x, at.y, at.w, at.h, 0.0),
+    }
+    unsafe { frame.dc.PopLayer() };
+    drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -7308,6 +7378,80 @@ mod tests {
         assert_eq!(stage.glass(ring, hole), stage.glass(ring, hole));
         // Not read yet: grey.
         assert_eq!(Stage::new((64.0, 32.0), None, whole, None).tone(left), (0.5, 0.0));
+    }
+
+    /// The map keeps each screen's picture by its name and where it is, another screen's left as it is: two screens of
+    /// one name (as two alike displays were once known, see `screens::told_apart`), drawn frame after frame, have each
+    /// desktop read once and each picture holding its own. A picture sized afresh beyond what it holds is read again
+    /// at the new size, and again at the old one when it is sized back (it no longer holds that).
+    #[test]
+    fn the_map_reads_each_screen_s_desktop_once() {
+        let (mut arts, mut reads) = (Vec::new(), reads::Reads::default());
+        let wide = RECT { left: 0, top: 0, right: 3840, bottom: 2160 };
+        let tall = RECT { left: -2160, top: -1071, right: 0, bottom: 2769 };
+        let now = Instant::now();
+        let mut read = Vec::new();
+        let mut frames = |arts: &mut Vec<MapArt>, reads: &mut reads::Reads, wanted: &[(RECT, (u32, u32))]| {
+            for _ in 0..10 {
+                for &(monitor, size) in wanted {
+                    map_art_of(arts, reads, "same", monitor, size, false);
+                }
+                // (A lot read at once, as it is between two frames.)
+                let Some((lot, asks)) = reads.lot(now) else { continue };
+                for ask in &asks {
+                    assert!(reads.came(lot, ask));
+                    let reads::Ask::Map { id, monitor, size } = ask.clone() else { panic!("the map asks for its own") };
+                    let pixels = [40u8, 80, 120, 255].repeat((size.0 * size.1) as usize);
+                    map_art_came(arts, &id, monitor, size, Capture::from_pixels(RECT { left: 0, top: 0, right: size.0 as i32, bottom: size.1 as i32 }, pixels));
+                }
+                reads.done(lot);
+                read.extend(asks);
+            }
+        };
+        frames(&mut arts, &mut reads, &[(wide, (384, 216)), (tall, (216, 384))]);
+        frames(&mut arts, &mut reads, &[(wide, (100, 56)), (tall, (216, 384))]);
+        frames(&mut arts, &mut reads, &[(wide, (384, 216)), (tall, (216, 384))]);
+        let map = |monitor: RECT, size: (u32, u32)| reads::Ask::Map { id: "same".into(), monitor, size };
+        assert_eq!(read, [map(wide, (384, 216)), map(tall, (216, 384)), map(wide, (100, 56)), map(wide, (384, 216))]);
+        assert_eq!(arts.iter().map(|art| (art.monitor, art.read_at)).collect::<Vec<_>>(), [(wide, Some((384, 216))), (tall, Some((216, 384)))]);
+        assert!(arts.iter().all(|art| art.desktop.is_some()));
+    }
+
+    /// A screen whose desktop has not been read (or was given up) is drawn plain, as the layout's map draws it, in the
+    /// preview and the layout's one screen alike, inside its frame's rounded corners and nowhere else.
+    #[test]
+    fn a_desktop_not_read_is_drawn_plain() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Gfx::new().unwrap();
+        let pixels = gfx.draw_offscreen((100, 60), 1.0, |frame| desktop_at(frame, None, Color::hex(0xFF0000, 1.0), Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 }, Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 })).unwrap();
+        let at = |x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
+        assert_eq!(at(50, 30), [0, 0, 255, 255]);
+        assert_eq!(at(12, 30), [0, 0, 255, 255]);
+        // (Outside its frame, and in its rounded corner.)
+        assert_eq!(at(5, 30), [0, 0, 0, 0]);
+        assert_eq!(at(10, 10), [0, 0, 0, 0]);
+    }
+
+    /// A desktop the preview holds is read again once the wallpaper changes, and is still wanted however often the
+    /// screens change while it is read (what was being read then is not taken): it is wanted till it holds the
+    /// wallpaper as it is now, not only while it holds none.
+    #[test]
+    fn a_wallpaper_refresh_outlives_the_screens_changing() {
+        let whole = RECT { left: 0, top: 0, right: 64, bottom: 32 };
+        let desktop = Capture::from_pixels(whole, [40u8, 80, 120, 255].repeat(64 * 32));
+        let mut stage = Stage { current: true, ..Stage::new((64.0, 32.0), Some("a".into()), whole, Some(desktop)) };
+        assert_eq!(stage.wanted(), None);
+        // The wallpaper changed (see `Ui::desktops_changed`), then the screens as it was read.
+        stage.current = false;
+        let (mut reads, now) = (reads::Reads::default(), Instant::now());
+        let ask = reads::Ask::Stage { screen: "a".into(), work: whole, size: (64.0, 32.0) };
+        reads.want(stage.wanted().expect("read again"));
+        assert_eq!(reads.lot(now), Some((0, vec![ask.clone()])));
+        reads.forget();
+        assert!(!reads.came(0, &ask));
+        reads.done(0);
+        reads.want(stage.wanted().expect("still read again"));
+        assert_eq!(reads.lot(now), Some((1, vec![ask])));
     }
 
     /// Choices wider than their room go on as many lines as they take, each whole, in order.

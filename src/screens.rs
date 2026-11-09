@@ -24,10 +24,17 @@ const EASED_FOR: Duration = Duration::from_secs(1);
 const INTERFACE_NAME: u32 = 1;
 /// MONITORINFOF_PRIMARY.
 const PRIMARY: u32 = 1;
+/// DISPLAY_DEVICE_ACTIVE and DISPLAY_DEVICE_ATTACHED: of a display listed on an output, that the output shows it.
+const SHOWN: u32 = 0x1 | 0x2;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Screen {
+    /// The name that stays its own, no other screen there is named so (see `named`).
     pub id: String,
+    /// The output it is shown on (`\\.\DISPLAY1` and its like), and the displays Windows lists on that output, in
+    /// its order: each one's device interface path and state (`DISPLAY_DEVICEW::StateFlags`).
+    pub output: String,
+    pub listed: Vec<(String, u32)>,
     /// Where it is on the desktop (physical px).
     pub monitor: RECT,
     pub primary: bool,
@@ -56,18 +63,64 @@ pub fn all() -> Vec<Screen> {
         let mut info = MONITORINFOEXW::default();
         info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
         if unsafe { GetMonitorInfoW(monitor, &mut info as *mut _ as *mut MONITORINFO) }.as_bool() {
-            // The display on that output; an output with no display device
-            // behind it (a remote session's) is known by its own name.
-            let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
-            let named = unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), 0, &mut device, INTERFACE_NAME) }.as_bool();
-            let id = Some(text(&device.DeviceID)).filter(|id| named && !id.is_empty()).unwrap_or_else(|| text(&info.szDevice));
-            found.push(Screen { id, monitor: info.monitorInfo.rcMonitor, primary: info.monitorInfo.dwFlags & PRIMARY != 0 });
+            // The displays Windows lists on that output (none behind an output of a remote session's).
+            let mut listed = Vec::new();
+            for at in 0.. {
+                let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+                if !unsafe { EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()), at, &mut device, INTERFACE_NAME) }.as_bool() {
+                    break;
+                }
+                let path = text(&device.DeviceID);
+                if !path.is_empty() {
+                    listed.push((path, device.StateFlags.0));
+                }
+            }
+            let output = text(&info.szDevice);
+            found.push(Screen { id: named(&output, &listed), output, listed, monitor: info.monitorInfo.rcMonitor, primary: info.monitorInfo.dwFlags & PRIMARY != 0 });
         }
         true.into()
     }
     let mut found: Vec<Screen> = Vec::new();
     let _ = unsafe { EnumDisplayMonitors(None, None, Some(each), LPARAM(&mut found as *mut _ as isize)) };
     found
+}
+
+/// The name that stays the screen on `output` its own, from the displays Windows lists there (see `Screen::listed`):
+/// the device interface path of the one it says the output shows (active and attached). A device interface path is the
+/// display device's instance in the system, which the system gives no other device (a display's holds the connector
+/// it is on, so two alike on two connectors differ), joined to the interface, and it stays the same for that display on
+/// that connector from one start to the next. An output shows one display and a display is shown by one output, so no
+/// two screens are named alike, whichever others there are. Windows lists every display it has known on an output, the
+/// one shown there not always first (the first was taken before, and two outputs were seen to name one display). Where
+/// none listed is said to be shown, the first is taken with the output's name, which no other screen has, and an output
+/// with none listed (a remote session's) is known by its own name.
+fn named(output: &str, listed: &[(String, u32)]) -> String {
+    match listed.iter().find(|(_, state)| state & SHOWN == SHOWN) {
+        Some((path, _)) => path.clone(),
+        None => match listed.first() {
+            Some((path, _)) => format!("{path} on {output}"),
+            None => output.to_string(),
+        },
+    }
+}
+
+/// Each screen as Windows has it, for a report: the output it is on, the name it goes by, where it is (physical px),
+/// whether it is the main screen, and each display listed on its output with its state.
+pub fn describe() -> Vec<String> {
+    described(&all())
+}
+
+/// `describe`, of `screens`.
+fn described(screens: &[Screen]) -> Vec<String> {
+    screens
+        .iter()
+        .map(|screen| {
+            let m = screen.monitor;
+            let main = if screen.primary { ", main" } else { "" };
+            let listed: Vec<String> = screen.listed.iter().map(|(path, state)| format!("{path} (state {state:#x})")).collect();
+            format!("Screen on {}: {} at ({}, {}) to ({}, {}){main}, listed: {}", screen.output, screen.id, m.left, m.top, m.right, m.bottom, listed.join(", "))
+        })
+        .collect()
 }
 
 /// The screens as they were last asked for, and each one's edges (left,
@@ -216,6 +269,29 @@ pub fn stretches(monitors: &[RECT], index: usize, edge: Edge, eased: bool) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screen is named by the display its output is said to show, whichever is listed first and whichever other
+    /// screens there are: two alike screens whose outputs both list one display first (as a report seemed to have
+    /// them) are two names, each its own shown display's, the same with the other screen gone. One whose output lists
+    /// the display it shows first keeps the name it had. One whose output says it shows none of those it lists is named
+    /// by the first and its output, and one with none listed by its output.
+    #[test]
+    fn a_screen_is_named_by_the_display_its_output_shows() {
+        let path = |model: &str, connector: u32| format!(r"\?\DISPLAY#{model}#5&1a2b3c4d&0&UID{connector}#{{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}}");
+        let (wide, tall) = (path("XMI3444", 4352), path("XMI3444", 4353));
+        let (known, shown) = (0x0, SHOWN);
+        // (Each output's list as Windows has it, the one shown on the second listed after the first's.)
+        let first = vec![(wide.clone(), shown)];
+        let second = vec![(wide.clone(), known), (tall.clone(), shown)];
+        assert_eq!(named(r"\.\DISPLAY1", &first), wide);
+        assert_eq!(named(r"\.\DISPLAY2", &second), tall);
+        assert_eq!(named(r"\.\DISPLAY1", &[(path("GSM77E8", 4355), shown), (wide.clone(), known)]), path("GSM77E8", 4355));
+        assert_eq!(named(r"\.\DISPLAY3", &[(wide.clone(), known)]), format!(r"{wide} on \.\DISPLAY3"));
+        assert_eq!(named(r"\.\DISPLAY4", &[]), r"\.\DISPLAY4");
+        // (A report says what each output lists, and the name its screen goes by.)
+        let screen = Screen { id: named(r"\.\DISPLAY2", &second), output: r"\.\DISPLAY2".into(), listed: second, monitor: RECT { left: -2160, top: -1071, right: 0, bottom: 2769 }, primary: false };
+        assert_eq!(described(&[screen]), [format!(r"Screen on \.\DISPLAY2: {tall} at (-2160, -1071) to (0, 2769), listed: {wide} (state 0x0), {tall} (state 0x3)")]);
+    }
 
     #[test]
     fn an_edge_is_a_seam_where_another_screen_lies_against_it() {
