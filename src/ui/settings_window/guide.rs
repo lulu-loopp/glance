@@ -726,9 +726,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         WM_LBUTTONUP => {
             let (x, y) = point(lparam);
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            crate::ui::window::let_go_of_capture(hwnd);
             with_ui(|ui| ui.guide_pointer(hwnd, Some((x, y)), Some(false)));
             LRESULT(0)
         }

@@ -32,7 +32,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
+    GetKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
@@ -4532,9 +4532,7 @@ impl Ui {
             return;
         }
         if self.sliding.is_some() || self.drag.is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            super::window::let_go_of_capture(self.hwnd);
             self.let_go();
             return;
         }
@@ -6058,9 +6056,7 @@ impl Ui {
         let state = self.phone.state.clone().unwrap_or(serde_json::Value::Null);
         let flag = |name: &str| state.get(name).and_then(serde_json::Value::as_bool);
         if let Some((part, _, at)) = self.phone.slid.take() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            super::window::let_go_of_capture(self.hwnd);
             // A colour being made: the lights take it as it is left.
             if let (Part::Hue | Part::Depth, Some(making)) = (&part, self.phone.making.as_mut()) {
                 match part {

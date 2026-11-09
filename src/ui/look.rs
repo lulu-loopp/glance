@@ -30,7 +30,7 @@ use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetCapture, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor, GetCursorPos, GetMessageW, IsWindowVisible, KillTimer, LoadCursorW, PostMessageW, RegisterClassW, SetCursor,
     SetTimer, SetWindowPos, ShowWindow, TranslateMessage, WindowFromPoint, ASFW_ANY, CS_DBLCLKS, GA_ROOT, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, MA_NOACTIVATE, MSG, SWP_NOACTIVATE, SW_HIDE,
@@ -1275,7 +1275,7 @@ impl Looker {
             player.pause();
         }
         self.holding = None;
-        let _ = unsafe { ReleaseCapture() };
+        super::window::let_go_of_capture(self.hwnd);
         // (Gone for what called it up at once: its keys its own again, as it goes. What is read through for it left.)
         OWNER.store(0, Ordering::Release);
         LOOKING.store(0, Ordering::Release);
@@ -2979,7 +2979,7 @@ impl Looker {
         let on = self.on_sheet(at);
         let pressed = self.pressed.take();
         self.dragging = None;
-        let _ = unsafe { ReleaseCapture() };
+        super::window::let_go_of_capture(self.hwnd);
         match self.holding.take() {
             Some(Holding::Track(seconds)) => {
                 if let Some(player) = &self.player {

@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FOR
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+    GetKeyState, SetCapture, SetFocus, VIRTUAL_KEY, VK_A, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
     VK_LWIN, VK_MENU, VK_RWIN, VK_TAB, VK_UP, VK_V, VK_X,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -1189,9 +1189,7 @@ impl Finder {
                     _ => None,
                 };
                 if let Some(path) = path {
-                    unsafe {
-                        let _ = ReleaseCapture();
-                    }
+                    crate::ui::window::let_go_of_capture(self.hwnd);
                     crate::station::drag::announce();
                     run::ask(Ask::DragFiles(vec![path], unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }));
                 }
@@ -1245,9 +1243,7 @@ impl Finder {
     }
 
     fn release(&mut self, at: POINT, ctrl: bool) {
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        crate::ui::window::let_go_of_capture(self.hwnd);
         self.selecting = false;
         let Some((pressed, _)) = self.pressed.take() else { return };
         let (x, y) = self.on_sheet(at);

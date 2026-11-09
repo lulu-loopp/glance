@@ -8,7 +8,7 @@
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, IsIconic, PostMessageW, SetForegroundWindow, MSG, SC_RESTORE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SYSCOMMAND, WM_SYSKEYDOWN,
@@ -361,9 +361,7 @@ impl Menu {
     /// Gone: the front given back where it was, unless something else has taken it.
     pub fn close(self) {
         let held = !self.left();
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        super::window::let_go_of_capture(self.window.hwnd);
         self.window.destroy();
         crate::widget::own_window_changed(self.rect);
         SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

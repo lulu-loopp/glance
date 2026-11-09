@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WM_APP};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -2043,7 +2043,7 @@ impl Widgets {
                     widget.next_frame = Instant::now();
                     return;
                 }
-                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                crate::ui::window::let_go_of_capture(widget.window.hwnd);
                 if let Some(drag) = crate::station::drag_off(hit, unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }) {
                     widget.lifting = Some((hit, drag, from));
                     widget.next_frame = Instant::now();
@@ -2175,7 +2175,7 @@ impl Widgets {
         // A thing on its station pressed and let go where it was: pressed (its capture lost: nothing).
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
             if let Some((hit, _)) = widget.shelf_press.take() {
-                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                crate::ui::window::let_go_of_capture(widget.window.hwnd);
                 if !cancelled {
                     crate::station::pressed(hit);
                 }
@@ -2737,7 +2737,7 @@ impl Widgets {
     fn merge(&mut self, drop: Dropping) {
         let (Some(guest), Some(_)) = (self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.guest), self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.target)) else { return };
         let mut guest = self.list.remove(guest);
-        let _ = unsafe { ReleaseCapture() };
+        crate::ui::window::let_go_of_capture(guest.window.hwnd);
         guest.hide_hint();
         if guest.tip.take().is_some() | std::mem::take(&mut guest.saying) {
             crate::ui::tip::hide();
@@ -2780,7 +2780,7 @@ impl Widgets {
         widget.drag = None;
         widget.settle = Some((Instant::now(), widget.surface_size));
         widget.next_frame = Instant::now();
-        let _ = unsafe { ReleaseCapture() };
+        crate::ui::window::let_go_of_capture(widget.window.hwnd);
         widget.window.lift(false);
         let Some(cursor) = cursor_position() else { return };
         let scale = widget.contact.scale;
@@ -3887,9 +3887,7 @@ impl Widget {
     /// (the capture taken away), neither: what was pressed is not done, and it stays where it was.
     fn release(&mut self, now: Instant, cancelled: bool) -> Released {
         // (Its own capture: not one another has taken since, a part torn out of it.)
-        if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.window.hwnd {
-            let _ = unsafe { ReleaseCapture() };
-        }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         // Back where it is kept, let go: but a note pulled off the panel going back to it, over the panel still on its
         // way, as in hand (kept under it, it went back behind it; the capture's end after it let go comes here too).
         let going_back = self.pulled.as_ref().is_some_and(|pulled| pulled.back.is_some());

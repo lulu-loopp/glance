@@ -303,9 +303,7 @@ impl FullMusic {
         if let Some(Hit::Track) = self.dragging.take() {
             crate::playing::slid(crate::playing::Slider::Seek(Follow::Music), true);
         }
-        unsafe {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-        }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
     }
 
     /// The pointer taken from it mid-drag (another window took it, or it is being left): the drag given up, the
