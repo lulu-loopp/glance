@@ -16,7 +16,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !define NAME "Glance"
-!define VERSION "0.4.3-preview"
+!define VERSION "0.4.4-preview"
 ; Its numbers alone, all a version resource may hold.
 !searchparse "${VERSION}-" "" NUMBERS "-"
 !define PUBLISHER "lulu-loopp"
