@@ -11,7 +11,7 @@ use crate::reading::{Sample, StaticInfo};
 /// The report, in English (it is for an issue on GitHub).
 pub fn report() -> String {
     let app = crate::app();
-    let info = &app.info;
+    let info = &app.info();
     let windows_key = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
     let bios = w!(r"HARDWARE\DESCRIPTION\System\BIOS");
     let yes = |b: bool| if b { "yes" } else { "no" };

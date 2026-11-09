@@ -4113,7 +4113,7 @@ impl Ui {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return self.module(bare);
         }
-        let (lang, info) = (self.lang, &crate::app().info);
+        let (lang, info) = (self.lang, &crate::app().info());
         let p = |zh, en| pick(lang, zh, en).to_string();
         if let Some(group) = id.strip_prefix(OVERLAY) {
             return match group {
@@ -4238,7 +4238,7 @@ impl Ui {
         }
         let app = crate::app();
         let seen = app.controller.seen.lock().unwrap();
-        let info = &app.info;
+        let info = &app.info();
         let gpu = info.gpu_of(id).map(|index| (&info.gpus[index], seen.gpus.get(index).cloned().unwrap_or_default()));
         // A module this machine has shown nothing of (no battery, no board
         // sensors, a GPU not read) has no lane, and nothing to set.
@@ -4273,7 +4273,7 @@ impl Ui {
                     _ => !seen.engines.is_empty(),
                 }),
                 ("memory", "dimms") => seen.dimms > 0,
-                ("memory", "speed") => app.info.memory_speed.is_some(),
+                ("memory", "speed") => info.memory_speed.is_some(),
                 ("battery", "power") => seen.battery_power,
                 ("battery", "health") => seen.battery_health,
                 ("network", "address") => seen.address,
@@ -5956,7 +5956,7 @@ impl Ui {
     /// Whether anything in it moves.
     fn paint_phone(&mut self, frame: &Frame, area: Rect) -> bool {
         let app = crate::app();
-        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info));
+        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info()));
         // The outline round it; the whole no taller or wider than the room, nor larger than a phone is.
         let (bezel, margin) = (10.0, 24.0);
         let (wide, tall) = super::phone_art::SCREEN;
@@ -6467,7 +6467,7 @@ impl Ui {
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&probe);
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
@@ -6490,7 +6490,7 @@ impl Ui {
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
         let (theme, frost) = self.stage.look(skin, prefs.theme, behind);
-        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);

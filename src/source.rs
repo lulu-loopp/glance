@@ -303,6 +303,7 @@ fn own_sampler(coming: bool) -> Sampler {
 
 /// The readings' source, and what the machine is. Elevated already, Glance reads the sensors itself; else the sensors
 /// are reached for (see `reach`), and if they have not answered in a while it reads what it can itself till they do.
+/// (What the machine is then lists no drive till they do, or are not to be had: see `Controller::drives_listed`.)
 pub fn open() -> (StaticInfo, Source) {
     let mut reaching = None;
     if !crate::elevation::is_elevated() {
@@ -333,7 +334,8 @@ static GPUS_AS: Mutex<Option<Vec<Option<usize>>>> = Mutex::new(None);
 
 /// The readings come with the GPUs of `info` from now.
 fn gpus_found(info: &StaticInfo) {
-    let first = &crate::app().info.gpus;
+    let first = crate::app().info();
+    let first = &first.gpus;
     let same = first.len() == info.gpus.len() && first.iter().zip(&info.gpus).all(|(a, b)| a.identity == b.identity);
     let order = (!same).then(|| first.iter().map(|gpu| info.gpus.iter().position(|now| now.identity == gpu.identity)).collect());
     if !same {
@@ -480,6 +482,7 @@ impl Source {
                                 crate::update::link_lost();
                                 linked_to(&again, &info);
                                 gpus_found(&info);
+                                crate::app().controller.drives_listed(&info);
                                 *held = Some(again);
                                 return None;
                             }
@@ -488,6 +491,7 @@ impl Source {
                             crate::presents::forget_mirrored();
                             crate::update::link_lost();
                             crate::app().controller.hearing_changed();
+                            // (The drives kept as the sensors listed them: a sampler of the meanwhile lists none.)
                             let sampler = own_sampler(true);
                             gpus_found(&sampler.info);
                             *FOUND.lock().unwrap() = Some(sampler.info.found.clone());
@@ -507,6 +511,7 @@ impl Source {
                         crate::presents::stop_started();
                         linked_to(&link, &info);
                         gpus_found(&info);
+                        crate::app().controller.drives_listed(&info);
                         crate::app().controller.hearing_changed();
                         *self = Source::Linked(Some(link));
                         return None;
@@ -516,6 +521,7 @@ impl Source {
                         *reaching = None;
                         *sampler = own_sampler(false);
                         gpus_found(&sampler.info);
+                        crate::app().controller.drives_listed(&sampler.info);
                         *FOUND.lock().unwrap() = Some(sampler.info.found.clone());
                     }
                     Some(Err(TryRecvError::Empty)) | None => {}

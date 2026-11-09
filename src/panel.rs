@@ -230,7 +230,9 @@ struct Playing {
 const GAME_GAP: Duration = Duration::from_secs(3);
 
 pub struct Controller {
-    info: StaticInfo,
+    /// What the machine is, as Glance started, its drives as what the readings come from last listed them (see
+    /// `drives_listed`).
+    info: RwLock<Arc<StaticInfo>>,
     config: Mutex<Config>,
     playing: Mutex<Playing>,
     /// The samples of the longest chart span, oldest first.
@@ -256,7 +258,7 @@ impl Controller {
     pub fn new(info: StaticInfo, settings: &Settings) -> Self {
         crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
         Controller {
-            info,
+            info: RwLock::new(Arc::new(info)),
             config: Mutex::new(config_from(settings)),
             playing: Mutex::new(Playing::default()),
             history: RwLock::new(VecDeque::new()),
@@ -268,6 +270,18 @@ impl Controller {
             widget_processes: AtomicBool::new(false),
             widgets_seen: AtomicBool::new(false),
         }
+    }
+
+    /// What the machine is (see `info`).
+    pub fn info(&self) -> Arc<StaticInfo> {
+        self.info.read().unwrap().clone()
+    }
+
+    /// The drives as `listed` lists them, from now: what the readings come from has looked at the hardware. (Glance
+    /// may have started with a sampler of the meanwhile, which lists none: see `Sampler::meanwhile`.)
+    pub fn drives_listed(&self, listed: &StaticInfo) {
+        let mut info = self.info.write().unwrap();
+        *info = Arc::new(info.with_drives_of(listed));
     }
 
     pub fn apply(&self, settings: &Settings) {
@@ -521,7 +535,7 @@ impl Controller {
     pub fn known_modules(&self) -> Vec<String> {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
-        known.extend(self.info.gpu_modules());
+        known.extend(self.info().gpu_modules());
         known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
         known
     }
@@ -3796,6 +3810,7 @@ impl<'a> Panel<'a> {
     /// window placed for them.
     fn arrange_lanes(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
+        let info = controller.info();
         let now = controller.seen.lock().unwrap().clone();
         let history = controller.history.read().unwrap();
         let samples = crate::panel::contiguous(&history);
@@ -3818,16 +3833,16 @@ impl<'a> Panel<'a> {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
                 // fits (each lane measured holding what it would hold).
-                let probe = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
-                opening.grow(&now, &controller.info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
+                let probe = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
+                opening.grow(&now, &info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
                 opening
             }
             None => {
                 let now = match self.held.take() {
-                    Some(held) => held.join(&now, &controller.info),
+                    Some(held) => held.join(&now, &info),
                     None => now,
                 };
-                let scene = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
+                let scene = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 let heights = view::heights(&scene);
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 let rail = heights.iter().position(|(id, _)| id == "apps");
@@ -3836,7 +3851,7 @@ impl<'a> Panel<'a> {
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
         };
-        let mut lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
+        let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
@@ -3959,6 +3974,7 @@ impl<'a> Panel<'a> {
         }
 
         let controller = self.controller;
+        let info = controller.info();
         let history = controller.history.read().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
         // The knob under the pointer, and the one held (the slider in hand's).
@@ -3985,7 +4001,7 @@ impl<'a> Panel<'a> {
         // up from it.)
         let says = crate::ui::look::hint_says(self.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -4537,6 +4553,7 @@ pub fn contiguous(history: &VecDeque<Sample>) -> &[Sample] {
 /// What the readings are drawn with at this moment.
 fn scene<'s>(
     controller: &'s Controller,
+    info: &'s StaticInfo,
     prefs: &'s Prefs,
     theme: &'s Theme,
     lang: Lang,
@@ -4552,7 +4569,7 @@ fn scene<'s>(
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
     Scene {
         thumbs: &crate::ui::view::RESTING,
-        info: &controller.info,
+        info,
         prefs,
         theme,
         lang,
@@ -4572,9 +4589,9 @@ fn scene<'s>(
     }
 }
 
-/// What a desktop widget's readings are drawn with at this moment.
-pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
-    Scene { buttons: false, ..scene(controller, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
+/// What a desktop widget's readings are drawn with at this moment, of the machine `info` says (`Controller::info`).
+pub(crate) fn scene_for<'s>(controller: &'s Controller, info: &'s StaticInfo, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
+    Scene { buttons: false, ..scene(controller, info, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
 }
 
 /// The sink's procedure: the input loop takes its messages before they are dispatched.

@@ -195,7 +195,7 @@ impl Ui {
         let (sw, sh) = self.stage.size;
         let middle = self.stage.middle();
         let (theme, frost) = self.stage.look(skin, prefs.theme, middle);
-        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
         let heights = view::heights(&scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
         let readings = super::super::forms::count(&scene);

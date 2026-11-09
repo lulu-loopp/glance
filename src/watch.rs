@@ -34,7 +34,7 @@ impl Watch {
         };
         let prefs = Prefs::resolve(&view, &app.controller.known_modules());
         let lang = Lang::resolve(prefs.language);
-        let tip = summary(sample, &app.info, lang);
+        let tip = summary(sample, &app.info(), lang);
         if tip != self.tip {
             crate::tray::set_tip(&tip);
             self.tip = tip;
@@ -49,7 +49,7 @@ impl Watch {
         if !alert {
             return;
         }
-        for (i, (part, temp)) in temperatures(sample, &app.info).into_iter().enumerate() {
+        for (i, (part, temp)) in temperatures(sample, &app.info()).into_iter().enumerate() {
             let tell = self.heat.entry(i).or_default().step(temp, limit, now);
             let Some(temp) = temp.filter(|_| tell) else { continue };
             let (title, text) = match lang {

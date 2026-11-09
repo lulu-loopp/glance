@@ -193,9 +193,9 @@ impl Sampler {
     }
 
     /// A sampler for the meanwhile, while the sensors' process is on its way: of the processors' and the memory's
-    /// use, the network's and the drives' (and the GPUs' as Windows counts it), nothing that asks the hardware. That
-    /// process looks at all of it as it starts, and the two are not to go through the same drivers at once (as they
-    /// did at a sign-in on a laptop, both in its discrete GPU's).
+    /// use, the network's and the drives' (and the GPUs' as Windows counts it), nothing that asks the hardware, the
+    /// drives' models among it (see `drive_models`). That process looks at all of it as it starts, and the two are
+    /// not to go through the same drivers at once (as they did at a sign-in on a laptop, both in its discrete GPU's).
     pub fn meanwhile() -> Self {
         Self::reading(false)
     }
@@ -267,7 +267,7 @@ impl Sampler {
             found.push("Sensors: not looked at yet (the sensors' process looks at them as it starts)".to_string());
         }
         let modules = crate::smbios::memory_modules();
-        let drives = crate::drives::models();
+        let drives = drive_models(hardware, crate::drives::models);
         let info = StaticInfo {
             cpu_name: reg_string(cpu_key, w!("ProcessorNameString")),
             memory_modules: crate::smbios::describe(&modules),
@@ -1278,6 +1278,19 @@ impl Spaces {
     }
 }
 
+/// The physical drives' models, by their numbers, as `models` finds them (each drive opened, and asked what it is):
+/// by a sampler of the `hardware` alone. A sampler of the meanwhile lists none, and opens none: a drive's driver
+/// stalled may be what holds the sensors' process up as it starts, and opened here too it would hold Glance's own
+/// readings up with it. Glance has the drives listed as the readings come from what has looked (see
+/// `Controller::drives_listed`).
+fn drive_models(hardware: bool, models: impl FnOnce() -> Vec<(u32, String)>) -> Vec<(u32, String)> {
+    if hardware {
+        models()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Space on every fixed drive that is mounted with a letter.
 fn volumes() -> Vec<VolumeSample> {
     let mounted = unsafe { GetLogicalDrives() };
@@ -1866,6 +1879,15 @@ mod tests {
         let system = ticks(k) + ticks(u);
         let cpus = std::thread::available_parallelism().unwrap().get() as u64;
         assert!(total.abs_diff(system) < cpus * 10_000_000, "{total} vs {system}");
+    }
+
+    /// A sampler of the meanwhile opens no drive to ask its model (it lists none), a sampler of the hardware lists
+    /// them all.
+    #[test]
+    fn the_meanwhile_opens_no_drive() {
+        let listed = || vec![(0, "Samsung SSD".to_string())];
+        assert!(drive_models(false, || -> Vec<(u32, String)> { panic!("a drive opened") }).is_empty());
+        assert_eq!(drive_models(true, listed), listed());
     }
 
     #[test]

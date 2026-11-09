@@ -38,6 +38,11 @@ impl StaticInfo {
         let slot: usize = id.strip_prefix("gpu:")?.parse().ok()?;
         self.gpus.iter().position(|gpu| gpu.slot == slot)
     }
+
+    /// This, with its drives as `listed` lists them (and all else as it is: its GPUs, as they were numbered).
+    pub fn with_drives_of(&self, listed: &StaticInfo) -> StaticInfo {
+        StaticInfo { drives: listed.drives.clone(), drive_ids: listed.drive_ids.clone(), ..self.clone() }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -366,5 +371,29 @@ mod tests {
         assert_eq!(info.gpu_of("gpu:2"), Some(1));
         assert_eq!(info.gpu_of("gpu:1"), None);
         assert_eq!(info.gpu_of("cpu"), None);
+    }
+
+    /// What Glance started with, from a sampler of the meanwhile (no drive listed), takes its drives from what the
+    /// readings come from once it has looked at them, and keeps all else.
+    #[test]
+    fn takes_the_drives_listed_later() {
+        let gpu = GpuInfo { slot: 1, identity: "10DE".into(), name: "GPU".into(), mem_total: 0, shared_total: 0 };
+        let first = StaticInfo {
+            cpu_name: "CPU".into(),
+            memory_modules: None,
+            memory_speed: None,
+            drives: Vec::new(),
+            drive_ids: Vec::new(),
+            network_adapter: None,
+            board: String::new(),
+            threads: 8,
+            mem_total: 16,
+            gpus: vec![gpu],
+            found: Vec::new(),
+        };
+        let listed = StaticInfo { drives: vec!["NVMe".into(), "USB".into()], drive_ids: vec![0, 2], cpu_name: "other".into(), gpus: Vec::new(), ..first.clone() };
+        let now = first.with_drives_of(&listed);
+        assert_eq!((now.drives, now.drive_ids), (vec!["NVMe".to_string(), "USB".to_string()], vec![0, 2]));
+        assert_eq!((now.cpu_name.as_str(), now.gpus.len(), now.gpus[0].slot), ("CPU", 1, 1));
     }
 }
