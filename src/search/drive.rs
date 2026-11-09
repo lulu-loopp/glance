@@ -15,7 +15,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE, CM_NOTIFY_ACTION_DEVICEREMOVEPENDING, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0, CM_NOTIFY_FILTER_0_1,
     CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE, CR_SUCCESS, HCMNOTIFICATION,
 };
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_DEVICE_REMOVED, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_DEVICE_REMOVED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     OpenFileById, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_SHARE_DELETE,
@@ -310,8 +310,10 @@ impl Drive {
         let folder = match opened {
             Ok(folder) => Listed::new(&self.held, folder),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => return Listing::Denied,
-            // (An id no longer of a file, ERROR_INVALID_PARAMETER, or a path not found.)
-            Err(_) => return Listing::Gone,
+            Err(error) if gone(folder, &error) => return Listing::Gone,
+            // (Held by another program that shares it with none, the drive not answering, and the like: listed again
+            // after.)
+            Err(error) => return Listing::Failed(error),
         };
         // (Let go of as it was opened: not read, and closed at once.)
         let Some(folder) = folder else { return Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)) };
@@ -342,6 +344,17 @@ impl Drive {
             }
         }
     }
+}
+
+/// Whether `error`, as `folder` was opened, says it is not there any more: an id no longer of a file
+/// (ERROR_INVALID_PARAMETER, its number's sequence moved on, or ERROR_FILE_NOT_FOUND), or a path not found. No other
+/// failing says so.
+fn gone(folder: &Folder, error: &Error) -> bool {
+    let codes: &[WIN32_ERROR] = match folder {
+        Folder::Id(_) => &[ERROR_INVALID_PARAMETER, ERROR_FILE_NOT_FOUND],
+        Folder::Path(_) => &[ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND],
+    };
+    codes.iter().any(|code| error.code() == code.to_hresult())
 }
 
 /// The serial number of the volume `root` (a folder of it opened) is on, where it can be told.
@@ -500,6 +513,35 @@ pub(crate) mod tests {
         assert!(answered, "let go of within the time it waits");
         assert!(left && still_open, "nothing more begun on it, its root still used");
         assert!(drive.held.busy.lock().unwrap().root.is_none(), "closed as the call ended");
+        drop(drive);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// Only a folder that is not there any more is gone, by its id or its path: one that cannot be opened now for
+    /// another reason (held by a program that shares it with none) failed, to be listed again, where it was taken for
+    /// gone and what was not yet listed of it was lost.
+    #[test]
+    fn only_a_folder_not_there_any_more_is_gone() {
+        let folder = std::env::temp_dir().join(format!("glance-gone-{}", std::process::id()));
+        let inner = folder.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("a.txt"), "a").unwrap();
+        let drive = Drive::open(&format!("{}\\", folder.display())).unwrap();
+        let Listing::Items(found) = drive.list(&Folder::Path(folder.clone()), &mut buffer()) else { panic!("listed") };
+        let id = found.iter().find(|item| item.name == "inner".encode_utf16().collect::<Vec<_>>()).unwrap().id;
+        let listing = |folder: &Folder| drive.list(folder, &mut buffer());
+        let (by_id, by_path) = (Folder::Id(id), Folder::Path(inner.clone()));
+
+        let held = unsafe { CreateFileW(&HSTRING::from(inner.as_os_str()), LIST, Default::default(), None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.unwrap();
+        let shared_with_none = [listing(&by_id), listing(&by_path)];
+        unsafe {
+            let _ = CloseHandle(held);
+        }
+        assert!(shared_with_none.iter().all(|listing| matches!(listing, Listing::Failed(_))), "held by another, it failed, to be listed again");
+        assert!([listing(&by_id), listing(&by_path)].iter().all(|listing| matches!(listing, Listing::Items(items) if items.len() == 1)));
+
+        std::fs::remove_dir_all(&inner).unwrap();
+        assert!(matches!(listing(&by_id), Listing::Gone) && matches!(listing(&by_path), Listing::Gone), "gone");
         drop(drive);
         std::fs::remove_dir_all(&folder).unwrap();
     }
