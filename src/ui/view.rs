@@ -182,6 +182,9 @@ pub enum Hit {
     Sort(ProcessSort),
     /// A list scrolled through (the processes', the station's), and how far it scrolls (DIPs, as `f32::to_bits`).
     List(List, u32),
+    /// A list's bar beside it (see `scroll_bar`), its thumb dragged along it: the list, how far it scrolls and how tall
+    /// its room is (DIPs, as `f32::to_bits`, as the list is laid out: the bar may be drawn larger or smaller).
+    Bar(List, u32, u32),
     /// A list turned through by pages (see `PAGE`), as far as it turns; and the way to its next page.
     Pages(List, u32),
     NextPage(List, u32),
@@ -312,10 +315,10 @@ impl Hit {
         self == Hit::VolumeUp
     }
 
-    /// The list it is, and how far it scrolls, for a hit on one.
+    /// The list it is, and how far it scrolls, for a hit on one or on its bar (the wheel over either scrolls it).
     pub fn list(self) -> Option<(List, f32)> {
         match self {
-            Hit::List(list, bits) => Some((list, f32::from_bits(bits))),
+            Hit::List(list, bits) | Hit::Bar(list, bits, _) => Some((list, f32::from_bits(bits))),
             _ => None,
         }
     }
@@ -438,8 +441,8 @@ impl Scrolls {
         (self.at[list], self.to[list], self.turning[list]) = (at, at, at);
     }
 
-    /// `list`, turned through by pages, held at `at` (DIPs, within `most`) by a hand swiping it: there at once.
-    pub fn hold_pages(&mut self, list: List, at: f32, most: f32) {
+    /// `list` held at `at` (DIPs, within `most`) by a hand, its pages swiped or its bar's thumb dragged: there at once.
+    pub fn hold(&mut self, list: List, at: f32, most: f32) {
         let at = at.clamp(0.0, most);
         let list = list as usize;
         (self.at[list], self.to[list], self.turning[list]) = (at, at, at);
@@ -504,6 +507,71 @@ pub fn lists_show(tab: Tab) -> [u8; LISTS] {
     shows
 }
 
+/// What of `hits` lies under (`x`, `y`) (DIPs, where they were drawn), in the order they were drawn.
+pub fn under(hits: &[HitBox], (x, y): (f32, f32)) -> impl Iterator<Item = &HitBox> {
+    hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h)
+}
+
+/// The wheel turned `delta` (a notch is 120, turned toward the reader below 0) over what is `under` the pointer (a
+/// thing on a list, then the list, its bar), or (`across`) the wheel turned across: the pages there turned, a page a
+/// notch (across, the way it turns), else the list there scrolled, `WHEEL_ROWS` rows a notch. Whether one was.
+pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> bool {
+    let notches = delta as f32 / 120.0;
+    let down = -notches * crate::panel::WHEEL_ROWS * TABLE_ROW;
+    if let Some((list, most)) = under.iter().find_map(|hit| hit.pages()) {
+        scrolls.turn_pages(list, if across { notches * PAGE } else { down }, PAGE, most);
+        return true;
+    }
+    match under.iter().find_map(|hit| hit.list()) {
+        Some((list, most)) if !across => {
+            scrolls.turn(list, down, most);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A list's bar's thumb in hand (see `Hit::Bar`), the bar where it was pressed (its top and how long the thumb runs
+/// along it, as large as it was drawn): its list, how far that scrolls, and where on the thumb the hand holds it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Thumb {
+    list: List,
+    most: f32,
+    top: f32,
+    runs: f32,
+    held: f32,
+}
+
+impl Thumb {
+    /// `bar`, where a press found it (a list's bar, see `Hit::Bar`, and none for anything else), pressed at `y` with its
+    /// list as `scrolls` has it: its thumb held where it is pressed on it, or, pressed on the bar above or below it, by
+    /// its middle, moved there at once (see `scroll_at`).
+    pub fn pressed((_, top, _, tall, hit): HitBox, y: f32, scrolls: &Scrolls) -> Option<Thumb> {
+        let Hit::Bar(list, most, laid) = hit else { return None };
+        let (most, laid) = (f32::from_bits(most), f32::from_bits(laid));
+        let scale = tall / laid;
+        let (down, long) = thumb_on(laid, scrolls.at(list).clamp(0.0, most), most);
+        let (at, long) = (top + down * scale, long * scale);
+        let held = if y >= at && y < at + long { y - at } else { long / 2.0 };
+        Some(Thumb { list, most, top, runs: tall - long, held })
+    }
+
+    /// The list it scrolls, and how far that scrolls.
+    pub fn list(&self) -> List {
+        self.list
+    }
+
+    pub fn most(&self) -> f32 {
+        self.most
+    }
+
+    /// How far its list is scrolled with the hand at `y` (where it was pressed): as far down all of it as the thumb is
+    /// down the bar, the thumb held where it was taken.
+    pub fn scroll_at(&self, y: f32) -> f32 {
+        ((y - self.held - self.top) / self.runs * self.most).clamp(0.0, self.most)
+    }
+}
+
 /// Which note the notes turned through by pages show (see `keep_note`): its name and its place as last drawn, and the
 /// note open beside them as last seen.
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -527,7 +595,7 @@ pub fn keep_note(scrolls: &mut Scrolls, shown: &mut NoteShown, notes: &[crate::n
         // (Its place holding another: the order changed, not the page turned, which is to another place.)
         if notes.get(*at).is_none_or(|note| note.name != *name) {
             if let Some(now) = place(name) {
-                scrolls.hold_pages(List::Notes, now as f32 * PAGE, most);
+                scrolls.hold(List::Notes, now as f32 * PAGE, most);
             }
         }
     }
@@ -1862,9 +1930,9 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
     if most > 0.0 {
         hits.push((left, top, width, tall, Hit::List(List::Apps, most.to_bits())));
     }
+    scroll_bar(frame, theme, List::Apps, (left, top, width, tall), scroll, most, hits);
     hits.push((left - 4.0, top - SHELF_GAP - HEAD - HEAD_GAP, width + 8.0, tall + SHELF_GAP + HEAD + HEAD_GAP + 4.0, Hit::AppsArea));
     hits.extend(places.into_iter().filter_map(|hit| shown_in(hit, view)));
-    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
 }
 
 /// A thing kept at hand held and dragged, its picture `side` square at (`x`, `y`): lifted off the others, a little
@@ -3913,12 +3981,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                     }
                 }
                 frame.unclip();
-                // A thin thumb shows where in the list the view is.
-                if max_scroll > 0.0 {
-                    let thumb = (list_height * *visible as f32 / rows.len() as f32).max(12.0);
-                    let at = y + (list_height - thumb) * scroll / max_scroll;
-                    frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, at, 2.0, thumb, 1.0);
-                }
+                scroll_bar(frame, theme, List::Processes, (left, y, width, list_height), scroll, max_scroll, hits);
             }
             (Block::Tabs { tab, count, copies, recent, view }, Pass::Content) => {
                 paint_tabs(frame, scene, (left, y, width), *tab, *count, *copies, *recent, *view, hits);
@@ -4574,7 +4637,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
     if most > 0.0 {
         hits.push((left, top, width, tall, Hit::List(list, most.to_bits())));
     }
-    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
+    scroll_bar(frame, theme, list, (left, top, width, tall), scroll, most, hits);
 }
 
 /// Recent files' page (see `Block::Recent`) from (`left`, `top`), `width` across, in room `tall` high: the filter's
@@ -4683,7 +4746,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     if most > 0.0 {
         hits.push((left, list_top, width, list_tall, Hit::List(List::Recent, most.to_bits())));
     }
-    scroll_thumb(frame, theme, left + width + 6.0, list_top, list_tall, whole, scroll, most);
+    scroll_bar(frame, theme, List::Recent, (left, list_top, width, list_tall), scroll, most, hits);
 }
 
 /// A page's filter (what was copied lately, the files come lately) at `top` from `left`, `width` across: its
@@ -4859,13 +4922,26 @@ fn shown_in(hit: HitBox, (x, y, w, h): (f32, f32, f32, f32)) -> Option<HitBox> {
     (right > left && bottom > top).then_some((left, top, right - left, bottom - top, hit.4))
 }
 
-/// A thin thumb beside a list `tall` high, its whole `whole` tall, scrolled `scroll` of `most`: where in it the view is.
+/// How far out beside a list its bar reaches (DIPs from the list's edge), pressed and turned there: past its thumb
+/// (drawn 6 to 8 out), short of its lane's edge (16 out at the least) and so of the panel's and a widget's.
+const BAR_REACH: f32 = 10.0;
+
+/// The thumb on the bar beside a list `tall` high, scrolled `scroll` of `most` past its room: how far down the bar it
+/// is, and how long (as long a share of the bar as the room is of all the list, 12 at the least).
+fn thumb_on(tall: f32, scroll: f32, most: f32) -> (f32, f32) {
+    let long = (tall * tall / (tall + most)).max(12.0);
+    ((tall - long) * scroll / most, long)
+}
+
+/// The bar beside a list scrolled past its room (`list`, its room from (`left`, `top`), `width` × `tall`, scrolled
+/// `scroll` of `most`): where the wheel scrolls it as over the list and its thumb is dragged along it, and the thumb
+/// drawn, a thin one where in all of it the room is. None where all of it shows.
 #[allow(clippy::too_many_arguments)]
-fn scroll_thumb(frame: &dyn Canvas, theme: &Theme, x: f32, top: f32, tall: f32, whole: f32, scroll: f32, most: f32) {
+fn scroll_bar(frame: &dyn Canvas, theme: &Theme, list: List, (left, top, width, tall): (f32, f32, f32, f32), scroll: f32, most: f32, hits: &mut Vec<HitBox>) {
     if most > 0.0 {
-        let thumb = (tall * tall / whole).max(12.0);
-        let at = top + (tall - thumb) * scroll / most;
-        frame.fill_rounded(theme.text3.alpha(0.6), x, at, 2.0, thumb, 1.0);
+        hits.push((left + width, top, BAR_REACH, tall, Hit::Bar(list, most.to_bits(), tall.to_bits())));
+        let (down, long) = thumb_on(tall, scroll, most);
+        frame.fill_rounded(theme.text3.alpha(0.6), left + width + 6.0, top + down, 2.0, long, 1.0);
     }
 }
 
@@ -4946,7 +5022,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
     if most > 0.0 {
         hits.push((left, top, width, tall, Hit::List(List::Copies, most.to_bits())));
     }
-    scroll_thumb(frame, theme, left + width + 6.0, top, tall, whole, scroll, most);
+    scroll_bar(frame, theme, List::Copies, (left, top, width, tall), scroll, most, hits);
 }
 
 /// The widths of the process table's four measures: a share, a size, a
@@ -5922,7 +5998,7 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 
     /// The frosted glass's sliders, at rest, under the pointer and held, on a light and a dark ground:
     /// `cargo test --features studio --lib -- --ignored glass_sliders` writes `target/glass-sliders.png`.
@@ -6168,7 +6244,7 @@ otepad.exe", "Notepad"),
                         let behind = desktop.bitmap(&frame.dc, px).ok();
                         for (lane_ids, shape, size, at, turned) in &widgets {
                             let mut scrolls = Scrolls::default();
-                            scrolls.hold_pages(List::Notes, turned * PAGE, 2.0 * PAGE);
+                            scrolls.hold(List::Notes, turned * PAGE, 2.0 * PAGE);
                             let scene = Scene { scrolls, ..scene };
                             let lanes: Vec<Lane> = lane_ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Shape(*shape))?, ink: theme.ink(id) })).collect();
                             let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
@@ -6429,7 +6505,7 @@ otepad.exe", "Notepad"),
         assert_eq!(layout.width(), 2.0 * COLUMN_WIDTH + theme.column_gap);
     }
 
-    fn sample(clock: Option<f32>, battery: Option<u8>, fan: Option<f32>) -> Sample {
+    pub(crate) fn sample(clock: Option<f32>, battery: Option<u8>, fan: Option<f32>) -> Sample {
         use crate::reading::*;
         Sample {
             t: 0,
@@ -6464,7 +6540,7 @@ otepad.exe", "Notepad"),
         }
     }
 
-    fn info() -> StaticInfo {
+    pub(crate) fn info() -> StaticInfo {
         use crate::reading::GpuInfo;
         StaticInfo {
             cpu_name: "CPU".into(),
@@ -7311,24 +7387,24 @@ seven".into()));
     fn pages_swiped_come_to_a_page() {
         let mut scrolls = Scrolls::default();
         let most = 3.0 * PAGE;
-        scrolls.hold_pages(List::Notes, 0.4 * PAGE, most);
+        scrolls.hold(List::Notes, 0.4 * PAGE, most);
         assert_eq!(scrolls.at(List::Notes), 0.4 * PAGE);
         scrolls.let_go_pages(List::Notes, 0.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], 0.0);
-        scrolls.hold_pages(List::Notes, 0.6 * PAGE, most);
+        scrolls.hold(List::Notes, 0.6 * PAGE, most);
         scrolls.let_go_pages(List::Notes, 0.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], PAGE);
-        scrolls.hold_pages(List::Notes, 1.1 * PAGE, most);
+        scrolls.hold(List::Notes, 1.1 * PAGE, most);
         scrolls.let_go_pages(List::Notes, 1.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], 2.0 * PAGE);
-        scrolls.hold_pages(List::Notes, 1.9 * PAGE, most);
+        scrolls.hold(List::Notes, 1.9 * PAGE, most);
         scrolls.let_go_pages(List::Notes, -1.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], PAGE);
-        scrolls.hold_pages(List::Notes, 9.0 * PAGE, most);
+        scrolls.hold(List::Notes, 9.0 * PAGE, most);
         assert_eq!(scrolls.at(List::Notes), most);
         scrolls.let_go_pages(List::Notes, 1.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], most);
-        scrolls.hold_pages(List::Notes, -PAGE, most);
+        scrolls.hold(List::Notes, -PAGE, most);
         scrolls.let_go_pages(List::Notes, -1.0, PAGE, most);
         assert_eq!(scrolls.to[List::Notes as usize], 0.0);
     }
@@ -7945,6 +8021,106 @@ seven".into()));
         // One missing later keeps its place, beside what came before it.
         assert_eq!(order(vec![fans(&["1", "2", "3"]), fans(&["1", "3"])]), ["1", "2", "3"]);
         assert_eq!(order(vec![fans(&["1", "2", "3"]), fans(&["2", "3"])]), ["1", "2", "3"]);
+    }
+
+    /// Every list with a bar beside it (the processes', the station's three pages in each of their views, quick
+    /// launch's), each scrolled `scroll` down (DIPs, as far as it goes), as it is drawn: what it is, and where a press
+    /// finds what (the panel's and a widget's alike: they find it in what was drawn, see `under`).
+    pub(crate) fn lists_with_bars(scroll: f32) -> Vec<(String, List, Vec<HitBox>)> {
+        let theme = Theme::new(Skin::Fluent, false);
+        let mut busy = sample(None, None, None);
+        busy.processes = (0..40).map(|at| ProcessSample { name: format!("p{at}"), cpu: at as f32, mem: 1 << 20, io: 0.0, gpu: None }).collect();
+        let history: &'static [Sample] = Box::leak(Box::new([busy]));
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["processes".to_string(), "station".to_string()]));
+        let seen = Seen::of(history);
+        let mut scrolls = Scrolls::default();
+        for list in [List::Processes, List::Shelf, List::Copies, List::Recent, List::Apps] {
+            scrolls.set(list, scroll);
+        }
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let mut lists = Vec::new();
+        let processes = vec![Lane { id: "processes".into(), blocks: lane(&scene, "processes", Detail::Full).unwrap(), ink: theme.ink("processes") }];
+        let layout = Layout::with_columns(vec![processes[0].height(&theme)], 1, &theme);
+        lists.push(("processes".to_string(), List::Processes, paint(&Nothing, &scene, &processes, &layout, Pass::Content)));
+        let ink = theme.ink("station");
+        let tiles: Vec<Tile> = (1..=40).map(|id| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false }).collect();
+        let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
+        let room = (0.0, 100.0, 320.0);
+        for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
+            let mut hits = Vec::new();
+            paint_shelf(&Nothing, &scene, ink, room, &tiles, Shows::View(view), STATION_TALL, None, false, &mut hits);
+            lists.push((format!("station {view:?}"), List::Shelf, hits));
+            let mut hits = Vec::new();
+            paint_copies(&Nothing, &scene, ink, room, &tiles, Default::default(), view, STATION_TALL, &mut hits);
+            lists.push((format!("copied {view:?}"), List::Copies, hits));
+            let mut hits = Vec::new();
+            paint_recent(&Nothing, &scene, ink, room, &rows, Default::default(), view, STATION_TALL, false, &mut hits);
+            lists.push((format!("recent {view:?}"), List::Recent, hits));
+        }
+        let apps: Vec<(String, String)> = (0..40).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+        let mut hits = Vec::new();
+        paint_apps(&Nothing, &scene, room, &apps, APP_ROWS, true, false, &mut hits);
+        lists.push(("quick launch".to_string(), List::Apps, hits));
+        lists
+    }
+
+    /// A list's room (where the wheel scrolls it) as it is drawn, and how far it scrolls.
+    fn room_of(hits: &[HitBox], list: List) -> ((f32, f32, f32, f32), f32) {
+        let (x, y, w, h, hit) = *hits.iter().find(|hit| matches!(hit.4, Hit::List(of, _) if of == list)).expect("a list scrolled");
+        ((x, y, w, h), hit.list().unwrap().1)
+    }
+
+    /// The wheel turned over a long list scrolls it, over its things, over the room between them and over its bar
+    /// beside it, each list with a bar in each of its views (the bar was drawn past the room the wheel turned it in: a
+    /// wheel turned over the bar did nothing). Turned up at its top, it stays.
+    #[test]
+    fn the_wheel_scrolls_a_list_over_it_and_over_its_bar() {
+        for (what, list, hits) in lists_with_bars(0.0) {
+            let ((x, y, w, h), _) = room_of(&hits, list);
+            let thing = hits.iter().find(|hit| matches!(hit.4, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_) | Hit::App(_))).map(|hit| (hit.0 + 2.0, hit.1 + 2.0));
+            for (at, point) in [("its room", Some((x + w / 2.0, y + h / 2.0))), ("a thing on it", thing), ("its bar", Some((x + w + 7.0, y + h / 2.0))), ("its bar's edge", Some((x + w + 1.0, y + 1.0)))] {
+                let Some(point) = point else { continue };
+                let under: Vec<Hit> = under(&hits, point).map(|hit| hit.4).collect();
+                let mut scrolls = Scrolls::default();
+                wheel(&mut scrolls, &under, 120, false);
+                assert_eq!(scrolls.to(list), 0.0, "{what}, up over {at}");
+                assert!(wheel(&mut scrolls, &under, -120, false), "{what}: the wheel over {at} found no list ({under:?})");
+                assert_eq!(scrolls.to(list), crate::panel::WHEEL_ROWS * TABLE_ROW, "{what}, over {at}");
+            }
+        }
+    }
+
+    /// A long list's bar is dragged by its thumb, each list with a bar in each of its views, found first where it is
+    /// pressed (as the panel and a widget find it): held where it is pressed on it, nothing moves. As far down the bar
+    /// as the hand takes it, as far down the list. Past either end, the list's end. Pressed on the bar above or below
+    /// it, it is held by its middle, there at once. (The bar was only drawn: a press there moved what it was on.)
+    #[test]
+    fn a_list_s_bar_is_dragged_by_its_thumb() {
+        for (what, list, hits) in lists_with_bars(0.0) {
+            let ((x, y, w, h), most) = room_of(&hits, list);
+            let at_rest = Scrolls::default();
+            let press = |py: f32| under(&hits, (x + w + 7.0, py)).next().and_then(|bar| Thumb::pressed(*bar, py, &at_rest));
+            let (_, long) = thumb_on(h, 0.0, most);
+            let on_thumb = y + long / 2.0;
+            let Some(thumb) = press(on_thumb) else { panic!("{what}: no bar found where its thumb is drawn") };
+            assert_eq!(thumb.list(), list, "{what}");
+            assert_eq!(thumb.scroll_at(on_thumb), 0.0, "{what}: held where pressed");
+            assert!((thumb.scroll_at(on_thumb + (h - long) / 2.0) - most / 2.0).abs() < 0.01, "{what}: half way down");
+            assert!((thumb.scroll_at(on_thumb + h - long) - most).abs() < 0.01, "{what}: at the foot");
+            assert_eq!((thumb.scroll_at(on_thumb + 5.0 * h), thumb.scroll_at(on_thumb - 5.0 * h)), (most, 0.0), "{what}: past its ends");
+            // Pressed on the bar under it: its middle where the bar was pressed, at once.
+            let below = y + h * 0.75;
+            let thumb = press(below).unwrap();
+            let (down, long) = thumb_on(h, thumb.scroll_at(below), most);
+            assert!((y + down + long / 2.0 - below).abs() < 0.01, "{what}: its thumb's middle at {} for {below}", y + down + long / 2.0);
+        }
+        // Drawn smaller than laid out (readings merged with what plays, at their zoom): pressed where it is drawn.
+        let (_, list, hits) = lists_with_bars(0.0).remove(0);
+        let (x, y, w, h, hit) = *hits.iter().find(|hit| matches!(hit.4, Hit::Bar(..))).unwrap();
+        let shown = (x * 0.5, y * 0.5, w * 0.5, h * 0.5, hit);
+        let thumb = Thumb::pressed(shown, shown.1 + 1.0, &Scrolls::default()).unwrap();
+        assert_eq!((thumb.list(), thumb.scroll_at(shown.1 + shown.3 + 1.0)), (list, hit.list().unwrap().1));
+        assert!(Thumb::pressed((x, y, w, h, Hit::List(list, 0)), y, &Scrolls::default()).is_none());
     }
 
     #[test]

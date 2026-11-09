@@ -55,7 +55,7 @@ use crate::ui::prefs::Prefs;
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
-use crate::ui::view::{self, Detail, Hit, HitBox, Layout, Scene, TABLE_ROW};
+use crate::ui::view::{self, Detail, Hit, HitBox, Layout, Scene};
 use crate::ui::settings_window;
 use crate::ui::window::Window;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -1452,6 +1452,12 @@ impl Controller {
                     // (The pointer taken from it mid-drag: given up, nowhere sought.)
                     panels[owner.unwrap()].slid(msg.message != crate::ui::window::CAPTURE_LOST)
                 }
+                // A list's bar's thumb let go, as the sound's track is.
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
+                    if owner.is_some_and(|at| panels[at].scrolling.is_some()) && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                {
+                    panels[owner.unwrap()].let_go_of_thumb()
+                }
                 // Let go of the panel after a widget was torn off it (the button went up before the widget took
                 // the pointer): the widget is let go.
                 WM_LBUTTONUP if owner.is_some() && widgets.torn_in_hand().is_some() => {
@@ -2384,6 +2390,8 @@ struct Panel<'a> {
     app_dropped: Option<(String, usize, Instant)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
+    /// A list's bar's thumb is being dragged along it (see `view::Thumb`).
+    scrolling: Option<view::Thumb>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<Hit>,
     /// The desktop behind the glass is to be taken again (the panel moved
@@ -2497,6 +2505,7 @@ impl<'a> Panel<'a> {
             app_point: (0.0, 0.0),
             app_dropped: None,
             sliding: None,
+            scrolling: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
             capturing: None,
@@ -3331,6 +3340,15 @@ impl<'a> Panel<'a> {
             self.follow_pointer();
             return;
         }
+        // On a list's bar: its thumb dragged along it till let go, the list scrolled as it goes.
+        let at = self.dips(client);
+        let thumb = view::under(&self.hits, at).next().and_then(|bar| view::Thumb::pressed(*bar, at.1, &self.scrolls));
+        if let Some(thumb) = thumb {
+            self.scrolling = Some(thumb);
+            self.drag_thumb(client);
+            self.follow_pointer();
+            return;
+        }
         // On the sound's track: it is slid along till let go.
         if let Some(slider) = self.hit_at(client).and_then(Hit::slider) {
             self.sliding = Some(slider);
@@ -3428,9 +3446,28 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// Whether it is being dragged (or the sound's track is): till its window is told the button went up.
+    /// Whether it is being dragged (or the sound's track is, or a list's bar's thumb): till its window is told the
+    /// button went up.
     fn held(&self) -> bool {
-        self.drag.is_some() || self.sliding.is_some()
+        self.drag.is_some() || self.sliding.is_some() || self.scrolling.is_some()
+    }
+
+    /// The list whose bar's thumb is in hand scrolled as far as the thumb goes with the hand at `client` (physical px in
+    /// the window, off the bar too, as far as it goes).
+    fn drag_thumb(&mut self, client: POINT) {
+        let Some(thumb) = self.scrolling else { return };
+        let (_, y) = self.dips(client);
+        self.scrolls.hold(thumb.list(), thumb.scroll_at(y), thumb.most());
+        self.next_frame = Instant::now();
+    }
+
+    /// A list's bar's thumb let go: the list left where it was taken.
+    fn let_go_of_thumb(&mut self) {
+        self.scrolling = None;
+        unsafe {
+            let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+        }
     }
 
     /// The track slid along as far as where `client` is along it (the pointer may have left the track: as far as it
@@ -3462,9 +3499,11 @@ impl<'a> Panel<'a> {
     /// onto another screen too; or, held by its edges, grows and shrinks as
     /// a whole from the corner opposite them (its shape is its lanes').
     fn dragged(&mut self, now: Instant) {
-        if self.sliding.is_some() {
+        if self.sliding.is_some() || self.scrolling.is_some() {
             if let (Some(cursor), Some(window)) = (cursor_position(), self.placement.as_ref().map(|p| p.window)) {
-                self.slide(POINT { x: cursor.x - window.left, y: cursor.y - window.top });
+                let client = POINT { x: cursor.x - window.left, y: cursor.y - window.top };
+                self.slide(client);
+                self.drag_thumb(client);
             }
             return;
         }
@@ -4355,9 +4394,13 @@ impl<'a> Panel<'a> {
 
     /// Each hit region a point in the window's client area (physical px) is in, in the order they were drawn.
     fn hits_at(&self, client: POINT) -> impl Iterator<Item = Hit> + '_ {
+        view::under(&self.hits, self.dips(client)).map(|hit| hit.4)
+    }
+
+    /// A point in the window's client area (physical px) where the panel draws it (its DIPs, from its corner).
+    fn dips(&self, client: POINT) -> (f32, f32) {
         let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
-        let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        self.hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+        (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1)
     }
 
     /// Whether a thing kept at hand is being dragged among the others on it.
@@ -4399,18 +4442,12 @@ impl<'a> Panel<'a> {
         self.next_frame = Instant::now();
     }
 
-    /// The list a point in the window's client area (physical px) is on, and how far it scrolls (under what is on
-    /// it: the wheel over a thing on the station scrolls the station).
-    fn list_at(&self, client: POINT) -> Option<(view::List, f32)> {
-        self.hits_at(client).find_map(Hit::list)
-    }
-
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         self.pointer = Some(client);
         // Off the panel (its window holds its screen): clicks there are let through at once, not as the pointer is
         // next followed (see `track`), which a quick click comes before.
-        if self.drag.is_none() && self.sliding.is_none() && !self.on_panel(client) {
+        if !self.held() && !self.on_panel(client) {
             self.window.set_click_through(true);
             return;
         }
@@ -4523,7 +4560,8 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// A wheel turn with the pointer at `screen`: scrolls the process list under it.
+    /// A wheel turn with the pointer at `screen`: scrolls the list under it (under what is on it: the wheel over a thing
+    /// on the station scrolls the station, and over its bar too).
     fn wheel(&mut self, screen: POINT, delta: i16) {
         let Some(window) = self.placement.as_ref().map(|p| p.window) else { return };
         // What plays: its lines turned.
@@ -4534,9 +4572,8 @@ impl<'a> Panel<'a> {
             return;
         }
         let client = POINT { x: screen.x - window.left, y: screen.y - window.top };
-        if let Some((list, most)) = self.list_at(client) {
-            let rows = -(delta as f32) / 120.0 * WHEEL_ROWS;
-            self.scrolls.turn(list, rows * TABLE_ROW, most);
+        let under: Vec<Hit> = self.hits_at(client).collect();
+        if view::wheel(&mut self.scrolls, &under, delta, false) {
             self.next_frame = Instant::now();
         }
     }
