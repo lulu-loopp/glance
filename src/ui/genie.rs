@@ -310,9 +310,14 @@ pub fn back_into(window: HWND, place: RECT) -> Option<RECT> {
 /// screens (see `shown_whole`), across as many as it goes. (A place under the window has no side of the window to pour
 /// through: its mouth, kept at the window's nearest side, poured into the window's edge above the place, far from it.)
 fn reachable(shows: RECT, place: RECT) -> bool {
+    reachable_among(shows, place, &screens())
+}
+
+/// `reachable` on `screens`.
+fn reachable_among(shows: RECT, place: RECT, screens: &[RECT]) -> bool {
     let (x, y) = ((place.left + place.right) / 2, (place.top + place.bottom) / 2);
     let under = shows.left <= x && x < shows.right && shows.top <= y && y < shows.bottom;
-    !under && shown_whole(shows, place, &screens())
+    !under && shown_whole(shows, place, screens)
 }
 
 /// How many frames of its pouring are looked at to tell whether it shows whole (see `shown_whole`): about as many as it
@@ -592,12 +597,13 @@ mod tests {
         assert_eq!((top.window_along, top.place_along, top.place_across), ((-900.0, -200.0), (-60.0, -20.0), (880.0, 920.0)));
     }
 
-    /// A window pours into a place outside it, not one under it.
+    /// A window pours into a place outside it, not one under it (on the owner's screens, whatever this machine's are).
     #[test]
     fn it_pours_only_into_a_place_outside_it() {
+        let screens = [rect(-2905, -1459, -745, 2381), rect(-745, -1440, 2695, 0), rect(0, 0, 1920, 1080)];
         let window = rect(9, -1290, 1941, -159);
-        assert!(!super::reachable(window, rect(1431, -963, 1458, -936)));
-        assert!(super::reachable(window, rect(1960, -963, 1987, -936)));
+        assert!(!super::reachable_among(window, rect(1431, -963, 1458, -936), &screens));
+        assert!(super::reachable_among(window, rect(1960, -963, 1987, -936), &screens));
     }
 
     /// A window pours across screens where they meet along its way (as the owner's: a wide screen over the main one,
