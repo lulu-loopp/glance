@@ -7,7 +7,7 @@
 
 use super::index::Item;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
 use windows::core::{Error, Result, HSTRING};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
@@ -57,13 +57,15 @@ struct Held {
 }
 
 /// What is under way on a drive: its root folder (none once closed) and how many calls use it now (a journal read
-/// through it, a folder listed: see `Drive::with_root`), each folder being listed, and its root opened again to be
-/// watched (see `Drive::watch`). A root let go of while it is used is closed by the last call using it, as it ends.
+/// through it, a folder listed: see `Drive::with_root`), each folder being listed, its root opened again to be
+/// watched (see `Drive::watch`), and those to be told as it is let go of (see `Drive::tell_let_go`). A root let go of
+/// while it is used is closed by the last call using it, as it ends.
 struct Busy {
     root: Option<HANDLE>,
     using: usize,
     listing: Vec<HANDLE>,
     watched: Option<HANDLE>,
+    told: Vec<Weak<dyn Fn() + Send + Sync>>,
 }
 
 impl Busy {
@@ -108,15 +110,21 @@ impl Held {
         self.let_go_within(LET_GO_WAIT);
     }
 
-    /// All held of the drive let go of: what is under way on it cancelled (nothing begun after), and cancelled again
-    /// as it is waited for (a watch asked again as it was cancelled, a folder opened as it was), its root closed as
-    /// soon as no call uses it, till that and its watching have ended, or for `wait` at most. What has not ended by
-    /// then (a call to a drive that answers nothing, cancelled or not) is not waited for: Windows' asking is answered,
-    /// and the root is closed by the last call using it, as that ends.
+    /// All held of the drive let go of: those waiting on what is under way on it told (see `Drive::tell_let_go`),
+    /// what is under way cancelled (nothing begun after), and cancelled again as it is waited for (a watch asked again
+    /// as it was cancelled, a folder opened as it was), its root closed as soon as no call uses it, till that and its
+    /// watching have ended, or for `wait` at most. What has not ended by then (a call to a drive that answers nothing,
+    /// cancelled or not) is not waited for: Windows' asking is answered, and the root is closed by the last call using
+    /// it, as that ends.
     fn let_go_within(&self, wait: Duration) {
         let until = Instant::now() + wait;
         let mut busy = self.busy.lock().unwrap();
         self.left.store(true, Ordering::SeqCst);
+        for told in std::mem::take(&mut busy.told) {
+            if let Some(tell) = told.upgrade() {
+                tell();
+            }
+        }
         loop {
             busy.cancel();
             if busy.using == 0 {
@@ -224,7 +232,7 @@ impl Drive {
         let root = open_folder(path)?;
         // (Closed if what follows fails.)
         let held = Held {
-            busy: Mutex::new(Busy { root: Some(root), using: 0, listing: Vec::new(), watched: None }),
+            busy: Mutex::new(Busy { root: Some(root), using: 0, listing: Vec::new(), watched: None, told: Vec::new() }),
             ended: Condvar::new(),
             left: AtomicBool::new(false),
             stays: AtomicBool::new(false),
@@ -287,6 +295,15 @@ impl Drive {
         };
         let _using = Using { held: &self.held };
         Some(asked(root))
+    }
+
+    /// `tell` called as the drive is let go of (from then on `left`), while its caller holds it: what waits for a
+    /// call on the drive is woken, though the call may not end (cancelled, a drive that answers nothing may hold it
+    /// for good). Those whose callers no longer hold them are forgotten as more are told.
+    pub fn tell_let_go(&self, tell: Weak<dyn Fn() + Send + Sync>) {
+        let mut busy = self.held.busy.lock().unwrap();
+        busy.told.retain(|told| told.strong_count() > 0);
+        busy.told.push(tell);
     }
 
     /// Its root opened again to be watched, kept to be let go of with the rest (none where it is let go of, or cannot
@@ -459,7 +476,8 @@ pub(crate) mod tests {
     use super::*;
 
     /// Let go of (as Windows asks to take the drive out), all held of a drive is closed: its root, once the listing
-    /// under way is done, and its watching, cancelled and ended. Nothing more is opened of it after.
+    /// under way is done, and its watching, cancelled and ended. Those waiting on it are told (a round of listing, not
+    /// to wait for calls that may not end). Nothing more is opened of it after.
     #[test]
     fn all_held_of_a_drive_is_let_go_of() {
         let folder = std::env::temp_dir().join(format!("glance-let-go-{}", std::process::id()));
@@ -489,8 +507,21 @@ pub(crate) mod tests {
         assert!(seen, "watched");
         let mut names = 0;
         assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer(), |part| names += part.items().len()), Listing::Listed) && names > 0);
+        // (Those waiting on it told, those no longer held not.)
+        let told = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tell = |told: &std::sync::Arc<std::sync::atomic::AtomicUsize>| -> std::sync::Arc<dyn Fn() + Send + Sync> {
+            let told = told.clone();
+            std::sync::Arc::new(move || {
+                told.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let (waiting, gone) = (tell(&told), tell(&told));
+        drive.tell_let_go(std::sync::Arc::downgrade(&waiting));
+        drive.tell_let_go(std::sync::Arc::downgrade(&gone));
+        drop(gone);
 
         drive.held.let_go();
+        assert_eq!(told.load(Ordering::SeqCst), 1, "those waiting on it told");
         assert!(watch_ended.recv_timeout(Duration::from_secs(1)).is_ok(), "its watching ended at once");
         assert!(drive.left() && !drive.stays());
         {
