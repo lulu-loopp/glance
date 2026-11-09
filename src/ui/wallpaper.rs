@@ -22,20 +22,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::backdrop::Capture;
 
-/// The desktop of the work area `work` (physical pixels) as a picture
-/// `width` × `height` pixels large. Needs COM on the calling thread.
-pub fn desktop(work: RECT, width: u32, height: u32) -> Capture {
-    desktops(&[(work, width, height)]).pop().expect("one asked for")
-}
-
-/// `desktop` for each of `asked` (a work area, and the picture's width and height), a live wallpaper printed once
-/// for them all. Needs COM on the calling thread.
+/// The desktop of each of `asked` (an area of it in physical pixels, and the picture's width and height) as a picture
+/// that large, a live wallpaper printed once for them all. Needs COM on the calling thread.
 pub fn desktops(asked: &[(RECT, u32, u32)]) -> Vec<Capture> {
     let printed = print();
     asked.iter().map(|&(work, width, height)| desktop_from(printed.as_ref(), work, width, height)).collect()
 }
 
-/// `desktop`, from the live wallpaper as `printed` holds it, if there is one.
+/// The desktop of `work` as a picture `width` × `height` pixels large, from the live wallpaper as `printed` holds it,
+/// if there is one.
 fn desktop_from(printed: Option<&Printed>, work: RECT, width: u32, height: u32) -> Capture {
     let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
     let pixels = printed
