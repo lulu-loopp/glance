@@ -116,6 +116,14 @@ const GIGABYTE_IT8696E: Layout = Layout {
     fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "cpu_opt_fan"],
 };
 
+/// Gigabyte's B760M GAMING WIFI6 PLUS GEN5, an Intel board with an IT8689E, wires its first five temperature inputs
+/// and its first fan header as the AM5 boards do, and its sixth input to an auxiliary sensor (as AIDA64 named each of
+/// them, read beside Glance on that board). Its other fan headers keep their numbers, what they are wired to not seen.
+const GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5: Layout = Layout {
+    temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm", "aux"],
+    fans: &["cpu_fan"],
+};
+
 /// MSI's boards with an NCT6687D wire its first seven monitoring channels
 /// and its eight fan inputs the same way (as Linux's nct6687d driver for
 /// those boards and LibreHardwareMonitor name them): by the channel's and
@@ -127,11 +135,12 @@ const MSI_NCT6687D: Layout = Layout {
 
 /// What the inputs of the chip `chip` are wired to on the board `board` made by `vendor`, where that is known.
 /// (Gigabyte's by the board's socket: its Intel boards with the same chips wire them otherwise, and were shown the AM5
-/// boards' names.)
+/// boards' names. An Intel board is named only where how it wires them was seen on it.)
 fn layout(vendor: &str, board: &str, chip: u16) -> Option<&'static Layout> {
     if vendor.starts_with("Gigabyte") {
         return match chip {
             0x8689 if am5(board) => Some(&GIGABYTE_IT8689E),
+            0x8689 if board.eq_ignore_ascii_case("B760M GAMING WIFI6 PLUS GEN5") => Some(&GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5),
             0x8696 if am5(board) => Some(&GIGABYTE_IT8696E),
             _ => None,
         };
@@ -700,6 +709,40 @@ mod tests {
         assert!(super::layout(gigabyte, "B650M DS3H", 0x8689).is_some());
         assert!(super::layout(gigabyte, "Z790 AORUS ELITE AX", 0x8689).is_none());
         assert!(super::layout("Micro-Star International Co., Ltd.", "MAG B650 TOMAHAWK WIFI (MS-7D75)", 0xD592).is_some());
+    }
+
+    /// The B760M GAMING WIFI6 PLUS GEN5's inputs shown as AIDA64 named them on that board: its sixth an auxiliary
+    /// sensor, not the SoC's supply an AM5 board has there, and its fan headers past the CPU's by their numbers.
+    /// Gigabyte's other Intel boards with the same chip keep the inputs' numbers.
+    #[test]
+    fn names_the_b760m_gaming_wifi6_plus_gen5s_inputs() {
+        use crate::ui::text::Lang;
+        use crate::ui::view::board_sensor;
+        let gigabyte = "Gigabyte Technology Co., Ltd.";
+        let board = super::layout(gigabyte, "B760M GAMING WIFI6 PLUS GEN5", 0x8689).expect("the B760M GAMING WIFI6 PLUS GEN5's wiring");
+        let shown = |lang| {
+            let temps: Vec<String> = board.temps.iter().map(|name| board_sensor(name, "temps", lang)).collect();
+            (temps, board_sensor(board.fans[0], "fans", lang), board.fans.len())
+        };
+        assert_eq!(shown(Lang::Zh), (["系统", "芯片组", "CPU", "PCIe x16 插槽", "VRM 供电", "辅助传感器"].map(String::from).to_vec(), "CPU 风扇".to_string(), 1));
+        assert_eq!(shown(Lang::En), (["System", "Chipset", "CPU", "PCIe x16 slot", "VRM", "Auxiliary sensor"].map(String::from).to_vec(), "CPU fan".to_string(), 1));
+        for other in ["B760M GAMING X AX", "B760M AORUS ELITE AX", "Z790 AORUS ELITE AX", "B660M GAMING X DDR4"] {
+            assert!(super::layout(gigabyte, other, 0x8689).is_none(), "{other}");
+        }
+        assert!(super::layout(gigabyte, "B760M GAMING WIFI6 PLUS GEN5", 0x8696).is_none());
+    }
+
+    /// Every input a known board's wiring names has a name in both languages (a key with none would be shown as it
+    /// is spelled).
+    #[test]
+    fn every_wired_input_has_a_name() {
+        use crate::ui::text::Lang;
+        let layouts = [&super::GIGABYTE_IT8689E, &super::GIGABYTE_IT8696E, &super::GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5, &super::MSI_NCT6687D];
+        for key in layouts.iter().flat_map(|layout| layout.temps.iter().chain(layout.fans.iter())) {
+            for lang in [Lang::Zh, Lang::En] {
+                assert_ne!(lang.name(key), *key, "{key}");
+            }
+        }
     }
 
     #[test]

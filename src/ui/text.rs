@@ -40,6 +40,7 @@ impl Lang {
             "m2_1" => ("M.2 插槽 1", "M.2 slot 1"),
             "vrm" => ("VRM 供电", "VRM"),
             "vsoc" => ("SoC 供电", "SoC VRM"),
+            "aux" => ("辅助传感器", "Auxiliary sensor"),
             "cpu_fan" => ("CPU 风扇", "CPU fan"),
             "gpu_fan" => ("显卡风扇", "GPU fan"),
             "mid_fan" => ("中间风扇", "Middle fan"),
