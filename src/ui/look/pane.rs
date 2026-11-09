@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use windows::core::{w, Interface, GUID, HSTRING, PWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, CreateSolidBrush, DeleteObject, FillRect, SetWindowRgn, HDC};
+use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, CreateSolidBrush, DeleteObject, FillRect, HDC};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
@@ -51,7 +51,6 @@ pub struct Pane {
     asks: Sender<Do>,
     made: Receiver<(PathBuf, bool)>,
     shown: Option<PathBuf>,
-    at: RECT,
     up: bool,
 }
 
@@ -82,7 +81,7 @@ impl Pane {
         let over_at = over.0 as isize;
         std::thread::Builder::new().name("glance: look pane".into()).spawn(move || run(HWND(over_at as *mut _), told, asked, tell, tell_host)).ok()?;
         let host = HWND(host.recv().ok()?? as *mut _);
-        Some(Pane { host, asks, made, shown: None, at: RECT::default(), up: false })
+        Some(Pane { host, asks, made, shown: None, up: false })
     }
 
     pub fn host(&self) -> HWND {
@@ -111,11 +110,10 @@ impl Pane {
 
     /// Laid at `at` (physical px on the screen), its corners `radius` px round, shown or not as it was: before a
     /// previewer is made in it, where it is to show (a previewer lays out what it shows for the window it is given).
+    /// (Its thread lays it only where it is not laid so already, and gives it its corners again where it could not:
+    /// see `Hosted::lay`.)
     pub fn lay(&mut self, at: RECT, radius: i32) {
-        if at != self.at {
-            self.at = at;
-            self.ask(Do::Lay(at, radius));
-        }
+        self.ask(Do::Lay(at, radius));
     }
 
     pub fn hide(&mut self) {
@@ -140,7 +138,6 @@ impl Pane {
         self.shown = Some(path.to_path_buf());
         // (Its thread lets go of the one there was, hiding it, laid nowhere: laid and shown again as it is next shown.)
         self.up = false;
-        self.at = RECT::default();
         self.ask(Do::Take);
     }
 
@@ -152,7 +149,6 @@ impl Pane {
     /// Its previewer let go of (it ends what it shows), and it hidden.
     pub fn unload(&mut self) {
         self.up = false;
-        self.at = RECT::default();
         self.shown = None;
         self.ask(Do::Unload);
     }
@@ -168,7 +164,10 @@ impl Drop for Pane {
 /// and how it tells the look of one made.
 struct Hosted {
     host: HWND,
+    /// Where its window was laid last, and the corners it was given as it was (its size and their radius, px): none
+    /// yet, or none it could be given, to be given them as it is next laid.
     at: RECT,
+    rounded: Option<(i32, i32, i32)>,
     shown: Option<IPreviewHandler>,
     made: Option<IPreviewHandler>,
     up: bool,
@@ -191,7 +190,7 @@ fn run(over: HWND, told: u32, asked: Receiver<Do>, tell: Sender<(PathBuf, bool)>
         let _ = tell_host.send(None);
         return;
     };
-    HOSTED.with(|hosted| *hosted.borrow_mut() = Some(Hosted { host, at: RECT::default(), shown: None, made: None, up: false, asked, over, told, tell }));
+    HOSTED.with(|hosted| *hosted.borrow_mut() = Some(Hosted { host, at: RECT::default(), rounded: None, shown: None, made: None, up: false, asked, over, told, tell }));
     let _ = tell_host.send(Some(host.0 as isize));
     let mut msg = MSG::default();
     unsafe {
@@ -287,16 +286,18 @@ impl Hosted {
     }
 
     fn lay(&mut self, at: RECT, radius: i32) {
+        let (w, h) = (at.right - at.left, at.bottom - at.top);
         if at != self.at {
             self.at = at;
-            let (w, h) = (at.right - at.left, at.bottom - at.top);
             unsafe {
                 let _ = SetWindowPos(self.host, Some(HWND_TOPMOST), at.left, at.top, w, h, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-                round(self.host, w, h, radius);
                 if let Some(handler) = &self.shown {
                     let _ = handler.SetRect(&RECT { left: 0, top: 0, right: w, bottom: h });
                 }
             }
+        }
+        if self.rounded != Some((w, h, radius)) && unsafe { round(self.host, w, h, radius) } {
+            self.rounded = Some((w, h, radius));
         }
     }
 
@@ -416,8 +417,9 @@ unsafe fn initialize(handler: &IPreviewHandler, path: &Path) -> windows::core::R
 }
 
 /// `host` (`w` × `h` px) given corners `radius` px round: drawn smooth by the system where it rounds windows' corners
-/// (Windows 11: its own two radii, round and small, as a look's body has them), else cut by a region.
-unsafe fn round(host: HWND, w: i32, h: i32, radius: i32) {
+/// (Windows 11: its own two radii, round and small, as a look's body has them), else cut by a region. Whether it was
+/// (a region the system could not make or give it: not, see `gfx::give_region`).
+unsafe fn round(host: HWND, w: i32, h: i32, radius: i32) -> bool {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DWMWCP_ROUNDSMALL};
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(host) }.max(96) as f32 / 96.0;
     let corners = match radius as f32 / dpi {
@@ -430,10 +432,9 @@ unsafe fn round(host: HWND, w: i32, h: i32, radius: i32) {
         if set.is_ok() {
             let none = DWMWA_COLOR_NONE;
             let _ = DwmSetWindowAttribute(host, DWMWA_BORDER_COLOR, std::ptr::from_ref(&none).cast(), std::mem::size_of_val(&none) as u32);
-        } else {
-            // (The region the system's from here on: not to be let go of here.)
-            SetWindowRgn(host, Some(CreateRoundRectRgn(0, 0, w + 1, h + 1, 2 * radius, 2 * radius)), true);
+            return true;
         }
+        crate::ui::gfx::give_region(host, CreateRoundRectRgn(0, 0, w + 1, h + 1, 2 * radius, 2 * radius), true)
     }
 }
 

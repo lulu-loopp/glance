@@ -457,18 +457,17 @@ impl Overlay {
     }
 
     /// Its window shaped as its glass is, `width` × `height` with corners `radius` round (physical px): the pointer
-    /// is taken on the glass alone (past its rounded corners, a press went to it, not to what was under them).
+    /// is taken on the glass alone (past its rounded corners, a press went to it, not to what was under them). One not
+    /// given it is asked for again as it is next drawn (see `gfx::give_region`).
     fn shape(&mut self, width: i32, height: i32, radius: f32) {
         let shaped = (width, height, radius.round() as i32);
         if self.shaped == shaped {
             return;
         }
-        self.shaped = shaped;
-        unsafe {
-            // (A round rectangle's region leaves its right and bottom edges out: one more each way.)
-            let region = windows::Win32::Graphics::Gdi::CreateRoundRectRgn(0, 0, width + 1, height + 1, 2 * shaped.2, 2 * shaped.2);
-            // (The window owns the region from here.)
-            windows::Win32::Graphics::Gdi::SetWindowRgn(self.window.hwnd, Some(region), true);
+        // (A round rectangle's region leaves its right and bottom edges out: one more each way.)
+        let region = unsafe { windows::Win32::Graphics::Gdi::CreateRoundRectRgn(0, 0, width + 1, height + 1, 2 * shaped.2, 2 * shaped.2) };
+        if gfx::give_region(self.window.hwnd, region, true) {
+            self.shaped = shaped;
         }
     }
 

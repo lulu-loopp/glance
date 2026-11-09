@@ -28,7 +28,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn, ValidateRect};
+use windows::Win32::Graphics::Gdi::{CreateRectRgn, ValidateRect};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, SetCapture, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -384,9 +384,6 @@ unsafe fn make_window() -> Option<HWND> {
         let hwnd = CreateWindowExW(style, class, w!("Glance"), WS_POPUP, 0, 0, 1, 1, None, None, Some(module.into()), None).ok()?;
         let disabled = windows::core::BOOL::from(true);
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disabled as *const _ as *const _, size_of::<windows::core::BOOL>() as u32);
-        // Its clicks nowhere till its sheet is drawn (see `Looker::take_clicks`): its sheet not drawn as it opens, it
-        // would be its whole screen's, above all, showing nothing.
-        SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         Some(hwnd)
     }
 }
@@ -1089,8 +1086,9 @@ struct Looker {
     /// The buttons held as they were last looked at (see `watch`), and how many pictures had been made (see `thumbs`).
     held: bool,
     pictures: u64,
-    /// Where on its window it takes clicks now (px), as its sheet is drawn.
-    region: RECT,
+    /// Where on its window it takes clicks now (px), as its sheet is drawn: its region as it has it (None: none, one not
+    /// given it, so that it takes them all over).
+    region: Option<RECT>,
     /// The window a previewer shows in (made as one is first wanted), and whether one is being made for it.
     pane: Option<pane::Pane>,
     pane_making: bool,
@@ -1158,7 +1156,9 @@ impl Looker {
             told: None,
             held: false,
             pictures: 0,
-            region: RECT::default(),
+            // Its clicks nowhere till its sheet is drawn (see `take_clicks`): its sheet not drawn as it opens, it would
+            // be its whole screen's, above all, showing nothing.
+            region: gfx::give_region(hwnd, unsafe { CreateRectRgn(0, 0, 0, 0) }, false).then_some(RECT::default()),
             pane: None,
             pane_making: false,
             player: None,
@@ -1293,10 +1293,11 @@ impl Looker {
             let _ = KillTimer(Some(self.hwnd), FRAME);
             let _ = KillTimer(Some(self.hwnd), WATCH);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
-            // (Its clicks nowhere again till its sheet is next drawn: see `make_window`.)
-            SetWindowRgn(self.hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
         }
-        self.region = RECT::default();
+        // (Its clicks nowhere again till its sheet is next drawn: see `new`.)
+        if gfx::give_region(self.hwnd, unsafe { CreateRectRgn(0, 0, 0, 0) }, false) {
+            self.region = Some(RECT::default());
+        }
         crate::widget::own_window_changed(self.monitor);
         if let Some(pane) = &mut self.pane {
             pane.unload();
@@ -2197,7 +2198,8 @@ impl Looker {
     }
 
     /// Its clicks taken only where its sheet is drawn, `at` (DIPs), and the room for its shadow round that: elsewhere
-    /// they go to what is under it.
+    /// they go to what is under it. (A region not given it is asked for again as it is next drawn: see
+    /// `gfx::give_region`.)
     fn take_clicks(&mut self, at: Rect) {
         let s = self.scale;
         let region = RECT {
@@ -2206,14 +2208,11 @@ impl Looker {
             right: ((at.x + at.w + SHADOW) * s).ceil() as i32,
             bottom: ((at.y + at.h + SHADOW) * s).ceil() as i32,
         };
-        if region == self.region {
+        if self.region == Some(region) {
             return;
         }
-        self.region = region;
-        unsafe {
-            let shape = CreateRectRgn(region.left, region.top, region.right, region.bottom);
-            // (The region the system's from here on: not to be let go of here.)
-            SetWindowRgn(self.hwnd, Some(shape), false);
+        if gfx::give_region(self.hwnd, unsafe { CreateRectRgn(region.left, region.top, region.right, region.bottom) }, false) {
+            self.region = Some(region);
         }
     }
 

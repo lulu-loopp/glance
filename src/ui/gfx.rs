@@ -2720,6 +2720,22 @@ pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
     Some((made(want.0), made(want.1)))
 }
 
+/// `region`, made for `hwnd` (none where the system could not make it, out of room for GDI's objects), given to it as
+/// where it shows and takes the pointer, drawn again at once where `redraw`: whether it was. One not made is not given
+/// (given none, the window would show and take the pointer all over), and one not taken is let go of here, the window's
+/// region left as it was. One taken is the system's from then on.
+pub fn give_region(hwnd: HWND, region: windows::Win32::Graphics::Gdi::HRGN, redraw: bool) -> bool {
+    use windows::Win32::Graphics::Gdi::{DeleteObject, SetWindowRgn};
+    if region.is_invalid() {
+        return false;
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(region), redraw) } != 0 {
+        return true;
+    }
+    let _ = unsafe { DeleteObject(region.into()) };
+    false
+}
+
 /// Where a window larger than what it draws takes the pointer: only where it shows what it draws (its region kept to
 /// that). With the window's thread held up (in a driver's call, say) while the pointer is over what it draws, its
 /// clicks not let through past that meanwhile, the rest of its screen still takes them: a panel's window holds its
@@ -2727,7 +2743,7 @@ pub fn room(have: Option<(u32, u32)>, want: (u32, u32)) -> Option<(u32, u32)> {
 pub struct Footprint {
     hwnd: HWND,
     /// What of the window shows, as last committed (physical px in the window, None for nothing), and the window's
-    /// region as it was last set.
+    /// region as it has it (None: none, its first not given it, so that it takes the pointer over all of it).
     shows: Option<RECT>,
     region: Option<RECT>,
 }
@@ -2736,32 +2752,27 @@ impl Footprint {
     /// For `hwnd`, which takes the pointer nowhere from now till it shows something (see `take`).
     pub fn of(hwnd: HWND) -> Footprint {
         let nowhere = RECT::default();
-        unsafe {
-            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-            SetWindowRgn(hwnd, Some(CreateRectRgn(0, 0, 0, 0)), false);
-        }
-        Footprint { hwnd, shows: None, region: Some(nowhere) }
+        let given = give_region(hwnd, unsafe { windows::Win32::Graphics::Gdi::CreateRectRgn(0, 0, 0, 0) }, false);
+        Footprint { hwnd, shows: None, region: given.then_some(nowhere) }
     }
 
     /// The window is to show `showing` (physical px in it), committed next: what showed till now and that taken, till
     /// that alone shows (see `shown`). The region and what is drawn come to the compositor apart, either first: the
     /// region holds both meanwhile, so that neither is cut, and is made smaller only once the compositor has taken
     /// what was committed last (`settled` waits for it: done in all but a moment of its own held up, a frame having
-    /// passed since).
+    /// passed since). A region the window could not be given (see `give_region`) leaves it as it was, and is asked for
+    /// again with the next frame.
     pub fn take(&mut self, showing: RECT, settled: impl FnOnce() -> Result<()>) -> Result<()> {
         let wanted = self.shows.map_or(showing, |shown| bounds(shown, showing));
         if self.region == Some(wanted) {
             return Ok(());
         }
-        if self.shows.is_some() && self.region.is_some_and(|region| bounds(region, wanted) != wanted) {
+        if self.shows.is_some() && self.region.is_none_or(|region| bounds(region, wanted) != wanted) {
             settled()?;
         }
-        unsafe {
-            use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
-            // (The system's from here on: not to be let go of here.)
-            SetWindowRgn(self.hwnd, Some(CreateRectRgn(wanted.left, wanted.top, wanted.right, wanted.bottom)), false);
+        if give_region(self.hwnd, unsafe { windows::Win32::Graphics::Gdi::CreateRectRgn(wanted.left, wanted.top, wanted.right, wanted.bottom) }, false) {
+            self.region = Some(wanted);
         }
-        self.region = Some(wanted);
         Ok(())
     }
 
@@ -3699,6 +3710,28 @@ mod tests {
         assert!(!over(500, 400), "it takes the pointer where it showed, drawn smaller");
         drop(surface);
         drop(window);
+    }
+
+    /// A region not made (the system out of room for GDI's objects) is given no window, which keeps the one it has
+    /// (given none, it would take the pointer all over). A region a window does not take (here, as one gone takes
+    /// none) is not counted as its: what its footprint asks for is asked for again with the next frame.
+    #[test]
+    fn a_region_not_given_is_asked_for_again() {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::Graphics::Gdi::{GetWindowRgnBox, HRGN, NULLREGION};
+        let window = crate::ui::window::Window::new().expect("a window");
+        let footprint = super::Footprint::of(window.hwnd);
+        assert_eq!(footprint.region, Some(RECT::default()), "a window's first region, given it, not counted");
+        assert!(!super::give_region(window.hwnd, HRGN::default(), false), "a region not made counted as given");
+        let mut held = RECT::default();
+        assert_eq!(unsafe { GetWindowRgnBox(window.hwnd, &mut held) }, NULLREGION, "a region not made took the window's own away");
+        let gone = window.hwnd;
+        drop(window);
+        let mut footprint = super::Footprint::of(gone);
+        assert_eq!(footprint.region, None, "a region a window did not take counted as its");
+        let shows = RECT { left: 0, top: 0, right: 100, bottom: 100 };
+        footprint.take(shows, || Ok(())).expect("taken");
+        assert_eq!(footprint.region, None, "a region a window did not take counted as its, not asked for again");
     }
 
     /// A device drawn in software, among this thread's (see `on_screen`) and held by nothing else: what is left of it.

@@ -158,6 +158,28 @@ fn without(parts: &[RECT], cut: RECT) -> Vec<RECT> {
     left
 }
 
+/// A region of `parts` (screen px) in a window at `rect`: none where the system could not make it whole (out of room for
+/// GDI's objects).
+fn region_of(parts: &[RECT], rect: RECT) -> Option<windows::Win32::Graphics::Gdi::HRGN> {
+    use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_ERROR, RGN_OR};
+    let region = unsafe { CreateRectRgn(0, 0, 0, 0) };
+    if region.is_invalid() {
+        return None;
+    }
+    for part in parts {
+        let piece = unsafe { CreateRectRgn(part.left - rect.left, part.top - rect.top, part.right - rect.left, part.bottom - rect.top) };
+        let joined = !piece.is_invalid() && unsafe { CombineRgn(Some(region), Some(region), Some(piece), RGN_OR) } != RGN_ERROR;
+        if !piece.is_invalid() {
+            let _ = unsafe { DeleteObject(piece.into()) };
+        }
+        if !joined {
+            let _ = unsafe { DeleteObject(region.into()) };
+            return None;
+        }
+    }
+    Some(region)
+}
+
 unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe { DefWindowProcW(window, message, wparam, lparam) }
 }
@@ -212,17 +234,11 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         )
         .ok()?;
         let _ = SetLayeredWindowAttributes(window, COLORREF(0), 1, LWA_ALPHA);
-        // (Only its parts: the rest of it covered, passed through to what covers it.)
-        if parts != [rect] {
-            use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_OR};
-            let region = CreateRectRgn(0, 0, 0, 0);
-            for part in &parts {
-                let piece = CreateRectRgn(part.left - rect.left, part.top - rect.top, part.right - rect.left, part.bottom - rect.top);
-                let _ = CombineRgn(Some(region), Some(region), Some(piece), RGN_OR);
-                let _ = DeleteObject(piece.into());
-            }
-            // (The system holds the region from here.)
-            SetWindowRgn(window, Some(region), false);
+        // (Only its parts: the rest of it covered, passed through to what covers it. Where it cannot be cut to them, it
+        // is not up, and is made again as the drops wanted are next followed.)
+        if parts != [rect] && !region_of(&parts, rect).is_some_and(|region| crate::ui::gfx::give_region(window, region, false)) {
+            let _ = DestroyWindow(window);
+            return None;
         }
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
