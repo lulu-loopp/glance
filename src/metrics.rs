@@ -7,7 +7,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 
 use crate::dimm::Dimms;
-use crate::gpu_power::{self, GpuPower};
+use crate::gpu_libraries::{self, GpuLibraries};
+use crate::gpu_power;
 use crate::reading::{BatterySample, GameSample, GpuInfo, GpuSample, MemorySample, NetworkInfo, ProcessSample, Sample, StaticInfo, SystemSample, VolumeSample};
 use crate::sensors::CpuReader;
 use crate::mic::Microphone;
@@ -70,30 +71,6 @@ struct Adapter {
     device: Option<u32>,
     /// Whether it slept at the last sample (see `asleep`).
     asleep: bool,
-    /// How its maker's library gives its power, if it does: looked for as it is first seen awake (none: not yet).
-    power: Option<Option<gpu_power::Reader>>,
-}
-
-impl Adapter {
-    /// How its maker's library gives its power, where it has been looked for and does.
-    fn reader(&self) -> Option<gpu_power::Reader> {
-        self.power.flatten()
-    }
-
-    /// How its maker's library gives its power, looked for there (that library opened, if it is not yet), each step
-    /// of it taken only as `awake` says every card of its maker is just before it (none: not looked for yet, one
-    /// asleep, see `GpuPower::reader`). One whose place on the bus is not known is read by none.
-    fn looked_up(&self, libraries: &mut GpuPower, awake: &mut dyn FnMut() -> bool) -> Option<Option<gpu_power::Reader>> {
-        self.address.map_or(Some(None), |address| libraries.reader(self.vendor, address, awake))
-    }
-
-    /// How its power is read, for a report.
-    fn describe(&self) -> &'static str {
-        match self.power {
-            Some(reader) => reader.map_or("not available", gpu_power::Reader::describe),
-            None => "looked for once it and its maker's other cards are awake (one asleep)",
-        }
-    }
 }
 
 /// What is read less often than every sample (see `Sampler::sample`).
@@ -136,7 +113,15 @@ pub struct Sampler {
     /// The processor's base clock (MHz), as the registry says; none where it does not.
     base_mhz: Option<f64>,
     adapters: Vec<Adapter>,
-    gpu_power: GpuPower,
+    /// The GPU makers' libraries, on a thread of their own (none for a sampler of the meanwhile), what they read of
+    /// each adapter, as last taken (see `sample_gpus`), and what the adapters' looking up through them has come to.
+    libraries: Option<GpuLibraries>,
+    from_libraries: Vec<Option<gpu_libraries::Read>>,
+    gpus_found: gpu_libraries::Found,
+    /// What was found of the rest of the hardware, for a report (`info.found` is these, then `gpus_found`'s), and
+    /// whether `info.found` has changed since it was last told (see `found_anew`).
+    hardware_found: Vec<String>,
+    found_changed: bool,
     /// The totals at the last successful read of the interface table.
     net_prev: Option<(HashMap<u64, (u64, u64)>, Instant)>,
     /// Readers that need the driver; absent without it or without rights.
@@ -262,18 +247,18 @@ impl Sampler {
         processes.sample(1, None);
         timed.ended("processes");
 
-        let mut gpu_power = GpuPower::new();
-        let (mut adapters, gpus) = enumerate_gpus();
+        let (adapters, gpus) = enumerate_gpus();
         timed.ended("GPUs");
         let cpu_key = w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
         let mut found = Vec::new();
+        let cards = || adapters.iter().zip(&gpus).map(|(adapter, gpu)| gpu_libraries::Card::new(gpu.name.clone(), adapter.vendor, adapter.address, adapter.device)).collect::<Vec<_>>();
+        let gpus_found = gpu_libraries::found_before(&cards());
+        // Each GPU looked up through its maker's library, and read through it, on the libraries' own thread, from now:
+        // nothing here waits for it (see `gpu_libraries`).
+        let libraries = gpu_libraries_of(hardware, cards, GpuLibraries::start);
         // (Each none for a sampler of the meanwhile.)
         let (mut cpu_sensors, mut super_io, mut dimms, mut laptop_fans) = (None, None, None, None);
         if hardware {
-            // Each GPU looked up at once where it and every other of its maker's are awake (a desktop's all are), the
-            // rest once they are (see `sample_gpus`).
-            look_up_gpus(hardware, &mut adapters, &DeviceManager, |adapter, awake| adapter.looked_up(&mut gpu_power, awake));
-            timed.ended("GPU libraries");
             cpu_sensors = CpuReader::open();
             timed.ended("CPU sensors");
             let found_super_io = SuperIo::open(&reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardManufacturer")), &reg_string(w!(r"HARDWARE\DESCRIPTION\System\BIOS"), w!("BaseBoardProduct")));
@@ -291,17 +276,14 @@ impl Sampler {
             if let Some(failed) = crate::pawnio::last_failure() {
                 found.push(format!("PawnIO, the last that failed: {failed}"));
             }
-            found.extend(adapters.iter().zip(&gpus).map(|(adapter, gpu)| format!("GPU power, {}: {}", gpu.name, adapter.describe())));
-            // (Intel's graphics, found awake, are asked what they read only if they still are: the rest of the hardware
-            // has been looked at since.)
-            let awake = |at| adapters.iter().find(|adapter| adapter.address == Some(at)).is_some_and(|adapter| !DeviceManager.sleeps(adapter.device));
-            if let Some(intel) = gpu_power.describe_intel(awake) {
-                found.push(format!("Intel's graphics library: {}", if intel.is_empty() { "no graphics of Intel's".to_string() } else { intel }));
-            }
             (super_io, dimms, laptop_fans) = (Some(found_super_io), Some(found_dimms), Some(found_fans));
             timed.ended("descriptions");
         } else {
             found.push("Sensors: not looked at yet (the sensors' process looks at them as it starts)".to_string());
+        }
+        let hardware_found = found.clone();
+        if hardware {
+            found.extend(gpus_found.lines.iter().cloned());
         }
         let modules = crate::smbios::memory_modules();
         timed.ended("memory modules");
@@ -343,8 +325,12 @@ impl Sampler {
             processes,
             slow: Slow::default(),
             base_mhz: Some(reg_dword(cpu_key, w!("~MHz")) as f64).filter(|mhz| *mhz > 0.0),
+            from_libraries: Vec::new(),
             adapters,
-            gpu_power,
+            libraries,
+            gpus_found,
+            hardware_found,
+            found_changed: false,
             net_prev,
             cpu_sensors,
             graphics_power: None,
@@ -422,9 +408,9 @@ impl Sampler {
         self.playing = Some((program.clone(), start, now));
         let playing_s = now.duration_since(start).as_secs();
         let usage = self.processes.usage_of(pid);
-        let adapter = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().find(|a| a.luid == *luid));
-        // (Whether its card sleeps asked again: the rest of the sample has been read since its readings were.)
-        let gpu_limit = adapter.filter(|a| driver_asked(self.hardware, DeviceManager.sleeps(a.device))).and_then(Adapter::reader).and_then(|reader| self.gpu_power.limit(reader));
+        // What holds its card back, as its maker's library last read it (see `sample_gpus`), of a card awake.
+        let used = self.adapter_by_pid.get(&pid).and_then(|luid| self.adapters.iter().position(|a| a.luid == *luid));
+        let gpu_limit = used.filter(|at| !self.adapters[*at].asleep).and_then(|at| self.from_libraries.get(at).copied().flatten()).and_then(|read| read.limit);
         // Its memory on the card it uses most (or on every card, while it
         // uses none); unread where an instance of it is.
         let card = self.adapter_by_pid.get(&pid).copied();
@@ -523,7 +509,7 @@ impl Sampler {
         // (Read before the GPUs: Intel's graphics built into the CPU take their power from it.)
         let cpu_sensors = self.cpu_sensors.as_mut().map(CpuReader::read);
         self.graphics_power = cpu_sensors.as_ref().and_then(|sensors| sensors.graphics_power);
-        let gpus = self.sample_gpus(collected);
+        let gpus = self.sample_gpus(collected, interval);
 
         if refresh_slow {
             // A process's share of every processor there is now.
@@ -608,8 +594,10 @@ impl Sampler {
     /// cannot be read leaves its readings unread ("—"), and the others and
     /// what each driver gives (temperature, fan, clock, power) stand.
     /// Uncollected (`collected` false), the counters would only repeat their
-    /// last values, and all of theirs are unread.
-    fn sample_gpus(&mut self, collected: bool) -> Vec<GpuSample> {
+    /// last values, and all of theirs are unread. What the makers' libraries
+    /// give is what they last read, taken as it is (read on their own thread
+    /// as the sample before asked, samples `interval` apart), and asked again.
+    fn sample_gpus(&mut self, collected: bool, interval: Duration) -> Vec<GpuSample> {
         let engines = if collected { self.engine_use() } else { None };
         if engines.is_none() {
             // The processes kept from an earlier look no longer know theirs.
@@ -628,14 +616,20 @@ impl Sampler {
             Some(per_adapter)
         };
         let (dedicated, shared) = if collected { (memory(self.gpu_dedicated), memory(self.gpu_shared)) } else { (None, None) };
-        // For one not looked up yet, how its power is read looked for once it and its maker's other cards are all
-        // awake (it could not be while one slept, see `look_up_gpus`).
-        let gpu_power = &mut self.gpu_power;
-        for at in look_up_gpus(self.hardware, &mut self.adapters, &DeviceManager, |adapter, awake| adapter.looked_up(gpu_power, awake)) {
-            crate::journal::note(format!("GPU power, {}, looked for as it and its maker's other cards were awake: {}", self.info.gpus[at].name, self.adapters[at].describe()));
+        self.from_libraries = self.libraries.as_ref().and_then(|libraries| libraries.take(interval * FROM_LIBRARIES_FOR)).unwrap_or_default();
+        if let Some(libraries) = &self.libraries {
+            if let Some(found) = libraries.found() {
+                self.gpus_found = found;
+                self.info.found = self.hardware_found.iter().chain(&self.gpus_found.lines).cloned().collect();
+                self.found_changed = true;
+            }
+            if let Some(stuck) = libraries.stuck() {
+                crate::journal::note(stuck);
+            }
         }
+        let (from_libraries, integrated) = (&self.from_libraries, &self.gpus_found.integrated);
         // Whether each sleeps now, asked of each just before it is read (see `read_gpus`).
-        read_gpus(self.hardware, &mut self.adapters, &DeviceManager, |adapter, asked| {
+        read_gpus(self.hardware, &mut self.adapters, &DeviceManager, |at, adapter, asked| {
             // An adapter the counters list nothing for has nothing
             // running; one with an instance not read has no use known.
             let kinds: Option<Vec<(String, f32)>> = engines.as_ref().filter(|(_, unread)| !unread.contains(&adapter.luid)).map(|(engines, _)| {
@@ -665,8 +659,15 @@ impl Sampler {
                 power: None,
                 asleep: adapter.asleep,
             };
-            if asked { from_driver(&self.gpu_power, self.graphics_power, adapter, counted) } else { counted }
+            let libraries = from_libraries.get(at).copied().flatten();
+            if asked { from_driver(libraries, integrated.get(at).copied().unwrap_or(false), self.graphics_power, adapter, counted) } else { counted }
         })
+    }
+
+    /// What was found of the hardware, for a report, if it has changed since this was last asked (the GPUs' makers'
+    /// libraries are looked up apart from the first look at the hardware, and their cards' lines come later).
+    pub fn found_anew(&mut self) -> Option<Vec<String>> {
+        std::mem::take(&mut self.found_changed).then(|| self.info.found.clone())
     }
 
     /// Each engine's use (its kind, and percent), by adapter and engine,
@@ -721,13 +722,19 @@ impl Sampler {
     }
 }
 
-/// `gpu` with what the adapter's driver gives now: its temperature, fan, clock and power, the rest from its maker's
-/// `libraries` (Intel's graphics built into the CPU drawing what the CPU counts its graphics' plane drew, its
-/// `graphics_power`, where it counts it). (Asked only of an adapter awake: see `driver_asked`.)
-fn from_driver(libraries: &GpuPower, graphics_power: Option<f32>, adapter: &Adapter, gpu: GpuSample) -> GpuSample {
+/// What the makers' libraries last read is shown with the samples taken within this many samples' time of it: the one
+/// after it was asked for, and the one after that, should the libraries be slow to answer. Older, it is not shown as
+/// now (the libraries slow, or stuck: see `gpu_libraries`).
+const FROM_LIBRARIES_FOR: u32 = 2;
+
+/// `gpu` with what the adapter's driver gives now: its temperature, fan, clock and power, the rest from what its
+/// maker's library last read of it (`libraries`), Intel's graphics built into the CPU (`integrated`) drawing what the
+/// CPU counts its graphics' plane drew, its `graphics_power`, where it counts it. (Asked only of an adapter awake: see
+/// `driver_asked`.)
+fn from_driver(libraries: Option<gpu_libraries::Read>, integrated: bool, graphics_power: Option<f32>, adapter: &Adapter, gpu: GpuSample) -> GpuSample {
     let perf = adapter_perf(adapter.kmt_handle);
     // (What Windows does not have of it, its maker's library may: Intel's graphics', so.)
-    let more = adapter.reader().and_then(|reader| libraries.more(reader)).unwrap_or_default();
+    let more = libraries.map(|read| read.more).unwrap_or_default();
     GpuSample {
         temp: perf.and_then(|p| (p.Temperature != 0).then(|| p.Temperature as f32 / 10.0)).or(more.temp),
         hot_spot: more.hot_spot,
@@ -735,11 +742,7 @@ fn from_driver(libraries: &GpuPower, graphics_power: Option<f32>, adapter: &Adap
         clock_mhz: graphics_clock(adapter.kmt_handle).or(more.clock_mhz),
         // Intel's graphics built into the CPU: what the CPU counts its graphics' plane drew, where it counts it (its
         // library said, of older ones, what the whole CPU drew), else what the library says.
-        power: adapter
-            .reader()
-            .filter(|reader| libraries.intel_integrated(*reader))
-            .and(graphics_power)
-            .or_else(|| adapter.reader().and_then(|reader| libraries.read(reader))),
+        power: graphics_power.filter(|_| integrated).or_else(|| libraries.and_then(|read| read.power)),
         ..gpu
     }
 }
@@ -751,67 +754,49 @@ fn asleep(state: Option<DEVICE_POWER_STATE>) -> bool {
     state.is_some_and(|state| [PowerDeviceD1, PowerDeviceD2, PowerDeviceD3].contains(&state))
 }
 
-/// Whether an adapter's driver and its maker's library are asked for its readings (its temperature, clock, fan,
-/// power): only by a sampler of the `hardware`, and never of an adapter `asleep`. Asked, a GPU asleep may be woken
-/// to answer (NVML's finding one is, as NVIDIA documents), and asked every second it is kept from sleeping. Asleep,
-/// it has no readings but what Windows counts of it (its use, its memory), and is shown asleep.
+/// Whether an adapter's driver is asked for its readings (its temperature, clock, fan), as its maker's library is on
+/// its own thread (see `gpu_libraries`): only by a sampler of the `hardware`, and never of an adapter `asleep`. Asked,
+/// a GPU asleep may be woken to answer (NVML's finding one is, as NVIDIA documents), and asked every second it is kept
+/// from sleeping. Asleep, it has no readings but what Windows counts of it (its use, its memory), and is shown asleep.
 fn driver_asked(hardware: bool, asleep: bool) -> bool {
     hardware && !asleep
 }
 
-/// Each of `adapters` not looked up yet looked up through its maker's library by `reader` (see `Adapter::looked_up`),
-/// by a sampler of the `hardware`: once, and only while neither it nor any other card of its maker sleeps, as `power`
-/// says just before each step of it, its own state asked again first (the cards before it have been looked up since
-/// the last was asked, which may have taken long). Neither IGCL nor NVAPI has a way to find one card but asking each
-/// of its maker's what it is (IGCL, its properties) or where it sits (NVAPI, its bus and its slot) till it comes to
-/// the one asked for, and IGCL, NVAPI and ADL list every one as they are opened: one asleep, an Intel or an AMD
-/// laptop's discrete GPU beside graphics of the same maker's in its CPU, would be asked along with the one awake. Its
-/// maker's cards are those there now (see `PowerNow::makers_awake`), not only those found as the sampler was made.
-/// Returns those looked up, by their place in `adapters`.
-fn look_up_gpus(hardware: bool, adapters: &mut [Adapter], power: &impl PowerNow, mut reader: impl FnMut(&Adapter, &mut dyn FnMut() -> bool) -> Option<Option<gpu_power::Reader>>) -> Vec<usize> {
-    let mut looked = Vec::new();
-    for (at, adapter) in adapters.iter_mut().enumerate().filter(|(_, adapter)| hardware && adapter.power.is_none()) {
-        adapter.asleep = power.sleeps(adapter.device);
-        if adapter.asleep {
-            continue;
-        }
-        let vendor = adapter.vendor;
-        adapter.power = reader(adapter, &mut || power.makers_awake(vendor));
-        if adapter.power.is_some() {
-            looked.push(at);
-        }
-    }
-    looked
-}
-
-/// Each of `adapters` read by `read`, given whether its driver and its maker's library are asked (see
-/// `driver_asked`), whether it sleeps asked of `power` just before it is read: after those before it were, whose
-/// drivers and libraries may have held the sample a while, as may their looking up.
-fn read_gpus<T>(hardware: bool, adapters: &mut [Adapter], power: &impl PowerNow, mut read: impl FnMut(&Adapter, bool) -> T) -> Vec<T> {
+/// Each of `adapters` read by `read`, given its place among them and whether its driver is asked (see `driver_asked`),
+/// whether it sleeps asked of `power` just before it is read: after those before it were, whose drivers may have held
+/// the sample a while.
+fn read_gpus<T>(hardware: bool, adapters: &mut [Adapter], power: &impl PowerNow, mut read: impl FnMut(usize, &Adapter, bool) -> T) -> Vec<T> {
     adapters
         .iter_mut()
-        .map(|adapter| {
+        .enumerate()
+        .map(|(at, adapter)| {
             adapter.asleep = power.sleeps(adapter.device);
-            read(adapter, driver_asked(hardware, adapter.asleep))
+            read(at, adapter, driver_asked(hardware, adapter.asleep))
         })
         .collect()
 }
 
+/// The GPU makers' libraries for the adapters (`cards` makes what they work on), started by `start`, by a sampler of
+/// the `hardware` alone: a sampler of the meanwhile starts none, and calls into none (see `Sampler::meanwhile`).
+fn gpu_libraries_of<T>(hardware: bool, cards: impl FnOnce() -> Vec<gpu_libraries::Card>, start: impl FnOnce(Vec<gpu_libraries::Card>) -> T) -> Option<T> {
+    hardware.then(|| start(cards()))
+}
+
 /// What Windows' device manager says of the GPUs' power now, asked just before anything is asked of one: of
 /// `DeviceManager`, or what stands for it in a test.
-trait PowerNow {
+pub(crate) trait PowerNow {
     /// Whether the device `device` (none: not found) sleeps now (see `asleep`).
     fn sleeps(&self, device: Option<u32>) -> bool;
 
     /// Whether every card of the maker `vendor` (its PCI vendor id) there is now is awake, as its maker's library
     /// would find it (see `sleeps_for_its_library`): all those its library may list and ask as it is opened or as it
-    /// looks for another (see `look_up_gpus`), one come since the sampler was made (a dock's) and one Windows'
+    /// looks for another (see `gpu_libraries`), one come since the sampler was made (a dock's) and one Windows'
     /// graphics list no adapter of (a compute card's) among them.
     fn makers_awake(&self, vendor: u32) -> bool;
 }
 
 /// Windows' device manager, which keeps each device's power state (see `power_state`).
-struct DeviceManager;
+pub(crate) struct DeviceManager;
 
 impl PowerNow for DeviceManager {
     fn sleeps(&self, device: Option<u32>) -> bool {
@@ -1534,7 +1519,7 @@ fn enumerate_gpus() -> (Vec<Adapter>, Vec<GpuInfo>) {
         let address = adapter_address(open.hAdapter);
         let identity = format!("{:04X}:{:04X}:{:08X}:{:02X}", desc.VendorId, desc.DeviceId, desc.SubSysId, desc.Revision)
             + &address.map_or(String::new(), |(bus, device, function)| format!("@{bus}.{device}.{function}"));
-        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, vendor: desc.VendorId, address, device: devices.get(&(LowPart, HighPart)).copied(), asleep: false, power: None });
+        adapters.push(Adapter { luid: (LowPart, HighPart), kmt_handle: open.hAdapter, vendor: desc.VendorId, address, device: devices.get(&(LowPart, HighPart)).copied(), asleep: false });
         let name_len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
         infos.push(GpuInfo {
             slot,
@@ -1944,120 +1929,19 @@ mod tests {
         assert!(!driver_asked(false, false));
     }
 
-    const INTEL: u32 = 0x8086;
-    const NVIDIA: u32 = 0x10DE;
-    const AMD: u32 = 0x1002;
-
-    /// A machine's GPUs as its device manager tells them, for a test: each card there, by its maker and its device,
-    /// and those of them asleep, put to sleep and woken as the test goes.
-    struct Machine {
-        cards: Vec<(u32, u32)>,
-        sleeping: std::cell::RefCell<HashSet<u32>>,
-    }
-
-    impl Machine {
-        fn new(cards: &[(u32, u32)], sleeping: &[u32]) -> Self {
-            Machine { cards: cards.to_vec(), sleeping: std::cell::RefCell::new(sleeping.iter().copied().collect()) }
-        }
-
-        fn sleep(&self, device: u32) {
-            self.sleeping.borrow_mut().insert(device);
-        }
-
-        fn wake(&self, device: u32) {
-            self.sleeping.borrow_mut().remove(&device);
-        }
-    }
-
-    impl PowerNow for Machine {
-        fn sleeps(&self, device: Option<u32>) -> bool {
-            device.is_some_and(|device| self.sleeping.borrow().contains(&device))
-        }
-
-        fn makers_awake(&self, vendor: u32) -> bool {
-            self.cards.iter().filter(|(maker, _)| *maker == vendor).all(|(_, device)| !self.sleeping.borrow().contains(device))
-        }
-    }
+    use crate::gpu_libraries::tests::{Machine, AMD, INTEL, NVIDIA};
 
     /// The adapter of the maker `vendor` whose device is `device`, as the sampler found it.
     fn card(vendor: u32, device: u32) -> Adapter {
-        Adapter { luid: (device, 0), kmt_handle: 0, vendor, address: Some((device, 0, 0)), device: Some(device), asleep: false, power: None }
+        Adapter { luid: (device, 0), kmt_handle: 0, vendor, address: Some((device, 0, 0)), device: Some(device), asleep: false }
     }
 
-    /// `adapters` looked up on `machine` (see `look_up_gpus`), each through a library standing in for its maker's,
-    /// which takes its step only as it is told its maker's cards are awake, as `GpuPower::reader` does, and does
-    /// `meanwhile` as it does (what goes to sleep as it takes its time). The devices of those its library was asked of,
-    /// in order.
-    fn looked_up(hardware: bool, adapters: &mut [Adapter], machine: &Machine, meanwhile: impl Fn(&Adapter)) -> Vec<u32> {
-        let mut asked = Vec::new();
-        look_up_gpus(hardware, adapters, machine, |adapter, awake| {
-            if !awake() {
-                return None;
-            }
-            asked.push(adapter.device.unwrap());
-            meanwhile(adapter);
-            Some(Some(gpu_power::Reader::Intel(0)))
-        });
-        asked
-    }
-
-    /// A GPU awake is looked up through its maker's library only while every other card of that maker is awake too:
-    /// an Intel laptop's graphics in its CPU not while its Arc card sleeps (IGCL would ask the sleeping card what it
-    /// is as it looked for the other), an AMD's likewise, a second NVIDIA card's not while the first sleeps (NVAPI would
-    /// ask where it sits). Another maker's card asleep stands in the way of none, and one looked up already is not
-    /// looked up again. All awake, each is, and a sampler of the meanwhile looks up none.
+    /// A sampler of the meanwhile starts no GPU maker's library (nor makes the cards they would work on), a sampler of
+    /// the hardware starts them.
     #[test]
-    fn no_card_asleep_is_asked_as_another_is_looked_up() {
-        let intel_laptop = Machine::new(&[(INTEL, 1), (INTEL, 2)], &[2]);
-        let mut adapters = [card(INTEL, 1), card(INTEL, 2)];
-        assert!(looked_up(true, &mut adapters, &intel_laptop, |_| {}).is_empty());
-        assert!(adapters.iter().all(|adapter| adapter.power.is_none()) && adapters[1].asleep);
-        let amd_laptop = Machine::new(&[(AMD, 1), (AMD, 2)], &[2]);
-        assert!(looked_up(true, &mut [card(AMD, 1), card(AMD, 2)], &amd_laptop, |_| {}).is_empty());
-        let two_nvidia = Machine::new(&[(NVIDIA, 1), (NVIDIA, 2)], &[1]);
-        assert!(looked_up(true, &mut [card(NVIDIA, 1), card(NVIDIA, 2)], &two_nvidia, |_| {}).is_empty());
-        // Graphics of Intel's in the CPU, beside an NVIDIA card asleep.
-        let hybrid = Machine::new(&[(INTEL, 1), (NVIDIA, 2)], &[2]);
-        let mut adapters = [card(INTEL, 1), card(NVIDIA, 2)];
-        assert_eq!(looked_up(true, &mut adapters, &hybrid, |_| {}), [1]);
-        assert!(adapters[1].power.is_none());
-        // The Arc card woken, both of the Intel laptop's are looked up, once.
-        intel_laptop.wake(2);
-        let mut adapters = [card(INTEL, 1), card(INTEL, 2)];
-        assert!(looked_up(false, &mut adapters, &intel_laptop, |_| {}).is_empty());
-        assert_eq!(looked_up(true, &mut adapters, &intel_laptop, |_| {}), [1, 2]);
-        assert!(looked_up(true, &mut adapters, &intel_laptop, |_| {}).is_empty());
-    }
-
-    /// Whether a card sleeps is asked just before it is looked up, after the cards before it were, as are its maker's
-    /// other cards: an Intel and NVIDIA laptop's NVIDIA card gone to sleep while Intel's library was opened and asked
-    /// is not looked up (NVML's finding it would start it up), nor an NVIDIA card awake while another of NVIDIA's went
-    /// to sleep meanwhile (NVAPI would ask the sleeping one where it sits). Once awake, each is.
-    #[test]
-    fn a_card_gone_to_sleep_while_another_was_looked_up_is_not_asked() {
-        let laptop = Machine::new(&[(INTEL, 1), (NVIDIA, 2)], &[]);
-        let mut adapters = [card(INTEL, 1), card(NVIDIA, 2)];
-        assert_eq!(looked_up(true, &mut adapters, &laptop, |_| laptop.sleep(2)), [1]);
-        assert!(adapters[1].power.is_none() && adapters[1].asleep);
-        laptop.wake(2);
-        assert_eq!(looked_up(true, &mut adapters, &laptop, |_| {}), [2]);
-        let two_nvidia = Machine::new(&[(INTEL, 1), (NVIDIA, 2), (NVIDIA, 3)], &[]);
-        let mut adapters = [card(INTEL, 1), card(NVIDIA, 2), card(NVIDIA, 3)];
-        assert_eq!(looked_up(true, &mut adapters, &two_nvidia, |adapter| if adapter.vendor == INTEL { two_nvidia.sleep(3) }), [1]);
-        assert!(adapters[1].power.is_none() && !adapters[1].asleep && adapters[2].power.is_none());
-    }
-
-    /// A card's maker's cards are those there now, not only those the sampler found as it was made: an NVIDIA card
-    /// come since (a dock's), or one Windows' graphics list no adapter of, asleep, holds back the NVIDIA card the
-    /// sampler has, which NVAPI would find only by asking it where it sits. Once it is awake, the card is looked up.
-    #[test]
-    fn a_card_come_since_holds_back_its_makers() {
-        let docked = Machine::new(&[(NVIDIA, 2), (NVIDIA, 3)], &[3]);
-        let mut adapters = [card(NVIDIA, 2)];
-        assert!(looked_up(true, &mut adapters, &docked, |_| {}).is_empty());
-        assert!(adapters[0].power.is_none() && !adapters[0].asleep);
-        docked.wake(3);
-        assert_eq!(looked_up(true, &mut adapters, &docked, |_| {}), [2]);
+    fn the_meanwhile_starts_no_gpu_library() {
+        assert!(gpu_libraries_of(false, || -> Vec<gpu_libraries::Card> { panic!("the cards made") }, |_| -> usize { panic!("a library started") }).is_none());
+        assert_eq!(gpu_libraries_of(true, || vec![gpu_libraries::Card::new("card".into(), NVIDIA, None, None)], |cards| cards.len()), Some(1));
     }
 
     /// Whether a card sleeps is asked just before it is read, after the cards before it were: an NVIDIA card gone to
@@ -2067,7 +1951,7 @@ mod tests {
     fn a_card_gone_to_sleep_while_another_was_read_is_not_asked() {
         let laptop = Machine::new(&[(INTEL, 1), (NVIDIA, 2)], &[]);
         let mut adapters = [card(INTEL, 1), card(NVIDIA, 2)];
-        let asked = read_gpus(true, &mut adapters, &laptop, |adapter, asked| {
+        let asked = read_gpus(true, &mut adapters, &laptop, |_, adapter, asked| {
             if adapter.vendor == INTEL {
                 laptop.sleep(2);
             }
@@ -2075,7 +1959,7 @@ mod tests {
         });
         assert_eq!(asked, [true, false]);
         assert!(!adapters[0].asleep && adapters[1].asleep);
-        assert_eq!(read_gpus(false, &mut adapters, &laptop, |_, asked| asked), [false, false]);
+        assert_eq!(read_gpus(false, &mut adapters, &laptop, |_, _, asked| asked), [false, false]);
         assert!(adapters[1].asleep);
     }
 
@@ -2122,20 +2006,28 @@ mod tests {
         }
     }
 
-    /// What this PC's GPUs awake read, through their drivers and their makers' libraries:
-    /// `cargo test --lib -- --ignored reads_this_machines_gpus --nocapture`.
+    /// What this PC's GPUs awake read through their makers' libraries, on the libraries' own thread, and what their
+    /// looking up came to: `cargo test --lib -- --ignored reads_this_machines_gpus --nocapture`.
     #[test]
-    #[ignore = "asks this PC's GPU drivers and their makers' libraries"]
+    #[ignore = "asks this PC's GPU makers' libraries"]
     fn reads_this_machines_gpus() {
-        let (mut adapters, gpus) = enumerate_gpus();
-        let mut libraries = GpuPower::new();
-        look_up_gpus(true, &mut adapters, &DeviceManager, |adapter, awake| adapter.looked_up(&mut libraries, awake));
-        let mut names = gpus.iter().map(|gpu| &gpu.name);
-        read_gpus(true, &mut adapters, &DeviceManager, |adapter, asked| {
-            let name = names.next().unwrap();
-            let reader = adapter.reader().filter(|_| asked);
-            println!("{name}: {}, {:?} W, {:?}, held back by {:?}", if asked { adapter.describe() } else { "asleep" }, reader.and_then(|r| libraries.read(r)), reader.and_then(|r| libraries.more(r)), reader.and_then(|r| libraries.limit(r)));
-        });
+        let (adapters, gpus) = enumerate_gpus();
+        let libraries = GpuLibraries::start(adapters.iter().zip(&gpus).map(|(adapter, gpu)| gpu_libraries::Card::new(gpu.name.clone(), adapter.vendor, adapter.address, adapter.device)).collect());
+        let began = Instant::now();
+        let found = loop {
+            if let Some(found) = libraries.found() {
+                break found;
+            }
+            assert!(began.elapsed() < Duration::from_secs(60), "the GPUs looked up");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        println!("looked up in {} ms:\n{}", began.elapsed().as_millis(), found.lines.join("\n"));
+        // (A reading asked, and taken once it is read.)
+        let _ = libraries.take(Duration::ZERO);
+        std::thread::sleep(Duration::from_secs(1));
+        for (gpu, read) in gpus.iter().zip(libraries.take(Duration::from_secs(60)).unwrap_or_default()) {
+            println!("{}: {read:?}", gpu.name);
+        }
     }
 
     #[test]

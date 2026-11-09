@@ -467,6 +467,7 @@ impl Source {
                         Some(Told::Buttons { down, pressed }) => crate::panel::heard_buttons(down, pressed),
                         Some(Told::Activity { touched, nothing }) => crate::touches::heard(touched, nothing),
                         Some(Told::Hello { .. }) => {}
+                        Some(Told::Found(found)) => *FOUND.lock().unwrap() = Some(found),
                         None => {
                             LINKED.store(false, Ordering::Relaxed);
                             *ASKING.lock().unwrap() = None;
@@ -535,7 +536,12 @@ impl Source {
                 }
                 std::thread::sleep(next.saturating_duration_since(now));
                 *tick += 1;
-                sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker, interval).map(as_first)
+                let sample = sampler.sample(want.refresh_slow || *tick % crate::HIDDEN_SLOW_TICKS == 0, want.wsl, want.docker, interval);
+                // (What its GPUs' looking up came to, once it is known: see `Sampler::found_anew`.)
+                if let Some(found) = sampler.found_anew() {
+                    *FOUND.lock().unwrap() = Some(found);
+                }
+                sample.map(as_first)
             }
         }
     }

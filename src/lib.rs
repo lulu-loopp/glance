@@ -27,6 +27,8 @@ mod drives;
 #[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
+mod gpu_libraries;
+#[cfg(windows)]
 mod gpu_power;
 #[cfg(windows)]
 mod hang;

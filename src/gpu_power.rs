@@ -60,16 +60,14 @@ impl Reader {
 }
 
 /// The vendors' libraries: each none till a card of its maker is first looked up (see `reader`), then whether the
-/// machine has it.
+/// machine has it. Made, used and dropped on the libraries' own thread alone (see `gpu_libraries`): their handles are
+/// not to be sent to another.
 pub struct GpuPower {
     nvml: Option<Option<Nvml>>,
     nvapi: Option<Option<Nvapi>>,
     adl: Option<Option<Adl>>,
     igcl: Option<Option<Igcl>>,
 }
-
-// The libraries' handles are used from one thread at a time (the sampler's).
-unsafe impl Send for GpuPower {}
 
 /// The makers' PCI vendor ids (Intel's is `INTEL_VENDOR`).
 const NVIDIA_VENDOR: u32 = 0x10DE;

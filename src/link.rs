@@ -31,6 +31,9 @@ use crate::reading::{Sample, StaticInfo};
 pub enum Told {
     /// As they start: their version, what the machine is, and what they found to read it with (for a report).
     Hello { version: String, info: StaticInfo, found: Vec<String> },
+    /// What they found to read the machine with, as it changes after hello (the GPUs' makers' libraries are looked up
+    /// apart from their first look at the hardware, and what came of it is told once it is known).
+    Found(Vec<String>),
     /// What they read, each time they read.
     Sample(Box<Sample>),
     /// The games presenting frames, as they are seen now, and whether a game shows (as set by hand, or as it

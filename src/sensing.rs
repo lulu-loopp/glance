@@ -21,15 +21,16 @@ const WAITED_FOR: Duration = Duration::from_secs(20);
 const HELLO_WITHIN: Duration = Duration::from_secs(5);
 /// How long a reading may take before the sensors are taken to be stuck (a driver, a device, a system call that
 /// does not come back): they end, and the rest of Glance starts them again.
-const STUCK_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(30);
 /// How long the first look at the hardware may take before they are: it opens every device and asks each what it is,
 /// and just after signing in, or an update, it does so on a machine with much else to do. The rest of Glance reads what
 /// it can itself while it waits on this (see `source`).
 pub const FIRST_LOOK_WITHIN: Duration = Duration::from_secs(120);
 /// What is done as the sensors start that the rest of Glance need not wait for, if it takes longer than this, is noted.
 const NOTED_AFTER: Duration = Duration::from_secs(5);
-/// A part of the first look at the hardware that took less than this is counted in its note, not named: of its 16
-/// parts, those so left out take under 2 s together of the 5 s it is noted after.
+/// A part of the first look at the hardware that took less than this is counted in its note, not named: of its 14
+/// parts, those so left out take under 2 s together of the 5 s it is noted after. (The GPUs' makers' libraries are no
+/// part of it: they are looked up on a thread of their own, which notes its own time, see `gpu_libraries`.)
 const PART_NAMED_FROM: Duration = Duration::from_millis(100);
 
 /// Whether this account's tasks are in order yet (see `keep_tasks`).
@@ -226,6 +227,11 @@ pub fn run() {
                     break;
                 }
             }
+            if let Some(found) = sampler.found_anew() {
+                if !tell(&Told::Found(found)) {
+                    break;
+                }
+            }
         }
         // Gone: the pipes let go (which ends the listener's reading), for the rest to come again; no edge watched
         // till it says again which.
@@ -252,7 +258,7 @@ static READING_SINCE: Mutex<Option<(Duration, Duration)>> = Mutex::new(None);
 /// How long the system has run awake: the time it slept left out (a reading under way as it went to sleep has not
 /// been taking all that while; counted by the clock, every one was taken for stuck as the PC woke, the sensors
 /// ended, and its CPU's readings lost).
-fn awake() -> Duration {
+pub(crate) fn awake() -> Duration {
     let mut unbiased = 0u64;
     let _ = unsafe { windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut unbiased) };
     Duration::from_nanos(unbiased * 100)
