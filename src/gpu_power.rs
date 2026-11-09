@@ -10,10 +10,12 @@
 //! Glance may run elevated, so the libraries are loaded from System32 only,
 //! where the drivers put them and no ordinary program can.
 //!
-//! A library is opened, and a card found through it, only once a card of its
-//! maker is awake (see `GpuPower::reader`): a laptop's discrete GPU sleeps
+//! A library is opened, and a card found through it, only once every card of
+//! its maker is awake (see `GpuPower::reader`): a laptop's discrete GPU sleeps
 //! while nothing draws on it, and finding it through its maker's library
-//! starts it up (NVML's finding a card does, as NVIDIA documents).
+//! starts it up (NVML's finding a card does, as NVIDIA documents), as asking
+//! it what it is or where it sits may, which IGCL and NVAPI do of each card
+//! as they look for another.
 
 use std::ffi::c_void;
 
@@ -101,7 +103,8 @@ impl GpuPower {
 
     /// How to read the discrete card made by `vendor` (its PCI vendor id) at `address`, if its maker's library says:
     /// that library opened first, if it is not yet, and the card found through it by where it sits (no other card
-    /// is found meanwhile). Asked only of a card awake (see the module's note).
+    /// is found meanwhile, though IGCL's and NVAPI's looking asks the others what they are or where they sit). Asked
+    /// only while every card of its maker is awake (see the module's note, and `metrics::looked_up_now`).
     pub fn reader(&mut self, vendor: u32, address: PciAddress) -> Option<Reader> {
         match vendor {
             NVIDIA_VENDOR => {
