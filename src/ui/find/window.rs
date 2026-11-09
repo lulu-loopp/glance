@@ -546,7 +546,8 @@ impl Finder {
     /// Shown, in front, where it is hidden, once its window takes the pointer only where its sheet is drawn (`held`, see
     /// `gfx::Footprint::holds`). Its window is as tall as its tallest sheet: shown before, its region not given it (the
     /// system out of room for GDI's objects), it took the clicks under a short sheet, showing nothing there. Till then
-    /// it is drawn as ever, hidden, its region asked for again each time (as its caret blinks, at the least).
+    /// it is drawn as ever, hidden, its region asked for again each time, with each look it takes at the least (see
+    /// `watch`).
     fn appear(&mut self, held: bool) {
         if !held || self.visible() {
             return;
@@ -1658,15 +1659,17 @@ impl Finder {
         RECT { left, top, right: left + px(WIDTH), bottom: top + px(self.height) }
     }
 
-    /// A look at what may have changed while it shows: a picture made for a row, the index grown or done, a word in
-    /// the foot gone.
+    /// A look at what may have changed while it is up: a picture made for a row, the index grown or done, a word in
+    /// the foot gone, and, while it is not yet shown, the region it is to be shown with (see `appear`), asked for again
+    /// each time: its caret's timer, which drew it, never comes where the caret is set not to blink, and a search
+    /// hidden as it opened, its region not given it, stayed so once the system could give it one.
     fn watch(&mut self) {
         let pictures = crate::station::thumbs::changes();
         let changed = self.waiting && pictures != self.pictures;
         self.pictures = pictures;
         let building = crate::search::standing().iter().any(|standing| !standing.ready);
         let told = self.told.as_ref().is_some_and(|(_, at)| at.elapsed() >= TOLD_FOR && at.elapsed() < TOLD_FOR + std::time::Duration::from_millis(WATCH_EVERY as u64 * 2));
-        if changed || building || told {
+        if changed || building || told || !self.visible() {
             self.draw();
         }
     }
@@ -2116,6 +2119,38 @@ mod tests {
         drop(finder);
         drop(made);
         assert_eq!(held, (false, false, false), "the search closed took up its device, what it draws on and its showing again");
+    }
+
+    /// The search up and not yet shown, its region not given it (here, as a window gone takes none), is drawn again as
+    /// it next watches, asking for its region again: drawn only as its caret blinked, it stayed hidden where the caret
+    /// is set not to blink, open all the while, once the system could give it one. (Never shown here: shown, it would
+    /// come to the front, taking it from whatever has it as the tests run.)
+    #[test]
+    fn the_search_not_yet_shown_asks_for_its_region_again() {
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        /// The window gone as the test ends, failed or not.
+        struct Made(HWND);
+        impl Drop for Made {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let made = Made(unsafe { make_window() }.expect("a window"));
+        let gone = Made(unsafe { make_window() }.expect("a window"));
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let mut finder = Finder::new(made.0, asks);
+        (finder.skin, finder.scale, finder.room) = (Skin::Paper, 1.0, 20.0);
+        finder.rect = RECT { left: -20000, top: -20000, right: -20000 + (WIDTH + 40.0) as i32, bottom: -19300 };
+        finder.footprint = gfx::Footprint::of(gone.0);
+        drop(gone);
+        finder.up = true;
+        finder.watch();
+        let (drawn, shown) = (finder.drawn.is_some(), finder.visible());
+        drop(finder);
+        drop(made);
+        assert!(drawn, "the search not yet shown not drawn again as it watched");
+        assert!(!shown, "the search shown while its region was not given it");
     }
 
     /// The drives are named as Windows writes them, each with its one colon, in both languages: the English foot put a

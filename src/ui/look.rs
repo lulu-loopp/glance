@@ -2233,7 +2233,7 @@ impl Looker {
     /// Its window shown, where it is hidden, once it takes clicks only where its sheet is drawn, at `at` (DIPs: see
     /// `take_clicks`). Its window is its whole screen's, above all: shown before, its region not given it (the system
     /// out of room for GDI's objects), it took every click on that screen, showing nothing there. Till then it is drawn
-    /// as ever, hidden, its region asked for again each time.
+    /// as ever, hidden, its region asked for again each time, at rest too (see `watch`).
     fn appear(&self, at: Rect) {
         if self.region != Some(self.clicks_at(at)) || unsafe { IsWindowVisible(self.hwnd) }.as_bool() {
             return;
@@ -3417,7 +3417,10 @@ impl Looker {
     // ----- Watching -----
 
     /// A look at what may have changed: a button pressed anywhere but on it and what called it up (it goes), what
-    /// called it up gone (so it does), a picture made for what it shows, a word on a button gone.
+    /// called it up gone (so it does), a picture made for what it shows, a word on a button gone, and, while it is up
+    /// and not yet shown, the region it is to be shown with (see `appear`), asked for again each time: its frame timer
+    /// stops once it rests, and a look resting hidden, its region not given it as it opened, stayed so once the system
+    /// could give it one.
     fn watch(&mut self) {
         if !self.up() || matches!(self.motion, Motion::Closing { .. }) {
             return;
@@ -3441,7 +3444,8 @@ impl Looker {
         self.held = held;
         let pictures = crate::station::thumbs::changes();
         let told = self.told.is_some_and(|(_, at)| at.elapsed() >= TOLD_FOR);
-        if pictures != self.pictures || told {
+        let unshown = !unsafe { IsWindowVisible(self.hwnd) }.as_bool();
+        if pictures != self.pictures || told || unshown {
             self.pictures = pictures;
             if told {
                 self.told = None;
@@ -4177,5 +4181,47 @@ mod tests {
         assert!(!shown_without, "shown while it would take clicks all over its screen");
         assert!(shown, "not shown once it takes clicks only where its sheet is");
         assert!(!off_sheet, "it takes the pointer off its sheet");
+    }
+
+    /// A look up and resting hidden, its region not given it as it opened (its frame timer stopped as it came to rest,
+    /// what it shows still), asks for its region again as it next watches, and shows once it is given it: it stayed
+    /// hidden till something else drew it, open all the while. (Off every screen, as what called it up is.)
+    #[test]
+    fn a_look_resting_hidden_asks_for_its_region_again() {
+        use windows::Win32::Graphics::Gdi::SetWindowRgn;
+        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+        /// The window gone as the test ends, failed or not: never left on the screen.
+        struct Made(HWND);
+        impl Drop for Made {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let _device = gfx::held().unwrap();
+        let away = RECT { left: -20000, top: -20000, right: -19000, bottom: -19300 };
+        let owner = crate::ui::window::Window::new().expect("a window");
+        owner.place(RECT { left: -20000, top: -20000, right: -19900, bottom: -19900 });
+        owner.show();
+        let made = Made(unsafe { make_window() }.expect("a window"));
+        let hwnd = made.0;
+        let (reads, _read) = std::sync::mpsc::channel();
+        let mut looker = Looker::new(hwnd, reads);
+        looker.items = vec![Item { key: 1, title: "words".into(), about: String::new(), shows: Shows::Words("words".into()), from: None, open: None, copy: None, pastes: false }];
+        (looker.read, looker.measured, looker.asked) = (vec![None], vec![None], vec![false]);
+        (looker.monitor, looker.work, looker.scale, looker.skin, looker.owner) = (away, away, 1.0, Skin::Paper, owner.hwnd.0 as isize);
+        looker.held = buttons_held();
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), away.left, away.top, away.right - away.left, away.bottom - away.top, SWP_NOACTIVATE);
+            SetWindowRgn(hwnd, None, false);
+        }
+        looker.region = None;
+        looker.watch();
+        let shown = unsafe { IsWindowVisible(hwnd) }.as_bool();
+        let region = looker.region;
+        drop(looker);
+        drop(made);
+        drop(owner);
+        assert!(region.is_some_and(|region| region != RECT::default()), "its region not asked for again");
+        assert!(shown, "a look resting hidden not shown once its region could be given");
     }
 }
