@@ -135,6 +135,13 @@ pub struct Changes {
     pub to_list: Vec<(u32, u64)>,
 }
 
+/// A folder being listed again, its names put in part by part (see `Index::relisting`): its entries as the round
+/// began not yet found among them, by their names.
+pub struct Relisting {
+    folder: u32,
+    by_name: HashMap<OsString, u32>,
+}
+
 /// The index as it was last kept, where it lies (see `store`): read in place, never copied. Each part's place in it
 /// (in bytes from its start), and how many it holds.
 struct Base {
@@ -511,9 +518,24 @@ impl Index {
 
     /// `folder` as it is listed now, against `before`, its entries when the round began: names gone marked dead
     /// (a folder only once the round is finished, as it may have moved), new ones added, folders found that are to
-    /// be listed noted in `changes` (and marked so till they are).
+    /// be listed noted in `changes` (and marked so till they are). (All its names at once: see `relisting` for them
+    /// part by part.)
     pub fn list(&mut self, folder: u32, items: &[Item], before: &[u32], changes: &mut Changes) {
-        let mut by_name: HashMap<OsString, u32> = before.iter().filter(|&&place| self.entry(place).alive()).map(|&place| (self.name(place).into_owned(), place)).collect();
+        let mut relisting = self.relisting(folder, before);
+        self.list_part(&mut relisting, items, changes);
+        self.listed(relisting, changes);
+    }
+
+    /// `folder` begun to be listed again, against `before` (see `list`), its names put in part by part as they are
+    /// listed (`list_part`), and those it had not found marked gone once all are (`listed`).
+    pub fn relisting(&self, folder: u32, before: &[u32]) -> Relisting {
+        let by_name = before.iter().filter(|&&place| self.entry(place).alive()).map(|&place| (self.name(place).into_owned(), place)).collect();
+        Relisting { folder, by_name }
+    }
+
+    /// A part of the names of a folder being listed again put in (see `list`).
+    pub fn list_part(&mut self, relisting: &mut Relisting, items: &[Item], changes: &mut Changes) {
+        let (folder, by_name) = (relisting.folder, &mut relisting.by_name);
         for item in items {
             let name = OsString::from_wide(&item.name);
             let flags = item.flags();
@@ -562,7 +584,12 @@ impl Index {
                 }
             }
         }
-        for (_, place) in by_name {
+    }
+
+    /// A folder being listed again listed whole: the entries it held that it was not found to hold marked gone (see
+    /// `list`).
+    pub fn listed(&mut self, relisting: Relisting, changes: &mut Changes) {
+        for (_, place) in relisting.by_name {
             if self.entry(place).folder() {
                 changes.missing.push(place);
             } else {

@@ -15,7 +15,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE, CM_NOTIFY_ACTION_DEVICEREMOVEPENDING, CM_NOTIFY_EVENT_DATA, CM_NOTIFY_FILTER, CM_NOTIFY_FILTER_0, CM_NOTIFY_FILTER_0_1,
     CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE, CR_SUCCESS, HCMNOTIFICATION,
 };
-use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_DEVICE_REMOVED, ERROR_NO_MORE_FILES, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_DEVICE_REMOVED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandle, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     OpenFileById, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_SHARE_DELETE,
@@ -171,15 +171,51 @@ pub enum Folder {
     Path(std::path::PathBuf),
 }
 
-/// What listing a folder found.
+/// How listing a folder ended (its names handed on part by part as they were read: see `Drive::list`).
 pub enum Listing {
-    Items(Vec<Item>),
+    /// All its names read.
+    Listed,
     /// The user may not list it.
     Denied,
     /// It is not there any more.
     Gone,
-    /// It could not be listed whole (something else failed).
+    /// It could not be listed whole (something else failed, or the drive was let go of as it was listed).
     Failed(Error),
+}
+
+/// A part of a folder's names, as many as were read at once, as Windows wrote them (to be made items: see `items`).
+pub struct Names<'a> {
+    read: &'a [u8],
+}
+
+impl<'a> Names<'a> {
+    /// Each name in it ("." and ".." left out), with its entry.
+    fn entries(&self) -> impl Iterator<Item = (&'a [u16], &'a FILE_ID_BOTH_DIR_INFO)> {
+        let read = self.read;
+        let mut at = Some(0usize);
+        std::iter::from_fn(move || loop {
+            let here = at?;
+            let info = unsafe { &*(read.as_ptr().add(here) as *const FILE_ID_BOTH_DIR_INFO) };
+            at = (info.NextEntryOffset != 0).then(|| here + info.NextEntryOffset as usize);
+            let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), info.FileNameLength as usize / 2) };
+            if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
+                break Some((name, info));
+            }
+        })
+    }
+
+    /// How much memory its items hold (see `items`), told before they are made.
+    pub fn held(&self) -> usize {
+        self.entries().map(|(name, _)| size_of::<Item>() + size_of_val(name)).sum()
+    }
+
+    /// Its names made items (as much memory as `held` tells).
+    pub fn items(&self) -> Vec<Item> {
+        let mut items = Vec::with_capacity(self.entries().count());
+        // (For a link, EaSize holds what kind of link it is.)
+        items.extend(self.entries().map(|(name, info)| Item { name: name.to_vec(), id: info.FileId as u64, attributes: info.FileAttributes, tag: info.EaSize }));
+        items
+    }
 }
 
 impl Drive {
@@ -291,13 +327,14 @@ impl Drive {
     }
 
     /// The names in `folder` (by its id where the drive's are kept, else by its path), `buffer` being where they are
-    /// read. (Its root used through the listing whole: none is begun once it is let go of, and one under way then is
-    /// cancelled.)
-    pub fn list(&self, folder: &Folder, buffer: &mut [u64]) -> Listing {
-        self.with_root(|root| self.list_from(root, folder, buffer)).unwrap_or_else(|| Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)))
+    /// read, each part of them handed to `names` as it is read (so that no more of a large folder is held at once than
+    /// `names` keeps), and how the listing ended. (Its root used through the listing whole: none is begun once it is
+    /// let go of, one under way then is cancelled, and one let go of between its parts reads no more.)
+    pub fn list(&self, folder: &Folder, buffer: &mut [u64], names: impl FnMut(Names<'_>)) -> Listing {
+        self.with_root(|root| self.list_from(root, folder, buffer, names)).unwrap_or_else(|| Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)))
     }
 
-    fn list_from(&self, root: HANDLE, folder: &Folder, buffer: &mut [u64]) -> Listing {
+    fn list_from(&self, root: HANDLE, folder: &Folder, buffer: &mut [u64], mut names: impl FnMut(Names<'_>)) -> Listing {
         let opened = match folder {
             Folder::Id(id) => {
                 let described = FILE_ID_DESCRIPTOR { dwSize: size_of::<FILE_ID_DESCRIPTOR>() as u32, Type: FileIdType, Anonymous: FILE_ID_DESCRIPTOR_0 { FileId: *id as i64 } };
@@ -310,38 +347,41 @@ impl Drive {
         let folder = match opened {
             Ok(folder) => Listed::new(&self.held, folder),
             Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => return Listing::Denied,
-            // (An id no longer of a file, ERROR_INVALID_PARAMETER, or a path not found.)
-            Err(_) => return Listing::Gone,
+            Err(error) if gone(folder, &error) => return Listing::Gone,
+            // (Held by another program that shares it with none, the drive not answering, and the like: listed again
+            // after.)
+            Err(error) => return Listing::Failed(error),
         };
         // (Let go of as it was opened: not read, and closed at once.)
         let Some(folder) = folder else { return Listing::Failed(Error::from(ERROR_DEVICE_REMOVED)) };
-        let mut items = Vec::new();
         let mut class = FileIdBothDirectoryRestartInfo;
         loop {
             let read = unsafe { GetFileInformationByHandleEx(folder.handle, class, buffer.as_mut_ptr() as *mut _, (buffer.len() * 8) as u32) };
             if let Err(error) = read {
                 if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
-                    return Listing::Items(items);
+                    return Listing::Listed;
                 }
                 return Listing::Failed(error);
             }
             class = FileIdBothDirectoryInfo;
-            let bytes = buffer.as_ptr() as *const u8;
-            let mut at = 0usize;
-            loop {
-                let info = unsafe { &*(bytes.add(at) as *const FILE_ID_BOTH_DIR_INFO) };
-                let name = unsafe { std::slice::from_raw_parts(info.FileName.as_ptr(), info.FileNameLength as usize / 2) };
-                if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                    // (For a link, EaSize holds what kind of link it is.)
-                    items.push(Item { name: name.to_vec(), id: info.FileId as u64, attributes: info.FileAttributes, tag: info.EaSize });
-                }
-                if info.NextEntryOffset == 0 {
-                    break;
-                }
-                at += info.NextEntryOffset as usize;
+            names(Names { read: unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, buffer.len() * 8) } });
+            // (Its names handed on may have waited: the drive let go of meanwhile, the rest is not read.)
+            if self.held.left() {
+                return Listing::Failed(Error::from(ERROR_DEVICE_REMOVED));
             }
         }
     }
+}
+
+/// Whether `error`, as `folder` was opened, says it is not there any more: an id no longer of a file
+/// (ERROR_INVALID_PARAMETER, its number's sequence moved on, or ERROR_FILE_NOT_FOUND), or a path not found. No other
+/// failing says so.
+fn gone(folder: &Folder, error: &Error) -> bool {
+    let codes: &[WIN32_ERROR] = match folder {
+        Folder::Id(_) => &[ERROR_INVALID_PARAMETER, ERROR_FILE_NOT_FOUND],
+        Folder::Path(_) => &[ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND],
+    };
+    codes.iter().any(|code| error.code() == code.to_hresult())
 }
 
 /// The serial number of the volume `root` (a folder of it opened) is on, where it can be told.
@@ -447,7 +487,8 @@ pub(crate) mod tests {
             }
         }
         assert!(seen, "watched");
-        assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer()), Listing::Items(items) if !items.is_empty()));
+        let mut names = 0;
+        assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer(), |part| names += part.items().len()), Listing::Listed) && names > 0);
 
         drive.held.let_go();
         assert!(watch_ended.recv_timeout(Duration::from_secs(1)).is_ok(), "its watching ended at once");
@@ -456,7 +497,7 @@ pub(crate) mod tests {
             let busy = drive.held.busy.lock().unwrap();
             assert!(busy.root.is_none() && busy.using == 0 && busy.watched.is_none() && busy.listing.is_empty());
         }
-        assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer()), Listing::Failed(_)));
+        assert!(matches!(drive.list(&Folder::Path(folder.clone()), &mut buffer(), |_| ()), Listing::Failed(_)));
         assert!(drive.watch().is_none() && drive.with_root(|_| ()).is_none());
         // (Nothing held: the folder can be removed.)
         drop(drive);
@@ -500,6 +541,69 @@ pub(crate) mod tests {
         assert!(answered, "let go of within the time it waits");
         assert!(left && still_open, "nothing more begun on it, its root still used");
         assert!(drive.held.busy.lock().unwrap().root.is_none(), "closed as the call ended");
+        drop(drive);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// Only a folder that is not there any more is gone, by its id or its path: one that cannot be opened now for
+    /// another reason (held by a program that shares it with none) failed, to be listed again, where it was taken for
+    /// gone and what was not yet listed of it was lost.
+    #[test]
+    fn only_a_folder_not_there_any_more_is_gone() {
+        let folder = std::env::temp_dir().join(format!("glance-gone-{}", std::process::id()));
+        let inner = folder.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("a.txt"), "a").unwrap();
+        let drive = Drive::open(&format!("{}\\", folder.display())).unwrap();
+        let mut found = Vec::new();
+        drive.list(&Folder::Path(folder.clone()), &mut buffer(), |part| found.extend(part.items()));
+        let id = found.iter().find(|item| item.name == "inner".encode_utf16().collect::<Vec<_>>()).unwrap().id;
+        let listing = |folder: &Folder| {
+            let mut names = 0;
+            let listing = drive.list(folder, &mut buffer(), |part| names += part.items().len());
+            (listing, names)
+        };
+        let (by_id, by_path) = (Folder::Id(id), Folder::Path(inner.clone()));
+
+        let held = unsafe { CreateFileW(&HSTRING::from(inner.as_os_str()), LIST, Default::default(), None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None) }.unwrap();
+        let shared_with_none = [listing(&by_id).0, listing(&by_path).0];
+        unsafe {
+            let _ = CloseHandle(held);
+        }
+        assert!(shared_with_none.iter().all(|listing| matches!(listing, Listing::Failed(_))), "held by another, it failed, to be listed again");
+        assert!(matches!(listing(&by_id), (Listing::Listed, 1)) && matches!(listing(&by_path), (Listing::Listed, 1)));
+
+        std::fs::remove_dir_all(&inner).unwrap();
+        assert!(matches!(listing(&by_id).0, Listing::Gone) && matches!(listing(&by_path).0, Listing::Gone), "gone");
+        drop(drive);
+        std::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// A large folder's names are handed on part by part as they are read, and once the drive is let go of between
+    /// two parts (its names handed on waited, as a round's do for room), the rest is not read.
+    #[test]
+    fn a_folder_is_read_part_by_part_till_its_drive_is_let_go_of() {
+        let folder = std::env::temp_dir().join(format!("glance-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        for file in 0..2000 {
+            std::fs::write(folder.join(format!("file {file}.txt")), "").unwrap();
+        }
+        let drive = Drive::open(&format!("{}\\", folder.display())).unwrap();
+        let (mut parts, mut names) = (0, 0);
+        let listing = drive.list(&Folder::Path(folder.clone()), &mut buffer(), |part| {
+            let items = part.items();
+            assert_eq!(part.held(), items.capacity() * size_of::<Item>() + items.iter().map(|item| item.name.capacity() * 2).sum::<usize>(), "told as made");
+            parts += 1;
+            names += items.len();
+        });
+        assert!(matches!(listing, Listing::Listed) && names == 2000 && parts > 1, "{parts} parts");
+
+        let mut read = 0;
+        let listing = drive.list(&Folder::Path(folder.clone()), &mut buffer(), |_| {
+            read += 1;
+            drive.held.let_go_within(Duration::ZERO);
+        });
+        assert!(matches!(listing, Listing::Failed(_)) && read == 1, "no more read once let go of");
         drop(drive);
         std::fs::remove_dir_all(&folder).unwrap();
     }
@@ -560,7 +664,7 @@ pub(crate) mod tests {
             move || {
                 let mut buffer = buffer();
                 let mut times = 0u32;
-                while !matches!(drive.list(&Folder::Path(root.clone()), &mut buffer), Listing::Failed(_)) {
+                while !matches!(drive.list(&Folder::Path(root.clone()), &mut buffer, |_| ()), Listing::Failed(_)) {
                     times += 1;
                 }
                 let _ = list_ended.send(times);
