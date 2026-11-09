@@ -533,15 +533,18 @@ impl Index {
         Relisting { folder, by_name }
     }
 
-    /// A part of the names of a folder being listed again put in (see `list`).
+    /// A part of the names of a folder being listed again put in (see `list`). Its entries are matched as they are now,
+    /// not as they were as it was begun: one marked dead since, as another folder's listing between two parts found it
+    /// moved there, is matched by none (as it is by none in a folder listed whole after that one).
     pub fn list_part(&mut self, relisting: &mut Relisting, items: &[Item], changes: &mut Changes) {
         let (folder, by_name) = (relisting.folder, &mut relisting.by_name);
         for item in items {
             let name = OsString::from_wide(&item.name);
             let flags = item.flags();
+            let child = by_name.remove(&name).filter(|&child| self.entry(child).alive());
             // (Where the drive keeps no ids, a folder is the one of its name.)
-            let id = if self.by_id { item.id } else { by_name.get(&name).and_then(|&child| self.id(child)).unwrap_or_else(|| self.make_id()) };
-            if let Some(child) = by_name.remove(&name) {
+            let id = if self.by_id { item.id } else { child.and_then(|child| self.id(child)).unwrap_or_else(|| self.make_id()) };
+            if let Some(child) = child {
                 let was = self.entry(child);
                 let same = match (was.folder(), item.folder()) {
                     (true, true) => self.id(child) == Some(id),
@@ -1144,6 +1147,47 @@ mod tests {
         round(&mut index, &[(docs, vec![item("a.txt", 0, FILE), item("Sub", 0, FOLDER)])]);
         let ids: HashSet<u64> = ["C:\\Docs", "C:\\New", "C:\\Docs\\Sub"].iter().filter_map(|path| index.id(place_of(&index, path))).collect();
         assert_eq!(ids.len(), 3);
+    }
+
+    /// A folder put in part by part, one of its folders moved and put in where it went by another folder's listing
+    /// between two of its parts (that part read before the move), comes to what it came to listed whole after that
+    /// other folder: the entry the move marked dead is not matched by the later part and brought back, where it was,
+    /// the folder then in both places and its dead counted among the names.
+    #[test]
+    fn a_folder_put_in_part_by_part_brings_back_none_of_what_another_listing_marked_dead() {
+        let made = || {
+            let mut index = Index::new(5, true);
+            round(&mut index, &[(ROOT, vec![item("A", 10, FOLDER), item("B", 11, FOLDER)])]);
+            let (a, b) = (place_of(&index, "C:\\A"), place_of(&index, "C:\\B"));
+            round(&mut index, &[(a, vec![item("a1", 20, FILE), item("Z", 21, FOLDER)])]);
+            let z = place_of(&index, "C:\\A\\Z");
+            round(&mut index, &[(z, vec![item("z.txt", 30, FILE)])]);
+            let before = index.children(&HashSet::from([a, b]));
+            (index, a, b, before)
+        };
+        let alive = |index: &Index| (1..index.len()).filter(|&place| index.entry(place).alive()).count();
+
+        // In parts: A's first part put in, B listed (Z found there, moved from A), then A's part holding Z.
+        let (mut parts, a, b, before) = made();
+        let mut changes = Changes::default();
+        let mut relisting = parts.relisting(a, &before[&a]);
+        parts.list_part(&mut relisting, &[item("a1", 20, FILE)], &mut changes);
+        parts.list(b, &[item("Z", 21, FOLDER)], before.get(&b).map_or(&[], Vec::as_slice), &mut changes);
+        parts.list_part(&mut relisting, &[item("Z", 21, FOLDER)], &mut changes);
+        parts.listed(relisting, &mut changes);
+        parts.finish(changes);
+
+        // Whole: B listed, then A.
+        let (mut whole, a, b, before) = made();
+        let mut changes = Changes::default();
+        whole.list(b, &[item("Z", 21, FOLDER)], before.get(&b).map_or(&[], Vec::as_slice), &mut changes);
+        whole.list(a, &[item("a1", 20, FILE), item("Z", 21, FOLDER)], &before[&a], &mut changes);
+        whole.finish(changes);
+
+        assert_eq!(paths(&parts), paths(&whole));
+        assert_eq!(paths(&parts).iter().filter(|path| path.ends_with("\\Z")).count(), 1, "in one place: {:?}", paths(&parts));
+        assert_eq!(parts.names(), alive(&parts), "the dead not counted among the names");
+        assert_eq!(parts.folder(21), Some(place_of(&parts, &paths(&parts).into_iter().find(|path| path.ends_with("\\Z")).unwrap())));
     }
 
     #[test]
