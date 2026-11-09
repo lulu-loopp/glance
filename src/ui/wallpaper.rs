@@ -23,10 +23,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::backdrop::Capture;
 
 /// The desktop of each of `asked` (an area of it in physical pixels, and the picture's width and height) as a picture
-/// that large, a live wallpaper printed once for them all. Needs COM on the calling thread.
-pub fn desktops(asked: &[(RECT, u32, u32)]) -> Vec<Capture> {
+/// that large, each made as it is taken, a live wallpaper printed once for them all first (and let go of with the
+/// last). Needs COM on the calling thread.
+pub fn desktops(asked: Vec<(RECT, u32, u32)>) -> impl Iterator<Item = Capture> {
     let printed = print(&asked.iter().map(|&(area, ..)| area).collect::<Vec<_>>());
-    asked.iter().map(|&(work, width, height)| desktop_from(printed.as_ref(), work, width, height)).collect()
+    each_from(printed, asked, |printed, (work, width, height)| desktop_from(printed.as_ref(), work, width, height))
+}
+
+/// Each of `asked` made from `printed` as it is taken, `printed` kept till the last is.
+fn each_from<P, A, T>(printed: P, asked: Vec<A>, make: impl Fn(&P, A) -> T) -> impl Iterator<Item = T> {
+    asked.into_iter().map(move |one| make(&printed, one))
 }
 
 /// The desktop of `work` as a picture `width` × `height` pixels large, from the live wallpaper as `printed` holds it,
@@ -267,6 +273,21 @@ fn cover(factory: &IWICImagingFactory, image: &IWICBitmapSource, width: u32, hei
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each desktop of a lot is made as it is taken, the print shared by all of them: one taken before another is
+    /// made goes on its way (sent, as the settings read them) without waiting for the rest.
+    #[test]
+    fn each_desktop_is_made_as_it_is_taken() {
+        let made = std::cell::Cell::new(0);
+        let mut each = each_from("print", vec![1, 2, 3], |printed, one| {
+            made.set(made.get() + 1);
+            format!("{printed} {one}")
+        });
+        assert_eq!(each.next().as_deref(), Some("print 1"));
+        assert_eq!(made.get(), 1);
+        assert_eq!(each.collect::<Vec<_>>(), ["print 2", "print 3"]);
+        assert_eq!(made.get(), 3);
+    }
 
     /// A live wallpaper's layer is printed from its corner as far as the areas asked of it reach, and not at all for
     /// areas outside it: two screens, a tall one left of a wide one (as a report had them), the layer over both.

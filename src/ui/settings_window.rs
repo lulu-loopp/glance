@@ -839,7 +839,7 @@ fn read_lot(lot: u64, asks: Vec<reads::Ask>, send: std::sync::mpsc::Sender<Read>
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
     let areas: Vec<(RECT, u32, u32)> = asks.iter().map(reads::Ask::area).collect();
-    for (ask, desktop) in asks.into_iter().zip(wallpaper::desktops(&areas)) {
+    for (ask, desktop) in asks.into_iter().zip(wallpaper::desktops(areas)) {
         if let reads::Ask::Stage { screen, work, size } = &ask {
             keep_desktop(screen, *work, *size, &desktop);
         }
@@ -892,7 +892,7 @@ pub fn read_desktops_ahead() {
     // (A live wallpaper printed once for them all: see `wallpaper::desktops`.)
     let wanted = stages_wanted(&crate::screens::all());
     let asked: Vec<(RECT, u32, u32)> = wanted.iter().map(|(_, work, size)| (*work, size.0 as u32, size.1 as u32)).collect();
-    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(&asked)) {
+    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(asked)) {
         keep_desktop(screen, *work, *size, &desktop);
     }
 }
