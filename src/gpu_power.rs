@@ -11,11 +11,11 @@
 //! where the drivers put them and no ordinary program can.
 //!
 //! A library is opened, and a card found through it, only once every card of
-//! its maker is awake (see `GpuPower::reader`): a laptop's discrete GPU sleeps
-//! while nothing draws on it, and finding it through its maker's library
-//! starts it up (NVML's finding a card does, as NVIDIA documents), as asking
-//! it what it is or where it sits may, which IGCL and NVAPI do of each card
-//! as they look for another.
+//! its maker is awake, as Windows says just before it (see `GpuPower::reader`):
+//! a laptop's discrete GPU sleeps while nothing draws on it, and finding it
+//! through its maker's library starts it up (NVML's finding a card does, as
+//! NVIDIA documents), as asking it what it is or where it sits may, which IGCL
+//! and NVAPI do of each card as they look for another.
 
 use std::ffi::c_void;
 
@@ -30,7 +30,7 @@ use windows::Win32::System::Memory::{GetProcessHeap, HeapAlloc, HEAP_ZERO_MEMORY
 pub type PciAddress = (u32, u32, u32);
 
 /// How one card's power is read.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reader {
     Nvidia(usize),
     Amd(usize),
@@ -101,23 +101,33 @@ impl GpuPower {
         self.igcl.as_ref()?.as_ref()
     }
 
-    /// How to read the discrete card made by `vendor` (its PCI vendor id) at `address`, if its maker's library says:
-    /// that library opened first, if it is not yet, and the card found through it by where it sits (no other card
-    /// is found meanwhile, though IGCL's and NVAPI's looking asks the others what they are or where they sit). Asked
-    /// only while every card of its maker is awake (see the module's note, and `metrics::looked_up_now`).
-    pub fn reader(&mut self, vendor: u32, address: PciAddress) -> Option<Reader> {
+    /// How to read the discrete card made by `vendor` (its PCI vendor id) at `address`, whether its maker's library
+    /// says (none: not looked up yet, a card of its maker asleep): that library opened first, if it is not yet, and
+    /// the card found through it by where it sits (no other card is found meanwhile, though IGCL's and NVAPI's
+    /// looking asks the others what they are or where they sit). Each library is asked only as `awake` says every
+    /// card of its maker is, just before it (see the module's note): NVIDIA's card is looked up through NVML and then
+    /// NVAPI, and NVML's opening and finding may take long enough for another of NVIDIA's cards to have gone to sleep
+    /// meanwhile. One asleep by then, the card is looked up again from NVAPI's step when this is next asked, what NVML
+    /// found of it kept (and NVML not asked of it again).
+    pub fn reader(&mut self, vendor: u32, address: PciAddress, awake: &mut dyn FnMut() -> bool) -> Option<Option<Reader>> {
         match vendor {
             NVIDIA_VENDOR => {
-                let index = opened(&mut self.nvml, Nvml::open)?.device(address)?;
+                if !awake() {
+                    return None;
+                }
+                let Some(index) = opened(&mut self.nvml, Nvml::open).and_then(|nvml| nvml.device(address)) else { return Some(None) };
                 // (And its hot spot, if NVAPI tells it: see `more`.)
+                if !awake() {
+                    return None;
+                }
                 if let Some(nvapi) = opened(&mut self.nvapi, Nvapi::open) {
                     nvapi.find(address);
                 }
-                Some(Reader::Nvidia(index))
+                Some(Some(Reader::Nvidia(index)))
             }
-            AMD_PCI_VENDOR => opened(&mut self.adl, Adl::open)?.adapter(address).map(Reader::Amd),
-            INTEL_VENDOR => opened(&mut self.igcl, Igcl::open)?.device(address).map(Reader::Intel),
-            _ => None,
+            AMD_PCI_VENDOR => awake().then(|| opened(&mut self.adl, Adl::open).and_then(|adl| adl.adapter(address)).map(Reader::Amd)),
+            INTEL_VENDOR => awake().then(|| opened(&mut self.igcl, Igcl::open).and_then(|igcl| igcl.device(address)).map(Reader::Intel)),
+            _ => Some(None),
         }
     }
 
@@ -838,6 +848,80 @@ mod tests {
     fn opens_no_library_till_a_card_is_looked_up() {
         let power = super::GpuPower::new();
         assert!(power.nvml.is_none() && power.nvapi.is_none() && power.adl.is_none() && power.igcl.is_none());
+    }
+
+    use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        /// What the libraries standing in for the makers' below were asked, in order.
+        static ASKED: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn asked(what: &'static str) {
+        ASKED.with_borrow_mut(|asked| asked.push(what));
+    }
+
+    /// What was asked since this was last taken.
+    fn taken() -> Vec<&'static str> {
+        ASKED.with_borrow_mut(std::mem::take)
+    }
+
+    // NVML and NVAPI as they stand for NVIDIA's below: one card, on bus 2, of an architecture that tells its hot spot.
+    unsafe extern "C" fn nvml_by_bus_id(_: *const u8, device: *mut NvmlDevice) -> i32 {
+        asked("NVML: found");
+        unsafe { *device = 1 as NvmlDevice };
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvml_power(_: NvmlDevice, _: *mut u32) -> i32 {
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvml_shutdown() -> i32 {
+        NVML_SUCCESS
+    }
+    unsafe extern "C" fn nvapi_bus(_: *mut c_void, bus: *mut u32) -> i32 {
+        asked("NVAPI: where");
+        unsafe { *bus = 2 };
+        NVAPI_OK
+    }
+    unsafe extern "C" fn nvapi_slot(_: *mut c_void, slot: *mut u32) -> i32 {
+        unsafe { *slot = 0 };
+        NVAPI_OK
+    }
+    unsafe extern "C" fn nvapi_architecture(_: *mut c_void, about: *mut NvArchitecture) -> i32 {
+        asked("NVAPI: what");
+        unsafe { (*about).architecture = 0x190 };
+        NVAPI_OK
+    }
+    unsafe extern "C" fn nvapi_sensors(_: *mut c_void, _: *mut NvThermalSensors) -> i32 {
+        NVAPI_OK
+    }
+
+    /// NVIDIA's card is looked up through NVML and then NVAPI, its maker's cards asked whether they are all awake just
+    /// before each: one of them gone to sleep while NVML was opened and asked has NVAPI asked nothing (where it would
+    /// ask each card where it sits), the look-up waiting, and once they are all awake again it goes on from NVAPI's
+    /// step, NVML not asked again. A card of its maker asleep before any is asked, no library is opened, and a card of
+    /// another maker waits for none.
+    #[test]
+    fn asks_each_library_only_as_its_makers_cards_are_awake() {
+        let nvml = Nvml { library: HMODULE::default(), by_bus_id: nvml_by_bus_id, power_usage: nvml_power, clock_reasons: None, fans: None, shutdown: nvml_shutdown, devices: Vec::new() };
+        let nvapi = Nvapi { sensors: nvapi_sensors, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: vec![1 as *mut c_void], devices: Vec::new() };
+        let mut power = GpuPower { nvml: Some(Some(nvml)), nvapi: Some(Some(nvapi)), adl: None, igcl: None };
+        let at = (2, 0, 0);
+        let mut awake = [true, false].into_iter();
+        assert_eq!(power.reader(NVIDIA_VENDOR, at, &mut || awake.next().unwrap()), None);
+        assert_eq!(taken(), ["NVML: found"]);
+        assert_eq!(power.reader(NVIDIA_VENDOR, at, &mut || true), Some(Some(Reader::Nvidia(0))));
+        assert_eq!(taken(), ["NVAPI: where", "NVAPI: what"]);
+        assert_eq!(power.nvapi().map(|nvapi| nvapi.devices.len()), Some(1));
+        // (Its libraries stand in for the makers' and have none to close.)
+        std::mem::forget(power);
+        let mut none_yet = GpuPower::new();
+        for vendor in [NVIDIA_VENDOR, AMD_PCI_VENDOR, INTEL_VENDOR] {
+            assert_eq!(none_yet.reader(vendor, at, &mut || false), None);
+        }
+        assert!(none_yet.nvml.is_none() && none_yet.nvapi.is_none() && none_yet.adl.is_none() && none_yet.igcl.is_none());
+        assert_eq!(none_yet.reader(0x1AF4, at, &mut || false), Some(None));
     }
 
     #[test]
