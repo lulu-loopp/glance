@@ -892,8 +892,9 @@ pub(crate) mod tests {
         assert_eq!(awaited(&libraries, GpuLibraries::found).lines, ["GPU power, card 2: NVML"]);
         let_go.send(()).unwrap();
         assert_eq!(awaited(&libraries, GpuLibraries::found).lines, ["GPU power, card 2: NVML", "Intel's graphics library: no graphics of Intel's"]);
-        let read = awaited(&libraries, read_lately);
-        assert_eq!(read, [Some(Read { power: Some(42.0), limit: Some(GpuLimit::Power), ..Read::default() })]);
+        // (Each reading told as it is read, the card's power before what holds its clock back: all of them waited for.)
+        let read = [Some(Read { power: Some(42.0), limit: Some(GpuLimit::Power), ..Read::default() })];
+        awaited(&libraries, |libraries| read_lately(libraries).filter(|lately| *lately == read));
     }
 
     /// A reading under way, however long it takes, holds nothing that takes from the libraries: taken from at once,
