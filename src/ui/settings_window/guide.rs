@@ -1547,7 +1547,7 @@ impl Ui {
         let shown = Rect { x: s.x - room, y: s.y - room, w: l.x + l.w - s.x + 2.0 * room, h: l.h.max(s.h) + 2.0 * room };
         let k = (area.w / shown.w).min(area.h / shown.h);
         let (ox, oy) = (area.x + area.w / 2.0 - (shown.x + shown.w / 2.0) * k, area.y + area.h / 2.0 - (shown.y + shown.h / 2.0) * k);
-        self.stage_picture(frame, area, (ox, oy), k, 1.0);
+        self.stage_picture(frame, area, 8.0, (ox, oy), k, 1.0);
         let skin = Skin::named(&self.settings.skin);
         let example = example(self.lang);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };

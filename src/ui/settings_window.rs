@@ -6366,7 +6366,7 @@ impl Ui {
         let area = self.shown_of(area, k, stage_x, stage_y);
         let palette = self.palette.clone();
         self.framed(frame, framed);
-        self.stage_picture(frame, area, (ox, oy), k, zoom);
+        self.stage_picture(frame, area, 8.0, (ox, oy), k, zoom);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
@@ -6506,8 +6506,10 @@ impl Ui {
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
         let Some((edge, prefs, part)) = panel else {
             let (ox, oy) = (area.x + (area.w - sw * fit) / 2.0, area.y + (area.h - sh * fit) / 2.0);
-            self.stage_picture(frame, area, (ox, oy), fit, 1.0);
-            return (None, Rect { x: ox, y: oy, w: sw * fit, h: sh * fit });
+            let screen = Rect { x: ox, y: oy, w: sw * fit, h: sh * fit };
+            let (clip, radius) = screen_shown(screen);
+            self.stage_picture(frame, clip, radius, (ox, oy), fit, 1.0);
+            return (None, screen);
         };
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
@@ -6556,12 +6558,13 @@ impl Ui {
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let framed = area;
-        let area = if whole { area } else { self.shown_of(area, k, stage_x, stage_y) };
+        // The whole screen inside its own rounded corners, a strip of it inside the preview's frame's.
+        let (area, radius) = if whole { screen_shown(Rect { x: ox, y: oy, w: sw * k, h: sh * k }) } else { (self.shown_of(area, k, stage_x, stage_y), 8.0) };
         if !whole {
             self.framed(frame, framed);
         }
         let mask = unsafe {
-            frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
+            frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: radius, radiusY: radius })
         };
         let layer = D2D1_LAYER_PARAMETERS1 {
             contentBounds: rect(area.x, area.y, area.w, area.h),
@@ -6573,7 +6576,7 @@ impl Ui {
         };
         unsafe { frame.dc.PushLayer(&layer, None) };
         // The desktop in the panel's units, which a zoomed panel shrinks.
-        self.stage_picture(frame, area, (ox, oy), k, zoom);
+        self.stage_picture(frame, area, radius, (ox, oy), k, zoom);
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
@@ -6593,23 +6596,31 @@ impl Ui {
         (layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
     }
 
-    /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area`: made a bitmap for the panel's
-    /// `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
-    fn stage_picture(&mut self, frame: &Frame, area: Rect, at: (f32, f32), k: f32, zoom: f32) {
+    /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area` inside its corners rounded by `radius`:
+    /// made a bitmap for the panel's `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
+    fn stage_picture(&mut self, frame: &Frame, area: Rect, radius: f32, at: (f32, f32), k: f32, zoom: f32) {
         let (sw, sh) = self.stage.size;
         let zoom_key = zoom.to_bits();
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
         let bitmap = self.stage.bitmap.as_ref().map(|(_, bitmap)| bitmap);
-        desktop_at(frame, bitmap, self.palette.switch_off, area, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
+        desktop_at(frame, bitmap, self.palette.switch_off, area, radius, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
     }
 }
 
-/// A desktop drawn at `at`, clipped to `area` inside its rounded corners: `bitmap`, or where there is none (not read
-/// yet, or given up: see `reads`), `none` all over, as the layout's map shows a screen whose desktop it has not.
-fn desktop_at(frame: &Frame, bitmap: Option<&ID2D1Bitmap1>, none: Color, area: Rect, at: Rect) {
-    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
+/// Where a screen drawn whole at `screen` is clipped to and its corners' radius: itself, its corners rounded as the
+/// layout's map rounds each screen it draws (the same in DIPs however large it is drawn), so that its desktop, a panel
+/// on it and its outline all keep inside them.
+fn screen_shown(screen: Rect) -> (Rect, f32) {
+    (screen, MAP_RADIUS * 2.0)
+}
+
+/// A desktop drawn at `at`, clipped to `area` inside its corners rounded by `radius`: `bitmap`, or where there is none
+/// (not read yet, or given up: see `reads`), `none` all over, as the layout's map shows a screen whose desktop it has
+/// not.
+fn desktop_at(frame: &Frame, bitmap: Option<&ID2D1Bitmap1>, none: Color, area: Rect, radius: f32, at: Rect) {
+    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, radius)) }) else { return };
     let layer = D2D1_LAYER_PARAMETERS1 {
         contentBounds: rect(area.x, area.y, area.w, area.h),
         geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
@@ -7423,7 +7434,7 @@ mod tests {
     fn a_desktop_not_read_is_drawn_plain() {
         let _device = crate::ui::gfx::held().unwrap();
         let gfx = Gfx::new().unwrap();
-        let pixels = gfx.draw_offscreen((100, 60), 1.0, |frame| desktop_at(frame, None, Color::hex(0xFF0000, 1.0), Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 }, Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 })).unwrap();
+        let pixels = gfx.draw_offscreen((100, 60), 1.0, |frame| desktop_at(frame, None, Color::hex(0xFF0000, 1.0), Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 }, 8.0, Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 })).unwrap();
         let at = |x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
         assert_eq!(at(50, 30), [0, 0, 255, 255]);
         assert_eq!(at(12, 30), [0, 0, 255, 255]);
@@ -7452,6 +7463,30 @@ mod tests {
         reads.done(0);
         reads.want(stage.wanted().expect("still read again"));
         assert_eq!(reads.lot(now), Some((1, vec![ask])));
+    }
+
+    /// A screen drawn whole, as the layout's one screen view and the guide draw it, has its corners rounded as the
+    /// map of every screen rounds each: its desktop (or the plain fill where it has none) is not drawn in its corner,
+    /// as the map's is not.
+    #[test]
+    fn a_screen_drawn_whole_is_rounded_as_the_map_draws_it() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Gfx::new().unwrap();
+        let screen = Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 };
+        let red = Color::hex(0xFF0000, 1.0);
+        let drawn = |paint: &dyn Fn(&Frame)| gfx.draw_offscreen((100, 60), 1.0, paint).unwrap();
+        let whole = drawn(&|frame| {
+            let (clip, radius) = screen_shown(screen);
+            desktop_at(frame, None, red, clip, radius, screen);
+        });
+        let map = drawn(&|frame| fill(frame, red, screen.x, screen.y, screen.w, screen.h, MAP_RADIUS * 2.0));
+        let at = |pixels: &[u8], x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
+        for pixels in [&whole, &map] {
+            assert_eq!(at(pixels, 10, 10), [0, 0, 0, 0]);
+            assert_eq!(at(pixels, 89, 49), [0, 0, 0, 0]);
+            assert_eq!(at(pixels, 50, 30), [0, 0, 255, 255]);
+            assert_eq!(at(pixels, 10, 30), [0, 0, 255, 255]);
+        }
     }
 
     /// Choices wider than their room go on as many lines as they take, each whole, in order.
