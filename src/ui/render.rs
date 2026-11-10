@@ -264,10 +264,20 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// Follows what is drawn now: `what` (another thing drawn in its place is not turned into), laid out as `layout`
-    /// at `zoom`. Laid out in other columns than it was, it turns, unless `moves` is false (motion reduced): how far
-    /// it has turned (eased), while it does.
-    pub fn follow(&mut self, what: u64, layout: &Layout, zoom: f32, now: Instant, moves: bool) -> Option<f32> {
+    /// Follows what is drawn now: `what` with its `lanes` (another thing drawn in its place, or other lanes, is not
+    /// turned into), laid out as `layout` at `zoom`. Laid out in other columns than it was, it turns, unless `moves`
+    /// is false (motion reduced): how far it has turned (eased), while it does. (What it turns from is drawn with the
+    /// lanes drawn now: lanes taken away, added or moved, each would start from where another was, so a turn is had
+    /// only by the same lanes, in the same order.)
+    pub fn follow(&mut self, what: u64, lanes: &[Lane], layout: &Layout, zoom: f32, now: Instant, moves: bool) -> Option<f32> {
+        let what = {
+            let mut hasher = DefaultHasher::new();
+            what.hash(&mut hasher);
+            for lane in lanes {
+                lane.id().hash(&mut hasher);
+            }
+            hasher.finish()
+        };
         match self.last.take() {
             Some((was, last, last_zoom)) if was == what => {
                 if last.columns != layout.columns && moves {
@@ -293,8 +303,10 @@ impl Turn {
         self.turning = Some((now, Before::Drawn(drawn)));
     }
 
-    pub fn turning(&self) -> bool {
-        self.turning.is_some()
+    /// Whether it turns as of `now`: one begun no longer ago than `widget::MORPH`. (Ended by `follow` alone, one left
+    /// as what it drew is no longer drawn has ended all the same, and nothing is to be drawn again for it.)
+    pub fn turning(&self, now: Instant) -> bool {
+        self.turning.as_ref().is_some_and(|(since, _)| now.duration_since(*since) < crate::widget::MORPH)
     }
 
     fn end(&mut self) {
@@ -419,18 +431,31 @@ mod tests {
         assert_eq!((two.columns, three.columns), (2, 3));
         let start = Instant::now();
         let at = |ms: u64| start + Duration::from_millis(ms);
+        let lanes = [super::view::Lane::empty("cpu", &theme), super::view::Lane::empty("gpu", &theme)];
         let mut turn = Turn::default();
-        assert_eq!(turn.follow(1, &two, 1.0, at(0), true), None, "drawn first");
-        assert_eq!(turn.follow(1, &two, 1.0, at(10), true), None, "the same columns");
-        assert_eq!(turn.follow(1, &three, 1.0, at(20), true), Some(0.0), "into three columns");
-        let half = turn.follow(1, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64 / 2), true).unwrap();
+        assert_eq!(turn.follow(1, &lanes, &two, 1.0, at(0), true), None, "drawn first");
+        assert_eq!(turn.follow(1, &lanes, &two, 1.0, at(10), true), None, "the same columns");
+        assert_eq!(turn.follow(1, &lanes, &three, 1.0, at(20), true), Some(0.0), "into three columns");
+        let half = turn.follow(1, &lanes, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64 / 2), true).unwrap();
         assert!(half > 0.5 && half < 1.0, "{half}");
-        assert_eq!(turn.follow(1, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64), true), None, "turned");
-        assert_eq!(turn.follow(2, &two, 1.0, at(400), true), None, "something else drawn in its place");
-        assert_eq!(turn.follow(2, &three, 1.0, at(410), false), None, "motion reduced");
+        assert_eq!(turn.follow(1, &lanes, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64), true), None, "turned");
+        assert_eq!(turn.follow(2, &lanes, &two, 1.0, at(400), true), None, "something else drawn in its place");
+        assert_eq!(turn.follow(2, &lanes, &three, 1.0, at(410), false), None, "motion reduced");
         turn.release();
-        assert_eq!(turn.follow(2, &two, 1.0, at(420), true), None, "let go of");
-        assert!(!turn.turning());
+        assert_eq!(turn.follow(2, &lanes, &two, 1.0, at(420), true), None, "let go of");
+        assert!(!turn.turning(at(420)));
+        // Other lanes laid out in other columns (a module taken away, another put first): no turn, each would start
+        // from where another lane was.
+        let fewer = [super::view::Lane::empty("gpu", &theme)];
+        assert_eq!(turn.follow(3, &lanes, &two, 1.0, at(430), true), None);
+        assert_eq!(turn.follow(3, &fewer, &three, 1.0, at(440), true), None, "another lane where the first was");
+        let swapped = [super::view::Lane::empty("gpu", &theme), super::view::Lane::empty("cpu", &theme)];
+        assert_eq!(turn.follow(3, &swapped, &two, 1.0, at(450), true), None, "the lanes in another order");
+        // One begun, and what it drew then no longer drawn (no `follow` to end it): turning till `widget::MORPH` has
+        // passed, and no longer.
+        turn.begin(at(500), Vec::new());
+        assert!(turn.turning(at(500 + crate::widget::MORPH.as_millis() as u64 - 1)));
+        assert!(!turn.turning(at(500 + crate::widget::MORPH.as_millis() as u64)));
     }
 
     /// What each thing carried together drew is taken from what was drawn by its name, from its own box's corner: each

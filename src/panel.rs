@@ -4181,7 +4181,7 @@ impl<'a> Panel<'a> {
         let (lanes, layout) = self.arrange_lanes();
         let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
         // Laid out in other columns (sized, or the readings grown): it turns into the new layout (see `render::Turn`).
-        let turn = self.turn.follow(0, &layout, zoom, now, !reduced_motion());
+        let turn = self.turn.follow(0, &lanes, &layout, zoom, now, !reduced_motion());
         let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
         // Drawn in what it is painted in (the window, but while it is sized), placed in the window there.
@@ -4356,7 +4356,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel (or, with none, four times a second).
-        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turn.turning();
+        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turn.turning(now) || self.restoring.is_some();
         self.next_frame = if moving {
             now
         } else {

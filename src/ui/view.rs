@@ -2457,6 +2457,12 @@ pub fn lanes(scene: &Scene) -> Vec<Lane> {
 }
 
 impl Lane {
+    /// A lane of module `id` showing nothing, for tests of what follows lanes by their modules.
+    #[cfg(test)]
+    pub fn empty(id: &str, theme: &Theme) -> Self {
+        Lane { id: id.to_string(), blocks: Vec::new(), ink: theme.ink(id) }
+    }
+
     pub fn height(&self, theme: &Theme) -> f32 {
         theme.pad_top + theme.pad_bottom + self.blocks.iter().map(Block::height).sum::<f32>()
     }

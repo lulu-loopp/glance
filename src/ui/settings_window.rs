@@ -5255,7 +5255,7 @@ impl Ui {
             self.gfx.settle();
         }
         // (A row held still moves only as the pointer does, which asks for a frame itself.)
-        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning();
+        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning(now);
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
@@ -6693,7 +6693,7 @@ impl Ui {
         };
         // Laid out in other columns than it was drawn in last, it turns into the new layout as the panel does, what
         // it turns from where it was on the screen.
-        let drawn = match cache.turn.follow(what, &layout, zoom, Instant::now(), !crate::panel::reduced_motion()) {
+        let drawn = match cache.turn.follow(what, &lanes, &layout, zoom, Instant::now(), !crate::panel::reduced_motion()) {
             Some(t) => cache.turn.draw(frame, &picture, &mut cache.layers, local, scale, t, |old, old_zoom| {
                 let was = corner(old, old_zoom);
                 ((was.0 - pos.0) / zoom, (was.1 - pos.1) / zoom)
