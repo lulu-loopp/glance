@@ -55,15 +55,25 @@ pub fn read() -> BatteryFigures {
             None => *held.get_or_insert(0) += status.Capacity as u64,
         }
     });
-    let watts = match held.filter(|_| !unknown) {
-        Some(held) => watts.or(trend(held)),
+    let reckoned = held.filter(|_| !unknown);
+    if reckoned.is_none() {
         // Not reckoned now: what was reckoned from is of before, and is not reckoned on from later.
-        None => {
-            *TREND.lock().unwrap() = None;
-            watts
-        }
-    };
-    BatteryFigures { watts, health: (design > 0).then(|| full as f32 / design as f32 * 100.0) }
+        *TREND.lock().unwrap() = None;
+    }
+    BatteryFigures { watts: together(watts, reckoned, unknown, trend), health: (design > 0).then(|| full as f32 / design as f32 * 100.0) }
+}
+
+/// The batteries' rate together: what those whose drivers say theirs say (`said`), and that reckoned (by `trend`) of
+/// those whose drivers do not, from what they hold together (`held`); none where some battery's is neither said nor
+/// can be reckoned (`unknown`, or not yet), as the rest alone is not the machine's.
+fn together(said: Option<f32>, held: Option<u64>, unknown: bool, trend: impl FnOnce(u64) -> Option<f32>) -> Option<f32> {
+    if unknown {
+        return None;
+    }
+    match held {
+        Some(held) => trend(held).map(|reckoned| reckoned + said.unwrap_or(0.0)),
+        None => said,
+    }
 }
 
 /// The rate (W, above 0 charging) a battery's driver says, none where it does not know it. It says so by i32::MIN,
@@ -185,8 +195,21 @@ fn ioctl<I, O>(handle: HANDLE, code: u32, input: &I, output: &mut O) -> Option<(
 
 #[cfg(test)]
 mod tests {
-    use super::said_watts;
+    use super::{said_watts, together};
     use windows::Win32::System::Power::{BATTERY_CHARGING, BATTERY_DISCHARGING, BATTERY_POWER_ON_LINE, BATTERY_STATUS};
+
+    /// Batteries some of whose drivers say their rate and some not: the rates said and the one reckoned added up, a
+    /// full battery's 0 W said beside one charging whose is reckoned taken as 0 W of the sum, not as all of it; none
+    /// till it can be reckoned, or where one battery's is neither said nor reckoned.
+    #[test]
+    fn the_rates_said_and_reckoned_are_added_up() {
+        assert_eq!(together(Some(0.0), Some(40_000), false, |_| Some(25.0)), Some(25.0));
+        assert_eq!(together(Some(-7.5), Some(40_000), false, |_| Some(-3.0)), Some(-10.5));
+        assert_eq!(together(None, Some(40_000), false, |_| Some(25.0)), Some(25.0));
+        assert_eq!(together(Some(0.0), Some(40_000), false, |_| None), None);
+        assert_eq!(together(Some(12.0), None, false, |_| unreachable!()), Some(12.0));
+        assert_eq!(together(Some(12.0), None, true, |_| unreachable!()), None);
+    }
 
     fn status(state: u32, rate: i32) -> BATTERY_STATUS {
         BATTERY_STATUS { PowerState: state, Capacity: 50_000, Voltage: 16_000, Rate: rate }
