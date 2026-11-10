@@ -7,7 +7,7 @@
 //! if only administrators can change it; else the release Glance names, file by file: each is read from the user's
 //! folder (where the remote fetched it), checked, and written to a folder of administrators' alone, made new each
 //! time. It keeps its configuration in that folder (where it would look for plugins), hears this machine alone, and
-//! takes nothing from the user's environment that would have Qt load another's code.
+//! takes nothing of the user's environment (see `environment`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -256,10 +256,34 @@ fn arguments(folder: &Path) -> Vec<std::ffi::OsString> {
     ["--server", "--server-host", "127.0.0.1", "--noautoconnect", "--config"].iter().map(Into::into).chain([folder.join(CONFIGURATION).into_os_string()]).collect()
 }
 
-/// Whether Qt reads a variable of this name (the user's environment is the sensors' too, and anything of the user's
-/// may set it: `QT_PLUGIN_PATH` would have it load what is there).
-fn for_qt(name: &std::ffi::OsStr) -> bool {
-    name.to_string_lossy().to_ascii_uppercase().starts_with("QT")
+/// The environment it runs in, made afresh: the user's is the sensors' too, and anything of the user's may set it, so
+/// that what it names would be loaded with an administrator's rights (`QT_PLUGIN_PATH` a folder of Qt's plugins, `PATH`
+/// a folder searched for each library a program loads by its name alone that Windows' own folders lack, as OpenRGB
+/// does AMD's). Windows' own folders alone (`windows`, where Windows is), its temporary files in `folder` (of
+/// administrators' alone), and the few names a program reads of the machine, as they are.
+fn environment(windows: &Path, folder: &Path) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let system = windows.join("System32");
+    let path = std::env::join_paths([system.clone(), windows.to_path_buf(), system.join("Wbem")]).expect("Windows' folders hold no ';'");
+    let drive = windows.components().next().map_or_else(Default::default, |drive| drive.as_os_str().to_os_string());
+    let mut made: Vec<(std::ffi::OsString, std::ffi::OsString)> = vec![
+        ("SystemRoot".into(), windows.into()),
+        ("windir".into(), windows.into()),
+        ("SystemDrive".into(), drive),
+        ("ComSpec".into(), system.join("cmd.exe").into()),
+        ("PATH".into(), path),
+        ("TEMP".into(), folder.into()),
+        ("TMP".into(), folder.into()),
+    ];
+    made.extend(["NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "PROCESSOR_IDENTIFIER", "PROCESSOR_LEVEL", "PROCESSOR_REVISION", "OS"].into_iter().filter_map(|name| Some((name.into(), std::env::var_os(name)?))));
+    made
+}
+
+/// Where Windows is, as the system says (not as the environment does).
+fn windows_folder() -> Option<PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
+    let mut buffer = [0u16; 260];
+    let length = unsafe { GetSystemWindowsDirectoryW(Some(&mut buffer)) } as usize;
+    (length > 0 && length < buffer.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buffer[..length])))
 }
 
 /// Runs the OpenRGB in `from`, its configuration in `folder`.
@@ -267,11 +291,9 @@ fn run_from(from: &Path, folder: &crate::elevation::Private) -> Result<Child, St
     use std::os::windows::process::CommandExt;
     /// CREATE_NO_WINDOW: no console for a program started without one.
     const NO_WINDOW: u32 = 0x0800_0000;
+    let windows = windows_folder().ok_or("Windows' folder not told")?;
     let mut command = Command::new(from.join("OpenRGB.exe"));
-    command.args(arguments(folder.path())).current_dir(from).creation_flags(NO_WINDOW);
-    for (name, _) in std::env::vars_os().filter(|(name, _)| for_qt(name)) {
-        command.env_remove(name);
-    }
+    command.args(arguments(folder.path())).current_dir(from).creation_flags(NO_WINDOW).env_clear().envs(environment(&windows, folder.path()));
     let mut program = command.spawn().map_err(|error| error.to_string())?;
     in_the_job(&program);
     // (What it does not like it says by ending at once, and by nothing else.)
@@ -436,11 +458,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(installed);
     }
 
+    /// It runs with nothing of the user's environment: no folder of the user's to be searched for a library or Qt's
+    /// plugins, whatever the user set, `PATH` Windows' own folders alone, its temporary files in its own folder.
     #[test]
-    fn takes_nothing_of_qt_from_the_users_environment() {
-        for name in ["QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "qt_debug_plugins", "QML2_IMPORT_PATH"] {
-            assert_eq!(for_qt(std::ffi::OsStr::new(name)), name != "QML2_IMPORT_PATH", "{name}");
-        }
-        assert!(!for_qt(std::ffi::OsStr::new("PATH")));
+    fn takes_nothing_from_the_users_environment() {
+        let (windows, folder) = (Path::new(r"C:\Windows"), Path::new(r"C:\ProgramData\Glance-OpenRGB-1"));
+        let made = environment(windows, folder);
+        let names: Vec<String> = made.iter().map(|(name, _)| name.to_string_lossy().to_ascii_uppercase()).collect();
+        assert!(names.iter().all(|name| !name.starts_with("QT") && !matches!(name.as_str(), "APPDATA" | "LOCALAPPDATA" | "USERPROFILE" | "PSMODULEPATH")), "{names:?}");
+        let value = |wanted: &str| made.iter().find(|(name, _)| name.eq_ignore_ascii_case(wanted)).map(|(_, value)| value.clone());
+        let path: Vec<PathBuf> = std::env::split_paths(&value("PATH").unwrap()).collect();
+        assert_eq!(path, [windows.join("System32"), windows.to_path_buf(), windows.join("System32").join("Wbem")]);
+        assert_eq!((value("TEMP"), value("TMP")), (Some(folder.into()), Some(folder.into())));
+        assert_eq!(value("SystemDrive"), Some("C:".into()));
     }
 }
