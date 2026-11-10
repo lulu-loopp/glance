@@ -101,19 +101,23 @@ const PUSH_LOOP: u64 = 5300;
 const STEPS: usize = 5;
 
 /// The second step's play (ms), and the sizes it makes the panel; when it starts to make it smaller, and when the
-/// corner is let go; when each click of the double-click goes down, how long one is held, and how long the ring each
-/// leaves shows; when the pointer goes back onto the panel.
-const SIZE_LOOP: u64 = 8400;
+/// corner is let go; when the pointer moves off the corner, how long it takes to go there and back, and when it comes
+/// back; when each click of the double-click goes down, how long one is held, and how long the ring each leaves shows;
+/// when the pointer goes back onto the panel.
+const SIZE_LOOP: u64 = 9400;
 const GROWN: f32 = 1.18;
 const SHRUNK: f32 = 0.8;
 const SHRINK_AT: f32 = 2800.0;
 const LET_GO: f32 = 4000.0;
-const CLICKS: [f32; 2] = [LET_GO + SIZE_REST, LET_GO + SIZE_REST + 180.0];
+const ASIDE_AT: f32 = LET_GO + 150.0;
+const AWAY: f32 = 400.0;
+const RETURN_AT: f32 = ASIDE_AT + AWAY + SIZE_REST;
+const CLICKS: [f32; 2] = [RETURN_AT + AWAY + 150.0, RETURN_AT + AWAY + 330.0];
 const CLICK: f32 = 60.0;
 const RING: f32 = 360.0;
 const BACK_AT: f32 = CLICKS[1] + crate::panel::RESTORE.as_millis() as f32 + SIZE_REST + 200.0;
-/// How long the second step's play rests before the corner is double-clicked and after the panel is back to its own
-/// size (ms), so that each change is seen before the next.
+/// How long the second step's play rests off the corner before it comes back to double-click it, and after the panel
+/// is back to its own size (ms), so that each is seen as a step of its own.
 const SIZE_REST: f32 = 1200.0;
 /// How the panel follows the hand in the second step's play: as a hand moves, gathering pace and slowing to rest.
 const SIZE_EASE: Easing = Easing(0.4, 0.0, 0.2, 1.0);
@@ -394,12 +398,13 @@ impl<M: Copy> Hand<M> {
     }
 }
 
-/// Where the pointer goes in the second step's play: on the panel as large as it opens, and on its free corner (the
-/// one away from its edge, at its foot) as large as it is drawn at.
+/// Where the pointer goes in the second step's play: on the panel as large as it opens, on its free corner (the one
+/// away from its edge, at its foot) as large as it is drawn at, and on the panel a little in from that corner.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SizeMark {
     Inside,
     Corner(f32),
+    Aside(f32),
 }
 
 /// The second step's play at a moment: how large the panel is, where the pointer is, whether it is held down, whether
@@ -415,10 +420,11 @@ struct Sizing {
 
 /// The second step's play, `t` into it: the pointer gliding from the panel to its free corner, the pointer that sizes
 /// shown once it is there; held down, the panel made larger, then smaller, following the hand (laid out in other
-/// columns on the way, it turns into them as the panel does: see `render::Turn`), each resting a moment; let go, and a
-/// while after the corner double-clicked, the panel back to its own size as Glance has it (see `panel::RESTORE`), the
-/// pointer as it was once it is; a while after, the pointer back on the panel. At its end as at its start, round and
-/// round.
+/// columns on the way, it turns into them as the panel does: see `render::Turn`), each resting a moment; let go, the
+/// pointer moved off the corner onto the panel, a plain pointer again, resting there a while, then back to double-click
+/// the corner as a plain pointer (a step of its own, not the sizing carried on), the panel back to its own size as
+/// Glance has it (see `panel::RESTORE`), the pointer as it was once it is; a while after, the pointer back on the panel.
+/// At its end as at its start, round and round.
 fn sizing(t: Duration) -> Sizing {
     let ms = (t.as_millis() as u64 % SIZE_LOOP) as f32;
     let restore = crate::panel::RESTORE.as_secs_f32() * 1000.0;
@@ -435,11 +441,19 @@ fn sizing(t: Duration) -> Sizing {
         corner(1.0 + (GROWN - 1.0) * eased(ms, 1400.0, 1000.0, SIZE_EASE))
     } else if ms < LET_GO {
         corner(GROWN + (SHRUNK - GROWN) * eased(ms, SHRINK_AT, 1000.0, SIZE_EASE))
+    } else if ms < ASIDE_AT {
+        Sizing { size: SHRUNK, hand: Hand::at(SizeMark::Corner(SHRUNK)), held: false, sizes: true, ring: None }
+    } else if ms < RETURN_AT {
+        let along = eased(ms, ASIDE_AT, AWAY, GLIDE);
+        let hand = if along < 1.0 { Hand::gliding(SizeMark::Corner(SHRUNK), SizeMark::Aside(SHRUNK), along) } else { Hand::at(SizeMark::Aside(SHRUNK)) };
+        Sizing { size: SHRUNK, hand, held: false, sizes: false, ring: None }
     } else if ms < restored {
         // (Made its own size again as the second click goes down, as a double-click is.)
         let size = if ms < CLICKS[1] { SHRUNK } else { crate::panel::restored(SHRUNK, 1.0, (ms - CLICKS[1]) / restore) };
         let held = CLICKS.iter().any(|&click| (click..click + CLICK).contains(&ms));
-        Sizing { size, hand: Hand::at(SizeMark::Corner(SHRUNK)), held, sizes: true, ring }
+        let along = eased(ms, RETURN_AT, AWAY, GLIDE);
+        let hand = if along < 1.0 { Hand::gliding(SizeMark::Aside(SHRUNK), SizeMark::Corner(SHRUNK), along) } else { Hand::at(SizeMark::Corner(SHRUNK)) };
+        Sizing { size, hand, held, sizes: false, ring }
     } else if ms < BACK_AT {
         Sizing { size: 1.0, hand: Hand::at(SizeMark::Corner(SHRUNK)), held: false, sizes: false, ring }
     } else {
@@ -1031,6 +1045,13 @@ fn free_corner(edge: Edge, r: Rect) -> (f32, f32) {
         Edge::Right => (r.x + 1.0, r.y + r.h - 1.0),
         Edge::Left | Edge::Top => (r.x + r.w - 1.0, r.y + r.h - 1.0),
     }
+}
+
+/// On the panel at `r`, on `edge`, a little in from its free corner (see `free_corner`): off the corner, where the
+/// pointer is a plain one.
+fn aside(edge: Edge, r: Rect) -> (f32, f32) {
+    let (corner, inside) = (free_corner(edge, r), inside(r));
+    (corner.0 + (inside.0 - corner.0) * 0.25, corner.1 + (inside.1 - corner.1) * 0.25)
 }
 
 /// The pointer that sizes (`icon`, along the diagonal it sizes), its middle at `at`, `size` across, as Windows draws
@@ -1799,12 +1820,13 @@ impl Ui {
         let place = |ui: &mut Self, mark: SizeMark| {
             let size = match mark {
                 SizeMark::Inside => 1.0,
-                SizeMark::Corner(size) => size,
+                SizeMark::Corner(size) | SizeMark::Aside(size) => size,
             };
             let r = ui.stage_panel(frame, area, panel, Staging { whole: true, size: Some(size), draw: false, ..Staging::default() }).panel?;
             Some(match mark {
                 SizeMark::Inside => inside(r),
                 SizeMark::Corner(_) => free_corner(edge, r),
+                SizeMark::Aside(_) => aside(edge, r),
             })
         };
         // (No panel yet, nothing read to show in it: no pointer either.)
@@ -2226,6 +2248,7 @@ mod tests {
         let place = |mark: SizeMark| match mark {
             SizeMark::Inside => inside(panel_at(1.0)),
             SizeMark::Corner(size) => free_corner(Edge::Right, panel_at(size)),
+            SizeMark::Aside(size) => aside(Edge::Right, panel_at(size)),
         };
         let was = sizing(Duration::ZERO);
         assert_eq!((was.size, was.hand, was.sizes, was.held), (1.0, Hand::at(SizeMark::Inside), false, false));
@@ -2257,8 +2280,9 @@ mod tests {
     }
 
     /// The second step's play rests between its changes: grown, the panel stays so a moment before it is made
-    /// smaller (long enough for a turn into other columns to end); let go, nothing moves a while before the corner is
-    /// double-clicked; back to its own size, nothing moves a while before the pointer goes back onto the panel.
+    /// smaller (long enough for a turn into other columns to end); let go, the pointer moves off the corner, a plain
+    /// pointer, and rests there a while before it comes back to double-click it as a plain pointer; back to its own
+    /// size, nothing moves a while before the pointer goes back onto the panel.
     #[test]
     fn the_size_s_play_rests_before_each_change() {
         // How long the play is still before `at` (ms): the panel as large, the pointer where it is, no click.
@@ -2277,9 +2301,13 @@ mod tests {
         let grown = sizing(Duration::from_millis(SHRINK_AT as u64 - 1));
         assert!(grown.size == GROWN && grown.held, "{grown:?}");
         assert!(still_before(SHRINK_AT) >= crate::widget::MORPH.as_secs_f32() * 1000.0, "{} ms grown", still_before(SHRINK_AT));
-        let let_go = sizing(Duration::from_millis(CLICKS[0] as u64 - 1));
-        assert!(let_go.size == SHRUNK && !let_go.held, "{let_go:?}");
-        assert!(still_before(CLICKS[0]) >= SIZE_REST, "{} ms before the double-click", still_before(CLICKS[0]));
+        let aside = sizing(Duration::from_millis(RETURN_AT as u64 - 1));
+        assert!(aside.size == SHRUNK && !aside.held && !aside.sizes && aside.hand == Hand::at(SizeMark::Aside(SHRUNK)), "{aside:?}");
+        assert!(still_before(RETURN_AT) >= SIZE_REST, "{} ms off the corner", still_before(RETURN_AT));
+        for click in CLICKS {
+            let down = sizing(Duration::from_millis(click as u64 + 1));
+            assert!(down.held && !down.sizes && down.hand == Hand::at(SizeMark::Corner(SHRUNK)), "{down:?}");
+        }
         assert!(still_before(BACK_AT) >= SIZE_REST, "{} ms before going back", still_before(BACK_AT));
     }
 
