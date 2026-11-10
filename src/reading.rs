@@ -66,6 +66,11 @@ pub struct Sample {
     /// The whole processor's use (%); `None` (as for each reading that may
     /// be) where it was not read this time.
     pub cpu: Option<f32>,
+    /// The whole processor's utility (%), as Task Manager's Performance page shows it: the time it was busy weighed by
+    /// how fast it ran against its base clock, so beyond 100 at a clock above the base. Told in a report alone, beside
+    /// `cpu`, which the two disagreeing far more than the clock does shows (see `diagnostics`).
+    #[serde(default)]
+    pub cpu_utility: Option<f32>,
     /// Each logical processor's use (%), in order; `None` where it was not
     /// read this time.
     pub threads: Vec<Option<f32>>,

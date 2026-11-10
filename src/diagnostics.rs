@@ -196,6 +196,10 @@ fn readings(sample: &Sample, info: &StaticInfo) -> Vec<String> {
     let value = |reading: Option<f32>, unit: &str| reading.map_or("not read".to_string(), |v| format!("{v:.1} {unit}"));
     let cpu = sample.cpu_sensors.clone().unwrap_or_default();
     let mut lines = vec![
+        // (Its time busy, as Glance shows it, and its utility, as Task Manager's Performance page does: the second is
+        // the first weighed by the clock against the base, and apart by much more than that, Windows' account of the
+        // time is short.)
+        format!("CPU use: {} of the time busy, utility {}, clock {}", value(sample.cpu, "%"), value(sample.cpu_utility, "%"), value(sample.ghz, "GHz")),
         format!("CPU temperature: {}", value(cpu.temp, "°C")),
         format!("CPU package power: {}", value(cpu.power, "W")),
         format!("CPU chiplet temperatures: {}", cpu.ccds.len()),

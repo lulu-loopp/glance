@@ -95,6 +95,7 @@ pub struct Sampler {
     docker: Option<crate::docker::Docker>,
     query: PDH_HQUERY,
     cpu_time: Option<PDH_HCOUNTER>,
+    cpu_utility: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
     /// Each logical processor's performance and nominal clock, and, on a
     /// processor with cores of more than one kind, its kind (see `Cores`).
@@ -227,6 +228,7 @@ impl Sampler {
             (unsafe { PdhAddEnglishCounterW(query, path, 0, &mut counter) } == ERROR_SUCCESS.0).then_some(counter)
         };
         let cpu_time = add(w!(r"\Processor Information(*)\% Processor Time"));
+        let cpu_utility = add(w!(r"\Processor Information(_Total)\% Processor Utility"));
         let cpu_performance = add(w!(r"\Processor Information(_Total)\% Processor Performance"));
         let cores = Cores {
             classes: Cores::kinds_of_this_machine(),
@@ -313,6 +315,7 @@ impl Sampler {
             hardware,
             query,
             cpu_time,
+            cpu_utility,
             cpu_performance,
             cores,
             gpu_engine,
@@ -501,6 +504,7 @@ impl Sampler {
         // (Without the performance counter, or the base clock, the clock is not read: shown as its base, it looked
         // read when it was not.)
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
+        let utility = counter(self.cpu_utility).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).map(|utility| utility as f32);
 
         // The driver installed meanwhile: what reads through it, not had without it, opened now.
         if self.hardware && crate::pawnio::arrived() {
@@ -550,6 +554,7 @@ impl Sampler {
         Some(Sample {
             t: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
             cpu,
+            cpu_utility: utility,
             threads,
             ghz: self.base_mhz.zip(performance).map(|(base, performance)| (base * performance / 100_000.0) as f32),
             kinds_ghz,

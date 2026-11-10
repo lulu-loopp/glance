@@ -1210,6 +1210,7 @@ pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: 
         threads,
         ghz: Some(ghz),
         kinds_ghz: Vec::new(),
+        cpu_utility: None,
         threads_ghz: Vec::new(),
         memory: MemorySample { used, committed: used + 6 * gb, commit_limit: info.mem_total + 8 * gb, cached: 12 * gb },
         gpus,

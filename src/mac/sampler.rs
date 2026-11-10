@@ -184,6 +184,7 @@ impl Sampler {
             threads,
             ghz: report.cpu_mhz.map(|mhz| mhz / 1000.0),
             kinds_ghz: Vec::new(),
+            cpu_utility: None,
             threads_ghz: Vec::new(),
             memory: memory(self.info.mem_total),
             gpus,
