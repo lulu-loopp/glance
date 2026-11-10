@@ -100,14 +100,21 @@ const PUSH_LOOP: u64 = 5300;
 /// How many steps there are (the word that it is done is none of them).
 const STEPS: usize = 5;
 
-/// The second step's play (ms), and the sizes it makes the panel; when each click of the double-click goes down, how
-/// long one is held, and how long the ring each leaves shows.
-const SIZE_LOOP: u64 = 6600;
+/// The second step's play (ms), and the sizes it makes the panel; when it starts to make it smaller, and when the
+/// corner is let go; when each click of the double-click goes down, how long one is held, and how long the ring each
+/// leaves shows; when the pointer goes back onto the panel.
+const SIZE_LOOP: u64 = 7600;
 const GROWN: f32 = 1.18;
 const SHRUNK: f32 = 0.8;
-const CLICKS: [f32; 2] = [3900.0, 4080.0];
+const SHRINK_AT: f32 = 2800.0;
+const LET_GO: f32 = 4000.0;
+const CLICKS: [f32; 2] = [LET_GO + SIZE_REST, LET_GO + SIZE_REST + 180.0];
 const CLICK: f32 = 60.0;
 const RING: f32 = 360.0;
+const BACK_AT: f32 = CLICKS[1] + crate::panel::RESTORE.as_millis() as f32 + SIZE_REST + 200.0;
+/// How long the second step's play rests before the corner is double-clicked and after the panel is back to its own
+/// size (ms), so that each change is seen before the next.
+const SIZE_REST: f32 = 800.0;
 /// How the panel follows the hand in the second step's play: as a hand moves, gathering pace and slowing to rest.
 const SIZE_EASE: Easing = Easing(0.4, 0.0, 0.2, 1.0);
 
@@ -407,9 +414,11 @@ struct Sizing {
 }
 
 /// The second step's play, `t` into it: the pointer gliding from the panel to its free corner, the pointer that sizes
-/// shown once it is there; held down, the panel made larger, then smaller, following the hand; let go, the corner
-/// double-clicked, and the panel back to its own size as Glance has it (see `panel::RESTORE`), the pointer as it was
-/// once it is; the pointer back on the panel. At its end as at its start, round and round.
+/// shown once it is there; held down, the panel made larger, then smaller, following the hand (laid out in other
+/// columns on the way, it turns into them as the panel does: see `render::Turn`), each resting a moment; let go, and a
+/// while after the corner double-clicked, the panel back to its own size as Glance has it (see `panel::RESTORE`), the
+/// pointer as it was once it is; a while after, the pointer back on the panel. At its end as at its start, round and
+/// round.
 fn sizing(t: Duration) -> Sizing {
     let ms = (t.as_millis() as u64 % SIZE_LOOP) as f32;
     let restore = crate::panel::RESTORE.as_secs_f32() * 1000.0;
@@ -422,19 +431,19 @@ fn sizing(t: Duration) -> Sizing {
         Sizing { size: 1.0, hand: Hand::gliding(SizeMark::Inside, SizeMark::Corner(1.0), eased(ms, 200.0, 1000.0, GLIDE)), held: false, sizes: false, ring: None }
     } else if ms < 1400.0 {
         corner(1.0)
-    } else if ms < 2600.0 {
+    } else if ms < SHRINK_AT {
         corner(1.0 + (GROWN - 1.0) * eased(ms, 1400.0, 1000.0, SIZE_EASE))
-    } else if ms < 3600.0 {
-        corner(GROWN + (SHRUNK - GROWN) * eased(ms, 2600.0, 1000.0, SIZE_EASE))
+    } else if ms < LET_GO {
+        corner(GROWN + (SHRUNK - GROWN) * eased(ms, SHRINK_AT, 1000.0, SIZE_EASE))
     } else if ms < restored {
         // (Made its own size again as the second click goes down, as a double-click is.)
         let size = if ms < CLICKS[1] { SHRUNK } else { crate::panel::restored(SHRUNK, 1.0, (ms - CLICKS[1]) / restore) };
         let held = CLICKS.iter().any(|&click| (click..click + CLICK).contains(&ms));
         Sizing { size, hand: Hand::at(SizeMark::Corner(SHRUNK)), held, sizes: true, ring }
-    } else if ms < 5300.0 {
+    } else if ms < BACK_AT {
         Sizing { size: 1.0, hand: Hand::at(SizeMark::Corner(SHRUNK)), held: false, sizes: false, ring }
     } else {
-        Sizing { size: 1.0, hand: Hand::gliding(SizeMark::Corner(SHRUNK), SizeMark::Inside, eased(ms, 5300.0, 1000.0, GLIDE)), held: false, sizes: false, ring: None }
+        Sizing { size: 1.0, hand: Hand::gliding(SizeMark::Corner(SHRUNK), SizeMark::Inside, eased(ms, BACK_AT, 1000.0, GLIDE)), held: false, sizes: false, ring: None }
     }
 }
 
@@ -1763,7 +1772,7 @@ impl Ui {
             Some(Part::Music) => self.music_on_stage(frame, area, edge, out).1,
             Some(part) => {
                 let prefs = self.prefs.clone().holding(part);
-                self.panel_on_stage(frame, area, Some((edge, &prefs, part)), false, out).1
+                self.stage_panel(frame, area, Some((edge, &prefs, part)), Staging { out, shown: Shown::Guide, ..Staging::default() }).screen
             }
             None => self.panel_on_stage(frame, area, None, true, 1.0).1,
         };
@@ -1786,7 +1795,7 @@ impl Ui {
         let edge = guide.edge.0;
         let prefs = self.prefs.clone().holding(Part::Monitor);
         let panel = Some((edge, &prefs, Part::Monitor));
-        self.stage_panel(frame, area, panel, Staging { whole: true, size: Some(play.size), ..Staging::default() });
+        self.stage_panel(frame, area, panel, Staging { whole: true, size: Some(play.size), shown: Shown::Guide, ..Staging::default() });
         let place = |ui: &mut Self, mark: SizeMark| {
             let size = match mark {
                 SizeMark::Inside => 1.0,
@@ -1821,7 +1830,7 @@ impl Ui {
         let prefs = self.prefs.clone().holding(Part::Monitor);
         let panel = Some((edge, &prefs, Part::Monitor));
         let rest = self.stage_panel(frame, area, panel, Staging { whole: true, draw: false, ..Staging::default() });
-        self.stage_panel(frame, area, panel, Staging { whole: true, out: play.out, ..Staging::default() });
+        self.stage_panel(frame, area, panel, Staging { whole: true, out: play.out, shown: Shown::Guide, ..Staging::default() });
         let (Some(body), Some(&lane), Some(bar)) = (rest.panel, rest.lanes.first(), rest.bar) else { return };
         let screen = rest.screen;
         // Taken by its head, the lane comes off alone where the panel has others, else the panel whole (see
@@ -1858,12 +1867,12 @@ impl Ui {
         if let Some((hand, opacity)) = play.lane {
             let at = hand.point(place);
             let corner = on_stage(at.0 - (head.0 - torn.x), at.1 - (head.1 - torn.y));
-            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), lane: only, opacity, desktop: false, torn: Some(0), ..Staging::default() });
+            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), lane: only, opacity, desktop: false, shown: Shown::Torn(0), ..Staging::default() });
         }
         if let Some((hand, opacity)) = play.whole {
             let at = hand.point(place);
             let corner = on_stage(at.0 - (foot.0 - body.x), at.1 - (foot.1 - body.y));
-            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), opacity, desktop: false, torn: Some(1), ..Staging::default() });
+            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), opacity, desktop: false, shown: Shown::Torn(1), ..Staging::default() });
         }
         paint_pointer(frame, play.hand.point(place), if play.held { 20.0 * 0.92 } else { 20.0 });
     }
@@ -2245,6 +2254,33 @@ mod tests {
         let end = sizing(Duration::from_millis(SIZE_LOOP - 1));
         let (at, rest) = (end.hand.point(place), inside(panel_at(1.0)));
         assert!(end.size == 1.0 && !end.sizes && (at.0 - rest.0).abs() < 1e-5 && (at.1 - rest.1).abs() < 1e-5, "{end:?}");
+    }
+
+    /// The second step's play rests between its changes: grown, the panel stays so a moment before it is made
+    /// smaller (long enough for a turn into other columns to end); let go, nothing moves a while before the corner is
+    /// double-clicked; back to its own size, nothing moves a while before the pointer goes back onto the panel.
+    #[test]
+    fn the_size_s_play_rests_before_each_change() {
+        // How long the play is still before `at` (ms): the panel as large, the pointer where it is, no click.
+        let still_before = |at: f32| {
+            let then = sizing(Duration::from_millis(at as u64 - 1));
+            let mut ms = at as u64 - 1;
+            while ms > 0 {
+                let was = sizing(Duration::from_millis(ms - 1));
+                if was.size != then.size || was.hand != then.hand || was.held != then.held {
+                    break;
+                }
+                ms -= 1;
+            }
+            at - ms as f32
+        };
+        let grown = sizing(Duration::from_millis(SHRINK_AT as u64 - 1));
+        assert!(grown.size == GROWN && grown.held, "{grown:?}");
+        assert!(still_before(SHRINK_AT) >= crate::widget::MORPH.as_secs_f32() * 1000.0, "{} ms grown", still_before(SHRINK_AT));
+        let let_go = sizing(Duration::from_millis(CLICKS[0] as u64 - 1));
+        assert!(let_go.size == SHRUNK && !let_go.held, "{let_go:?}");
+        assert!(still_before(CLICKS[0]) >= SIZE_REST, "{} ms before the double-click", still_before(CLICKS[0]));
+        assert!(still_before(BACK_AT) >= SIZE_REST, "{} ms before going back", still_before(BACK_AT));
     }
 
     /// The third step's play runs on round with nothing jumping, across where it begins again too: the pointer and

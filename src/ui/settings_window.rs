@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::f32::consts::E;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
@@ -1600,13 +1601,38 @@ pub(super) struct Staging {
     pub desktop: bool,
     /// Drawn, else only measured.
     pub draw: bool,
-    /// A widget torn off it, drawn in the layers of that one of `Ui::torn_layers`, else the panel in the stage's own.
-    pub torn: Option<usize>,
+    /// Which of the stage's panels it is.
+    pub shown: Shown,
 }
 
 impl Default for Staging {
     fn default() -> Self {
-        Staging { whole: false, out: 1.0, size: None, at: None, lane: None, opacity: 1.0, desktop: true, draw: true, torn: None }
+        Staging { whole: false, out: 1.0, size: None, at: None, lane: None, opacity: 1.0, desktop: true, draw: true, shown: Shown::Preview }
+    }
+}
+
+/// Which of the stage's panels one staged is: the preview's, the guide's plays', or a widget the guide's play tears
+/// off it (the lane's, the whole panel's). Each is drawn in layers of its own and turns between its layouts on its own
+/// (see `StageLayers`), however the others are drawn between its frames.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Shown {
+    Preview,
+    Guide,
+    Torn(usize),
+}
+
+/// A staged panel's layers (see `render::PanelLayers`), and its turn from one layout into the next as the panel's
+/// own turns (see `render::Turn`).
+#[derive(Default)]
+struct StageLayers {
+    layers: PanelLayers,
+    turn: render::Turn,
+}
+
+impl StageLayers {
+    fn release(&mut self) {
+        self.layers.release();
+        self.turn.release();
     }
 }
 
@@ -1902,9 +1928,10 @@ struct Ui {
     library_music: super::music::Music,
     library_music_ground: render::GroundLayers,
     library_layers: [PanelLayers; 2],
-    /// The widgets the guide's play tears off the panel on the stage, the lane's and the whole panel's (each drawn in
-    /// layers of its own, as the panel under them is).
-    torn_layers: [PanelLayers; 2],
+    /// The panel the guide's plays show on the stage, and the widgets its play tears off it, the lane's and the whole
+    /// panel's (see `Shown`).
+    guide_layers: StageLayers,
+    torn_layers: [StageLayers; 2],
     map_art: Vec<MapArt>,
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
@@ -1933,7 +1960,7 @@ struct Ui {
     targets: Vec<(Rect, Target)>,
     relabel_at: Option<Instant>,
     stage: Stage,
-    layers: PanelLayers,
+    layers: StageLayers,
     last_frame: Instant,
     next_frame: Instant,
     /// When the guide is next drawn, apart from the window (see `guide`).
@@ -1966,6 +1993,7 @@ impl Lives for Ui {
             guide.let_go_of_surfaces();
         }
         self.layers.release();
+        self.guide_layers.release();
         self.stage.bitmap = None;
         for stage in &mut self.kept_stages {
             stage.bitmap = None;
@@ -1975,7 +2003,10 @@ impl Lives for Ui {
         }
         self.music.release();
         self.library_music.release();
-        for layers in self.library_layers.iter_mut().chain(&mut self.torn_layers) {
+        for layers in &mut self.library_layers {
+            layers.release();
+        }
+        for layers in &mut self.torn_layers {
             layers.release();
         }
     }
@@ -2172,7 +2203,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             library_music: super::music::Music::default(),
             library_music_ground: render::GroundLayers::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
-            torn_layers: [PanelLayers::default(), PanelLayers::default()],
+            guide_layers: StageLayers::default(),
+            torn_layers: [StageLayers::default(), StageLayers::default()],
             map_art: Vec::new(),
             kept_stages: Vec::new(),
             reads: reads::Reads::default(),
@@ -2189,7 +2221,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             targets: Vec::new(),
             relabel_at: None,
             stage,
-            layers: PanelLayers::default(),
+            layers: StageLayers::default(),
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
@@ -5223,7 +5255,7 @@ impl Ui {
             self.gfx.settle();
         }
         // (A row held still moves only as the pointer does, which asks for a frame itself.)
-        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target;
+        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning();
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
@@ -6525,7 +6557,7 @@ impl Ui {
     /// it (see `Staging`): as `panel_on_stage` draws it, or as large as the guide's plays make it, or put down on the
     /// screen as a widget pulled off it, whole or one lane of it. What was drawn, where (see `Staged`).
     pub(super) fn stage_panel(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, staging: Staging) -> Staged {
-        let Staging { whole, out, size, at, lane: only, opacity, desktop, draw, torn } = staging;
+        let Staging { whole, out, size, at, lane: only, opacity, desktop, draw, shown: staged_as } = staging;
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
@@ -6562,26 +6594,36 @@ impl Ui {
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
         let columns = self.settings.columns_of(part);
+        // What it is (another drawn in its place is not turned into: see `render::Turn::follow`).
+        let what = {
+            let mut key = DefaultHasher::new();
+            (part, edge, whole, size.is_some(), at.is_some(), only).hash(&mut key);
+            key.finish()
+        };
         // No larger than the screen holds it, as the panel is made (see `Panel::dragged`).
         let size = size.unwrap_or_else(|| self.settings.panel_size_on(part, self.stage.screen.as_deref())).clamp(SIZES.0, SIZES.1);
         let size = size.min(arrange::largest(&measure, edge, &heights, (sw, sh), columns, size, rail).max(SIZES.0));
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
-        let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
         // (Slid in, as far past the edge as its shadow reaches.)
         let away = 1.0 - out;
         let boxes = layout.lanes();
-        // Its corner on the screen: against its edge, or where it is put down (where one lane of it is, that lane's).
-        let pos = match (at, only.and_then(|lane| boxes.get(lane))) {
-            (Some(at), Some(lane)) => (at.0 - lane.x * zoom, at.1 - lane.y * zoom),
-            (Some(at), None) => at,
-            (None, _) => match edge {
-                Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-                Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-                Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
-            },
+        // Its corner on the screen, laid out as `layout` at `zoom`: against its edge, or where it is put down (where
+        // one lane of it is, that lane's).
+        let corner = |layout: &view::Layout, zoom: f32| {
+            let (pw, ph, inset) = (layout.width() * zoom, layout.height() * zoom, measure.inset * zoom);
+            match (at, only.and_then(|lane| layout.lanes().get(lane).copied())) {
+                (Some(at), Some(lane)) => (at.0 - lane.x * zoom, at.1 - lane.y * zoom),
+                (Some(at), None) => at,
+                (None, _) => match edge {
+                    Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                    Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                    Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
+                },
+            }
         };
+        let pos = corner(&layout, zoom);
         let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
         let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let shown = |x: f32, y: f32, w: f32, h: f32| Rect { x: ox + x * k, y: oy + y * k, w: w * k, h: h * k };
@@ -6643,11 +6685,21 @@ impl Ui {
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
         let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: at.is_none().then_some(edge), backdrop, frost, rough: false };
-        let cache = match torn {
-            Some(at) => &mut self.torn_layers[at],
-            None => &mut self.layers,
+        let scale = self.scale * zoom * k;
+        let cache = match staged_as {
+            Shown::Preview => &mut self.layers,
+            Shown::Guide => &mut self.guide_layers,
+            Shown::Torn(at) => &mut self.torn_layers[at],
         };
-        let drawn = cache.draw(frame, &picture, local, self.scale * zoom * k);
+        // Laid out in other columns than it was drawn in last, it turns into the new layout as the panel does, what
+        // it turns from where it was on the screen.
+        let drawn = match cache.turn.follow(what, &layout, zoom, Instant::now(), !crate::panel::reduced_motion()) {
+            Some(t) => cache.turn.draw(frame, &picture, &mut cache.layers, local, scale, t, |old, old_zoom| {
+                let was = corner(old, old_zoom);
+                ((was.0 - pos.0) / zoom, (was.1 - pos.1) / zoom)
+            }),
+            None => cache.layers.draw(frame, &picture, local, scale),
+        };
         for layer in layers.into_iter().rev() {
             unsafe { frame.dc.PopLayer() };
             drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));

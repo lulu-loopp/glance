@@ -2,6 +2,7 @@
 //! whatever size it is wanted, on screen or in the settings' preview.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::time::Instant;
 
 use windows::core::Result;
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap1;
@@ -242,6 +243,97 @@ pub fn record(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout
     recorder.parts()
 }
 
+/// What a turn between layouts starts from: a layout drawn (at its zoom), or what a turn under way drew last.
+pub enum Before {
+    Shown(Layout, f32),
+    Drawn(Vec<Part>),
+}
+
+/// A panel's lanes laid out anew in other columns (it is sized, or what it shows grows) turning into the new layout,
+/// each reading moved from where it was to where it goes over `widget::MORPH`, as a widget turns between its forms (see
+/// `morph`). One turning already turns on from where it got to. The panel on the screen and the one the settings and
+/// the guide show on their stage turn alike.
+#[derive(Default)]
+pub struct Turn {
+    /// What it drew last (see `follow`), laid out how, at what zoom.
+    last: Option<(u64, Layout, f32)>,
+    turning: Option<(Instant, Before)>,
+    /// What the turn under way drew last.
+    turned: Vec<Part>,
+    layer: Layer,
+}
+
+impl Turn {
+    /// Follows what is drawn now: `what` (another thing drawn in its place is not turned into), laid out as `layout`
+    /// at `zoom`. Laid out in other columns than it was, it turns, unless `moves` is false (motion reduced): how far
+    /// it has turned (eased), while it does.
+    pub fn follow(&mut self, what: u64, layout: &Layout, zoom: f32, now: Instant, moves: bool) -> Option<f32> {
+        match self.last.take() {
+            Some((was, last, last_zoom)) if was == what => {
+                if last.columns != layout.columns && moves {
+                    let before = match self.turning.take() {
+                        Some(_) => Before::Drawn(std::mem::take(&mut self.turned)),
+                        None => Before::Shown(last, last_zoom),
+                    };
+                    self.turning = Some((now, before));
+                }
+            }
+            Some(_) => self.end(),
+            None => {}
+        }
+        self.last = Some((what, layout.clone(), zoom));
+        if self.turning.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= crate::widget::MORPH) {
+            self.end();
+        }
+        self.turning.as_ref().map(|(since, _)| super::morph::ease(now.duration_since(*since).as_secs_f32() / crate::widget::MORPH.as_secs_f32()))
+    }
+
+    /// Turns from `drawn` (what was drawn otherwise: a lane as a thing was carried off it), from now.
+    pub fn begin(&mut self, now: Instant, drawn: Vec<Part>) {
+        self.turning = Some((now, Before::Drawn(drawn)));
+    }
+
+    pub fn turning(&self) -> bool {
+        self.turning.is_some()
+    }
+
+    fn end(&mut self) {
+        self.turning = None;
+        self.turned.clear();
+        self.layer.release();
+    }
+
+    /// What it drew let go of: drawn again, it starts afresh.
+    pub fn release(&mut self) {
+        self.last = None;
+        self.end();
+    }
+
+    /// Draws `picture` turned `t` of the way from what it turns from: the skin's ground as it is now (in `layers`), and
+    /// over it each reading between where it was and where it goes. `old_at` says where the layout it turns from (at
+    /// its zoom) has its corner, in the units of the one it turns into (that is, which side of it each keeps to). Its
+    /// arguments as `PanelLayers::draw`'s. (Nothing to press mid-turn: where each thing is comes as it ends.)
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(&mut self, frame: &Frame, picture: &Picture, layers: &mut PanelLayers, local: Matrix3x2, scale: f32, t: f32, old_at: impl FnOnce(&Layout, f32) -> (f32, f32)) -> Result<Drawn> {
+        let (Some((_, before)), Some(&(_, _, zoom))) = (self.turning.as_mut(), self.last.as_ref()) else { unreachable!("drawn turning only after `follow` says it turns") };
+        let grounded = layers.draw_ground(frame, picture, local, scale)?;
+        if let Before::Shown(old, old_zoom) = before {
+            *before = Before::Drawn(record(frame, picture.scene, picture.lanes, old, None, *old_zoom / zoom, old_at(old, *old_zoom)));
+        }
+        let Before::Drawn(from) = before else { unreachable!() };
+        let now_drawn = record(frame, picture.scene, picture.lanes, picture.layout, None, 1.0, (0.0, 0.0));
+        let parts = super::morph::between(from, &now_drawn, t);
+        let halo = (picture.scene.theme.skin == Skin::Glass).then_some(picture.scene.theme.legibility);
+        let content = Matrix3x2::translation(picture.at.0, picture.at.1) * local;
+        self.layer.draw(frame, t.to_bits() as u64 + 1, content, (0.0, 0.0, picture.layout.width(), picture.layout.height()), scale, halo, |frame| {
+            super::morph::draw(frame, &parts);
+            Ok(())
+        })?;
+        self.turned = parts;
+        Ok(Drawn { hits: None, grounded })
+    }
+}
+
 /// What shows a station's lane, as a thing is carried off it (see `carry`): what it drew meanwhile, kept, and the thing.
 #[derive(Default)]
 pub struct Away(Option<(view::Hit, Vec<Part>)>);
@@ -282,7 +374,34 @@ pub fn record_tile(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &L
 mod tests {
     use super::super::morph::{Op, Part};
     use super::super::view::{self, Hit};
-    use super::Away;
+    use super::{Away, Turn};
+    use std::time::{Duration, Instant};
+
+    /// Laid out in other columns than it was drawn in last, a panel turns into the new layout for `widget::MORPH`,
+    /// from the start; laid out in the same columns, or drawn as something else in its place, or with motion reduced,
+    /// it does not; one let go of starts afresh.
+    #[test]
+    fn a_panel_laid_out_in_other_columns_turns_into_them() {
+        use super::super::theme::{Skin, Theme};
+        let theme = Theme::new(Skin::Paper, false);
+        let laid = |columns: usize| super::super::arrange::arrange(&theme, crate::settings::Edge::Right, vec![300.0; 6], (2560.0, 1440.0), Some(columns), 1.0, None).0;
+        let (two, three) = (laid(2), laid(3));
+        assert_eq!((two.columns, three.columns), (2, 3));
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut turn = Turn::default();
+        assert_eq!(turn.follow(1, &two, 1.0, at(0), true), None, "drawn first");
+        assert_eq!(turn.follow(1, &two, 1.0, at(10), true), None, "the same columns");
+        assert_eq!(turn.follow(1, &three, 1.0, at(20), true), Some(0.0), "into three columns");
+        let half = turn.follow(1, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64 / 2), true).unwrap();
+        assert!(half > 0.5 && half < 1.0, "{half}");
+        assert_eq!(turn.follow(1, &three, 1.0, at(20 + crate::widget::MORPH.as_millis() as u64), true), None, "turned");
+        assert_eq!(turn.follow(2, &two, 1.0, at(400), true), None, "something else drawn in its place");
+        assert_eq!(turn.follow(2, &three, 1.0, at(410), false), None, "motion reduced");
+        turn.release();
+        assert_eq!(turn.follow(2, &two, 1.0, at(420), true), None, "let go of");
+        assert!(!turn.turning());
+    }
 
     /// What shows a station's lane, a thing carried off it: put back, nothing turns; taken off the station, what was
     /// drawn as it was carried is turned from, once; none of it drawn there, nothing kept.

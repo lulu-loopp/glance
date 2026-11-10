@@ -2248,12 +2248,6 @@ impl Behind {
     }
 }
 
-/// What a turn between layouts starts from: a layout shown (at its zoom), or what a turn under way drew last.
-enum Before {
-    Shown(Layout, f32),
-    Drawn(Vec<crate::ui::morph::Part>),
-}
-
 /// A capture of the desktop behind the panel, asked for: for which
 /// `Panel::generation`, and whether it is taken again where the panel now is
 /// (the panel kept out of it; its theme following), else refreshed in place.
@@ -2283,10 +2277,7 @@ impl crate::ui::life::Lives for Panel<'_> {
         self.music.release();
         self.music_layer.release();
         self.music_ground.release();
-        self.last_layout = None;
-        self.turning = None;
-        self.turned.clear();
-        self.turn_layer.release();
+        self.turn.release();
         self.behind = None;
         if let Some(scene) = &mut self.backdrop {
             scene.rest();
@@ -2384,15 +2375,10 @@ struct Panel<'a> {
     corner: (f32, f32),
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
-    /// The layout drawn last, at its zoom: laid out anew in other columns, it turns into the new one (see `morph`).
-    last_layout: Option<(Layout, f32)>,
-    /// Turning from one layout into the next: since when, and from what; what the turn drew last (where a turn
-    /// that turns again starts from); and the layer it is drawn in.
-    turning: Option<(Instant, Before)>,
-    turned: Vec<crate::ui::morph::Part>,
+    /// Laid out anew in other columns, it turns into the new layout (see `render::Turn`).
+    turn: render::Turn,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
-    turn_layer: gfx::Layer,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -2546,11 +2532,8 @@ impl<'a> Panel<'a> {
             settings_from: None,
             corner: (0.0, 0.0),
             was_sized: false,
-            last_layout: None,
-            turning: None,
-            turned: Vec::new(),
+            turn: render::Turn::default(),
             away: render::Away::default(),
-            turn_layer: gfx::Layer::default(),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
             tear_music: None,
@@ -4085,25 +4068,8 @@ impl<'a> Panel<'a> {
         self.step_restore(now, false);
         let (lanes, layout) = self.arrange_lanes();
         let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
-        // Laid out in other columns (sized, or the readings grown): it turns into the new layout, each reading moved
-        // from where it was to where it goes, as a widget turns between its forms. One turning already turns on from
-        // where it got to.
-        if let Some((last, last_zoom)) = self.last_layout.take() {
-            if last.columns != layout.columns && !reduced_motion() {
-                let before = match self.turning.take() {
-                    Some(_) => Before::Drawn(std::mem::take(&mut self.turned)),
-                    None => Before::Shown(last, last_zoom),
-                };
-                self.turning = Some((now, before));
-            }
-        }
-        self.last_layout = Some((layout.clone(), zoom));
-        if self.turning.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= crate::widget::MORPH) {
-            self.turning = None;
-            self.turned.clear();
-            self.turn_layer.release();
-        }
-        let turn = self.turning.as_ref().map(|(since, _)| crate::ui::morph::ease(now.duration_since(*since).as_secs_f32() / crate::widget::MORPH.as_secs_f32()));
+        // Laid out in other columns (sized, or the readings grown): it turns into the new layout (see `render::Turn`).
+        let turn = self.turn.follow(0, &layout, zoom, now, !reduced_motion());
         let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
         // Drawn in what it is painted in (the window, but while it is sized), placed in the window there.
@@ -4163,15 +4129,14 @@ impl<'a> Panel<'a> {
             None => (placement.floating.is_none() && self.edge == Edge::Right, false),
         };
         let centred = placement.held.is_none() && placement.floating.is_none() && self.edge == Edge::Top;
-        let halo = (self.theme.skin == Skin::Glass).then_some(self.theme.legibility);
-        let (before, turned, turn_layer) = (self.turning.as_mut().map(|(_, before)| before), &mut self.turned, &mut self.turn_layer);
+        let turning = &mut self.turn;
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
         let lifting = self.lifting.take().and_then(|(hit, drag, from)| self.hits.iter().find(|box_| box_.4 == hit).map(|&(hx, hy, hw, hh, _)| (hit, drag, from, (hx, hy, hw, hh))));
         let mut lifted = None;
-        let (away, mut taken_off) = (&mut self.away, None);
+        let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
@@ -4192,39 +4157,23 @@ impl<'a> Panel<'a> {
             let local = Matrix3x2::translation(x, y);
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
             // carried (its room outlined) into how it is drawn now.
-            let mut gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none()).map(Before::Drawn);
-            let (turn, before) = match gone_from.as_mut() {
-                Some(from) => (Some(0.0), Some(from)),
-                None => (turn, before),
+            let gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none());
+            let turn = match gone_from {
+                Some(from) => {
+                    turning.begin(now, from);
+                    Some(0.0)
+                }
+                None => turn,
             };
-            drawn = Some(match (turn, before) {
-                (Some(t), Some(before)) => (|| {
-                    // Turning: the skin's ground as it is now, and over it each reading between where it was and
-                    // where it goes.
-                    let grounded = layers.draw_ground(frame, &picture, local, px)?;
-                    if let Before::Shown(old, old_zoom) = before {
-                        let k = *old_zoom / zoom;
-                        let (old_w, old_h) = (old.width() * k, old.height() * k);
-                        let old_at = (
-                            if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 },
-                            if keeps_bottom { height - old_h } else { 0.0 },
-                        );
-                        *before = Before::Drawn(render::record(frame, &scene, &lanes, old, None, k, old_at));
-                    }
-                    let now_drawn = render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0));
-                    let Before::Drawn(from) = before else { unreachable!() };
-                    let parts = crate::ui::morph::between(from, &now_drawn, t);
-                    turn_layer.draw(frame, t.to_bits() as u64 + 1, local, (0.0, 0.0, width, height), px, halo, |frame| {
-                        crate::ui::morph::draw(frame, &parts);
-                        Ok(())
-                    })?;
-                    *turned = parts;
-                    // (Nothing to press mid-turn: where each thing is comes as it ends.)
-                    Ok(render::Drawn { hits: None, grounded })
-                })(),
-                _ => layers.draw(frame, &picture, local, px),
+            drawn = Some(match turn {
+                // Turning: what it turns from kept to the side the panel keeps to.
+                Some(t) => turning.draw(frame, &picture, layers, local, px, t, |old, old_zoom| {
+                    let k = old_zoom / zoom;
+                    let (old_w, old_h) = (old.width() * k, old.height() * k);
+                    (if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 }, if keeps_bottom { height - old_h } else { 0.0 })
+                }),
+                None => layers.draw(frame, &picture, local, px),
             });
-            taken_off = gone_from;
             // (Not shown, a frame part of which failed: see `Frame::fail`.)
             if let Some(Err(error)) = &drawn {
                 frame.fail(error.clone());
@@ -4249,9 +4198,6 @@ impl<'a> Panel<'a> {
             }
         };
         let (hits, grounded) = (drawn.hits, drawn.grounded);
-        if let Some(from) = taken_off {
-            self.turning = Some((now, from));
-        }
         if let (Some((hit, drag, from, (_, _, hw, hh))), Some(parts), Some(at)) = (lifting, lifted, lifting.and_then(|(hit, ..)| self.hit_on_screen(hit))) {
             let lifted = crate::carry::Lifted { hit, drag, parts, size: (hw, hh), at: POINT { x: at.left, y: at.top }, from, px, over: placement.panel, window: self.window.hwnd, look: self.menu_look() };
             crate::carry::begin(&self.gfx, lifted);
@@ -4280,7 +4226,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel (or, with none, four times a second).
-        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
+        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turn.turning();
         self.next_frame = if moving {
             now
         } else {
