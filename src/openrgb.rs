@@ -3,10 +3,11 @@
 //! its own. Never on a laptop (see `runs_on`): the remote sets the light under a laptop's keys its own way (its
 //! `keys`), and runs OpenRGB itself, without these rights, for the rest.
 //!
-//! What runs is the release Glance names, file by file: each is read from the user's folder (where the remote fetched
-//! it), checked, and written to a folder of administrators' alone, made new each time. It keeps its configuration
-//! there too (where it would look for plugins), hears this machine alone, and takes nothing from the user's
-//! environment that would have Qt load another's code.
+//! What runs is the OpenRGB put in Glance's own folder with it, where there is one (see `with_glance`), run from there
+//! if only administrators can change it; else the release Glance names, file by file: each is read from the user's
+//! folder (where the remote fetched it), checked, and written to a folder of administrators' alone, made new each
+//! time. It keeps its configuration in that folder (where it would look for plugins), hears this machine alone, and
+//! takes nothing from the user's environment that would have Qt load another's code.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -64,6 +65,8 @@ const ENDED_WITHIN: Duration = Duration::from_secs(5);
 
 struct Running {
     program: Child,
+    /// Where its program is, and the folder of administrators' alone its configuration is kept in.
+    from: PathBuf,
     folder: crate::elevation::Private,
 }
 
@@ -129,8 +132,8 @@ fn afresh() {
     let mut running = RUNNING.lock().unwrap();
     let Some(mut was) = running.take() else { return };
     end(&mut was.program);
-    match run_from(&was.folder) {
-        Ok(program) => *running = Some(Running { program, folder: was.folder }),
+    match run_from(&was.from, &was.folder) {
+        Ok(program) => *running = Some(Running { program, from: was.from, folder: was.folder }),
         Err(error) => crate::journal::note(format!("OpenRGB did not start again: {error}")),
     }
 }
@@ -182,9 +185,26 @@ fn started() -> Result<Running, String> {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_nanos());
     let name = format!("{FOLDERS}{}-{stamp}", std::process::id());
     let folder = crate::elevation::private_folder(&program_data, &name).ok_or("no folder of administrators' alone")?;
-    put_in(&RELEASE, &fetched().ok_or("no folder of the user's")?, folder.path())?;
-    let program = run_from(&folder)?;
-    Ok(Running { program, folder })
+    let from = match std::env::current_exe().ok().as_deref().and_then(Path::parent).and_then(with_glance) {
+        Some(with_glance) => {
+            let from = crate::elevation::vouched_folder(&with_glance).ok_or("the OpenRGB in Glance's folder can be changed by others than administrators")?;
+            std::fs::create_dir_all(folder.path().join(CONFIGURATION)).map_err(|error| error.to_string())?;
+            from
+        }
+        None => {
+            put_in(&RELEASE, &fetched().ok_or("no folder of the user's")?, folder.path())?;
+            folder.path().to_path_buf()
+        }
+    };
+    let program = run_from(&from, &folder)?;
+    Ok(Running { program, from, folder })
+}
+
+/// The OpenRGB put in Glance's own folder `installed` with it, where there is one: a newer one than the release, or
+/// one changed for this PC's lights, which the remote runs too (see its `lights::program`).
+fn with_glance(installed: &Path) -> Option<PathBuf> {
+    let folder = installed.join(crate::elevation::OPENRGB);
+    folder.join("OpenRGB.exe").is_file().then_some(folder)
 }
 
 /// Whether it is run, with the PawnIO modules that reach the board's SMBus and its LPC bus (`RELEASE`'s), on the
@@ -242,12 +262,13 @@ fn for_qt(name: &std::ffi::OsStr) -> bool {
     name.to_string_lossy().to_ascii_uppercase().starts_with("QT")
 }
 
-fn run_from(folder: &crate::elevation::Private) -> Result<Child, String> {
+/// Runs the OpenRGB in `from`, its configuration in `folder`.
+fn run_from(from: &Path, folder: &crate::elevation::Private) -> Result<Child, String> {
     use std::os::windows::process::CommandExt;
     /// CREATE_NO_WINDOW: no console for a program started without one.
     const NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new(folder.path().join("OpenRGB.exe"));
-    command.args(arguments(folder.path())).current_dir(folder.path()).creation_flags(NO_WINDOW);
+    let mut command = Command::new(from.join("OpenRGB.exe"));
+    command.args(arguments(folder.path())).current_dir(from).creation_flags(NO_WINDOW);
     for (name, _) in std::env::vars_os().filter(|(name, _)| for_qt(name)) {
         command.env_remove(name);
     }
@@ -401,6 +422,18 @@ mod tests {
         assert!(!runs_on(&examples::desktop(), PlatformRoleSlate));
         assert!(runs_on(&examples::desktop(), PlatformRoleDesktop));
         assert!(runs_on(&examples::ddr4_desktop(), PlatformRoleUnspecified));
+    }
+
+    /// The OpenRGB in Glance's folder is the one there with its program, and none where its folder has no program.
+    #[test]
+    fn finds_the_openrgb_put_with_glance() {
+        let installed = folder("installed");
+        assert_eq!(with_glance(&installed), None);
+        std::fs::create_dir_all(installed.join("OpenRGB")).unwrap();
+        assert_eq!(with_glance(&installed), None);
+        std::fs::write(installed.join("OpenRGB").join("OpenRGB.exe"), "x").unwrap();
+        assert_eq!(with_glance(&installed), Some(installed.join("OpenRGB")));
+        let _ = std::fs::remove_dir_all(installed);
     }
 
     #[test]

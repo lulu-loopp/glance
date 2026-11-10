@@ -263,7 +263,18 @@ pub fn program(config: &Config) -> Option<PathBuf> {
         return None;
     }
     let installed = std::env::var_os("ProgramFiles").map(|files| Path::new(&files).join("OpenRGB").join("OpenRGB.exe"));
-    config.openrgb.clone().into_iter().chain(installed).find(|path| path.is_file()).or_else(crate::fetch::fetched)
+    config.openrgb.clone().into_iter().chain(with_glance()).chain(installed).find(|path| path.is_file()).or_else(crate::fetch::fetched)
+}
+
+/// The program of the OpenRGB put in Glance's own folder with it (this helper's), where there is one: the one Glance's
+/// sensors run too (see their `openrgb`), and then none is fetched for them.
+pub fn with_glance() -> Option<PathBuf> {
+    std::env::current_exe().ok().as_deref().and_then(Path::parent).map(beside).filter(|program| program.is_file())
+}
+
+/// Where that program is, beside this helper in `folder`.
+fn beside(folder: &Path) -> PathBuf {
+    folder.join("OpenRGB").join("OpenRGB.exe")
 }
 
 /// CREATE_NO_WINDOW: no console for a program started without one.

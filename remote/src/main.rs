@@ -876,14 +876,18 @@ fn main() -> std::io::Result<()> {
                     })?;
                     fetch::forget()?;
                 }
-                // Whether Glance's sensors run OpenRGB; that they are to (the release they take it from fetched, and
-                // the one this helper started stopped: it holds the port); that they no longer do.
+                // Whether Glance's sensors run OpenRGB; that they are to (the release they take it from fetched, where
+                // none was put with Glance, and the one this helper started stopped: it holds the port); that they no
+                // longer do.
                 Some("raised") => {
                     say!("{}", if Config::load().lights_raised { "raised" } else { "plain" });
                     return Ok(());
                 }
                 Some("raise") => {
-                    fetch::fetch()?;
+                    // (The sensors run the one put with Glance, where there is one: see `lights::with_glance`.)
+                    if lights::with_glance().is_none() {
+                        fetch::fetch()?;
+                    }
                     // (Told first: lights asked for as this one is stopped start no other.)
                     Config::change(|config| {
                         config.lights_left_alone = false;

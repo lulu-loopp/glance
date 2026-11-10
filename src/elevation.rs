@@ -59,6 +59,8 @@ use windows::Win32::UI::Shell::ShellExecuteW;
 /// runs as the user, and its sensors, which run elevated.
 pub const APP: &str = "glance.exe";
 pub const SENSORS: &str = "glance-sensors.exe";
+/// The folder in Glance's own an OpenRGB put there with it is in (see `openrgb`).
+pub const OPENRGB: &str = "OpenRGB";
 
 /// The task that starts the sensors, and the one that starts Glance when the
 /// user signs in.
@@ -217,7 +219,7 @@ fn folders_hold(folder: &Path) -> bool {
 
 /// What an install folder may already hold: an earlier Glance (and what an install of it leaves while it runs, or
 /// if it was cut short).
-const INSTALLED: [&str; 12] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
+const INSTALLED: [&str; 13] = [APP, SENSORS, "glance-remote.exe", "uninstall.exe", "resources", "licenses", OPENRGB, INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
 /// What an install leaves while it runs (or left, cut short): none of it is an earlier Glance's own files.
 const UNDER_WAY: [&str; 6] = [INCOMING, REPLACED, DONE_WITH, TASKS_OFF, TASKS_OFF_NEW, INSTALLING];
 /// Held, sharing nothing, by the install under way, for the whole of it: another finds it held, and does nothing.
@@ -470,6 +472,14 @@ fn only_trusted_inside(folder: &Path) -> bool {
                 })
             })
         })
+}
+
+/// Where `folder` really is, if no one but administrators can change it or anything in it (none of it a link), nor
+/// move it or any folder above it aside (see `only_trusted_inside`, `folders_hold`): what is in it may then be run with
+/// an administrator's rights, from that path.
+pub fn vouched_folder(folder: &Path) -> Option<PathBuf> {
+    let real = plain(&std::fs::canonicalize(folder).ok()?);
+    (only_trusted_inside(&real) && folders_hold(&real)).then_some(real)
 }
 
 /// Whether every folder above `folder` holds (see `checked`).
@@ -1739,6 +1749,35 @@ mod tests {
         assert!(inner.status.success() && through.is_err() && !landed, "written through a link in its own folder");
     }
 
+    /// An install folder holding an earlier Glance and the OpenRGB put there with it is that Glance's, to install over
+    /// and to take away: anything else in it, and it is not.
+    #[test]
+    fn an_earlier_glance_with_its_openrgb_is_its_own() {
+        let folder = crate::settings::local_dir().join("earlier-glance");
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(folder.join(super::OPENRGB)).unwrap();
+        for name in [super::APP, "uninstall.exe"] {
+            std::fs::write(folder.join(name), "x").unwrap();
+        }
+        std::fs::write(folder.join(super::OPENRGB).join("OpenRGB.exe"), "x").unwrap();
+        let with_openrgb = super::claimable(&folder);
+        std::fs::write(folder.join("theirs.txt"), "x").unwrap();
+        let with_another = super::claimable(&folder);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert!(with_openrgb && !with_another, "{with_openrgb} {with_another}");
+    }
+
+    /// A folder the user can change is vouched for by no one: what is in it is not run with an administrator's rights.
+    #[test]
+    fn vouches_for_no_folder_the_user_can_change() {
+        let folder = crate::settings::local_dir().join("not-vouched");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("OpenRGB.exe"), "x").unwrap();
+        let vouched = super::vouched_folder(&folder);
+        let _ = std::fs::remove_dir_all(&folder);
+        assert_eq!(vouched, None);
+    }
+
     /// A folder taken out whole as Glance is uninstalled (the station's): its files, the folders in it and theirs, and
     /// a link in it to a folder elsewhere taken as the link, what it leads to left as it is.
     #[test]
@@ -1895,6 +1934,8 @@ mod tests {
         assert!(remember_download(&file));
         std::fs::write(&file, b"x").unwrap();
         assert!(only_trusted_inside(folder.path()));
+        // Vouched for, where it really is.
+        assert_eq!(vouched_folder(folder.path()).as_deref(), Some(folder.path()));
         // Not made over something already there.
         assert!(private_folder(&program_data, &name).is_none());
         // Held: it cannot be renamed, even by an administrator.
