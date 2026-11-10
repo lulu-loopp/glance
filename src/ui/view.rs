@@ -2102,11 +2102,16 @@ const LARGE_PLATE: f32 = 0.75;
 /// taller than lets two rows of them, their words under them, show whole (the second's names were cut off under the
 /// room's foot, the files on no plate of their own seeming to float).
 fn large_plate(w: f32, tall: f32) -> f32 {
-    (w * LARGE_PLATE).min((tall - CARDS_LEAD - TILE_GAP) / 2.0 - CARD_WORDS).max(w * 0.4)
+    (w * LARGE_PLATE).min((tall - 4.0 * CARD_PAD - CARD_APART) / 2.0 - CARD_WORDS).max(w * 0.4)
 }
 
-/// How far down their room cards lie (see `paint_tiles`).
-const CARDS_LEAD: f32 = 4.0;
+/// The box under a card that is lit under the pointer or marked chosen (see `tile_plate`): how far it reaches past the
+/// card all round (the card's picture and words held as far in from its edges), how far apart two cards' boxes lie,
+/// and how far the outer ones reach past the room the cards are laid out in (into the lane's own inset). A card filled
+/// its box to 4 in from its edges, its words to 2 off its foot, and the boxes of two cards side by side touched.
+const CARD_PAD: f32 = 6.0;
+const CARD_APART: f32 = 4.0;
+const CARD_REACH: f32 = 4.0;
 /// A tab's height, and the room round its name.
 const TAB_H: f32 = 24.0;
 const TAB_PAD: f32 = 8.0;
@@ -4427,8 +4432,8 @@ fn shelf_places(shows: Shows, count: usize, width: f32, tall: f32) -> (Vec<Rect>
     match shows {
         Shows::View(ShelfView::Cards) => {
             let across = cards_across(width);
-            let w = (width - (across - 1) as f32 * TILE_GAP) / across as f32;
-            grid(across, w, w * PLATE + CARD_WORDS, TILE_GAP)
+            let w = card_width(across, width);
+            cards(across, count, w, w * PLATE + CARD_WORDS)
         }
         Shows::Row => {
             let (mut places, _) = grid(tiles_across(width), TILE_W, TILE_H, TILE_GAP);
@@ -4438,10 +4443,26 @@ fn shelf_places(shows: Shows, count: usize, width: f32, tall: f32) -> (Vec<Rect>
         }
         Shows::View(ShelfView::List) => grid(1, width, LIST_ROW, 0.0),
         Shows::View(ShelfView::Large) => {
-            let w = (width - (LARGE_ACROSS - 1) as f32 * TILE_GAP) / LARGE_ACROSS as f32;
-            grid(LARGE_ACROSS, w, large_plate(w, tall) + CARD_WORDS, TILE_GAP)
+            let w = card_width(LARGE_ACROSS, width);
+            cards(LARGE_ACROSS, count, w, large_plate(w, tall) + CARD_WORDS)
         }
     }
+}
+
+/// How wide each of `across` cards is in `width`: their boxes (see `CARD_PAD`) filling it and `CARD_REACH` past it on
+/// either side, `CARD_APART` apart.
+fn card_width(across: usize, width: f32) -> f32 {
+    (width + 2.0 * CARD_REACH - (across - 1) as f32 * CARD_APART) / across as f32 - 2.0 * CARD_PAD
+}
+
+/// `count` cards `w` wide and `h` high laid `across` a row as `card_width` lays them, the rows under each other their
+/// boxes `CARD_APART` apart, the first's box at the room's top (see `paint_tiles`): their places, and how far down the
+/// last box reaches.
+fn cards(across: usize, count: usize, w: f32, h: f32) -> (Vec<Rect>, f32) {
+    let (step_x, step_y) = (w + 2.0 * CARD_PAD + CARD_APART, h + 2.0 * CARD_PAD + CARD_APART);
+    let places = (0..count).map(|at| Rect { x: CARD_PAD - CARD_REACH + (at % across) as f32 * step_x, y: CARD_PAD + (at / across) as f32 * step_y, w, h }).collect();
+    let lines = count.div_ceil(across);
+    (places, if lines > 0 { lines as f32 * step_y - CARD_APART } else { 0.0 })
 }
 
 /// How round a plate is that lies round something `inner` round, `gap` from it all round: concentric with it (the same
@@ -4650,15 +4671,11 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
 fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (places, whole) = shelf_places(shows, tiles.len(), width, tall);
-    // (Cards lie so far down their room as the plate under the pointer reaches past them: at the top unscrolled, its
-    // top was cut off.)
-    let lead = if matches!(shows, Shows::View(ShelfView::Cards | ShelfView::Large)) { CARDS_LEAD } else { 0.0 };
-    let whole = whole + lead;
     let most = (whole - tall).max(0.0);
     let scroll = scene.scrolls.at(list).clamp(0.0, most);
     frame.clip(left - 4.0, top - 2.0, width + 8.0, tall + 4.0);
     for (at, (tile, place)) in tiles.iter().zip(&places).enumerate() {
-        let (x, y) = (left + place.x, top + lead + place.y - scroll);
+        let (x, y) = (left + place.x, top + place.y - scroll);
         if y + place.h < top || y > top + tall {
             continue;
         }
@@ -4688,7 +4705,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let shown = match shows {
             Shows::View(view @ (ShelfView::Cards | ShelfView::Large)) => {
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
-                tile_plate(frame, theme, (x - 4.0, y - 4.0, place.w + 8.0, place.h + 6.0), plate_round(theme, face_round(theme, place.w.min(plate)), 4.0), lit, chosen);
+                tile_plate(frame, theme, (x - CARD_PAD, y - CARD_PAD, place.w + 2.0 * CARD_PAD, place.h + 2.0 * CARD_PAD), plate_round(theme, face_round(theme, place.w.min(plate)), CARD_PAD), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
@@ -8122,6 +8139,53 @@ seven".into()));
         }
     }
 
+    /// Cards chosen side by side and one under another, as the station, Recently copied and Recent files lay them out,
+    /// each large and small, in every skin: each card's mark holds its picture and its words CARD_PAD in from its
+    /// edges all round, and the marks of two cards lie apart, where they touched and the words ran to their edges.
+    #[test]
+    fn a_chosen_cards_mark_holds_it_with_room_round_it() {
+        use crate::ui::morph::{Op, Recorder};
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let ids: Vec<u64> = (0..4).map(|at| 0x5EED_0031 + at).collect();
+        let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false }).collect();
+        let mut dots = super::super::thumb::Dots::new();
+        dots.mark_chosen(ids.iter().map(|&id| Hit::Shelf(id)).collect());
+        let width = COLUMN_WIDTH - 32.0;
+        for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
+            let theme = Theme::new(skin, false);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &dots, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            for view in [ShelfView::Cards, ShelfView::Large] {
+                let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                paint_shelf(&recorder, &scene, theme.ink("station"), (0.0, 0.0, width), &tiles, Shows::View(view), STATION_TALL, None, false, &mut Vec::new());
+                let parts = recorder.parts();
+                let marks: Vec<(f32, f32, f32, f32)> = ids
+                    .iter()
+                    .map(|id| {
+                        let key = format!("tile.{:?}", Hit::Shelf(*id));
+                        let ops: Vec<&Op> = parts.iter().filter(|part| part.key.as_deref() == Some(key.as_str())).flat_map(|part| &part.ops).collect();
+                        let mark = ops.iter().find_map(|op| if let Op::Rounded { x, y, w, h, .. } = op { Some((*x, *y, *w, *h)) } else { None }).expect("its mark");
+                        for op in &ops {
+                            let held = match op {
+                                Op::Text { x, y, width, .. } => (*x, *y, *width, LINE),
+                                Op::Icon { centre, size, .. } => (centre.x - size / 2.0, centre.y - size / 2.0, *size, *size),
+                                _ => continue,
+                            };
+                            let room = (held.0 - mark.0, held.1 - mark.1, mark.0 + mark.2 - held.0 - held.2, mark.1 + mark.3 - held.1 - held.3);
+                            assert!([room.0, room.1, room.2, room.3].iter().all(|&room| room >= CARD_PAD - 0.01), "{skin:?} {view:?}: {op:?} in {mark:?}");
+                        }
+                        mark
+                    })
+                    .collect();
+                let across = if view == ShelfView::Large { LARGE_ACROSS } else { cards_across(width) };
+                let (one, beside, under) = (marks[0], marks[1], marks[across]);
+                assert!(beside.0 - (one.0 + one.2) >= CARD_APART - 0.01, "{skin:?} {view:?}: {one:?} {beside:?}");
+                assert!(under.1 - (one.1 + one.3) >= CARD_APART - 0.01, "{skin:?} {view:?}: {one:?} {under:?}");
+            }
+        }
+    }
+
     /// What is chosen is told at a glance from what is under the pointer, in every skin, light and dark: on glass and
     /// Windows 11 its plate is washed in the skin's own mark (glass's blue, as what was copied is marked, Windows 11's
     /// accent), where the plate under the pointer is the sheet's own grey or white, on chart paper it is edged in the
@@ -8416,20 +8480,23 @@ seven".into()));
         let across = cards_across(width);
         assert_eq!(across, 3);
         let card = cards[0];
-        assert!((card.w * 3.0 + 2.0 * TILE_GAP - width).abs() < 0.01);
+        // Their boxes from CARD_REACH before the room to as far past it, CARD_APART apart, the first's at its top.
+        let boxed = |card: Rect| (card.x - CARD_PAD, card.y - CARD_PAD, card.x + card.w + CARD_PAD, card.y + card.h + CARD_PAD);
+        assert!((boxed(card).0 + CARD_REACH).abs() < 0.01 && boxed(card).1.abs() < 0.01, "{card:?}");
+        assert!((boxed(cards[across - 1]).2 - width - CARD_REACH).abs() < 0.01);
+        assert!((boxed(cards[1]).0 - boxed(card).2 - CARD_APART).abs() < 0.01);
+        assert!((boxed(cards[across]).1 - boxed(card).3 - CARD_APART).abs() < 0.01 && cards[across].x == card.x);
         assert!((card.h - (card.w * PLATE + CARD_WORDS)).abs() < 0.01);
-        assert_eq!((cards[across].x, cards[across].y), (0.0, card.h + TILE_GAP));
-        assert!((cards[across - 1].x + card.w - width).abs() < 0.01);
-        assert!((tall - (3.0 * card.h + 2.0 * TILE_GAP)).abs() < 0.01);
+        assert!((tall - boxed(cards[8]).3).abs() < 0.01);
         let (list, tall) = shelf_places(Shows::View(ShelfView::List), 3, width, STATION_TALL);
         assert_eq!((list[2].y, list[2].w, tall), (2.0 * LIST_ROW, width, 3.0 * LIST_ROW));
         // Large cards: two across, filling it, each a plate and its words under it, two rows of them whole in the room,
         // on the station's page and on Recent files' (under its filters).
         for room in [STATION_TALL, STATION_TALL - CHIP_H - 6.0] {
             let (large, _) = shelf_places(Shows::View(ShelfView::Large), 4, width, room);
-            assert!((large[0].w * 2.0 + TILE_GAP - width).abs() < 0.01);
-            assert_eq!((large[2].x, large[3].x), (0.0, large[1].x));
-            assert!(CARDS_LEAD + large[3].y + large[3].h <= room + 0.01, "{room}: {:?}", large[3]);
+            assert!((large[1].x + large[1].w + CARD_PAD - width - CARD_REACH).abs() < 0.01);
+            assert_eq!((large[2].x, large[3].x), (large[0].x, large[1].x));
+            assert!(large[3].y + large[3].h + CARD_PAD <= room + 0.01, "{room}: {:?}", large[3]);
         }
         let (row, tall) = shelf_places(Shows::Row, 9, width, STATION_TALL);
         assert_eq!((row.len(), tall), (tiles_across(width), TILE_H));
