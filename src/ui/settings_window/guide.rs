@@ -103,7 +103,7 @@ const STEPS: usize = 5;
 /// The second step's play (ms), and the sizes it makes the panel; when it starts to make it smaller, and when the
 /// corner is let go; when each click of the double-click goes down, how long one is held, and how long the ring each
 /// leaves shows; when the pointer goes back onto the panel.
-const SIZE_LOOP: u64 = 7600;
+const SIZE_LOOP: u64 = 8400;
 const GROWN: f32 = 1.18;
 const SHRUNK: f32 = 0.8;
 const SHRINK_AT: f32 = 2800.0;
@@ -114,7 +114,7 @@ const RING: f32 = 360.0;
 const BACK_AT: f32 = CLICKS[1] + crate::panel::RESTORE.as_millis() as f32 + SIZE_REST + 200.0;
 /// How long the second step's play rests before the corner is double-clicked and after the panel is back to its own
 /// size (ms), so that each change is seen before the next.
-const SIZE_REST: f32 = 800.0;
+const SIZE_REST: f32 = 1200.0;
 /// How the panel follows the hand in the second step's play: as a hand moves, gathering pace and slowing to rest.
 const SIZE_EASE: Easing = Easing(0.4, 0.0, 0.2, 1.0);
 
