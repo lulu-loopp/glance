@@ -1,9 +1,12 @@
 //! The guide to Glance: shown once as Glance first starts with it (installed, or updated to a version with it), and
-//! again from the general page. Three steps, each with what it teaches played over and over on Glance's own things
+//! again from the general page. Five steps, each with what it teaches played over and over on Glance's own things
 //! till the user leaves it: a panel opened from the screen's edge (in a dialog over the desktop, the user's own desktop
-//! small at its top, the real panel sliding out on it); a component dragged onto an edge (on the layout page itself,
-//! its own editor played on, a teaching tip beside the window); search and the preview called up by their shortcuts (in
-//! the dialog again). Each step says so once the user has done it themselves. Then a word that it is done.
+//! small at its top, the real panel sliding out on it); the panel made larger and smaller by its corner, and made its
+//! own size again by a double-click there; a lane of it torn off by its head, a widget of its own, and the whole panel
+//! by the rest of it (each in the dialog, the whole screen small at its top); a component dragged onto an edge (on the
+//! layout page itself, its own editor played on, a teaching tip beside the window); search and the preview called up
+//! by their shortcuts (in the dialog again). Each step says so once the user has done it themselves. Then a word that
+//! it is done.
 //!
 //! It is the settings window's, drawn on its thread with its desktop and its panels (see `Ui::panel_on_stage`): the
 //! window stays up all through it, the dialog over it in its middle (the window covered under it and taking nothing
@@ -94,13 +97,32 @@ const MOVE: Easing = Easing(0.3, 0.0, 0.12, 1.0);
 /// pointer back where it began, the panel put away as it leaves it.
 const PUSH_LOOP: u64 = 5300;
 
+/// How many steps there are (the word that it is done is none of them).
+const STEPS: usize = 5;
+
+/// The second step's play (ms), and the sizes it makes the panel; when each click of the double-click goes down, how
+/// long one is held, and how long the ring each leaves shows.
+const SIZE_LOOP: u64 = 6600;
+const GROWN: f32 = 1.18;
+const SHRUNK: f32 = 0.8;
+const CLICKS: [f32; 2] = [3900.0, 4080.0];
+const CLICK: f32 = 60.0;
+const RING: f32 = 360.0;
+/// How the panel follows the hand in the second step's play: as a hand moves, gathering pace and slowing to rest.
+const SIZE_EASE: Easing = Easing(0.4, 0.0, 0.2, 1.0);
+
+/// The third step's play (ms).
+const TEAR_LOOP: u64 = 9200;
+
 /// What a step asks, done elsewhere: a panel opened by a push into an edge, search called up, something looked at
-/// larger.
+/// larger, a panel made larger or smaller by hand, a widget torn off a panel.
 #[derive(Clone, Copy)]
 pub(crate) enum Saw {
     Pushed,
     Searched,
     Looked,
+    Sized,
+    Torn,
 }
 
 impl Saw {
@@ -109,6 +131,8 @@ impl Saw {
             Saw::Pushed => 1,
             Saw::Searched => 2,
             Saw::Looked => 4,
+            Saw::Sized => 8,
+            Saw::Torn => 16,
         }
     }
 }
@@ -131,6 +155,8 @@ pub(crate) fn saw(saw: Saw) {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Step {
     Push,
+    Size,
+    Tear,
     Layout,
     Keys,
     /// The word that it is done.
@@ -140,7 +166,9 @@ enum Step {
 impl Step {
     fn after(self) -> Option<Step> {
         match self {
-            Step::Push => Some(Step::Layout),
+            Step::Push => Some(Step::Size),
+            Step::Size => Some(Step::Tear),
+            Step::Tear => Some(Step::Layout),
             Step::Layout => Some(Step::Keys),
             Step::Keys => Some(Step::Ready),
             Step::Ready => None,
@@ -150,20 +178,17 @@ impl Step {
     fn before(self) -> Option<Step> {
         match self {
             Step::Push => None,
-            Step::Layout => Some(Step::Push),
+            Step::Size => Some(Step::Push),
+            Step::Tear => Some(Step::Size),
+            Step::Layout => Some(Step::Tear),
             Step::Keys => Some(Step::Layout),
             Step::Ready => Some(Step::Keys),
         }
     }
 
-    /// Its place among the three (the word that it is done has none).
+    /// Its place among the steps (the word that it is done has none).
     fn index(self) -> Option<usize> {
-        match self {
-            Step::Push => Some(0),
-            Step::Layout => Some(1),
-            Step::Keys => Some(2),
-            Step::Ready => None,
-        }
+        (self != Step::Ready).then_some(self as usize)
     }
 }
 
@@ -224,14 +249,16 @@ impl Guide {
 pub(super) struct Guide {
     step: Step,
     /// Each step done by the user themselves.
-    done: [bool; 3],
+    done: [bool; STEPS],
     /// Search and the preview called up, on the last step.
     tried: [bool; 2],
     /// Whether the window was up as it began (from the general page): shown again there as it ends, else closed.
     was_up: bool,
     /// When the step shown began to play.
     since: Instant,
-    /// The edge the first step shows the panel opened from, and what that edge opens.
+    /// The edge the step shown has the panel on, and what that edge opens: the first step's opened from the right,
+    /// where that opens anything, else the first that does; the second's and third's the readings', where they are on
+    /// an edge, else the right.
     edge: (Edge, Option<Part>),
     dialog: Option<Popup>,
     tip: Option<Popup>,
@@ -334,6 +361,161 @@ fn pushing(t: Duration) -> (f32, f32) {
     let along = eased(ms, 500.0, 1100.0, GLIDE) - eased(ms, 3800.0, 1000.0, GLIDE);
     let out = eased(ms, 1800.0, 420.0, SLIDE_OUT) - eased(ms, 4150.0, 420.0, SLIDE_OUT);
     (along, out)
+}
+
+/// Where the pointer of a play is: at `from`, gliding from it to `to` (`along`, 0 to 1), or at `to`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Hand<M> {
+    from: M,
+    to: M,
+    along: f32,
+}
+
+impl<M: Copy> Hand<M> {
+    fn at(mark: M) -> Self {
+        Hand { from: mark, to: mark, along: 0.0 }
+    }
+
+    fn gliding(from: M, to: M, along: f32) -> Self {
+        Hand { from, to, along }
+    }
+
+    /// Where it is, `place` saying where each mark is.
+    fn point(self, mut place: impl FnMut(M) -> (f32, f32)) -> (f32, f32) {
+        let (from, to) = (place(self.from), place(self.to));
+        (from.0 + (to.0 - from.0) * self.along, from.1 + (to.1 - from.1) * self.along)
+    }
+}
+
+/// Where the pointer goes in the second step's play: on the panel as large as it opens, and on its free corner (the
+/// one away from its edge, at its foot) as large as it is drawn at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SizeMark {
+    Inside,
+    Corner(f32),
+}
+
+/// The second step's play at a moment: how large the panel is, where the pointer is, whether it is held down, whether
+/// it shows as the pointer that sizes, and how far along a click's ring is (0 to 1), where one shows.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Sizing {
+    size: f32,
+    hand: Hand<SizeMark>,
+    held: bool,
+    sizes: bool,
+    ring: Option<f32>,
+}
+
+/// The second step's play, `t` into it: the pointer gliding from the panel to its free corner, the pointer that sizes
+/// shown once it is there; held down, the panel made larger, then smaller, following the hand; let go, the corner
+/// double-clicked, and the panel back to its own size as Glance has it (see `panel::RESTORE`), the pointer as it was
+/// once it is; the pointer back on the panel. At its end as at its start, round and round.
+fn sizing(t: Duration) -> Sizing {
+    let ms = (t.as_millis() as u64 % SIZE_LOOP) as f32;
+    let restore = crate::panel::RESTORE.as_secs_f32() * 1000.0;
+    let restored = CLICKS[1] + restore;
+    let ring = CLICKS.iter().rev().map(|&click| ms - click).find(|since| (0.0..RING).contains(since)).map(|since| since / RING);
+    let corner = |size: f32| Sizing { size, hand: Hand::at(SizeMark::Corner(size)), held: true, sizes: true, ring: None };
+    if ms < 200.0 {
+        Sizing { size: 1.0, hand: Hand::at(SizeMark::Inside), held: false, sizes: false, ring: None }
+    } else if ms < 1200.0 {
+        Sizing { size: 1.0, hand: Hand::gliding(SizeMark::Inside, SizeMark::Corner(1.0), eased(ms, 200.0, 1000.0, GLIDE)), held: false, sizes: false, ring: None }
+    } else if ms < 1400.0 {
+        corner(1.0)
+    } else if ms < 2600.0 {
+        corner(1.0 + (GROWN - 1.0) * eased(ms, 1400.0, 1000.0, SIZE_EASE))
+    } else if ms < 3600.0 {
+        corner(GROWN + (SHRUNK - GROWN) * eased(ms, 2600.0, 1000.0, SIZE_EASE))
+    } else if ms < restored {
+        // (Made its own size again as the second click goes down, as a double-click is.)
+        let size = if ms < CLICKS[1] { SHRUNK } else { crate::panel::restored(SHRUNK, 1.0, (ms - CLICKS[1]) / restore) };
+        let held = CLICKS.iter().any(|&click| (click..click + CLICK).contains(&ms));
+        Sizing { size, hand: Hand::at(SizeMark::Corner(SHRUNK)), held, sizes: true, ring }
+    } else if ms < 5300.0 {
+        Sizing { size: 1.0, hand: Hand::at(SizeMark::Corner(SHRUNK)), held: false, sizes: false, ring }
+    } else {
+        Sizing { size: 1.0, hand: Hand::gliding(SizeMark::Corner(SHRUNK), SizeMark::Inside, eased(ms, 5300.0, 1000.0, GLIDE)), held: false, sizes: false, ring: None }
+    }
+}
+
+/// Where the pointer goes in the third step's play: on the panel, on its first lane's head, on its foot, on the
+/// screen's edge it opens from, where the lane torn off is put down, and where the whole panel is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TearMark {
+    Inside,
+    Head,
+    Foot,
+    Edge,
+    LaneDrop,
+    WholeDrop,
+}
+
+/// The third step's play at a moment: how far the panel is slid out, where the pointer is, whether it is held down,
+/// and each widget torn off (the lane's, the whole panel's) where it shows: where the pointer holds it by (where it
+/// was taken), and how opaque it is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Tearing {
+    out: f32,
+    hand: Hand<TearMark>,
+    held: bool,
+    lane: Option<(Hand<TearMark>, f32)>,
+    whole: Option<(Hand<TearMark>, f32)>,
+}
+
+/// The third step's play, `t` into it: the pointer on the first lane's head, held, pulled off: the lane a widget under
+/// the hand, the panel gone once it shows, as Glance has it; put down. The panel pushed out again, held by its foot
+/// and pulled off whole, put down. Both widgets faded, the panel slid out, the pointer back on it, round
+/// and round.
+fn tearing(t: Duration) -> Tearing {
+    let ms = (t.as_millis() as u64 % TEAR_LOOP) as f32;
+    let fade = 1.0 - eased(ms, 7000.0, 500.0, LINEAR);
+    let mut play = Tearing { out: 1.0, hand: Hand::at(TearMark::Inside), held: false, lane: None, whole: None };
+    if ms < 300.0 {
+    } else if ms < 1100.0 {
+        play.hand = Hand::gliding(TearMark::Inside, TearMark::Head, eased(ms, 300.0, 800.0, GLIDE));
+    } else if ms < 1300.0 {
+        (play.hand, play.held) = (Hand::at(TearMark::Head), true);
+    } else if ms < 2300.0 {
+        (play.hand, play.held) = (Hand::gliding(TearMark::Head, TearMark::LaneDrop, eased(ms, 1300.0, 1000.0, GLIDE)), true);
+        // (Torn off a few DIPs on, the panel gone once the widget is up.)
+        if ms >= 1340.0 {
+            play.lane = Some((play.hand, 1.0));
+        }
+        if ms >= 1420.0 {
+            play.out = 0.0;
+        }
+    } else {
+        play.lane = Some((Hand::at(TearMark::LaneDrop), fade));
+        play.out = 0.0;
+        if ms < 2500.0 {
+            play.hand = Hand::at(TearMark::LaneDrop);
+        } else if ms < 3400.0 {
+            play.hand = Hand::gliding(TearMark::LaneDrop, TearMark::Edge, eased(ms, 2500.0, 900.0, GLIDE));
+        } else if ms < 3900.0 {
+            (play.hand, play.out) = (Hand::at(TearMark::Edge), eased(ms, 3450.0, 420.0, SLIDE_OUT));
+        } else if ms < 4800.0 {
+            (play.hand, play.out) = (Hand::gliding(TearMark::Edge, TearMark::Foot, eased(ms, 3900.0, 900.0, GLIDE)), 1.0);
+        } else if ms < 5000.0 {
+            (play.hand, play.out, play.held) = (Hand::at(TearMark::Foot), 1.0, true);
+        } else if ms < 6000.0 {
+            (play.hand, play.held) = (Hand::gliding(TearMark::Foot, TearMark::WholeDrop, eased(ms, 5000.0, 1000.0, GLIDE)), true);
+            play.out = if ms >= 5120.0 { 0.0 } else { 1.0 };
+            if ms >= 5040.0 {
+                play.whole = Some((play.hand, 1.0));
+            }
+        } else {
+            play.whole = Some((Hand::at(TearMark::WholeDrop), fade));
+            if ms >= 7000.0 {
+                (play.hand, play.out) = (Hand::gliding(TearMark::WholeDrop, TearMark::Inside, eased(ms, 7000.0, 1200.0, GLIDE)), eased(ms, 7400.0, 420.0, SLIDE_OUT));
+            } else {
+                play.hand = Hand::at(TearMark::WholeDrop);
+            }
+        }
+    }
+    // (Faded all the way: gone.)
+    play.lane = play.lane.filter(|(_, opacity)| *opacity > 0.0);
+    play.whole = play.whole.filter(|(_, opacity)| *opacity > 0.0);
+    play
 }
 
 /// The last step's play for shortcuts of `keys` keys (search's, the preview's), once round: when its keys go down one
@@ -625,6 +807,26 @@ fn words(step: Step, edge: Edge, lang: Lang) -> Words {
             };
             Words { title: p("从屏幕边缘呼出面板", "Open a panel from the screen's edge"), body, wait, done: p("面板已呼出，鼠标移开后自动收起", "The panel is open. It closes as the pointer leaves it") }
         }
+        Step::Size => Words {
+            title: p("调整面板大小", "Resize the panel"),
+            body: p(
+                "拖动面板的任意边角即可放大或缩小，双击边角恢复默认大小。",
+                "Drag any edge or corner of the panel to make it larger or smaller. Double-click an edge or corner to restore its default size.",
+            )
+            .into(),
+            wait: p("现在请呼出面板，拖动边角试一次", "Now open a panel and drag an edge or corner").into(),
+            done: p("已调整大小", "The panel is resized"),
+        },
+        Step::Tear => Words {
+            title: p("拖出成为小组件", "Drag out a widget"),
+            body: p(
+                "按住某一块的标题拖出，这一块单独成为小组件。按住面板其他地方拖出，整个面板成为小组件。",
+                "Hold a block by its title and drag it out to make that block a widget of its own. Hold the panel anywhere else and drag it out to make the whole panel a widget.",
+            )
+            .into(),
+            wait: p("现在请呼出面板，拖出一个小组件试一次", "Now open a panel and drag out a widget").into(),
+            done: p("小组件已拖出", "A widget is dragged out"),
+        },
         Step::Layout => Words {
             title: p("将组件放到屏幕边缘", "Put components on the screen's edges"),
             body: p(
@@ -809,6 +1011,41 @@ fn paint_pointer(frame: &Frame, at: (f32, f32), size: f32) {
     frame.icon(Icon::Pointer, centre, size, Color::hex(0x111111, 1.0));
 }
 
+/// Where the second and third steps' pointer rests on the panel at `r`: within it, clear of its edges and its buttons.
+fn inside(r: Rect) -> (f32, f32) {
+    (r.x + r.w * 0.42, r.y + r.h * 0.62)
+}
+
+/// The panel's free corner at `r`, on `edge`: the one at its foot away from the edge, a DIP inside it.
+fn free_corner(edge: Edge, r: Rect) -> (f32, f32) {
+    match edge {
+        Edge::Right => (r.x + 1.0, r.y + r.h - 1.0),
+        Edge::Left | Edge::Top => (r.x + r.w - 1.0, r.y + r.h - 1.0),
+    }
+}
+
+/// The pointer that sizes (`icon`, along the diagonal it sizes), its middle at `at`, `size` across, as Windows draws
+/// it: dark, ringed in white, a little shadow under it.
+fn paint_sizer(frame: &Frame, at: (f32, f32), size: f32, icon: Icon) {
+    let centre = |dx: f32, dy: f32| Point { x: at.0 + dx, y: at.1 + dy };
+    frame.icon(icon, centre(0.0, 1.0), size, Color::hex(0x000000, 0.3));
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7)] {
+        frame.icon(icon, centre(dx * 1.5, dy * 1.5), size, Color::hex(0xFFFFFF, 1.0));
+    }
+    frame.icon(icon, centre(0.0, 0.0), size, Color::hex(0x111111, 1.0));
+}
+
+/// The ring a click leaves round `at`, `along` its life (0 to 1): growing as it fades.
+fn paint_ring(frame: &Frame, at: (f32, f32), along: f32) {
+    let r = 11.0 * (0.5 + along);
+    let opacity = 1.0 - along;
+    let ring = |color: Color, out: f32, line: f32| {
+        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(color), at.0 - r - out, at.1 - r - out, 2.0 * (r + out), 2.0 * (r + out), r + out, line);
+    };
+    ring(Color::hex(0x000000, 0.35 * opacity), 1.5, 1.0);
+    ring(Color::hex(0xFFFFFF, 0.85 * opacity), 0.0, 2.0);
+}
+
 /// `paint` drawn `opacity` opaque, within `bounds`.
 fn faded(frame: &Frame, bounds: Rect, opacity: f32, paint: impl FnOnce()) {
     let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: rect(bounds.x, bounds.y, bounds.w, bounds.h), maskTransform: Matrix3x2::identity(), opacity, ..Default::default() };
@@ -894,7 +1131,7 @@ impl Ui {
         let was_up = unsafe { IsWindowVisible(self.hwnd) }.as_bool();
         self.guide = Some(Guide {
             step: Step::Push,
-            done: [false; 3],
+            done: [false; STEPS],
             tried: [false; 2],
             was_up,
             since: Instant::now(),
@@ -935,9 +1172,22 @@ impl Ui {
         };
         let tip = if want_tip { self.make_tip() } else { None };
         let dialog = if want_dialog { self.make_dialog() } else { None };
-        let Some((from, from_since, edge)) = self.guide.as_ref().map(|guide| (guide.step, guide.since, guide.edge.0)) else { return };
-        let heights = (self.dialog_height(from, edge), self.dialog_height(step, edge));
+        let Some((from, from_since, was_on)) = self.guide.as_ref().map(|guide| (guide.step, guide.since, guide.edge)) else { return };
+        let screen = self.stage.screen.clone().unwrap_or_default();
+        let places = self.settings.places();
+        let on = match step {
+            // The edge the panel is shown opened from: the right, where it opens anything, else the first that does.
+            Step::Push => {
+                let edge = if places.part(&screen, Edge::Right).is_some() { Edge::Right } else { places.lit(&screen).each().next().unwrap_or(Edge::Right) };
+                (edge, places.part(&screen, edge))
+            }
+            // The readings, which tear off by their lanes' heads, on their own edge, else on the right.
+            Step::Size | Step::Tear => (EDGES.into_iter().find(|&edge| places.part(&screen, edge) == Some(Part::Monitor)).unwrap_or(Edge::Right), Some(Part::Monitor)),
+            Step::Layout | Step::Keys | Step::Ready => was_on,
+        };
+        let heights = (self.dialog_height(from, was_on.0), self.dialog_height(step, on.0));
         let Some(guide) = self.guide.as_mut() else { return };
+        guide.edge = on;
         if tip.is_some() {
             guide.tip = tip;
         }
@@ -967,13 +1217,6 @@ impl Ui {
             if let Some(guide) = self.guide.as_mut() {
                 guide.drag = Some(Drag { before, screen, moves, at: 0, since: now, from: None, pointer: None });
             }
-        } else {
-            // The edge the panel is shown opened from: the right, where it opens anything, else the first that does.
-            let screen = self.stage.screen.clone().unwrap_or_default();
-            let places = self.settings.places();
-            let edge = if places.part(&screen, Edge::Right).is_some() { Edge::Right } else { places.lit(&screen).each().next().unwrap_or(Edge::Right) };
-            let part = places.part(&screen, edge);
-            guide.edge = (edge, part);
         }
         self.guide_frame = now;
     }
@@ -1171,7 +1414,9 @@ impl Ui {
         });
         let told = TOLD.swap(0, Ordering::AcqRel);
         match guide.step {
-            Step::Push if told & Saw::Pushed.bit() != 0 => guide.done[0] = true,
+            Step::Push if told & Saw::Pushed.bit() != 0 => guide.done[Step::Push as usize] = true,
+            Step::Size if told & Saw::Sized.bit() != 0 => guide.done[Step::Size as usize] = true,
+            Step::Tear if told & Saw::Torn.bit() != 0 => guide.done[Step::Tear as usize] = true,
             Step::Keys => {
                 for (at, saw) in [Saw::Searched, Saw::Looked].into_iter().enumerate() {
                     if told & saw.bit() != 0 {
@@ -1179,7 +1424,7 @@ impl Ui {
                     }
                 }
                 if guide.tried == [true, true] {
-                    guide.done[2] = true;
+                    guide.done[Step::Keys as usize] = true;
                 }
             }
             _ => {}
@@ -1435,6 +1680,8 @@ impl Ui {
         fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
         match step {
             Step::Push => self.play_push(frame, guide, area, since, now),
+            Step::Size => self.play_size(frame, guide, area, since, now),
+            Step::Tear => self.play_tear(frame, guide, area, since, now),
             Step::Keys => down = self.play_keys(frame, guide, area, since, now),
             // (At the end, the desktop as it is, nothing played on it.)
             _ => {
@@ -1444,7 +1691,7 @@ impl Ui {
         stroke_inside(frame, area, 8.0, palette.card_stroke);
         y += DESK + 20.0;
         if let Some(index) = step.index() {
-            let count = format!("{} / 3", index + 1);
+            let count = format!("{} / {STEPS}", index + 1);
             frame.text(&count, SMALL, palette.text3, PAD, y + 6.0, inner, Align::End);
         }
         frame.text(words.title, TITLE, palette.text, PAD, y, inner - 60.0, Align::Start);
@@ -1532,6 +1779,95 @@ impl Ui {
         paint_pointer(frame, (rest.0 + (pushed.0 - rest.0) * along, rest.1 + (pushed.1 - rest.1) * along), 20.0);
     }
 
+    /// The second step's play in `area`: the whole screen, the readings' panel on its edge made larger and smaller by
+    /// its free corner and double-clicked back to its own size, round and round (see `sizing`).
+    fn play_size(&mut self, frame: &Frame, guide: &Guide, area: Rect, since: Instant, now: Instant) {
+        let play = sizing(now.saturating_duration_since(since));
+        let edge = guide.edge.0;
+        let prefs = self.prefs.clone().holding(Part::Monitor);
+        let panel = Some((edge, &prefs, Part::Monitor));
+        self.stage_panel(frame, area, panel, Staging { whole: true, size: Some(play.size), ..Staging::default() });
+        let place = |ui: &mut Self, mark: SizeMark| {
+            let size = match mark {
+                SizeMark::Inside => 1.0,
+                SizeMark::Corner(size) => size,
+            };
+            let r = ui.stage_panel(frame, area, panel, Staging { whole: true, size: Some(size), draw: false, ..Staging::default() }).panel?;
+            Some(match mark {
+                SizeMark::Inside => inside(r),
+                SizeMark::Corner(_) => free_corner(edge, r),
+            })
+        };
+        // (No panel yet, nothing read to show in it: no pointer either.)
+        let (Some(from), Some(to)) = (place(self, play.hand.from), place(self, play.hand.to)) else { return };
+        let at = Hand::gliding(from, to, play.hand.along).point(|point| point);
+        let size = if play.held { 20.0 * 0.92 } else { 20.0 };
+        if play.sizes {
+            paint_sizer(frame, at, size, if edge == Edge::Right { Icon::MoveDiagonal } else { Icon::MoveDiagonal2 });
+        } else {
+            paint_pointer(frame, at, size);
+        }
+        if let Some(ring) = play.ring {
+            paint_ring(frame, at, ring);
+        }
+    }
+
+    /// The third step's play in `area`: the whole screen, the readings' panel on its edge, its first lane torn off by
+    /// its head and the whole panel by the rest of it, each a widget put down on the screen, round and round (see
+    /// `tearing`).
+    fn play_tear(&mut self, frame: &Frame, guide: &Guide, area: Rect, since: Instant, now: Instant) {
+        let play = tearing(now.saturating_duration_since(since));
+        let edge = guide.edge.0;
+        let prefs = self.prefs.clone().holding(Part::Monitor);
+        let panel = Some((edge, &prefs, Part::Monitor));
+        let rest = self.stage_panel(frame, area, panel, Staging { whole: true, draw: false, ..Staging::default() });
+        self.stage_panel(frame, area, panel, Staging { whole: true, out: play.out, ..Staging::default() });
+        let (Some(body), Some(&lane), Some(bar)) = (rest.panel, rest.lanes.first(), rest.bar) else { return };
+        let screen = rest.screen;
+        // Taken by its head, the lane comes off alone where the panel has others, else the panel whole (see
+        // `Panel::head_at`); taken by its foot, left of its buttons (where nothing takes a press of its own), the
+        // panel whole.
+        let only = (rest.lanes.len() > 1).then_some(0);
+        let torn = if only.is_some() { lane } else { body };
+        let head = (lane.x + lane.w * 0.3, lane.y + rest.head / 2.0);
+        let foot = (bar.x + bar.w * 0.25, bar.y + bar.h / 2.0);
+        // Where each is put down: the lane by the screen's far corner, the panel further in, clear of it (on the
+        // other side, where the panel is on the left).
+        let across = |x: f32, w: f32| {
+            let x = if edge == Edge::Left { 2.0 * screen.x + screen.w - x - w } else { x };
+            x.clamp(screen.x, (screen.x + screen.w - w).max(screen.x))
+        };
+        let down = |y: f32, h: f32| y.clamp(screen.y, (screen.y + screen.h - h).max(screen.y));
+        let lane_to = (across(screen.x + screen.w * 0.05, torn.w), down(screen.y + screen.h * if edge == Edge::Top { 0.3 } else { 0.08 }, torn.h));
+        let whole_to = (across(screen.x + screen.w * 0.3, body.w), down(if edge == Edge::Top { screen.y + screen.h * 0.25 } else { body.y + screen.h * 0.04 }, body.h));
+        let place = |mark: TearMark| match mark {
+            TearMark::Inside => inside(body),
+            TearMark::Head => head,
+            TearMark::Foot => foot,
+            TearMark::Edge => match edge {
+                Edge::Right => (screen.x + screen.w - 3.0, screen.y + screen.h / 2.0),
+                Edge::Left => (screen.x + 3.0, screen.y + screen.h / 2.0),
+                Edge::Top => (screen.x + screen.w / 2.0, screen.y + 3.0),
+            },
+            TearMark::LaneDrop => (lane_to.0 + head.0 - torn.x, lane_to.1 + head.1 - torn.y),
+            TearMark::WholeDrop => (whole_to.0 + foot.0 - body.x, whole_to.1 + foot.1 - body.y),
+        };
+        // Each widget where the hand holds it by where it was taken (the stage's DIPs: see `Staging::at`).
+        let k = screen.w / self.stage.size.0;
+        let on_stage = |x: f32, y: f32| ((x - screen.x) / k, (y - screen.y) / k);
+        if let Some((hand, opacity)) = play.lane {
+            let at = hand.point(place);
+            let corner = on_stage(at.0 - (head.0 - torn.x), at.1 - (head.1 - torn.y));
+            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), lane: only, opacity, desktop: false, torn: Some(0), ..Staging::default() });
+        }
+        if let Some((hand, opacity)) = play.whole {
+            let at = hand.point(place);
+            let corner = on_stage(at.0 - (foot.0 - body.x), at.1 - (foot.1 - body.y));
+            self.stage_panel(frame, area, panel, Staging { whole: true, at: Some(corner), opacity, desktop: false, torn: Some(1), ..Staging::default() });
+        }
+        paint_pointer(frame, play.hand.point(place), if play.held { 20.0 * 0.92 } else { 20.0 });
+    }
+
     /// The last step's play in `area`: the desktop by the middle of its top, search coming up on it as its shortcut is
     /// pressed, the first file found looked at larger beside it as the preview's is, both gone again, round and round.
     /// How many of each shortcut's keys are down.
@@ -1616,12 +1952,12 @@ impl Ui {
         let words = words(Step::Layout, Edge::Left, lang);
         let (x, inner) = (p.x + TIP_PAD, p.w - 2.0 * TIP_PAD);
         let mut y = p.y + TIP_PAD;
-        frame.text("2 / 3", SMALL, palette.text3, x, y + 3.0, inner, Align::End);
+        frame.text(&format!("{} / {STEPS}", Step::Layout as usize + 1), SMALL, palette.text3, x, y + 3.0, inner, Align::End);
         frame.text(words.title, TIP_TITLE, palette.text, x, y, inner - 40.0, Align::Start);
         y += 24.0;
         frame.text_wrapped(&words.body, BODY, palette.text2, x, y, inner);
         y += frame.gfx.wrapped_height(&words.body, BODY, inner) + 10.0;
-        paint_state(frame, &palette, &grounds, &words, guide.done[1], x, y + 10.0, inner);
+        paint_state(frame, &palette, &grounds, &words, guide.done[Step::Layout as usize], x, y + 10.0, inner);
         y += 20.0 + 14.0;
         paint_buttons(frame, &palette, &grounds, tip, &buttons(Step::Layout, lang), x + inner, y + BUTTON / 2.0, 72.0);
     }
@@ -1688,7 +2024,7 @@ impl Ui {
     /// A component put on an edge by hand: the layout's step done, where it shows.
     pub(super) fn guide_saw_layout(&mut self) {
         if let Some(guide) = self.guide.as_mut().filter(|guide| guide.step == Step::Layout) {
-            guide.done[1] = true;
+            guide.done[Step::Layout as usize] = true;
         }
     }
 
@@ -1849,6 +2185,117 @@ mod tests {
         assert!(along_most > 0.999 && out_most >= 1.0, "{along_most} {out_most}");
     }
 
+    /// The steps go one after another, each back to the one before, and each but the word that it is done has its
+    /// place among them in order.
+    #[test]
+    fn the_steps_go_in_order() {
+        let mut step = Step::Push;
+        let mut seen = vec![step];
+        while let Some(after) = step.after() {
+            assert_eq!(after.before(), Some(step));
+            step = after;
+            seen.push(step);
+        }
+        assert_eq!(seen, [Step::Push, Step::Size, Step::Tear, Step::Layout, Step::Keys, Step::Ready]);
+        assert_eq!(seen.iter().map(|step| step.index()).collect::<Vec<_>>(), [Some(0), Some(1), Some(2), Some(3), Some(4), None]);
+        assert_eq!(STEPS, seen.len() - 1);
+    }
+
+    /// A panel at the right of a screen (its fractions), centred on its edge as Glance has it, as large as `size`.
+    fn panel_at(size: f32) -> Rect {
+        let (w, h) = (0.37 * size, 0.69 * size);
+        Rect { x: 0.99 - w, y: 0.5 - h / 2.0, w, h }
+    }
+
+    /// The second step's play runs on round with nothing jumping, across where it begins again too: the pointer and
+    /// the panel move a little from one frame to the next. The pointer that sizes shows only with the pointer on the
+    /// corner, never as it glides there; held, the hand is on the corner of the panel as large as it is drawn, so that
+    /// the corner follows it. The panel is made larger and smaller, double-clicked back to its own size, and each
+    /// click leaves a ring.
+    #[test]
+    fn the_size_s_play_never_jumps() {
+        let place = |mark: SizeMark| match mark {
+            SizeMark::Inside => inside(panel_at(1.0)),
+            SizeMark::Corner(size) => free_corner(Edge::Right, panel_at(size)),
+        };
+        let was = sizing(Duration::ZERO);
+        assert_eq!((was.size, was.hand, was.sizes, was.held), (1.0, Hand::at(SizeMark::Inside), false, false));
+        let (mut was, mut was_at) = (was, was.hand.point(place));
+        let (mut most, mut least, mut rings) = (1.0f32, 1.0f32, 0);
+        for ms in (5..=2 * SIZE_LOOP).step_by(5) {
+            let now = sizing(Duration::from_millis(ms));
+            let at = now.hand.point(place);
+            assert!((at.0 - was_at.0).abs() < 0.02 && (at.1 - was_at.1).abs() < 0.02, "{ms} ms: the pointer from {was_at:?} to {at:?}");
+            assert!((now.size - was.size).abs() < 0.04, "{ms} ms: the panel from {} to {}", was.size, now.size);
+            if now.sizes {
+                assert!(now.hand.from == now.hand.to && matches!(now.hand.to, SizeMark::Corner(_)), "{ms} ms: sizing off the corner {:?}", now.hand);
+            }
+            // (Held but for the clicks, which leave their rings.)
+            if now.held && now.ring.is_none() {
+                assert_eq!(now.hand, Hand::at(SizeMark::Corner(now.size)), "{ms} ms: the corner left behind");
+            }
+            if now.ring.is_some() && was.ring.is_none_or(|was| now.ring.unwrap() < was) {
+                rings += 1;
+            }
+            (most, least) = (most.max(now.size), least.min(now.size));
+            (was, was_at) = (now, at);
+        }
+        assert!(most >= GROWN - 1e-4 && least <= SHRUNK + 1e-4, "{most} {least}");
+        assert_eq!(rings, 4, "two clicks a round");
+        let end = sizing(Duration::from_millis(SIZE_LOOP - 1));
+        let (at, rest) = (end.hand.point(place), inside(panel_at(1.0)));
+        assert!(end.size == 1.0 && !end.sizes && (at.0 - rest.0).abs() < 1e-5 && (at.1 - rest.1).abs() < 1e-5, "{end:?}");
+    }
+
+    /// The third step's play runs on round with nothing jumping, across where it begins again too: the pointer and
+    /// each widget move a little from one frame to the next, a widget comes off under the hand where it was taken and
+    /// fades out from where it was put down; the panel goes at once only while a widget torn off it is in hand.
+    #[test]
+    fn the_tear_s_play_never_jumps() {
+        let body = panel_at(1.0);
+        let place = |mark: TearMark| match mark {
+            TearMark::Inside => inside(body),
+            TearMark::Head => (body.x + 0.05, body.y + 0.03),
+            TearMark::Foot => (body.x + 0.1, body.y + 0.2),
+            TearMark::Edge => (0.997, 0.5),
+            TearMark::LaneDrop => (0.1, 0.12),
+            TearMark::WholeDrop => (0.4, 0.4),
+        };
+        let start = tearing(Duration::ZERO);
+        assert_eq!((start.out, start.hand, start.held, start.lane, start.whole), (1.0, Hand::at(TearMark::Inside), false, None, None));
+        let mut was = start;
+        let (mut lanes, mut wholes) = (0, 0);
+        for ms in (5..=2 * TEAR_LOOP).step_by(5) {
+            let now = tearing(Duration::from_millis(ms));
+            let (a, b) = (was.hand.point(place), now.hand.point(place));
+            assert!((a.0 - b.0).abs() < 0.03 && (a.1 - b.1).abs() < 0.03, "{ms} ms: the pointer from {a:?} to {b:?}");
+            for (name, was_widget, widget, taken) in [("lane", was.lane, now.lane, TearMark::Head), ("whole", was.whole, now.whole, TearMark::Foot)] {
+                match (was_widget, widget) {
+                    (Some((a, a_shown)), Some((b, b_shown))) => {
+                        let (a, b) = (a.point(place), b.point(place));
+                        assert!((a.0 - b.0).abs() < 0.03 && (a.1 - b.1).abs() < 0.03, "{ms} ms: the {name} from {a:?} to {b:?}");
+                        assert!((a_shown - b_shown).abs() < 0.02, "{ms} ms: the {name} from {a_shown} to {b_shown} opaque");
+                    }
+                    (None, Some((hand, _))) => {
+                        let (at, from) = (hand.point(place), place(taken));
+                        assert!(now.held && (at.0 - from.0).abs() < 0.01 && (at.1 - from.1).abs() < 0.01, "{ms} ms: the {name} came at {at:?}");
+                        if name == "lane" { lanes += 1 } else { wholes += 1 }
+                    }
+                    (Some((_, shown)), None) => assert!(shown < 0.02, "{ms} ms: the {name} went at {shown}"),
+                    (None, None) => {}
+                }
+            }
+            let in_hand = |play: &Tearing| play.held && (play.lane.is_some_and(|(hand, _)| hand.from != hand.to) || play.whole.is_some_and(|(hand, _)| hand.from != hand.to));
+            assert!((now.out - was.out).abs() < 0.12 || (in_hand(&was) && in_hand(&now) && now.out == 0.0), "{ms} ms: the panel from {} to {}", was.out, now.out);
+            was = now;
+        }
+        assert_eq!((lanes, wholes), (2, 2), "each torn off once a round");
+        let end = tearing(Duration::from_millis(TEAR_LOOP - 1));
+        let (at, rest) = (end.hand.point(place), inside(body));
+        assert!((at.0 - rest.0).abs() < 1e-5 && (at.1 - rest.1).abs() < 1e-5 && end.lane.is_none() && end.whole.is_none() && !end.held, "{end:?}");
+        assert!((end.out - 1.0).abs() < 1e-4, "{}", end.out);
+    }
+
     /// The last step's play presses each shortcut's keys one after another and lets them go, search shows as the first
     /// is pressed and the look only while search does; it ends as it begins, nothing down and nothing up.
     #[test]
@@ -1877,7 +2324,7 @@ mod tests {
     #[test]
     fn what_comes_in_under_the_dialog_is_drawn_once_at_rest() {
         let now = Instant::now();
-        for step in [Step::Push, Step::Keys, Step::Ready] {
+        for step in [Step::Push, Step::Size, Step::Tear, Step::Keys, Step::Ready] {
             assert!(holds(None, step, false), "{step:?}: held at rest, nothing new");
             assert!(!holds(None, step, true), "{step:?}: drawn once what it shows has come in");
         }

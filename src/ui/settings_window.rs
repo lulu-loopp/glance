@@ -1157,7 +1157,6 @@ enum Field {
     /// Set on a slider (see `slider`).
     OverlaySize,
     OverlayClear,
-    PanelSize,
     OverlayLayout,
     OverlayRows,
     /// When the overlay shows: never, while a game plays, or always.
@@ -1583,6 +1582,47 @@ fn map_art_came(arts: &mut [MapArt], id: &str, monitor: RECT, size: (u32, u32), 
 }
 
 /// The desktop the preview shows, at the size of the work area (DIPs).
+/// How `Ui::stage_panel` draws a panel on the stage.
+#[derive(Clone, Copy)]
+pub(super) struct Staging {
+    /// The whole screen, else the whole height of it with the whole panel and a strip of desktop beside it.
+    pub whole: bool,
+    /// How far it is slid out from its edge: 1 all the way, 0 just past the edge.
+    pub out: f32,
+    /// As large as this, not as the settings have it on that screen.
+    pub size: Option<f32>,
+    /// Put down at this point of the screen (stage DIPs), its corner there, or its lane `lane`'s: away from its edge.
+    pub at: Option<(f32, f32)>,
+    /// Only this lane of it drawn.
+    pub lane: Option<usize>,
+    pub opacity: f32,
+    /// The desktop drawn under it, else it over what is drawn already.
+    pub desktop: bool,
+    /// Drawn, else only measured.
+    pub draw: bool,
+    /// A widget torn off it, drawn in the layers of that one of `Ui::torn_layers`, else the panel in the stage's own.
+    pub torn: Option<usize>,
+}
+
+impl Default for Staging {
+    fn default() -> Self {
+        Staging { whole: false, out: 1.0, size: None, at: None, lane: None, opacity: 1.0, desktop: true, draw: true, torn: None }
+    }
+}
+
+/// What `Ui::stage_panel` drew, and where (the window's DIPs).
+pub(super) struct Staged {
+    /// How fast the panel's charts move (physical pixels a second), where it has any.
+    pub plot: Option<f32>,
+    pub screen: Rect,
+    /// The panel, its lanes and the bar at its foot, where there was one to draw.
+    pub panel: Option<Rect>,
+    pub lanes: Vec<Rect>,
+    pub bar: Option<Rect>,
+    /// How deep a lane's head is, by which a readings lane is torn off alone.
+    pub head: f32,
+}
+
 struct Stage {
     size: (f32, f32),
     /// The screen it is, by its name, and its work area as the desktop
@@ -1862,6 +1902,9 @@ struct Ui {
     library_music: super::music::Music,
     library_music_ground: render::GroundLayers,
     library_layers: [PanelLayers; 2],
+    /// The widgets the guide's play tears off the panel on the stage, the lane's and the whole panel's (each drawn in
+    /// layers of its own, as the panel under them is).
+    torn_layers: [PanelLayers; 2],
     map_art: Vec<MapArt>,
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
@@ -1899,9 +1942,6 @@ struct Ui {
     drawn_size: Option<(u32, u32)>,
     /// Something it shows taken in since it was last drawn (see `take_in`).
     taken_unseen: bool,
-    /// The largest panel size at which the panel still grows on the screen the preview shows (see
-    /// `arrange::largest`): past it a larger size changed the figure and nothing else.
-    largest: f32,
     /// The guide to Glance, while it is up (see `guide`).
     guide: Option<guide::Guide>,
     /// Where the layout's editor was last drawn (window DIPs), for the guide's step on it to point at.
@@ -1935,7 +1975,7 @@ impl Lives for Ui {
         }
         self.music.release();
         self.library_music.release();
-        for layers in &mut self.library_layers {
+        for layers in self.library_layers.iter_mut().chain(&mut self.torn_layers) {
             layers.release();
         }
     }
@@ -2132,6 +2172,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             library_music: super::music::Music::default(),
             library_music_ground: render::GroundLayers::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
+            torn_layers: [PanelLayers::default(), PanelLayers::default()],
             map_art: Vec::new(),
             kept_stages: Vec::new(),
             reads: reads::Reads::default(),
@@ -2155,7 +2196,6 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             guide_frame: Instant::now(),
             drawn_size: None,
             taken_unseen: false,
-            largest: SIZES.1,
             guide: None,
             editor_at: None,
             library_at: None,
@@ -2491,11 +2531,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
-/// Sets `field`, a slider's, to `value` in `settings`: `part`'s panel's size, on the screen named `screen` (see
-/// `Settings::size_panel`).
-fn put_slider(settings: &mut Settings, field: Field, value: f32, part: Part, screen: Option<&str>) {
+/// Sets `field`, a slider's (the overlay's), to `value` in `settings`.
+fn put_slider(settings: &mut Settings, field: Field, value: f32) {
     match field {
-        Field::PanelSize => settings.size_panel(part, screen, value),
         Field::OverlayClear => settings.overlay.clear = value,
         _ => settings.overlay.size = value,
     }
@@ -2632,7 +2670,6 @@ impl Ui {
             }
             (Page::Workbench, _) => {
                 rows.push(Row::Choice(Field::Columns));
-                rows.push(Row::Slider(Field::PanelSize));
                 for entry in &self.prefs.workbench {
                     let id = format!("{WORKBENCH}{}", entry.id);
                     rows.push(Row::Module(id.clone()));
@@ -2708,7 +2745,6 @@ impl Ui {
         match tab {
             Tab::Shown => {
                 rows.push(Row::Choice(Field::Columns));
-                rows.push(Row::Slider(Field::PanelSize));
                 let module = |rows: &mut Vec<Row>, id: &str| {
                     rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
@@ -3539,7 +3575,7 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
+            Field::OverlaySize | Field::OverlayClear => (self.slider(field).0, Vec::new(), None),
             // (Shown only while there are any: see `rows`.)
             Field::StationHidden => {
                 let n = settings.recent_hidden.len();
@@ -3584,7 +3620,7 @@ impl Ui {
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
-            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
+            Field::OverlaySize | Field::OverlayClear => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
             Field::StationHidden if index == 1 => settings.recent_hidden.clear(),
             Field::StationHidden => {}
@@ -3675,23 +3711,6 @@ impl Ui {
         let lang = self.lang;
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
-            // No larger than the screen holds it: at that, said so. The size of the screen the window shows (its own),
-            // which, with more than one, is said.
-            Field::PanelSize => {
-                // A hundredth at a step, as sizing the panel by its corner goes. (On a step, as the slider moves by
-                // them: a most between two could never be reached.)
-                const STEP: f32 = 0.01;
-                let most = (sizes.0 + ((self.largest - sizes.0) / STEP + 1e-4).floor() * STEP).clamp(sizes.0, sizes.1);
-                let value = self.panel_size().clamp(sizes.0, most);
-                let full = most < sizes.1 && value >= most - 0.001;
-                let name = match (crate::screens::monitors().len() > 1, full) {
-                    (false, false) => pick(lang, "面板大小", "Panel size"),
-                    (false, true) => pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)"),
-                    (true, false) => pick(lang, "面板大小（本屏幕）", "Panel size (this screen)"),
-                    (true, true) => pick(lang, "面板大小（本屏幕，已达上限）", "Panel size (this screen, as large as it holds)"),
-                };
-                (name, sizes.0, most, STEP, value)
-            }
             Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
@@ -3708,9 +3727,8 @@ impl Ui {
         if value == now {
             return;
         }
-        let (part, screen) = (self.previewed(), self.stage.screen.clone());
-        put_slider(&mut self.settings, field, value, part, screen.as_deref());
-        crate::app().preview(|live| put_slider(live, field, value, part, screen.as_deref()));
+        put_slider(&mut self.settings, field, value);
+        crate::app().preview(|live| put_slider(live, field, value));
         self.next_frame = Instant::now();
     }
 
@@ -3719,9 +3737,8 @@ impl Ui {
     fn keep_slider(&mut self, field: Field) {
         let value = self.slider(field).4;
         let mut now = None;
-        let (part, screen) = (self.previewed(), self.stage.screen.clone());
         crate::app().change(|held| {
-            put_slider(held, field, value, part, screen.as_deref());
+            put_slider(held, field, value);
             now = Some(held.clone());
         });
         self.take(now.unwrap());
@@ -6499,17 +6516,27 @@ impl Ui {
     /// just past the edge), running live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
-    #[allow(clippy::too_many_arguments)]
     fn panel_on_stage(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, whole: bool, out: f32) -> (Option<f32>, Rect) {
+        let staged = self.stage_panel(frame, area, panel, Staging { whole, out, ..Staging::default() });
+        (staged.plot, staged.screen)
+    }
+
+    /// The stage's desktop in `area` and on it the panel `panel` (its edge, what it shows, what it is), as `staging` has
+    /// it (see `Staging`): as `panel_on_stage` draws it, or as large as the guide's plays make it, or put down on the
+    /// screen as a widget pulled off it, whole or one lane of it. What was drawn, where (see `Staged`).
+    pub(super) fn stage_panel(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, staging: Staging) -> Staged {
+        let Staging { whole, out, size, at, lane: only, opacity, desktop, draw, torn } = staging;
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
         let Some((edge, prefs, part)) = panel else {
             let (ox, oy) = (area.x + (area.w - sw * fit) / 2.0, area.y + (area.h - sh * fit) / 2.0);
             let screen = Rect { x: ox, y: oy, w: sw * fit, h: sh * fit };
-            let (clip, radius) = screen_shown(screen);
-            self.stage_picture(frame, clip, radius, (ox, oy), fit, 1.0);
-            return (None, screen);
+            if draw && desktop {
+                let (clip, radius) = screen_shown(screen);
+                self.stage_picture(frame, clip, radius, (ox, oy), fit, 1.0);
+            }
+            return Staged { plot: None, screen, panel: None, lanes: Vec::new(), bar: None, head: 0.0 };
         };
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
@@ -6518,11 +6545,11 @@ impl Ui {
         let history = app.controller.history.read().unwrap();
         let samples = crate::panel::contiguous(&history);
         if samples.is_empty() {
-            if !whole {
+            if !whole && draw && desktop {
                 fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
                 stroke_inside(frame, area, 8.0, self.palette.card_stroke);
             }
-            return (None, Rect { x: area.x, y: area.y, w: area.w, h: area.h });
+            return Staged { plot: None, screen: Rect { x: area.x, y: area.y, w: area.w, h: area.h }, panel: None, lanes: Vec::new(), bar: None, head: 0.0 };
         }
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
@@ -6535,19 +6562,41 @@ impl Ui {
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
         let columns = self.settings.columns_of(part);
-        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), columns, SIZES.1, rail);
-        let size = self.settings.panel_size_on(part, self.stage.screen.as_deref()).clamp(SIZES.0, SIZES.1);
+        // No larger than the screen holds it, as the panel is made (see `Panel::dragged`).
+        let size = size.unwrap_or_else(|| self.settings.panel_size_on(part, self.stage.screen.as_deref())).clamp(SIZES.0, SIZES.1);
+        let size = size.min(arrange::largest(&measure, edge, &heights, (sw, sh), columns, size, rail).max(SIZES.0));
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
         let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
         // (Slid in, as far past the edge as its shadow reaches.)
         let away = 1.0 - out;
-        let pos = match edge {
-            Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-            Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-            Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
+        let boxes = layout.lanes();
+        // Its corner on the screen: against its edge, or where it is put down (where one lane of it is, that lane's).
+        let pos = match (at, only.and_then(|lane| boxes.get(lane))) {
+            (Some(at), Some(lane)) => (at.0 - lane.x * zoom, at.1 - lane.y * zoom),
+            (Some(at), None) => at,
+            (None, _) => match edge {
+                Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
+            },
         };
+        let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
+        let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let shown = |x: f32, y: f32, w: f32, h: f32| Rect { x: ox + x * k, y: oy + y * k, w: w * k, h: h * k };
+        let screen = Rect { x: ox, y: oy, w: sw * k, h: sh * k };
+        let staged = |plot| Staged {
+            plot,
+            screen,
+            panel: Some(shown(pos.0, pos.1, pw, ph)),
+            lanes: boxes.iter().map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom)).collect(),
+            bar: Some(layout.bar()).map(|bar| shown(pos.0 + bar.x * zoom, pos.1 + bar.y * zoom, bar.w * zoom, bar.h * zoom)),
+            head: (measure.pad_top + view::HEAD_BAND) * zoom * k,
+        };
+        if !draw {
+            return staged(None);
+        }
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
@@ -6555,36 +6604,55 @@ impl Ui {
         let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 
-        let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
-        let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let framed = area;
         // The whole screen inside its own rounded corners, a strip of it inside the preview's frame's.
-        let (area, radius) = if whole { screen_shown(Rect { x: ox, y: oy, w: sw * k, h: sh * k }) } else { (self.shown_of(area, k, stage_x, stage_y), 8.0) };
-        if !whole {
+        let (area, radius) = if whole { screen_shown(screen) } else { (self.shown_of(area, k, stage_x, stage_y), 8.0) };
+        if !whole && desktop {
             self.framed(frame, framed);
         }
-        let mask = unsafe {
-            frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: radius, radiusY: radius })
-        };
-        let layer = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: rect(area.x, area.y, area.w, area.h),
-            geometricMask: std::mem::ManuallyDrop::new(mask.ok().map(|m| windows::core::Interface::cast(&m).unwrap())),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity: 1.0,
-            ..Default::default()
-        };
-        unsafe { frame.dc.PushLayer(&layer, None) };
-        // The desktop in the panel's units, which a zoomed panel shrinks.
-        self.stage_picture(frame, area, radius, (ox, oy), k, zoom);
+        // Clipped to the screen, and where one lane of it is drawn, to that lane inside its corners; as opaque as `opacity`.
+        let lane = only.and_then(|lane| boxes.get(lane)).map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom));
+        let clips: Vec<(Rect, f32)> = std::iter::once((area, radius)).chain(lane.map(|lane| (lane, theme.radius * zoom * k))).collect();
+        let last = clips.len() - 1;
+        let layers: Vec<D2D1_LAYER_PARAMETERS1> = clips
+            .iter()
+            .enumerate()
+            .map(|(at, (clip, radius))| {
+                let mask = unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(*clip, *radius)) };
+                D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: rect(clip.x, clip.y, clip.w, clip.h),
+                    geometricMask: std::mem::ManuallyDrop::new(mask.ok().map(|m| windows::core::Interface::cast(&m).unwrap())),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: if at == last { opacity } else { 1.0 },
+                    ..Default::default()
+                }
+            })
+            .collect();
+        for layer in &layers {
+            unsafe { frame.dc.PushLayer(layer, None) };
+        }
+        // The desktop in the panel's units, which a zoomed panel shrinks (made even where it is drawn already: the
+        // panel's glass is frosted from it).
+        if desktop {
+            self.stage_picture(frame, area, radius, (ox, oy), k, zoom);
+        } else {
+            self.stage_bitmap(frame, zoom);
+        }
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
-        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: Some(edge), backdrop, frost, rough: false };
-        let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
-        unsafe { frame.dc.PopLayer() };
-        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-        if !whole {
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: at.is_none().then_some(edge), backdrop, frost, rough: false };
+        let cache = match torn {
+            Some(at) => &mut self.torn_layers[at],
+            None => &mut self.layers,
+        };
+        let drawn = cache.draw(frame, &picture, local, self.scale * zoom * k);
+        for layer in layers.into_iter().rev() {
+            unsafe { frame.dc.PopLayer() };
+            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        }
+        if !whole && desktop {
             stroke_inside(frame, framed, 8.0, self.palette.card_stroke);
         }
         match drawn {
@@ -6593,17 +6661,22 @@ impl Ui {
             // (Not shown, the frame: see `Frame::fail`.)
             Err(error) => frame.fail(error),
         }
-        (layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
+        staged(layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32))
+    }
+
+    /// The stage's desktop made a bitmap for a panel's `zoom` (a zoomed panel's units shrink it), where it is not yet.
+    fn stage_bitmap(&mut self, frame: &Frame, zoom: f32) {
+        let zoom_key = zoom.to_bits();
+        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
+            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
+        }
     }
 
     /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area` inside its corners rounded by `radius`:
     /// made a bitmap for the panel's `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
     fn stage_picture(&mut self, frame: &Frame, area: Rect, radius: f32, at: (f32, f32), k: f32, zoom: f32) {
         let (sw, sh) = self.stage.size;
-        let zoom_key = zoom.to_bits();
-        if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
-            self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
-        }
+        self.stage_bitmap(frame, zoom);
         let bitmap = self.stage.bitmap.as_ref().map(|(_, bitmap)| bitmap);
         desktop_at(frame, bitmap, self.palette.switch_off, area, radius, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
     }

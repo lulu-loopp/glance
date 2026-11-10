@@ -131,6 +131,9 @@ struct Shot {
     /// A song playing, filmed as a music widget on the desktop or as the music full screen, instead of the panel.
     #[serde(default)]
     music: Option<MusicShot>,
+    /// How large the panel is drawn, as the user sizes it (1 as it first opens).
+    #[serde(default = "opaque")]
+    size: f32,
 }
 
 /// A song as the music widget or the full screen shows it: its lines (as Glance's lyrics hold them, in a JSON file),
@@ -190,6 +193,7 @@ struct MusicKey {
     opacity: f32,
 }
 
+/// Whole: fully opaque, or as large as at first.
 fn opaque() -> f32 {
     1.0
 }
@@ -818,7 +822,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             None => {
                 let heights = view::heights(scene);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, heights)| (id.as_str(), *heights)).collect();
-                held.insert(arrange::Opening::new(theme, edge, &lanes, 0, (sw, sh), None, 1.0, arrange::Want::Itself, scene.seen.clone()))
+                held.insert(arrange::Opening::new(theme, edge, &lanes, 0, (sw, sh), None, shot.size, arrange::Want::Itself, scene.seen.clone()))
             }
         };
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
