@@ -155,7 +155,7 @@ fn given(given: &[Content], stays_here: bool, folder: &std::path::Path) -> Optio
                 formats.extend(files_made(&made));
                 Some(formats)
             }
-            None => formats(&Content::Files(as_paths(given, folder)?)),
+            None => formats(&Content::Files(kept(For::Drag, folder, as_paths(given, folder)?))),
         },
     }
 }
@@ -171,7 +171,7 @@ pub(super) fn as_one(given: &[Content]) -> Option<Content> {
         [one] => Some(one.clone()),
         _ => match words_of(given) {
             Some(words) => Some(Content::Text(words.join(BETWEEN))),
-            None => Some(Content::Files(as_paths(given, &dragged_folder())?)),
+            None => Some(Content::Files(kept(For::Clipboard, &dragged_folder(), as_paths(given, &dragged_folder())?))),
         },
     }
 }
@@ -264,9 +264,38 @@ fn write_in(folder: &std::path::Path, name: &str, contents: &[u8]) -> Option<std
 }
 
 /// Where words and links dragged off with files are written as files: a folder of Glance's among Windows' temporary
-/// ones.
+/// ones (in a test, its own).
 fn dragged_folder() -> std::path::PathBuf {
-    std::env::temp_dir().join("Glance").join("dragged")
+    #[cfg(not(test))]
+    return std::env::temp_dir().join("Glance").join("dragged");
+    #[cfg(test)]
+    return crate::settings::local_dir().join("dragged");
+}
+
+/// What the files written for things given together (see `as_paths`) are for: dragged off, or put on the clipboard.
+#[derive(Clone, Copy)]
+enum For {
+    Drag = 0,
+    Clipboard = 1,
+}
+
+/// The files written for the last things dragged off together, and for the last put on the clipboard together: each
+/// one's own folder (see `write_in`).
+static KEPT: std::sync::Mutex<[Vec<std::path::PathBuf>; 2]> = std::sync::Mutex::new([Vec::new(), Vec::new()]);
+
+/// `paths`, those of them written in `folder` now kept as what was last given `for_`, and all else written there let
+/// go of: what was written for things dragged off before (their drop long over: a drag is begun only once the last is
+/// done), for things put on the clipboard before (replaced there), or by an earlier Glance. So the folder holds no
+/// more than what may still be asked for.
+fn kept(for_: For, folder: &std::path::Path, paths: Vec<std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    let mut kept = KEPT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept[for_ as usize] = paths.iter().filter(|path| path.starts_with(folder)).filter_map(|path| path.parent().map(std::path::Path::to_path_buf)).collect();
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        if !kept.iter().flatten().any(|own| *own == entry.path()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    paths
 }
 
 /// `files` (each its name and contents) as files dropped where only files are taken, made by the program they are
@@ -351,6 +380,13 @@ mod tests {
 
     use super::super::clipboard::Content;
 
+    /// The tests that write files for things given together, one at a time: what is kept of them is one for all.
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn writing() -> std::sync::MutexGuard<'static, ()> {
+        WRITING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The formats given, as the data object is given them: the number of each, and the index of the file it is of.
     fn kinds(given: &[(u32, Vec<u8>, i32)]) -> Vec<(u32, i32)> {
         given.iter().map(|(format, _, index)| (*format, *index)).collect()
@@ -412,6 +448,7 @@ mod tests {
     /// rest written as files first, named unlike the files given.
     #[test]
     fn things_given_together_are_given_as_one() {
+        let _writing = writing();
         use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
         let (text, drop) = (u32::from(CF_UNICODETEXT.0), u32::from(CF_HDROP.0));
         let (descriptor, contents) = (format(windows::core::w!("FileGroupDescriptorW")), format(windows::core::w!("FileContents")));
@@ -440,10 +477,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&folder);
     }
 
+    /// The files written for things given together are kept only while they may be asked for: those for the last
+    /// dragged off and the last put on the clipboard, each dragged or put there anew letting go of its last, and of
+    /// anything else written there.
+    #[test]
+    fn only_the_files_last_given_are_kept() {
+        let _writing = writing();
+        let folder = crate::settings::local_dir().join("kept");
+        let _ = std::fs::remove_dir_all(&folder);
+        let file = folder.join("given").join("报告.pdf");
+        let words = |text: &str| [Content::Files(vec![file.clone()]), Content::Text(text.into())];
+        let written = |paths: &[std::path::PathBuf]| paths[1].clone();
+        std::fs::create_dir_all(folder.join("earlier")).unwrap();
+        let dragged = written(&super::kept(super::For::Drag, &folder, super::as_paths(&words("一"), &folder).unwrap()));
+        let copied = written(&super::kept(super::For::Clipboard, &folder, super::as_paths(&words("二"), &folder).unwrap()));
+        assert!(dragged.exists() && copied.exists() && !folder.join("earlier").exists());
+        let dragged_again = written(&super::kept(super::For::Drag, &folder, super::as_paths(&words("三"), &folder).unwrap()));
+        assert!(!dragged.exists() && copied.exists() && dragged_again.exists());
+        let copied_again = written(&super::kept(super::For::Clipboard, &folder, super::as_paths(&words("四"), &folder).unwrap()));
+        assert!(!copied.exists() && dragged_again.exists() && copied_again.exists());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     /// Things put on the clipboard together are put there as one: one as it is, words and links as their words with an
     /// empty line between each, with files among them all as files.
     #[test]
     fn things_copied_together_are_copied_as_one() {
+        let _writing = writing();
         let words = Content::Text("周四开会".into());
         assert_eq!(super::as_one(std::slice::from_ref(&words)), Some(words.clone()));
         assert_eq!(super::as_one(&[words.clone(), Content::Text("https://a.b".into())]), Some(Content::Text("周四开会\r\n\r\nhttps://a.b".into())));
