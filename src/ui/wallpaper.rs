@@ -22,20 +22,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::backdrop::Capture;
 
-/// The desktop of the work area `work` (physical pixels) as a picture
-/// `width` × `height` pixels large. Needs COM on the calling thread.
-pub fn desktop(work: RECT, width: u32, height: u32) -> Capture {
-    desktops(&[(work, width, height)]).pop().expect("one asked for")
+/// The desktop of each of `asked` (an area of it in physical pixels, and the picture's width and height) as a picture
+/// that large, each made as it is taken, a live wallpaper printed once for them all first (and let go of with the
+/// last). Needs COM on the calling thread.
+pub fn desktops(asked: Vec<(RECT, u32, u32)>) -> impl Iterator<Item = Capture> {
+    let printed = print(&asked.iter().map(|&(area, ..)| area).collect::<Vec<_>>());
+    each_from(printed, asked, |printed, (work, width, height)| desktop_from(printed.as_ref(), work, width, height))
 }
 
-/// `desktop` for each of `asked` (a work area, and the picture's width and height), a live wallpaper printed once
-/// for them all. Needs COM on the calling thread.
-pub fn desktops(asked: &[(RECT, u32, u32)]) -> Vec<Capture> {
-    let printed = print();
-    asked.iter().map(|&(work, width, height)| desktop_from(printed.as_ref(), work, width, height)).collect()
+/// Each of `asked` made from `printed` as it is taken, `printed` kept till the last is.
+fn each_from<P, A, T>(printed: P, asked: Vec<A>, make: impl Fn(&P, A) -> T) -> impl Iterator<Item = T> {
+    asked.into_iter().map(move |one| make(&printed, one))
 }
 
-/// `desktop`, from the live wallpaper as `printed` holds it, if there is one.
+/// The desktop of `work` as a picture `width` × `height` pixels large, from the live wallpaper as `printed` holds it,
+/// if there is one.
 fn desktop_from(printed: Option<&Printed>, work: RECT, width: u32, height: u32) -> Capture {
     let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
     let pixels = printed
@@ -80,7 +81,8 @@ fn live_layer() -> Option<HWND> {
 }
 
 /// The live wallpaper layer as the desktop shows it just then (`print`), printed once for every screen read from it:
-/// its pixels (rows top to bottom, BGRX), where it is on the desktop, and the GDI objects that hold them.
+/// its pixels (rows top to bottom, BGRX), where what was printed of it is on the desktop, and the GDI objects that
+/// hold them.
 struct Printed {
     memory: windows::Win32::Graphics::Gdi::HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
@@ -99,16 +101,15 @@ impl Drop for Printed {
     }
 }
 
-/// The live wallpaper's layer printed whole, with what DirectX draws in it as the screen shows it. `None` without a
-/// live wallpaper (see `live_layer`), or if it could not be printed.
-fn print() -> Option<Printed> {
+/// The live wallpaper's layer printed as far as the areas `asked` of the desktop take (see `printed_extent`), with what
+/// DirectX draws in it as the screen shows it. `None` without a live wallpaper (see `live_layer`), where none of them
+/// is in it, or if it could not be printed.
+fn print(asked: &[RECT]) -> Option<Printed> {
     let layer = live_layer()?;
-    let mut at = RECT::default();
-    unsafe { GetWindowRect(layer, &mut at) }.ok()?;
+    let mut whole = RECT::default();
+    unsafe { GetWindowRect(layer, &mut whole) }.ok()?;
+    let at = printed_extent(whole, asked)?;
     let (w, h) = (at.right - at.left, at.bottom - at.top);
-    if w <= 0 || h <= 0 {
-        return None;
-    }
     let header = BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: w,
@@ -135,6 +136,17 @@ fn print() -> Option<Printed> {
         let _ = windows::Win32::Graphics::Gdi::GdiFlush();
         done.then_some(printed)
     }
+}
+
+/// What of a live wallpaper's layer at `layer` (physical px) is printed for the areas `asked` of the desktop: from its
+/// corner as far right and down as the farthest of those in it reaches. PrintWindow draws a window from its own corner
+/// at the corner of what it draws into, whatever origin that is given, so less of the layer is printed only by stopping
+/// short of its far edges. None, where none of them is in it (none would be read from it: see `shown_in`).
+fn printed_extent(layer: RECT, asked: &[RECT]) -> Option<RECT> {
+    let inside = |area: &&RECT| area.left >= layer.left && area.top >= layer.top && area.right <= layer.right && area.bottom <= layer.bottom && area.right > area.left && area.bottom > area.top;
+    let right = asked.iter().filter(inside).map(|area| area.right).max()?;
+    let bottom = asked.iter().filter(inside).map(|area| area.bottom).max()?;
+    Some(RECT { right, bottom, ..layer })
 }
 
 /// The part of a printed layer (see `Printed`) inside the work area it was asked for, as a picture WIC reads from
@@ -255,5 +267,44 @@ fn cover(factory: &IWICImagingFactory, image: &IWICBitmapSource, width: u32, hei
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         converter.CopyPixels(std::ptr::null(), width * 4, &mut pixels)?;
         Ok(pixels)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each desktop of a lot is made as it is taken, the print shared by all of them: one taken before another is
+    /// made goes on its way (sent, as the settings read them) without waiting for the rest.
+    #[test]
+    fn each_desktop_is_made_as_it_is_taken() {
+        let made = std::cell::Cell::new(0);
+        let mut each = each_from("print", vec![1, 2, 3], |printed, one| {
+            made.set(made.get() + 1);
+            format!("{printed} {one}")
+        });
+        assert_eq!(each.next().as_deref(), Some("print 1"));
+        assert_eq!(made.get(), 1);
+        assert_eq!(each.collect::<Vec<_>>(), ["print 2", "print 3"]);
+        assert_eq!(made.get(), 3);
+    }
+
+    /// A live wallpaper's layer is printed from its corner as far as the areas asked of it reach, and not at all for
+    /// areas outside it: two screens, a tall one left of a wide one (as a report had them), the layer over both.
+    #[test]
+    fn a_live_wallpaper_is_printed_as_far_as_it_is_asked() {
+        let layer = RECT { left: -2160, top: -1071, right: 3840, bottom: 2769 };
+        let tall = RECT { left: -2160, top: -1071, right: 0, bottom: 2729 };
+        let wide = RECT { left: 0, top: 0, right: 3840, bottom: 2120 };
+        // (Both work areas stop short of the tall one's taskbar.)
+        assert_eq!(printed_extent(layer, &[tall, wide]), Some(RECT { bottom: 2729, ..layer }));
+        assert_eq!(printed_extent(layer, &[tall, layer]), Some(layer));
+        assert_eq!(printed_extent(layer, &[tall]), Some(RECT { right: 0, bottom: 2729, ..layer }));
+        assert_eq!(printed_extent(layer, &[RECT { left: 100, top: 100, right: 500, bottom: 300 }]), Some(RECT { right: 500, bottom: 300, ..layer }));
+        // (One not wholly in it is not read from it.)
+        let beyond = RECT { left: 3840, top: 0, right: 5760, bottom: 1080 };
+        assert_eq!(printed_extent(layer, &[beyond]), None);
+        assert_eq!(printed_extent(layer, &[beyond, tall]), Some(RECT { right: 0, bottom: 2729, ..layer }));
+        assert_eq!(printed_extent(layer, &[]), None);
     }
 }

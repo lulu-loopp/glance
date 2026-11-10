@@ -9,6 +9,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::f32::consts::E;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
@@ -32,7 +33,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, HIMC};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
+    GetKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
@@ -70,6 +71,7 @@ use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitiv
 
 pub(crate) mod guide;
 mod layout_page;
+mod reads;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
 use crate::update;
@@ -741,6 +743,8 @@ static WORKBENCH_OWED: AtomicBool = AtomicBool::new(false);
 /// The screens changed, to be read again by the window (see `tick`): told outside its state, which a dialog of it
 /// may hold.
 static SCREENS_OWED: AtomicBool = AtomicBool::new(false);
+/// The wallpaper changed, to be read again by the window: told as `SCREENS_OWED` is.
+static WALLPAPER_OWED: AtomicBool = AtomicBool::new(false);
 /// Whether the window was minimized as it was last sized (see WM_SIZE).
 static MINIMIZED: AtomicBool = AtomicBool::new(false);
 
@@ -777,10 +781,10 @@ fn tick(now: Instant) -> Option<Duration> {
         _ => {}
     }
     with_ui(|ui| {
-        // The screens changed (see WM_DISPLAYCHANGE): as they are now.
-        if SCREENS_OWED.swap(false, Ordering::AcqRel) {
-            ui.screens = crate::screens::all();
-            ui.next_frame = now;
+        // The screens or the wallpaper changed (see WM_DISPLAYCHANGE and WM_SETTINGCHANGE): as they are now.
+        let (screens, wallpaper) = (SCREENS_OWED.swap(false, Ordering::AcqRel), WALLPAPER_OWED.swap(false, Ordering::AcqRel));
+        if screens || wallpaper {
+            ui.desktops_changed(screens, wallpaper);
         }
         // What the window of a report's thread told.
         let told = THREAD_OWED.swap(0, Ordering::AcqRel);
@@ -810,6 +814,8 @@ fn tick(now: Instant) -> Option<Duration> {
         } else if now >= ui.guide_frame {
             ui.draw_guide(now);
         }
+        // (Drawn or not, the desktops wanted read: see `draw`.)
+        ui.read_wanted();
         let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
         next.saturating_duration_since(now)
     })
@@ -826,26 +832,29 @@ enum SwitchAsked {
     Remote,
 }
 
-/// The desktop inside `rect` as `wallpaper::desktop` reads it, `width` × `height` pixels, on a thread of the
-/// caller's (which joins the process's apartment for the decoders it uses).
-fn read_desktop(rect: RECT, width: u32, height: u32) -> Capture {
+/// Reads the desktops of lot `lot` (see `reads::Reads::lot`) as `wallpaper::desktops` reads them, a live wallpaper
+/// printed once for them all, the preview's kept (see `DESKTOPS`), and sends each as it is read, then that the lot has
+/// all come. On a thread of the caller's (which joins the process's apartment for the decoders it uses).
+fn read_lot(lot: u64, asks: Vec<reads::Ask>, send: std::sync::mpsc::Sender<Read>) {
     unsafe {
         let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
     }
-    wallpaper::desktop(rect, width, height)
+    let areas: Vec<(RECT, u32, u32)> = asks.iter().map(reads::Ask::area).collect();
+    for (ask, desktop) in asks.into_iter().zip(wallpaper::desktops(areas)) {
+        if let reads::Ask::Stage { screen, work, size } = &ask {
+            keep_desktop(screen, *work, *size, &desktop);
+        }
+        if send.send(Read::Came { lot, ask, desktop }).is_err() {
+            return;
+        }
+    }
+    let _ = send.send(Read::Done(lot));
 }
 
 /// Each screen's desktop as the preview last read it (its name, its work area, the size it was read at): kept for
 /// as long as Glance runs, so that the settings open on the desktop as it was (read again as they open, and taken
 /// if it has changed), not on an empty stage while it is read. Small: read at the preview's size, in DIPs.
 static DESKTOPS: std::sync::Mutex<Vec<(String, RECT, (f32, f32), Capture)>> = std::sync::Mutex::new(Vec::new());
-
-/// Reads screen `screen`'s desktop for the preview (see `read_desktop`), and keeps it (see `DESKTOPS`).
-fn read_and_keep(screen: &str, work: RECT, size: (f32, f32)) -> Capture {
-    let desktop = read_desktop(work, size.0 as u32, size.1 as u32);
-    keep_desktop(screen, work, size, &desktop);
-    desktop
-}
 
 /// Keeps `desktop`, screen `screen`'s as read at `work` and `size` (see `DESKTOPS`).
 fn keep_desktop(screen: &str, work: RECT, size: (f32, f32), desktop: &Capture) {
@@ -884,15 +893,16 @@ pub fn read_desktops_ahead() {
     // (A live wallpaper printed once for them all: see `wallpaper::desktops`.)
     let wanted = stages_wanted(&crate::screens::all());
     let asked: Vec<(RECT, u32, u32)> = wanted.iter().map(|(_, work, size)| (*work, size.0 as u32, size.1 as u32)).collect();
-    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(&asked)) {
+    for ((screen, work, size), desktop) in wanted.iter().zip(wallpaper::desktops(asked)) {
         keep_desktop(screen, *work, *size, &desktop);
     }
 }
 
-/// A desktop read on another thread for the settings (see `Ui::read`): for the preview, or for the map.
+/// What a lot of desktops read on another thread for the settings brings (see `read_lot`): each desktop as it is read,
+/// for the preview or for the map, then that the lot has all come.
 enum Read {
-    Stage(Stage),
-    Map { id: String, monitor: RECT, size: (u32, u32), desktop: Capture },
+    Came { lot: u64, ask: reads::Ask, desktop: Capture },
+    Done(u64),
 }
 
 /// How the phone remote is, as its helper says (see `Ui::remote_asked`), a code asked of it with what for (none
@@ -1148,7 +1158,6 @@ enum Field {
     /// Set on a slider (see `slider`).
     OverlaySize,
     OverlayClear,
-    PanelSize,
     OverlayLayout,
     OverlayRows,
     /// When the overlay shows: never, while a game plays, or always.
@@ -1313,6 +1322,18 @@ enum Switch {
     RemoteRaised,
     /// Whether the remote puts the screens out with their signal kept.
     RemoteScreens,
+}
+
+/// The remote's switches, the lights' program fetched (`lights`) or not, on a laptop or not: the lights set, the
+/// memory's with an administrator's rights while that program is there (on no laptop, where the sensors run no
+/// OpenRGB with those rights, see `openrgb::runs_on`, and a laptop's memory has no lights), and the screens put out.
+fn remote_switches(lights: bool, laptop: bool) -> Vec<Switch> {
+    let mut switches = vec![Switch::RemoteLights];
+    if lights && !laptop {
+        switches.push(Switch::RemoteRaised);
+    }
+    switches.push(Switch::RemoteScreens);
+    switches
 }
 
 /// What a QR code shown is for.
@@ -1519,21 +1540,126 @@ struct MapArt {
     monitor: RECT,
     /// The size it was last asked for at (physical px): what it holds, or will once it is read.
     asked: (u32, u32),
-    /// The picture held: none till the first is read (on another thread: see `Ui::read`); the one before while
-    /// another is read.
+    /// The picture held: none till the first is read (on another thread: see `Ui::read_wanted`), the one before while
+    /// another is read. And the size it was read at, while it is the wallpaper's as it is now (none once that changed).
     desktop: Option<Capture>,
+    read_at: Option<(u32, u32)>,
     bitmap: Option<ID2D1Bitmap1>,
 }
 
+/// The map's picture of the screen named `id` at `monitor` (see `MapArt`), wanted `size` physical pixels large: made,
+/// where the map has none of it yet, and its desktop wanted of `reads` where it does not hold it as it is asked. The
+/// picture held is drawn smaller or larger to the size wanted, and asked again only where it is smaller than that, or
+/// more than twice as large, and not while the window is sized by hand (each size of it would read the desktop again):
+/// once it is let go. Another screen's picture is left as it is (those of screens no longer there go as the screens
+/// change: see `Ui::desktops_changed`).
+fn map_art_of<'a>(arts: &'a mut Vec<MapArt>, reads: &mut reads::Reads, id: &str, monitor: RECT, size: (u32, u32), by_hand: bool) -> &'a mut MapArt {
+    let holds = |asked: (u32, u32)| asked.0 >= size.0 && asked.1 >= size.1 && asked.0 <= size.0 * 2 && asked.1 <= size.1 * 2;
+    let at = match arts.iter().position(|art| art.id == id && art.monitor == monitor) {
+        Some(at) => at,
+        None => {
+            arts.push(MapArt { id: id.to_string(), monitor, asked: size, desktop: None, read_at: None, bitmap: None });
+            arts.len() - 1
+        }
+    };
+    let art = &mut arts[at];
+    if !holds(art.asked) && !by_hand {
+        art.asked = size;
+    }
+    if art.read_at != Some(art.asked) {
+        reads.want(reads::Ask::Map { id: id.to_string(), monitor, size: art.asked });
+    }
+    art
+}
+
+/// Screen `id`'s desktop at `monitor`, read `size` large, taken by the map's picture of it where that is still asked at
+/// that size (see `map_art_of`).
+fn map_art_came(arts: &mut [MapArt], id: &str, monitor: RECT, size: (u32, u32), desktop: Capture) {
+    if let Some(art) = arts.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.asked == size) {
+        art.desktop = Some(desktop);
+        art.read_at = Some(size);
+        art.bitmap = None;
+    }
+}
+
 /// The desktop the preview shows, at the size of the work area (DIPs).
+/// How `Ui::stage_panel` draws a panel on the stage.
+#[derive(Clone, Copy)]
+pub(super) struct Staging {
+    /// The whole screen, else the whole height of it with the whole panel and a strip of desktop beside it.
+    pub whole: bool,
+    /// How far it is slid out from its edge: 1 all the way, 0 just past the edge.
+    pub out: f32,
+    /// As large as this, not as the settings have it on that screen.
+    pub size: Option<f32>,
+    /// Put down at this point of the screen (stage DIPs), its corner there, or its lane `lane`'s: away from its edge.
+    pub at: Option<(f32, f32)>,
+    /// Only this lane of it drawn.
+    pub lane: Option<usize>,
+    pub opacity: f32,
+    /// The desktop drawn under it, else it over what is drawn already.
+    pub desktop: bool,
+    /// Drawn, else only measured.
+    pub draw: bool,
+    /// Which of the stage's panels it is.
+    pub shown: Shown,
+}
+
+impl Default for Staging {
+    fn default() -> Self {
+        Staging { whole: false, out: 1.0, size: None, at: None, lane: None, opacity: 1.0, desktop: true, draw: true, shown: Shown::Preview }
+    }
+}
+
+/// Which of the stage's panels one staged is: the preview's, the guide's plays', or a widget the guide's play tears
+/// off it (the lane's, the whole panel's). Each is drawn in layers of its own and turns between its layouts on its own
+/// (see `StageLayers`), however the others are drawn between its frames.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Shown {
+    Preview,
+    Guide,
+    Torn(usize),
+}
+
+/// A staged panel's layers (see `render::PanelLayers`), and its turn from one layout into the next as the panel's
+/// own turns (see `render::Turn`).
+#[derive(Default)]
+struct StageLayers {
+    layers: PanelLayers,
+    turn: render::Turn,
+}
+
+impl StageLayers {
+    fn release(&mut self) {
+        self.layers.release();
+        self.turn.release();
+    }
+}
+
+/// What `Ui::stage_panel` drew, and where (the window's DIPs).
+pub(super) struct Staged {
+    /// How fast the panel's charts move (physical pixels a second), where it has any.
+    pub plot: Option<f32>,
+    pub screen: Rect,
+    /// The panel, its lanes and the bar at its foot, where there was one to draw.
+    pub panel: Option<Rect>,
+    pub lanes: Vec<Rect>,
+    pub bar: Option<Rect>,
+    /// How deep a lane's head is, by which a readings lane is torn off alone.
+    pub head: f32,
+}
+
 struct Stage {
     size: (f32, f32),
     /// The screen it is, by its name, and its work area as the desktop
     /// was taken (physical px).
     screen: Option<String>,
     work: RECT,
-    /// None till it has been read (on another thread: see `Ui::read`).
+    /// None till it has been read (on another thread: see `Ui::read_wanted`). And whether it was read from the wallpaper
+    /// as it is now, since the window opened: one kept from before (see `DESKTOPS`), or read before the wallpaper
+    /// changed, is shown till it is read again (see `wanted`).
     desktop: Option<Capture>,
+    current: bool,
     /// The desktop as a bitmap, for the zoom it was made at.
     bitmap: Option<(u32, ID2D1Bitmap1)>,
     /// What was last measured of the desktop (see `tone` and `glass`): the same for as long as it is shown as it
@@ -1555,7 +1681,14 @@ struct Measured {
 
 impl Stage {
     fn new(size: (f32, f32), screen: Option<String>, work: RECT, desktop: Option<Capture>) -> Self {
-        Stage { size, screen, work, desktop, bitmap: None, measured: Measured::default() }
+        Stage { size, screen, work, desktop, current: false, bitmap: None, measured: Measured::default() }
+    }
+
+    /// Its desktop, as it is to be read (see `reads::Ask`): while it holds none read from the wallpaper as it is now,
+    /// and is a screen's.
+    fn wanted(&self) -> Option<reads::Ask> {
+        let screen = self.screen.clone().filter(|_| !self.current)?;
+        Some(reads::Ask::Stage { screen, work: self.work, size: self.size })
     }
 
     /// How light the desktop is behind `area` (mean and spread, one value a pixel); grey till it has been read.
@@ -1721,6 +1854,8 @@ struct Ui {
     phones_at: Instant,
     /// Whether this copy may start with Windows (see elevation.rs).
     may_autostart: bool,
+    /// Whether this machine is a laptop (see `laptop`), where no OpenRGB is run with an administrator's rights.
+    laptop: bool,
     /// The installer's uninstaller beside this executable, if it was
     /// installed somewhere ordinary programs cannot change.
     uninstaller: Option<std::path::PathBuf>,
@@ -1793,12 +1928,17 @@ struct Ui {
     library_music: super::music::Music,
     library_music_ground: render::GroundLayers,
     library_layers: [PanelLayers; 2],
+    /// The panel the guide's plays show on the stage, and the widgets its play tears off it, the lane's and the whole
+    /// panel's (see `Shown`).
+    guide_layers: StageLayers,
+    torn_layers: [StageLayers; 2],
     map_art: Vec<MapArt>,
     /// The desktops of the other screens the preview has shown, kept: turning to a page that shows another screen
     /// (the overlay's) and back takes them as they are, not read from the wallpaper and scaled anew each time.
     kept_stages: Vec<Stage>,
-    /// The desktops read on other threads (every screen's for the preview as the window opens, and any one asked for
-    /// since: see `read`), come back: for the preview, or for the map.
+    /// The desktops read on other threads (every screen's for the preview as the window opens, and any one wanted
+    /// since: see `read_wanted`), each asked once, and what they bring as it comes: for the preview, or for the map.
+    reads: reads::Reads,
     read: (std::sync::mpsc::Sender<Read>, std::sync::mpsc::Receiver<Read>),
     /// The control the keyboard acts on, and whether the keyboard has been
     /// used since the last click (the focus is shown only then).
@@ -1820,7 +1960,7 @@ struct Ui {
     targets: Vec<(Rect, Target)>,
     relabel_at: Option<Instant>,
     stage: Stage,
-    layers: PanelLayers,
+    layers: StageLayers,
     last_frame: Instant,
     next_frame: Instant,
     /// When the guide is next drawn, apart from the window (see `guide`).
@@ -1829,9 +1969,6 @@ struct Ui {
     drawn_size: Option<(u32, u32)>,
     /// Something it shows taken in since it was last drawn (see `take_in`).
     taken_unseen: bool,
-    /// The largest panel size at which the panel still grows on the screen the preview shows (see
-    /// `arrange::largest`): past it a larger size changed the figure and nothing else.
-    largest: f32,
     /// The guide to Glance, while it is up (see `guide`).
     guide: Option<guide::Guide>,
     /// Where the layout's editor was last drawn (window DIPs), for the guide's step on it to point at.
@@ -1856,6 +1993,7 @@ impl Lives for Ui {
             guide.let_go_of_surfaces();
         }
         self.layers.release();
+        self.guide_layers.release();
         self.stage.bitmap = None;
         for stage in &mut self.kept_stages {
             stage.bitmap = None;
@@ -1866,6 +2004,9 @@ impl Lives for Ui {
         self.music.release();
         self.library_music.release();
         for layers in &mut self.library_layers {
+            layers.release();
+        }
+        for layers in &mut self.torn_layers {
             layers.release();
         }
     }
@@ -2025,6 +2166,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             reading_drives: None,
             drives_at: None,
             choosing_folders: None,
+            laptop: crate::laptop::this_machine(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
@@ -2061,8 +2203,11 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             library_music: super::music::Music::default(),
             library_music_ground: render::GroundLayers::default(),
             library_layers: [PanelLayers::default(), PanelLayers::default()],
+            guide_layers: StageLayers::default(),
+            torn_layers: [StageLayers::default(), StageLayers::default()],
             map_art: Vec::new(),
             kept_stages: Vec::new(),
+            reads: reads::Reads::default(),
             read: std::sync::mpsc::channel(),
             focus: None,
             keyboard: false,
@@ -2076,14 +2221,13 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             targets: Vec::new(),
             relabel_at: None,
             stage,
-            layers: PanelLayers::default(),
+            layers: StageLayers::default(),
             showing: None,
             last_frame: Instant::now(),
             next_frame: Instant::now(),
             guide_frame: Instant::now(),
             drawn_size: None,
             taken_unseen: false,
-            largest: SIZES.1,
             guide: None,
             editor_at: None,
             library_at: None,
@@ -2234,6 +2378,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             crate::screens::changed();
             gfx::screens_changed();
             SCREENS_OWED.store(true, Ordering::Release);
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        // The wallpaper changed (as Windows tells every window when a picture or colour is set for it).
+        windows::Win32::UI::WindowsAndMessaging::WM_SETTINGCHANGE if wparam.0 as u32 == windows::Win32::UI::WindowsAndMessaging::SPI_SETDESKWALLPAPER.0 => {
+            WALLPAPER_OWED.store(true, Ordering::Release);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_GETMINMAXINFO => {
@@ -2414,11 +2563,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
     }
 }
 
-/// Sets `field`, a slider's, to `value` in `settings`: `part`'s panel's size, on the screen named `screen` (see
-/// `Settings::size_panel`).
-fn put_slider(settings: &mut Settings, field: Field, value: f32, part: Part, screen: Option<&str>) {
+/// Sets `field`, a slider's (the overlay's), to `value` in `settings`.
+fn put_slider(settings: &mut Settings, field: Field, value: f32) {
     match field {
-        Field::PanelSize => settings.size_panel(part, screen, value),
         Field::OverlayClear => settings.overlay.clear = value,
         _ => settings.overlay.size = value,
     }
@@ -2555,7 +2702,6 @@ impl Ui {
             }
             (Page::Workbench, _) => {
                 rows.push(Row::Choice(Field::Columns));
-                rows.push(Row::Slider(Field::PanelSize));
                 for entry in &self.prefs.workbench {
                     let id = format!("{WORKBENCH}{}", entry.id);
                     rows.push(Row::Module(id.clone()));
@@ -2631,7 +2777,6 @@ impl Ui {
         match tab {
             Tab::Shown => {
                 rows.push(Row::Choice(Field::Columns));
-                rows.push(Row::Slider(Field::PanelSize));
                 let module = |rows: &mut Vec<Row>, id: &str| {
                     rows.push(Row::Module(id.to_string()));
                     // A card's rows, while it is open or still closing.
@@ -2722,11 +2867,7 @@ impl Ui {
     fn remote_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Switch(Switch::Remote));
         if self.remote {
-            rows.push(Row::Switch(Switch::RemoteLights));
-            if self.remote_lights {
-                rows.push(Row::Switch(Switch::RemoteRaised));
-            }
-            rows.push(Row::Switch(Switch::RemoteScreens));
+            rows.extend(remote_switches(self.remote_lights, self.laptop).into_iter().map(Row::Switch));
             // A code shows under the row that asked for it.
             let shown = self.code.as_ref().map(|(_, what)| *what);
             rows.push(Row::Pair);
@@ -2895,13 +3036,10 @@ impl Ui {
             return;
         }
         // Shown before, as it is now: taken as it was kept; else read from the wallpaper on another thread (shown
-        // without it meanwhile).
+        // without it meanwhile: see `take_in`).
         let next = match self.kept_stages.iter().position(is) {
             Some(at) => self.kept_stages.swap_remove(at),
-            None => {
-                self.read_stage(screen.to_string(), work, size);
-                Stage::new(size, Some(screen.to_string()), work, None)
-            }
+            None => Stage::new(size, Some(screen.to_string()), work, None),
         };
         let before = std::mem::replace(&mut self.stage, next);
         // One kept for each screen, as it last was.
@@ -2927,7 +3065,7 @@ impl Ui {
     }
 
     /// Reads every screen's desktop as the preview shows it (its wallpaper, at its work area's size), on another
-    /// thread: each kept as it comes (see `draw`).
+    /// thread (see `read_wanted`): each kept as it comes (see `take_in`).
     fn read_stages(&mut self) {
         let wanted = stages_wanted(&self.screens);
         // As they were last read, at once (read again below, and taken if changed).
@@ -2937,25 +3075,47 @@ impl Ui {
                 self.kept_stages.push(Stage::new(*size, Some(screen.clone()), *work, Some(desktop)));
             }
         }
-        let send = self.read.0.clone();
-        std::thread::spawn(move || {
-            for (screen, work, size) in wanted {
-                let desktop = read_and_keep(&screen, work, size);
-                let stage = Stage::new(size, Some(screen), work, Some(desktop));
-                if send.send(Read::Stage(stage)).is_err() {
-                    break;
-                }
-            }
-        });
+        for (screen, work, size) in wanted {
+            self.reads.want(reads::Ask::Stage { screen, work, size });
+        }
     }
 
-    /// Reads screen `screen`'s desktop for the preview (its work area `work`, `size` DIPs) on another thread.
-    fn read_stage(&self, screen: String, work: RECT, size: (f32, f32)) {
+    /// The desktops wanted since the last lot went (see `reads::Reads`), read together on another thread, once the lot
+    /// before has come or been given up (see `reads::GIVEN_UP_AFTER`: what it had yet to bring is then shown as a
+    /// desktop not read is, till the screens or the wallpaper change).
+    fn read_wanted(&mut self) {
+        let now = Instant::now();
+        if self.reads.give_up(now) {
+            crate::journal::note(format!("settings: the desktops being read had not come after {} s, given up", reads::GIVEN_UP_AFTER.as_secs()));
+        }
+        let Some((lot, asks)) = self.reads.lot(now) else { return };
         let send = self.read.0.clone();
-        std::thread::spawn(move || {
-            let desktop = read_and_keep(&screen, work, size);
-            let _ = send.send(Read::Stage(Stage::new(size, Some(screen), work, Some(desktop))));
-        });
+        std::thread::spawn(move || read_lot(lot, asks, send));
+    }
+
+    /// The screens or the wallpaper changed (see WM_DISPLAYCHANGE and WM_SETTINGCHANGE): the screens as they are now,
+    /// the map's pictures and the desktops kept of those no longer where and as large as they were let go, and every
+    /// desktop may be read again (one given up too). The wallpaper changed, each desktop shown or kept is read again,
+    /// shown as it was till it comes (wanted by what holds it till then: see `take_in` and `map_art_of`, so the screens
+    /// changing meanwhile does not lose it).
+    fn desktops_changed(&mut self, screens: bool, wallpaper: bool) {
+        if screens {
+            self.screens = crate::screens::all();
+            let present = &self.screens;
+            self.map_art.retain(|art| present.iter().any(|screen| screen.id == art.id && screen.monitor == art.monitor));
+            let wanted = stages_wanted(present);
+            self.kept_stages.retain(|kept| wanted.iter().any(|(screen, work, size)| kept.screen.as_ref() == Some(screen) && kept.work == *work && kept.size == *size));
+        }
+        self.reads.forget();
+        if wallpaper {
+            for art in &mut self.map_art {
+                art.read_at = None;
+            }
+            for stage in std::iter::once(&mut self.stage).chain(&mut self.kept_stages) {
+                stage.current = false;
+            }
+        }
+        self.next_frame = Instant::now();
     }
 
     /// The screen the preview shows, by its name: on the layout's page, the
@@ -3002,34 +3162,7 @@ impl Ui {
     /// pixels large, for the layout's editor: taken once, and again when its
     /// size changes.
     fn map_picture(&mut self, frame: &Frame, id: &str, monitor: RECT, size: (u32, u32)) -> Option<ID2D1Bitmap1> {
-        // The picture held is drawn smaller or larger to the size wanted. Read again (on another thread, the one held
-        // drawn meanwhile) only where it is smaller than that, or more than twice as large; and not while the window
-        // is sized by hand (each size of it would read the desktop again): once it is let go.
-        let holds = |asked: (u32, u32)| asked.0 >= size.0 && asked.1 >= size.1 && asked.0 <= size.0 * 2 && asked.1 <= size.1 * 2;
-        let found = self.map_art.iter().position(|art| art.id == id && art.monitor == monitor);
-        let at = match found {
-            Some(at) if holds(self.map_art[at].asked) || self.by_hand => at,
-            _ => {
-                let send = self.read.0.clone();
-                let of = id.to_string();
-                std::thread::spawn(move || {
-                    let desktop = read_desktop(monitor, size.0, size.1);
-                    let _ = send.send(Read::Map { id: of, monitor, size, desktop });
-                });
-                match found {
-                    Some(at) => {
-                        self.map_art[at].asked = size;
-                        at
-                    }
-                    None => {
-                        self.map_art.retain(|art| art.id != id);
-                        self.map_art.push(MapArt { id: id.to_string(), monitor, asked: size, desktop: None, bitmap: None });
-                        self.map_art.len() - 1
-                    }
-                }
-            }
-        };
-        let art = &mut self.map_art[at];
+        let art = map_art_of(&mut self.map_art, &mut self.reads, id, monitor, size, self.by_hand);
         if art.bitmap.is_none() {
             art.bitmap = art.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, 1.0).ok());
         }
@@ -3474,7 +3607,7 @@ impl Ui {
                 vec![seconds("30"), minutes("1"), minutes("2"), minutes("5")],
                 at(&[30, 60, 120, 300], prefs.chart_seconds as u64),
             ),
-            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => (self.slider(field).0, Vec::new(), None),
+            Field::OverlaySize | Field::OverlayClear => (self.slider(field).0, Vec::new(), None),
             // (Shown only while there are any: see `rows`.)
             Field::StationHidden => {
                 let n = settings.recent_hidden.len();
@@ -3519,7 +3652,7 @@ impl Ui {
             Field::ProcessCount => prefs.processes.count = [5, 8, 12][index],
             Field::Interval => settings.interval_ms = [500, 1000, 2000][index],
             Field::Span => prefs.chart_seconds = [30.0, 60.0, 120.0, 300.0][index],
-            Field::OverlaySize | Field::OverlayClear | Field::PanelSize => {}
+            Field::OverlaySize | Field::OverlayClear => {}
             Field::TempAlert => prefs.hot_temp = [75.0, 85.0, 95.0][index],
             Field::StationHidden if index == 1 => settings.recent_hidden.clear(),
             Field::StationHidden => {}
@@ -3610,23 +3743,6 @@ impl Ui {
         let lang = self.lang;
         let (sizes, overlay) = (SIZES, &self.settings.overlay);
         match field {
-            // No larger than the screen holds it: at that, said so. The size of the screen the window shows (its own),
-            // which, with more than one, is said.
-            Field::PanelSize => {
-                // A hundredth at a step, as sizing the panel by its corner goes. (On a step, as the slider moves by
-                // them: a most between two could never be reached.)
-                const STEP: f32 = 0.01;
-                let most = (sizes.0 + ((self.largest - sizes.0) / STEP + 1e-4).floor() * STEP).clamp(sizes.0, sizes.1);
-                let value = self.panel_size().clamp(sizes.0, most);
-                let full = most < sizes.1 && value >= most - 0.001;
-                let name = match (crate::screens::monitors().len() > 1, full) {
-                    (false, false) => pick(lang, "面板大小", "Panel size"),
-                    (false, true) => pick(lang, "面板大小（已达屏幕上限）", "Panel size (as large as this screen holds)"),
-                    (true, false) => pick(lang, "面板大小（本屏幕）", "Panel size (this screen)"),
-                    (true, true) => pick(lang, "面板大小（本屏幕，已达上限）", "Panel size (this screen, as large as it holds)"),
-                };
-                (name, sizes.0, most, STEP, value)
-            }
             Field::OverlayClear => (pick(lang, "玻璃透明度", "Glass clarity"), 0.0, 1.0, 0.05, overlay.clear.clamp(0.0, 1.0)),
             _ => (pick(lang, "大小", "Size"), sizes.0, sizes.1, 0.05, overlay.size.clamp(sizes.0, sizes.1)),
         }
@@ -3643,9 +3759,8 @@ impl Ui {
         if value == now {
             return;
         }
-        let (part, screen) = (self.previewed(), self.stage.screen.clone());
-        put_slider(&mut self.settings, field, value, part, screen.as_deref());
-        crate::app().preview(|live| put_slider(live, field, value, part, screen.as_deref()));
+        put_slider(&mut self.settings, field, value);
+        crate::app().preview(|live| put_slider(live, field, value));
         self.next_frame = Instant::now();
     }
 
@@ -3654,9 +3769,8 @@ impl Ui {
     fn keep_slider(&mut self, field: Field) {
         let value = self.slider(field).4;
         let mut now = None;
-        let (part, screen) = (self.previewed(), self.stage.screen.clone());
         crate::app().change(|held| {
-            put_slider(held, field, value, part, screen.as_deref());
+            put_slider(held, field, value);
             now = Some(held.clone());
         });
         self.take(now.unwrap());
@@ -4102,7 +4216,7 @@ impl Ui {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return self.module(bare);
         }
-        let (lang, info) = (self.lang, &crate::app().info);
+        let (lang, info) = (self.lang, &crate::app().info());
         let p = |zh, en| pick(lang, zh, en).to_string();
         if let Some(group) = id.strip_prefix(OVERLAY) {
             return match group {
@@ -4227,7 +4341,7 @@ impl Ui {
         }
         let app = crate::app();
         let seen = app.controller.seen.lock().unwrap();
-        let info = &app.info;
+        let info = &app.info();
         let gpu = info.gpu_of(id).map(|index| (&info.gpus[index], seen.gpus.get(index).cloned().unwrap_or_default()));
         // A module this machine has shown nothing of (no battery, no board
         // sensors, a GPU not read) has no lane, and nothing to set.
@@ -4262,7 +4376,7 @@ impl Ui {
                     _ => !seen.engines.is_empty(),
                 }),
                 ("memory", "dimms") => seen.dimms > 0,
-                ("memory", "speed") => app.info.memory_speed.is_some(),
+                ("memory", "speed") => info.memory_speed.is_some(),
                 ("battery", "power") => seen.battery_power,
                 ("battery", "health") => seen.battery_health,
                 ("network", "address") => seen.address,
@@ -4521,9 +4635,7 @@ impl Ui {
             return;
         }
         if self.sliding.is_some() || self.drag.is_some() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            super::window::let_go_of_capture(self.hwnd);
             self.let_go();
             return;
         }
@@ -5031,40 +5143,48 @@ impl Ui {
 
     /// What has come in since it last looked, taken in: desktops read meanwhile (the one shown, if it waited for it;
     /// else kept, unless kept already; the map's in place, if it is still of that screen as it is), and the screen the
-    /// preview shows, as it is now. On every turn of the loop, the window drawn or not (held under the guide, whose
-    /// small desktops are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
+    /// preview shows, as it is now, its desktop and those kept wanted till each holds the wallpaper as it is now (read with
+    /// those the frame drawn next wants: see `read_wanted`). On every turn of the loop, the window drawn or not (held under the guide, whose small desktops
+    /// are the preview's): what it shows taken in is noted as not yet drawn (see `guide_holds_window`).
     fn take_in(&mut self) {
         while let Ok(read) = self.read.1.try_recv() {
+            let (lot, ask, desktop) = match read {
+                Read::Came { lot, ask, desktop } => (lot, ask, desktop),
+                Read::Done(lot) => {
+                    self.reads.done(lot);
+                    continue;
+                }
+            };
+            if !self.reads.came(lot, &ask) {
+                continue;
+            }
             // (Drawn with it now, as far as it is drawn: see `guide_holds_window`.)
             self.taken_unseen = true;
             self.next_frame = Instant::now();
-            match read {
-                Read::Stage(stage) => {
+            match ask {
+                reads::Ask::Stage { screen, work, size } => {
+                    let stage = Stage { current: true, ..Stage::new(size, Some(screen), work, Some(desktop)) };
                     let same = |other: &Stage| other.screen == stage.screen && other.work == stage.work && other.size == stage.size;
-                    // (What was shown at once, as it was kept: taken again only if the desktop has changed since.)
+                    // (What was shown at once, as it was kept: taken again only if the desktop has changed since, and
+                    // known to be as it is now either way.)
                     let changed = |other: &Stage| other.desktop.as_ref().is_none_or(|was| stage.desktop.as_ref().is_some_and(|now| now.digest != was.digest));
-                    if same(&self.stage) {
-                        if changed(&self.stage) {
-                            self.stage = stage;
-                        }
-                    } else {
-                        match self.kept_stages.iter().position(same) {
-                            Some(at) if changed(&self.kept_stages[at]) => self.kept_stages[at] = stage,
-                            Some(_) => {}
-                            None => self.kept_stages.push(stage),
-                        }
+                    let held = if same(&self.stage) { Some(&mut self.stage) } else { self.kept_stages.iter_mut().find(|kept| same(kept)) };
+                    match held {
+                        Some(held) if changed(held) => *held = stage,
+                        Some(held) => held.current = true,
+                        None => self.kept_stages.push(stage),
                     }
                 }
-                Read::Map { id, monitor, size, desktop } => {
-                    if let Some(art) = self.map_art.iter_mut().find(|art| art.id == id && art.monitor == monitor && art.asked == size) {
-                        art.desktop = Some(desktop);
-                        art.bitmap = None;
-                    }
-                }
+                reads::Ask::Map { id, monitor, size } => map_art_came(&mut self.map_art, &id, monitor, size, desktop),
             }
         }
         if let Some(screen) = self.stage_screen() {
             self.show_screen(&screen);
+        }
+        // (Each one shown or kept, till it holds the wallpaper as it is now: so a refresh asked for is not lost to the
+        // screens changing as it is read.)
+        for ask in std::iter::once(&self.stage).chain(&self.kept_stages).filter_map(Stage::wanted).collect::<Vec<_>>() {
+            self.reads.want(ask);
         }
     }
 
@@ -5135,7 +5255,7 @@ impl Ui {
             self.gfx.settle();
         }
         // (A row held still moves only as the pointer does, which asks for a frame itself.)
-        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target;
+        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning();
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
@@ -5143,6 +5263,8 @@ impl Ui {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
         };
+        // (The desktops wanted as it was drawn read together, those taken in before it was too: see `take_in`.)
+        self.read_wanted();
         self.draw_guide(now);
     }
 
@@ -5945,7 +6067,7 @@ impl Ui {
     /// Whether anything in it moves.
     fn paint_phone(&mut self, frame: &Frame, area: Rect) -> bool {
         let app = crate::app();
-        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info));
+        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info()));
         // The outline round it; the whole no taller or wider than the room, nor larger than a phone is.
         let (bezel, margin) = (10.0, 24.0);
         let (wide, tall) = super::phone_art::SCREEN;
@@ -6047,9 +6169,7 @@ impl Ui {
         let state = self.phone.state.clone().unwrap_or(serde_json::Value::Null);
         let flag = |name: &str| state.get(name).and_then(serde_json::Value::as_bool);
         if let Some((part, _, at)) = self.phone.slid.take() {
-            unsafe {
-                let _ = ReleaseCapture();
-            }
+            super::window::let_go_of_capture(self.hwnd);
             // A colour being made: the lights take it as it is left.
             if let (Part::Hue | Part::Depth, Some(making)) = (&part, self.phone.making.as_mut()) {
                 match part {
@@ -6295,7 +6415,7 @@ impl Ui {
         let area = self.shown_of(area, k, stage_x, stage_y);
         let palette = self.palette.clone();
         self.framed(frame, framed);
-        self.stage_picture(frame, area, (ox, oy), k, zoom);
+        self.stage_picture(frame, area, 8.0, (ox, oy), k, zoom);
         unsafe { frame.dc.PushAxisAlignedClip(&rect(area.x, area.y, area.w, area.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         let (at, scale) = ((ox + pos.0 * k, oy + pos.1 * k), zoom * k);
         let pointer = self.pointer.map(|(x, y)| ((x - at.0) / scale, (y - at.1) / scale)).filter(|(x, y)| *x >= 0.0 && *y >= 0.0 && *x < size.0 && *y < size.1);
@@ -6428,15 +6548,27 @@ impl Ui {
     /// just past the edge), running live: the whole screen (`whole`), else the whole height of it
     /// with the whole panel and a strip of desktop beside it. Returns how fast the panel's charts move (physical pixels
     /// a second), and where the screen was drawn.
-    #[allow(clippy::too_many_arguments)]
     fn panel_on_stage(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, whole: bool, out: f32) -> (Option<f32>, Rect) {
+        let staged = self.stage_panel(frame, area, panel, Staging { whole, out, ..Staging::default() });
+        (staged.plot, staged.screen)
+    }
+
+    /// The stage's desktop in `area` and on it the panel `panel` (its edge, what it shows, what it is), as `staging` has
+    /// it (see `Staging`): as `panel_on_stage` draws it, or as large as the guide's plays make it, or put down on the
+    /// screen as a widget pulled off it, whole or one lane of it. What was drawn, where (see `Staged`).
+    pub(super) fn stage_panel(&mut self, frame: &Frame, area: Rect, panel: Option<(Edge, &Prefs, Part)>, staging: Staging) -> Staged {
+        let Staging { whole, out, size, at, lane: only, opacity, desktop, draw, shown: staged_as } = staging;
         let lang = self.lang;
         let (sw, sh) = self.stage.size;
         let fit = (area.w / sw).min(area.h / sh).min(1.0);
         let Some((edge, prefs, part)) = panel else {
             let (ox, oy) = (area.x + (area.w - sw * fit) / 2.0, area.y + (area.h - sh * fit) / 2.0);
-            self.stage_picture(frame, area, (ox, oy), fit, 1.0);
-            return (None, Rect { x: ox, y: oy, w: sw * fit, h: sh * fit });
+            let screen = Rect { x: ox, y: oy, w: sw * fit, h: sh * fit };
+            if draw && desktop {
+                let (clip, radius) = screen_shown(screen);
+                self.stage_picture(frame, clip, radius, (ox, oy), fit, 1.0);
+            }
+            return Staged { plot: None, screen, panel: None, lanes: Vec::new(), bar: None, head: 0.0 };
         };
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
@@ -6445,72 +6577,134 @@ impl Ui {
         let history = app.controller.history.read().unwrap();
         let samples = crate::panel::contiguous(&history);
         if samples.is_empty() {
-            if !whole {
+            if !whole && draw && desktop {
                 fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
                 stroke_inside(frame, area, 8.0, self.palette.card_stroke);
             }
-            return (None, Rect { x: area.x, y: area.y, w: area.w, h: area.h });
+            return Staged { plot: None, screen: Rect { x: area.x, y: area.y, w: area.w, h: area.h }, panel: None, lanes: Vec::new(), bar: None, head: 0.0 };
         }
         let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
         let pen = wall - interval - PEN_LAG_MS;
         let measure = Theme::new(skin, false);
         // The preview shows what the panel would hold if it opened now.
         let seen = app.controller.seen.lock().unwrap().clone();
-        let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let probe = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs, theme: &measure, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&probe);
         let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&measure)).collect();
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
         let columns = self.settings.columns_of(part);
-        self.largest = arrange::largest(&measure, edge, &heights, (sw, sh), columns, SIZES.1, rail);
-        let size = self.settings.panel_size_on(part, self.stage.screen.as_deref()).clamp(SIZES.0, SIZES.1);
+        // What it is (another drawn in its place is not turned into: see `render::Turn::follow`).
+        let what = {
+            let mut key = DefaultHasher::new();
+            (part, edge, whole, size.is_some(), at.is_some(), only).hash(&mut key);
+            key.finish()
+        };
+        // No larger than the screen holds it, as the panel is made (see `Panel::dragged`).
+        let size = size.unwrap_or_else(|| self.settings.panel_size_on(part, self.stage.screen.as_deref())).clamp(SIZES.0, SIZES.1);
+        let size = size.min(arrange::largest(&measure, edge, &heights, (sw, sh), columns, size, rail).max(SIZES.0));
         let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
         let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
-        let inset = measure.inset * zoom;
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
         // (Slid in, as far past the edge as its shadow reaches.)
         let away = 1.0 - out;
-        let pos = match edge {
-            Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-            Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
-            Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
+        let boxes = layout.lanes();
+        // Its corner on the screen, laid out as `layout` at `zoom`: against its edge, or where it is put down (where
+        // one lane of it is, that lane's).
+        let corner = |layout: &view::Layout, zoom: f32| {
+            let (pw, ph, inset) = (layout.width() * zoom, layout.height() * zoom, measure.inset * zoom);
+            match (at, only.and_then(|lane| layout.lanes().get(lane).copied())) {
+                (Some(at), Some(lane)) => (at.0 - lane.x * zoom, at.1 - lane.y * zoom),
+                (Some(at), None) => at,
+                (None, _) => match edge {
+                    Edge::Left => (inset - away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                    Edge::Right => (sw - inset - pw + away * (pw + inset + GAP), along(sh / 2.0, ph, sh)),
+                    Edge::Top => (along(sw / 2.0, pw, sw), inset - away * (ph + inset + GAP)),
+                },
+            }
         };
+        let pos = corner(&layout, zoom);
+        let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
+        let (ox, oy) = (area.x + stage_x, area.y + stage_y);
+        let shown = |x: f32, y: f32, w: f32, h: f32| Rect { x: ox + x * k, y: oy + y * k, w: w * k, h: h * k };
+        let screen = Rect { x: ox, y: oy, w: sw * k, h: sh * k };
+        let staged = |plot| Staged {
+            plot,
+            screen,
+            panel: Some(shown(pos.0, pos.1, pw, ph)),
+            lanes: boxes.iter().map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom)).collect(),
+            bar: Some(layout.bar()).map(|bar| shown(pos.0 + bar.x * zoom, pos.1 + bar.y * zoom, bar.w * zoom, bar.h * zoom)),
+            head: (measure.pad_top + view::HEAD_BAND) * zoom * k,
+        };
+        if !draw {
+            return staged(None);
+        }
         // The desktop behind the panel decides its theme when it follows the
         // backdrop, and how frosted glass is.
         let behind = RECT { left: pos.0 as i32, top: pos.1 as i32, right: (pos.0 + pw) as i32, bottom: (pos.1 + ph) as i32 };
         let (theme, frost) = self.stage.look(skin, prefs.theme, behind);
-        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay: crate::app().controller.overlay_wanted(), buttons: true, newer: update::available().is_some(), settings_lit: None };
         let lanes = view::lanes(&scene);
 
-        let (k, stage_x, stage_y) = self.staged(area, edge, pw, whole);
-        let (ox, oy) = (area.x + stage_x, area.y + stage_y);
         let framed = area;
-        let area = if whole { area } else { self.shown_of(area, k, stage_x, stage_y) };
-        if !whole {
+        // The whole screen inside its own rounded corners, a strip of it inside the preview's frame's.
+        let (area, radius) = if whole { screen_shown(screen) } else { (self.shown_of(area, k, stage_x, stage_y), 8.0) };
+        if !whole && desktop {
             self.framed(frame, framed);
         }
-        let mask = unsafe {
-            frame.gfx.factory.CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT { rect: rect(area.x, area.y, area.w, area.h), radiusX: 8.0, radiusY: 8.0 })
-        };
-        let layer = D2D1_LAYER_PARAMETERS1 {
-            contentBounds: rect(area.x, area.y, area.w, area.h),
-            geometricMask: std::mem::ManuallyDrop::new(mask.ok().map(|m| windows::core::Interface::cast(&m).unwrap())),
-            maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-            maskTransform: Matrix3x2::identity(),
-            opacity: 1.0,
-            ..Default::default()
-        };
-        unsafe { frame.dc.PushLayer(&layer, None) };
-        // The desktop in the panel's units, which a zoomed panel shrinks.
-        self.stage_picture(frame, area, (ox, oy), k, zoom);
+        // Clipped to the screen, and where one lane of it is drawn, to that lane inside its corners; as opaque as `opacity`.
+        let lane = only.and_then(|lane| boxes.get(lane)).map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom));
+        let clips: Vec<(Rect, f32)> = std::iter::once((area, radius)).chain(lane.map(|lane| (lane, theme.radius * zoom * k))).collect();
+        let last = clips.len() - 1;
+        let layers: Vec<D2D1_LAYER_PARAMETERS1> = clips
+            .iter()
+            .enumerate()
+            .map(|(at, (clip, radius))| {
+                let mask = unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(*clip, *radius)) };
+                D2D1_LAYER_PARAMETERS1 {
+                    contentBounds: rect(clip.x, clip.y, clip.w, clip.h),
+                    geometricMask: std::mem::ManuallyDrop::new(mask.ok().map(|m| windows::core::Interface::cast(&m).unwrap())),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: if at == last { opacity } else { 1.0 },
+                    ..Default::default()
+                }
+            })
+            .collect();
+        for layer in &layers {
+            unsafe { frame.dc.PushLayer(layer, None) };
+        }
+        // The desktop in the panel's units, which a zoomed panel shrinks (made even where it is drawn already: the
+        // panel's glass is frosted from it).
+        if desktop {
+            self.stage_picture(frame, area, radius, (ox, oy), k, zoom);
+        } else {
+            self.stage_bitmap(frame, zoom);
+        }
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
-        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: Some(edge), backdrop, frost, rough: false };
-        let drawn = self.layers.draw(frame, &picture, local, self.scale * zoom * k);
-        unsafe { frame.dc.PopLayer() };
-        drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
-        if !whole {
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: at.is_none().then_some(edge), backdrop, frost, rough: false };
+        let scale = self.scale * zoom * k;
+        let cache = match staged_as {
+            Shown::Preview => &mut self.layers,
+            Shown::Guide => &mut self.guide_layers,
+            Shown::Torn(at) => &mut self.torn_layers[at],
+        };
+        // Laid out in other columns than it was drawn in last, it turns into the new layout as the panel does, what
+        // it turns from where it was on the screen.
+        let drawn = match cache.turn.follow(what, &layout, zoom, Instant::now(), !crate::panel::reduced_motion()) {
+            Some(t) => cache.turn.draw(frame, &picture, &mut cache.layers, local, scale, t, |old, old_zoom| {
+                let was = corner(old, old_zoom);
+                ((was.0 - pos.0) / zoom, (was.1 - pos.1) / zoom)
+            }),
+            None => cache.layers.draw(frame, &picture, local, scale),
+        };
+        for layer in layers.into_iter().rev() {
+            unsafe { frame.dc.PopLayer() };
+            drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
+        }
+        if !whole && desktop {
             stroke_inside(frame, framed, 8.0, self.palette.card_stroke);
         }
         match drawn {
@@ -6519,35 +6713,54 @@ impl Ui {
             // (Not shown, the frame: see `Frame::fail`.)
             Err(error) => frame.fail(error),
         }
-        (layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32), Rect { x: ox, y: oy, w: sw * k, h: sh * k })
+        staged(layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32))
     }
 
-    /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area`: made a bitmap for the panel's
-    /// `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
-    fn stage_picture(&mut self, frame: &Frame, area: Rect, at: (f32, f32), k: f32, zoom: f32) {
-        let (sw, sh) = self.stage.size;
+    /// The stage's desktop made a bitmap for a panel's `zoom` (a zoomed panel's units shrink it), where it is not yet.
+    fn stage_bitmap(&mut self, frame: &Frame, zoom: f32) {
         let zoom_key = zoom.to_bits();
         if self.stage.bitmap.as_ref().is_none_or(|(key, _)| *key != zoom_key) {
             self.stage.bitmap = self.stage.desktop.as_ref().and_then(|desktop| desktop.bitmap(&frame.dc, zoom).ok()).map(|b| (zoom_key, b));
         }
-        if let Some((_, bitmap)) = &self.stage.bitmap {
-            // (Inside the area's rounded corners.)
-            let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, 8.0)) }) else { return };
-            let layer = D2D1_LAYER_PARAMETERS1 {
-                contentBounds: rect(area.x, area.y, area.w, area.h),
-                geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
-                maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                maskTransform: Matrix3x2::identity(),
-                opacity: 1.0,
-                ..Default::default()
-            };
-            unsafe {
-                frame.dc.PushLayer(&layer, None);
-                frame.dc.DrawBitmap(bitmap, Some(&rect(at.0, at.1, sw * k, sh * k)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None);
-                frame.dc.PopLayer();
-            }
-        }
     }
+
+    /// The stage's desktop at `at`, `k` DIPs to one of its own, clipped to `area` inside its corners rounded by `radius`:
+    /// made a bitmap for the panel's `zoom` (a zoomed panel's units shrink it), as it is drawn under it.
+    fn stage_picture(&mut self, frame: &Frame, area: Rect, radius: f32, at: (f32, f32), k: f32, zoom: f32) {
+        let (sw, sh) = self.stage.size;
+        self.stage_bitmap(frame, zoom);
+        let bitmap = self.stage.bitmap.as_ref().map(|(_, bitmap)| bitmap);
+        desktop_at(frame, bitmap, self.palette.switch_off, area, radius, Rect { x: at.0, y: at.1, w: sw * k, h: sh * k });
+    }
+}
+
+/// Where a screen drawn whole at `screen` is clipped to and its corners' radius: itself, its corners rounded as the
+/// layout's map rounds each screen it draws (the same in DIPs however large it is drawn), so that its desktop, a panel
+/// on it and its outline all keep inside them.
+fn screen_shown(screen: Rect) -> (Rect, f32) {
+    (screen, MAP_RADIUS * 2.0)
+}
+
+/// A desktop drawn at `at`, clipped to `area` inside its corners rounded by `radius`: `bitmap`, or where there is none
+/// (not read yet, or given up: see `reads`), `none` all over, as the layout's map shows a screen whose desktop it has
+/// not.
+fn desktop_at(frame: &Frame, bitmap: Option<&ID2D1Bitmap1>, none: Color, area: Rect, radius: f32, at: Rect) {
+    let Ok(mask) = (unsafe { frame.gfx.factory.CreateRoundedRectangleGeometry(&rounded(area, radius)) }) else { return };
+    let layer = D2D1_LAYER_PARAMETERS1 {
+        contentBounds: rect(area.x, area.y, area.w, area.h),
+        geometricMask: std::mem::ManuallyDrop::new(windows::core::Interface::cast(&mask).ok()),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: Matrix3x2::identity(),
+        opacity: 1.0,
+        ..Default::default()
+    };
+    unsafe { frame.dc.PushLayer(&layer, None) };
+    match bitmap {
+        Some(bitmap) => unsafe { frame.dc.DrawBitmap(bitmap, Some(&rect(at.x, at.y, at.w, at.h)), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) },
+        None => fill(frame, none, at.x, at.y, at.w, at.h, 0.0),
+    }
+    unsafe { frame.dc.PopLayer() };
+    drop(std::mem::ManuallyDrop::into_inner(layer.geometricMask));
 }
 
 fn mix(a: Color, b: Color, t: f32) -> Color {
@@ -7248,6 +7461,17 @@ mod tests {
         assert_eq!(update::download_page(Lang::En), "https://glancepc.com/en/#download");
     }
 
+    /// The memory's lights are offered once the lights' program is there, on no laptop: there the sensors run no
+    /// OpenRGB with an administrator's rights, and the switch could only fail.
+    #[test]
+    fn offers_the_memorys_lights_on_no_laptop() {
+        use Switch::{RemoteLights, RemoteRaised, RemoteScreens};
+        assert_eq!(remote_switches(true, false), [RemoteLights, RemoteRaised, RemoteScreens]);
+        assert_eq!(remote_switches(false, false), [RemoteLights, RemoteScreens]);
+        assert_eq!(remote_switches(true, true), [RemoteLights, RemoteScreens]);
+        assert_eq!(remote_switches(false, true), [RemoteLights, RemoteScreens]);
+    }
+
     /// Recent files' drives: those it reads now and those left out that are away (as last seen), by their letters,
     /// none twice. One left out by its volume, kept with its label and letter, and listed again (a drive left out
     /// and away listed again too, one neither read nor left out not made up).
@@ -7290,6 +7514,104 @@ mod tests {
         assert_eq!(stage.glass(ring, hole), stage.glass(ring, hole));
         // Not read yet: grey.
         assert_eq!(Stage::new((64.0, 32.0), None, whole, None).tone(left), (0.5, 0.0));
+    }
+
+    /// The map keeps each screen's picture by its name and where it is, another screen's left as it is: two screens of
+    /// one name (as two alike displays were once known, see `screens::told_apart`), drawn frame after frame, have each
+    /// desktop read once and each picture holding its own. A picture sized afresh beyond what it holds is read again
+    /// at the new size, and again at the old one when it is sized back (it no longer holds that).
+    #[test]
+    fn the_map_reads_each_screen_s_desktop_once() {
+        let (mut arts, mut reads) = (Vec::new(), reads::Reads::default());
+        let wide = RECT { left: 0, top: 0, right: 3840, bottom: 2160 };
+        let tall = RECT { left: -2160, top: -1071, right: 0, bottom: 2769 };
+        let now = Instant::now();
+        let mut read = Vec::new();
+        let mut frames = |arts: &mut Vec<MapArt>, reads: &mut reads::Reads, wanted: &[(RECT, (u32, u32))]| {
+            for _ in 0..10 {
+                for &(monitor, size) in wanted {
+                    map_art_of(arts, reads, "same", monitor, size, false);
+                }
+                // (A lot read at once, as it is between two frames.)
+                let Some((lot, asks)) = reads.lot(now) else { continue };
+                for ask in &asks {
+                    assert!(reads.came(lot, ask));
+                    let reads::Ask::Map { id, monitor, size } = ask.clone() else { panic!("the map asks for its own") };
+                    let pixels = [40u8, 80, 120, 255].repeat((size.0 * size.1) as usize);
+                    map_art_came(arts, &id, monitor, size, Capture::from_pixels(RECT { left: 0, top: 0, right: size.0 as i32, bottom: size.1 as i32 }, pixels));
+                }
+                reads.done(lot);
+                read.extend(asks);
+            }
+        };
+        frames(&mut arts, &mut reads, &[(wide, (384, 216)), (tall, (216, 384))]);
+        frames(&mut arts, &mut reads, &[(wide, (100, 56)), (tall, (216, 384))]);
+        frames(&mut arts, &mut reads, &[(wide, (384, 216)), (tall, (216, 384))]);
+        let map = |monitor: RECT, size: (u32, u32)| reads::Ask::Map { id: "same".into(), monitor, size };
+        assert_eq!(read, [map(wide, (384, 216)), map(tall, (216, 384)), map(wide, (100, 56)), map(wide, (384, 216))]);
+        assert_eq!(arts.iter().map(|art| (art.monitor, art.read_at)).collect::<Vec<_>>(), [(wide, Some((384, 216))), (tall, Some((216, 384)))]);
+        assert!(arts.iter().all(|art| art.desktop.is_some()));
+    }
+
+    /// A screen whose desktop has not been read (or was given up) is drawn plain, as the layout's map draws it, in the
+    /// preview and the layout's one screen alike, inside its frame's rounded corners and nowhere else.
+    #[test]
+    fn a_desktop_not_read_is_drawn_plain() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Gfx::new().unwrap();
+        let pixels = gfx.draw_offscreen((100, 60), 1.0, |frame| desktop_at(frame, None, Color::hex(0xFF0000, 1.0), Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 }, 8.0, Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 })).unwrap();
+        let at = |x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
+        assert_eq!(at(50, 30), [0, 0, 255, 255]);
+        assert_eq!(at(12, 30), [0, 0, 255, 255]);
+        // (Outside its frame, and in its rounded corner.)
+        assert_eq!(at(5, 30), [0, 0, 0, 0]);
+        assert_eq!(at(10, 10), [0, 0, 0, 0]);
+    }
+
+    /// A desktop the preview holds is read again once the wallpaper changes, and is still wanted however often the
+    /// screens change while it is read (what was being read then is not taken): it is wanted till it holds the
+    /// wallpaper as it is now, not only while it holds none.
+    #[test]
+    fn a_wallpaper_refresh_outlives_the_screens_changing() {
+        let whole = RECT { left: 0, top: 0, right: 64, bottom: 32 };
+        let desktop = Capture::from_pixels(whole, [40u8, 80, 120, 255].repeat(64 * 32));
+        let mut stage = Stage { current: true, ..Stage::new((64.0, 32.0), Some("a".into()), whole, Some(desktop)) };
+        assert_eq!(stage.wanted(), None);
+        // The wallpaper changed (see `Ui::desktops_changed`), then the screens as it was read.
+        stage.current = false;
+        let (mut reads, now) = (reads::Reads::default(), Instant::now());
+        let ask = reads::Ask::Stage { screen: "a".into(), work: whole, size: (64.0, 32.0) };
+        reads.want(stage.wanted().expect("read again"));
+        assert_eq!(reads.lot(now), Some((0, vec![ask.clone()])));
+        reads.forget();
+        assert!(!reads.came(0, &ask));
+        reads.done(0);
+        reads.want(stage.wanted().expect("still read again"));
+        assert_eq!(reads.lot(now), Some((1, vec![ask])));
+    }
+
+    /// A screen drawn whole, as the layout's one screen view and the guide draw it, has its corners rounded as the
+    /// map of every screen rounds each: its desktop (or the plain fill where it has none) is not drawn in its corner,
+    /// as the map's is not.
+    #[test]
+    fn a_screen_drawn_whole_is_rounded_as_the_map_draws_it() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = Gfx::new().unwrap();
+        let screen = Rect { x: 10.0, y: 10.0, w: 80.0, h: 40.0 };
+        let red = Color::hex(0xFF0000, 1.0);
+        let drawn = |paint: &dyn Fn(&Frame)| gfx.draw_offscreen((100, 60), 1.0, paint).unwrap();
+        let whole = drawn(&|frame| {
+            let (clip, radius) = screen_shown(screen);
+            desktop_at(frame, None, red, clip, radius, screen);
+        });
+        let map = drawn(&|frame| fill(frame, red, screen.x, screen.y, screen.w, screen.h, MAP_RADIUS * 2.0));
+        let at = |pixels: &[u8], x: usize, y: usize| <[u8; 4]>::try_from(&pixels[(y * 100 + x) * 4..][..4]).unwrap();
+        for pixels in [&whole, &map] {
+            assert_eq!(at(pixels, 10, 10), [0, 0, 0, 0]);
+            assert_eq!(at(pixels, 89, 49), [0, 0, 0, 0]);
+            assert_eq!(at(pixels, 50, 30), [0, 0, 255, 255]);
+            assert_eq!(at(pixels, 10, 30), [0, 0, 255, 255]);
+        }
     }
 
     /// Choices wider than their room go on as many lines as they take, each whole, in order.

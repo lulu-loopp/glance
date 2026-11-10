@@ -55,7 +55,7 @@ use crate::ui::prefs::Prefs;
 use crate::ui::skins;
 use crate::ui::text::Lang;
 use crate::ui::theme::{self, Entrance, Skin, Theme};
-use crate::ui::view::{self, Detail, Hit, HitBox, Layout, Scene, TABLE_ROW};
+use crate::ui::view::{self, Detail, Hit, HitBox, Layout, Scene};
 use crate::ui::settings_window;
 use crate::ui::window::Window;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
@@ -98,8 +98,56 @@ pub(crate) const SCROLL_EASE: f32 = 0.06;
 pub(crate) const OPEN: (Duration, Easing) = (Duration::from_millis(260), Easing(0.16, 1.0, 0.3, 1.0));
 pub(crate) const OPEN_FADE: Duration = Duration::from_millis(140);
 pub(crate) const CLOSE: (Duration, Easing) = (Duration::from_millis(180), Easing(0.4, 0.0, 1.0, 1.0));
-/// The sizes the panel and the overlay may be drawn at, as designed's share.
-pub(crate) const SIZES: (f32, f32) = (0.75, 2.0);
+/// The sizes the panel and the overlay may be drawn at, as designed's share. How small is the user's to say, as far as
+/// what is drawn can still be used: its buttons, at half, are as large as a small icon, and its edges are taken as
+/// widely at any size (see `EDGE`).
+pub(crate) const SIZES: (f32, f32) = (0.5, 2.0);
+/// The sides of a panel `size` large (its own DIPs), drawn `zoom` times as large as designed, a point `(x, y)` from
+/// its corner is near enough to size it by: as near on the screen however large it is drawn (its own DIPs shrink with
+/// it), and on an edge near a corner, the corner's other side too. None of them by the side `against` its edge (what
+/// plays, sized from its sides out on the screen while it stays against that one).
+fn sides_at(size: (f32, f32), zoom: f32, against: Option<Edge>, x: f32, y: f32) -> Edges {
+    let (width, height) = size;
+    let (edge, corner) = (EDGE / zoom, CORNER / zoom);
+    let mut edges = Edges { left: x < edge, right: x >= width - edge, top: y < edge, bottom: y >= height - edge };
+    if let Some(against) = against {
+        match against {
+            Edge::Left => edges.left = false,
+            Edge::Right => edges.right = false,
+            Edge::Top => edges.top = false,
+        }
+        if !edges.any() {
+            return edges;
+        }
+    }
+    let across = edges.left || edges.right;
+    let down = edges.top || edges.bottom;
+    Edges {
+        left: edges.left || (down && x < corner),
+        right: edges.right || (down && x >= width - corner),
+        top: edges.top || (across && y < corner),
+        bottom: edges.bottom || (across && y >= height - corner),
+    }
+}
+
+/// A panel's own size, where it fits as large as `largest` on its screen: as large as designed, as far as it fits, and
+/// never smaller than it may be made.
+fn own_size(largest: f32) -> f32 {
+    1.0f32.clamp(SIZES.0, largest.max(SIZES.0))
+}
+
+/// How large a panel going back from `from` to its own size `to` is `t` along the way (0 to 1): eased, in hundredths as
+/// a hand sizes it, and there at the end.
+pub(crate) fn restored(from: f32, to: f32, t: f32) -> f32 {
+    if t >= 1.0 {
+        to
+    } else {
+        ((from + (to - from) * crate::ui::morph::ease(t.max(0.0))) * 100.0).round() / 100.0
+    }
+}
+
+/// How long a panel takes back to its own size, its edge double-clicked (see `restoring`).
+pub(crate) const RESTORE: Duration = Duration::from_millis(260);
 /// With animations turned off in Windows the panel only fades.
 const PLAIN_FADE: Duration = Duration::from_millis(120);
 /// While the pinned panel is dragged, the pointer is followed this often (ms).
@@ -233,7 +281,9 @@ struct Playing {
 const GAME_GAP: Duration = Duration::from_secs(3);
 
 pub struct Controller {
-    info: StaticInfo,
+    /// What the machine is, as Glance started, its drives as what the readings come from last listed them (see
+    /// `drives_listed`).
+    info: RwLock<Arc<StaticInfo>>,
     config: Mutex<Config>,
     playing: Mutex<Playing>,
     /// The samples of the longest chart span, oldest first.
@@ -259,7 +309,7 @@ impl Controller {
     pub fn new(info: StaticInfo, settings: &Settings) -> Self {
         crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
         Controller {
-            info,
+            info: RwLock::new(Arc::new(info)),
             config: Mutex::new(config_from(settings)),
             playing: Mutex::new(Playing::default()),
             history: RwLock::new(VecDeque::new()),
@@ -271,6 +321,18 @@ impl Controller {
             widget_processes: AtomicBool::new(false),
             widgets_seen: AtomicBool::new(false),
         }
+    }
+
+    /// What the machine is (see `info`).
+    pub fn info(&self) -> Arc<StaticInfo> {
+        self.info.read().unwrap().clone()
+    }
+
+    /// The drives as `listed` lists them, from now: what the readings come from has looked at the hardware. (Glance
+    /// may have started with a sampler of the meanwhile, which lists none: see `Sampler::meanwhile`.)
+    pub fn drives_listed(&self, listed: &StaticInfo) {
+        let mut info = self.info.write().unwrap();
+        *info = Arc::new(info.with_drives_of(listed));
     }
 
     pub fn apply(&self, settings: &Settings) {
@@ -524,7 +586,7 @@ impl Controller {
     pub fn known_modules(&self) -> Vec<String> {
         // The game in front first, while there is one.
         let mut known = vec!["game".to_string(), "cpu".to_string()];
-        known.extend(self.info.gpu_modules());
+        known.extend(self.info().gpu_modules());
         known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "lyrics", "wsl", "docker"].map(String::from));
         known
     }
@@ -1045,8 +1107,8 @@ impl Controller {
                             panel.app_press = None;
                             panel.app_over = None;
                             panel.next_frame = now;
+                            crate::ui::window::let_go_of_capture(panel.window.hwnd);
                         }
-                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
                     } else if crate::station::select::window().is_some() {
                         // Things chosen together: nothing chosen, and nothing more.
                         crate::station::select::change(crate::station::select::Chosen::clear);
@@ -1064,6 +1126,16 @@ impl Controller {
                     let at = owner.unwrap();
                     if at == 0 {
                         crate::screens::changed();
+                        // (What is hidden on a card no screen needs any longer let go of, so that none keeps it awake:
+                        // the overlay and the tip made again as they are next shown, the widgets' and the panels' on
+                        // their screens' devices, the beside page's thread told.)
+                        if msg.wParam.0 == 0 {
+                            if overlay.as_ref().is_some_and(Overlay::hidden_on_a_card_not_needed) {
+                                overlay = None;
+                            }
+                            crate::ui::tip::screens_changed();
+                            crate::ui::beside::screens_changed();
+                        }
                         widgets.screens_changed();
                     }
                     if let Some(again) = panels[at].screens_changed(msg.wParam.0 as u32, now) {
@@ -1230,7 +1302,7 @@ impl Controller {
                 WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST if owner.is_some_and(|at| panels[at].app_press.is_some()) => {
                     let panel = &mut panels[owner.unwrap()];
                     let (moving, _, moved) = panel.app_press.take().unwrap();
-                    let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                    crate::ui::window::let_go_of_capture(panel.window.hwnd);
                     if moved {
                         panel.held_at(lparam_point(msg.lParam));
                     }
@@ -1273,13 +1345,16 @@ impl Controller {
                         });
                         // The edge it was at, unless it had been moved away.
                         let from = panel.placement.as_ref().filter(|placement| placement.floating.is_none()).map(|_| panel.edge);
-                        if !widgets.tear(form, scale, at, grab, size, lent, from, panel.part, only) {
+                        if widgets.tear(form, scale, at, grab, size, lent, from, panel.part, only) {
+                            crate::ui::settings_window::guide::saw(crate::ui::settings_window::guide::Saw::Torn);
+                        } else {
                             panel.torn = false;
                             panel.exclude();
                         }
                     }
                     if let Some((size, at, grab)) = panel.tear_music.take() {
                         widgets.tear_music(size, at, grab);
+                        crate::ui::settings_window::guide::saw(crate::ui::settings_window::guide::Saw::Torn);
                     }
                 }
                 // The music full screen: its keys (Esc leaves it), presses (a double click leaves it), the pointer
@@ -1417,6 +1492,10 @@ impl Controller {
                     let tapped = msg.message == WM_LBUTTONUP && panel.tapped();
                     let held_drag = panel.drag;
                     let kept = panel.let_go(now);
+                    // Sized by its edges (what plays, given room by them): what the guide asks.
+                    if kept.as_ref().is_some_and(|(_, size)| size.is_some()) || panel.sized_room.is_some() {
+                        crate::ui::settings_window::guide::saw(crate::ui::settings_window::guide::Saw::Sized);
+                    }
                     // Let go where it was pressed: a tap on what was pressed (a line of what plays).
                     if tapped {
                         panel.click(lparam_point(msg.lParam));
@@ -1464,6 +1543,12 @@ impl Controller {
                     // (The pointer taken from it mid-drag: given up, nowhere sought.)
                     panels[owner.unwrap()].slid(msg.message != crate::ui::window::CAPTURE_LOST)
                 }
+                // A list's bar's thumb let go, as the sound's track is.
+                WM_LBUTTONUP | crate::ui::window::CAPTURE_LOST | WM_MOUSEMOVE
+                    if owner.is_some_and(|at| panels[at].scrolling.is_some()) && (msg.message != WM_MOUSEMOVE || let_go(&msg)) =>
+                {
+                    panels[owner.unwrap()].let_go_of_thumb()
+                }
                 // Let go of the panel after a widget was torn off it (the button went up before the widget took
                 // the pointer): the widget is let go.
                 WM_LBUTTONUP if owner.is_some() && widgets.torn_in_hand().is_some() => {
@@ -1490,7 +1575,7 @@ impl Controller {
                     let panel = &mut panels[owner.unwrap()];
                     // (A note pressed and let go on the panel: opened, as a press on it is.)
                     if panel.note_press.take().is_some() {
-                        let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                        crate::ui::window::let_go_of_capture(panel.window.hwnd);
                     }
                     panel.click(lparam_point(msg.lParam));
                     // Its music asked to be shown over the whole of its screen.
@@ -2170,10 +2255,10 @@ impl Edges {
 }
 
 /// How near its edge the pointer sizes the pinned panel rather than
-/// pressing what is there (DIPs).
+/// pressing what is there (DIPs on the screen, however large the panel is drawn).
 const EDGE: f32 = 6.0;
 /// How far along an edge from a corner the pointer sizes the panel by both
-/// of the corner's edges at once (DIPs): a corner is easier to take than a
+/// of the corner's edges at once (DIPs on the screen): a corner is easier to take than a
 /// square of `EDGE` each way.
 const CORNER: f32 = 20.0;
 
@@ -2260,12 +2345,6 @@ impl Behind {
     }
 }
 
-/// What a turn between layouts starts from: a layout shown (at its zoom), or what a turn under way drew last.
-enum Before {
-    Shown(Layout, f32),
-    Drawn(Vec<crate::ui::morph::Part>),
-}
-
 /// A capture of the desktop behind the panel, asked for: for which
 /// `Panel::generation`, and whether it is taken again where the panel now is
 /// (the panel kept out of it; its theme following), else refreshed in place.
@@ -2295,10 +2374,7 @@ impl crate::ui::life::Lives for Panel<'_> {
         self.music.release();
         self.music_layer.release();
         self.music_ground.release();
-        self.last_layout = None;
-        self.turning = None;
-        self.turned.clear();
-        self.turn_layer.release();
+        self.turn.release();
         self.behind = None;
         if let Some(scene) = &mut self.backdrop {
             scene.rest();
@@ -2396,15 +2472,10 @@ struct Panel<'a> {
     corner: (f32, f32),
     /// Sized by hand in a frame since it was last drawn at rest (see `Gfx::settle`).
     was_sized: bool,
-    /// The layout drawn last, at its zoom: laid out anew in other columns, it turns into the new one (see `morph`).
-    last_layout: Option<(Layout, f32)>,
-    /// Turning from one layout into the next: since when, and from what; what the turn drew last (where a turn
-    /// that turns again starts from); and the layer it is drawn in.
-    turning: Option<(Instant, Before)>,
-    turned: Vec<crate::ui::morph::Part>,
+    /// Laid out anew in other columns, it turns into the new layout (see `render::Turn`).
+    turn: render::Turn,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
-    turn_layer: gfx::Layer,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -2435,6 +2506,11 @@ struct Panel<'a> {
     /// While it is sized by its edges: the size it is at, and the limit
     /// the pointer is past, if it is (shown on it as it is dragged).
     sizing: Option<(f32, Option<Limit>)>,
+    /// The presses on its edges, to tell a double click on them: the panel back to its own size (see `restore`).
+    edge_clicks: crate::ui::keys::Clicks,
+    /// Going back to its own size, an edge double-clicked: since when, from what size to what, the edges pressed (the
+    /// corner across from them stays where the panel was moved away from its edge), and where it was then.
+    restoring: Option<(Instant, f32, f32, Edges, RECT)>,
     /// What plays, sized by its edges: the room the hand gives it (DIPs, at the panel's size 1), till it is kept.
     sized_room: Option<(f32, f32)>,
     /// What plays let go after it was sized: settling from the room the hand gave it to the room its layout is right
@@ -2467,6 +2543,8 @@ struct Panel<'a> {
     app_dropped: Option<(String, usize, Instant)>,
     /// The sound's track is being slid along.
     sliding: Option<crate::playing::Slider>,
+    /// A list's bar's thumb is being dragged along it (see `view::Thumb`).
+    scrolling: Option<view::Thumb>,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<Hit>,
     /// The desktop behind the glass is to be taken again (the panel moved
@@ -2551,11 +2629,8 @@ impl<'a> Panel<'a> {
             settings_from: None,
             corner: (0.0, 0.0),
             was_sized: false,
-            last_layout: None,
-            turning: None,
-            turned: Vec::new(),
+            turn: render::Turn::default(),
             away: render::Away::default(),
-            turn_layer: gfx::Layer::default(),
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
             tear_music: None,
@@ -2568,6 +2643,8 @@ impl<'a> Panel<'a> {
             drag: None,
             largest: SIZES.1,
             sizing: None,
+            edge_clicks: crate::ui::keys::Clicks::default(),
+            restoring: None,
             sized_room: None,
             music_settle: None,
             shelf_press: None,
@@ -2580,6 +2657,7 @@ impl<'a> Panel<'a> {
             app_point: (0.0, 0.0),
             app_dropped: None,
             sliding: None,
+            scrolling: None,
             thumbs: crate::ui::thumb::Dots::new(),
             recapture: false,
             capturing: None,
@@ -2620,8 +2698,8 @@ impl<'a> Panel<'a> {
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.drawn = self.prefs.clone().holding(self.part);
         self.columns = if self.part == Part::Workbench { config.workbench_columns } else { config.columns };
-        // Mid-drag, the size is the drag's.
-        if self.drag.is_none() {
+        // Mid-drag, the size is the drag's; going back to its own size, the way there's.
+        if self.drag.is_none() && self.restoring.is_none() {
             self.size = config.size_on(self.part, self.screen.as_deref());
         }
         let skin = Skin::named(&config.skin);
@@ -2955,6 +3033,8 @@ impl<'a> Panel<'a> {
             crate::ui::beside::close();
         }
         self.end_drag();
+        // (Going back to its own size: there at once, and kept.)
+        self.step_restore(Instant::now(), true);
         self.let_go_todo();
         // (What it said under what the pointer was on goes with it: a drive's row, the line that switches players.)
         self.hover = None;
@@ -3292,27 +3372,10 @@ impl<'a> Panel<'a> {
             (_, Some(opening), _) => (opening.layout.width(), opening.layout.height()),
             _ => return Edges::default(),
         };
-        let mut edges = Edges { left: x < EDGE, right: x >= width - EDGE, top: y < EDGE, bottom: y >= height - EDGE };
+        let zoom = self.placement.as_ref().map_or(1.0, |placement| placement.px / placement.contact.scale);
         // What plays, against its edge, is sized from its edges out on the screen (it stays against that one).
-        if self.part == Part::Music && !self.floating() {
-            match self.edge {
-                Edge::Left => edges.left = false,
-                Edge::Right => edges.right = false,
-                Edge::Top => edges.top = false,
-            }
-            if !edges.any() {
-                return edges;
-            }
-        }
-        // On an edge near a corner: the corner's other edge too.
-        let across = edges.left || edges.right;
-        let down = edges.top || edges.bottom;
-        Edges {
-            left: edges.left || (down && x < CORNER),
-            right: edges.right || (down && x >= width - CORNER),
-            top: edges.top || (across && y < CORNER),
-            bottom: edges.bottom || (across && y >= height - CORNER),
-        }
+        let against = (self.part == Part::Music && !self.floating()).then_some(self.edge);
+        sides_at((width, height), zoom, against, x, y)
     }
 
     /// What a press at `client` (physical px in the window) would do to the
@@ -3418,6 +3481,15 @@ impl<'a> Panel<'a> {
             self.follow_pointer();
             return;
         }
+        // On a list's bar: its thumb dragged along it till let go, the list scrolled as it goes.
+        let at = self.dips(client);
+        let thumb = view::under(&self.hits, at).next().and_then(|bar| view::Thumb::pressed(*bar, at.1, &self.scrolls));
+        if let Some(thumb) = thumb {
+            self.scrolling = Some(thumb);
+            self.drag_thumb(client);
+            self.follow_pointer();
+            return;
+        }
         // On the sound's track: it is slid along till let go.
         if let Some(slider) = self.hit_at(client).and_then(Hit::slider) {
             self.sliding = Some(slider);
@@ -3429,7 +3501,19 @@ impl<'a> Panel<'a> {
             return;
         }
         let Some(edges) = self.grip_at(client) else { return };
+        // A second press on its edges, as soon and as near as Windows tells a double click: back to its own size. (What
+        // plays is sized by the room it is given instead.)
+        if edges.any() && self.part != Part::Music {
+            if self.edge_clicks.press(client) == windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDBLCLK {
+                self.restore(edges, Instant::now());
+                return;
+            }
+        } else {
+            self.edge_clicks = crate::ui::keys::Clicks::default();
+        }
         let (Some(from), Some(placement)) = (cursor_position(), &self.placement) else { return };
+        // (Taken in hand going back to its own size: as large as it has come, from there.)
+        self.restoring = None;
         let rect = placement.panel;
         let room = self.music_room();
         // (Settling after a drag before: taken in hand where it is.)
@@ -3471,10 +3555,8 @@ impl<'a> Panel<'a> {
         if !self.pressed_to_pull() && !self.held() {
             unsafe {
                 let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-                if windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() == self.window.hwnd {
-                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-                }
             }
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
         pulled
     }
@@ -3514,7 +3596,7 @@ impl<'a> Panel<'a> {
         let (Some(press), Some(now)) = (self.shelf_press, cursor_position()) else { return };
         if crate::station::run::drag_begins(press.from, now) {
             self.shelf_press = None;
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
             // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from here,
             // and the panel hears no more of it to take it away.)
             self.unsay();
@@ -3526,9 +3608,28 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// Whether it is being dragged (or the sound's track is): till its window is told the button went up.
+    /// Whether it is being dragged (or the sound's track is, or a list's bar's thumb): till its window is told the
+    /// button went up.
     fn held(&self) -> bool {
-        self.drag.is_some() || self.sliding.is_some()
+        self.drag.is_some() || self.sliding.is_some() || self.scrolling.is_some()
+    }
+
+    /// The list whose bar's thumb is in hand scrolled as far as the thumb goes with the hand at `client` (physical px in
+    /// the window, off the bar too, as far as it goes).
+    fn drag_thumb(&mut self, client: POINT) {
+        let Some(thumb) = self.scrolling else { return };
+        let (_, y) = self.dips(client);
+        self.scrolls.hold(thumb.list(), thumb.scroll_at(y), thumb.most());
+        self.next_frame = Instant::now();
+    }
+
+    /// A list's bar's thumb let go: the list left where it was taken.
+    fn let_go_of_thumb(&mut self) {
+        self.scrolling = None;
+        unsafe {
+            let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
+        }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
     }
 
     /// The track slid along as far as where `client` is along it (the pointer may have left the track: as far as it
@@ -3551,8 +3652,8 @@ impl<'a> Panel<'a> {
         let Some(slider) = self.sliding.take() else { return };
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         crate::playing::slid(slider, taken);
     }
 
@@ -3560,9 +3661,11 @@ impl<'a> Panel<'a> {
     /// onto another screen too; or, held by its edges, grows and shrinks as
     /// a whole from the corner opposite them (its shape is its lanes').
     fn dragged(&mut self, now: Instant) {
-        if self.sliding.is_some() {
+        if self.sliding.is_some() || self.scrolling.is_some() {
             if let (Some(cursor), Some(window)) = (cursor_position(), self.placement.as_ref().map(|p| p.window)) {
-                self.slide(POINT { x: cursor.x - window.left, y: cursor.y - window.top });
+                let client = POINT { x: cursor.x - window.left, y: cursor.y - window.top };
+                self.slide(client);
+                self.drag_thumb(client);
             }
             return;
         }
@@ -3657,12 +3760,59 @@ impl<'a> Panel<'a> {
         if size == self.size {
             return;
         }
-        self.size = size;
         if let Some(drag) = &mut self.drag {
             drag.sized = true;
         }
-        // Away from the edge, the corner opposite the edges held stays;
-        // against it, the panel stays against it.
+        self.sized_to(size, e, r, now);
+    }
+
+    /// Back to its own size, its edges `edges` double-clicked: as large as it opens at, or as large as its screen holds
+    /// it, eased there (see `restoring`), and kept so once there.
+    fn restore(&mut self, edges: Edges, now: Instant) {
+        let Some(placement) = &self.placement else { return };
+        let to = own_size(self.largest);
+        if (self.size - to).abs() < 0.005 {
+            return;
+        }
+        self.restoring = Some((now, self.size, to, edges, placement.panel));
+        self.next_frame = now;
+    }
+
+    /// Going back to its own size (see `restoring`): as large as it has come at `now`, laid out afresh as each
+    /// hundredth is passed, as it is sized by hand; there at once where `done` (the panel going), and kept once there.
+    fn step_restore(&mut self, now: Instant, done: bool) {
+        let Some((since, from, to, edges, rect)) = self.restoring else { return };
+        let t = if done { 1.0 } else { (now.saturating_duration_since(since).as_secs_f32() / RESTORE.as_secs_f32()).min(1.0) };
+        let size = restored(from, to, t);
+        if size != self.size {
+            self.sized_to(size, edges, rect, now);
+        }
+        if t < 1.0 {
+            return;
+        }
+        self.restoring = None;
+        // Away from the edge: kept where it came to rest, as it is where it is let go (see `let_go`).
+        let rested = if self.floating() { self.kept_at() } else { None };
+        if let Some(placement) = &mut self.placement {
+            placement.held = None;
+            if let Some(rested) = &rested {
+                placement.floating = Some(rested.at);
+            }
+        }
+        self.recapture |= self.skin.sees_backdrop();
+        let (part, screen) = (self.part, self.screen.clone());
+        crate::app().change(|settings| {
+            if let Some(rested) = rested {
+                settings.panel_at = Some(rested);
+            }
+            settings.size_panel(part, screen.as_deref(), to);
+        });
+    }
+
+    /// Made `size` large by its edges `e`, `r` where it was as they were taken: away from the edge, the corner opposite
+    /// them stays; against it, the panel stays against it.
+    fn sized_to(&mut self, size: f32, e: Edges, r: RECT, now: Instant) {
+        self.size = size;
         let floating = self.floating();
         if let Some(placement) = &mut self.placement {
             placement.held = floating.then_some(Held {
@@ -3763,8 +3913,8 @@ impl<'a> Panel<'a> {
         let drag = self.drag.take()?;
         unsafe {
             let _ = KillTimer(Some(self.window.hwnd), crate::overlay::FOLLOW_TIMER);
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
         }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         Some(drag)
     }
 
@@ -3908,6 +4058,7 @@ impl<'a> Panel<'a> {
     /// window placed for them.
     fn arrange_lanes(&mut self) -> (Vec<view::Lane>, Layout) {
         let controller = self.controller;
+        let info = controller.info();
         let now = controller.seen.lock().unwrap().clone();
         let history = controller.history.read().unwrap();
         let samples = crate::panel::contiguous(&history);
@@ -3930,16 +4081,16 @@ impl<'a> Panel<'a> {
             Some(opening) => {
                 // What the machine has shown since joins its lane where it
                 // fits (each lane measured holding what it would hold).
-                let probe = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
-                opening.grow(&now, &controller.info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
+                let probe = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
+                opening.grow(&now, &info, |id, seen, detail| view::lane_height(&probe, id, seen, detail));
                 opening
             }
             None => {
                 let now = match self.held.take() {
-                    Some(held) => held.join(&now, &controller.info),
+                    Some(held) => held.join(&now, &info),
                     None => now,
                 };
-                let scene = scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
+                let scene = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 let heights = view::heights(&scene);
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 let rail = heights.iter().position(|(id, _)| id == "apps");
@@ -3948,7 +4099,7 @@ impl<'a> Panel<'a> {
                 self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
             }
         };
-        let mut lanes = view::lanes(&scene(controller, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
+        let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
         drop(history);
@@ -4026,27 +4177,11 @@ impl<'a> Panel<'a> {
         if self.part == Part::Music {
             return self.frame_music(now);
         }
+        self.step_restore(now, false);
         let (lanes, layout) = self.arrange_lanes();
         let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
-        // Laid out in other columns (sized, or the readings grown): it turns into the new layout, each reading moved
-        // from where it was to where it goes, as a widget turns between its forms. One turning already turns on from
-        // where it got to.
-        if let Some((last, last_zoom)) = self.last_layout.take() {
-            if last.columns != layout.columns && !reduced_motion() {
-                let before = match self.turning.take() {
-                    Some(_) => Before::Drawn(std::mem::take(&mut self.turned)),
-                    None => Before::Shown(last, last_zoom),
-                };
-                self.turning = Some((now, before));
-            }
-        }
-        self.last_layout = Some((layout.clone(), zoom));
-        if self.turning.as_ref().is_some_and(|(since, _)| now.duration_since(*since) >= crate::widget::MORPH) {
-            self.turning = None;
-            self.turned.clear();
-            self.turn_layer.release();
-        }
-        let turn = self.turning.as_ref().map(|(since, _)| crate::ui::morph::ease(now.duration_since(*since).as_secs_f32() / crate::widget::MORPH.as_secs_f32()));
+        // Laid out in other columns (sized, or the readings grown): it turns into the new layout (see `render::Turn`).
+        let turn = self.turn.follow(0, &layout, zoom, now, !reduced_motion());
         let placement = self.placement.as_ref().unwrap();
         let px = placement.px;
         // Drawn in what it is painted in (the window, but while it is sized), placed in the window there.
@@ -4071,6 +4206,7 @@ impl<'a> Panel<'a> {
         }
 
         let controller = self.controller;
+        let info = controller.info();
         let history = controller.history.read().unwrap();
         let seen = &self.opening.as_ref().unwrap().seen;
         // The knob under the pointer, and the one held (the slider in hand's).
@@ -4099,7 +4235,7 @@ impl<'a> Panel<'a> {
         // up from it.)
         let says = crate::ui::look::hint_says(self.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -4107,8 +4243,7 @@ impl<'a> Panel<'a> {
             None => (placement.floating.is_none() && self.edge == Edge::Right, false),
         };
         let centred = placement.held.is_none() && placement.floating.is_none() && self.edge == Edge::Top;
-        let halo = (self.theme.skin == Skin::Glass).then_some(self.theme.legibility);
-        let (before, turned, turn_layer) = (self.turning.as_mut().map(|(_, before)| before), &mut self.turned, &mut self.turn_layer);
+        let turning = &mut self.turn;
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
         let mut drawn = None;
@@ -4119,7 +4254,7 @@ impl<'a> Panel<'a> {
             (hit, carried, drag, from, boxes)
         });
         let mut lifted = None;
-        let (away, mut taken_off) = (&mut self.away, None);
+        let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let painted = surface.draw(&self.gfx, size, px, |frame| {
@@ -4140,39 +4275,23 @@ impl<'a> Panel<'a> {
             let local = Matrix3x2::translation(x, y);
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
             // carried (its room outlined) into how it is drawn now.
-            let mut gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none()).map(Before::Drawn);
-            let (turn, before) = match gone_from.as_mut() {
-                Some(from) => (Some(0.0), Some(from)),
-                None => (turn, before),
+            let gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none());
+            let turn = match gone_from {
+                Some(from) => {
+                    turning.begin(now, from);
+                    Some(0.0)
+                }
+                None => turn,
             };
-            drawn = Some(match (turn, before) {
-                (Some(t), Some(before)) => (|| {
-                    // Turning: the skin's ground as it is now, and over it each reading between where it was and
-                    // where it goes.
-                    let grounded = layers.draw_ground(frame, &picture, local, px)?;
-                    if let Before::Shown(old, old_zoom) = before {
-                        let k = *old_zoom / zoom;
-                        let (old_w, old_h) = (old.width() * k, old.height() * k);
-                        let old_at = (
-                            if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 },
-                            if keeps_bottom { height - old_h } else { 0.0 },
-                        );
-                        *before = Before::Drawn(render::record(frame, &scene, &lanes, old, None, k, old_at));
-                    }
-                    let now_drawn = render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0));
-                    let Before::Drawn(from) = before else { unreachable!() };
-                    let parts = crate::ui::morph::between(from, &now_drawn, t);
-                    turn_layer.draw(frame, t.to_bits() as u64 + 1, local, (0.0, 0.0, width, height), px, halo, |frame| {
-                        crate::ui::morph::draw(frame, &parts);
-                        Ok(())
-                    })?;
-                    *turned = parts;
-                    // (Nothing to press mid-turn: where each thing is comes as it ends.)
-                    Ok(render::Drawn { hits: None, grounded })
-                })(),
-                _ => layers.draw(frame, &picture, local, px),
+            drawn = Some(match turn {
+                // Turning: what it turns from kept to the side the panel keeps to.
+                Some(t) => turning.draw(frame, &picture, layers, local, px, t, |old, old_zoom| {
+                    let k = old_zoom / zoom;
+                    let (old_w, old_h) = (old.width() * k, old.height() * k);
+                    (if keeps_right { width - old_w } else if centred { (width - old_w) / 2.0 } else { 0.0 }, if keeps_bottom { height - old_h } else { 0.0 })
+                }),
+                None => layers.draw(frame, &picture, local, px),
             });
-            taken_off = gone_from;
             // (Not shown, a frame part of which failed: see `Frame::fail`.)
             if let Some(Err(error)) = &drawn {
                 frame.fail(error.clone());
@@ -4197,9 +4316,6 @@ impl<'a> Panel<'a> {
             }
         };
         let (hits, grounded) = (drawn.hits, drawn.grounded);
-        if let Some(from) = taken_off {
-            self.turning = Some((now, from));
-        }
         if let (Some((_, carried, drag, from, _)), Some(recorded)) = (lifting, lifted) {
             // (Each in its room on the screen, its box as large as it is drawn there.)
             let tiles: Vec<crate::carry::Tile> = recorded
@@ -4240,7 +4356,7 @@ impl<'a> Panel<'a> {
 
         // At rest only the charts move, a plot's width over its span: the
         // panel is drawn again when they have crept a quarter of a pixel (or, with none, four times a second).
-        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turning.is_some();
+        let moving = thumbs_moving || settings_window::bounce(self.settings_from).is_some() || !self.shift.done(now) || !self.opacity.done(now) || lists_moving || crate::ui::view::gliding_drawn() || self.turn.turning();
         self.next_frame = if moving {
             now
         } else {
@@ -4402,7 +4518,7 @@ impl<'a> Panel<'a> {
         self.show_stations();
         self.bar = view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
         // (Settling after it was sized, too: see `music_settle`.)
-        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some() || settings_window::bounce(self.settings_from).is_some();
+        let moving = !self.shift.done(now) || !self.opacity.done(now) || painted.busy || self.music_settle.is_some() || self.restoring.is_some() || settings_window::bounce(self.settings_from).is_some();
         self.next_frame = if moving { now } else { now + Duration::from_millis(250) };
     }
 
@@ -4469,9 +4585,13 @@ impl<'a> Panel<'a> {
 
     /// Each hit region a point in the window's client area (physical px) is in, in the order they were drawn.
     fn hits_at(&self, client: POINT) -> impl Iterator<Item = Hit> + '_ {
+        view::under(&self.hits, self.dips(client)).map(|hit| hit.4)
+    }
+
+    /// A point in the window's client area (physical px) where the panel draws it (its DIPs, from its corner).
+    fn dips(&self, client: POINT) -> (f32, f32) {
         let px = self.placement.as_ref().map_or(1.0, |placement| placement.px);
-        let (x, y) = (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1);
-        self.hits.iter().filter(move |(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4)
+        (client.x as f32 / px - self.corner.0, client.y as f32 / px - self.corner.1)
     }
 
     /// Whether a thing kept at hand is being dragged among the others on it.
@@ -4513,18 +4633,12 @@ impl<'a> Panel<'a> {
         self.next_frame = Instant::now();
     }
 
-    /// The list a point in the window's client area (physical px) is on, and how far it scrolls (under what is on
-    /// it: the wheel over a thing on the station scrolls the station).
-    fn list_at(&self, client: POINT) -> Option<(view::List, f32)> {
-        self.hits_at(client).find_map(Hit::list)
-    }
-
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         self.pointer = Some(client);
         // Off the panel (its window holds its screen): clicks there are let through at once, not as the pointer is
         // next followed (see `track`), which a quick click comes before.
-        if self.drag.is_none() && self.sliding.is_none() && !self.on_panel(client) {
+        if !self.held() && !self.on_panel(client) {
             self.window.set_click_through(true);
             return;
         }
@@ -4566,7 +4680,7 @@ impl<'a> Panel<'a> {
         let hit = self.hit_at(client);
         let pressed = self.shelf_press.take();
         if pressed.is_some() {
-            let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+            crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
         // A to-do being written: a press away from its field gives back the keys.
         if !matches!(hit, Some(Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
@@ -4649,7 +4763,8 @@ impl<'a> Panel<'a> {
         }
     }
 
-    /// A wheel turn with the pointer at `screen`: scrolls the process list under it.
+    /// A wheel turn with the pointer at `screen`: scrolls the list under it (under what is on it: the wheel over a thing
+    /// on the station scrolls the station, and over its bar too).
     fn wheel(&mut self, screen: POINT, delta: i16) {
         let Some(window) = self.placement.as_ref().map(|p| p.window) else { return };
         // What plays: its lines turned.
@@ -4660,9 +4775,8 @@ impl<'a> Panel<'a> {
             return;
         }
         let client = POINT { x: screen.x - window.left, y: screen.y - window.top };
-        if let Some((list, most)) = self.list_at(client) {
-            let rows = -(delta as f32) / 120.0 * WHEEL_ROWS;
-            self.scrolls.turn(list, rows * TABLE_ROW, most);
+        let under: Vec<Hit> = self.hits_at(client).collect();
+        if view::wheel(&mut self.scrolls, &under, delta, false) {
             self.next_frame = Instant::now();
         }
     }
@@ -4679,6 +4793,7 @@ pub fn contiguous(history: &VecDeque<Sample>) -> &[Sample] {
 /// What the readings are drawn with at this moment.
 fn scene<'s>(
     controller: &'s Controller,
+    info: &'s StaticInfo,
     prefs: &'s Prefs,
     theme: &'s Theme,
     lang: Lang,
@@ -4694,7 +4809,7 @@ fn scene<'s>(
     let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
     Scene {
         thumbs: &crate::ui::view::RESTING,
-        info: &controller.info,
+        info,
         prefs,
         theme,
         lang,
@@ -4714,9 +4829,9 @@ fn scene<'s>(
     }
 }
 
-/// What a desktop widget's readings are drawn with at this moment.
-pub(crate) fn scene_for<'s>(controller: &'s Controller, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
-    Scene { buttons: false, ..scene(controller, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
+/// What a desktop widget's readings are drawn with at this moment, of the machine `info` says (`Controller::info`).
+pub(crate) fn scene_for<'s>(controller: &'s Controller, info: &'s StaticInfo, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
+    Scene { buttons: false, ..scene(controller, info, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
 }
 
 /// The sink's procedure: the input loop takes its messages before they are dispatched.
@@ -5165,6 +5280,48 @@ mod tests {
         assert_eq!(config.size_on(Part::Workbench, Some("b")), 1.25);
         assert_eq!(config.size_on(Part::Music, Some("a")), 1.0);
         assert_eq!((config.columns, config.workbench_columns), (None, Some(3)));
+    }
+
+    /// A panel's sides are as easy to take however large it is drawn: as many DIPs on the screen from its sides at half
+    /// its size and at twice it, its own DIPs shrinking and growing with it (taken in its own, a panel made small was
+    /// all but impossible to take by its side, one made large took presses well inside it); its corner as wide.
+    #[test]
+    fn a_panel_s_sides_are_as_wide_on_the_screen_at_any_size() {
+        let size = (400.0, 600.0);
+        for zoom in [0.5, 1.0, 2.0] {
+            let own = |screen: f32| screen / zoom;
+            assert!(sides_at(size, zoom, None, own(EDGE - 0.5), 300.0).left, "{zoom}: just inside its side's reach");
+            assert!(!sides_at(size, zoom, None, own(EDGE + 0.5), 300.0).any(), "{zoom}: just past it");
+            assert!(sides_at(size, zoom, None, 200.0, size.1 - own(EDGE - 0.5)).bottom);
+            assert!(!sides_at(size, zoom, None, 200.0, size.1 - own(EDGE + 0.5)).any());
+            let corner = sides_at(size, zoom, None, own(CORNER - 0.5), size.1 - own(1.0));
+            assert!(corner.left && corner.bottom, "{zoom}: its corner's reach");
+            let past = sides_at(size, zoom, None, own(CORNER + 0.5), size.1 - own(1.0));
+            assert!(!past.left && past.bottom, "{zoom}: past its corner's reach");
+        }
+        // Against its edge, never by the side on it.
+        assert!(!sides_at(size, 1.0, Some(Edge::Left), 1.0, 300.0).any());
+        assert!(sides_at(size, 1.0, Some(Edge::Left), 1.0, size.1 - 1.0).bottom);
+    }
+
+    /// A panel double-clicked by its side goes back to its own size: as large as designed where that fits, as large as
+    /// fits where it does not, never smaller than a panel may be; there from where it was evenly, nothing jumping,
+    /// growing or shrinking all the way, and there at the end.
+    #[test]
+    fn a_panel_goes_back_to_its_own_size_evenly() {
+        assert_eq!(own_size(1.6), 1.0);
+        assert_eq!(own_size(0.7), 0.7);
+        assert_eq!(own_size(0.2), SIZES.0);
+        for (from, to) in [(0.5, 1.0), (1.8, 1.0), (1.4, 0.7)] {
+            assert_eq!(restored(from, to, 0.0), from);
+            assert_eq!(restored(from, to, 1.0), to);
+            let mut was = from;
+            for at in 1..=100 {
+                let size = restored(from, to, at as f32 / 100.0);
+                assert!((size - was).abs() <= 0.05 && (size - was) * (to - from) >= 0.0, "{from} to {to}, {at} %: {was} to {size}");
+                was = size;
+            }
+        }
     }
 
     /// The pointer that went past the seam a little and came back has not come across from the screen it went

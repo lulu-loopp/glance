@@ -21,13 +21,17 @@ const WAITED_FOR: Duration = Duration::from_secs(20);
 const HELLO_WITHIN: Duration = Duration::from_secs(5);
 /// How long a reading may take before the sensors are taken to be stuck (a driver, a device, a system call that
 /// does not come back): they end, and the rest of Glance starts them again.
-const STUCK_AFTER: Duration = Duration::from_secs(30);
+pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(30);
 /// How long the first look at the hardware may take before they are: it opens every device and asks each what it is,
 /// and just after signing in, or an update, it does so on a machine with much else to do. The rest of Glance reads what
 /// it can itself while it waits on this (see `source`).
 pub const FIRST_LOOK_WITHIN: Duration = Duration::from_secs(120);
 /// What is done as the sensors start that the rest of Glance need not wait for, if it takes longer than this, is noted.
 const NOTED_AFTER: Duration = Duration::from_secs(5);
+/// A part of the first look at the hardware that took less than this is counted in its note, not named: of its 14
+/// parts, those so left out take under 2 s together of the 5 s it is noted after. (The GPUs' makers' libraries are no
+/// part of it: they are looked up on a thread of their own, which notes its own time, see `gpu_libraries`.)
+const PART_NAMED_FROM: Duration = Duration::from_millis(100);
 
 /// Whether this account's tasks are in order yet (see `keep_tasks`).
 static TASKS_KEPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -47,6 +51,17 @@ fn keep_tasks() {
     }
     TASKS_KEPT.store(true, std::sync::atomic::Ordering::Release);
     tell_autostart();
+}
+
+/// What is noted of a first look at the hardware that took `took`: the parts of it (`parts`, in the order they ran) that
+/// took `PART_NAMED_FROM` or more, each by how long, and how many others took less.
+fn first_look_noted(took: Duration, parts: &[(&str, Duration)]) -> String {
+    let mut told: Vec<String> = parts.iter().filter(|(_, part)| *part >= PART_NAMED_FROM).map(|(name, part)| format!("{name} {} ms", part.as_millis())).collect();
+    let others = parts.len() - told.len();
+    if others > 0 {
+        told.push(format!("{others} more under {} ms", PART_NAMED_FROM.as_millis()));
+    }
+    format!("sensors: the first look at the hardware took {} s ({})", took.as_secs(), told.join(", "))
 }
 
 /// Tells the rest, if it is there and this account's tasks are in order, whether Glance starts at sign-in. (Said after
@@ -85,10 +100,10 @@ pub fn run() {
     std::thread::Builder::new().name("glance sensors: readings watched".into()).spawn(watch_readings).expect("a thread started");
     let began = Instant::now();
     *READING_SINCE.lock().unwrap() = Some((awake(), FIRST_LOOK_WITHIN));
-    let mut sampler = Sampler::new();
+    let (mut sampler, parts) = Sampler::timed();
     *READING_SINCE.lock().unwrap() = None;
     if began.elapsed() >= NOTED_AFTER {
-        crate::journal::note(format!("sensors: the first look at the hardware took {} s", began.elapsed().as_secs()));
+        crate::journal::note(first_look_noted(began.elapsed(), &parts));
     }
     crate::presents::start();
     crate::openrgb::watch();
@@ -212,6 +227,11 @@ pub fn run() {
                     break;
                 }
             }
+            if let Some(found) = sampler.found_anew() {
+                if !tell(&Told::Found(found)) {
+                    break;
+                }
+            }
         }
         // Gone: the pipes let go (which ends the listener's reading), for the rest to come again; no edge watched
         // till it says again which.
@@ -238,7 +258,7 @@ static READING_SINCE: Mutex<Option<(Duration, Duration)>> = Mutex::new(None);
 /// How long the system has run awake: the time it slept left out (a reading under way as it went to sleep has not
 /// been taking all that while; counted by the clock, every one was taken for stuck as the PC woke, the sensors
 /// ended, and its CPU's readings lost).
-fn awake() -> Duration {
+pub(crate) fn awake() -> Duration {
     let mut unbiased = 0u64;
     let _ = unsafe { windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut unbiased) };
     Duration::from_nanos(unbiased * 100)
@@ -428,6 +448,20 @@ fn watch_edges() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A slow first look is noted with where its time went: the parts that took a while named in the order they ran,
+    /// in ms, and the others only counted.
+    #[test]
+    fn first_look_noted_by_its_parts() {
+        let ms = Duration::from_millis;
+        let parts = [("counters", ms(312)), ("processes", ms(40)), ("GPUs", ms(5120)), ("GPU libraries", ms(99)), ("CPU sensors", ms(100)), ("microphone", ms(3))];
+        assert_eq!(
+            first_look_noted(ms(8045), &parts),
+            "sensors: the first look at the hardware took 8 s (counters 312 ms, GPUs 5120 ms, CPU sensors 100 ms, 3 more under 100 ms)"
+        );
+        // Every part named, nothing is said of others.
+        assert_eq!(first_look_noted(ms(5400), &parts[2..3]), "sensors: the first look at the hardware took 5 s (GPUs 5120 ms)");
+    }
 
     /// A reading is stuck by the time it has taken awake: the clock counted on through a sleep (the clock as
     /// `Instant` keeps it, on Windows) is not what it took.

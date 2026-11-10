@@ -26,6 +26,16 @@ const NO_POINTER: isize = 1;
 /// from it (or let go).
 pub const CAPTURE_LOST: u32 = WM_APP + 8;
 
+/// The capture `hwnd` took let go of, where it still holds it. One another window of its thread has taken since (a
+/// menu opened as a button is held, a part torn out of a widget) is that window's, and stays so: the system lets go of
+/// whichever window of the thread holds it, and that window, told it lost it, went (a menu closed as it opened).
+pub fn let_go_of_capture(hwnd: HWND) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture};
+    if unsafe { GetCapture() } == hwnd {
+        let _ = unsafe { ReleaseCapture() };
+    }
+}
+
 /// Posted to the window's thread when it is asked to close as a window is (Alt+F4 while it has the keys): not
 /// destroyed (each of Glance's windows goes as what owns it lets it go), what owns it told instead.
 pub const CLOSE_ASKED: u32 = WM_APP + 19;
@@ -534,6 +544,26 @@ mod tests {
         assert!(unsafe { IsWindow(Some(window.hwnd)) }.as_bool());
         let mut message = MSG::default();
         assert!(unsafe { PeekMessageW(&mut message, Some(window.hwnd), CLOSE_ASKED, CLOSE_ASKED, PM_REMOVE) }.as_bool());
+    }
+
+    /// A window letting go of the capture it took leaves it with another window of its thread that has taken it since
+    /// (a menu opened over the panel as the bar's thumb was held): let go of all the same, the menu, told it lost it,
+    /// closed as it opened. Its own it lets go of.
+    #[test]
+    fn a_window_lets_go_only_of_the_capture_it_holds() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, SetCapture};
+        let (panel, menu) = (Window::new().unwrap(), Window::new().unwrap());
+        unsafe { SetCapture(panel.hwnd) };
+        assert_eq!(unsafe { GetCapture() }, panel.hwnd, "the capture not taken");
+        unsafe { SetCapture(menu.hwnd) };
+        let_go_of_capture(panel.hwnd);
+        let kept = unsafe { GetCapture() } == menu.hwnd;
+        let_go_of_capture(menu.hwnd);
+        let gone = unsafe { GetCapture() }.is_invalid();
+        menu.destroy();
+        panel.destroy();
+        assert!(kept, "the capture another window took since let go of");
+        assert!(gone, "a window's own capture kept");
     }
 
     /// A window taking the keys takes the focus as it is clicked (its style no longer asks never to), and once it gives

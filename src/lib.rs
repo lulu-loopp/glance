@@ -27,6 +27,8 @@ mod drives;
 #[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
+mod gpu_libraries;
+#[cfg(windows)]
 mod gpu_power;
 #[cfg(windows)]
 mod hang;
@@ -173,7 +175,6 @@ pub(crate) const HIDDEN_SLOW_TICKS: u64 = 5;
 /// What every part of Glance shares.
 #[cfg(windows)]
 pub(crate) struct App {
-    pub info: StaticInfo,
     pub controller: Arc<Controller>,
     pub settings: Mutex<Settings>,
     /// Where the settings are kept.
@@ -194,15 +195,20 @@ pub(crate) fn app() -> &'static App {
 pub(crate) fn pictured(info: StaticInfo, history: Vec<reading::Sample>) {
     let config = settings::config_dir();
     let settings = Settings::load(&config);
-    let controller = Arc::new(Controller::new(info.clone(), &settings));
+    let controller = Arc::new(Controller::new(info, &settings));
     for sample in history {
         controller.record(sample);
     }
-    let _ = APP.set(App { info, controller, settings: Mutex::new(settings), config });
+    let _ = APP.set(App { controller, settings: Mutex::new(settings), config });
 }
 
 #[cfg(windows)]
 impl App {
+    /// What the machine is (see `Controller::info`).
+    pub fn info(&self) -> Arc<StaticInfo> {
+        self.controller.info()
+    }
+
     /// Shows the settings as `change` would make them, without keeping them (a slider while it is slid): under
     /// their lock as `change` does, so that a change made elsewhere meanwhile is neither undone nor reaches the panel
     /// out of order.
@@ -533,8 +539,8 @@ pub fn run() {
     // Each GPU by the number it was given.
     let new_gpus = settings::slot_gpus(&mut info.gpus, &mut settings.gpu_slots);
     let gpu_slots = settings.gpu_slots.clone();
-    let controller = Arc::new(Controller::new(info.clone(), &settings));
-    let _ = APP.set(App { info, controller: controller.clone(), settings: Mutex::new(settings), config });
+    let controller = Arc::new(Controller::new(info, &settings));
+    let _ = APP.set(App { controller: controller.clone(), settings: Mutex::new(settings), config });
     if new_gpus {
         app().change(|settings| settings.gpu_slots = gpu_slots);
     }
@@ -605,7 +611,7 @@ pub fn run() {
                 sample.ping_ms = latency::latest();
                 watch.sample(&sample, Instant::now());
                 if let Some(told) = &mut told {
-                    told.tell(&sample, &app().info);
+                    told.tell(&sample, &app().info());
                 }
                 controller.record(sample);
             }

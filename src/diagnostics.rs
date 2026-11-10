@@ -11,7 +11,7 @@ use crate::reading::{Sample, StaticInfo};
 /// The report, in English (it is for an issue on GitHub).
 pub fn report() -> String {
     let app = crate::app();
-    let info = &app.info;
+    let info = &app.info();
     let windows_key = w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
     let bios = w!(r"HARDWARE\DESCRIPTION\System\BIOS");
     let yes = |b: bool| if b { "yes" } else { "no" };
@@ -44,6 +44,8 @@ pub fn report() -> String {
     ];
     lines.extend(info.gpus.iter().map(|gpu| format!("GPU: {}", gpu.name)));
     lines.push(format!("Drawn on: {} ({} devices held)", crate::ui::gfx::drawn_on().unwrap_or_else(|| "nothing yet".into()), crate::ui::gfx::alive()));
+    // (Each screen's name, which what is laid out on it is kept under: two screens are never to share one.)
+    lines.extend(crate::screens::describe());
     lines.extend(crate::source::found().unwrap_or_else(|| info.found.clone()));
     lines.extend(crate::source::sensor_lines());
     lines.extend(crate::drives::describe());

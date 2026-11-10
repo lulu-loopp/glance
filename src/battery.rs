@@ -11,7 +11,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
 use windows::Win32::System::Power::{
-    BatteryInformation, BATTERY_CAPACITY_RELATIVE, BATTERY_INFORMATION, BATTERY_QUERY_INFORMATION, BATTERY_STATUS, BATTERY_SYSTEM_BATTERY, BATTERY_WAIT_STATUS,
+    BatteryInformation, BATTERY_CAPACITY_RELATIVE, BATTERY_CHARGING, BATTERY_DISCHARGING, BATTERY_INFORMATION, BATTERY_QUERY_INFORMATION, BATTERY_STATUS, BATTERY_SYSTEM_BATTERY, BATTERY_WAIT_STATUS,
     GUID_DEVICE_BATTERY, IOCTL_BATTERY_QUERY_INFORMATION, IOCTL_BATTERY_QUERY_STATUS, IOCTL_BATTERY_QUERY_TAG,
 };
 use windows::Win32::System::IO::DeviceIoControl;
@@ -47,13 +47,12 @@ pub fn read() -> BatteryFigures {
             full += info.FullChargedCapacity as u64;
             design += info.DesignedCapacity as u64;
         }
-        // Milliwatts; i32::MIN when the driver does not know.
         let Some(status) = status(handle, tag) else { return };
-        match status.Rate {
+        match said_watts(&status) {
+            Some(rate) => *watts.get_or_insert(0.0) += rate,
             // (What it holds unknown too: nothing to reckon with.)
-            i32::MIN if status.Capacity == BATTERY_UNKNOWN_CAPACITY => unknown = true,
-            i32::MIN => *held.get_or_insert(0) += status.Capacity as u64,
-            rate => *watts.get_or_insert(0.0) += rate as f32 / 1000.0,
+            None if status.Capacity == BATTERY_UNKNOWN_CAPACITY => unknown = true,
+            None => *held.get_or_insert(0) += status.Capacity as u64,
         }
     });
     let watts = match held.filter(|_| !unknown) {
@@ -65,6 +64,20 @@ pub fn read() -> BatteryFigures {
         }
     };
     BatteryFigures { watts, health: (design > 0).then(|| full as f32 / design as f32 * 100.0) }
+}
+
+/// The rate (W, above 0 charging) a battery's driver says, none where it does not know it. It says so by i32::MIN,
+/// and some laptops' drivers say 0 while they say the battery is charging or discharging (a firmware that does not
+/// measure it): that is no rate either, as a battery's charge cannot move at 0 W. One neither charging nor
+/// discharging (full, or held at a charge limit) is at 0 W, as said.
+fn said_watts(status: &BATTERY_STATUS) -> Option<f32> {
+    let moving = status.PowerState & (BATTERY_CHARGING | BATTERY_DISCHARGING) != 0;
+    match status.Rate {
+        i32::MIN => None,
+        0 if moving => None,
+        // Milliwatts.
+        rate => Some(rate as f32 / 1000.0),
+    }
 }
 
 /// What the batteries whose rate is reckoned held when last seen to change (or first looked at), when that was,
@@ -172,6 +185,32 @@ fn ioctl<I, O>(handle: HANDLE, code: u32, input: &I, output: &mut O) -> Option<(
 
 #[cfg(test)]
 mod tests {
+    use super::said_watts;
+    use windows::Win32::System::Power::{BATTERY_CHARGING, BATTERY_DISCHARGING, BATTERY_POWER_ON_LINE, BATTERY_STATUS};
+
+    fn status(state: u32, rate: i32) -> BATTERY_STATUS {
+        BATTERY_STATUS { PowerState: state, Capacity: 50_000, Voltage: 16_000, Rate: rate }
+    }
+
+    #[test]
+    fn a_rate_said_is_taken() {
+        assert_eq!(said_watts(&status(BATTERY_POWER_ON_LINE | BATTERY_CHARGING, 45_000)), Some(45.0));
+        assert_eq!(said_watts(&status(BATTERY_DISCHARGING, -12_500)), Some(-12.5));
+    }
+
+    #[test]
+    fn zero_while_charging_or_discharging_is_no_rate() {
+        assert_eq!(said_watts(&status(BATTERY_POWER_ON_LINE | BATTERY_CHARGING, 0)), None);
+        assert_eq!(said_watts(&status(BATTERY_DISCHARGING, 0)), None);
+        assert_eq!(said_watts(&status(BATTERY_POWER_ON_LINE, i32::MIN)), None);
+    }
+
+    #[test]
+    fn zero_while_held_is_zero() {
+        // Plugged in and neither charging nor discharging: full, or at a charge limit.
+        assert_eq!(said_watts(&status(BATTERY_POWER_ON_LINE, 0)), Some(0.0));
+    }
+
     #[test]
     #[ignore = "reads this machine's batteries"]
     fn reads_the_batteries() {

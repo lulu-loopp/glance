@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use windows::Win32::Foundation::RECT;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 
 use super::*;
 use crate::settings::{Part, Places, PARTS};
@@ -132,7 +132,7 @@ impl Ui {
             // (The desktop as held already, whatever the panel's size it was made for: drawn to the picture's size, it
             // is not made again for each.)
             let held = self.stage.bitmap.as_ref().map_or(1.0, |(key, _)| f32::from_bits(*key));
-            self.stage_picture(frame, picture, (picture.x + (picture.w - sw * cover) / 2.0, picture.y + (picture.h - sh * cover) / 2.0), cover, held);
+            self.stage_picture(frame, picture, 8.0, (picture.x + (picture.w - sw * cover) / 2.0, picture.y + (picture.h - sh * cover) / 2.0), cover, held);
             unsafe { frame.dc.PushAxisAlignedClip(&rect(picture.x, picture.y, picture.w, picture.h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
             let inside = Rect { x: picture.x + TILE_ROOM, y: picture.y + TILE_ROOM, w: picture.w - 2.0 * TILE_ROOM, h: picture.h - 2.0 * TILE_ROOM };
             match part {
@@ -195,7 +195,7 @@ impl Ui {
         let (sw, sh) = self.stage.size;
         let middle = self.stage.middle();
         let (theme, frost) = self.stage.look(skin, prefs.theme, middle);
-        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info, prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
+        let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
         let heights = view::heights(&scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
         let readings = super::super::forms::count(&scene);
@@ -342,11 +342,12 @@ impl Ui {
             let target = Target::View(Some(screen.id.clone()));
             let pointed = hovered.as_ref() == Some(&target);
             let pixels = ((r.w * self.scale).round().max(1.0) as u32, (r.h * self.scale).round().max(1.0) as u32);
+            let radius = screen_shown(r).1;
             match self.map_picture(frame, &screen.id, m, pixels) {
-                Some(picture) => picture_rounded(frame, &picture, r, MAP_RADIUS * 2.0, if pointed { 1.0 } else { 0.85 }),
-                None => fill(frame, palette.switch_off, r.x, r.y, r.w, r.h, MAP_RADIUS * 2.0),
+                Some(picture) => picture_rounded(frame, &picture, r, radius, if pointed { 1.0 } else { 0.85 }),
+                None => fill(frame, palette.switch_off, r.x, r.y, r.w, r.h, radius),
             }
-            stroke_inside(frame, r, MAP_RADIUS * 2.0, palette.card_stroke);
+            stroke_inside(frame, r, radius, palette.card_stroke);
             let digit = (index + 1).to_string();
             // (At its foot, the taskbar's edge, which holds nothing: clear of the pills on its other edges. On a screen
             // drawn too small for them, all of its marks smaller, apart.)
@@ -387,6 +388,9 @@ impl Ui {
             }
             None => self.panel_on_stage(frame, canvas, None, true, 1.0),
         };
+        // (Its outline as the map draws each screen's: see `screen_shown`.)
+        let (outline, radius) = screen_shown(r);
+        stroke_inside(frame, outline, radius, palette.card_stroke);
         let work = self.stage.work;
         let monitors: Vec<RECT> = self.screens.iter().map(|known| known.monitor).collect();
         let along = |px: i32, upright: bool| if upright { r.y + (px - work.top) as f32 * r.h / (work.bottom - work.top).max(1) as f32 } else { r.x + (px - work.left) as f32 * r.w / (work.right - work.left).max(1) as f32 };
@@ -566,9 +570,7 @@ impl Ui {
     /// the one it came from. Not carried (a press and no more): a pill pressed shows the panel its edge opens.
     pub(super) fn put_down(&mut self) {
         let Some(carry) = self.carry.take() else { return };
-        unsafe {
-            let _ = ReleaseCapture();
-        }
+        crate::ui::window::let_go_of_capture(self.hwnd);
         self.pressed = None;
         if !carry.moved {
             if let Some((screen, edge)) = carry.from {

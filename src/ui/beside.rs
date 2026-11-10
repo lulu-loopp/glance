@@ -100,6 +100,10 @@ enum Ask {
     Follow(RECT, Skin, bool),
     /// The skin chosen does not see the desktop: the scene kept from page to page let go of.
     Unsee,
+    /// The screens changed: the scene kept from page to page let go of where it was made on a device no screen would
+    /// be drawn for any longer (see `gfx::needed`: a laptop's discrete card, its screen unplugged), and the thread's
+    /// devices no page holds and no screen needs, so that a card is kept awake by none of it.
+    ScreensChanged,
     /// Glance going: what is written on the page kept (see `Beside::keep_as_glance_goes`), told when it is.
     Quitting(Sender<()>),
 }
@@ -228,6 +232,13 @@ pub fn keep_as_glance_goes() {
     let (told, kept) = std::sync::mpsc::channel();
     ask(Ask::Quitting(told));
     let _ = kept.recv_timeout(std::time::Duration::from_secs(5));
+}
+
+/// The screens changed (see `Ask::ScreensChanged`). Its thread not started yet, it holds nothing to let go of.
+pub fn screens_changed() {
+    if ASKS.get().is_some() {
+        ask(Ask::ScreensChanged);
+    }
 }
 
 /// The page up, gone.
@@ -379,6 +390,7 @@ fn run(asks: Receiver<Ask>) {
                         Ask::Open(opening) => show(opening),
                         Ask::Close => gone(),
                         Ask::Unsee => BEHIND.with(|held| *held.borrow_mut() = (None, None, None)),
+                        Ask::ScreensChanged => screens_have_changed(),
                         Ask::Quitting(told) => {
                             with(Beside::keep_as_glance_goes);
                             let _ = told.send(());
@@ -635,6 +647,17 @@ thread_local! {
 thread_local! {
     /// What takes drops on the page, while it is up.
     static DROP_TARGET: RefCell<Option<windows::Win32::System::Ole::IDropTarget>> = const { RefCell::new(None) };
+}
+
+/// The screens changed (see `Ask::ScreensChanged`): the scene kept from page to page let go of where the device it was
+/// made on is one no screen would be drawn for any longer, or no longer this thread's, and the thread's devices no page
+/// holds and no screen needs.
+fn screens_have_changed() {
+    let needed = BEHIND_ON.with(|on| on.borrow().as_ref().and_then(std::rc::Weak::upgrade).is_some_and(|gfx| gfx::needed(&gfx)));
+    if !needed {
+        BEHIND.with(|held| *held.borrow_mut() = (None, None, None));
+    }
+    gfx::let_go_of_strays();
 }
 
 /// The page up, gone (a note on it kept first: one that cannot be kept leaves it up, saying so). Asked while the page
@@ -1209,9 +1232,7 @@ impl Beside {
     fn let_go(&mut self, x: f32) -> bool {
         let Some((moving, _, moved)) = self.holding.take() else { return false };
         self.pressed = None;
-        unsafe {
-            let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
-        }
+        super::window::let_go_of_capture(self.hwnd);
         if moved {
             let shown = crate::station::apps::shown();
             let before = shown.get(self.gap_at(x, shown.len())).map(|app| app.target.clone());
@@ -2001,6 +2022,32 @@ otepad.exe"),
 #[cfg(test)]
 mod tests {
     use super::goes_now;
+
+    /// The screens changed, the scene kept from page to page on a device no screen would be drawn for any longer (a
+    /// laptop's discrete card, its screen unplugged as no page was up) is let go of, and that device with it: kept, it
+    /// kept the card awake till a page was next up. One kept on a device a screen needs stays, for the next page.
+    #[test]
+    fn what_is_kept_for_the_next_page_on_a_card_no_screen_needs_goes() {
+        use super::{BEHIND, BEHIND_ON};
+        let _device = crate::ui::gfx::held().unwrap();
+        let kept = |gfx: &std::rc::Rc<crate::ui::gfx::Gfx>| {
+            BEHIND_ON.with(|on| *on.borrow_mut() = Some(std::rc::Rc::downgrade(gfx)));
+            BEHIND.with(|held| held.borrow_mut().2 = Some(std::time::Instant::now()));
+        };
+        let still_kept = || BEHIND.with(|held| held.borrow().2.is_some());
+        let main = crate::ui::gfx::for_main_screen().expect("graphics");
+        kept(&main);
+        super::screens_have_changed();
+        assert!(still_kept(), "what is kept on a device a screen needs let go of");
+        let held = crate::ui::gfx::in_software();
+        kept(&held);
+        let stray = std::rc::Rc::downgrade(&held);
+        drop(held);
+        super::screens_have_changed();
+        assert!(!still_kept(), "what is kept on a device no screen needs kept");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept by the thread");
+        drop(main);
+    }
 
     /// A page beside the panel on a narrow screen at a large scale (a portrait screen 1080 px wide at 350%, the page
     /// 1260 px wide at it): within the screen, on every side, not ending Glance.

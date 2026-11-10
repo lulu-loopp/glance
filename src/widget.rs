@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{ID2D1Bitmap1, D2D1_LAYER_PARAMETERS1};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WM_APP};
 use windows_numerics::{Matrix3x2, Vector2};
 
@@ -416,6 +416,8 @@ enum Drag {
     /// Pages swiped across (see `view::Hit::Pages`): which list, how far it turns, a page's width (its own DIPs),
     /// where the hand and the list were as it began, and the hand's last places (for a flick).
     Swipe { list: view::List, most: f32, wide: f32, from: POINT, start: f32, trail: Vec<(Instant, POINT)> },
+    /// A list's bar's thumb dragged along it (see `view::Thumb`).
+    Scroll(view::Thumb),
 }
 
 /// What the widgets are drawn with, as the panel has them now.
@@ -1257,9 +1259,7 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
                 let keep = |old: &Shown| (old.zoom / z, (0.0, 0.0));
                 let (drawn, drawn_whole) = paint_readings(frame, readings, scene, &picture, &keep, Matrix3x2::identity(), px * z, halo, (!host_plays).then_some(&[][..]), now);
                 whole &= drawn_whole;
-                if let Some(from) = drawn {
-                    placed((rx, ry), &mut hits, from, z);
-                }
+                placed((rx, ry), &mut hits, readings.found(drawn), z);
                 // A small layout with what plays in a row of its own under it: a rule between them.
                 let below = rects.iter().enumerate().find(|(other, _)| *other != index).map(|(_, rect)| rect.1).filter(|y| *y > 0.0);
                 if let (false, false, Some(rule_y)) = (host_plays, apart, below) {
@@ -1398,11 +1398,24 @@ struct Readings {
     only: Option<String>,
     /// Which note its notes turned through by pages show (see `view::keep_note`).
     note_shown: view::NoteShown,
+    /// Where a press finds what it shows, as it was last drawn anew (DIPs from its corner): merged, given with what
+    /// plays' again each frame it is drawn from its layers as it was (see `draw_merged`).
+    hits: Vec<view::HitBox>,
 }
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
+    }
+
+    /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
+    /// it was, where it was last drawn anew. (Merged, a frame that drew what plays alone anew left them out: a press,
+    /// the pointer and the wheel found nothing on the readings till they were next drawn anew.)
+    fn found(&mut self, drawn: Option<Vec<view::HitBox>>) -> Vec<view::HitBox> {
+        if let Some(drawn) = drawn {
+            self.hits = drawn;
+        }
+        self.hits.clone()
     }
 
     /// What it shows, as the settings keep it.
@@ -1939,6 +1952,12 @@ impl Widgets {
             }
             widget.next_frame = Instant::now();
         }
+        // Each hidden on the device of its screen now, where no screen needs the one it held, and this thread's devices
+        // no window holds and no screen needs let go of: a card whose screen was unplugged is kept awake by none.
+        for widget in self.list.iter_mut().filter(|widget| !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(widget.window.hwnd) }.as_bool()) {
+            widget.follow_device_hidden();
+        }
+        gfx::let_go_of_strays();
     }
 
     /// A widget to add as the others are restored (a 0.2.3 panel left on
@@ -2025,7 +2044,7 @@ impl Widgets {
                     widget.next_frame = Instant::now();
                     return;
                 }
-                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                crate::ui::window::let_go_of_capture(widget.window.hwnd);
                 // (What was said of what was pressed is not said while it is carried: the pointer is the drag's from
                 // here, and the widget hears no more of it to take it away.)
                 widget.unsay();
@@ -2112,7 +2131,7 @@ impl Widgets {
     pub fn wheel(&mut self, hwnd: HWND, screen: POINT, delta: i16, across: bool) {
         let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) else { return };
         // What it shows where the wheel turned, as a press there finds it.
-        let hit = {
+        let hit: Vec<view::Hit> = {
             let mut client = screen;
             unsafe {
                 let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut client);
@@ -2120,22 +2139,21 @@ impl Widgets {
             let px = widget.contact.scale * widget.zoom;
             let margin = widget.margin_px();
             let (x, y) = ((client.x - margin) as f32 / px - widget.hits_from.0, (client.y - margin) as f32 / px - widget.hits_from.1);
-            let under: Vec<view::Hit> = widget.hits.iter().filter(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4).collect();
-            under
+            view::under(&widget.hits, (x, y)).map(|hit| hit.4).collect()
         };
-        // (Under what is on it: the wheel over a thing on the station scrolls the station.)
-        let list = hit.iter().find_map(|hit| hit.list());
-        let pages = hit.iter().find_map(|hit| hit.pages());
-        if across {
-            if let (Some((list, most)), Some(readings)) = (pages, widget.content.readings_mut()) {
-                readings.scrolls.turn_pages(list, delta as f32 / 120.0 * view::PAGE, view::PAGE, most);
+        // Its pages turned, or its list scrolled (under what is on it: the wheel over a thing on the station scrolls the
+        // station, and over its bar too). Turned across, only pages.
+        let turn = |widget: &mut Widget| {
+            if widget.content.readings_mut().is_some_and(|readings| view::wheel(&mut readings.scrolls, &hit, delta, across)) {
                 widget.unsay();
                 widget.next_frame = Instant::now();
             }
+        };
+        if across {
+            turn(widget);
             return;
         }
-        let hit = hit.first().copied();
-        let on_sound = hit.is_some_and(view::Hit::of_sound);
+        let on_sound = hit.first().is_some_and(|hit| hit.of_sound());
         if let Content::Music(shown) = &mut widget.content {
             shown.music.wheel(delta, on_sound);
             widget.next_frame = Instant::now();
@@ -2156,22 +2174,7 @@ impl Widgets {
                 }
             }
         }
-
-        let mut readings = match &mut widget.content {
-            Content::Readings(readings) => Some(readings),
-            Content::Merged(merged) => merged.parts.iter_mut().find_map(|part| if let Content::Readings(readings) = part { Some(readings) } else { None }),
-            Content::Music(_) => None,
-        };
-        let rows = -(delta as f32) / 120.0 * crate::panel::WHEEL_ROWS;
-        if let (Some((list, most)), Some(readings)) = (pages, readings.as_deref_mut()) {
-            readings.scrolls.turn_pages(list, rows * view::TABLE_ROW, view::PAGE, most);
-            widget.unsay();
-            widget.next_frame = Instant::now();
-        } else if let (Some((list, most)), Some(readings)) = (list, readings) {
-            readings.scrolls.turn(list, rows * view::TABLE_ROW, most);
-            widget.unsay();
-            widget.next_frame = Instant::now();
-        }
+        turn(widget);
     }
 
     /// Let go of a press on a widget, or (`cancelled`) its capture lost: then no press is completed.
@@ -2180,7 +2183,7 @@ impl Widgets {
         // lost: nothing).
         if let Some(widget) = self.list.iter_mut().find(|w| w.window.hwnd == hwnd) {
             if let Some(press) = widget.shelf_press.take() {
-                let _ = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture() };
+                crate::ui::window::let_go_of_capture(widget.window.hwnd);
                 if !cancelled && crate::station::select::release(press) {
                     crate::station::pressed(press.hit);
                 }
@@ -2189,7 +2192,7 @@ impl Widgets {
             }
         }
         if let Some(widget) = self.list.iter().find(|w| w.window.hwnd == hwnd) {
-            note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), Some(Drag::Swipe { .. }) => "swiping".into(), None => "in no hand".into() }));
+            note(format!("widget: release ({}), {}", if cancelled { "its capture lost" } else { "let go" }, match &widget.drag { Some(Drag::Move { moved, torn, .. }) => format!("moving (moved {moved}, torn {torn})"), Some(Drag::Size { .. }) => "sizing".into(), Some(Drag::Slide { .. }) => "sliding".into(), Some(Drag::Swipe { .. }) => "swiping".into(), Some(Drag::Scroll(_)) => "scrolling".into(), None => "in no hand".into() }));
         }
         // Held over another long enough: merged into it.
         if let Some(drop) = self.dropping.take() {
@@ -2757,7 +2760,7 @@ impl Widgets {
     fn merge(&mut self, drop: Dropping) {
         let (Some(guest), Some(_)) = (self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.guest), self.list.iter().position(|w| w.window.hwnd.0 as isize == drop.target)) else { return };
         let mut guest = self.list.remove(guest);
-        let _ = unsafe { ReleaseCapture() };
+        crate::ui::window::let_go_of_capture(guest.window.hwnd);
         guest.hide_hint();
         if guest.tip.take().is_some() | std::mem::take(&mut guest.saying) {
             crate::ui::tip::hide();
@@ -2800,7 +2803,7 @@ impl Widgets {
         widget.drag = None;
         widget.settle = Some((Instant::now(), widget.surface_size));
         widget.next_frame = Instant::now();
-        let _ = unsafe { ReleaseCapture() };
+        crate::ui::window::let_go_of_capture(widget.window.hwnd);
         widget.window.lift(false);
         let Some(cursor) = cursor_position() else { return };
         let scale = widget.contact.scale;
@@ -2904,6 +2907,10 @@ fn takes(hits: &[view::HitBox], from: (f32, f32), size: (f32, f32), pinned: bool
     if let Some(track) = hits.iter().filter(|hit| hit.4.slider().is_some()).find(under) {
         return Takes::Track(*track);
     }
+    // A list's bar: its thumb dragged along it, as a track is.
+    if let Some(bar) = hits.iter().filter(|hit| matches!(hit.4, view::Hit::Bar(..))).find(under) {
+        return Takes::Bar(*bar);
+    }
     // Pinned, it is neither moved nor sized: only its buttons and what it shows that takes a press (the keys of what
     // plays, a line of its lyrics, a drive's row) are pressed. (Its buttons alone were, and those did nothing pinned.)
     let on_content = hits.iter().filter(|hit| hit.4.takes_press()).any(|hit| under(&hit));
@@ -2939,12 +2946,13 @@ fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: b
 }
 
 /// What a press on a widget takes (see `Widget::takes_at`): a thing on its station (dragged off it, or pressed), the
-/// sound's track (slid along), nothing (pinned, off its buttons and what it shows that takes a press), one of its
+/// sound's track (slid along), a list's bar (its thumb dragged along it), nothing (pinned, off its buttons and what it shows that takes a press), one of its
 /// buttons or, pinned, what it shows that takes a press (acted on as it is let go), its edges or a corner (sized by
 /// them), or the whole of it (moved, or what it shows there pressed as it is let go where it was).
 enum Takes {
     Shelf(view::Hit),
     Track(view::HitBox),
+    Bar(view::HitBox),
     Nothing,
     Pressed,
     Edges((bool, bool, bool, bool)),
@@ -3688,6 +3696,13 @@ impl Widget {
                 self.slide();
                 return;
             }
+            Takes::Bar(bar) => {
+                let Some(thumb) = self.content.readings_mut().and_then(|readings| view::Thumb::pressed(bar, ly, &readings.scrolls)) else { return };
+                self.drag = Some(Drag::Scroll(thumb));
+                unsafe { SetCapture(self.window.hwnd) };
+                self.drag_thumb();
+                return;
+            }
             Takes::Nothing => {
                 note("widget: pressed while pinned");
                 return;
@@ -3724,6 +3739,7 @@ impl Widget {
             Some(Drag::Move { .. }) => "widget: pressed to move".to_string(),
             Some(Drag::Slide { slider, .. }) => format!("widget: a track pressed ({slider:?})"),
             Some(Drag::Swipe { list, .. }) => format!("widget: pages swiped ({list:?})"),
+            Some(Drag::Scroll(thumb)) => format!("widget: a list's bar pressed ({:?})", thumb.list()),
             None => "widget: pressed, nothing taken".to_string(),
         });
     }
@@ -3762,7 +3778,7 @@ impl Widget {
         let at = *start - (cursor.x - from.x) as f32 / px / *wide * view::PAGE;
         let (list, most) = (*list, *most);
         if let Some(readings) = self.content.readings_mut() {
-            readings.scrolls.hold_pages(list, at, most);
+            readings.scrolls.hold(list, at, most);
         }
     }
 
@@ -3775,9 +3791,25 @@ impl Widget {
         crate::playing::slide_along(*slider, along / wide);
     }
 
+    /// The list whose bar's thumb is in hand scrolled as far as the thumb goes with the hand where the pointer is.
+    fn drag_thumb(&mut self) {
+        let (Some(Drag::Scroll(thumb)), Some(cursor)) = (&self.drag, cursor_position()) else { return };
+        let thumb = *thumb;
+        let y = (cursor.y - self.at.y) as f32 / (self.contact.scale * self.zoom) - self.hits_from.1;
+        if let Some(readings) = self.content.readings_mut() {
+            readings.scrolls.hold(thumb.list(), thumb.scroll_at(y), thumb.most());
+        }
+        self.unsay();
+        self.next_frame = Instant::now();
+    }
+
     fn follow(&mut self, now: Instant) {
         if matches!(self.drag, Some(Drag::Slide { .. })) {
             self.slide();
+            return;
+        }
+        if matches!(self.drag, Some(Drag::Scroll(_))) {
+            self.drag_thumb();
             return;
         }
         if matches!(self.drag, Some(Drag::Swipe { .. })) {
@@ -3875,7 +3907,7 @@ impl Widget {
                 let bottom = corner.y + start.1 as i32;
                 self.at = POINT { x: if l { right } else { corner.x }, y: if t { bottom } else { corner.y } };
             }
-            Some(Drag::Slide { .. } | Drag::Swipe { .. }) | None => {}
+            Some(Drag::Slide { .. } | Drag::Swipe { .. } | Drag::Scroll(_)) | None => {}
         }
     }
 
@@ -3883,9 +3915,7 @@ impl Widget {
     /// (the capture taken away), neither: what was pressed is not done, and it stays where it was.
     fn release(&mut self, now: Instant, cancelled: bool) -> Released {
         // (Its own capture: not one another has taken since, a part torn out of it.)
-        if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetCapture() } == self.window.hwnd {
-            let _ = unsafe { ReleaseCapture() };
-        }
+        crate::ui::window::let_go_of_capture(self.window.hwnd);
         // Back where it is kept, let go: but a note pulled off the panel going back to it, over the panel still on its
         // way, as in hand (kept under it, it went back behind it; the capture's end after it let go comes here too).
         let going_back = self.pulled.as_ref().is_some_and(|pulled| pulled.back.is_some());
@@ -3900,6 +3930,8 @@ impl Widget {
                 crate::playing::slid(slider, !cancelled);
                 Released::Nothing
             }
+            // A list's bar let go: the list left where the thumb took it.
+            Drag::Scroll(_) => Released::Nothing,
             // Pages let go: on to the page nearest; flicked, the next that way (the hand going left, the next on).
             Drag::Swipe { list, most, trail, .. } => {
                 let px = self.contact.scale * self.zoom;
@@ -4406,7 +4438,8 @@ impl Widget {
         // Merged with what plays, the readings without the music lane (what plays shows itself).
         let prefs = self.content.prefs(look.prefs);
         let prefs = prefs.as_ref().unwrap_or(look.prefs);
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let info = controller.info();
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         // Laid out as it is wanted: what fills the room it is dragged to, else
         // what it shows.
         let work = self.contact.work;
@@ -4787,7 +4820,8 @@ impl Widget {
         let dark = theme::is_dark(look.prefs.theme, self.behind.as_ref().map(|b| b.tone.0).filter(|_| sees));
         let dark = dark || on_music;
         let theme = if dark == theme.dark { theme } else { self.content.dressed(Theme::new(look.skin, dark)) };
-        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, prefs, &theme, look.lang, history, seen) };
+        let info = controller.info();
+        let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
@@ -4839,6 +4873,19 @@ impl Widget {
             self.gfx = current;
         }
         self.surface.is_some()
+    }
+
+    /// Hidden (one shown only while a game is played, as none is), on a device no screen would be drawn for any longer
+    /// (see `gfx::needed`: a laptop's discrete card, its screen unplugged meanwhile): on the one for the screen it is on
+    /// now, all it held on the one before let go of (made again on this one as it shows), so that it keeps no card
+    /// awake. On one still needed, it stays as it is, to show at once (it follows its screen's as it next draws).
+    fn follow_device_hidden(&mut self) {
+        if gfx::needed(&self.gfx) {
+            return;
+        }
+        let Ok(current) = gfx::for_area(self.rect()) else { return };
+        self.gone();
+        self.gfx = current;
     }
 
     fn draw(&mut self, theme: &Theme, scene: &Scene, music_ground: MusicGround, now: Instant) {
@@ -5352,6 +5399,30 @@ mod tests {
         assert!((carried_reach(size, (100.0, 50.0), 1.0, 90.0, 0.0) - 50.0).abs() < 1e-3);
     }
 
+    /// A widget hidden (shown only while a game is played) on a device no screen would be drawn for any longer (a
+    /// laptop's discrete card, its screen unplugged) goes onto its screen's as the screens change, all it held on that
+    /// card let go of, and the card's device can be: kept, it kept the card awake till a game was played. One on a
+    /// device a screen needs stays as it is, to show at once.
+    #[test]
+    fn a_hidden_widget_lets_go_of_a_card_no_screen_needs() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
+        let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, Content::Readings(Readings::new(choice))).unwrap();
+        let screens = Rc::downgrade(&widget.gfx);
+        widget.follow_device_hidden();
+        assert!(std::ptr::eq(Rc::as_ptr(&widget.gfx), screens.as_ptr()) && widget.surface.is_some(), "a hidden widget on a device a screen needs moved off it");
+        let held = gfx::in_software();
+        let stray = Rc::downgrade(&held);
+        widget.gone();
+        widget.gfx = held;
+        widget.follow_device_hidden();
+        gfx::let_go_of_strays();
+        assert!(gfx::needed(&widget.gfx), "a hidden widget left on a device no screen needs");
+        assert!(stray.upgrade().is_none(), "a device no screen needs kept");
+        drop(widget);
+    }
+
     /// A widget's settings' button shows while the settings asked from it are open, the pointer away from it, lit: they
     /// pour back into it as they close, moved with it where the widget is moved meanwhile. Asked from elsewhere, or
     /// closed, it shows no more.
@@ -5519,6 +5590,73 @@ mod tests {
             let placed = [words.left, words.top, words.right, words.bottom].map(|edge| edge as f32);
             assert!(drawn.iter().zip(placed).all(|(drawn, placed)| (drawn - placed).abs() <= 1.0), "{px}: {drawn:?} {placed:?}");
         }
+    }
+
+    /// A press on a long list's bar takes its thumb, to be dragged along it, pinned or not (as a track is), each list
+    /// with a bar in each of its views, the hand over it, as over a track. (A press there moved the widget, or, pinned,
+    /// did nothing.)
+    #[test]
+    fn a_press_on_a_list_s_bar_takes_its_thumb() {
+        use windows::Win32::UI::WindowsAndMessaging::IDC_HAND;
+        for (what, _, hits) in view::tests::lists_with_bars(0.0) {
+            let &(x, y, w, h, _) = hits.iter().find(|hit| matches!(hit.4, view::Hit::List(..))).unwrap();
+            let point = (x + w + 7.0, y + h / 2.0);
+            for pinned in [false, true] {
+                let taken = takes(&hits, (0.0, 0.0), (1000.0, 1000.0), pinned, false, point);
+                assert!(matches!(taken, Takes::Bar((.., view::Hit::Bar(..)))), "{what}, pinned {pinned}");
+                let over = view::under(&hits, point).next().map(|hit| hit.4).filter(|hit| hit.takes_press());
+                assert!(pointer_for(&taken, false, over, false) == IDC_HAND, "{what}, pinned {pinned}");
+            }
+        }
+    }
+
+    /// Readings merged with what plays, drawn again from their layers as they were (nothing of them changed, as in most
+    /// frames while it plays, what plays drawn anew beside them): a press, the pointer and the wheel find on them what
+    /// they found as they were drawn anew, the wheel over their station's long list scrolling it. (Such a frame gave
+    /// what plays' alone: nothing on the readings was found till they were next drawn anew.) Drawn as `draw_merged`
+    /// draws them (what plays is drawn only with Glance running).
+    #[test]
+    fn readings_merged_with_what_plays_are_found_as_it_plays() {
+        let _device = gfx::held().unwrap();
+        let _pretending = crate::pretending();
+        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
+        crate::station::run::pretend((1..=40).map(item).collect(), crate::settings::ShelfView::List);
+        let theme = workbench_dressed(Theme::new(Skin::Fluent, false));
+        let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+        let history: &'static [Sample] = Box::leak(Box::new([view::tests::sample(None, None, None)]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::Shelf, hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let readings = Content::Readings(Readings { workbench: true, ..Readings::new(choice) });
+        let mut merged = Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, (600.0, 700.0));
+        let now = Instant::now();
+        assert!(merged.lay_out(&scene, &theme, (1920.0, 1080.0), &seen, now));
+        let size = merged.size;
+        let Content::Readings(readings) = &mut merged.parts[0] else { unreachable!() };
+        let shown = readings.last.clone().unwrap();
+        let lanes = view::lanes_at(&scene, |_| shown.detail);
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &shown.layout, small: None, size: (size.0 / shown.zoom, size.1 / shown.zoom), at: (0.0, 0.0), edge: None, backdrop: None, frost: 0.0, rough: false };
+        let gfx = Gfx::new().expect("graphics");
+        let mut frames = Vec::new();
+        for _ in 0..2 {
+            gfx.draw_offscreen((800, 900), 1.0, |frame| {
+                let keep = |old: &Shown| (old.zoom / shown.zoom, (0.0, 0.0));
+                let (drawn, _) = paint_readings(frame, readings, &scene, &picture, &keep, Matrix3x2::identity(), shown.zoom, None, Some(&[][..]), now);
+                frames.push((drawn.is_some(), readings.found(drawn)));
+            })
+            .expect("drawn");
+        }
+        // (The device let go before anything is asserted: held by a test that fails, it holds the process.)
+        drop(merged);
+        drop(gfx);
+        assert_eq!(frames.iter().map(|(anew, _)| *anew).collect::<Vec<_>>(), [true, false], "drawn anew, then as it was");
+        for (frame, (_, hits)) in frames.iter().enumerate() {
+            let Some(&(x, y, w, h, _)) = hits.iter().find(|hit| matches!(hit.4, view::Hit::List(view::List::Shelf, _))) else { panic!("frame {frame}: no list found on the readings in {hits:?}") };
+            let under: Vec<view::Hit> = view::under(hits, (x + w / 2.0, y + h / 2.0)).map(|hit| hit.4).collect();
+            let mut scrolls = view::Scrolls::default();
+            assert!(view::wheel(&mut scrolls, &under, -120, false) && scrolls.to(view::List::Shelf) > 0.0, "frame {frame}");
+        }
+        assert_eq!(frames[0].1, frames[1].1);
     }
 
     /// A widget of one of the panel's lanes alone has no bar under it (how long the PC has been up is not about that

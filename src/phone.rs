@@ -376,11 +376,22 @@ pub fn forget() {
     firewall(&["delete", "rule", &format!("name={RULE}")]);
 }
 
-/// The remote running, if it is on: asked of it as Glance starts.
+/// The remote running, if it is on: asked of it as Glance starts. On a laptop, where the sensors run no OpenRGB (see
+/// `openrgb::runs_on`), a remote told to ask theirs (by an earlier Glance) runs its own again: else it would start none,
+/// and set no lights.
 pub fn keep() {
     if let Some(helper) = helper() {
+        if lowered_as_glance_starts(crate::laptop::this_machine(), lights_raised) {
+            let _ = ask(&["lights", "lower"]);
+        }
         elevation::run_remote(&helper);
     }
+}
+
+/// Whether the remote is told, as Glance starts, to run its own OpenRGB again: on a `laptop`, where it was told to ask
+/// the one the sensors run (`raised` says, asked of it on a laptop alone).
+fn lowered_as_glance_starts(laptop: bool, raised: impl FnOnce() -> bool) -> bool {
+    laptop && raised()
 }
 
 /// Whether the remote is on: started at sign-in, by this account's task.
@@ -413,6 +424,15 @@ pub fn turn(on: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On a laptop, a remote told to ask an OpenRGB the sensors run (which they run on no laptop) is told to run its
+    /// own again as Glance starts. Elsewhere it is not asked.
+    #[test]
+    fn a_laptops_remote_runs_its_own_lights_program() {
+        assert!(lowered_as_glance_starts(true, || true));
+        assert!(!lowered_as_glance_starts(true, || false));
+        assert!(!lowered_as_glance_starts(false, || panic!("asked on a desktop")));
+    }
 
     #[test]
     fn arguments_are_carried_as_windows_reads_them_back() {

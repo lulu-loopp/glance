@@ -17,7 +17,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Controls::RichEdit::*;
 use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_UNAWARE};
 use windows::Win32::UI::Input::Ime::{ImmGetContext, ImmReleaseContext, HIMC};
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetCursor, SetForegroundWindow, SetTimer, HCURSOR, SCROLLBAR_CONSTANTS, SCROLL_WINDOW_FLAGS, WS_VSCROLL};
 
 /// The edit control's message asking which character is at a point (winuser.h's `EM_CHARFROMPOS`; the bindings leave it
@@ -720,12 +720,10 @@ impl ITextHost_Impl for Host_Impl {
         self.TxViewChange(false.into());
     }
     fn TxSetCapture(&self, capture: BOOL) {
-        unsafe {
-            if capture.as_bool() {
-                SetCapture(self.kept.hwnd);
-            } else {
-                let _ = ReleaseCapture();
-            }
+        if capture.as_bool() {
+            unsafe { SetCapture(self.kept.hwnd) };
+        } else {
+            super::window::let_go_of_capture(self.kept.hwnd);
         }
     }
     fn TxSetFocus(&self) {
