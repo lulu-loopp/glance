@@ -4217,7 +4217,7 @@ impl<'a> Panel<'a> {
         // (What was just copied from it, marked so a moment.)
         let thumbs_moving = self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR) | thumbs_moving;
         // (What is chosen together on it, marked so.)
-        self.thumbs.mark_chosen(crate::station::select::now().hits);
+        self.thumbs.mark_chosen(crate::station::select::marked(self.window.hwnd.0 as isize));
         // What is kept at hand: the one held where it would go, the others making room; one let go, kept where it went
         // till the order comes so.
         let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();

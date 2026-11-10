@@ -61,6 +61,12 @@ pub struct Chosen {
 }
 
 impl Chosen {
+    /// What is marked chosen in the window `window`: what is chosen there, none of what is chosen in another window
+    /// that shows the same things (a press, a drag or a menu there takes them one by one).
+    pub fn marked_in(&self, window: isize) -> Vec<Hit> {
+        if self.on.is_some_and(|on| on.window == window) { self.hits.clone() } else { Vec::new() }
+    }
+
     /// Whether `hit` in the list `on` is chosen.
     pub fn holds(&self, on: On, hit: Hit) -> bool {
         self.on == Some(on) && self.hits.contains(&hit)
@@ -246,6 +252,11 @@ pub fn now() -> Chosen {
     CHOSEN.lock().unwrap().clone()
 }
 
+/// What is marked chosen in the window `window` (see `Chosen::marked_in`).
+pub fn marked(window: isize) -> Vec<Hit> {
+    now().marked_in(window)
+}
+
 /// The window what is chosen is in, where anything is.
 pub fn window() -> Option<isize> {
     let chosen = CHOSEN.lock().unwrap();
@@ -307,6 +318,16 @@ mod tests {
     const SHIFT: Keys = Keys { ctrl: false, shift: true };
     const BOTH: Keys = Keys { ctrl: true, shift: true };
     const ALONE: Keys = Keys { ctrl: false, shift: false };
+
+    /// What is chosen is marked in its own window alone, not in another showing the same things.
+    #[test]
+    fn what_is_chosen_is_marked_in_its_own_window_alone() {
+        let mut chosen = Chosen::default();
+        click(&mut chosen, ON, ORDER[1], CTRL);
+        click(&mut chosen, ON, ORDER[3], CTRL);
+        assert_eq!(chosen.marked_in(ON.window), [ORDER[1], ORDER[3]]);
+        assert_eq!(chosen.marked_in(ON.window + 1), []);
+    }
 
     /// A press and its letting go, never dragged: whether it was a press alone.
     fn click(chosen: &mut Chosen, on: On, hit: Hit, keys: Keys) -> bool {

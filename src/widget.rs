@@ -4350,7 +4350,7 @@ impl Widget {
             moving |= self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR);
         }
         // What is chosen together on what it shows of the station, marked so.
-        self.thumbs.mark_chosen(crate::station::select::now().hits);
+        self.thumbs.mark_chosen(crate::station::select::marked(self.window.hwnd.0 as isize));
         if shows(|hit| matches!(hit, view::Hit::App(_) | view::Hit::AppsArea)) {
             let order: Vec<String> = crate::station::apps::shown().iter().map(|app| app.target.clone()).collect();
             moving |= self.thumbs.apps(now, &order, None);
