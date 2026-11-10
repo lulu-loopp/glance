@@ -6326,7 +6326,7 @@ impl Ui {
         let width = |text: &str, font| frame.gfx.measure(text, font);
         let line = |font| frame.gfx.baseline(font);
         let metrics = super::overlay::Metrics { width: &width, line: &line };
-        let shape = overlay.shape((sw - 2.0 * super::overlay::INSET) / size);
+        let shape = overlay.shape(sw / size);
         let glass = |k: f32| {
             let px = self.scale * k * size;
             (px, super::overlay::size(&readings, shape, px, &metrics), super::overlay::radius(&readings, shape, px, &metrics))
@@ -6341,9 +6341,9 @@ impl Ui {
         let k = k.min(area.w / (gw * size + room)).min(area.h / (gh * size + room));
         let (px, (gw, gh), _) = glass(k);
         let (w, h) = (gw * size, gh * size);
-        let inset = super::overlay::INSET;
-        let x = inset + overlay.at.0.clamp(0.0, 1.0) * (sw - 2.0 * inset - w).max(0.0);
-        let y = inset + overlay.at.1.clamp(0.0, 1.0) * (sh - 2.0 * inset - h).max(0.0);
+        // (Up to the screen's edges, as on the screen: see `overlay::room`.)
+        let x = overlay.at.0.clamp(0.0, 1.0) * (sw - w).max(0.0);
+        let y = overlay.at.1.clamp(0.0, 1.0) * (sh - h).max(0.0);
         let view = |at: f32, length: f32, room: f32, extent: f32| (at + length / 2.0 - room / 2.0 / k).clamp(0.0, (extent - room / k).max(0.0));
         let (vx, vy) = (view(x, w, area.w, sw), view(y, h, area.h, sh));
         let (ox, oy) = (area.x - vx * k + ((area.w - sw * k) / 2.0).max(0.0), area.y - vy * k + ((area.h - sh * k) / 2.0).max(0.0));

@@ -109,9 +109,6 @@ fn group_of(name: &str) -> Option<&'static str> {
     GROUPS.iter().find(|(_, items)| items.iter().any(|(item, _)| *item == name)).map(|(id, _)| *id)
 }
 
-/// How far the glass keeps from its screen's edges (DIPs).
-pub const INSET: f32 = 16.0;
-
 /// The room around the glass its shadow falls in (DIPs).
 pub const MARGIN: f32 = 12.0;
 

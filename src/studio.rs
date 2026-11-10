@@ -985,7 +985,9 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                 let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(rest.0 + outward * shift * travel * zoom, rest.1);
                 let _ = layers.draw(frame, &picture, local, px * zoom);
                 if let (Some(layout), Some(sample)) = (shot.overlay, scene.history.last()) {
-                    use crate::ui::overlay::{self, Metrics, INSET, MARGIN};
+                    use crate::ui::overlay::{self, Metrics, MARGIN};
+                    /// Where the film puts the overlay, from the picture's corner (DIPs).
+                    const INSET: f32 = 16.0;
                     let items = crate::settings::OverlaySettings::default().chosen();
                     let playing = sample.game.is_some();
                     let readings = overlay::readings(sample, sample.game.as_ref(), playing, &items, lang);

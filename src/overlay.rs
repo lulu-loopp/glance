@@ -36,7 +36,7 @@ use crate::ui::canvas::{Color, Point};
 use crate::ui::gfx::{self, Gfx, Surface};
 use crate::ui::glass::Frosted;
 use crate::ui::life::{Lives, Showing};
-use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, Tone, INSET, MARGIN};
+use crate::ui::overlay::{self, Glass, Hand, Layout, Metrics, Shape, Tone, MARGIN};
 use crate::ui::text::Lang;
 use crate::ui::window::Window;
 
@@ -201,13 +201,12 @@ fn monitor_info(monitor: HMONITOR) -> (RECT, f32) {
     (info.rcMonitor, dpi as f32 / 96.0)
 }
 
-/// The room glass `size` large has on `screen`, inside the inset: its
-/// left, top, and how far it can move across and down.
-fn room(screen: RECT, size: (i32, i32), scale: f32) -> (i32, i32, i32, i32) {
-    let inset = (INSET * scale).round() as i32;
-    let across = (screen.right - screen.left - 2 * inset - size.0).max(0);
-    let down = (screen.bottom - screen.top - 2 * inset - size.1).max(0);
-    (screen.left + inset, screen.top + inset, across, down)
+/// The room glass `size` large has on `screen`, up to its edges: its left, top, and how far it can move across and
+/// down. (It kept 16 DIPs from them, and could not be put as high on the screen as was wanted.)
+fn room(screen: RECT, size: (i32, i32)) -> (i32, i32, i32, i32) {
+    let across = (screen.right - screen.left - size.0).max(0);
+    let down = (screen.bottom - screen.top - size.1).max(0);
+    (screen.left, screen.top, across, down)
 }
 
 
@@ -351,11 +350,11 @@ impl Overlay {
         };
         (self.screen, self.dpi) = monitor_info(monitor);
         self.size = settings.size.clamp(crate::panel::SIZES.0, crate::panel::SIZES.1);
-        // As wide as its screen at most, inside the inset (DIPs at its size).
-        let widest = (self.screen.right - self.screen.left) as f32 / self.scale() - 2.0 * INSET / self.size;
+        // As wide as its screen at most (DIPs at its size).
+        let widest = (self.screen.right - self.screen.left) as f32 / self.scale();
         self.drawn = (readings, frames, settings.shape(widest));
         let size = self.dims();
-        let (left, top, across, down) = room(self.screen, size, self.dpi);
+        let (left, top, across, down) = room(self.screen, size);
         let x = left + (settings.at.0.clamp(0.0, 1.0) * across as f32).round() as i32;
         let y = top + (settings.at.1.clamp(0.0, 1.0) * down as f32).round() as i32;
         self.rect = RECT { left: x, top: y, right: x + size.0, bottom: y + size.1 };
@@ -830,7 +829,7 @@ impl Overlay {
         // Tinted for where it was put.
         self.look();
         self.draw();
-        let (left, top, across, down) = room(self.screen, (glass.right - glass.left, glass.bottom - glass.top), self.dpi);
+        let (left, top, across, down) = room(self.screen, (glass.right - glass.left, glass.bottom - glass.top));
         let share = |at: i32, room: i32| if room > 0 { (at as f32 / room as f32).clamp(0.0, 1.0) } else { 0.0 };
         Some(Placed { at: (share(glass.left - left, across), share(glass.top - top, down)), point: (centre.x, centre.y), size: self.size })
     }
@@ -914,5 +913,20 @@ impl Overlay {
         self.placed.set(RECT::default());
         // (What it draws with given back while it is away: see `life`.)
         self.hidden();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use windows::Win32::Foundation::RECT;
+
+    /// The overlay can be put right up to any edge of its screen, as far as the pointer takes it: put at the top
+    /// left, its glass is at the screen's corner, and at the bottom right, at the opposite one.
+    #[test]
+    fn the_overlay_goes_up_to_its_screens_edges() {
+        let screen = RECT { left: -1920, top: 120, right: 0, bottom: 1200 };
+        let (left, top, across, down) = super::room(screen, (400, 60));
+        assert_eq!((left, top), (screen.left, screen.top));
+        assert_eq!((left + across + 400, top + down + 60), (screen.right, screen.bottom));
     }
 }
