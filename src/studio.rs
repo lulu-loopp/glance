@@ -11,6 +11,7 @@
 //! Each shot becomes a folder of numbered PNG frames.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use windows::core::HSTRING;
@@ -798,10 +799,10 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         }
     };
     // A sample a second, from well before the shot to its end.
-    let history: Vec<Sample> = (0..=(backlog + shot.seconds as f64) as usize)
+    let history: Vec<Arc<Sample>> = (0..=(backlog + shot.seconds as f64) as usize)
         .map(|i| {
             let t = (i as f64 - backlog) as f32;
-            made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)), shot.game.as_deref().filter(|_| t >= shot.game_from))
+            Arc::new(made_up(info, start_ms + i as f64 * interval - backlog * 1000.0, i as u64, load(t.max(0.0)), shot.game.as_deref().filter(|_| t >= shot.game_from)))
         })
         .collect();
 
@@ -991,7 +992,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
                     let items = crate::settings::OverlaySettings::default().chosen();
                     let playing = sample.game.is_some();
                     let readings = overlay::readings(sample, sample.game.as_ref(), playing, &items, lang);
-                    let frames = overlay::frames(scene.history.iter(), playing);
+                    let frames = overlay::frames(scene.history.iter().map(|s| &**s), playing);
                     let width = |text: &str, font| frame.gfx.measure(text, font);
                     let line = |font| frame.gfx.baseline(font);
                     let metrics = Metrics { width: &width, line: &line };
@@ -1321,7 +1322,7 @@ pub fn frames(wallpaper: &str) -> Result<(), String> {
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
-    let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
+    let history: Vec<Arc<Sample>> = (0..400).map(|i| Arc::new(made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None))).collect();
     let theme = Theme::new(Skin::Glass, true);
     let work = (width as f32 / px, height as f32 / px);
     let window = unsafe { CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, w!("STATIC"), None, WS_POPUP | WS_VISIBLE, 200, 200, 1400, 1200, None, None, None, None) }.map_err(|e| e.to_string())?;
@@ -1613,7 +1614,7 @@ fn panel_memory(gfx: &Gfx, surface: &mut crate::ui::gfx::Surface, window: window
     known.extend(info.gpu_modules());
     known.extend(["memory", "network", "disk", "processes", "storage", "board", "battery", "system", "time", "wsl", "docker"].map(String::from));
     let prefs = Prefs::resolve(&serde_json::Value::Null, &known);
-    let history: Vec<Sample> = (0..400).map(|i| made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None)).collect();
+    let history: Vec<Arc<Sample>> = (0..400).map(|i| Arc::new(made_up(&info, 1_760_000_000_000.0 + i as f64 * 1000.0, i as u64, 0.4, None))).collect();
     let theme = Theme::new(skin, true);
     let work = (width as f32 / px, height as f32 / px);
     let desktop = {
