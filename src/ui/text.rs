@@ -130,6 +130,12 @@ pub fn usage(used: u64, total: u64) -> String {
     format!("{:.decimals$} / {:.decimals$} GB", used as f64 / GIB, total as f64 / GIB)
 }
 
+/// A time played, `seconds` long, to the second: its hours always written, two figures at least, so that it keeps one
+/// width as it counts (00:47:12, 02:03:04).
+pub fn played(seconds: u64) -> String {
+    format!("{:02}:{:02}:{:02}", seconds / 3600, seconds % 3600 / 60, seconds % 60)
+}
+
 pub fn percent(value: f32) -> String {
     if value < 10.0 { format!("{value:.1}%") } else { format!("{value:.0}%") }
 }

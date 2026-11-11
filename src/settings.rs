@@ -589,9 +589,10 @@ impl OverlaySettings {
         self.offered = true;
     }
 
-    /// What it shows, by item, group by group.
-    pub fn chosen(&self) -> Vec<&'static str> {
-        crate::ui::overlay::chosen(&self.groups)
+    /// What it shows, by item, group by group, on a machine whose drives `drives` (by number) have told their
+    /// temperature.
+    pub fn chosen(&self, drives: &[u32]) -> Vec<String> {
+        crate::ui::overlay::chosen(&self.groups, drives)
     }
 
     /// How its readings are laid out, on a screen `width` DIPs wide (at
@@ -1722,7 +1723,7 @@ mod tests {
         // not written again.
         let mut settings: Settings = serde_json::from_str(r#"{"overlay":{"items":["gpu","network"],"style":"plate"}}"#).unwrap();
         settings.carry_over();
-        assert_eq!(settings.overlay.chosen(), ["gpu", "down", "up"]);
+        assert_eq!(settings.overlay.chosen(&[]), ["gpu", "down", "up"]);
         assert!(!serde_json::to_string(&settings).unwrap().contains("\"items\":[\""));
     }
 }

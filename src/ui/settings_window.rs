@@ -2807,9 +2807,13 @@ impl Ui {
                 }
                 rows.extend([Row::Slider(Field::OverlaySize), Row::Slider(Field::OverlayClear)]);
                 // What it shows, group by group, as the panel's modules are.
-                // (A battery's only on a machine that has shown one.)
-                let battery = crate::app().controller.seen.lock().unwrap().battery;
-                for entry in self.settings.overlay.groups.iter().filter(|entry| battery || entry.id != "battery") {
+                // (A battery's only on a machine that has shown one, the drives' only where one has told its
+                // temperature.)
+                let (battery, drives) = {
+                    let seen = crate::app().controller.seen.lock().unwrap();
+                    (seen.battery, !seen.drives.is_empty())
+                };
+                for entry in self.settings.overlay.groups.iter().filter(|entry| (battery || entry.id != "battery") && (drives || entry.id != "drives")) {
                     let id = format!("{OVERLAY}{}", entry.id);
                     rows.push(Row::Module(id.clone()));
                     if self.opened(&id) > 0.0 {
@@ -4225,8 +4229,10 @@ impl Ui {
                 "gpu" => ("GPU".into(), None),
                 "memory" => (p("内存", "Memory"), None),
                 "vram" => (p("显存", "Video memory"), None),
+                "drives" => (p("磁盘温度", "Drive temperature"), Some(p("磁盘编号与“磁盘管理”中的一致", "Disks are numbered as Disk Management numbers them"))),
                 "network" => (p("网速", "Network"), None),
                 "clock" => (p("时间", "Time"), None),
+                "played" => (p("游玩时长", "Time played"), Some(p("本次游戏的时长，精确到秒。没有游戏运行时显示“—”", "This session's length, to the second. “—” while no game runs"))),
                 "battery" => (p("电池", "Battery"), None),
                 _ => (p("麦克风", "Microphone"), Some(p("默认麦克风是否静音", "Whether the default microphone is muted"))),
             };
@@ -4334,10 +4340,14 @@ impl Ui {
         if id == "station" {
             return ["history", "recent"].map(String::from).to_vec();
         }
-        // An overlay's group of one item has no card: its switch is the item's.
+        // An overlay's group of one item has no card: its switch is the item's. (The drives': one for each drive
+        // that has told its temperature.)
         if let Some(group) = id.strip_prefix(OVERLAY) {
-            let items = super::overlay::GROUPS.iter().find(|(g, _)| *g == group).map_or(&[][..], |(_, items)| *items);
-            return if items.len() > 1 { items.iter().map(|(name, _)| name.to_string()).collect() } else { Vec::new() };
+            let items: Vec<String> = match group {
+                "drives" => crate::app().controller.seen.lock().unwrap().drives.iter().map(|(id, _)| super::overlay::drive_item(*id)).collect(),
+                _ => super::overlay::GROUPS.iter().find(|(g, _)| *g == group).map_or(Vec::new(), |(_, items)| items.iter().map(|(name, _)| name.to_string()).collect()),
+            };
+            return if items.len() > 1 { items } else { Vec::new() };
         }
         let app = crate::app();
         let seen = app.controller.seen.lock().unwrap();
@@ -4418,6 +4428,12 @@ impl Ui {
         match name.split_once(':') {
             // A drive, by its letter.
             Some(("volumes", volume)) => (Cow::Owned(volume.to_string()), None),
+            // A disk, by its number and its name.
+            Some(("drive", number)) => {
+                let named = crate::app().controller.seen.lock().unwrap().drives.iter().find(|(id, _)| id.to_string() == number).map(|(_, name)| name.clone());
+                let disk = format!("{} {number}", pick(self.lang, "磁盘", "Disk"));
+                (Cow::Owned(named.map_or(disk.clone(), |name| format!("{disk} · {name}"))), None)
+            }
             // One of the board's sensors, by its name on the panel.
             Some((group, sensor)) => (Cow::Owned(super::view::board_sensor(sensor, group, self.lang)), None),
             None => {
@@ -4449,6 +4465,8 @@ impl Ui {
             ("overlay", "down") => (p("下载", "Download"), None),
             ("overlay", "up") => (p("上传", "Upload"), None),
             ("overlay", "battery") => (p("电量", "Charge"), None),
+            ("overlay", "memory" | "vram") => (p("已用", "In use"), None),
+            ("overlay", "memory_percent" | "vram_percent") => (p("占用百分比", "Percent used"), None),
             ("overlay", "battery_power") => (p("功率", "Power"), Some(p("充电或放电的功率", "Watts going in or out"))),
             ("overlay", _) if name.ends_with("_temp") => (p("温度", "Temperature"), None),
             ("overlay", _) if name.ends_with("_power") => (p("功耗", "Power"), None),
@@ -6317,7 +6335,9 @@ impl Ui {
                 stroke_inside(frame, area, 8.0, self.palette.card_stroke);
                 return;
             };
-            super::overlay::preview(&sample, &overlay.chosen(), self.lang)
+            let app = crate::app();
+            let drives: Vec<u32> = app.controller.seen.lock().unwrap().drives.iter().map(|(id, _)| *id).collect();
+            super::overlay::preview(&sample, &app.info(), &overlay.chosen(&drives), self.lang)
         };
         let frames = super::overlay::preview_frames();
         let (sw, sh) = self.stage.size;

@@ -324,7 +324,9 @@ impl Overlay {
         let game = sample.and_then(|s| s.game.as_ref()).filter(|game| playing || game.by_hand);
         // (One taken by hand does not bring the overlay up: shown where it is up, its frames are.)
         let framed = playing || game.is_some();
-        let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, game, framed, &settings.chosen(), lang)).unwrap_or_default();
+        let drives: Vec<u32> = crate::app().controller.seen.lock().unwrap().drives.iter().map(|(id, _)| *id).collect();
+        let info = crate::app().info();
+        let readings = sample.filter(|_| wanted).map(|s| overlay::readings(s, &info, game, framed, &settings.chosen(&drives), lang)).unwrap_or_default();
         if readings.is_empty() {
             return self.hide();
         }

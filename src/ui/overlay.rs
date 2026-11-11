@@ -10,23 +10,36 @@ use serde::{Deserialize, Serialize};
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
 use super::prefs::ModuleEntry;
 use super::text::{self, Lang};
-use crate::reading::{GameSample, Sample};
+use crate::reading::{GameSample, Sample, StaticInfo};
 
 /// What the overlay can show, group by group (a group is one reading, a
 /// tile on the card), in the order it shows them unless they are moved: a
 /// group's id, and its items, each with whether it is shown by default. The
 /// first item chosen of a group is its main figure; the rest follow it.
-pub const GROUPS: [(&str, &[(&str, bool)]); 9] = [
+/// The drives' group has an item for each drive that tells its temperature
+/// (see `DRIVE`), each shown unless turned off.
+pub const GROUPS: [(&str, &[(&str, bool)]); 11] = [
     ("frames", &[("fps", true), ("low", true), ("frametime", false)]),
     ("cpu", &[("cpu", true), ("cpu_temp", true), ("cpu_power", false)]),
     ("gpu", &[("gpu", true), ("gpu_temp", true), ("gpu_power", false)]),
-    ("memory", &[("memory", true)]),
-    ("vram", &[("vram", true)]),
+    ("memory", &[("memory", true), ("memory_percent", false)]),
+    ("vram", &[("vram", true), ("vram_percent", false)]),
+    ("drives", &[]),
     ("network", &[("down", true), ("up", true)]),
     ("battery", &[("battery", true), ("battery_power", true)]),
     ("mic", &[("mic", true)]),
     ("clock", &[("time", true)]),
+    ("played", &[("played", true)]),
 ];
+
+/// What a drive's item in the drives' group is named: this, and the drive's
+/// number (as Windows numbers its disks).
+pub const DRIVE: &str = "drive:";
+
+/// The item of drive `id` in the drives' group.
+pub fn drive_item(id: u32) -> String {
+    format!("{DRIVE}{id}")
+}
 
 /// The groups shown at first.
 const GROUPS_ON: [&str; 3] = ["frames", "cpu", "gpu"];
@@ -74,17 +87,22 @@ pub fn carried_over(items: &[String]) -> Vec<ModuleEntry> {
     groups
 }
 
+/// Whether item `name` of group `id` is shown by default: a drive's is.
+fn shown_at_first(id: &str, name: &str) -> bool {
+    name.starts_with(DRIVE) || group_items(id).iter().any(|(item, on)| *item == name && *on)
+}
+
 /// Whether group `id` shows item `name` (while it is on): as chosen, or as
 /// it is by default.
 pub fn shows(groups: &[ModuleEntry], id: &str, name: &str) -> bool {
     let chosen = groups.iter().find(|entry| entry.id == id).and_then(|entry| entry.items.get(name).copied());
-    chosen.unwrap_or_else(|| group_items(id).iter().any(|(item, on)| *item == name && *on))
+    chosen.unwrap_or_else(|| shown_at_first(id, name))
 }
 
 /// Group `id` to show item `name`, or not; only what differs from the
 /// default is kept.
 pub fn set_item(groups: &mut [ModuleEntry], id: &str, name: &str, on: bool) {
-    let default = group_items(id).iter().any(|(item, shown)| *item == name && *shown);
+    let default = shown_at_first(id, name);
     if let Some(entry) = groups.iter_mut().find(|entry| entry.id == id) {
         if on == default {
             entry.items.remove(name);
@@ -95,17 +113,27 @@ pub fn set_item(groups: &mut [ModuleEntry], id: &str, name: &str, on: bool) {
 }
 
 /// The items `groups` show, group by group in their order: those chosen of
-/// each group that is on.
-pub fn chosen(groups: &[ModuleEntry]) -> Vec<&'static str> {
+/// each group that is on; of the drives' group, those of `drives` (by
+/// number, the drives that have told their temperature).
+pub fn chosen(groups: &[ModuleEntry], drives: &[u32]) -> Vec<String> {
     groups
         .iter()
         .filter(|entry| entry.on)
-        .flat_map(|entry| group_items(&entry.id).iter().map(|(name, _)| *name).filter(|name| shows(groups, &entry.id, name)))
+        .flat_map(|entry| {
+            let names: Vec<String> = match entry.id.as_str() {
+                "drives" => drives.iter().map(|&id| drive_item(id)).collect(),
+                id => group_items(id).iter().map(|(name, _)| name.to_string()).collect(),
+            };
+            names.into_iter().filter(|name| shows(groups, &entry.id, name))
+        })
         .collect()
 }
 
 /// The group item `name` is of.
 fn group_of(name: &str) -> Option<&'static str> {
+    if name.starts_with(DRIVE) {
+        return Some("drives");
+    }
     GROUPS.iter().find(|(_, items)| items.iter().any(|(item, _)| *item == name)).map(|(id, _)| *id)
 }
 
@@ -281,6 +309,7 @@ const RATE: Form = Form {
     split: &[("999", "B/s"), ("99.9", "KB/s"), ("999", "KB/s"), ("99.9", "MB/s"), ("999", "MB/s"), ("99.9", "GB/s")],
 };
 const TIME: Form = Form { whole: &["00:00"], split: &[("00:00", "")] };
+const PLAYED: Form = Form { whole: &["00:00:00"], split: &[("00:00:00", "")] };
 const TIME_OF_TWELVE: Form = Form { whole: &["12:00 PM", "12:00 下午"], split: &[("12:00", "PM"), ("12:00", "下午")] };
 const MIC_ZH: Form = Form { whole: &["已静音", "开启"], split: &[("已静音", ""), ("开启", "")] };
 const MIC_EN: Form = Form { whole: &["Muted", "On"], split: &[("Muted", ""), ("On", "")] };
@@ -337,20 +366,23 @@ fn reading(kind: Kind, name: &str, parts: Vec<Option<Part>>) -> Option<Reading> 
     })
 }
 
-/// What the overlay shows of sample `s`, reading by reading: the `items`
-/// chosen that are read, a group's together, the groups in the order the
-/// items have them. A game's readings are `game`'s while one is `playing`,
-/// "—" otherwise or while it presents no frames for a moment (it lost the
-/// front to a menu, it loads), so that they hold their place.
-pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&str], lang: Lang) -> Vec<Reading> {
-    let on = |name: &str| items.contains(&name);
+/// What the overlay shows of sample `s` (of the machine `info` tells), reading by reading: the `items` chosen that are
+/// read, a group's together, the groups in the order the items have them. A game's readings are `game`'s while one is
+/// `playing`, "—" otherwise or while it presents no frames for a moment (it lost the front to a menu, it loads), so
+/// that they hold their place.
+pub fn readings(s: &Sample, info: &StaticInfo, game: Option<&GameSample>, playing: bool, items: &[impl AsRef<str>], lang: Lang) -> Vec<Reading> {
+    let on = |name: &str| items.iter().any(|item| item.as_ref() == name);
     let celsius = |t: f32| format!("{t:.0} °C");
     let watts = |w: f32| format!("{w:.0} W");
+    // Of `total`, the share `used` is.
+    let share = |used: u64, total: u64| (total > 0).then(|| text::percent(used as f32 / total as f32 * 100.0));
     // The GPU the game uses, or the busiest.
-    let gpu = game
+    let gpu_at = game
         .and_then(|game| game.gpu_index)
-        .and_then(|i| s.gpus.get(i))
-        .or_else(|| s.gpus.iter().max_by(|a, b| a.usage.unwrap_or(0.0).total_cmp(&b.usage.unwrap_or(0.0))));
+        .filter(|&i| i < s.gpus.len())
+        .or_else(|| (0..s.gpus.len()).max_by(|&a, &b| s.gpus[a].usage.unwrap_or(0.0).total_cmp(&s.gpus[b].usage.unwrap_or(0.0))));
+    let gpu = gpu_at.map(|i| &s.gpus[i]);
+    let vram_total = gpu_at.and_then(|i| info.gpus.get(i)).map_or(0, |gpu| gpu.mem_total);
     let cpu_sensors = s.cpu_sensors.as_ref();
     let rate = |rate: Option<f64>| rate.map(|rate| text::rate(rate, false));
     let chosen = |name: &str, value: Option<String>, form: &'static Form| on(name).then_some(value).flatten().map(|value| part(value, form));
@@ -385,8 +417,28 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                     chosen("gpu_power", gpu.and_then(|g| g.power).map(watts), &WATTS),
                 ],
             )],
-            "memory" => vec![reading(Kind::Memory, lang.pick("内存", "RAM"), vec![chosen("memory", Some(text::size(s.memory.used)), &SIZE)])],
-            "vram" => vec![reading(Kind::Memory, lang.pick("显存", "VRAM"), vec![chosen("vram", gpu.and_then(|g| g.mem_used).map(text::size), &SIZE)])],
+            "memory" => vec![reading(
+                Kind::Memory,
+                lang.pick("内存", "RAM"),
+                vec![chosen("memory", Some(text::size(s.memory.used)), &SIZE), chosen("memory_percent", share(s.memory.used, info.mem_total), &PERCENT)],
+            )],
+            "vram" => vec![reading(
+                Kind::Memory,
+                lang.pick("显存", "VRAM"),
+                vec![chosen("vram", gpu.and_then(|g| g.mem_used).map(text::size), &SIZE), chosen("vram_percent", gpu.and_then(|g| g.mem_used).and_then(|used| share(used, vram_total)), &PERCENT)],
+            )],
+            // Each drive chosen a reading of its own, numbered as Windows numbers it where there is more than one.
+            "drives" => {
+                let several = s.drive_temps.len() > 1;
+                s.drive_temps
+                    .iter()
+                    .filter(|drive| on(&drive_item(drive.id)))
+                    .map(|drive| {
+                        let name = if several { format!("{} {}", lang.pick("磁盘", "Disk"), drive.id) } else { lang.pick("磁盘", "Disk").to_string() };
+                        reading(Kind::Memory, &name, vec![Some(part(celsius(drive.celsius), &CELSIUS))])
+                    })
+                    .collect()
+            }
             // Each way a reading of its own: neither is the other's detail.
             "network" => vec![
                 reading(Kind::Network, lang.pick("下载", "Down"), vec![chosen("down", rate(s.net_down), &RATE)]),
@@ -405,6 +457,8 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
                 let written = if half.is_empty() { figure } else { format!("{figure} {half}") };
                 vec![reading(Kind::Clock, lang.pick("时间", "Time"), vec![chosen("time", Some(written), if twelve { &TIME_OF_TWELVE } else { &TIME })])]
             }
+            // How long the game has been played, to the second ("—" with none played).
+            "played" => vec![reading(Kind::Clock, lang.pick("时长", "Played"), vec![chosen("played", Some(game.map_or("—".into(), |game| text::played(game.playing_s))), &PLAYED)])],
             _ => vec![s.mic_muted.filter(|_| on("mic")).and_then(|muted| {
                 let value = if muted { lang.pick("已静音", "Muted") } else { lang.pick("开启", "On") };
                 let form = if lang == Lang::Zh { &MIC_ZH } else { &MIC_EN };
@@ -413,7 +467,7 @@ pub fn readings(s: &Sample, game: Option<&GameSample>, playing: bool, items: &[&
         }
     };
     let mut groups: Vec<&str> = Vec::new();
-    for id in items.iter().filter_map(|item| group_of(item)) {
+    for id in items.iter().filter_map(|item| group_of(item.as_ref())) {
         if !groups.contains(&id) {
             groups.push(id);
         }
@@ -439,7 +493,7 @@ pub fn frames<'a>(history: impl DoubleEndedIterator<Item = &'a Sample>, playing:
 /// What the overlay would show of sample `s` over a game: its game's
 /// readings, or with none running, an example game's, for the settings'
 /// preview.
-pub fn preview(s: &Sample, items: &[&str], lang: Lang) -> Vec<Reading> {
+pub fn preview(s: &Sample, info: &StaticInfo, items: &[impl AsRef<str>], lang: Lang) -> Vec<Reading> {
     let example = GameSample {
         name: String::new(),
         program: String::new(),
@@ -455,10 +509,10 @@ pub fn preview(s: &Sample, items: &[&str], lang: Lang) -> Vec<Reading> {
         mem: None,
         vram: None,
         gpu_limit: None,
-        playing_s: 0,
+        playing_s: 47 * 60 + 12,
         by_hand: false,
     };
-    readings(s, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
+    readings(s, info, Some(s.game.as_ref().unwrap_or(&example)), true, items, lang)
 }
 
 /// An example of the frame rate's course, for the preview.
@@ -1033,6 +1087,10 @@ mod tests {
         names.to_vec()
     }
 
+    fn info() -> StaticInfo {
+        crate::ui::view::tests::info()
+    }
+
     /// The overlay, its buttons and a slider's knob come out the same, pixel for pixel, wherever in the compositor's
     /// atlas their surface is handed a region (its place there, in DIPs, rarely exact): no part of them moves by a
     /// pixel, nor apart from another, as the frames go (the overlay's words shook, and its buttons' rings moved off
@@ -1045,7 +1103,7 @@ mod tests {
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let mut s = sample(true);
         s.cpu = Some(49.0);
-        let readings = readings(&s, s.game.as_ref(), false, &items(&["frames", "cpu", "gpu"]), Lang::Zh);
+        let readings = readings(&s, &info(), s.game.as_ref(), false, &items(&["frames", "cpu", "gpu"]), Lang::Zh);
         let shape = Shape { layout: Layout::Strip, rows: 1, width: f32::INFINITY };
         let glass = Glass { tone: Tone::Dark, opacity: 0.6, presence: 1.0 };
         let (w, h) = (240u32, 64u32);
@@ -1082,30 +1140,30 @@ mod tests {
         // Unread readings left out, not shown as gaps (no CPU heat, no
         // GPU); but a game's 1% low keeps its place, a dash till it is known.
         assert_eq!(
-            plain(readings(&s, s.game.as_ref(), true, &chosen, Lang::Zh)),
+            plain(readings(&s, &info(), s.game.as_ref(), true, &chosen, Lang::Zh)),
             [s4("帧率", "144", "", "1% — · 9.3 ms"), s4("CPU", "40", "%", ""), s4("内存", "8.0", "GB", "")]
         );
         // Without a game, the frame rate is a dash, in its place.
         let s = sample(false);
         assert_eq!(
-            plain(readings(&s, None, false, &items(&["fps", "low", "cpu"]), Lang::En)),
+            plain(readings(&s, &info(), None, false, &items(&["fps", "low", "cpu"]), Lang::En)),
             [s4("FPS", "—", "", "1% —"), s4("CPU", "40", "%", "")]
         );
         // The battery: its charge, then what goes in (marked so) or out.
         let mut s = sample(false);
         s.battery = Some(crate::reading::BatterySample { percent: 76, charging: false, plugged: false, seconds_left: None, watts: Some(-14.6), health: None });
-        assert_eq!(plain(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::Zh)), [s4("电池", "76", "%", "15 W")]);
+        assert_eq!(plain(readings(&s, &info(), None, false, &items(&["battery", "battery_power"]), Lang::Zh)), [s4("电池", "76", "%", "15 W")]);
         s.battery = Some(crate::reading::BatterySample { percent: 40, charging: true, plugged: true, seconds_left: None, watts: Some(30.2), health: None });
-        assert_eq!(plain(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::En)), [s4("Battery", "40", "%", "+30 W")]);
+        assert_eq!(plain(readings(&s, &info(), None, false, &items(&["battery", "battery_power"]), Lang::En)), [s4("Battery", "40", "%", "+30 W")]);
         // None, nothing of it.
         s.battery = None;
-        assert!(readings(&s, None, false, &items(&["battery", "battery_power"]), Lang::En).is_empty());
+        assert!(readings(&s, &info(), None, false, &items(&["battery", "battery_power"]), Lang::En).is_empty());
         let s = sample(false);
         // A muted microphone, to be heeded.
-        let mic = readings(&s, None, false, &items(&["mic"]), Lang::En);
+        let mic = readings(&s, &info(), None, false, &items(&["mic"]), Lang::En);
         assert_eq!((mic[0].figure.as_str(), mic[0].hot), ("Muted", true));
         // The time of day: hours and minutes, of a 24-hour clock.
-        let time = readings(&s, None, false, &items(&["time"]), Lang::En);
+        let time = readings(&s, &info(), None, false, &items(&["time"]), Lang::En);
         let figure = time[0].figure.as_bytes();
         assert_eq!((time[0].name.as_str(), figure.len(), figure[2]), ("Time", 5, b':'));
         assert!([0, 1, 3, 4].iter().all(|at| figure[*at].is_ascii_digit()) && time[0].unit.is_empty());
@@ -1113,11 +1171,59 @@ mod tests {
         let mut s = sample(false);
         s.net_down = Some(2048.0);
         s.net_up = Some(10.0);
-        let net = readings(&s, None, false, &items(&["down", "up"]), Lang::En);
+        let net = readings(&s, &info(), None, false, &items(&["down", "up"]), Lang::En);
         assert_eq!(plain(net), [s4("Down", "2.0", "KB/s", ""), s4("Up", "10", "B/s", "")]);
         // In the order of the items' groups.
-        let moved = readings(&s, None, false, &items(&["memory", "cpu"]), Lang::En);
+        let moved = readings(&s, &info(), None, false, &items(&["memory", "cpu"]), Lang::En);
         assert_eq!(moved.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["RAM", "CPU"]);
+    }
+
+    /// Memory and video memory as a share of what the machine has, alone or after what is used; none where the
+    /// machine does not say how much it has.
+    #[test]
+    fn tells_memory_as_a_share() {
+        let s4 = |a: &str, b: &str, c: &str, d: &str| (a.to_string(), b.to_string(), c.to_string(), d.to_string());
+        let mut s = sample(false);
+        s.gpus = vec![crate::reading::GpuSample { mem_used: Some(256 << 20), ..Default::default() }];
+        // 2 GB of the test machine's 4 GB, and 256 MB of its card's 1 GB.
+        s.memory.used = 2 << 30;
+        assert_eq!(plain(readings(&s, &info(), None, false, &items(&["memory", "memory_percent"]), Lang::En)), [s4("RAM", "2.0", "GB", "50%")]);
+        assert_eq!(plain(readings(&s, &info(), None, false, &items(&["memory_percent", "vram_percent"]), Lang::Zh)), [s4("内存", "50", "%", ""), s4("显存", "25", "%", "")]);
+        let none = StaticInfo { mem_total: 0, gpus: Vec::new(), ..info() };
+        assert!(readings(&s, &none, None, false, &items(&["memory_percent", "vram_percent"]), Lang::En).is_empty());
+    }
+
+    /// Each drive chosen that tells its temperature a reading of its own, numbered as Windows numbers its disks where
+    /// there is more than one; one turned off left out. Every drive is shown at first.
+    #[test]
+    fn shows_each_drive_chosen_by_its_number() {
+        use crate::reading::DriveTemperature;
+        let s4 = |a: &str, b: &str, c: &str, d: &str| (a.to_string(), b.to_string(), c.to_string(), d.to_string());
+        let mut s = sample(false);
+        s.drive_temps = vec![DriveTemperature { id: 0, name: "NVMe".into(), celsius: 41.4 }, DriveTemperature { id: 2, name: "SATA".into(), celsius: 35.0 }];
+        let mut groups = default_groups();
+        groups.iter_mut().filter(|entry| entry.id != "drives").for_each(|entry| entry.on = false);
+        groups.iter_mut().find(|entry| entry.id == "drives").unwrap().on = true;
+        let shown = |groups: &[ModuleEntry], s: &Sample| plain(readings(s, &info(), None, false, &chosen(groups, &[0, 2]), Lang::Zh));
+        assert_eq!(shown(&groups, &s), [s4("磁盘 0", "41", "°C", ""), s4("磁盘 2", "35", "°C", "")]);
+        set_item(&mut groups, "drives", &drive_item(2), false);
+        assert_eq!(chosen(&groups, &[0, 2]), ["drive:0"]);
+        assert_eq!(shown(&groups, &s), [s4("磁盘 0", "41", "°C", "")]);
+        // A machine with one drive: not numbered.
+        s.drive_temps.truncate(1);
+        assert_eq!(plain(readings(&s, &info(), None, false, &items(&["drive:0"]), Lang::En)), [s4("Disk", "41", "°C", "")]);
+    }
+
+    /// The time the game has been played, to the second, its hours always written; a dash with none played.
+    #[test]
+    fn tells_the_time_played_to_the_second() {
+        assert_eq!([0, 47 * 60 + 12, 2 * 3600 + 3 * 60 + 4, 12 * 3600 + 34].map(text::played), ["00:00:00", "00:47:12", "02:03:04", "12:00:34"]);
+        let mut s = sample(true);
+        s.game.as_mut().unwrap().playing_s = 47 * 60 + 12;
+        let played = readings(&s, &info(), s.game.as_ref(), true, &items(&["played"]), Lang::En);
+        assert_eq!((played[0].name.as_str(), played[0].figure.as_str()), ("Played", "00:47:12"));
+        let s = sample(false);
+        assert_eq!(readings(&s, &info(), None, false, &items(&["played"]), Lang::Zh)[0].figure, "—");
     }
 
     #[test]
@@ -1127,10 +1233,10 @@ mod tests {
         let line = |_: Font| (8.0, 2.0);
         let m = Metrics { width: &width, line: &line };
         let mut s = sample(false);
-        let few = readings(&s, None, false, &items(&["cpu", "memory"]), Lang::En);
+        let few = readings(&s, &info(), None, false, &items(&["cpu", "memory"]), Lang::En);
         s.cpu = Some(100.0);
         s.memory.used = 999 << 30;
-        let many = readings(&s, None, false, &items(&["cpu", "memory"]), Lang::En);
+        let many = readings(&s, &info(), None, false, &items(&["cpu", "memory"]), Lang::En);
         let card = Shape { layout: Layout::Card, rows: 1, width: f32::INFINITY };
         let strip = |rows| Shape { layout: Layout::Strip, rows, width: f32::INFINITY };
         for shape in [card, strip(1), strip(2)] {
@@ -1153,18 +1259,18 @@ mod tests {
     #[test]
     fn groups_show_their_items_in_their_order() {
         let mut groups = default_groups();
-        assert_eq!(chosen(&groups), ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"]);
+        assert_eq!(chosen(&groups, &[]), ["fps", "low", "cpu", "cpu_temp", "gpu", "gpu_temp"]);
         // Moved, switched, and an item chosen.
         groups.swap(0, 1);
         groups[2].on = false;
         set_item(&mut groups, "cpu", "cpu_power", true);
-        assert_eq!(chosen(&groups), ["cpu", "cpu_temp", "cpu_power", "fps", "low"]);
+        assert_eq!(chosen(&groups, &[]), ["cpu", "cpu_temp", "cpu_power", "fps", "low"]);
         // Only what differs from the default is kept.
         set_item(&mut groups, "cpu", "cpu_power", false);
         assert!(groups[0].items.is_empty());
         // The choices of 0.2.1 and before carried over.
         let old = ["fps", "cpu", "network", "mic"].map(String::from);
-        assert_eq!(chosen(&carried_over(&old)), ["fps", "cpu", "down", "up", "mic"]);
+        assert_eq!(chosen(&carried_over(&old), &[]), ["fps", "cpu", "down", "up", "mic"]);
         // Every group once, known ones only.
         let mut odd = vec![ModuleEntry { id: "mic".into(), on: true, items: Default::default() }, ModuleEntry { id: "gone".into(), on: true, items: Default::default() }];
         complete(&mut odd);
