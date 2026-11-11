@@ -117,11 +117,12 @@ const GIGABYTE_IT8696E: Layout = Layout {
 };
 
 /// Gigabyte's B760M GAMING WIFI6 PLUS GEN5, an Intel board with an IT8689E, wires its first five temperature inputs
-/// and its first fan header as the AM5 boards do, and its sixth input to an auxiliary sensor (as AIDA64 named each of
-/// them, read beside Glance on that board). Its other fan headers keep their numbers, what they are wired to not seen.
+/// and its first four fan headers as the AM5 boards do, and its sixth input to an auxiliary sensor (as AIDA64 named each
+/// of them, read beside Glance on that board, its second header turning as its first case fan; the third and fourth the
+/// case fans after it, as its owner told). Its other fan headers keep their numbers, what they are wired to not seen.
 const GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5: Layout = Layout {
     temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm", "aux"],
-    fans: &["cpu_fan"],
+    fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3"],
 };
 
 /// MSI's boards with an NCT6687D wire its first seven monitoring channels
@@ -712,8 +713,9 @@ mod tests {
     }
 
     /// The B760M GAMING WIFI6 PLUS GEN5's inputs shown as AIDA64 named them on that board: its sixth an auxiliary
-    /// sensor, not the SoC's supply an AM5 board has there, and its fan headers past the CPU's by their numbers.
-    /// Gigabyte's other Intel boards with the same chip keep the inputs' numbers.
+    /// sensor, not the SoC's supply an AM5 board has there, and its fan headers the CPU's and the case's in turn (its
+    /// second, shown as "风扇 2", AIDA64's first case fan). Gigabyte's other Intel boards with the same chip keep the
+    /// inputs' numbers.
     #[test]
     fn names_the_b760m_gaming_wifi6_plus_gen5s_inputs() {
         use crate::ui::text::Lang;
@@ -722,10 +724,15 @@ mod tests {
         let board = super::layout(gigabyte, "B760M GAMING WIFI6 PLUS GEN5", 0x8689).expect("the B760M GAMING WIFI6 PLUS GEN5's wiring");
         let shown = |lang| {
             let temps: Vec<String> = board.temps.iter().map(|name| board_sensor(name, "temps", lang)).collect();
-            (temps, board_sensor(board.fans[0], "fans", lang), board.fans.len())
+            let fans: Vec<String> = board.fans.iter().map(|name| board_sensor(name, "fans", lang)).collect();
+            (temps, fans)
         };
-        assert_eq!(shown(Lang::Zh), (["系统", "芯片组", "CPU", "PCIe x16 插槽", "VRM 供电", "辅助传感器"].map(String::from).to_vec(), "CPU 风扇".to_string(), 1));
-        assert_eq!(shown(Lang::En), (["System", "Chipset", "CPU", "PCIe x16 slot", "VRM", "Auxiliary sensor"].map(String::from).to_vec(), "CPU fan".to_string(), 1));
+        let (temps, fans) = shown(Lang::Zh);
+        assert_eq!(temps, ["系统", "芯片组", "CPU", "PCIe x16 插槽", "VRM 供电", "辅助传感器"]);
+        assert_eq!(fans, ["CPU 风扇", "系统风扇 1", "系统风扇 2", "系统风扇 3"]);
+        let (temps, fans) = shown(Lang::En);
+        assert_eq!(temps, ["System", "Chipset", "CPU", "PCIe x16 slot", "VRM", "Auxiliary sensor"]);
+        assert_eq!(fans, ["CPU fan", "System fan 1", "System fan 2", "System fan 3"]);
         for other in ["B760M GAMING X AX", "B760M AORUS ELITE AX", "Z790 AORUS ELITE AX", "B660M GAMING X DDR4"] {
             assert!(super::layout(gigabyte, other, 0x8689).is_none(), "{other}");
         }
