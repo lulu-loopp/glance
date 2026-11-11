@@ -463,11 +463,9 @@ pub fn run() {
             }
             std::process::exit(0);
         }
-        [_, flag, folder, payload] if flag == "--install" || flag == "--install-anyway" => {
-            // "anyway": the user chose an unprotected place all the same.
-            let anyway = flag == "--install-anyway";
-            done(elevation::install_into(std::path::Path::new(folder), std::path::Path::new(payload), anyway))
-        }
+        [_, flag, folder, payload] if flag == "--install" => done(elevation::install_into(std::path::Path::new(folder), std::path::Path::new(payload))),
+        // Once installed in `now`, the earlier Glance in another folder taken out (see `elevation::moved_from`).
+        [_, flag, earlier, now] if flag == "--moved-from" => done(elevation::moved_from(std::path::Path::new(earlier), std::path::Path::new(now))),
         _ => {}
     }
     // Started elevated with Glance running already: by an earlier version's launch task, which started `glance.exe`

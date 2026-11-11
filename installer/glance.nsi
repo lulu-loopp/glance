@@ -58,7 +58,6 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_PAGE_CUSTOMFUNCTION_SHOW FinishShow
 !insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
@@ -67,8 +66,12 @@ VIAddVersionKey "LegalCopyright" "${PUBLISHER}"
 !insertmacro MUI_LANGUAGE "English"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 
-LangString OpenFolderAsk ${LANG_SIMPCHINESE} "所选位置不受保护。$\r$\n$\r$\n该位置的上级文件夹可由普通程序重命名或更改权限，因此安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n为确保安全，安装在此处后：$\r$\n　· 每次启动 Glance 都需要确认管理员权限；$\r$\n　· 无法启用“开机时启动”。$\r$\n$\r$\n建议安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。$\r$\n$\r$\n是否仍要安装到此位置？"
-LangString OpenFolderAsk ${LANG_ENGLISH} "The selected location is not protected.$\r$\n$\r$\nA folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nTo keep it safe, when installed here:$\r$\n  · Glance asks for administrator rights at every start;$\r$\n  · $\"Start with Windows$\" cannot be turned on.$\r$\n$\r$\nInstalling to Program Files, or to a new folder at the root of a drive (for example D:\Glance), is recommended.$\r$\n$\r$\nInstall to this location anyway?"
+LangString OpenFolderRefused ${LANG_SIMPCHINESE} "无法安装到所选位置。$\r$\n$\r$\n所选位置不受保护：它的上级文件夹可由普通程序重命名或更改权限，安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n请安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。"
+LangString OpenFolderRefused ${LANG_ENGLISH} "Glance cannot be installed to the selected location.$\r$\n$\r$\nThe location is not protected: a folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed here could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nInstall to Program Files, or to a new folder at the root of a drive (for example D:\Glance)."
+LangString EarlierOpen ${LANG_SIMPCHINESE} "当前安装的 Glance 位于不受保护的位置，此版本不能再安装到该位置。$\r$\n$\r$\n该位置的上级文件夹可由普通程序重命名或更改权限，安装在此处的 Glance 可能被其他程序替换，并在以管理员身份运行时被利用。$\r$\n$\r$\n安装到新位置后，原位置中的 Glance 将被移除，设置保持不变。"
+LangString EarlierOpen ${LANG_ENGLISH} "The installed copy of Glance is in a location that is not protected, and this version can no longer be installed there.$\r$\n$\r$\nA folder above it can be renamed or have its permissions changed by ordinary programs, so a copy of Glance installed there could be replaced by another program and misused when it runs with administrator rights.$\r$\n$\r$\nOnce Glance is installed to a new location, the copy in the old location is removed. Settings are kept."
+LangString EarlierLeft ${LANG_SIMPCHINESE} "Glance 已安装到新位置，但原位置中的部分文件未能删除。可稍后手动删除以下文件夹：$\r$\n$Earlier"
+LangString EarlierLeft ${LANG_ENGLISH} "Glance has been installed to the new location, but some files in the old location could not be removed. You can delete this folder later:$\r$\n$Earlier"
 LangString OpenFolderStop ${LANG_SIMPCHINESE} "所选位置不受保护，安装已停止。$\r$\n$\r$\n请安装到 Program Files，或磁盘根目录下的新文件夹（例如 D:\Glance）。"
 LangString OpenFolderStop ${LANG_ENGLISH} "The selected location is not protected; installation has stopped.$\r$\n$\r$\nInstall to Program Files, or to a new folder at the root of a drive (for example D:\Glance)."
 LangString OccupiedFolder ${LANG_SIMPCHINESE} "无法安装到所选文件夹。$\r$\n$\r$\n该文件夹已存在，且不是仅管理员可修改的早期 Glance 安装：其他程序可能已改动其中的内容，以管理员身份向其中写入文件并不安全。$\r$\n$\r$\n请选择一个尚不存在的新文件夹（例如 D:\Glance），或先删除该文件夹。"
@@ -79,8 +82,6 @@ LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件�
 LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder, and installation has stopped. The version installed before is unchanged."
 LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除。Glance 仍保留在已安装的应用中，关闭占用这些文件的程序后，可再次卸载。$\r$\n$INSTDIR"
 LangString RemoveFailed ${LANG_ENGLISH} "Some files in the following folder could not be removed. Glance remains among the installed apps, and can be uninstalled again once the programs using these files are closed.$\r$\n$INSTDIR"
-LangString BackToDefaultNo ${LANG_SIMPCHINESE} "选择“否”将恢复为默认位置：$PROGRAMFILES64\${NAME}"
-LangString BackToDefaultNo ${LANG_ENGLISH} "Choose No to return to the default location: $PROGRAMFILES64\${NAME}"
 LangString BackToDefaultOk ${LANG_SIMPCHINESE} "点击“确定”后将恢复为默认位置：$PROGRAMFILES64\${NAME}"
 LangString BackToDefaultOk ${LANG_ENGLISH} "Clicking OK returns to the default location: $PROGRAMFILES64\${NAME}"
 LangString SettingsLeft ${LANG_SIMPCHINESE} "Glance 的设置文件正被其他程序占用，未能删除。可稍后手动删除以下文件夹：$\r$\n$APPDATA\dev.weiyi.glance"
@@ -117,6 +118,9 @@ Function StartAsUser
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\${EXE}"'
 FunctionEnd
 
+; Where an earlier Glance is installed, if one is.
+Var Earlier
+
 Function .onInit
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP "Glance needs 64-bit Windows."
@@ -126,11 +130,10 @@ Function .onInit
   ; Where an earlier Glance was put, so that installing again (an update)
   ; replaces it there. Read here, in the 64-bit view it was written in:
   ; InstallDirRegKey looks in the 32-bit one. A folder given with /D stands.
+  ReadRegStr $Earlier HKLM "${UNINSTALL_KEY}" "InstallLocation"
   ${If} $INSTDIR == "$PROGRAMFILES64\${NAME}"
-    ReadRegStr $0 HKLM "${UNINSTALL_KEY}" "InstallLocation"
-    ${If} $0 != ""
-      StrCpy $INSTDIR $0
-    ${EndIf}
+  ${AndIf} $Earlier != ""
+    StrCpy $INSTDIR $Earlier
   ${EndIf}
 FunctionEnd
 
@@ -154,9 +157,6 @@ FunctionEnd
   ${EndIf}
 !macroend
 
-; Whether the user chose to install in an unprotected place all the same.
-Var Anyway
-
 ; Why installing stopped, by the helper's answer: 1 a folder above can be
 ; changed by others, 2 the folder cannot be vouched for, 3 it is a link or
 ; a drive's root, 4 the files could not be put there.
@@ -173,19 +173,20 @@ Var Anyway
   Abort
 !macroend
 
-; An unprotected place is the user's call: told what it means, they may
-; install there all the same (No is the default). A folder that cannot be
-; vouched for, a link or a drive's root is refused.
+; A place that is not protected, a folder that cannot be vouched for, a link
+; or a drive's root is refused, and the default folder put back. An earlier
+; Glance installed somewhere not protected is told it moves.
 Function CheckFolder
-  StrCpy $Anyway 0
   !insertmacro Helper
   !insertmacro Ask '--check-install-folder "$INSTDIR"'
   ${If} $0 == 1
-    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "$(OpenFolderAsk)$\r$\n$\r$\n$(BackToDefaultNo)" /SD IDNO IDYES anyway
+    ${If} $INSTDIR == $Earlier
+      MessageBox MB_ICONEXCLAMATION "$(EarlierOpen)$\r$\n$\r$\n$(BackToDefaultOk)" /SD IDOK
+    ${Else}
+      MessageBox MB_ICONSTOP "$(OpenFolderRefused)$\r$\n$\r$\n$(BackToDefaultOk)" /SD IDOK
+    ${EndIf}
     Call BackToDefault
     Abort
-    anyway:
-    StrCpy $Anyway 1
   ${ElseIf} $0 == 2
     MessageBox MB_ICONSTOP "$(OccupiedFolder)$\r$\n$\r$\n$(BackToDefaultOk)" /SD IDOK
     Call BackToDefault
@@ -208,16 +209,6 @@ Function BackToDefault
   SendMessage $1 ${WM_SETTEXT} 0 "STR:$INSTDIR"
 FunctionEnd
 
-; Installed in an unprotected place, Glance is not started from the finish
-; page: started from there it would run with the installer's rights, from
-; a folder others could have swapped since. The user starts it as usual.
-Function FinishShow
-  ${If} $Anyway == 1
-    SendMessage $mui.FinishPage.Run ${BM_SETCHECK} ${BST_UNCHECKED} 0
-    ShowWindow $mui.FinishPage.Run ${SW_HIDE}
-  ${EndIf}
-FunctionEnd
-
 Section "Glance"
   !insertmacro Helper
   ; The files are laid out in the plugins folder first; the helper then
@@ -225,7 +216,7 @@ Section "Glance"
   ; while it is held), creates it administrators' if it is new, checks it
   ; again, and copies them in: with Glance's tasks off meanwhile, and every
   ; program of Glance's running from there (the phone remote's too) ended
-  ; and gone first. A silent install never installs "anyway".
+  ; and gone first.
   SetOutPath "$PLUGINSDIR\payload"
   File "..\target\release\${EXE}"
   ; Its sensors, which its task starts elevated.
@@ -243,13 +234,17 @@ Section "Glance"
   File /r "..\pawnio-modules\source\*"
   WriteUninstaller "$PLUGINSDIR\payload\uninstall.exe"
   SetOutPath "$PLUGINSDIR"
-  ${If} $Anyway == 1
-    !insertmacro Ask '--install-anyway "$INSTDIR" "$PLUGINSDIR\payload"'
-  ${Else}
-    !insertmacro Ask '--install "$INSTDIR" "$PLUGINSDIR\payload"'
-  ${EndIf}
+  !insertmacro Ask '--install "$INSTDIR" "$PLUGINSDIR\payload"'
   ${If} $0 != 0
     !insertmacro Refuse $0
+  ${EndIf}
+  ; Installed in another folder than an earlier Glance: that one's programs
+  ; ended and its files taken out (its settings are the same file, kept).
+  ${If} $Earlier != ""
+    !insertmacro Ask '--moved-from "$Earlier" "$INSTDIR"'
+    ${If} $0 != 0
+      MessageBox MB_ICONEXCLAMATION "$(EarlierLeft)" /SD IDOK
+    ${EndIf}
   ${EndIf}
 
   ; The PawnIO driver, if no program has installed it yet: from the

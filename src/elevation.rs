@@ -673,17 +673,18 @@ fn noted_downloads() -> Vec<PathBuf> {
 /// the system, and read by everyone (as Program Files' folders are), in the
 /// one step that creates it; an earlier Glance's folder that only
 /// administrators could change is used as it is. Only where every folder
-/// above holds too, unless the user chose to install there `anyway`.
+/// above holds too: nowhere else, whatever the user would choose (installed
+/// where others could swap it, the copy run as administrator was theirs to
+/// replace).
 ///
 /// Every folder on the way is held before the next is made or used: then
 /// nothing above can be swapped for a link, and every folder made is
 /// checked by handle to be where it was meant to be. The install folder is
 /// administrators' alone, so nothing in it can be changed by anyone else:
 /// the files land where they were meant to and nowhere else.
-pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), InstallFolder> {
+pub fn install_into(folder: &Path, payload: &Path) -> Result<(), InstallFolder> {
     match install_folder(folder) {
         InstallFolder::Holds => {}
-        InstallFolder::Open if anyway => {}
         other => return Err(other),
     }
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
@@ -692,8 +693,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     if !same_path(&held[0].place().ok_or(InstallFolder::Failed)?, &existing) {
         return Err(InstallFolder::Indirect);
     }
-    // The folders between it and the install folder, as they come (only in
-    // an unprotected place), then the install folder, administrators'.
+    // The folders between it and the install folder, as they come, then the install folder, administrators'.
     let missing: Vec<&Path> = folder.ancestors().take_while(|dir| *dir != existing.as_path()).collect();
     for dir in missing.iter().rev() {
         let parent = held.last().unwrap();
@@ -713,7 +713,7 @@ pub fn install_into(folder: &Path, payload: &Path, anyway: bool) -> Result<(), I
     if !(claimable(&folder) && only_trusted_inside(&folder)) {
         return Err(InstallFolder::Occupied);
     }
-    if !anyway && !above_holds(&folder) {
+    if !above_holds(&folder) {
         return Err(InstallFolder::Open);
     }
     // Nothing of Glance's runs from it while its files are replaced, and nothing starts one meanwhile; its tasks
@@ -1048,11 +1048,31 @@ fn patiently(mut act: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()
     }
 }
 
-/// Takes Glance's own files out of `folder`, for the uninstaller: held, and
-/// only if only administrators can change it (then no one else can have put
-/// anything in its place or make it a link); only what Glance puts there,
-/// then the folder itself, by its handle, if nothing else is left.
+/// Takes Glance's own files out of `folder`, for the uninstaller (see `take_out`), and what it kept beside them.
 pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
+    take_out(folder, true)
+}
+
+/// Takes out the Glance installed in `earlier` once it has been installed in `now`, elsewhere: the user chose another
+/// folder for it (an earlier Glance in a folder not protected can be installed again only elsewhere: see
+/// `install_into`). Its programs running from there are ended, and its files go, as uninstalling takes them (see
+/// `take_out`); what Glance keeps beside its folder stays, for the one installed now. Nothing to do where `earlier` is
+/// `now`, or holds no Glance any more.
+pub fn moved_from(earlier: &Path, now: &Path) -> Result<(), InstallFolder> {
+    let (Ok(earlier_found), Ok(now_found)) = (std::fs::canonicalize(earlier), std::fs::canonicalize(now)) else {
+        return if earlier.exists() { Err(InstallFolder::Failed) } else { Ok(()) };
+    };
+    if same_path(&earlier_found, &now_found) || !earlier.join(APP).exists() {
+        return Ok(());
+    }
+    take_out(earlier, false)
+}
+
+/// Takes Glance's own files out of `folder`: held, and only if only administrators can change it (then no one else
+/// can have put anything in its place or make it a link); its programs running from there ended first; only what
+/// Glance puts there, then the folder itself, by its handle, if nothing else is left. With what Glance kept beside
+/// it (`forgetting`: the lights' program fetched), for an uninstall.
+fn take_out(folder: &Path, forgetting: bool) -> Result<(), InstallFolder> {
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
     let held = hold(&folder).ok_or(InstallFolder::Indirect)?;
     if direct(&folder).is_none() || !held.place().is_some_and(|place| same_path(&place, &folder)) {
@@ -1065,7 +1085,9 @@ pub fn uninstall_from(folder: &Path) -> Result<(), InstallFolder> {
     if !end_programs_in(&folder) {
         return Err(InstallFolder::Failed);
     }
-    crate::openrgb::forget();
+    if forgetting {
+        crate::openrgb::forget();
+    }
     // The uninstaller last, and only once all the rest is gone: left, it is there to try again with (as Glance is
     // left in the installed programs: see the installer).
     let mut removed = true;
@@ -1551,8 +1573,10 @@ pub fn register_launch_task() {
             delete_task(LOGON_TASK);
         }
         // This account's sign-in task, made by an earlier version to start Glance whole and elevated, starts it as
-        // the user now.
-        if runs(&logon_task(), APP) {
+        // the user now; and one left starting a Glance taken away (installed in another folder since: see
+        // `moved_from`) starts this one, on or off as it was.
+        let gone = task_program(&logon_task()).map(PathBuf::from).is_some_and(|program| program.file_name().is_some_and(|name| name.eq_ignore_ascii_case(APP)) && !program.exists());
+        if runs(&logon_task(), APP) || gone {
             register_task(&logon_task(), true, task_enabled(&logon_task()));
         }
     } else {
@@ -2088,6 +2112,30 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// Installed in another folder, the earlier Glance is taken out of its own: not where it is the folder installed in
+    /// now, holds no Glance or is gone, nor where others could have changed what is in it (then nothing in it is taken).
+    #[test]
+    fn takes_out_only_an_earlier_glance_elsewhere() {
+        let base = std::env::temp_dir().join(format!("glance-moved-test-{}", std::process::id()));
+        let (earlier, now) = (base.join("Earlier"), base.join("Now"));
+        std::fs::create_dir_all(&earlier).unwrap();
+        std::fs::create_dir_all(&now).unwrap();
+        std::fs::write(now.join(APP), b"MZ").unwrap();
+        // The same folder, written otherwise.
+        assert_eq!(moved_from(&now, &base.join("now\\")), Ok(()));
+        assert!(now.join(APP).exists());
+        // No Glance in it, or none there at all.
+        std::fs::write(earlier.join("notes.txt"), b"theirs").unwrap();
+        assert_eq!(moved_from(&earlier, &now), Ok(()));
+        assert_eq!(moved_from(&base.join("Gone"), &now), Ok(()));
+        assert!(earlier.join("notes.txt").exists());
+        // A Glance in a folder anyone may change: refused, all of it left.
+        std::fs::write(earlier.join(APP), b"MZ").unwrap();
+        assert_eq!(moved_from(&earlier, &now), Err(InstallFolder::Occupied));
+        assert!(earlier.join(APP).exists() && earlier.join("notes.txt").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     #[test]
     fn sees_through_links() {
         // A junction to a folder: what was chosen is not where it leads.
@@ -2112,7 +2160,7 @@ mod tests {
         let payload = base.join("payload");
         std::fs::create_dir(&payload).unwrap();
         std::fs::write(payload.join("glance.exe"), b"MZ").unwrap();
-        assert_eq!(install_into(&earlier, &payload, true), Err(InstallFolder::Occupied));
+        assert_eq!(install_into(&earlier, &payload), Err(InstallFolder::Occupied));
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
         std::fs::remove_dir(&inner).unwrap();
         std::fs::remove_dir(&link).unwrap();
