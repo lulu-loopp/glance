@@ -32,6 +32,19 @@ pub struct Prefs {
     pub hot_temp: f32,
     pub theme: ThemePref,
     pub language: LanguagePref,
+    /// The names the user gave the board's sensors, each by its board and its sensor (see `sensor_key`): what the
+    /// board's wiring is not known to name, or names otherwise than the user sees it.
+    #[serde(rename = "sensorNames", skip_serializing_if = "BTreeMap::is_empty")]
+    pub sensor_names: BTreeMap<String, String>,
+}
+
+/// The most a sensor's name given by the user holds (characters).
+pub const SENSOR_NAME_MOST: usize = 24;
+
+/// What the name given to sensor `sensor` of `group` ("temps" or "fans") on the board `board` is kept under: another
+/// board's sensor of the same number is another.
+fn sensor_key(board: &str, group: &str, sensor: &str) -> String {
+    format!("{board}/{group}:{sensor}")
 }
 
 /// The load (percent) past which a reading is marked as high: its figure in the signal colour, its chart's line drawn.
@@ -285,6 +298,7 @@ impl Default for Prefs {
             hot_temp: 85.0,
             theme: ThemePref::System,
             language: LanguagePref::System,
+            sensor_names: BTreeMap::new(),
         }
     }
 }
@@ -457,6 +471,29 @@ impl Prefs {
         set_item_in(&mut self.modules, id, name, on);
     }
 
+    /// What the board `board`'s sensor `sensor` of `group` ("temps" or "fans") is called: the name the user gave it,
+    /// else by what it is wired to where the board is known, else by its number (see `view::board_sensor`).
+    pub fn sensor_name(&self, board: &str, group: &str, sensor: &str, lang: super::text::Lang) -> String {
+        self.given_name(board, group, sensor).map_or_else(|| super::view::board_sensor(sensor, group, lang), str::to_string)
+    }
+
+    /// The name the user gave the board `board`'s sensor `sensor` of `group`, if any.
+    pub fn given_name(&self, board: &str, group: &str, sensor: &str) -> Option<&str> {
+        self.sensor_names.get(&sensor_key(board, group, sensor)).map(String::as_str)
+    }
+
+    /// The board `board`'s sensor `sensor` of `group` named `name` by the user: its spaces at its ends left out, no
+    /// longer than `SENSOR_NAME_MOST`; none (or only spaces), it is called as it was before it was named.
+    pub fn name_sensor(&mut self, board: &str, group: &str, sensor: &str, name: &str) {
+        let name: String = name.trim().chars().take(SENSOR_NAME_MOST).collect();
+        let key = sensor_key(board, group, sensor);
+        if name.trim().is_empty() {
+            self.sensor_names.remove(&key);
+        } else {
+            self.sensor_names.insert(key, name.trim_end().to_string());
+        }
+    }
+
     /// The switches stored before 0.1.8 made the modules' items: the
     /// choices they held, for every module of their kind.
     fn carry_over(&mut self) {
@@ -615,5 +652,30 @@ mod tests {
         assert_eq!(Prefs::resolve(&chosen, &known()).music.ground, MusicGround::Skin);
         chosen["music"]["ground"] = "cover".into();
         assert_eq!(Prefs::resolve(&chosen, &known()).music.ground, MusicGround::Cover);
+    }
+
+    /// A board's sensor named by the user goes by that name on that board only (another board's sensor of the same
+    /// number keeps its own), its spaces at the ends left out and cut to the most a name holds; named nothing (or only
+    /// spaces), it goes by its board's name for it again; the names are kept with the settings, and none kept, none
+    /// are written.
+    #[test]
+    fn a_sensor_named_goes_by_that_name_on_its_board_only() {
+        use super::{Prefs, SENSOR_NAME_MOST};
+        use crate::ui::text::Lang;
+        let mut prefs = Prefs::default();
+        assert_eq!(prefs.sensor_name("B760M", "fans", "2", Lang::En), "Fan 2");
+        prefs.name_sensor("B760M", "fans", "2", "  Front intake  ");
+        assert_eq!(prefs.sensor_name("B760M", "fans", "2", Lang::En), "Front intake");
+        assert_eq!(prefs.sensor_name("B760M", "fans", "2", Lang::Zh), "Front intake");
+        assert_eq!(prefs.sensor_name("X670E", "fans", "2", Lang::En), "Fan 2");
+        assert_eq!(prefs.sensor_name("B760M", "temps", "2", Lang::En), "Sensor 2");
+        let kept = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(kept["sensorNames"]["B760M/fans:2"], "Front intake");
+        assert_eq!(Prefs::resolve(&kept, &[]).given_name("B760M", "fans", "2"), Some("Front intake"));
+        prefs.name_sensor("B760M", "fans", "2", &"风".repeat(SENSOR_NAME_MOST + 5));
+        assert_eq!(prefs.given_name("B760M", "fans", "2").unwrap().chars().count(), SENSOR_NAME_MOST);
+        prefs.name_sensor("B760M", "fans", "2", "   ");
+        assert_eq!(prefs.given_name("B760M", "fans", "2"), None);
+        assert!(serde_json::to_value(&prefs).unwrap().get("sensorNames").is_none());
     }
 }

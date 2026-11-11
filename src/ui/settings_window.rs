@@ -31,16 +31,16 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, HIMC};
+use windows::Win32::UI::Input::Ime::{ImmAssociateContextEx, ImmGetVirtualKey, HIMC, IACE_DEFAULT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_PROCESSKEY, VK_LEFT, VK_MENU,
+    GetKeyState, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_A, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_C, VK_V, VK_X, VK_PROCESSKEY, VK_LEFT, VK_MENU,
     VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
     VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
     IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
-    WM_KEYDOWN, WM_SYSKEYDOWN, WM_ACTIVATE, WA_INACTIVE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, MSG, PM_REMOVE, QS_ALLINPUT,
+    WM_KEYDOWN, WM_SYSKEYDOWN, WM_CHAR, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_ACTIVATE, WA_INACTIVE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, MSG, PM_REMOVE, QS_ALLINPUT,
     DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
     SM_CXICON, SM_CXSMICON, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOZORDER, WM_CAPTURECHANGED, WM_DESTROY,
@@ -1358,6 +1358,32 @@ enum Keys {
 }
 
 /// What a press lands on.
+/// A board's sensor being named in its row (the module's `id`, the item's `name`: see `sensor_of`): the words written,
+/// since when its caret blinks, whether the input method is putting words together, and as they were last drawn (the
+/// window's DIPs), where the words are, how far they are scrolled along, and where the caret is (its left, its top, how
+/// tall it is).
+struct Renaming {
+    id: String,
+    name: String,
+    typing: super::typing::Typing,
+    blink_from: Instant,
+    composing: bool,
+    field: Option<Rect>,
+    along: f32,
+    caret: Option<(f32, f32, f32)>,
+}
+
+/// The room of the button beside a board's sensor that names it (DIPs, square).
+const PEN: f32 = 24.0;
+
+/// How long the caret of a sensor being named shows, and is gone, as it blinks.
+const BLINK: Duration = Duration::from_millis(530);
+
+/// Of a module's item `name`, the group ("temps" or "fans") and the sensor of the board it is, if it is one.
+fn sensor_of(name: &str) -> Option<(&str, &str)> {
+    name.split_once(':').filter(|(group, _)| matches!(*group, "temps" | "fans"))
+}
+
 #[derive(Clone, PartialEq, Debug)]
 enum Target {
     Skin(Skin),
@@ -1369,6 +1395,9 @@ enum Target {
     Expand(String),
     /// One of a module's items.
     Item(String, String),
+    /// The button beside one of a module's items that is a sensor of the board (see `sensor_of`): pressed, the
+    /// sensor's name is written in its place.
+    Rename(String, String),
     Grip(String),
     /// A shortcut's keys: pressed, the next combination becomes them.
     Shortcut(Keys),
@@ -1906,6 +1935,8 @@ struct Ui {
     /// the last one lacked Ctrl, Alt or Win.
     recording: Option<Keys>,
     needs_modifier: bool,
+    /// A board's sensor being named, in its row.
+    renaming: Option<Renaming>,
     pointer: Option<(f32, f32)>,
     pressed: Option<Target>,
     /// What the pointer is over as the frame being drawn is drawn: found among the last frame's targets before they
@@ -2191,6 +2222,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             was_sized: false,
             recording: None,
             needs_modifier: false,
+            renaming: None,
             pointer: None,
             pressed: None,
             hovered_now: None,
@@ -2481,6 +2513,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.let_go());
             LRESULT(0)
         }
+        // A key the input method takes while a sensor is being named is its own (it puts words together with it).
+        WM_KEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_PROCESSKEY && with_ui(|ui| ui.renaming.is_some()).unwrap_or(false) => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
             let alt = unsafe { GetKeyState(VK_MENU.0 as i32) } < 0;
@@ -2502,11 +2536,22 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.wheel(delta));
             LRESULT(0)
         }
+        // A character typed, or given by the input method, in the name of a sensor being named.
+        WM_CHAR if with_ui(|ui| ui.rename_char(wparam.0 as u16)).unwrap_or(false) => LRESULT(0),
+        WM_IME_STARTCOMPOSITION | WM_IME_ENDCOMPOSITION => {
+            with_ui(|ui| ui.composing(message == WM_IME_STARTCOMPOSITION));
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == 1 => {
             // Over the client area: a hand on what can be dragged.
             let grip = with_ui(|ui| matches!(ui.hovered(), Some(Target::Grip(_) | Target::Library(_) | Target::Chip(..))) || ui.drag.is_some() || ui.carry.as_ref().is_some_and(|carry| carry.moved)).unwrap_or(false);
             if grip {
                 unsafe { SetCursor(LoadCursorW(None, IDC_HAND).ok()) };
+                return LRESULT(1);
+            }
+            // Over the name of a sensor being named, the text cursor.
+            if with_ui(|ui| ui.over_rename()).unwrap_or(false) {
+                unsafe { SetCursor(LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_IBEAM).ok()) };
                 return LRESULT(1);
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -2517,7 +2562,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         // no longer above all, gone from the front (see `WM_ACTIVATE`, below). One of its own (a question it asks):
         // in front still, above all with it, which stays over it (else the widgets above all come over the question).
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
-            with_ui(|ui| ui.record(None));
+            with_ui(|ui| {
+                ui.record(None);
+                ui.end_rename(true);
+            });
             if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
                 leave_the_front(hwnd);
             }
@@ -3677,6 +3725,194 @@ impl Ui {
 
     /// Starts or stops taking a new shortcut. Meanwhile the old one is let
     /// go, or its keys would never come here.
+    /// The board's sensor of item `name` of module `id` named in its row: the name it goes by now written there, all of
+    /// it chosen, and the input method let in for the words (the window takes none otherwise: see `create`). A key that
+    /// began it (Space) types nothing there.
+    fn begin_rename(&mut self, id: String, name: String) {
+        self.end_rename(true);
+        let Some((group, sensor)) = sensor_of(&name) else { return };
+        let called = self.prefs.sensor_name(&crate::app().info().board, group, sensor, self.lang);
+        let mut typing = super::typing::Typing::most(prefs::SENSOR_NAME_MOST);
+        typing.put(&called.encode_utf16().collect::<Vec<u16>>());
+        typing.go(0, false);
+        typing.go(typing.text.len(), true);
+        self.renaming = Some(Renaming { id, name, typing, blink_from: Instant::now(), composing: false, field: None, along: 0.0, caret: None });
+        unsafe {
+            let mut typed = MSG::default();
+            let _ = PeekMessageW(&mut typed, Some(self.hwnd), WM_CHAR, WM_CHAR, PM_REMOVE);
+            let _ = ImmAssociateContextEx(self.hwnd, HIMC::default(), IACE_DEFAULT);
+        }
+        self.next_frame = Instant::now();
+    }
+
+    /// The sensor being named, if one is, named as written (`keep`), else left as it was; the input method shut out
+    /// again, what it was putting together let go. Named as it is called unnamed, or nothing (only spaces), it is
+    /// unnamed: called again as the board's wiring has it.
+    fn end_rename(&mut self, keep: bool) {
+        let Some(renaming) = self.renaming.take() else { return };
+        unsafe {
+            if renaming.composing {
+                let context = windows::Win32::UI::Input::Ime::ImmGetContext(self.hwnd);
+                let _ = windows::Win32::UI::Input::Ime::ImmNotifyIME(context, windows::Win32::UI::Input::Ime::NI_COMPOSITIONSTR, windows::Win32::UI::Input::Ime::CPS_CANCEL, 0);
+                let _ = windows::Win32::UI::Input::Ime::ImmReleaseContext(self.hwnd, context);
+            }
+            let _ = ImmAssociateContextEx(self.hwnd, HIMC::default(), 0);
+        }
+        self.next_frame = Instant::now();
+        let Some((group, sensor)) = sensor_of(&renaming.name).filter(|_| keep) else { return };
+        let board = crate::app().info().board.clone();
+        let written = renaming.typing.string();
+        let unnamed = super::view::board_sensor(sensor, group, self.lang);
+        let name = if written.trim() == unnamed { "" } else { written.as_str() };
+        let before = self.prefs.given_name(&board, group, sensor).map(str::to_string);
+        self.prefs.name_sensor(&board, group, sensor, name);
+        if self.prefs.given_name(&board, group, sensor).map(str::to_string) != before {
+            self.save();
+        }
+    }
+
+    /// A key down while a sensor is being named, and whether it was taken: Enter keeps the name, Escape leaves it as it
+    /// was; Tab keeps it and goes on to the next stop (not taken); the arrows, Home and End move the caret (with Shift,
+    /// the selection); Backspace and Delete erase; Ctrl+A chooses all, Ctrl+C and Ctrl+X copy and cut, Ctrl+V pastes
+    /// (one line of it). Every other key is taken too (the characters come as `WM_CHAR`: see `rename_char`).
+    fn rename_key(&mut self, key: VIRTUAL_KEY, shift: bool) -> bool {
+        match key {
+            VK_RETURN => self.end_rename(true),
+            VK_ESCAPE => self.end_rename(false),
+            VK_TAB => {
+                self.end_rename(true);
+                return false;
+            }
+            _ => {
+                let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+                let hwnd = self.hwnd;
+                let pasted = (ctrl && key == VK_V).then(|| crate::clipboard::text(hwnd).unwrap_or_default());
+                let Some(renaming) = self.renaming.as_mut() else { return false };
+                let typing = &mut renaming.typing;
+                match key {
+                    VK_LEFT | VK_RIGHT => {
+                        let forward = key == VK_RIGHT;
+                        let selection = typing.selection();
+                        let to = if !shift && !selection.is_empty() { if forward { selection.end } else { selection.start } } else { typing.step(typing.caret, forward) };
+                        typing.go(to, shift);
+                    }
+                    VK_HOME => typing.go(0, shift),
+                    VK_END => typing.go(typing.text.len(), shift),
+                    VK_BACK | VK_DELETE => typing.erase(key == VK_DELETE),
+                    VK_A if ctrl => {
+                        typing.go(0, false);
+                        typing.go(typing.text.len(), true);
+                    }
+                    VK_C | VK_X if ctrl => {
+                        let selection = typing.selection();
+                        if !selection.is_empty() {
+                            let text = String::from_utf16_lossy(&typing.text[selection]);
+                            if crate::clipboard::put(hwnd, &[(crate::clipboard::TEXT, crate::clipboard::utf16_z(&text))]) && key == VK_X {
+                                typing.put(&[]);
+                            }
+                        }
+                    }
+                    VK_V if ctrl => {
+                        let line: Vec<u16> = pasted.as_deref().unwrap_or_default().lines().next().unwrap_or_default().encode_utf16().collect();
+                        typing.put(&line);
+                    }
+                    _ => {}
+                }
+                renaming.blink_from = Instant::now();
+            }
+        }
+        self.next_frame = Instant::now();
+        true
+    }
+
+    /// A character typed (or given by the input method), and whether it was taken: in the name of a sensor being named,
+    /// one that is no key (see `rename_key`).
+    fn rename_char(&mut self, unit: u16) -> bool {
+        let Some(renaming) = self.renaming.as_mut() else { return false };
+        if unit >= 0x20 && unit != 0x7F {
+            renaming.typing.put(&[unit]);
+            renaming.blink_from = Instant::now();
+            self.next_frame = Instant::now();
+        }
+        true
+    }
+
+    /// The input method putting words together (or done), for the name of a sensor being named: its words and choices
+    /// put at the caret.
+    fn composing(&mut self, composing: bool) {
+        if let Some(renaming) = self.renaming.as_mut() {
+            renaming.composing = composing;
+            self.place_ime();
+        }
+    }
+
+    /// The input method's words and choices put at the caret of the name being written, as it was last drawn.
+    fn place_ime(&self) {
+        let Some((x, top, tall)) = self.renaming.as_ref().and_then(|renaming| renaming.caret) else { return };
+        let px = |dips: f32| (dips * self.scale).round() as i32;
+        super::typing::place_ime(self.hwnd, POINT { x: px(x), y: px(top) }, px(top + tall) - px(top), "Microsoft YaHei UI", px(14.0));
+    }
+
+    /// Whether the pointer is on the name of a sensor being named.
+    fn over_rename(&self) -> bool {
+        let field = self.renaming.as_ref().and_then(|renaming| renaming.field);
+        matches!((field, self.pointer), (Some(field), Some((x, y))) if x >= field.x && x < field.x + field.w && y >= field.y && y < field.y + field.h)
+    }
+
+    /// Where in the name being written a caret put at `x` (the window's DIPs) goes: between the characters nearest it.
+    fn rename_caret_at(&self, x: f32) -> usize {
+        let Some(renaming) = self.renaming.as_ref() else { return 0 };
+        let Some(field) = renaming.field else { return 0 };
+        let typing = &renaming.typing;
+        let font = Font::new(Family::Segoe, 14.0, 400.0);
+        let at = x - field.x + renaming.along;
+        let mut best = (0, at.abs());
+        let mut i = 0;
+        while i < typing.text.len() {
+            i = typing.step(i, true);
+            let off = (self.gfx.measure(&String::from_utf16_lossy(&typing.text[..i]), font) - at).abs();
+            if off < best.1 {
+                best = (i, off);
+            }
+        }
+        best.0
+    }
+
+    /// The name of the sensor being named, written in its row: from `x`, `room` across, centred on `cy`, in `font`; in a
+    /// box ringed in the accent, its selection marked, its caret blinking, scrolled along as far as shows the caret.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_rename(&mut self, frame: &Frame, palette: &Palette, font: Font, x: f32, cy: f32, room: f32, now: Instant) {
+        let Some(renaming) = self.renaming.as_mut() else { return };
+        // (The box 8 DIPs out from the words at either end, as tall as a button.)
+        let (out, tall) = (8.0, 28.0);
+        let words = (room - out).max(0.0);
+        let boxed = Rect { x: x - out, y: cy - tall / 2.0, w: words + 2.0 * out, h: tall };
+        fill(frame, palette.control, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
+        Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x + 0.75, boxed.y + 0.75, boxed.w - 1.5, boxed.h - 1.5, 5.25, 1.5);
+        let typing = &renaming.typing;
+        let before = |at: usize| frame.gfx.measure(&String::from_utf16_lossy(&typing.text[..at.min(typing.text.len())]), font);
+        let caret_x = before(typing.caret);
+        let along = (caret_x - words + 2.0).max(0.0);
+        let (caret_top, caret_tall) = (cy - font.size * 0.65, font.size * 1.3);
+        frame.clip(x, boxed.y, words, tall);
+        if typing.caret != typing.anchor {
+            let (from, to) = (before(typing.caret.min(typing.anchor)), before(typing.caret.max(typing.anchor)));
+            frame.fill(palette.selection.alpha(0.3), x + from - along, caret_top, to - from, caret_tall);
+        }
+        text_centred(frame, &typing.string(), font, palette.text, x - along, cy, 10_000.0, Align::Start);
+        let blinks = now.duration_since(renaming.blink_from).as_millis() / BLINK.as_millis();
+        if blinks.is_multiple_of(2) && !renaming.composing {
+            frame.fill(palette.text, x + caret_x - along, caret_top, 1.2, caret_tall);
+        }
+        frame.unclip();
+        renaming.field = Some(Rect { x: boxed.x, y: boxed.y, w: boxed.w, h: boxed.h });
+        renaming.along = along - out;
+        renaming.caret = Some((x + caret_x - along, caret_top, caret_tall));
+        if renaming.composing {
+            self.place_ime();
+        }
+    }
+
     fn record(&mut self, which: Option<Keys>) {
         if which == self.recording {
             return;
@@ -4434,8 +4670,8 @@ impl Ui {
                 let disk = format!("{} {number}", pick(self.lang, "磁盘", "Disk"));
                 (Cow::Owned(named.map_or(disk.clone(), |name| format!("{disk} · {name}"))), None)
             }
-            // One of the board's sensors, by its name on the panel.
-            Some((group, sensor)) => (Cow::Owned(super::view::board_sensor(sensor, group, self.lang)), None),
+            // One of the board's sensors, by its name on the panel (the one the user gave it, if they did).
+            Some((group, sensor)) => (Cow::Owned(self.prefs.sensor_name(&crate::app().info().board, group, sensor, self.lang)), None),
             None => {
                 let (label, word) = self.module_item_label(id, name);
                 (Cow::Borrowed(label), word)
@@ -4556,6 +4792,21 @@ impl Ui {
     fn press(&mut self, x: f32, y: f32) {
         self.stop_drag();
         self.pointer = Some((x, y));
+        // Pressed in the name being written, the caret goes there (with Shift, the selection to there); anywhere else,
+        // the name is kept.
+        if self.renaming.is_some() {
+            if self.over_rename() {
+                let at = self.rename_caret_at(x);
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                if let Some(renaming) = self.renaming.as_mut() {
+                    renaming.typing.go(at, shift);
+                    renaming.blink_from = Instant::now();
+                }
+                self.next_frame = Instant::now();
+                return;
+            }
+            self.end_rename(true);
+        }
         if self.page == Page::Phone && self.press_phone(x, y) {
             return;
         }
@@ -4749,6 +5000,8 @@ impl Ui {
                 self.save();
             }
             Target::Item(..) => {}
+            Target::Rename(id, name) if self.module_on(&id) => self.begin_rename(id, name),
+            Target::Rename(..) => {}
             // The uninstaller asks first and closes Glance itself.
             Target::Uninstall => {
                 // Checked again as it is run: the window may have been open a while.
@@ -4852,6 +5105,8 @@ impl Ui {
                 // A module's row, which opens its card if it has one, then its switch.
                 Row::Module(id) if self.opens(&id) => vec![Target::Expand(id.clone()), Target::Module(id)],
                 Row::Module(id) => vec![Target::Module(id)],
+                // A sensor of the board's switch, then the button that names it.
+                Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) && sensor_of(&name).is_some() => vec![Target::Item(id.clone(), name.clone()), Target::Rename(id, name)],
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
@@ -4898,6 +5153,10 @@ impl Ui {
         self.stop_drag();
         if let Some(which) = self.recording {
             self.take_shortcut(which, key);
+            return true;
+        }
+        // A sensor being named takes the keys (but Tab, which keeps its name and goes on: see `rename_key`).
+        if self.renaming.is_some() && !alt && self.rename_key(key, shift) {
             return true;
         }
         let moves_module = alt && (key == VK_UP || key == VK_DOWN) && matches!(self.focus, Some(Target::Module(_) | Target::Expand(_)));
@@ -5031,7 +5290,7 @@ impl Ui {
             (Row::Tabs, Target::Tab(_)) => true,
             (Row::Slider(f), Target::Slider(g)) => f == g,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
-            (Row::Item(m, a), Target::Item(n, b)) => m == n && a == b,
+            (Row::Item(m, a), Target::Item(n, b) | Target::Rename(n, b)) => m == n && a == b,
             (Row::ModuleChoice(_, f), Target::Choice(g, _)) => f == g,
             _ => false,
         });
@@ -5281,6 +5540,11 @@ impl Ui {
             // Otherwise as often as the preview's charts creep a quarter pixel.
             now + creeping(creep).min(Duration::from_millis(250))
         };
+        // (And as the caret of a sensor being named next blinks.)
+        if let Some(renaming) = &self.renaming {
+            let blinks = (now.duration_since(renaming.blink_from).as_millis() / BLINK.as_millis()) as u32;
+            self.next_frame = self.next_frame.min(renaming.blink_from + BLINK * (blinks + 1));
+        }
         // (The desktops wanted as it was drawn read together, those taken in before it was too: see `take_in`.)
         self.read_wanted();
         self.draw_guide(now);
@@ -5771,7 +6035,28 @@ impl Ui {
                     let target = Target::Item(id.clone(), name.clone());
                     let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
                     let switch_left = left + width - ROW_SIDE - CHEVRON_ROOM - 40.0;
-                    field_label_in(frame, colors, &name_text, detail, label, hint, left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
+                    let (words_left, cy, room) = (left + ITEM_INSET, y + row_height / 2.0, switch_left - 12.0 - left - ITEM_INSET);
+                    let renamed = self.renaming.as_ref().is_some_and(|renaming| renaming.id == id && renaming.name == name);
+                    if renamed {
+                        self.paint_rename(frame, palette, label, words_left, cy, room, now);
+                    } else if sensor_of(&name).is_some() && active && usable {
+                        // A sensor of the board: its name, and just after it the button that names it, shown as the
+                        // pointer is on the row or on it, or as it has the focus.
+                        let pen = Target::Rename(id.clone(), name.clone());
+                        field_label_in(frame, colors, &name_text, detail, label, hint, words_left, cy, room - PEN - 4.0);
+                        let pen_left = words_left + frame.gfx.measure(&name_text, label).min(room - PEN - 4.0) + 4.0;
+                        let lit = self.hovered_now.as_ref() == Some(&pen);
+                        let focused = self.keyboard && self.focus.as_ref() == Some(&pen);
+                        if lit || focused || self.hovered_now.as_ref() == Some(&target) {
+                            if lit {
+                                fill(frame, palette.hover, pen_left, cy - PEN / 2.0, PEN, PEN, 6.0);
+                            }
+                            frame.icon(Icon::SquarePen, Point { x: pen_left + PEN / 2.0, y: cy }, 14.0, if lit { palette.text } else { palette.text3 });
+                        }
+                        self.targets.push((Rect { x: pen_left, y: cy - PEN / 2.0, w: PEN, h: PEN }, pen));
+                    } else {
+                        field_label_in(frame, colors, &name_text, detail, label, hint, words_left, cy, room);
+                    }
                     let pressed = self.pressed == Some(target.clone());
                     let on = self.item_on(&id, &name);
                     self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
@@ -7123,6 +7408,52 @@ mod pictures {
                 ui.settings.recent_folders.clear();
                 ui.settings.recent_hidden.clear();
                 ui.settings.recent_hidden_drives.clear();
+                ui.scroll_target = 0.0;
+            });
+            // The board's card open, scrolled to: a sensor the user named, the pointer on its row (the button that names
+            // it shown), and another being named, words written in it (the window's own settings, not kept).
+            let board = crate::app().info().board.clone();
+            with_ui(|ui| {
+                ui.tab = Tab::Shown;
+                ui.turn_to(Page::Monitor);
+                ui.prefs.name_sensor(&board, "temps", "vrm", "供电模块");
+                ui.set_open("board", true, true);
+            });
+            for _ in 0..12 {
+                with_ui(|ui| {
+                    ui.scroll_target = (ui.row_top("board") - 24.0).clamp(0.0, (ui.content_height() - ui.client().1).max(0.0));
+                    ui.draw(Instant::now());
+                });
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+            let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+            // (Painted once to learn where the rows are: `draw` paints nothing of a window not shown.)
+            gfx.draw_offscreen(size, scale, |frame| {
+                with_ui(|ui| ui.paint(frame, Instant::now()));
+            })
+            .unwrap();
+            with_ui(|ui| {
+                let row = ui.targets.iter().find(|(_, target)| *target == Target::Item("board".into(), "temps:vrm".into())).map(|(r, _)| *r).unwrap();
+                ui.pointer = Some((row.x + row.w / 2.0, row.y + row.h / 2.0));
+                ui.begin_rename("board".into(), "fans:system_fan_2".into());
+                for unit in "机箱后部".encode_utf16() {
+                    ui.rename_char(unit);
+                }
+            });
+            let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                with_ui(|ui| {
+                    fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                    ui.paint(frame, Instant::now())
+                });
+            })
+            .unwrap();
+            crate::studio::save_png(&out.join(format!("monitor-board-named-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+            with_ui(|ui| {
+                ui.end_rename(false);
+                ui.prefs.name_sensor(&board, "temps", "vrm", "");
+                ui.pointer = None;
+                ui.set_open("board", false, true);
                 ui.scroll_target = 0.0;
             });
             // The workbench carried from the library over an edge: of every screen small (the first screen's left),
