@@ -80,7 +80,7 @@ pub struct BoardSeen {
 impl Seen {
     /// What `history`, oldest first, has shown.
     #[cfg(any(test, feature = "studio"))]
-    pub fn of(history: &[Sample]) -> Self {
+    pub fn of(history: &[std::sync::Arc<Sample>]) -> Self {
         let mut seen = Seen::default();
         history.iter().for_each(|sample| seen.note(sample));
         seen

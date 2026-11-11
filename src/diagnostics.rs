@@ -60,8 +60,8 @@ pub fn report() -> String {
     }
     lines.extend(presenting());
     lines.push("Latest readings:".into());
-    match app.controller.history.read().unwrap().back() {
-        Some(sample) => lines.extend(readings(sample, info).into_iter().map(|line| format!("  {line}"))),
+    match app.controller.history.latest() {
+        Some(sample) => lines.extend(readings(&sample, info).into_iter().map(|line| format!("  {line}"))),
         None => lines.push("  none yet".into()),
     }
     lines.join("\n")
@@ -171,7 +171,7 @@ fn presenting() -> Vec<String> {
             yes(program.in_front)
         ));
     }
-    let game = crate::app().controller.history.read().unwrap().back().and_then(|sample| sample.game.clone());
+    let game = crate::app().controller.history.latest().and_then(|sample| sample.game.clone());
     lines.push(match game {
         Some(game) => format!("  game taken: {} ({}), {}", game.program, if game.by_hand { "by hand" } else { "found" }, game.fps.map_or("frames not counted".into(), |fps| format!("{fps:.0} frames a second"))),
         None => "  game taken: none".into(),

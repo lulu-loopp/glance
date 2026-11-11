@@ -11,7 +11,6 @@
 //! "on the panel" is decided from the global cursor position against where
 //! the panel rests, so nothing that moves on screen feeds back into it.
 
-use std::collections::VecDeque;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::rc::Rc;
@@ -286,10 +285,8 @@ pub struct Controller {
     info: RwLock<Arc<StaticInfo>>,
     config: Mutex<Config>,
     playing: Mutex<Playing>,
-    /// The samples of the longest chart span, oldest first.
-    /// Read by the threads that draw at once (the panel's and the settings'), each for as long as it draws; written
-    /// by the sampler alone, a sample at a time.
-    pub history: RwLock<VecDeque<Sample>>,
+    /// The samples of the longest chart span, oldest first (see `History`).
+    pub history: History,
     /// What the machine has shown it can read since Glance started.
     pub seen: Mutex<Seen>,
     /// The overlay, opened by a game, closed by hand for the rest of it.
@@ -312,7 +309,7 @@ impl Controller {
             info: RwLock::new(Arc::new(info)),
             config: Mutex::new(config_from(settings)),
             playing: Mutex::new(Playing::default()),
-            history: RwLock::new(VecDeque::new()),
+            history: History::default(),
             seen: Mutex::new(Seen::default()),
             overlay_closed: AtomicBool::new(false),
             sink: AtomicIsize::new(0),
@@ -426,15 +423,7 @@ impl Controller {
             }
         }
         let keep = self.config.lock().unwrap().history;
-        {
-            let mut history = self.history.write().unwrap();
-            while history.len() >= keep {
-                history.pop_front();
-            }
-            history.push_back(sample);
-            // (Kept in one piece, for those that read it: see `contiguous`.)
-            history.make_contiguous();
-        }
+        self.history.push(sample, keep);
         // Told once the sample is there to be drawn.
         if started || ended {
             // The bar's overlay button is lit while the overlay is up.
@@ -644,7 +633,7 @@ impl Controller {
             }
             let Some(overlay) = overlay else { return };
             let settings = self.config.lock().unwrap().overlay.clone();
-            let history = self.history.read().unwrap();
+            let history = self.history.samples();
             let beneath = panels.iter().find(|panel| panel.is_shown()).map(|panel| panel.window.hwnd);
             overlay.show(&history, &settings, panels[0].lang, playing, wanted, beneath);
         };
@@ -785,8 +774,8 @@ impl Controller {
                 {
                     let kept = self.config.lock().unwrap().widgets.clone();
                     let seen = self.seen.lock().unwrap().clone();
-                    let history = self.history.read().unwrap();
-                    let samples = crate::panel::contiguous(&history);
+                    let samples = self.history.samples();
+                    let samples = &samples[..];
                     if !samples.is_empty() {
                         let look = crate::widget::Look { prefs: &panels[0].prefs, skin: panels[0].skin, lang: panels[0].lang, live: panels[0].live };
                         if let Some(due) = widgets.tick(now, &look, &kept, samples, &seen, self) {
@@ -829,7 +818,7 @@ impl Controller {
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                     self.set_seen(&self.widgets_seen, widgets.any_seen());
                 }
-                if !pinned_at.is_empty() && !self.history.read().unwrap().is_empty() {
+                if !pinned_at.is_empty() && self.history.latest().is_some() {
                     for (point, edge) in std::mem::take(&mut pinned_at) {
                         let point = POINT { x: point.0, y: point.1 };
                         // On its screen, or the nearest, if it is gone; at its edge, each its own panel (one up there
@@ -2809,7 +2798,7 @@ impl<'a> Panel<'a> {
     /// (`pushed`: opened by the pointer at the edge, a push into it or a rest on its seam; else by hand, the pointer
     /// anywhere.)
     fn open(&mut self, cursor: POINT, contact: Contact, edge: Edge, floating: Option<(f32, f32)>, pushed: bool, now: Instant) {
-        if self.controller.history.read().unwrap().is_empty() {
+        if self.controller.history.latest().is_none() {
             return;
         }
         // (Up already: it stays as it is. Each edge has a panel of its own: another edge's opens beside it.)
@@ -4060,8 +4049,8 @@ impl<'a> Panel<'a> {
         let controller = self.controller;
         let info = controller.info();
         let now = controller.seen.lock().unwrap().clone();
-        let history = controller.history.read().unwrap();
-        let samples = crate::panel::contiguous(&history);
+        let samples = controller.history.samples();
+        let samples = &samples[..];
         let contact = self.placement.as_ref().unwrap().contact;
         let work = (
             (contact.work.right - contact.work.left) as f32 / contact.scale,
@@ -4102,7 +4091,6 @@ impl<'a> Panel<'a> {
         let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);
-        drop(history);
         let placement = self.placement.as_mut().unwrap();
         place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, None);
         self.follow_beside();
@@ -4207,7 +4195,7 @@ impl<'a> Panel<'a> {
 
         let controller = self.controller;
         let info = controller.info();
-        let history = controller.history.read().unwrap();
+        let history = controller.history.samples();
         let seen = &self.opening.as_ref().unwrap().seen;
         // The knob under the pointer, and the one held (the slider in hand's).
         let held = self.sliding.and_then(|sliding| self.hits.iter().map(|hit| hit.4).find(|hit| hit.slider() == Some(sliding)));
@@ -4235,7 +4223,7 @@ impl<'a> Panel<'a> {
         // up from it.)
         let says = crate::ui::look::hint_says(self.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
-        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, crate::panel::contiguous(&history), seen) };
+        let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
         let edge = (!self.floating()).then_some(self.edge);
         // What it turns from keeps to the side the panel keeps to: the corner held as it is sized, else its edge.
         let (keeps_right, keeps_bottom) = match placement.held {
@@ -4782,12 +4770,37 @@ impl<'a> Panel<'a> {
     }
 }
 
-/// The samples read, oldest first, in one piece as the sampler keeps them (see `Controller::record`): read under
-/// the history's read lock, never made so there (that would need it written).
-pub fn contiguous(history: &VecDeque<Sample>) -> &[Sample] {
-    let (samples, rest) = history.as_slices();
-    debug_assert!(rest.is_empty(), "the history is kept in one piece");
-    samples
+/// The samples kept, oldest first, as they were when taken (see `History`).
+pub type Samples = Arc<[Arc<Sample>]>;
+
+/// The samples of the longest chart span, oldest first: written by the sampler, a sample at a time, and drawn from by
+/// every thread that draws (the panel's, the widgets', the settings'). Each takes the samples as they are, a pointer's
+/// copy under the lock and no more, and draws from them with nothing held: a new sample makes a new list in their place
+/// (each sample shared with the last, not copied), so no drawing, however long, keeps the sampler waiting, nor the
+/// others waiting behind it.
+#[derive(Default)]
+pub struct History {
+    now: Mutex<Samples>,
+}
+
+impl History {
+    /// The samples as they are now.
+    pub fn samples(&self) -> Samples {
+        self.now.lock().unwrap().clone()
+    }
+
+    /// The last sample read, if any yet.
+    pub fn latest(&self) -> Option<Arc<Sample>> {
+        self.now.lock().unwrap().last().cloned()
+    }
+
+    /// `sample` added, the oldest let go so that no more than `keep` are kept.
+    pub fn push(&self, sample: Sample, keep: usize) {
+        let sample = Arc::new(sample);
+        let mut now = self.now.lock().unwrap();
+        let from = (now.len() + 1).saturating_sub(keep);
+        *now = now[from..].iter().cloned().chain(std::iter::once(sample)).collect();
+    }
 }
 
 /// What the readings are drawn with at this moment.
@@ -4801,7 +4814,7 @@ fn scene<'s>(
     tab: view::Tab,
     hover: Option<Hit>,
     pinned: bool,
-    history: &'s [Sample],
+    history: &'s [Arc<Sample>],
     seen: &'s Seen,
 ) -> Scene<'s> {
     let interval = controller.config.lock().unwrap().interval;
@@ -4830,7 +4843,7 @@ fn scene<'s>(
 }
 
 /// What a desktop widget's readings are drawn with at this moment, of the machine `info` says (`Controller::info`).
-pub(crate) fn scene_for<'s>(controller: &'s Controller, info: &'s StaticInfo, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Sample], seen: &'s Seen) -> Scene<'s> {
+pub(crate) fn scene_for<'s>(controller: &'s Controller, info: &'s StaticInfo, prefs: &'s Prefs, theme: &'s Theme, lang: Lang, history: &'s [Arc<Sample>], seen: &'s Seen) -> Scene<'s> {
     Scene { buttons: false, ..scene(controller, info, prefs, theme, lang, view::Scrolls::default(), view::Tab::default(), None, false, history, seen) }
 }
 
@@ -5263,6 +5276,32 @@ fn let_go(message: &MSG) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The samples drawn from are held as they were taken while a new one comes and others are taken: a drawing however
+    /// long keeps neither the sampler nor another drawing waiting (the settings' preview held the history's read lock
+    /// through its drawing, the sampler waited on it to write, and the panel, behind the sampler, stalled with it). No
+    /// more than are to be kept are kept, the oldest let go.
+    #[test]
+    fn samples_held_while_drawn_keep_no_one_waiting() {
+        let at = |t: u64| Sample { t, ..crate::ui::view::tests::sample(None, None, None) };
+        let history = Arc::new(History::default());
+        history.push(at(1), 3);
+        history.push(at(2), 3);
+        let drawn = history.samples();
+        let (told, heard) = std::sync::mpsc::channel();
+        let other = Arc::clone(&history);
+        std::thread::spawn(move || {
+            other.push(at(3), 3);
+            other.push(at(4), 3);
+            told.send(other.samples().iter().map(|sample| sample.t).collect::<Vec<_>>()).unwrap();
+        });
+        let now = heard.recv_timeout(Duration::from_secs(5)).expect("the sampler and a second drawing kept waiting");
+        assert_eq!(now, [2, 3, 4]);
+        assert_eq!(drawn.iter().map(|sample| sample.t).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(history.latest().map(|sample| sample.t), Some(4));
+        // (The samples kept still in the list drawn from are the same ones, not copies.)
+        assert!(Arc::ptr_eq(&drawn[1], &history.samples()[0]));
+    }
 
     /// A panel opens as large as what it shows was made on its screen, and dealt into its own columns, however the other
     /// component's are: as far as the settings offer, what the file says aside. What plays, drawn as designed (made larger

@@ -2,6 +2,7 @@
 //! columns, and drawn for a sample and the history before it.
 
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use super::canvas::{Align, Canvas, Color, Fill, Font, Point};
 use super::icons::Icon;
@@ -616,7 +617,7 @@ pub struct Scene<'a> {
     pub prefs: &'a Prefs,
     pub theme: &'a Theme,
     pub lang: Lang,
-    pub history: &'a [Sample],
+    pub history: &'a [Arc<Sample>],
     /// What the machine has shown it can read: the rows and lanes there are.
     pub seen: &'a Seen,
     /// The pen's time: the chart runs a little behind the newest sample, so
@@ -2420,7 +2421,7 @@ pub fn front_is_game() -> bool {
 }
 
 /// Whether a game shows (the game button lit): one found and not turned off, or one asked for by hand.
-pub fn game_shown(history: &[Sample]) -> bool {
+pub fn game_shown(history: &[Arc<Sample>]) -> bool {
     if front_is_game() {
         true
     } else if game_hidden() {
@@ -3291,7 +3292,7 @@ fn round_up_rate(value: f64) -> f64 {
 /// The most `series` reads in the samples on screen, or 0.
 fn visible_peak(scene: &Scene, series: &Series) -> f64 {
     let oldest = scene.pen_ms - scene.prefs.chart_seconds * 1000.0;
-    scene.history.iter().filter(|s| s.t as f64 >= oldest).filter_map(series).fold(0.0, f64::max)
+    scene.history.iter().filter(|s| s.t as f64 >= oldest).filter_map(|s| series(s)).fold(0.0, f64::max)
 }
 
 /// Rounds `value` (above 0) up to 1, 2 or 5 times a power of ten.
@@ -6211,7 +6212,7 @@ otepad.exe", "Notepad"),
             for (row, (skin, dark)) in rows.iter().enumerate() {
                 let theme = Theme::new(*skin, *dark);
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes = vec![
@@ -6267,7 +6268,7 @@ otepad.exe", "Notepad"),
                 for dark in [false, true] {
                     let theme = Theme::new(skin, dark);
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                    let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
+                    let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(Some(4200.0), None, None))]));
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let made = |ids: &[&str]| -> Vec<Lane> { ids.iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect() };
@@ -6332,7 +6333,7 @@ otepad.exe", "Notepad"),
                     let mut theme = Theme::new(skin, dark);
                     (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                    let history: &'static [Sample] = Box::leak(Box::new([sample(Some(4200.0), None, None)]));
+                    let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(Some(4200.0), None, None))]));
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: history[0].t as f64, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     // Each widget: its lanes, its shape, its size, where it is, and how far its notes are turned (pages).
@@ -6408,7 +6409,7 @@ otepad.exe", "Notepad"),
         for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
             let theme = Theme::new(skin, true);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 225, length: 225, seekable: true }], ink: theme.ink("time") };
@@ -6459,7 +6460,7 @@ otepad.exe", "Notepad"),
         for (row, (skin, dark)) in rows.iter().enumerate() {
             let theme = Theme::new(*skin, *dark);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::Note(crate::notes::number_of("c.md"))), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for (column, view) in views.iter().enumerate() {
@@ -6559,7 +6560,7 @@ otepad.exe", "Notepad"),
                     };
                     frame.fill_rounded(ground, x, y, lane_w, lane_h, theme.radius);
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                    let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                    let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
                     let hover = match column {
                         0 => Some(Hit::Shelf(3)),
@@ -6648,7 +6649,7 @@ otepad.exe", "Notepad"),
                         Skin::Glass => if dark { Color::hex(0x2A3550, 0.92) } else { Color::hex(0xE4EAF2, 0.9) },
                     };
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                    let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                    let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
                     let y = row as f32 * (lane_h + 24.0) + 12.0;
                     for (column, (tab, view, chosen, hover)) in columns.iter().enumerate() {
@@ -6819,7 +6820,7 @@ otepad.exe", "Notepad"),
     #[test]
     fn tags_the_thread_pointed_at() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let mut read = sample(None, None, None);
         read.threads_ghz = vec![Some(5.0), Some(4.5), Some(5.4), Some(4.2)];
         let history = leak(vec![read]);
@@ -6833,8 +6834,8 @@ otepad.exe", "Notepad"),
     #[test]
     fn shows_each_kind_of_cores_clock() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         // Big and little cores: each kind's clock, in place of the one clock.
         let mut hybrid = sample(None, None, None);
         hybrid.kinds_ghz = vec![Some(5.2), None];
@@ -6847,8 +6848,8 @@ otepad.exe", "Notepad"),
     #[test]
     fn keeps_a_reading_in_place_while_it_is_missing() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         // The GPU's clock, the battery and a fan read a moment ago, and not now.
         let history = leak(vec![sample(Some(1350.0), Some(80), Some(900.0)), sample(None, None, None)]);
         let gpu = lane(&scene(history), "gpu:0", Detail::Full).unwrap();
@@ -6872,8 +6873,8 @@ otepad.exe", "Notepad"),
     #[test]
     fn a_gpu_asleep_says_so() {
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample], lang| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene = |history: &'static [Arc<Sample>], lang| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let asleep = || {
             let mut read = sample(Some(1350.0), None, None);
             read.gpus[0] = crate::reading::GpuSample { usage: Some(0.0), engines: Some(Vec::new()), mem_used: Some(0), shared_used: Some(0), asleep: true, ..Default::default() };
@@ -6895,8 +6896,8 @@ otepad.exe", "Notepad"),
     fn tells_readings_apart_by_what_they_are_of() {
         use crate::reading::{CpuSensors, DriveTemperature};
         let (info, prefs, theme) = (info(), Prefs::default(), Theme::new(Skin::Paper, false));
-        let scene = |history: &'static [Sample]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let scene = |history: &'static [Arc<Sample>]| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let with = |ccds: Vec<(usize, f32)>, drives: Vec<(u32, f32)>| {
             let mut s = sample(None, None, None);
             s.cpu_sensors = Some(CpuSensors { temp: Some(50.0), ccds, power: None, graphics_power: None });
@@ -6929,7 +6930,7 @@ otepad.exe", "Notepad"),
         use crate::reading::{DockerSample, WslSample};
         let (info, theme) = (info(), Theme::new(Skin::Paper, false));
         let prefs = Prefs::resolve(&serde_json::json!({"modules": [{"id": "wsl", "on": true}, {"id": "docker", "on": true}]}), &["wsl".to_string(), "docker".to_string()]);
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let with = |wsl: WslSample, docker: DockerSample| {
             let mut s = sample(None, None, None);
             (s.wsl, s.docker) = (Some(wsl), Some(docker));
@@ -6937,11 +6938,11 @@ otepad.exe", "Notepad"),
         };
         let running = || with(WslSample::Running { distros: Some(vec!["Ubuntu".into()]), cpu: Some(3.0), used: Some(1 << 30), total: Some(1 << 33), gpu: None }, DockerSample::Running { context: "default".into(), containers: Vec::new() });
         let stopped = || with(WslSample::Stopped, DockerSample::Stopped { context: "default".into() });
-        let shown = |seen: &'static Seen, history: &'static [Sample]| {
+        let shown = |seen: &'static Seen, history: &'static [Arc<Sample>]| {
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             lanes(&scene).into_iter().map(|lane| lane.id).filter(|id| id == "wsl" || id == "docker").collect::<Vec<_>>()
         };
-        let seen_of = |history: &'static [Sample]| -> &'static Seen { Box::leak(Box::new(Seen::of(history))) };
+        let seen_of = |history: &'static [Arc<Sample>]| -> &'static Seen { Box::leak(Box::new(Seen::of(history))) };
         // Not running, not there (nor installed): no lane.
         let history = leak(vec![stopped()]);
         assert!(shown(seen_of(history), history).is_empty());
@@ -6964,13 +6965,13 @@ otepad.exe", "Notepad"),
     #[test]
     fn the_cpu_shows_its_fan() {
         let (info, theme) = (info(), Theme::new(Skin::Paper, false));
-        let leak = |history: Vec<Sample>| -> &'static [Sample] { Box::leak(history.into_boxed_slice()) };
+        let leak = |history: Vec<Sample>| -> &'static [Arc<Sample>] { Box::leak(history.into_iter().map(Arc::new).collect()) };
         let fans = |read: &[(&str, f32)]| {
             let mut s = sample(None, None, None);
             s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: read.iter().map(|(n, rpm)| (n.to_string(), *rpm)).collect() });
             s
         };
-        let cpu_fans = |prefs: &Prefs, history: &'static [Sample]| {
+        let cpu_fans = |prefs: &Prefs, history: &'static [Arc<Sample>]| {
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::En, history, seen: Box::leak(Box::new(Seen::of(history))), pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             facts(&lane(&scene, "cpu", Detail::Full).unwrap()).into_iter().filter(|(_, value)| value.ends_with("RPM") || value == UNREAD).collect::<Vec<_>>()
         };
@@ -7332,7 +7333,7 @@ seven".into()));
         }
         let theme = Theme::new(Skin::Fluent, true);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let drawn = |settings_open: bool| {
             let settings_lit = settings_open.then_some(1.0);
@@ -7353,7 +7354,7 @@ seven".into()));
     fn only_a_gliding_line_drawn_asks_for_frames() {
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let drawn = |done: f32| {
@@ -7377,7 +7378,7 @@ seven".into()));
         let _pretending = crate::pretending();
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let long = "Bliss_v2.1.1_(Chocapic13_Shaders_edit).zip";
@@ -7474,7 +7475,7 @@ seven".into()));
         assert_eq!(rows[0].entry, Entry::File(Key { drive: 'D', file: 9 }));
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         for view in [ShelfView::List, ShelfView::Cards] {
@@ -7492,7 +7493,7 @@ seven".into()));
     fn a_press_on_a_list_finds_its_thing() {
         let theme = Theme::new(Skin::Paper, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
@@ -7521,7 +7522,7 @@ seven".into()));
     fn a_thing_half_shown_is_pressed_only_where_it_shows() {
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let mut scrolls = Scrolls::default();
         for list in [List::Shelf, List::Copies, List::Recent, List::Notes, List::Apps] {
@@ -7571,7 +7572,7 @@ seven".into()));
         for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
             let theme = Theme::new(skin, false);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let (mut wide, mut narrow) = (Vec::new(), Vec::new());
@@ -7595,7 +7596,7 @@ seven".into()));
     fn a_workbench_is_laid_out_again_for_its_size() {
         let theme = Theme::new(Skin::Glass, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let heights: Vec<f32> = heights(&scene).iter().map(|(_, h)| h[0]).collect();
@@ -7714,7 +7715,7 @@ seven".into()));
         assert_eq!(crate::notes::named(card.number), None, "gone: nothing opened");
         let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into() };
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let theme = Theme::new(Skin::Glass, false);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
@@ -7813,7 +7814,7 @@ seven".into()));
             let mut theme = Theme::new(skin, false);
             (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             for held in [&ids[..1], &ids[1..2], &ids[2..3], &ids[3..4], &ids[4..], &ids[..]] {
@@ -7848,7 +7849,7 @@ seven".into()));
             for tab in [Tab::Shelf, Tab::Copies(Default::default()), Tab::Recent(Default::default())] {
                 let theme = Theme::new(skin, false);
                 let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-                let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+                let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes: Vec<Lane> = ["station"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
@@ -7877,7 +7878,7 @@ seven".into()));
         moving.apps(std::time::Instant::now(), &order, Some((2, 2, Some((30.0, 30.0)))));
         let moving: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(moving));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: moving, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
@@ -7900,7 +7901,7 @@ seven".into()));
     fn places_stand_still_while_one_is_dragged() {
         let theme = Theme::new(Skin::Glass, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let apps: Vec<(String, String)> = (0..4).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let order: Vec<String> = apps.iter().map(|(_, target)| target.clone()).collect();
@@ -7930,7 +7931,7 @@ seven".into()));
     fn the_deck_reaches_every_note() {
         let theme = Theme::new(Skin::Fluent, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let notes: Vec<NoteCard> = (0..13).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
         let pressed = |scrolls: Scrolls| {
@@ -7959,7 +7960,7 @@ seven".into()));
     fn a_note_stuck_on_the_desktop_is_drawn_as_its_page() {
         use crate::ui::morph::{Op, Recorder};
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let text = "# A note\nIts first line, long enough to be written on two of the page's lines\n- [ ] something to do\n";
         let note = crate::notes::Note { name: "a.md".into(), text: text.into(), colour: crate::notes::Colour::Green, stamp: crate::notes::store::Stamp { bytes: 0, written_ms: 0, digest: 0 } };
@@ -8010,7 +8011,7 @@ seven".into()));
     fn a_card_held_from_the_panel_is_drawn_as_it_is_held() {
         let theme = Theme::new(Skin::Paper, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let card = |held| NoteCard { number: 1, title: "Title".into(), lines: vec!["line".into()], when: "now".into(), colour: Default::default(), held };
@@ -8042,7 +8043,7 @@ seven".into()));
         let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let theme = Theme::new(Skin::Paper, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
@@ -8095,7 +8096,7 @@ seven".into()));
     fn what_is_chosen_is_marked_by_its_plate_in_every_skin() {
         use crate::ui::morph::{Op, Recorder};
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let (one, two) = (0x5EED_0021, 0x5EED_0022);
         let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false }];
@@ -8146,7 +8147,7 @@ seven".into()));
     fn a_chosen_cards_mark_holds_it_with_room_round_it() {
         use crate::ui::morph::{Op, Recorder};
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let ids: Vec<u64> = (0..4).map(|at| 0x5EED_0031 + at).collect();
         let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false }).collect();
@@ -8233,7 +8234,7 @@ seven".into()));
         let _holding = HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let theme = Theme::new(Skin::Paper, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let id = 0x5EED_0031;
@@ -8301,7 +8302,7 @@ seven".into()));
             let right = reach.reach.get().unwrap().2;
             assert!(right <= 220.0 + knob_reach(&theme) + 0.01 && right > 220.0 + knob_reach(&theme) - 1.0, "{skin:?}: the knob reaches {right}, said {}", knob_reach(&theme));
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let lane = Lane { id: "time".into(), blocks: vec![Block::Sound { level: 100, muted: false }, Block::Progress { at: 3725, length: 3725, seekable: true }], ink: theme.ink("time") };
@@ -8323,7 +8324,7 @@ seven".into()));
     fn a_list_at_a_lanes_foot_fills_it() {
         let theme = Theme::new(Skin::Paper, false);
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["notes".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let notes: Vec<NoteCard> = (0..30).map(|at| NoteCard { number: at, title: format!("{at}"), lines: vec!["a".into()], when: String::new(), colour: Default::default(), held: super::Held::Not }).collect();
@@ -8361,7 +8362,7 @@ seven".into()));
         for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
             let theme = Theme::new(skin, false);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
@@ -8453,7 +8454,7 @@ seven".into()));
         for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
             let theme = Theme::new(skin, false);
             let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
-            let history: &'static [Sample] = Box::leak(Box::new([sample(None, None, None)]));
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
             let seen = Seen::of(history);
             let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
             let width = COLUMN_WIDTH - 2.0 * theme.pad_x;
@@ -8509,7 +8510,7 @@ seven".into()));
             s.board = Some(crate::reading::BoardSensors { temps: Vec::new(), fans: names.iter().map(|n| (n.to_string(), 900.0)).collect() });
             s
         };
-        let order = |history: Vec<Sample>| Seen::of(&history).board.unwrap().fans;
+        let order = |history: Vec<Sample>| Seen::of(&history.into_iter().map(Arc::new).collect::<Vec<_>>()).board.unwrap().fans;
         // Fan 2 alone at first, then both: 1 goes before 2, as read.
         assert_eq!(order(vec![fans(&["2"]), fans(&["1", "2"])]), ["1", "2"]);
         // One missing later keeps its place, beside what came before it.
@@ -8524,7 +8525,7 @@ seven".into()));
         let theme = Theme::new(Skin::Fluent, false);
         let mut busy = sample(None, None, None);
         busy.processes = (0..40).map(|at| ProcessSample { name: format!("p{at}"), cpu: at as f32, mem: 1 << 20, io: 0.0, gpu: None }).collect();
-        let history: &'static [Sample] = Box::leak(Box::new([busy]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(busy)]));
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["processes".to_string(), "station".to_string()]));
         let seen = Seen::of(history);
         let mut scrolls = Scrolls::default();

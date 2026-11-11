@@ -18,6 +18,7 @@
 //! the stage moves with it, what is on it as it was.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -26,7 +27,6 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetCapture;
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, KillTimer, SetTimer, IDC_ARROW};
 
-use std::collections::VecDeque;
 
 use crate::reading::Sample;
 use crate::settings::OverlaySettings;
@@ -303,7 +303,7 @@ impl Overlay {
     /// frames, on its screen; otherwise on the screen it was put on. Hidden
     /// while not wanted, and while there is nothing to show. Above all but
     /// `beneath` (the open panel's window).
-    pub fn show(&mut self, history: &VecDeque<Sample>, settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
+    pub fn show(&mut self, history: &[Arc<Sample>], settings: &OverlaySettings, lang: Lang, playing: bool, wanted: bool, beneath: Option<HWND>) {
         self.locked = settings.locked;
         let clear = settings.clear.clamp(0.0, 1.0);
         if self.shown && clear != self.clear {
@@ -313,10 +313,10 @@ impl Overlay {
         self.clear = clear;
         self.through = settings.click_through;
         self.window.set_click_through(self.through);
-        self.game = crate::ui::view::game_shown(history.back().map(std::slice::from_ref).unwrap_or_default());
+        self.game = crate::ui::view::game_shown(history.last().map(std::slice::from_ref).unwrap_or_default());
         self.beneath = beneath;
         self.lang = lang;
-        let sample = history.back();
+        let sample = history.last();
         // The game played: one found, or one taken for a game by hand.
         let game = sample.and_then(|s| s.game.as_ref()).filter(|game| playing || game.by_hand);
         // (One taken by hand does not bring the overlay up: shown where it is up, its frames are.)
@@ -325,7 +325,7 @@ impl Overlay {
         if readings.is_empty() {
             return self.hide();
         }
-        let frames = overlay::frames(history.iter(), framed);
+        let frames = overlay::frames(history.iter().map(|s| &**s), framed);
         // Held as the pointer has it while it is dragged.
         if self.grab.is_some() {
             self.drawn = (readings, frames, self.drawn.2);

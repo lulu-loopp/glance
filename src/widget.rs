@@ -10,6 +10,7 @@
 //! above the others or on the desktop, its buttons) is the same for each.
 
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
@@ -2078,7 +2079,7 @@ impl Widgets {
                     let lit = match button {
                         Button::Pin => widget.pinned,
                         Button::Through => widget.click_through,
-                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.read().unwrap().iter().last().map(std::slice::from_ref).unwrap_or_default()),
+                        Button::Game => crate::ui::view::game_shown(crate::app().controller.history.latest().as_ref().map(std::slice::from_ref).unwrap_or_default()),
                         _ => false,
                     };
                     crate::ui::tip::show(widget.window.hwnd, button.says(lit, lang, false), at, crate::os::apps_dark());
@@ -2546,7 +2547,7 @@ impl Widgets {
         }
     }
 
-    pub fn tick(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
+    pub fn tick(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Arc<Sample>], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
         // The music full screen, over everything while it is up: drawn at every frame.
         let full = self.full.as_mut().map(|full| full.tick(now));
         let due = self.tick_widgets(now, look, kept, history, seen, controller);
@@ -2556,7 +2557,7 @@ impl Widgets {
         }
     }
 
-    fn tick_widgets(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
+    fn tick_widgets(&mut self, now: Instant, look: &Look, kept: &[WidgetAt], history: &[Arc<Sample>], seen: &Seen, controller: &crate::panel::Controller) -> Option<Duration> {
         if !self.restored {
             // Restored once each screen they are on can be drawn on (else they would be lost, not made): the devices
             // asked for held as they are made, each on its own.
@@ -4315,7 +4316,7 @@ impl Widget {
     }
 
     /// Lays it out, places its window and draws it.
-    fn frame(&mut self, now: Instant, look: &Look, history: &[Sample], seen: &Seen, controller: &crate::panel::Controller) -> Frame {
+    fn frame(&mut self, now: Instant, look: &Look, history: &[Arc<Sample>], seen: &Seen, controller: &crate::panel::Controller) -> Frame {
         // (What it draws and takes from behind it is sized as it is: see `gfx::room`.)
         // (Settling to its size after it is let go, too.)
         let sizing = matches!(self.drag, Some(Drag::Size { .. })) || self.settle.is_some();
@@ -5315,9 +5316,8 @@ fn clip(r: RECT, bounds: RECT) -> RECT {
 
 /// The game button pressed (a widget's or the panel's): showing a game (found or asked for), off; else on.
 pub(crate) fn press_game() {
-    let history = crate::app().controller.history.read().unwrap();
-    let shown = crate::ui::view::game_shown(history.iter().last().map(std::slice::from_ref).unwrap_or_default());
-    drop(history);
+    let latest = crate::app().controller.history.latest();
+    let shown = crate::ui::view::game_shown(latest.as_ref().map(std::slice::from_ref).unwrap_or_default());
     crate::source::set_game_mode(if shown { crate::presents::GameMode::Off } else { crate::presents::GameMode::On });
 }
 
@@ -5623,7 +5623,7 @@ mod tests {
         crate::station::run::pretend((1..=40).map(item).collect(), crate::settings::ShelfView::List);
         let theme = workbench_dressed(Theme::new(Skin::Fluent, false));
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
-        let history: &'static [Sample] = Box::leak(Box::new([view::tests::sample(None, None, None)]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(view::tests::sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::Shelf, hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };

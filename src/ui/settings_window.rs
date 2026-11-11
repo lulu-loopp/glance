@@ -6067,7 +6067,7 @@ impl Ui {
     /// Whether anything in it moves.
     fn paint_phone(&mut self, frame: &Frame, area: Rect) -> bool {
         let app = crate::app();
-        let reads = app.controller.history.read().unwrap().back().map_or(serde_json::Value::Null, |sample| crate::remote::figures(sample, &app.info()));
+        let reads = app.controller.history.latest().map_or(serde_json::Value::Null, |sample| crate::remote::figures(&sample, &app.info()));
         // The outline round it; the whole no taller or wider than the room, nor larger than a phone is.
         let (bezel, margin) = (10.0, 24.0);
         let (wide, tall) = super::phone_art::SCREEN;
@@ -6312,13 +6312,12 @@ impl Ui {
     fn paint_overlay_preview(&mut self, frame: &Frame, area: Rect) {
         let overlay = &self.settings.overlay;
         let readings = {
-            let history = crate::app().controller.history.read().unwrap();
-            let Some(sample) = history.back() else {
+            let Some(sample) = crate::app().controller.history.latest() else {
                 fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
                 stroke_inside(frame, area, 8.0, self.palette.card_stroke);
                 return;
             };
-            super::overlay::preview(sample, &overlay.chosen(), self.lang)
+            super::overlay::preview(&sample, &overlay.chosen(), self.lang)
         };
         let frames = super::overlay::preview_frames();
         let (sw, sh) = self.stage.size;
@@ -6573,9 +6572,8 @@ impl Ui {
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
         let interval = self.settings.interval_ms as f64;
-        // Held while the preview is drawn; the sampler waits that long.
-        let history = app.controller.history.read().unwrap();
-        let samples = crate::panel::contiguous(&history);
+        let samples = app.controller.history.samples();
+        let samples = &samples[..];
         if samples.is_empty() {
             if !whole && draw && desktop {
                 fill(frame, self.palette.card, area.x, area.y, area.w, area.h, 8.0);
