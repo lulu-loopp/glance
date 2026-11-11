@@ -2574,8 +2574,8 @@ pub fn lane_height(scene: &Scene, id: &str, seen: &Seen, detail: Detail) -> Opti
     Some(scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>())
 }
 
-/// What a board's sensor `name` of `group` ("temps" or "fans") is called:
-/// by what it is wired to, where the board is known; else by its number.
+/// What a board's sensor `name` of `group` ("temps" or "fans") is called, unless the user named it (see
+/// `Prefs::sensor_name`): by what it is wired to, where the board is known; else by its number.
 pub fn board_sensor(name: &str, group: &str, lang: Lang) -> String {
     if name.parse::<u32>().is_ok() {
         let numbered = if group == "fans" { ("风扇", "Fan") } else { ("传感器", "Sensor") };
@@ -2637,12 +2637,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 facts.push((lang.pick("功耗", "Power").into(), shown(sensors.and_then(|c| c.power), |power| format!("{power:.1} W")), false));
             }
             // Its fans, of the board's seen turning (a header with none on it reads 0), as switched: its own by default
-            // (see `prefs::CPU_FAN`). One alone, as "Fan"; more, each by its name.
+            // (see `prefs::CPU_FAN`). One alone, as "Fan" (unless the user named it); more, each by its name.
             if let Some(board) = scene.seen.board.as_ref().filter(|_| on("fans")) {
                 let fans: Vec<&String> = board.fans.iter().filter(|n| board.turning.contains(n) && on(&format!("fans:{n}"))).collect();
                 for n in &fans {
                     let rpm = s.board.as_ref().and_then(|b| b.fans.iter().find(|(read, _)| read == *n)).map(|(_, rpm)| *rpm);
-                    let label = if fans.len() == 1 { lang.pick("风扇", "Fan").into() } else { board_sensor(n, "fans", lang) };
+                    let label = match prefs.given_name(&info.board, "fans", n) {
+                        Some(given) => given.to_string(),
+                        None if fans.len() == 1 => lang.pick("风扇", "Fan").into(),
+                        None => prefs.sensor_name(&info.board, "fans", n, lang),
+                    };
                     facts.push((label, shown(rpm, |rpm| format!("{rpm:.0} RPM")), false));
                 }
             }
@@ -2920,7 +2924,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "board" => {
             let had = scene.seen.board.as_ref()?;
             let board = s.board.as_ref();
-            let named = |name: &str, group: &str| board_sensor(name, group, lang);
+            let named = |name: &str, group: &str| prefs.sensor_name(&info.board, group, name, lang);
             // Each sensor shown as it is switched (see `Prefs::shows`).
             let temps: Vec<&String> = had.temps.iter().filter(|n| on(&format!("temps:{n}"))).collect();
             let fans: Vec<&String> = had.fans.iter().filter(|n| on(&format!("fans:{n}"))).collect();
