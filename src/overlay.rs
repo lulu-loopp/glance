@@ -19,7 +19,7 @@
 
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY};
@@ -169,6 +169,9 @@ impl Edges {
 
 /// How near its edge the pointer sizes it rather than moves it (DIPs).
 const EDGE: f32 = 8.0;
+
+/// An overlay frame taking longer than this is noted: as long as two refreshes of a 60 Hz screen.
+const SLOW_FRAME: Duration = Duration::from_millis(33);
 
 /// How far around the overlay's shadow the screen is looked at, for how to
 /// tint the glass (DIPs): what is behind it, blurred, is much like what is
@@ -472,6 +475,7 @@ impl Overlay {
 
     /// Draws what it shows where it is, set off in colour while it is dragged.
     fn draw(&mut self) {
+        let began = Instant::now();
         // This thread's device for the screen its glass is on: a new one after the last was lost, or on another
         // adapter's screen (see `gfx::on_screen`).
         let Ok(gfx) = gfx::for_area(self.rect) else { return };
@@ -525,6 +529,11 @@ impl Overlay {
         // Its buttons, lit as it is now; and what one of them says, over it still.
         self.draw_bar();
         crate::ui::tip::above();
+        // A frame slow enough to be seen over the game, noted (as the panel's are).
+        let whole = began.elapsed();
+        if whole > SLOW_FRAME {
+            crate::widget::note_sparingly("overlay frame", || format!("overlay: a frame took {:.1} ms ({} readings, {width}x{height} px)", whole.as_secs_f32() * 1000.0, self.drawn.0.len()));
+        }
     }
 
     /// Where each of its buttons' middles is on the screen, whether it

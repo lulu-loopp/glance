@@ -75,6 +75,8 @@ const SEAM_STILL: f32 = 8.0;
 const SEAM_DWELL: Duration = Duration::from_millis(500);
 /// History is kept for the longest chart span the settings offer.
 const LONGEST_SPAN: Duration = Duration::from_secs(300);
+/// A panel frame taking longer than this is noted: as long as two refreshes of a 60 Hz screen, a stall that is seen.
+const SLOW_FRAME: Duration = Duration::from_millis(33);
 /// The chart's pen runs this far behind the newest sample beyond one
 /// interval, so the next sample has arrived by the time it is drawn to.
 pub(crate) const PEN_LAG_MS: f64 = 100.0;
@@ -4137,6 +4139,7 @@ impl<'a> Panel<'a> {
 
     /// Draws the panel as it is at `now` where it is laid out in its window, and finishes a closing that is done.
     fn frame(&mut self, now: Instant) {
+        let began = Instant::now();
         let _timed = crate::perf::Timed::start("panel frame", || format!("{} moving={}", match self.phase { Phase::Hidden => "hidden", Phase::Closing => "closing", _ => "open" }, !(self.shift.done(now) && self.opacity.done(now))));
         let by_hand = self.drag.is_some_and(|drag| drag.edges.any());
         let _sizing = gfx::sizing(by_hand);
@@ -4163,10 +4166,16 @@ impl<'a> Panel<'a> {
         let lists_moving = self.scrolls.ease(dt, SCROLL_EASE);
 
         if self.part == Part::Music {
-            return self.frame_music(now);
+            self.frame_music(now);
+            let whole = began.elapsed();
+            if whole > SLOW_FRAME {
+                crate::widget::note_sparingly("panel frame", || format!("panel: a frame of what plays took {:.1} ms", whole.as_secs_f32() * 1000.0));
+            }
+            return;
         }
         self.step_restore(now, false);
         let (lanes, layout) = self.arrange_lanes();
+        let laid_out = began.elapsed();
         let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
         // Laid out in other columns (sized, or the readings grown): it turns into the new layout (see `render::Turn`).
         let turn = self.turn.follow(0, &lanes, &layout, zoom, now, !reduced_motion());
@@ -4245,6 +4254,7 @@ impl<'a> Panel<'a> {
         let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
+        let drawing = began.elapsed();
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if let Some((hit, carried, _, _, boxes)) = &lifting {
@@ -4294,6 +4304,7 @@ impl<'a> Panel<'a> {
             }
         });
         drop(history);
+        let (drew, took) = (began.elapsed(), surface.took);
         let drawn = match (painted, drawn) {
             (Ok(()), Some(Ok(drawn))) => drawn,
             // Not drawn: drawn again shortly (the device gone, on a new one).
@@ -4364,6 +4375,18 @@ impl<'a> Panel<'a> {
             if let Some(field) = self.on_screen(Hit::Todo(view::TodoHit::Field)) {
                 crate::ui::todo::placed(hwnd, field, px);
             }
+        }
+        // A frame slow enough to be seen, noted (as the widgets' and the settings' are).
+        let whole = began.elapsed();
+        if whole > SLOW_FRAME {
+            let ms = |d: Duration| d.as_secs_f32() * 1000.0;
+            let what = format!("{:?}, {} lanes, {}x{} px{}{}", self.part, lanes.len(), size.0, size.1, if by_hand { ", sized by hand" } else { "" }, if moving { ", moving" } else { "" });
+            crate::widget::note_sparingly("panel frame", || {
+                format!(
+                    "panel: a frame took {:.1} ms: laid out {:.1}, made ready {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}), after {:.1}; {what}",
+                    ms(whole), ms(laid_out), ms(drawing - laid_out), ms(drew - drawing), ms(took.given), ms(took.painted), ms(took.handed), ms(whole - drew)
+                )
+            });
         }
     }
 
