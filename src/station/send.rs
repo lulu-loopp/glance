@@ -317,6 +317,18 @@ fn dropped(key: u64, at: POINT) -> bool {
     true
 }
 
+/// The sending to the device `key` on the strip cancelled, where one goes on (pressed there): whether one did.
+pub fn cancel(key: u64) -> bool {
+    let sendings = crate::nearby::shown().sendings;
+    let held = STRIP.lock().unwrap();
+    let job = held.as_ref().and_then(|strip| strip.chips.iter().find(|chip| key_of(&chip.device.fingerprint) == key)).and_then(|chip| chip.job).map(|(job, _)| job);
+    drop(held);
+    match job.filter(|job| sendings.get(job).is_none_or(|state| !state.over())) {
+        Some(job) => crate::nearby::cancel(job),
+        None => false,
+    }
+}
+
 /// Where on the screen what drag `drag` let go on a device went (its mark's middle), where it was let go on one.
 pub fn into_device(drag: u64) -> Option<POINT> {
     STRIP.lock().unwrap().as_ref().and_then(|strip| strip.into.filter(|(dropped, _)| *dropped == drag).map(|(_, at)| at))

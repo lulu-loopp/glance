@@ -152,6 +152,8 @@ pub enum Event {
 pub trait Told: Send + Sync {
     /// Asks the user whether to take what `asked` offers: no answer within `ASKED_FOR` (or no Glance to ask), none.
     fn ask(&self, asked: &Asked) -> Option<Answer>;
+    /// The asking going on given up (its device cancelled it): answered as not taken, and taken back from the user.
+    fn withdraw(&self);
     fn tell(&self, event: Event);
 }
 
@@ -181,8 +183,9 @@ pub struct Trusted {
     pub fingerprint: String,
     pub alias: String,
     pub kind: Option<String>,
-    /// When it last sent (seconds since 1970).
+    /// When it last sent, and since when it is trusted (seconds since 1970; none known: 0).
     pub last: u64,
+    pub since: u64,
     /// The paired phone that told its certificate, over what it is paired by (see `/v1/nearby/trust` in main): it is
     /// trusted while that phone is paired, and no longer.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,7 +210,7 @@ impl Kept {
                 trusted.alias = sender.alias.clone();
                 trusted.last = now;
             }
-            None => self.trusted.push(Trusted { fingerprint: sender.fingerprint.to_ascii_uppercase(), alias: sender.alias.clone(), kind: sender.kind.clone(), last: now, phone: None }),
+            None => self.trusted.push(Trusted { fingerprint: sender.fingerprint.to_ascii_uppercase(), alias: sender.alias.clone(), kind: sender.kind.clone(), last: now, since: now, phone: None }),
         }
     }
 }
@@ -296,7 +299,8 @@ pub struct Receiver {
     keep: Keeping,
     /// The receiving going on, and whether a device is being asked about (another meanwhile is turned away).
     session: Mutex<Option<Session>>,
-    asking: Mutex<bool>,
+    /// The device whose sending the user is being asked about (one at a time), by its address.
+    asking: Mutex<Option<IpAddr>>,
     /// The devices heard lately (see `discover`).
     pub devices: Mutex<HashMap<String, Device>>,
     callers: Mutex<HashMap<IpAddr, usize>>,
@@ -321,7 +325,7 @@ impl Receiver {
             }
         }
         let receipts = Receipt::folder(&inbox);
-        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(false), devices: Mutex::default(), callers: Mutex::default() })
+        Ok(Receiver { own, info, tls, inbox, receipts, told, kept: Box::new(kept), keep: Box::new(keep), session: Mutex::new(None), asking: Mutex::new(None), devices: Mutex::default(), callers: Mutex::default() })
     }
 
     /// Serves what comes to `listener`, a thread to each, for as long as it listens.
@@ -412,13 +416,18 @@ impl Receiver {
                 Ok(Some((200, self.about())))
             }
             ("POST", "/prepare-upload") => self.prepare(body, from, verified).map(Some),
+            // A sending cancelled by its device: the one going on (named, or the device's, unnamed: LocalSend's
+            // earlier way), or, before any is, the asking about it.
             ("POST", "/cancel") => {
-                let id = head.query("sessionId").unwrap_or_default();
+                let id = head.query("sessionId");
                 let mut session = self.session.lock().unwrap();
-                if session.as_ref().is_some_and(|session| session.id == id && session.from.address == from) {
+                if session.as_ref().is_some_and(|session| id.is_none_or(|id| session.id == id) && session.from.address == from) {
                     let ended = session.take().unwrap();
                     drop(session);
                     self.end(ended, Some("cancelled by the sender".into()));
+                } else if id.is_none() && *self.asking.lock().unwrap() == Some(from) {
+                    drop(session);
+                    self.told.withdraw();
                 }
                 Ok(None)
             }
@@ -520,13 +529,13 @@ impl Receiver {
             }
             {
                 let mut asking = self.asking.lock().unwrap();
-                if *asking {
+                if asking.is_some() {
                     return Err((409, "another device is being asked about"));
                 }
-                *asking = true;
+                *asking = Some(from);
             }
             let answer = self.told.ask(&Asked { from: sender.clone(), files: files.iter().map(|(file, _)| file.clone()).collect() });
-            *self.asking.lock().unwrap() = false;
+            *self.asking.lock().unwrap() = None;
             let answer = answer.unwrap_or_default();
             crate::journal::note(format!("nearby: {} ({}) offered {} files: {}", sender.alias, sender.address, files.len(), if answer.take { "taken" } else { "refused" }));
             if !answer.take {

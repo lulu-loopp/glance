@@ -27,6 +27,8 @@ pub enum Command {
     /// Send `files` to the device `to` (its fingerprint), as sending `job`.
     Send { job: u64, to: String, files: Vec<Outgoing> },
     Cancel { job: u64 },
+    /// The PIN the device of sending `job` asked for (see `send::State::Pin`).
+    Pin { job: u64, pin: String },
     /// Announce this PC (Glance is about to show the devices nearby), and say which they are now.
     Announce,
 }
@@ -192,6 +194,14 @@ impl Told for Link {
             self.write(&json!({ "kind": "unasked", "id": id }));
         }
         answer
+    }
+
+    fn withdraw(&self) {
+        let pending: Vec<(u64, mpsc::Sender<Answer>)> = self.pending.lock().unwrap().drain().collect();
+        for (id, waiting) in pending {
+            let _ = waiting.send(Answer::default());
+            self.write(&json!({ "kind": "unasked", "id": id }));
+        }
     }
 
     fn tell(&self, event: Event) {

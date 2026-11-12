@@ -2,19 +2,30 @@
 //! Glance, and Glance of it.
 
 use super::*;
-use std::sync::atomic::AtomicBool;
+use std::sync::Condvar;
 
-/// What Glance would be told, and how it answers when asked.
+/// What Glance would be told, and how it answers when asked: at once, or after the user thought `thinks` (none, where
+/// the asking was withdrawn meanwhile).
+#[derive(Default)]
 struct Heard {
     events: Mutex<Vec<Event>>,
     asked: Mutex<Vec<Asked>>,
     answer: Option<Answer>,
+    thinks: Duration,
+    withdrawn: (Mutex<bool>, Condvar),
 }
 
 impl Told for Heard {
     fn ask(&self, asked: &Asked) -> Option<Answer> {
         self.asked.lock().unwrap().push(asked.clone());
-        self.answer
+        let (withdrawn, told) = &self.withdrawn;
+        let (withdrawn, _) = told.wait_timeout_while(withdrawn.lock().unwrap(), self.thinks, |withdrawn| !*withdrawn).unwrap();
+        if *withdrawn { None } else { self.answer }
+    }
+
+    fn withdraw(&self) {
+        *self.withdrawn.0.lock().unwrap() = true;
+        self.withdrawn.1.notify_all();
     }
 
     fn tell(&self, event: Event) {
@@ -39,8 +50,13 @@ struct Both {
 
 /// A receiver answering `answer` when it asks, serving on the loopback; a sender with a certificate of its own.
 fn both(name: &str, answer: Option<Answer>, kept: Kept) -> Both {
+    thinking(name, answer, Duration::ZERO, kept)
+}
+
+/// The same, its user answering after thinking `thinks`.
+fn thinking(name: &str, answer: Option<Answer>, thinks: Duration, kept: Kept) -> Both {
     let dir = folder(name);
-    let heard = Arc::new(Heard { events: Mutex::default(), asked: Mutex::default(), answer });
+    let heard = Arc::new(Heard { answer, thinks, ..Heard::default() });
     let kept = Arc::new(Mutex::new(kept));
     let (reading, keeping) = (kept.clone(), kept.clone());
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -69,9 +85,14 @@ fn files(name: &str, contents: &[(&str, &[u8])]) -> Vec<link::Outgoing> {
 }
 
 fn sent(both: &Both, files: &[link::Outgoing]) -> Vec<send::State> {
-    let states = Arc::new(Heard { events: Mutex::default(), asked: Mutex::default(), answer: None });
+    sent_as(both, files, &send::Job::default())
+}
+
+/// What a sending of `files`, as `job`, was told to Glance as, state by state.
+fn sent_as(both: &Both, files: &[link::Outgoing], job: &send::Job) -> Vec<send::State> {
+    let states = Arc::new(Heard::default());
     let told: Arc<dyn Told> = states.clone();
-    send::send(&both.sender, &both.me, &both.device, files, 7, &told, &AtomicBool::new(false));
+    send::send(&both.sender, &both.me, &both.device, files, 7, &told, job);
     let events = states.events.lock().unwrap();
     events.iter().map(|event| match event {
         Event::Sending { job: 7, state } => state.clone(),
@@ -230,9 +251,9 @@ fn a_receiver_of_another_certificate_is_not_sent_to() {
     let both = both("pinned", Some(Answer { take: true, trust: false }), Kept::default());
     let mut device = both.device.clone();
     device.fingerprint = "00".repeat(32);
-    let states = Arc::new(Heard { events: Mutex::default(), asked: Mutex::default(), answer: None });
+    let states = Arc::new(Heard::default());
     let told: Arc<dyn Told> = states.clone();
-    send::send(&both.sender, &both.me, &device, &files("pinned", &[("a.jpg", b"x")]), 1, &told, &AtomicBool::new(false));
+    send::send(&both.sender, &both.me, &device, &files("pinned", &[("a.jpg", b"x")]), 1, &told, &send::Job::default());
     let last = states.events.lock().unwrap().last().cloned();
     assert!(matches!(last, Some(Event::Sending { state: send::State::Failed { .. }, .. })), "{last:?}");
     assert!(both.heard.asked.lock().unwrap().is_empty());
@@ -250,4 +271,102 @@ fn names_given_are_only_names() {
     assert_eq!(extension("a.tar.gz"), "gz");
     assert_eq!(extension("a.j p g"), "");
     assert_eq!(extension("noext"), "");
+}
+
+/// A sending cancelled while the device's user is asked about it ends at once, cancelled, and the device is told: its
+/// asking is taken back from its user.
+#[test]
+fn a_sending_cancelled_while_its_user_is_asked_is_taken_back() {
+    let both = thinking("withdrawn", Some(Answer { take: true, trust: false }), Duration::from_secs(20), Kept::default());
+    let paths = files("withdrawn", &[("a.jpg", b"x")]);
+    let job = Arc::new(send::Job::default());
+    let cancelling = job.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        cancelling.cancel();
+    });
+    let began = Instant::now();
+    let states = sent_as(&both, &paths, &job);
+    assert_eq!(states.last(), Some(&send::State::Cancelled));
+    assert!(began.elapsed() < Duration::from_secs(3), "ended as it was cancelled, not as its user answered");
+    // (Told on a connection of its own: looked for a while.)
+    let until = Instant::now() + Duration::from_secs(5);
+    while !*both.heard.withdrawn.0.lock().unwrap() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(*both.heard.withdrawn.0.lock().unwrap(), "the asking taken back");
+    assert!(came(&both.heard).is_none());
+}
+
+/// A device (on the loopback, by `own`'s certificate) that asks for the PIN "1234": an offer without it, or with
+/// another, turned down at once (401); with it, nothing wanted (204).
+fn asking_for_a_pin(own: &tls::Own) -> Device {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = own.server().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let config = config.clone();
+            std::thread::spawn(move || {
+                let mut stream = rustls::StreamOwned::new(rustls::ServerConnection::new(config).unwrap(), stream);
+                let Ok(Some(mut head)) = http::head(&mut stream, false) else { return };
+                let _ = http::Body::of(&mut head, &mut stream, false).and_then(|body| body.whole(1 << 20));
+                let status = if head.query("pin") == Some("1234") { 204 } else { 401 };
+                let _ = http::answer(&mut stream, status, None);
+            });
+        }
+    });
+    Device { fingerprint: own.fingerprint.clone(), alias: "iPhone 15".into(), model: None, kind: Some("mobile".into()), address: IpAddr::from([127, 0, 0, 1]), port, https: true, heard: Instant::now() }
+}
+
+/// Gives the PINs in `given`, one each time a PIN is asked for (cancels the sending where none is left), and keeps the
+/// states told.
+struct Giving {
+    job: Arc<send::Job>,
+    given: Mutex<Vec<&'static str>>,
+    states: Mutex<Vec<send::State>>,
+}
+
+impl Told for Giving {
+    fn ask(&self, _: &Asked) -> Option<Answer> {
+        None
+    }
+
+    fn withdraw(&self) {}
+
+    fn tell(&self, event: Event) {
+        let Event::Sending { state, .. } = event else { return };
+        if matches!(state, send::State::Pin { .. }) {
+            let mut given = self.given.lock().unwrap();
+            if given.is_empty() {
+                self.job.cancel();
+            } else {
+                self.job.give_pin(given.remove(0).to_string());
+            }
+        }
+        self.states.lock().unwrap().push(state);
+    }
+}
+
+/// A device asking for a PIN is offered again with each one Glance gives: told how many it turned down, then sent
+/// with the right one. Cancelled while one is waited for, it ends at once.
+#[test]
+fn a_pin_asked_for_is_given_and_tried_again() {
+    let dir = folder("pin");
+    let device = asking_for_a_pin(&tls::Own::in_folder(&dir.join("device")).unwrap());
+    let own = tls::Own::in_folder(&dir.join("sender")).unwrap();
+    let me = Info { alias: "Glance PC".into(), fingerprint: own.fingerprint.clone(), port: Some(1), ..Info::default() };
+    let paths = files("pin", &[("a.jpg", b"x")]);
+    let send_giving = |given: Vec<&'static str>| {
+        let job = Arc::new(send::Job::default());
+        let giving = Arc::new(Giving { job: job.clone(), given: Mutex::new(given), states: Mutex::default() });
+        let told: Arc<dyn Told> = giving.clone();
+        send::send(&own, &me, &device, &paths, 7, &told, &job);
+        let states = giving.states.lock().unwrap().clone();
+        states
+    };
+    assert_eq!(send_giving(vec!["0000", "1234"]), [send::State::Waiting, send::State::Pin { tried: 0 }, send::State::Pin { tried: 1 }, send::State::Sent]);
+    let began = Instant::now();
+    assert_eq!(send_giving(Vec::new()).last(), Some(&send::State::Cancelled));
+    assert!(began.elapsed() < Duration::from_secs(3));
 }

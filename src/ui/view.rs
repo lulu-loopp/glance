@@ -260,7 +260,8 @@ pub enum Hit {
     /// Where a station is: what is dragged there may be dropped on it (see `station::run::shows_at`).
     Station,
     /// A device nearby on a station's strip (by its key, see `station::send::key_of`), what is dragged off the station
-    /// let go there to be sent to it; the strip itself, over what is under it.
+    /// let go there to be sent to it, and a sending to it going on cancelled as it is pressed; the strip itself, over
+    /// what is under it.
     SendTo(u64),
     Strip,
     /// The thing whose box was put just before it, its name shown shortened there (see `named`).
@@ -275,7 +276,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::SendTo(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)))
     }
 
     /// The track it is, where it is one dragged along.
@@ -4192,9 +4193,12 @@ const CHIP_MARK: f32 = 16.0;
 /// How far below its place it rises from.
 const STRIP_RISES: f32 = 24.0;
 
+/// A box: where it starts, how wide, how tall (DIPs).
+type Boxed = (f32, f32, f32, f32);
+
 /// Where the strip and its devices are in a lane's `area` (DIPs), with `count` devices: the strip, and each device's
 /// box (as many across as fit, three at most; one row with none, where it says it looks for them).
-fn strip_places(area: Rect, count: usize) -> ((f32, f32, f32, f32), Vec<(f32, f32, f32, f32)>) {
+fn strip_places(area: Rect, count: usize) -> (Boxed, Vec<Boxed>) {
     let (x, w) = (area.x + STRIP_INSET, area.w - 2.0 * STRIP_INSET);
     let inner = w - 2.0 * STRIP_PAD.0;
     let across = (((inner + STRIP_GAP) / (CHIP_LEAST + STRIP_GAP)).floor() as usize).clamp(1, 3);
@@ -4233,7 +4237,7 @@ fn sending_said(sending: &crate::nearby::Sending, lang: Lang) -> String {
         Sending::Sent => lang.pick("已发送", "Sent").into(),
         Sending::Refused => lang.pick("对方已拒绝", "Declined").into(),
         Sending::Busy => lang.pick("对方正忙", "Busy").into(),
-        Sending::Pin => lang.pick("需要 PIN 码", "A PIN is needed").into(),
+        Sending::Pin { .. } => lang.pick("需要 PIN 码", "A PIN is needed").into(),
         Sending::Cancelled => lang.pick("已取消", "Cancelled").into(),
         Sending::Failed { .. } => lang.pick("发送失败", "Not sent").into(),
     }
@@ -4243,8 +4247,9 @@ fn sending_said(sending: &crate::nearby::Sending, lang: Lang) -> String {
 /// plate in the skin's look rising into its place as it comes, "发送到" on it, and the devices across it, each its
 /// mark in a round, its name, and its kind or how a sending to it goes (a ring of how much has gone, a tick on the
 /// lane's ink as it is sent); the one the pointer is over grown and lit, all dimmed where what is dragged may not
-/// leave this PC. Its boxes: each device where something is dragged (to be let go there), then the strip, over what is
-/// under it.
+/// leave this PC. A device a sending to goes on, the pointer on it, offers to cancel it: a cross in its round, "取消发送"
+/// under it. Its boxes: each device where something is dragged (to be let go there), or a sending to it may be
+/// cancelled, then the strip, over what is under it.
 fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: Rect, strip: &crate::station::send::Shown) -> Vec<HitBox> {
     let (theme, lang) = (scene.theme, scene.lang);
     let ((x, y, w, h), chips) = strip_places(area, strip.chips.len());
@@ -4254,7 +4259,9 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
     }
     let drop = (1.0 - up) * STRIP_RISES;
     let seen = |color: Color, much: f32| color.alpha(up * much);
-    super::menu::plate_seen(frame, super::menu::Look::of(theme.skin, theme.dark), (x, y + drop, w, h), up);
+    let plate = super::menu::plate_seen(frame, super::menu::Look::of(theme.skin, theme.dark), (x, y + drop, w, h), up);
+    // (A sending going on is cancelled from its device, nothing being dragged.)
+    let cancels = |chip: &crate::station::send::ChipShown| !strip.open && !strip.stays_here && chip.sending.as_ref().is_some_and(|(sending, _)| !sending.over());
     let says = Font { weight: 600.0, ..theme.small };
     frame.text(lang.pick("发送到", "Send to"), says, seen(theme.text2, 1.0), x + STRIP_PAD.0, frame.line_in(says, y + drop + STRIP_PAD.1, STRIP_SAYS), w - 2.0 * STRIP_PAD.0, Align::Start);
     let dim = if strip.stays_here { 0.4 } else { 1.0 };
@@ -4266,8 +4273,11 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
     }
     for (chip, &(cx, cy, cw, ch)) in strip.chips.iter().zip(&chips) {
         let cy = cy + drop;
+        let cancelling = cancels(chip) && scene.hover == Some(Hit::SendTo(chip.key));
         if chip.lit {
             frame.fill_rounded(seen(ink.trace, 0.22), cx, cy, cw, ch, 10.0);
+        } else if cancelling {
+            frame.fill_rounded(seen(plate.highlight, 1.0), cx, cy, cw, ch, 10.0);
         }
         let centre = Point { x: cx + cw / 2.0, y: cy + 4.0 + CHIP_MARK };
         let scale = 1.0 + crate::station::send::GROWN * chip.grown;
@@ -4280,8 +4290,10 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
                 frame.icon(Icon::Check, centre, CHIP_MARK * grows, seen(ink_on(ink.trace), dim));
             }
             None => {
-                frame.fill_circle(seen(theme.text.alpha(if theme.dark { 0.12 } else { 0.07 }), dim), centre, CHIP_MARK * scale);
-                frame.icon(device_mark(chip.kind.as_deref()), centre, CHIP_MARK * scale, seen(theme.text, dim));
+                let round = theme.text.alpha(if theme.dark { 0.12 } else { 0.07 } * if cancelling { 1.5 } else { 1.0 });
+                frame.fill_circle(seen(round, dim), centre, CHIP_MARK * scale);
+                let mark = if cancelling { Icon::Close } else { device_mark(chip.kind.as_deref()) };
+                frame.icon(mark, centre, CHIP_MARK * scale, seen(theme.text, dim));
             }
         }
         if let Some((crate::nearby::Sending::Going { done, of }, _)) = &chip.sending {
@@ -4293,18 +4305,19 @@ fn paint_strip(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, area: 
         let name = fitted(frame, &chip.alias, name_font, cw - 4.0);
         centred(frame, &name, name_font, seen(theme.text, dim), cx, name_top, cw);
         let said = match &chip.sending {
+            _ if cancelling => lang.pick("取消发送", "Cancel").to_string(),
             Some((sending, _)) => sending_said(sending, lang),
             None => kind_named(chip.kind.as_deref(), lang).to_string(),
         };
+        // (Asked for what only the user can give: said as what wants them.)
+        let asks = !cancelling && matches!(chip.sending, Some((crate::nearby::Sending::Pin { .. }, _)));
         let said = fitted(frame, &said, kind_font, cw - 4.0);
-        centred(frame, &said, kind_font, seen(theme.text2, 0.85 * dim), cx, name_top + name_font.size + 4.0, cw);
+        centred(frame, &said, kind_font, seen(if asks { theme.signal } else { theme.text2 }, 0.85 * dim), cx, name_top + name_font.size + 4.0, cw);
     }
     // (Its places where it stands, risen: the boxes stay put as it rises, the windows catching drops over them with
     // them.)
     let mut boxes: Vec<HitBox> = Vec::new();
-    if strip.open || strip.stays_here {
-        boxes.extend(strip.chips.iter().zip(&chips).map(|(chip, &(cx, cy, cw, ch))| (cx, cy, cw, ch, Hit::SendTo(chip.key))));
-    }
+    boxes.extend(strip.chips.iter().zip(&chips).filter(|(chip, _)| strip.open || strip.stays_here || cancels(chip)).map(|(chip, &(cx, cy, cw, ch))| (cx, cy, cw, ch, Hit::SendTo(chip.key))));
     boxes.push((x, y, w, h, Hit::Strip));
     boxes
 }
@@ -6869,8 +6882,8 @@ otepad.exe", "Notepad"),
     }
 
     /// The devices nearby at the station's foot in each skin, light and dark (the rows): rising, one under the pointer,
-    /// dimmed (what is dragged may not leave this PC), a sending waiting, going, sent, and none found yet (the
-    /// columns): `cargo test --features studio --lib -- --ignored send_strip` writes `target/send-strip.png`.
+    /// dimmed (what is dragged may not leave this PC), a sending waiting, going, sent, none found yet, one waiting under
+    /// the pointer (to be cancelled), and one asking for a PIN (the columns): `cargo test --features studio --lib -- --ignored send_strip` writes `target/send-strip.png`.
     #[test]
     #[ignore = "writes a picture to look at"]
     #[cfg(feature = "studio")]
@@ -6909,7 +6922,11 @@ otepad.exe", "Notepad"),
             Shown { up: 1.0, open: false, stays_here: false, chips: three(false, Some((Sending::Going { done: 46, of: 100 }, 0.0))) },
             Shown { up: 1.0, open: false, stays_here: false, chips: three(false, Some((Sending::Sent, 1.0))) },
             Shown { up: 1.0, open: true, stays_here: false, chips: Vec::new() },
+            // (Under the pointer as it waits: to be cancelled. Asking for a PIN.)
+            Shown { up: 1.0, open: false, stays_here: false, chips: three(false, Some((Sending::Waiting, 0.0))) },
+            Shown { up: 1.0, open: false, stays_here: false, chips: three(false, Some((Sending::Pin { tried: 0 }, 0.0))) },
         ];
+        let hovered = |column: usize| (column == 7).then(|| Hit::SendTo(crate::station::send::key_of("Galaxy Z Fold6")));
         let (lane_w, lane_h) = (COLUMN_WIDTH, 360.0);
         let rows = [(Skin::Glass, false), (Skin::Glass, true), (Skin::Fluent, false), (Skin::Fluent, true), (Skin::Paper, false), (Skin::Paper, true)];
         let (w, h) = (states.len() as f32 * (lane_w + 12.0), rows.len() as f32 * (lane_h + 12.0));
@@ -6931,7 +6948,7 @@ otepad.exe", "Notepad"),
                     let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
-                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: hovered(column), thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
                     paint_lane(frame, &scene, &lane, area, 0.0, Pass::Content, &mut Vec::new());

@@ -36,7 +36,7 @@ The mockup's defaults were kept, because the owner did not choose otherwise:
    - the edge notice on/off
    - where files go (the station's folder)
 
-Not in v1: receiving text messages as notes, the reverse-download (browser) mode, and a PIN.
+Not in v1: receiving text messages as notes, the reverse-download (browser) mode, and a PIN of this PC's own.
 
 ## The protocol (LocalSend v2, as the protocol document and the app's source say)
 
@@ -70,7 +70,15 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
 - **Sending.** We are a LocalSend client:
   - rustls, with our certificate as the client certificate, pinned to the device's announced fingerprint
   - `prepare-upload`, then one `upload` per file, streamed from disk
-  - `cancel` when the user cancels
+  - `cancel` when the user cancels: with the session's id once there is one; while the device's user is still asked
+    (no session yet), without one, which LocalSend takes as the sender's from that address. The offer's own
+    connection is then given up at once (`CancelIoEx` on its socket: shutting it down wakes no blocked read on
+    Windows). This PC as a receiver does the same for a sender: a `cancel` without a session, from the address being
+    asked about, takes the asking back from the notice.
+  - a 401 to `prepare-upload` asks for the receiver's PIN: the state `pin {tried}` is told to Glance, which asks the
+    user for it, and the offer is made again as `prepare-upload?pin=…`. A PIN not right is answered at once with 401
+    again (`tried` counts them). One right is held for the device's user like any offer: "waiting" is told only once
+    the device has held it for a second, so the notice stays while a PIN is tried.
 
 ## Trust
 
@@ -106,7 +114,7 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
     - `devices [{id, alias, kind, ...}]` (when the list changes)
     - `sent {job, ...}` (progress and result of a send)
   - Glance → helper: `send {job, to, files[{path, name}]}` (a folder sent as its files, each named by its place in
-    it, "folder/inner/file", as LocalSend names them), `cancel {job|session}`, `announce`
+    it, "folder/inner/file", as LocalSend names them), `cancel {job}`, `pin {job, pin}`, `announce`
   - Everything the helper says is data, checked: a `came` file must be a plain name, and the file must exist in the
     station folder.
 - **Glance not running.** Unknown devices are refused, trusted ones taken. The helper writes each finished session
@@ -138,6 +146,13 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
     as files first (as for a drag into a chat), in a folder of the sending's own, deleted as it ends.
   - The device shows "等待对方接受", a ring, then a tick (or what became of it). The strip goes down 1.1 s after the
     sending is over and the drag is over (2.4 s after one that did not go through).
+  - While a sending waits on the device's user, asks for a PIN or goes, the pointer on its device shows a cross in its
+    round and "取消发送" under it: pressed, the sending is cancelled ("已取消", the strip down 2.4 s later).
+- **Outgoing PIN.** The device shows "需要 PIN 码" in the signal colour, and the edge notice (beside a panel up at
+  its edge) asks for it: a padlock, "<device> 需要 PIN 码", a box that has the keys at once (its window taken to the
+  front; no input method), what is sent under it, 取消 and 发送. Enter or 发送 gives it; while it is tried the box
+  takes nothing more. Turned down, the box shakes (360 ms), what was written is chosen, and "PIN 码不正确" shows under
+  it. Escape or 取消 cancels the sending. The PIN is used for that offer only and never kept.
 - **Settings page.** As listed above. Turning it on adds the firewall rule and the task (the same path as the remote).
 
 ## Android

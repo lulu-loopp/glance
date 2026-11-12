@@ -62,8 +62,11 @@ pub enum Sending {
     Refused,
     /// The device is receiving another sending.
     Busy,
-    /// It asks for a PIN.
-    Pin,
+    /// It asks for a PIN (given with `pin`), and how many given it turned down so far.
+    Pin {
+        #[serde(default)]
+        tried: u32,
+    },
     Cancelled,
     Failed { why: String },
 }
@@ -71,8 +74,19 @@ pub enum Sending {
 impl Sending {
     /// Whether it is over: sent, or not to be.
     pub fn over(&self) -> bool {
-        !matches!(self, Sending::Waiting | Sending::Going { .. })
+        !matches!(self, Sending::Waiting | Sending::Going { .. } | Sending::Pin { .. })
     }
+}
+
+/// A sending of this PC's as it was asked for: to which device (what it calls itself, its kind), and what (the first
+/// file's name, how many files, how large all of them are).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outgoing {
+    pub to: String,
+    pub kind: Option<String>,
+    pub first: String,
+    pub files: usize,
+    pub bytes: u64,
 }
 
 /// What the helper tells.
@@ -118,6 +132,8 @@ pub struct Shown {
     pub receiving: Option<Receiving>,
     pub devices: Vec<Device>,
     pub sendings: HashMap<u64, Sending>,
+    /// What each sending sends, to whom.
+    pub outgoing: HashMap<u64, Outgoing>,
 }
 
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
@@ -174,7 +190,12 @@ pub fn send(job: u64, to: &str, files: &[(PathBuf, String)]) {
         sending(job, Sending::Failed { why: "nothing to send".into() });
         return;
     }
+    let bytes = files.iter().filter_map(|(path, _)| std::fs::metadata(path).ok()).map(|meta| meta.len()).sum();
+    let first = files[0].1.rsplit('/').next().unwrap_or_default().to_string();
     change(|shown| {
+        let device = shown.devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(to));
+        let (alias, kind) = device.map_or_else(|| (String::new(), None), |device| (device.alias.clone(), device.kind.clone()));
+        shown.outgoing.insert(job, Outgoing { to: alias, kind, first, files: files.len(), bytes });
         shown.sendings.insert(job, Sending::Waiting);
     });
     if !command(&send_line(job, to, files)) {
@@ -192,6 +213,7 @@ fn send_line(job: u64, to: &str, files: &[(PathBuf, String)]) -> serde_json::Val
 pub fn forget(job: u64) {
     change(|shown| {
         shown.sendings.remove(&job);
+        shown.outgoing.remove(&job);
     });
 }
 
@@ -206,8 +228,14 @@ fn sending(job: u64, state: Sending) {
     }
 }
 
+/// Sending `job` cancelled (the helper tells it is, as it ends).
 pub fn cancel(job: u64) -> bool {
     command(&json!({ "kind": "cancel", "job": job }))
+}
+
+/// The PIN the device of sending `job` asked for, given: offered again with it (the helper tells how that goes).
+pub fn pin(job: u64, pin: &str) -> bool {
+    command(&json!({ "kind": "pin", "job": job, "pin": pin }))
 }
 
 /// This PC announced to the devices nearby, and which they are said again (the devices are about to be shown).
@@ -360,8 +388,8 @@ fn serve() {
         // Gone: nothing to tell it, nothing it asked to answer, nothing coming, and what it was sending not sent.
         *DOWN.lock().unwrap() = None;
         let going: Vec<u64> = shown().sendings.iter().filter(|(_, state)| !state.over()).map(|(job, _)| *job).collect();
-        let sendings = shown().sendings;
-        change(|shown| *shown = Shown { sendings, ..Shown::default() });
+        let Shown { sendings, outgoing, .. } = shown();
+        change(|shown| *shown = Shown { sendings, outgoing, ..Shown::default() });
         for job in going {
             sending(job, Sending::Failed { why: "the helper went".into() });
         }
@@ -539,6 +567,9 @@ mod tests {
         assert!(matches!(ask, Told::Ask { id: 3, ref files, .. } if files[0].size == 5));
         let sending: Told = serde_json::from_str(r#"{"kind":"sending","job":7,"state":{"state":"sending","done":1,"of":2}}"#).unwrap();
         assert!(matches!(sending, Told::Sending { job: 7, state: Sending::Going { done: 1, of: 2 } }));
+        let pin: Told = serde_json::from_str(r#"{"kind":"sending","job":7,"state":{"state":"pin","tried":2}}"#).unwrap();
+        assert!(matches!(pin, Told::Sending { job: 7, state: Sending::Pin { tried: 2 } }));
+        assert!(!Sending::Pin { tried: 2 }.over(), "waits on the PIN");
         let came: Told = serde_json::from_str(&format!(r#"{{"kind":"came","session":"s1","from":{from},"files":[],"short":null}}"#)).unwrap();
         assert!(matches!(came, Told::Came { ref session, short: None } if session == "s1"));
         let receipt: Receipt = serde_json::from_str(&format!(r#"{{"session":"s1","from":{from},"files":[{{"file":"9a.jpg","name":"a.jpg","size":5,"type":"image/jpeg"}}],"at":9}}"#)).unwrap();

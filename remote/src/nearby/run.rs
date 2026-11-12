@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -30,8 +29,8 @@ pub struct Running {
     pub receiver: Arc<Receiver>,
     pub discovery: Arc<Discovery>,
     told: Arc<Link>,
-    /// The sendings going on, each by its job and what cancels it.
-    jobs: Mutex<HashMap<u64, Arc<AtomicBool>>>,
+    /// The sendings going on, each by its number.
+    jobs: Mutex<HashMap<u64, Arc<send::Job>>>,
 }
 
 /// The nearby transfer this helper runs, once started.
@@ -92,18 +91,23 @@ impl Running {
                     self.told.tell(Event::Sending { job, state: send::State::Failed { why: "the device is not nearby".into() } });
                     return;
                 };
-                let cancelled = Arc::new(AtomicBool::new(false));
-                self.jobs.lock().unwrap().insert(job, cancelled.clone());
+                let going = Arc::new(send::Job::default());
+                self.jobs.lock().unwrap().insert(job, going.clone());
                 let running = self.clone();
                 std::thread::spawn(move || {
                     let told: Arc<dyn Told> = running.told.clone();
-                    send::send(&running.receiver.own, &running.receiver.info, &device, &files, job, &told, &cancelled);
+                    send::send(&running.receiver.own, &running.receiver.info, &device, &files, job, &told, &going);
                     running.jobs.lock().unwrap().remove(&job);
                 });
             }
             Command::Cancel { job } => {
-                if let Some(cancelled) = self.jobs.lock().unwrap().get(&job) {
-                    cancelled.store(true, Ordering::SeqCst);
+                if let Some(going) = self.jobs.lock().unwrap().get(&job) {
+                    going.cancel();
+                }
+            }
+            Command::Pin { job, pin } => {
+                if let Some(going) = self.jobs.lock().unwrap().get(&job) {
+                    going.give_pin(pin);
                 }
             }
             // (Answers are the link's own.)
@@ -132,7 +136,8 @@ pub fn phone_trusted(phone: &str, fingerprint: &str, alias: &str) -> std::io::Re
         let trusted = &mut config.nearby.trusted;
         // (One phone, one certificate: what it told before goes.)
         trusted.retain(|trusted| trusted.phone.as_deref() != Some(phone) && !trusted.fingerprint.eq_ignore_ascii_case(&fingerprint));
-        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last: 0, phone: Some(phone.to_string()) });
+        let since = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last: 0, since, phone: Some(phone.to_string()) });
     })?;
     Ok(true)
 }

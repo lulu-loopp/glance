@@ -34,6 +34,10 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             *last = (!again).then(|| (id, std::time::Instant::now()));
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
+        // A device on the strip a sending to goes on: that sending cancelled.
+        Hit::SendTo(key) => {
+            send::cancel(key);
+        }
         // The notes shown another way (their head's views).
         Hit::NotesShow(view) => {
             std::thread::spawn(move || crate::app().change(|settings| settings.notes_view = view));

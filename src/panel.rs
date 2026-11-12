@@ -1054,10 +1054,19 @@ impl Controller {
                     seam_armed = false;
                 }
             };
-            // The notice at the edge: the pointer over it, a press on it; pressed where it tells what comes or came,
-            // the panel opened where it stands (where the panel is kept moved away from its edge, there).
+            // The notice at the edge: the pointer over it, a press on it, the keys (a PIN written in it); pressed where
+            // it tells what comes or came, the panel opened where it stands (where the panel is kept moved away from its
+            // edge, there).
             if peek.owns(msg.hwnd) {
                 match msg.message {
+                    WM_KEYDOWN | windows::Win32::UI::WindowsAndMessaging::WM_CHAR => {
+                        // (Its characters, as the keyboard's layout makes them of the keys.)
+                        if msg.message == WM_KEYDOWN {
+                            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg) };
+                        }
+                        peek.handle(&msg, now);
+                        continue;
+                    }
                     WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
                         if let Some(crate::ui::peek::Act::Open { edge, at }) = peek.handle(&msg, now) {
                             if self.config.lock().unwrap().panel_at.is_some() {

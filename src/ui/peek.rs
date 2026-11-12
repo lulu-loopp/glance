@@ -1,8 +1,9 @@
 //! The notice at the screen's edge for nearby transfer (see `docs/nearby.md`): a device asking to send is asked about
 //! there (its name, what it sends, Accept and Decline, and, for a device that showed its certificate, whether its
-//! files are taken from now on without asking); and while no panel is up, what comes is told as it comes, and what
-//! came by its picture. Pressed then, the panel opens where the station is, and the picture is carried onto its face
-//! there.
+//! files are taken from now on without asking); a device sent to that asks for a PIN is given it there (written in a
+//! box that takes the keys at once: Enter sends it, Escape cancels the sending, one turned down shakes the box); and
+//! while no panel is up, what comes is told as it comes, and what came by its picture. Pressed then, the panel opens
+//! where the station is, and the picture is carried onto its face there.
 //!
 //! A plate drawn as the panel's skin draws its plates (see `menu::plate`), slid out of the edge of the pointer's screen
 //! that opens the workbench, in a window of the panel's thread. What came goes back in after a while, held while the
@@ -15,14 +16,16 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
-use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_V};
+use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
 
-use super::canvas::{Align, Canvas, Point};
+use super::canvas::{Align, Canvas, Font, Point};
 use super::gfx::{self, Frame, Gfx, Surface};
 use super::icons::Icon;
 use super::life::{Lives, Showing};
 use super::text::Lang;
 use super::theme::{Skin, Theme};
+use super::typing::Typing;
 use super::window::Window;
 use crate::mouse::Contact;
 use crate::nearby::{Asking, Offered, Receiving};
@@ -46,6 +49,17 @@ const TRUST_ROW: f32 = 20.0;
 const BUTTON: f32 = 32.0;
 const BAR: f32 = 4.0;
 const SPACE: f32 = 10.0;
+/// A PIN's box, the line under it (what is sent, or that the PIN was not right), the room before its words, the size of
+/// its words and the room between them (spelled out, as a PIN is read); the most a PIN may hold (UTF-16 units).
+const FIELD: f32 = 34.0;
+const FIELD_LINE: f32 = 18.0;
+const FIELD_PAD: f32 = 10.0;
+const PIN_SIZE: f32 = 15.0;
+const PIN_SPACING: f32 = 3.0;
+const PIN_MOST: usize = 32;
+/// How long a box shakes as a PIN in it is turned down, and how far it goes each way (DIPs) as it does.
+const SHAKE: Duration = Duration::from_millis(360);
+const SHAKEN: [(f32, f32); 6] = [(0.0, 0.0), (0.2, -6.0), (0.4, 5.0), (0.6, -3.0), (0.8, 2.0), (1.0, 0.0)];
 /// The most files an asking lists, each on its row (the rest counted under them).
 const LISTED: usize = 3;
 
@@ -69,6 +83,9 @@ enum Says {
     Coming(Receiving),
     /// What came (the thing `id` on the station), from whom, how many files, and whether all are pictures.
     Came { id: u64, from: String, kind: Option<String>, files: usize, pictures: bool },
+    /// The device of sending `job` asks for a PIN: what it calls itself, what is sent (said), and how many PINs given it
+    /// turned down.
+    Pin { job: u64, to: String, what: String, tried: u32 },
 }
 
 /// A part of it a press does something on.
@@ -79,6 +96,8 @@ enum Spot {
     Trust,
     Decline,
     Accept,
+    /// The box a PIN is written in.
+    Field,
 }
 
 /// What it asks of the panel's thread.
@@ -137,6 +156,29 @@ impl Lives for Drawn {
     }
 }
 
+/// A PIN being written for sending `job` (whose device asks for it): what is written, how many PINs the device turned
+/// down as last told (one more turned down shakes the box), whether the one given is being tried, since when the caret
+/// shows (it blinks from then), since when the box shakes, and whether the notice has taken the keys for it.
+struct Written {
+    job: u64,
+    typing: Typing,
+    tried: u32,
+    trying: bool,
+    blink: Instant,
+    shaken: Option<Instant>,
+    keys: bool,
+}
+
+/// A PIN's box as it is drawn: what is written, whether it has the keys and the caret shows, how far the box is shaken
+/// aside (DIPs), and whether the PIN given is being tried.
+struct Field<'a> {
+    typing: &'a Typing,
+    keys: bool,
+    caret: bool,
+    shaken: f32,
+    trying: bool,
+}
+
 /// What the panel's thread knows as the notice looks again (see `Peek::tick`).
 pub struct Seen<'a> {
     /// Whether a panel is up.
@@ -171,6 +213,10 @@ pub struct Peek {
     /// Its parts a press does something on, as last drawn (DIPs, from its plate's corner).
     spots: Vec<(f32, f32, f32, f32, Spot)>,
     flight: Option<Flight>,
+    /// The PIN being written, while one is asked for, and where in its box each place between its characters is, as
+    /// last drawn (UTF-16 units into it, DIPs from its plate's corner).
+    written: Option<Written>,
+    places: Vec<(usize, f32)>,
     /// Drawn again on the next look: what it shows changed, or its picture was not yet made.
     stale: bool,
 }
@@ -224,6 +270,21 @@ impl Peek {
                 None => {}
             }
         }
+        // A PIN's box: its caret blinking while the keys are its, and shaking as one in it was turned down.
+        if let Some(written) = self.written.as_mut().filter(|_| self.sliding.is_none()) {
+            if written.shaken.is_some_and(|shaken| now.saturating_duration_since(shaken) >= SHAKE) {
+                written.shaken = None;
+            }
+            let every = caret_blink();
+            let soon = if written.shaken.is_some() {
+                Duration::ZERO
+            } else {
+                let shown = now.saturating_duration_since(written.blink).as_millis() % every.as_millis().max(1);
+                every - Duration::from_millis(shown as u64)
+            };
+            self.stale = true;
+            due = Some(due.map_or(soon, |due: Duration| due.min(soon)));
+        }
         // Lit as the pointer is on a part of it: looked at again till it leaves (no message says it has).
         if self.over.is_some() {
             if !self.pointer_on() {
@@ -251,8 +312,16 @@ impl Peek {
         let station = crate::station::run::shown();
         let came = station.arrived.as_ref().filter(|(_, at)| self.told.is_none_or(|told| *at > told)).cloned();
         let notice = crate::app().settings.lock().unwrap().nearby_notice;
+        // (A device sent to asking for a PIN: the earliest sending's first.)
+        let pin = nearby.sendings.iter().filter_map(|(job, sending)| if let crate::nearby::Sending::Pin { tried } = sending { Some((*job, *tried)) } else { None }).min_by_key(|(job, _)| *job);
+        let lang = look().2;
         let wanted = if let Some(asking) = nearby.asks.first() {
             Some(Says::Ask(asking.clone()))
+        } else if let Some((job, tried)) = pin {
+            let outgoing = nearby.outgoing.get(&job);
+            let to = outgoing.map(|outgoing| outgoing.to.clone()).filter(|to| !to.is_empty()).unwrap_or_else(|| lang.pick("对方", "The device").to_string());
+            let what = outgoing.map(|outgoing| sent_said(outgoing, lang)).unwrap_or_default();
+            Some(Says::Pin { job, to, what, tried })
         } else if !notice || seen.panel_up {
             None
         } else if let Some(receiving) = nearby.receiving {
@@ -276,6 +345,27 @@ impl Peek {
         let was = std::mem::replace(&mut self.says, wanted.clone());
         self.pressed = None;
         self.stale = true;
+        // A PIN asked for: written in a box of its own (kept as more of them are turned down, which shakes it); none
+        // asked for now, the keys given back.
+        match &wanted {
+            Some(Says::Pin { job, tried, .. }) => match self.written.as_mut().filter(|written| written.job == *job) {
+                Some(written) => {
+                    if *tried > written.tried {
+                        written.tried = *tried;
+                        written.trying = false;
+                        written.shaken = Some(now);
+                        written.typing.go(0, false);
+                        written.typing.go(written.typing.text.len(), true);
+                        written.blink = now;
+                    }
+                }
+                None => {
+                    self.let_go_of_keys();
+                    self.written = Some(Written { job: *job, typing: Typing::most(PIN_MOST), tried: *tried, trying: false, blink: now, shaken: None, keys: false });
+                }
+            },
+            _ => self.let_go_of_keys(),
+        }
         let Some(says) = wanted else {
             self.until = None;
             if was.is_some() {
@@ -325,6 +415,18 @@ impl Peek {
         true
     }
 
+    /// The PIN's box gone, the keys it took given back.
+    fn let_go_of_keys(&mut self) {
+        if let Some(written) = self.written.take() {
+            if written.keys {
+                if let Some(drawn) = self.drawn.as_ref() {
+                    drawn.window.take_keys(false);
+                }
+            }
+        }
+        self.places.clear();
+    }
+
     /// Slides out (`out`) or back in, from where it is now.
     fn slide(&mut self, out: bool, now: Instant) {
         self.sliding = Some((self.out, out, now));
@@ -352,6 +454,21 @@ impl Peek {
 
     /// A message of its window: the pointer moved over it, a press on it and let go. What the panel's thread is to do.
     pub fn handle(&mut self, msg: &MSG, now: Instant) -> Option<Act> {
+        match msg.message {
+            WM_KEYDOWN => {
+                self.key(VIRTUAL_KEY(msg.wParam.0 as u16), now);
+                return None;
+            }
+            WM_CHAR => {
+                let unit = msg.wParam.0 as u16;
+                // (What keys with Ctrl and the like give is no character to write.)
+                if unit >= 0x20 && unit != 0x7F {
+                    self.write(&[unit], now);
+                }
+                return None;
+            }
+            _ => {}
+        }
         let at = self.on_plate(msg.lParam);
         match msg.message {
             WM_MOUSEMOVE => {
@@ -364,6 +481,16 @@ impl Peek {
             }
             WM_LBUTTONDOWN => {
                 self.pressed = at.and_then(|at| self.spot_at(at));
+                // In the PIN's box: the caret where it was pressed, the keys taken again where they were given away.
+                if let (Some(Spot::Field), Some((x, _))) = (self.pressed, at) {
+                    let place = self.places.iter().min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs())).map(|place| place.0);
+                    if let Some(written) = self.written.as_mut() {
+                        written.typing.go(place.unwrap_or(written.typing.text.len()), false);
+                        written.blink = now;
+                    }
+                    self.take_keys();
+                    self.stale = true;
+                }
                 None
             }
             WM_LBUTTONUP => {
@@ -389,6 +516,14 @@ impl Peek {
                 crate::nearby::answer(asking.id, spot == Spot::Accept, spot == Spot::Accept && asking.from.verified && self.trust.1);
                 None
             }
+            (Spot::Accept, Says::Pin { .. }) => {
+                self.give_pin();
+                None
+            }
+            (Spot::Decline, Says::Pin { job, .. }) => {
+                crate::nearby::cancel(job);
+                None
+            }
             (Spot::Body, Says::Coming(_)) => {
                 self.slide(false, now);
                 self.says = None;
@@ -405,6 +540,83 @@ impl Peek {
             }
             _ => None,
         }
+    }
+
+    /// The keys taken for the PIN's box (its window brought to the front with them), where they are not yet.
+    fn take_keys(&mut self) {
+        let (Some(written), Some(drawn)) = (self.written.as_mut(), self.drawn.as_ref()) else { return };
+        if !written.keys {
+            written.keys = true;
+            drawn.window.take_keys(true);
+            // (A PIN is no words to compose: no input method for it.)
+            unsafe {
+                let _ = windows::Win32::UI::Input::Ime::ImmAssociateContextEx(drawn.window.hwnd, windows::Win32::UI::Input::Ime::HIMC::default(), 0);
+            }
+        } else {
+            drawn.window.focus();
+        }
+    }
+
+    /// The PIN written given to the device that asked for it, where something is written and none is being tried.
+    fn give_pin(&mut self) {
+        let Some(written) = self.written.as_mut() else { return };
+        let pin = written.typing.string();
+        let pin = pin.trim();
+        if written.trying || pin.is_empty() {
+            return;
+        }
+        written.trying = crate::nearby::pin(written.job, pin);
+        self.stale = true;
+    }
+
+    /// A key pressed while the PIN's box has the keys: the caret moved, a character taken away, all of it chosen, what
+    /// is on the clipboard written; Enter gives the PIN, Escape cancels the sending.
+    fn key(&mut self, key: VIRTUAL_KEY, now: Instant) {
+        let Some(job) = self.written.as_ref().map(|written| written.job) else { return };
+        let held = |key: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(key.0)) } < 0;
+        let (shift, ctrl) = (held(VK_SHIFT), held(VK_CONTROL));
+        match key {
+            VK_RETURN => return self.give_pin(),
+            VK_ESCAPE => {
+                crate::nearby::cancel(job);
+                return;
+            }
+            VK_V if ctrl => {
+                let hwnd = self.drawn.as_ref().map(|drawn| drawn.window.hwnd).unwrap_or_default();
+                let text = crate::clipboard::text(hwnd).unwrap_or_default();
+                let plain: Vec<u16> = text.trim().chars().filter(|c| !c.is_control()).collect::<String>().encode_utf16().collect();
+                return self.write(&plain, now);
+            }
+            _ => {}
+        }
+        let Some(written) = self.written.as_mut() else { return };
+        let typing = &mut written.typing;
+        match key {
+            VK_BACK | VK_DELETE => typing.erase(key == VK_DELETE),
+            VK_LEFT | VK_RIGHT => {
+                let forward = key == VK_RIGHT;
+                let selection = typing.selection();
+                let to = if !shift && !selection.is_empty() { if forward { selection.end } else { selection.start } } else { typing.step(typing.caret, forward) };
+                typing.go(to, shift);
+            }
+            VK_HOME => typing.go(0, shift),
+            VK_END => typing.go(typing.text.len(), shift),
+            VK_A if ctrl => {
+                typing.go(0, false);
+                typing.go(typing.text.len(), true);
+            }
+            _ => return,
+        }
+        written.blink = now;
+        self.stale = true;
+    }
+
+    /// `units` written at the caret in the PIN's box (in place of what is chosen there).
+    fn write(&mut self, units: &[u16], now: Instant) {
+        let Some(written) = self.written.as_mut().filter(|written| !written.trying) else { return };
+        written.typing.put(units);
+        written.blink = now;
+        self.stale = true;
     }
 
     /// Where a point of its window (`lparam`, physical px) is on its plate (DIPs from its corner, as it stands out).
@@ -451,10 +663,19 @@ impl Peek {
         drawn.shown();
         let mut whole = true;
         let mut spots = Vec::new();
+        let mut places = Vec::new();
         let (over, trust) = (self.over, self.trust.1);
+        let now = Instant::now();
+        let field = self.written.as_ref().map(|written| Field {
+            typing: &written.typing,
+            keys: written.keys,
+            caret: written.keys && (now.saturating_duration_since(written.blink).as_millis() / caret_blink().as_millis().max(1)).is_multiple_of(2),
+            shaken: written.shaken.map_or(0.0, |shaken| shaken_by(now.saturating_duration_since(shaken))),
+            trying: written.trying,
+        });
         let done = surface.draw(&drawn.gfx, size, scale, |frame| {
             frame.origin(corner.0 + dx, corner.1 + dy);
-            whole = paint(frame, &theme, lang, &says, (over, trust), &mut spots);
+            whole = paint(frame, &theme, lang, &says, (over, trust), field.as_ref(), &mut spots, &mut places);
             frame.origin(0.0, 0.0);
         });
         if let Err(error) = &done {
@@ -465,7 +686,12 @@ impl Peek {
         }
         drawn.surface = Some(surface);
         self.spots = spots;
+        self.places = places;
         drawn.window.show();
+        // (A PIN asked for: written at once, out, without a press first.)
+        if self.written.as_ref().is_some_and(|written| !written.keys) && self.sliding.is_none_or(|(_, out, _)| out) {
+            self.take_keys();
+        }
         whole
     }
 
@@ -500,7 +726,7 @@ impl Peek {
         };
         // (Nowhere to land: fading where it was.)
         let opacity = if to.is_some() { 1.0 } else { 1.0 - t };
-        let Some(drawn) = self.drawn.as_mut() else { return None };
+        let drawn = self.drawn.as_mut()?;
         let scale = self.place.map_or(1.0, |place| place.contact.scale);
         let size = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
         let surface = match drawn.surface.take() {
@@ -650,7 +876,29 @@ fn tall(says: &Says) -> f32 {
         }
         Says::Coming(_) => PAD + THUMB + SPACE + BAR + PAD,
         Says::Came { .. } => PAD + THUMB + PAD,
+        Says::Pin { .. } => PAD + HEAD + SPACE + FIELD + FIELD_LINE + SPACE + BUTTON + PAD,
     }
+}
+
+/// How far a box shaken `since` ago is aside (DIPs): as `SHAKEN` goes, between its steps evenly.
+fn shaken_by(since: Duration) -> f32 {
+    let t = (since.as_secs_f32() / SHAKE.as_secs_f32()).clamp(0.0, 1.0);
+    let after = SHAKEN.iter().position(|(at, _)| *at >= t).unwrap_or(SHAKEN.len() - 1).max(1);
+    let ((t0, x0), (t1, x1)) = (SHAKEN[after - 1], SHAKEN[after]);
+    x0 + (x1 - x0) * ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
+}
+
+/// How long the caret shows, and is hidden, as it blinks (as Windows is set).
+fn caret_blink() -> Duration {
+    let blink = unsafe { windows::Win32::UI::WindowsAndMessaging::GetCaretBlinkTime() };
+    // (Set not to blink: shown on, looked at now and then.)
+    Duration::from_millis(if blink == 0 || blink == u32::MAX { 1000 } else { u64::from(blink) })
+}
+
+/// What a sending sends, said under a PIN's box: its file and how large it is, or how many files and how large all.
+fn sent_said(outgoing: &crate::nearby::Outgoing, lang: Lang) -> String {
+    let size = size_of_bytes(outgoing.bytes);
+    if outgoing.files == 1 { format!("{} · {size}", outgoing.first) } else { format!("{} · {size}", counted(outgoing.files, false, lang)) }
 }
 
 /// How large `bytes` is, said.
@@ -702,13 +950,18 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
                 Lang::En => (format!("Received {what}"), format!("From {from} · In the station")),
             }
         }
+        Says::Pin { to, .. } => match lang {
+            Lang::Zh => (format!("{to} 需要 PIN 码"), "请输入对方设置的 PIN 码".to_string()),
+            Lang::En => (format!("{to} asks for a PIN"), "Enter the PIN set on that device".to_string()),
+        },
     }
 }
 
 /// Draws `says` on its plate from the frame's origin, `over` the part the pointer is on and the asking's device to be
-/// trusted or not (`trust`); its parts a press does something on put in `spots`. Whether all of it was drawn (its
-/// picture made).
-fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (Option<Spot>, bool), spots: &mut Vec<(f32, f32, f32, f32, Spot)>) -> bool {
+/// trusted or not (`trust`), a PIN's box as `field` is; its parts a press does something on put in `spots`, and where
+/// in the PIN's box each place between its characters is in `places`. Whether all of it was drawn (its picture made).
+#[allow(clippy::too_many_arguments)]
+fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (Option<Spot>, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
     let canvas: &dyn Canvas = frame;
     let height = tall(says);
     let plate = super::menu::plate(canvas, super::menu::Look::of(theme.skin, theme.dark), (0.0, 0.0, WIDE, height));
@@ -768,20 +1021,60 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (
                 spots.push((PAD, y, inner, TRUST_ROW, Spot::Trust));
                 y += TRUST_ROW + SPACE;
             }
-            // Decline, Accept.
-            let wide = (inner - 8.0) / 2.0;
-            for (at, spot, said) in [(PAD, Spot::Decline, lang.pick("拒绝", "Decline")), (PAD + wide + 8.0, Spot::Accept, lang.pick("接收", "Accept"))] {
-                let lit = over == Some(spot);
-                let (ground, words) = if spot == Spot::Accept { (accent, super::view::ink_on(accent)) } else { (theme.track, theme.text) };
-                let ground = if lit { ground.alpha(0.82) } else { ground };
-                canvas.fill_rounded(ground, at, y, wide, BUTTON, theme.control_radius.max(6.0));
-                if lit && spot == Spot::Decline {
-                    canvas.fill_rounded(plate.highlight, at, y, wide, BUTTON, theme.control_radius.max(6.0));
+            buttons(canvas, theme, (accent, plate.highlight), title_font, y, [lang.pick("拒绝", "Decline"), lang.pick("接收", "Accept")], over, spots);
+        }
+        Says::Pin { what, tried, .. } => {
+            // The device's asking: a padlock, its name, what to write.
+            let centre = Point { x: PAD + HEAD / 2.0, y: PAD + HEAD / 2.0 };
+            canvas.fill_circle(accent, centre, HEAD / 2.0);
+            canvas.icon(Icon::Lock, centre, 17.0, super::view::ink_on(accent));
+            let left = PAD + HEAD + 10.0;
+            canvas.text(&title, title_font, theme.text, left, PAD + 1.0, inner - HEAD - 10.0, Align::Start);
+            canvas.text(&under, theme.small, theme.text2, left, PAD + 19.0, inner - HEAD - 10.0, Align::Start);
+            // Its box, ringed in the accent while it has the keys, shaken aside as a PIN was turned down.
+            let y = PAD + HEAD + SPACE;
+            let typing = field.map(|field| field.typing);
+            let (keys, caret, shaken, trying) = field.map_or((false, false, 0.0, false), |field| (field.keys, field.caret, field.shaken, field.trying));
+            let x = PAD + shaken;
+            let radius = theme.control_radius.max(6.0);
+            canvas.fill_rounded(theme.track, x, y, inner, FIELD, radius);
+            let (ring, width) = if keys { (accent, 1.5) } else { (theme.text3.alpha(0.6), 1.0) };
+            canvas.stroke_rounded(super::canvas::Fill::Solid(ring), x + width / 2.0, y + width / 2.0, inner - width, FIELD - width, radius, width);
+            let font = Font { size: PIN_SIZE, ..theme.body };
+            let words = if trying { theme.text3 } else { theme.text };
+            // Each character on its own, spaced as a PIN is read; where each place between them is, kept.
+            let mut at = x + FIELD_PAD;
+            let top = canvas.line_in(font, y, FIELD);
+            let mut unit = 0;
+            places.push((0, at - shaken));
+            let mut lefts = vec![(0usize, at)];
+            if let Some(typing) = typing {
+                for character in typing.string().chars() {
+                    let said = character.to_string();
+                    let w = canvas.measure(&said, font);
+                    canvas.text(&said, font, words, at, top, w + 1.0, Align::Start);
+                    unit += character.len_utf16();
+                    at += w + PIN_SPACING;
+                    places.push((unit, at - shaken - PIN_SPACING / 2.0));
+                    lefts.push((unit, at - PIN_SPACING / 2.0));
                 }
-                let said_w = canvas.measure(said, title_font);
-                canvas.text(said, title_font, words, at + (wide - said_w) / 2.0, canvas.line_in(title_font, y, BUTTON), said_w + 1.0, Align::Start);
-                spots.push((at, y, wide, BUTTON, spot));
+                // What is chosen, washed in the accent; the caret.
+                let x_of = |unit: usize| lefts.iter().find(|(at, _)| *at == unit).map_or(x + FIELD_PAD, |(_, x)| *x);
+                let selection = typing.selection();
+                if !selection.is_empty() {
+                    let (from, to) = (x_of(selection.start), x_of(selection.end));
+                    canvas.fill_rounded(accent.alpha(0.28), from - 1.0, y + 7.0, to - from + 2.0, FIELD - 14.0, 3.0);
+                } else if caret {
+                    canvas.fill(words, x_of(typing.caret).round(), y + 8.0, 1.0, FIELD - 16.0);
+                }
             }
+            spots.push((PAD, y, inner, FIELD, Spot::Field));
+            // Under it, what is sent, or that the PIN given was not right.
+            let refused = *tried > 0 && !trying;
+            let (said, colour) = if refused { (lang.pick("PIN 码不正确", "That PIN is not right").to_string(), theme.signal) } else { (what.clone(), theme.text3) };
+            canvas.text(&said, theme.small, colour, PAD + 2.0, canvas.line_in(theme.small, y + FIELD, FIELD_LINE) + 1.0, inner - 4.0, Align::Start);
+            let y = y + FIELD + FIELD_LINE + SPACE;
+            buttons(canvas, theme, (accent, plate.highlight), title_font, y, [lang.pick("取消", "Cancel"), lang.pick("发送", "Send")], over, spots);
         }
         Says::Coming(receiving) => {
             // A picture's mark where the picture will be, and a bar of how much has come.
@@ -807,6 +1100,26 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (
         canvas.fill_rounded(plate.highlight, 0.0, 0.0, WIDE, height, plate.radius);
     }
     whole
+}
+
+/// Its two buttons at `y`, side by side, named `said`: the one that turns it down (`Spot::Decline`, on the track) and the
+/// one that goes on (`Spot::Accept`, in the accent), lit as the pointer is on one (`over`); put in `spots`.
+#[allow(clippy::too_many_arguments)]
+fn buttons(canvas: &dyn Canvas, theme: &Theme, (accent, highlight): (super::canvas::Color, super::canvas::Color), font: Font, y: f32, said: [&str; 2], over: Option<Spot>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>) {
+    let inner = WIDE - 2.0 * PAD;
+    let wide = (inner - 8.0) / 2.0;
+    for (at, spot, said) in [(PAD, Spot::Decline, said[0]), (PAD + wide + 8.0, Spot::Accept, said[1])] {
+        let lit = over == Some(spot);
+        let (ground, words) = if spot == Spot::Accept { (accent, super::view::ink_on(accent)) } else { (theme.track, theme.text) };
+        let ground = if lit { ground.alpha(0.82) } else { ground };
+        canvas.fill_rounded(ground, at, y, wide, BUTTON, theme.control_radius.max(6.0));
+        if lit && spot == Spot::Decline {
+            canvas.fill_rounded(highlight, at, y, wide, BUTTON, theme.control_radius.max(6.0));
+        }
+        let said_w = canvas.measure(said, font);
+        canvas.text(said, font, words, at + (wide - said_w) / 2.0, canvas.line_in(font, y, BUTTON), said_w + 1.0, Align::Start);
+        spots.push((at, y, wide, BUTTON, spot));
+    }
 }
 
 /// A title and the line under it beside the picture.
@@ -928,7 +1241,15 @@ mod pictures {
             ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false)),
             ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false)),
             ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false)),
+            ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false)),
+            ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false)),
         ];
+        let mut written = Typing::most(PIN_MOST);
+        written.put(&"1234".encode_utf16().collect::<Vec<u16>>());
+        let mut wrong = Typing::most(PIN_MOST);
+        wrong.put(&"0000".encode_utf16().collect::<Vec<u16>>());
+        wrong.go(0, false);
+        wrong.go(4, true);
         let gfx = gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/peek", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
@@ -944,7 +1265,12 @@ mod pictures {
                             .draw_offscreen(size, scale, |frame| {
                                 frame.fill(super::super::canvas::Color::hex(0x1E5AA8, 1.0), 0.0, 0.0, w, h);
                                 frame.origin(ROOM, ROOM);
-                                paint(frame, &theme, Lang::Zh, says, *state, &mut Vec::new());
+                                let field = match label {
+                                    &"pin" => Some(Field { typing: &written, keys: true, caret: true, shaken: 0.0, trying: false }),
+                                    &"pin-wrong" => Some(Field { typing: &wrong, keys: true, caret: false, shaken: -4.0, trying: false }),
+                                    _ => None,
+                                };
+                                paint(frame, &theme, Lang::Zh, says, *state, field.as_ref(), &mut Vec::new(), &mut Vec::new());
                             })
                             .unwrap();
                         if pass == 1 {
