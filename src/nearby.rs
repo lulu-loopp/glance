@@ -449,6 +449,26 @@ mod tests {
         assert!(!receipt("", &["a.jpg"]).sound());
     }
 
+    /// The pipes are made once (none made again while they are), and the helper opens them as it does (writing the
+    /// one, reading the other, asking no more), what it writes read whole.
+    #[test]
+    fn the_helper_opens_the_pipes_as_it_does() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::FromRawHandle;
+        let (up, down) = made().expect("made");
+        assert!(made().is_none(), "made once");
+        let (up_name, down_name) = names().unwrap();
+        let mut telling = std::fs::OpenOptions::new().access_mode(0x0010_0082).open(&up_name).expect("opened to write");
+        let _told = std::fs::OpenOptions::new().access_mode(0x0012_0089).open(&down_name).expect("opened to read");
+        // (More than that is not given: a further instance of a pipe made by the user.)
+        assert!(std::fs::OpenOptions::new().write(true).open(&up_name).is_err());
+        writeln!(telling, r#"{{"kind":"unasked","id":4}}"#).unwrap();
+        let mut heard = String::new();
+        BufReader::new(unsafe { std::fs::File::from_raw_handle(up.0) }).read_line(&mut heard).unwrap();
+        assert!(matches!(serde_json::from_str::<Told>(&heard).unwrap(), Told::Unasked { id: 4 }));
+        drop(unsafe { std::fs::File::from_raw_handle(down.0) });
+    }
+
     /// What the helper tells is read as it writes it, the receipts too.
     #[test]
     fn what_the_helper_tells_is_read() {
