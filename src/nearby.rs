@@ -56,7 +56,8 @@ pub struct Device {
 pub enum Sending {
     /// Offered: the device's user is to take it.
     Waiting,
-    Sending { done: u64, of: u64 },
+    #[serde(rename = "sending")]
+    Going { done: u64, of: u64 },
     Sent,
     Refused,
     /// The device is receiving another sending.
@@ -482,7 +483,7 @@ mod tests {
         let ask: Told = serde_json::from_str(&format!(r#"{{"kind":"ask","id":3,"from":{from},"files":[{{"id":"f","name":"a.jpg","size":5,"type":"image/jpeg"}}]}}"#)).unwrap();
         assert!(matches!(ask, Told::Ask { id: 3, ref files, .. } if files[0].size == 5));
         let sending: Told = serde_json::from_str(r#"{"kind":"sending","job":7,"state":{"state":"sending","done":1,"of":2}}"#).unwrap();
-        assert!(matches!(sending, Told::Sending { job: 7, state: Sending::Sending { done: 1, of: 2 } }));
+        assert!(matches!(sending, Told::Sending { job: 7, state: Sending::Going { done: 1, of: 2 } }));
         let came: Told = serde_json::from_str(&format!(r#"{{"kind":"came","session":"s1","from":{from},"files":[],"short":null}}"#)).unwrap();
         assert!(matches!(came, Told::Came { ref session, short: None } if session == "s1"));
         let receipt: Receipt = serde_json::from_str(&format!(r#"{{"session":"s1","from":{from},"files":[{{"file":"9a.jpg","name":"a.jpg","size":5,"type":"image/jpeg"}}],"at":9}}"#)).unwrap();

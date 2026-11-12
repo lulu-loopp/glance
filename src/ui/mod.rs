@@ -26,6 +26,8 @@ pub mod icons;
 pub mod keys;
 #[cfg(windows)]
 pub mod menu;
+#[cfg(windows)]
+pub mod peek;
 pub mod morph;
 pub mod motion;
 pub mod overlay;

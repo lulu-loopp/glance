@@ -627,6 +627,8 @@ impl Controller {
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
         let mut widgets = crate::widget::Widgets::default();
+        // The notice at the edge for nearby transfer (see `ui::peek`).
+        let mut peek = crate::ui::peek::Peek::default();
         let draw_overlay = |overlay: &mut Option<Overlay>, panels: &[Panel]| {
             let playing = self.playing();
             let wanted = self.overlay_wanted();
@@ -819,6 +821,17 @@ impl Controller {
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                     self.set_seen(&self.widgets_seen, widgets.any_seen());
+                }
+                // The notice at the edge: what a device nearby asks, sends, sent, told; carried onto the station's face where a
+                // panel draws it.
+                {
+                    let panel_up = panels.iter().any(Panel::is_shown);
+                    let face = |id: u64| panels.iter().filter(|panel| panel.is_shown()).find_map(|panel| panel.face_on_screen(Hit::Shelf(id)));
+                    let at_edges: Vec<(RECT, Edge, RECT)> = panels.iter().filter_map(Panel::at_edge).collect();
+                    let seen = crate::ui::peek::Seen { panel_up, game: &fullscreen_game, face: &face, panels: &at_edges };
+                    if let Some(due) = peek.tick(now, &seen) {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
                 }
                 if !pinned_at.is_empty() && self.history.latest().is_some() {
                     for (point, edge) in std::mem::take(&mut pinned_at) {
@@ -1035,6 +1048,31 @@ impl Controller {
                     seam_armed = false;
                 }
             };
+            // The notice at the edge: the pointer over it, a press on it; pressed where it tells what comes or came,
+            // the panel opened where it stands (where the panel is kept moved away from its edge, there).
+            if peek.owns(msg.hwnd) {
+                match msg.message {
+                    WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                        if let Some(crate::ui::peek::Act::Open { edge, at }) = peek.handle(&msg, now) {
+                            if self.config.lock().unwrap().panel_at.is_some() {
+                                let target = self.hand_target(&mut panels, last_place);
+                                self.open_by_hand(&mut panels[target], last_place, now);
+                                last_place = panels[target].place().or(last_place);
+                            } else if let Some(contact) = monitor_at(at) {
+                                let target = panel_for(&mut panels, self, contact.monitor, edge);
+                                panels[target].open(at, contact, edge, None, false, now);
+                                last_place = Some((at, edge));
+                            }
+                        }
+                        continue;
+                    }
+                    crate::ui::window::SCREENS_CHANGED => {
+                        peek.screens_changed();
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             match msg.message {
                 // The shortcut and the tray: the panel of the edge last opened (see `hand_target`), opened, or (the
                 // shortcut) closed where it is up.
@@ -2458,6 +2496,8 @@ struct Panel<'a> {
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
+    /// Where each thing on its station has its face, as `hits` are (see `view::faces`).
+    faces: Vec<(Hit, view::Rect)>,
     /// Where its settings' button was as the settings were asked from it, while they are (see `settings_here`).
     settings_from: Option<RECT>,
     corner: (f32, f32),
@@ -2620,6 +2660,7 @@ impl<'a> Panel<'a> {
             held: None,
             style: String::new(),
             hits: Vec::new(),
+            faces: Vec::new(),
             settings_from: None,
             corner: (0.0, 0.0),
             was_sized: false,
@@ -2684,6 +2725,12 @@ impl<'a> Panel<'a> {
     /// Where it is up at its edge: along it where it centres, and the edge (none, moved away from it, or hidden).
     fn place(&self) -> Option<(POINT, Edge)> {
         self.placement.as_ref().filter(|_| self.is_shown() && !self.floating()).map(|placement| (placement.anchor, self.edge))
+    }
+
+    /// Where it is up at its edge: its screen, its edge, and the panel at rest (physical px) (none, moved away from it,
+    /// or hidden).
+    fn at_edge(&self) -> Option<(RECT, Edge, RECT)> {
+        self.placement.as_ref().filter(|_| self.is_shown() && !self.floating()).map(|placement| (placement.contact.monitor, self.edge, placement.panel))
     }
 
     /// The settings changed: what is shown, and how.
@@ -3580,11 +3627,22 @@ impl<'a> Panel<'a> {
 
     /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
     fn hit_on_screen(&self, hit: Hit) -> Option<RECT> {
+        let (x, y, w, h, _) = self.hits.iter().find(|(.., at)| *at == hit)?;
+        self.box_on_screen((*x, *y, *w, *h))
+    }
+
+    /// Where the thing on its station pressed as `hit` has its face on the screen (physical px), as it was last drawn.
+    fn face_on_screen(&self, hit: Hit) -> Option<RECT> {
+        let (_, face) = self.faces.iter().find(|(at, _)| *at == hit)?;
+        self.box_on_screen((face.x, face.y, face.w, face.h))
+    }
+
+    /// Where a box drawn at (`x`, `y`), `w` × `h` from its corner (DIPs, as `hits` are) is on the screen (physical px).
+    fn box_on_screen(&self, (x, y, w, h): (f32, f32, f32, f32)) -> Option<RECT> {
         let placement = self.placement.as_ref()?;
         let (px, window) = (placement.px, placement.window);
         let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
-        let (x, y, w, h, _) = self.hits.iter().find(|(.., at)| *at == hit)?;
-        Some(RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
+        Some(RECT { left: screen(x, self.corner.0, window.left), top: screen(y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
     }
 
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
@@ -4266,6 +4324,7 @@ impl<'a> Panel<'a> {
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let drawing = began.elapsed();
+        view::faces();
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if let Some((hit, carried, _, _, boxes)) = &lifting {
@@ -4358,8 +4417,11 @@ impl<'a> Panel<'a> {
         if grounded {
             self.gfx.clear_caches();
         }
+        // (Its own faces: what another window of this thread drew meanwhile was let go of as it began.)
+        let faces = view::faces();
         if let Some(hits) = hits {
             self.hits = hits;
+            self.faces = faces;
             self.follow_settings();
             self.hover_again();
         }

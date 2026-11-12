@@ -61,6 +61,9 @@ pub enum Ask {
     Arrivals(Option<String>),
     /// What a device nearby is sending, as it comes (none: nothing, or the helper gone).
     Receiving(Option<crate::nearby::Receiving>),
+    /// What came from a device nearby (these things on it) drawn as coming in from `at` on: carried onto the station,
+    /// it comes in as it lands (see `ui::peek`).
+    Landing(Vec<u64>, std::time::Instant),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -668,6 +671,7 @@ impl Station {
                     }
                 }
                 Ask::Receiving(receiving) => self.receiving = receiving,
+                Ask::Landing(ids, at) => self.arrived = Some((ids, at)),
                 Ask::CopyText(text, from) => {
                     self.copy(&Content::Text(text), false, from.into_iter().collect());
                 }

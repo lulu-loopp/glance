@@ -54,6 +54,24 @@ thread_local! {
     static GLIDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The notes stuck on the desktop written in where they are now, by their names (see `written_in_place`).
     static IN_PLACE: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Where each thing on a station drawn on this thread lately has its face, by what it is pressed as (see `faces`).
+    static FACES: std::cell::RefCell<Vec<(Hit, Rect)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where each thing on a station drawn on this thread since this was last asked has its face (its picture's plate,
+/// in the same room as the boxes it is pressed by), by what it is pressed as: the latest of each. (What comes to the
+/// station from a device nearby is carried onto its face: see `ui::peek`.)
+pub fn faces() -> Vec<(Hit, Rect)> {
+    FACES.with(|faces| std::mem::take(&mut *faces.borrow_mut()))
+}
+
+/// The face of `hit` drawn at `face`.
+fn face_drawn(hit: Hit, face: Rect) {
+    FACES.with(|faces| {
+        let mut faces = faces.borrow_mut();
+        faces.retain(|(drawn, _)| *drawn != hit);
+        faces.push((hit, face));
+    });
 }
 
 /// The note `name` stuck on the desktop written in where it is (`written`), or no longer: while it is, its card is
@@ -1174,7 +1192,7 @@ pub struct Tile {
 }
 
 /// The mark of a device nearby of the kind `kind` (as LocalSend names kinds): a phone's, else a computer's.
-fn device_mark(kind: Option<&str>) -> Icon {
+pub(crate) fn device_mark(kind: Option<&str>) -> Icon {
     if kind == Some("mobile") { Icon::Smartphone } else { Icon::Monitor }
 }
 
@@ -4463,7 +4481,7 @@ fn paint_badge(frame: &dyn Canvas, theme: &Theme, text: &str, ground: Color, x: 
 
 /// What is written or drawn on a mark of `ground`: white on a dark one, near black on a light one (chart paper's dark
 /// ink is light).
-fn ink_on(ground: Color) -> Color {
+pub(crate) fn ink_on(ground: Color) -> Color {
     let light = 0.2126 * ground.r + 0.7152 * ground.g + 0.0722 * ground.b;
     if light > 0.6 { Color::hex(0x111111, 1.0) } else { Color::hex(0xFFFFFF, 1.0) }
 }
@@ -4657,6 +4675,21 @@ fn arrival_glow(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, clear
     frame.stroke_rounded(Fill::Solid(ink.trace.alpha(clear)), x - gap, y - gap, w + 2.0 * gap, h + 2.0 * gap, face_round(theme, w.min(h)) + gap, 2.5);
 }
 
+/// The face of the thing `id` on the station drawn at (`x`, `y`), `w` × `h`, in `theme`, as its tile draws it, `shows`
+/// of it: whether it was drawn whole (none: there is no such thing; false: its picture is still being made, and is
+/// told as it is, as the station's are).
+pub(crate) fn paint_kept_face(frame: &dyn Canvas, theme: &Theme, id: u64, (x, y, w, h): (f32, f32, f32, f32), shows: f32, lang: Lang) -> Option<bool> {
+    let shown = crate::station::run::shown();
+    let item = shown.items.iter().find(|item| item.id == id)?;
+    let tile = Tile::of(item, &crate::station::folder::Folder::own(), lang, crate::station::now_ms());
+    let whole = match &tile.face {
+        Face::Picture { path, .. } if shows_itself(path) => crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))).is_some(),
+        _ => true,
+    };
+    paint_face(frame, theme, theme.ink("station"), &tile, x, y, w, h, shows);
+    Some(whole)
+}
+
 /// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at as many pixels as
 /// it covers); till
 /// it is had, or where there is none (gone), its mark (see `paint_file_mark`), faint where it is gone.
@@ -4799,6 +4832,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                 tile_plate(frame, theme, (x - CARD_PAD, y - CARD_PAD, place.w + 2.0 * CARD_PAD, place.h + 2.0 * CARD_PAD), plate_round(theme, face_round(theme, place.w.min(plate)), CARD_PAD), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
+                face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
                 arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
@@ -4814,6 +4848,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             Shows::Row => {
                 tile_plate(frame, theme, (x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0), 8.0, lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
+                face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
                 arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
@@ -4827,6 +4862,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             Shows::View(ShelfView::List) => {
                 tile_plate(frame, theme, (x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0), plate_round(theme, face_round(theme, LIST_PICTURE), 4.0), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
+                face_drawn(pressed, Rect { x: fx, y: fy, w: fw, h: fh });
                 paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
                 arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
@@ -5931,6 +5967,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 if current {
                     frame.key("");
                     hits.push((cx, cy, side, side + if named { GRID_NAME } else { 0.0 }, *hit));
+                    face_drawn(*hit, Rect { x: cx, y: cy, w: side, h: side });
                     // (Its whole name told as the pointer rests on it, where the foot does not say it.)
                     if named || !footed {
                         name_shown(hits, *hit, &tile.label, &shown);
