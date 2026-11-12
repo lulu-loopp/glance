@@ -225,6 +225,20 @@ fun Words(text: String, color: Color, modifier: Modifier = Modifier, size: Float
     }
 }
 
+/** Something the app has to say (why it could not do what was asked), and a word to put it away. */
+@Composable
+fun Tell(title: String, text: String, close: String, dismiss: () -> Unit) {
+    Dialog(onDismissRequest = dismiss) {
+        Column(Modifier.widthIn(max = 328.dp).clip(RoundedCornerShape(24.dp)).background(Card2).padding(start = 24.dp, top = 24.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(end = 12.dp))
+            Text(text, fontSize = 14.sp, lineHeight = 22.sp, color = Dim, modifier = Modifier.padding(end = 12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Words(close, Ink, Modifier.padding(horizontal = 4.dp).widthIn(min = 56.dp), size = 15f, weight = FontWeight.SemiBold, press = dismiss)
+            }
+        }
+    }
+}
+
 /** A question over the app: what it is, what doing it means, and the two answers. */
 /** Something long to read, in a box that scrolls, and a word to put it away. */
 @Composable

@@ -132,4 +132,25 @@
     <string name="newer_installing">Confirm the installation in the window the system shows</string>
     <string name="newer_failed">The download did not finish. Tap to try again</string>
     <string name="keys_level">How bright</string>
+    <string name="auto_send">Send new photos to this PC automatically</string>
+    <string name="auto_send_what">Sent within seconds of being taken, without opening this app. Only while on the same network as the PC.</string>
+    <string name="auto_send_elsewhere">Currently sent to %1$s. Turning this on sends to this PC instead.</string>
+    <string name="auto_screenshots">Include screenshots</string>
+    <string name="auto_videos">Include videos</string>
+    <string name="auto_notice">Show a notice after sending</string>
+    <string name="auto_sent">Sent to %1$s</string>
+    <plurals name="auto_sent_many">
+        <item quantity="one">Sent %2$d item to %1$s</item>
+        <item quantity="other">Sent %2$d items to %1$s</item>
+    </plurals>
+    <string name="auto_channel">Photos sent to a PC</string>
+    <string name="auto_failed">Automatic sending could not be turned on</string>
+    <string name="auto_pc_off">Nearby sharing is off on this PC. On the PC, turn on Glance Settings › Nearby sharing › Receive files from devices nearby first.</string>
+    <string name="auto_unreachable">This PC could not be reached. Make sure the phone and the PC are on the same network and the PC is on.</string>
+    <string name="auto_refused">This PC no longer accepts this phone. Pair it again.</string>
+    <string name="auto_said">The PC could not do it: %1$s</string>
+    <string name="auto_partial">Glance may only see some of your photos, so it cannot notice new ones. Allow access to all photos in the system settings, then turn this on again.</string>
+    <string name="auto_denied">Without access to photos, nothing can be sent. Access can be allowed for Glance in the system settings.</string>
+    <string name="auto_no_access">Paused: Glance may no longer see all photos. Allow access to all photos in the system settings to go on.</string>
+    <string name="auto_videos_denied">Without access to videos, they cannot be sent. Access can be allowed for Glance in the system settings.</string>
 </resources>

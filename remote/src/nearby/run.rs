@@ -142,11 +142,16 @@ pub fn phone_trusted(phone: &str, fingerprint: &str, alias: &str) -> std::io::Re
     Ok(true)
 }
 
-/// What a paired phone is told of nearby transfer: whether it is on, and where and as whom this PC receives (its
-/// certificate's fingerprint, to be pinned).
+/// What a paired phone is told of nearby transfer: whether it is on, where and as whom this PC receives (its
+/// certificate's fingerprint, to be pinned), and the most it takes (`Receiver::limits`: one file, all of one sending;
+/// and how many files one sending may hold).
 pub fn told_to_phones() -> serde_json::Value {
     let running = RUNNING.get();
+    let limits = running.map(|running| running.receiver.limits());
     json!({
+        "most_file": limits.map(|(file, _)| file),
+        "most_sending": limits.and_then(|(_, sending)| sending),
+        "most_files": super::MOST_FILES,
         "on": running.is_some(),
         "alias": running.map(|running| running.receiver.me().alias),
         "port": running.and_then(|running| running.receiver.info.port),

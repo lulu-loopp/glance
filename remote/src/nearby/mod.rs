@@ -402,6 +402,20 @@ impl Receiver {
         }
     }
 
+    /// The most one file offered may be, and all of one sending (none: no more than any): as the station can hold
+    /// them (`Kept::most_file`, `Kept::most_sending`), and leaving `ROOM_LEFT` on the drive. An offer beyond either is
+    /// refused (403); Glance's app sends no more than they say (see `run::told_to_phones`).
+    pub fn limits(&self) -> (u64, Option<u64>) {
+        let kept = (self.kept)();
+        let file = kept.most_file.map_or(MOST_FILE, |most| most.min(MOST_FILE));
+        let drive = free_space(&self.inbox).map(|free| free.saturating_sub(ROOM_LEFT));
+        let sending = match (kept.most_sending, drive) {
+            (Some(kept), Some(drive)) => Some(kept.min(drive)),
+            (kept, drive) => kept.or(drive),
+        };
+        (file, sending)
+    }
+
     /// What this PC says of itself now: called as what it keeps names it, where that is a name (it may be renamed as it
     /// runs: told so from then on), else as its computer is.
     pub fn me(&self) -> Info {
@@ -490,7 +504,7 @@ impl Receiver {
             return Err((400, "too many files"));
         }
         let kept = (self.kept)();
-        let most_file = kept.most_file.map_or(MOST_FILE, |most| most.min(MOST_FILE));
+        let (most_file, most_sending) = self.limits();
         let mut files = Vec::new();
         for (id, file) in offered {
             let size = file.get("size").and_then(Value::as_u64).ok_or((400, "a file with no size"))?;
@@ -506,7 +520,7 @@ impl Receiver {
             return Ok((204, String::new()));
         }
         let total = files.iter().try_fold(0u64, |total, (file, _)| total.checked_add(file.size)).ok_or((400, "sizes beyond counting"))?;
-        if kept.most_sending.is_some_and(|most| total > most) || free_space(&self.inbox).is_some_and(|free| total.saturating_add(ROOM_LEFT) > free) {
+        if most_sending.is_some_and(|most| total > most) {
             return Err((403, "no room for them"));
         }
         let sender = Sender {

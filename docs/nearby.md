@@ -181,16 +181,65 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
 
 ## Android
 
-- A `JobService` with `TriggerContentUri` on `MediaStore.Images.Media.EXTERNAL_CONTENT_URI` (descendants)
-  rescheduled each time. It sends the images added since the last one sent, in their order. Screenshots are told
-  apart by their relative path (`Screenshots`) and left out when the switch for them is off.
-- **Client certificate.** An EC P-256 key in the Android KeyStore, with its self-signed certificate. Its fingerprint
-  is sent to the helper once over the signed pairing channel.
-- **Finding the PC.** The paired PC's address (as the remote finds it today), plus the nearby port, which the helper
-  says in its signed status.
-- **Sending.** LocalSend v2 over HTTPS: pinned to the PC's fingerprint (told at pairing, in the signed status),
-  presenting the client certificate.
-- A short notice after sending, which can be switched off.
+In the app's settings, under the name of the PC looked at (the mockup's "Glance 安卓应用 › 这台电脑"):
+"新照片自动发到这台电脑" (off), with "拍照后几秒内发出，无需打开本应用。只在与电脑处于同一网络时发送。", and, while it
+is on, 包括截图 (on), 包括视频 (off), 发送后显示提示 (on). One PC at a time is sent to: turned on for another, it moves
+there (the PC sent to now is named under the switch). Unpairing that PC turns it off. (`AutoSend.kt`, `AutoSendCard.kt`.)
+
+- **Turning it on.**
+  - The photos are asked for (and the videos, where they are sent, and the notice): `READ_MEDIA_IMAGES` (Android 13
+    on), `READ_EXTERNAL_STORAGE` before. Android 14's partial access is told apart (`READ_MEDIA_VISUAL_USER_SELECTED`
+    granted alone): new photos would not be seen, so it is explained and not turned on. Refused: said so.
+  - The PC is asked, signed, `GET /v1/nearby`. Off there: "这台电脑尚未开启附近传输…" and it stays off. Not reached,
+    or no longer paired: said so.
+  - The phone's certificate is told it, `POST /v1/nearby/trust {fingerprint, alias}`: the PC trusts it while the
+    phone is paired. The alias is the name the phone's user gave it (`Settings.Global.DEVICE_NAME`).
+  - What was taken before is not sent.
+- **Client certificate.** An EC P-256 key in the Android KeyStore (`glance-nearby`, never leaving it), with the
+  self-signed certificate the key store makes for it (CN=Glance, 20 years). Fingerprint: SHA-256 of its DER, capital
+  hex. Presented whenever the phone sends (`Own.Presenting`).
+- **Noticing.** `PhotoWatch`, a `JobService` with content triggers on `MediaStore.Images` (and `Video`, with videos
+  sent), descendants, 1.5 s update delay and 8 s at most (a burst is told as one). Re-armed each time it runs, and
+  (with a look at what came meanwhile) as the phone starts, as the app is updated (`Booted`) and as it is opened:
+  content-trigger jobs are not persisted, and an app stopped by its user loses its jobs.
+- **Queueing** (`AutoSend.look`). What was added (by `DATE_ADDED`) since a day before the last look of its kind
+  (pictures and videos each have their own: one may be readable while the other is not), not before
+  turning on nor before videos were turned on, and not seen yet, is looked at once and remembered as seen (forgotten
+  once older than the next look goes back to). It is queued where it is the camera's (`RELATIVE_PATH` under `DCIM/`,
+  below Android 10 its path) or a screen's capture ("screen" in its folder: `DCIM/Screenshots`,
+  `Pictures/Screenshots`, screen recordings; below Android 10 its bucket's name) and screenshots are sent.
+  - What the system still has pending (being written) is not seen till it is published, which notices it again.
+    Seen by date rather than by id, it is not missed for being numbered before something published sooner, and the
+    day before the last look covers what was pending through it.
+  - However long no look ran (the phone kept from it), the next goes back to the last.
+  - Without access to all photos (taken away in the system's settings, or only some given), nothing is looked at and
+    nothing sent: the queue is kept, and once access is back what came meanwhile is found. The settings say it is
+    paused.
+- **Sending** (`PhotoSend`). A persisted job, on an unmetered network, backoff exponential from 30 s. What waits goes
+  as one sending, and what is queued meanwhile goes after it in the same run.
+  - One run at a time sends: it is taken up as its job starts (before its thread does anything, so a late thread of
+    a stopped run cannot take it back), and a look queues and schedules the job only where no run is sending (under
+    the same lock), so a running one is never replaced; a run with nothing left lets go in the same
+    step it finds so. Turning off, or on for another PC, stops the run (it cancels its sending).
+  - What was deleted since, or is in the trash, leaves the queue. The PC is asked where it receives (`/v1/nearby`:
+    port, its certificate's fingerprint, and the most it takes: `most_file`, `most_sending`, from the station's room
+    and the drive's, and `most_files`, as the helper refuses beyond them). Not answered, or answered unsigned (another machine at its
+    old address), it is looked for on the network (the remote's `Pc.find`, the address kept). The job never turns
+    sending off by itself.
+  - What fits in that is offered, in order. What does not waits till the PC has room.
+  - LocalSend v2 over HTTPS: the PC pinned to the fingerprint it said, the phone's certificate presented, one request
+    per connection. `prepare-upload` (info: the alias, version 2.1, `deviceModel`, `mobile`, the fingerprint, https),
+    then each file's `upload`, streamed at its length.
+  - 204: nothing wanted. Refused by its user (403 "refused", or "not taken from devices not trusted"), or a PIN wanted
+    (401, which Glance never wants): given up. Anything else (403 for room since it said, 409 busy), or not reached:
+    tried again later.
+  - Each file leaves the queue as soon as the PC took it. One that fails cancels the sending (`/cancel`): the PC
+    keeps what it took, and the rest is offered again later.
+- **The notice.** "已发到 <PC>" ("已将 N 项发到 <PC>", as many as went), a quiet notification that goes by itself after 6 s, where the
+  notice is on and notifications are allowed.
+
+Delivery is "within seconds when the phone and PC are on the same network". Doze may delay it, and away from the
+PC's network the backoff grows (a photo taken back on it sends what waits at once).
 
 ## Order of work
 

@@ -227,6 +227,26 @@ fn files_not_as_offered_are_refused() {
     assert!(files.is_empty() && short.is_some());
 }
 
+/// The most a sending may be is what the station keeps room for (the drive leaving room too), and what Glance's app is
+/// told: an offer of that much is taken, one byte more is refused up front (403), as is a file beyond the most a file
+/// may be.
+#[test]
+fn offers_are_taken_within_the_limits_told() {
+    let both = both("limits", None, Kept { most_file: Some(6), most_sending: Some(10), ..Kept::default() });
+    assert_eq!(both.receiver.limits(), (6, Some(10)));
+    let offer = |sizes: &[u64]| {
+        let files: serde_json::Map<String, Value> = sizes.iter().enumerate().map(|(at, size)| (at.to_string(), json!({ "id": at.to_string(), "fileName": "a.jpg", "size": size, "fileType": "image/jpeg" }))).collect();
+        json!({ "info": { "alias": "Fold", "fingerprint": both.sender.fingerprint }, "files": files }).to_string()
+    };
+    // (Presenting no certificate, it is refused before any asking: the user answers nothing here.)
+    assert_eq!(without_certificate(&both, "/prepare-upload", offer(&[6, 5]).as_bytes()).0, 403, "beyond the sending's most");
+    assert_eq!(without_certificate(&both, "/prepare-upload", offer(&[7]).as_bytes()).0, 403, "beyond a file's most");
+    assert!(both.heard.asked.lock().unwrap().is_empty(), "refused before its user was asked");
+    // Within them, it goes on to be asked about (its user answers nothing: refused then, but asked).
+    assert_eq!(without_certificate(&both, "/prepare-upload", offer(&[6, 4]).as_bytes()).0, 403);
+    assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
+}
+
 /// A device that registers is known (by the fingerprint it said, presenting no certificate), and told of this PC.
 #[test]
 fn a_device_registering_is_known_and_answered() {

@@ -132,4 +132,24 @@
     <string name="newer_installing">请在系统窗口中确认安装</string>
     <string name="newer_failed">下载未完成，点按重试</string>
     <string name="keys_level">背光亮度</string>
+    <string name="auto_send">新照片自动发到这台电脑</string>
+    <string name="auto_send_what">拍照后几秒内发出，无需打开本应用。只在与电脑处于同一网络时发送。</string>
+    <string name="auto_send_elsewhere">目前发到 %1$s。开启后改为发到这台电脑。</string>
+    <string name="auto_screenshots">包括截图</string>
+    <string name="auto_videos">包括视频</string>
+    <string name="auto_notice">发送后显示提示</string>
+    <string name="auto_sent">已发到 %1$s</string>
+    <plurals name="auto_sent_many">
+        <item quantity="other">已将 %2$d 项发到 %1$s</item>
+    </plurals>
+    <string name="auto_channel">照片自动发送</string>
+    <string name="auto_failed">无法开启自动发送</string>
+    <string name="auto_pc_off">这台电脑尚未开启附近传输。请先在电脑上打开 Glance 设置 › 附近传输 › 接收附近设备的文件。</string>
+    <string name="auto_unreachable">无法连接这台电脑。请确认手机与电脑处于同一网络，且电脑已开机。</string>
+    <string name="auto_refused">这台电脑已不再接受本机，请重新配对。</string>
+    <string name="auto_said">电脑无法完成此操作：%1$s</string>
+    <string name="auto_partial">目前只允许 Glance 访问部分照片，无法发现新拍的照片。请在系统设置中允许访问全部照片，再重新开启。</string>
+    <string name="auto_denied">未获得访问照片的权限，无法自动发送。可在系统设置中为 Glance 开启此权限。</string>
+    <string name="auto_no_access">已暂停：Glance 无法访问全部照片。请在系统设置中允许访问全部照片后继续。</string>
+    <string name="auto_videos_denied">未获得访问视频的权限，无法发送视频。可在系统设置中为 Glance 开启此权限。</string>
 </resources>

@@ -110,6 +110,8 @@ class MainActivity : ComponentActivity() {
         // Dark behind the system's bars too, their icons light.
         enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         opened = intent?.dataString
+        // New photos sent by themselves: noticed again where they are (an app stopped by its user loses its jobs).
+        kotlin.concurrent.thread(name = "auto-send-resume") { AutoSend.resume(applicationContext) }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.Black, background = Ground, surface = Card, onBackground = Ink, onSurface = Ink)) {
                 Surface(Modifier.fillMaxSize(), color = Ground) { App(opened) { opened = null } }
@@ -243,6 +245,7 @@ private fun App(opened: String?, taken: () -> Unit) {
             val looked = pcs.getOrNull(chosen)
             // (Told if it can be reached: one that cannot keeps this phone's key till it is removed there.)
             kotlin.concurrent.thread { runCatching { which.ask("/v1/unpair", JSONObject()) } }
+            AutoSend.unpaired(context, which.key)
             Pcs.remove(context, at)
             pcs = Pcs.all(context)
             // The PC looked at stays the one looked at, unless it was the one unpaired.
@@ -368,17 +371,20 @@ private fun SettingsPage(
                 }
             }
         }
+        // New photos sent by themselves to the PC looked at.
+        val sending: @Composable () -> Unit = { pcs.getOrNull(chosen)?.let { AutoSendCard(it, pcs) } }
         // Narrow, one under the other; wide (a phone unfolded, a tablet), side by side.
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val gap = Arrangement.spacedBy(12.dp)
             if (maxWidth >= WIDE) {
                 Row(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired(); about() }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired(); sending(); about() }
                     Column(Modifier.weight(1f), verticalArrangement = gap) { showing() }
                 }
             } else {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) {
                     paired()
+                    sending()
                     showing()
                     about()
                 }
