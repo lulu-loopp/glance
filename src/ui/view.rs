@@ -212,6 +212,8 @@ pub enum Hit {
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
     Shelf(u64),
     Copied(u64),
+    /// What a device nearby is sending, shown first on the station as it comes (see `nearby`).
+    Receiving,
     /// A file come lately, by its number on its drive, or files come together, as the page's filter shows them (see
     /// `station::recent::Entry`).
     Recent(crate::station::recent::Entry),
@@ -1052,7 +1054,7 @@ impl Lately {
 
     /// As a card shows it: its picture, its name, and when it came under it.
     fn tile(&self) -> Tile {
-        Tile { id: 0, label: self.label.clone(), about: self.when.clone(), face: Face::Picture { path: self.path.clone(), more: self.more }, pinned: false }
+        Tile { id: 0, label: self.label.clone(), about: self.when.clone(), face: Face::Picture { path: self.path.clone(), more: self.more }, pinned: false, badge: None }
     }
 
     /// The page's rows of `files` (newest first) that `filter` takes (see `station::recent::listed`).
@@ -1167,6 +1169,13 @@ pub struct Tile {
     about: String,
     face: Face,
     pinned: bool,
+    /// The mark of the device nearby it came from (or comes from), where it did.
+    badge: Option<Icon>,
+}
+
+/// The mark of a device nearby of the kind `kind` (as LocalSend names kinds): a phone's, else a computer's.
+fn device_mark(kind: Option<&str>) -> Icon {
+    if kind == Some("mobile") { Icon::Smartphone } else { Icon::Monitor }
 }
 
 /// What a tile shows: a file's picture as Explorer shows it (with how many more files there are with it), the
@@ -1176,6 +1185,8 @@ enum Face {
     Picture { path: std::path::PathBuf, more: usize },
     Text(String),
     Link,
+    /// What a device nearby is sending, as it comes: how much of it has (in thousandths).
+    Receiving { per_mille: u16 },
 }
 
 impl Tile {
@@ -1225,7 +1236,23 @@ impl Tile {
             }
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
-        Tile { id: item.id, label, about, face, pinned: item.pinned }
+        Tile { id: item.id, label, about, face, pinned: item.pinned, badge: item.from.as_ref().map(|device| device_mark(device.kind.as_deref())) }
+    }
+
+    /// What a device nearby is sending (`receiving`), as its tile shows it while it comes: named as its first file, how
+    /// much of it has come, its mark of the device.
+    fn receiving(receiving: &crate::nearby::Receiving, lang: Lang) -> Tile {
+        let done = if receiving.of == 0 { 0.0 } else { (receiving.done as f64 / receiving.of as f64).clamp(0.0, 1.0) };
+        let label = match receiving.files.as_slice() {
+            [one] => one.name.clone(),
+            [first, ..] => match lang {
+                Lang::Zh => format!("{} 等 {} 项", first.name, receiving.files.len()),
+                Lang::En => format!("{} and {} more", first.name, receiving.files.len() - 1),
+            },
+            [] => String::new(),
+        };
+        let about = format!("{} · {}%", lang.pick("正在接收", "Receiving"), (done * 100.0).floor());
+        Tile { id: 0, label, about, face: Face::Receiving { per_mille: (done * 1000.0) as u16 }, pinned: false, badge: Some(device_mark(receiving.from.kind.as_deref())) }
     }
 }
 
@@ -2166,7 +2193,8 @@ fn station_lane(full: bool, tab: Tab, lang: Lang) -> Vec<Block> {
     let shown = crate::station::run::shown();
     let folder = crate::station::folder::Folder::own();
     let now = crate::station::now_ms();
-    let tiles: Vec<Tile> = put_on(&shown.items).map(|item| Tile::of(item, &folder, lang, now)).collect();
+    // (What a device nearby is sending first, as it comes: where what it sends will be.)
+    let tiles: Vec<Tile> = shown.receiving.iter().map(|receiving| Tile::receiving(receiving, lang)).chain(put_on(&shown.items).map(|item| Tile::of(item, &folder, lang, now))).collect();
     use crate::station::keep::Refused;
     let said = if let Some(refused) = shown.refused {
         Some(match refused {
@@ -4520,7 +4548,7 @@ fn face_round(theme: &Theme, small: f32) -> f32 {
 /// as it covers), another file's or a folder's icon in its middle, a text's first lines, or a web address's mark; how
 /// many more files are with it, and a pin where it is pinned.
 #[allow(clippy::too_many_arguments)]
-fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32) {
+fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &Tile, x: f32, y: f32, w: f32, h: f32, shows: f32) {
     let small = w.min(h);
     let radius = face_round(theme, small);
     // (A plate under what fills it: a picture, words, a link's mark. A file or folder stands on the card itself, by
@@ -4541,7 +4569,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                 plate();
                 match crate::station::thumbs::of(path, picture_pixels(frame, w.max(h))) {
                     // (Square-cornered on its plate, cut round only where it meets the plate's corners.)
-                    Some(picture) => frame.picture_within(&picture, picture.fitted_in(x, y, w, h), (x, y, w, h, radius), 1.0),
+                    Some(picture) => frame.picture_within(&picture, picture.fitted_in(x, y, w, h), (x, y, w, h, radius), shows),
                     None => frame.icon(Icon::Image, centre, small * 0.4, theme.text3),
                 }
                 (x + w - 5.0, y + h - 5.0)
@@ -4579,13 +4607,54 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             plate();
             frame.icon(Icon::Link, Point { x: x + w / 2.0, y: y + h / 2.0 }, (small * 0.42).min(28.0), ink.trace);
         }
+        // Coming: a picture's mark in a ring that fills as it comes.
+        Face::Receiving { per_mille } => {
+            plate();
+            let centre = Point { x: x + w / 2.0, y: y + h / 2.0 };
+            let radius = (small * 0.25).min(15.0);
+            frame.icon(Icon::Image, centre, radius * 1.1, theme.text3);
+            let line = (radius / 6.0).clamp(1.5, 2.5);
+            frame.arc(centre, radius, 0.0, std::f32::consts::TAU, theme.text3.alpha(theme.text3.a * 0.25), line);
+            if *per_mille > 0 {
+                frame.arc(centre, radius, 0.0, std::f32::consts::TAU * f32::from(*per_mille) / 1000.0, theme.text3, line);
+            }
+        }
     }
-    // Pinned: a pin in its corner.
-    if tile.pinned && small >= 40.0 {
-        let corner = Point { x: x + w - 9.0, y: y + 9.0 };
-        frame.fill_circle(ink.trace, corner, 8.0);
-        frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
+    // Pinned: a pin in its corner; from a device nearby, its mark over the corner (the pin then beside it).
+    if small >= 40.0 {
+        if let Some(badge) = tile.badge {
+            let corner = Point { x: x + w - 4.0, y: y + 4.0 };
+            frame.fill_circle(ink.trace, corner, 9.0);
+            frame.icon(badge, corner, 11.0, ink_on(ink.trace));
+        }
+        if tile.pinned {
+            let corner = Point { x: x + w - if tile.badge.is_some() { 27.0 } else { 9.0 }, y: y + 9.0 };
+            frame.fill_circle(ink.trace, corner, 8.0);
+            frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
+        }
     }
+}
+
+/// What came from a device nearby just now (see `station::run::Shown::arrived`), `t` of the way through coming in (none:
+/// not coming in): how much of its face shows (it fades in first), and how clear the glow round it is (after).
+fn arriving(t: Option<f32>) -> (f32, f32) {
+    /// The part of its coming in its face takes to fade in.
+    const FADES_IN: f32 = 0.3;
+    let Some(t) = t else { return (1.0, 0.0) };
+    let shows = super::morph::ease((t / FADES_IN).min(1.0));
+    let after = ((t - FADES_IN) / (1.0 - FADES_IN)).clamp(0.0, 1.0);
+    let glow = if t < FADES_IN { 0.0 } else if after < 0.3 { after / 0.3 } else { (1.0 - after) / 0.7 };
+    (shows, glow * 0.9)
+}
+
+/// A glow `clear` round a tile's face (`x`, `y`, `w`, `h`) in the lane's ink, as something that just came lands there
+/// (see `arriving`).
+fn arrival_glow(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, clear: f32, (x, y, w, h): (f32, f32, f32, f32)) {
+    if clear <= 0.0 {
+        return;
+    }
+    let gap = 3.0;
+    frame.stroke_rounded(Fill::Solid(ink.trace.alpha(clear)), x - gap, y - gap, w + 2.0 * gap, h + 2.0 * gap, face_round(theme, w.min(h)) + gap, 2.5);
 }
 
 /// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at as many pixels as
@@ -4673,7 +4742,8 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         centred(frame, said.unwrap_or_default(), theme.small, theme.text2, left, middle + 4.0, width);
         return;
     }
-    paint_tiles(frame, scene, ink, (left, top, width), tiles, shows, tall, List::Shelf, &|tile: &Tile, _| Hit::Shelf(tile.id), hits);
+    let hit = |tile: &Tile, _| if matches!(tile.face, Face::Receiving { .. }) { Hit::Receiving } else { Hit::Shelf(tile.id) };
+    paint_tiles(frame, scene, ink, (left, top, width), tiles, shows, tall, List::Shelf, &hit, hits);
     // Where something dragged may be dropped: all of its lane, its head too (after its things: a press finds the
     // first box it is in, a thing before the list it is on).
     hits.push(drop_area(left, top, width, tall));
@@ -4709,6 +4779,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
         let chosen = scene.thumbs.chosen(pressed);
         let words = if lit || chosen { theme.text } else { theme.text2 };
         let copied = scene.thumbs.copied(pressed);
+        let arriving = arriving(scene.thumbs.arrived(pressed));
         // Carried off it: the room it left, outlined (its picture's, or as a row, the row's), nothing of it there.
         if held == Held::Away {
             let room = match shows {
@@ -4728,7 +4799,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 let plate = if view == ShelfView::Large { large_plate(place.w, tall) } else { place.w * PLATE };
                 tile_plate(frame, theme, (x - CARD_PAD, y - CARD_PAD, place.w + 2.0 * CARD_PAD, place.h + 2.0 * CARD_PAD), plate_round(theme, face_round(theme, place.w.min(plate)), CARD_PAD), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y, place.w, plate));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
+                arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 // (Its name in the main ink, as the list's is; what it is and when under it, as the list's is.)
                 let shown = fitted(frame, &tile.label, theme.small, place.w);
                 frame.text(&shown, theme.small, theme.text, x, y + plate + 5.0, place.w, Align::Start);
@@ -4742,7 +4814,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             Shows::Row => {
                 tile_plate(frame, theme, (x - 2.0, y - 2.0, place.w + 4.0, place.h + 4.0), 8.0, lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x + (TILE_W - TILE_PICTURE) / 2.0, y, TILE_PICTURE, TILE_PICTURE));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
+                arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 let shown = fitted(frame, &tile.label, theme.small, TILE_W);
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
@@ -4754,7 +4827,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             Shows::View(ShelfView::List) => {
                 tile_plate(frame, theme, (x - 4.0, y + 1.0, place.w + 8.0, place.h - 2.0), plate_round(theme, face_round(theme, LIST_PICTURE), 4.0), lit, chosen);
                 let (fx, fy, fw, fh) = tile_face(pressed, (x, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-                paint_face(frame, theme, ink, tile, fx, fy, fw, fh);
+                paint_face(frame, theme, ink, tile, fx, fy, fw, fh, arriving.0);
+                arrival_glow(frame, theme, ink, arriving.1, (fx, fy, fw, fh));
                 let room = width - LIST_PICTURE - 10.0 - if tile.pinned { 18.0 } else { 0.0 };
                 let shown = fitted(frame, &tile.label, theme.body, room);
                 frame.text(&shown, theme.body, theme.text, x + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
@@ -4864,7 +4938,7 @@ fn paint_recent(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         tile_plate(frame, theme, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round, lit, scene.thumbs.chosen(pressed));
         let face = row.tile();
         let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-        paint_face(frame, theme, ink, &face, fx, fy, fw, fh);
+        paint_face(frame, theme, ink, &face, fx, fy, fw, fh, 1.0);
         let when_w = frame.measure(&row.when, theme.small);
         let room = width - LIST_PICTURE - 10.0 - when_w - 8.0;
         let shown = fitted(frame, &row.label, theme.body, room);
@@ -5048,6 +5122,12 @@ pub fn copied() -> Option<(std::time::Instant, Vec<Hit>)> {
     }).collect()))
 }
 
+/// What last came from devices nearby (see `station::run::Shown::arrived`): when, and what it is pressed as.
+pub fn arrived() -> Option<(std::time::Instant, Vec<Hit>)> {
+    let (ids, at) = crate::station::run::shown().arrived.clone()?;
+    Some((at, ids.into_iter().map(Hit::Shelf).collect()))
+}
+
 /// A page's filter's choices: their height and the room round each name. A day's heading over its files.
 const CHIP_H: f32 = 22.0;
 const CHIP_PAD: f32 = 9.0;
@@ -5157,7 +5237,7 @@ fn paint_copies(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left
         let lit = scene.hover == Some(pressed);
         tile_plate(frame, theme, (left - 4.0, y + 1.0, width + 8.0, LIST_ROW - 2.0), round, lit, scene.thumbs.chosen(pressed));
         let (fx, fy, fw, fh) = tile_face(pressed, (left, y + (LIST_ROW - LIST_PICTURE) / 2.0, LIST_PICTURE, LIST_PICTURE));
-        paint_face(frame, theme, ink, row, fx, fy, fw, fh);
+        paint_face(frame, theme, ink, row, fx, fy, fw, fh, 1.0);
         let room = width - LIST_PICTURE - 10.0;
         frame.text(&fitted(frame, &row.label, theme.body, room), theme.body, theme.text, left + LIST_PICTURE + 10.0, y + 4.0, room, Align::Start);
         frame.text(&fitted(frame, &row.about, theme.small, room), theme.small, theme.text3, left + LIST_PICTURE + 10.0, y + 4.0 + LINE, room, Align::Start);
@@ -5837,7 +5917,9 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                         frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, face_round(theme, side) + 3.0);
                     }
                 }
-                paint_face(frame, theme, ink, tile, cx, cy, side, side);
+                let arriving = arriving(scene.thumbs.arrived(*hit));
+                paint_face(frame, theme, ink, tile, cx, cy, side, side, arriving.0);
+                arrival_glow(frame, theme, ink, arriving.1, (cx, cy, side, side));
                 // (Copied by a press: marked so on its picture, as on the station's pages.)
                 if current {
                     copied_mark(frame, theme, scene.lang, ink.trace, scene.thumbs.copied(*hit), Mark::Centre(cx + side / 2.0, cy + side / 2.0, side));
@@ -5855,7 +5937,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     }
                 }
             };
-            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_face(frame, theme, ink, &tiles[at].0, cx, cy, side, side);
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_face(frame, theme, ink, &tiles[at].0, cx, cy, side, side, 1.0);
             let hovered = tiles.iter().find(|(_, hit)| lit(*hit)).map(|(tile, _)| tile.label.as_str()).filter(|_| !named);
             paint_grid(frame, scene, hits, room, &grid, tiles.len(), list, &draw, &small, hovered);
         }
@@ -7518,7 +7600,7 @@ seven".into()));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
-        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None };
         let first = |hits: &[HitBox], x: f32, y: f32| hits.iter().find(|(hx, hy, w, h, _)| x >= *hx && x < hx + w && y >= *hy && y < hy + h).map(|hit| hit.4);
         let many: Vec<Tile> = (1..=40).map(tile).collect();
         for shows in [Shows::View(ShelfView::Cards), Shows::View(ShelfView::List), Shows::View(ShelfView::Large)] {
@@ -7554,7 +7636,7 @@ seven".into()));
         }
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let ink = theme.ink("station");
-        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false };
+        let tile = |id: u64| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None };
         let many: Vec<Tile> = (1..=40).map(tile).collect();
         let within = |hits: &[HitBox], top: f32, tall: f32, what: &str| {
             for hit in hits.iter().filter(|hit| matches!(hit.4, Hit::Shelf(_) | Hit::Copied(_) | Hit::Recent(_) | Hit::Note(_) | Hit::App(_) | Hit::AddApp)) {
@@ -8071,7 +8153,7 @@ seven".into()));
         // (Its own number: none other drawn meanwhile is held so.)
         let id = 0x5EED_0001;
         let hit = Hit::Shelf(id);
-        let tiles = [Tile { id, label: "Held".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let tiles = [Tile { id, label: "Held".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
         let drawn = || {
             let (reach, mut hits) = (Reach::default(), Vec::new());
             paint_shelf(&reach, &scene, ink, (0.0, 0.0, 324.0), &tiles, Shows::View(ShelfView::Cards), STATION_TALL, None, false, &mut hits);
@@ -8120,7 +8202,7 @@ seven".into()));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let (one, two) = (0x5EED_0021, 0x5EED_0022);
-        let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let tiles = [Tile { id: one, label: "One".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }, Tile { id: two, label: "Two".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
         let entry = crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'Q', file: one as u128 });
         let rows = [Lately { entry, day: "Today", label: "Lately".into(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }];
         let dots = |hits: Vec<Hit>| -> &'static super::super::thumb::Dots<Hit> {
@@ -8171,7 +8253,7 @@ seven".into()));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let ids: Vec<u64> = (0..4).map(|at| 0x5EED_0031 + at).collect();
-        let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false }).collect();
+        let tiles: Vec<Tile> = ids.iter().map(|&id| Tile { id, label: "a-rather-long-file-name.md".into(), about: "58 minutes ago, long".into(), face: Face::Link, pinned: false, badge: None }).collect();
         let mut dots = super::super::thumb::Dots::new();
         dots.mark_chosen(ids.iter().map(|&id| Hit::Shelf(id)).collect());
         let width = COLUMN_WIDTH - 32.0;
@@ -8206,6 +8288,71 @@ seven".into()));
                 assert!(under.1 - (one.1 + one.3) >= CARD_APART - 0.01, "{skin:?} {view:?}: {one:?} {under:?}");
             }
         }
+    }
+
+    /// What a device nearby is sending is shown first on the station as it comes: named as it is sent, how much has
+    /// come said under it and drawn as a ring that fills, the phone's mark on its corner; what came from one carries
+    /// that mark, a computer's from a computer.
+    #[test]
+    fn what_comes_from_a_device_nearby_is_shown_first_as_it_comes() {
+        use crate::ui::morph::{Op, Recorder};
+        let from = |kind: &str| crate::nearby::Sender { alias: "Z Fold".into(), model: None, kind: Some(kind.into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
+        let offered = |name: &str| crate::nearby::Offered { name: name.into(), size: 100, kind: "image/jpeg".into() };
+        let receiving = crate::nearby::Receiving { session: "s1".into(), from: from("mobile"), files: vec![offered("IMG_1.jpg")], done: 37, of: 100 };
+        let item = crate::station::shelf::Item {
+            id: 4,
+            what: crate::station::shelf::What::Text { text: "words".into() },
+            added_ms: 0,
+            pinned: false,
+            copied: false,
+            stays_here: false,
+            own_bytes: 0,
+            from: None,
+        };
+        let shown = crate::station::run::Shown { items: vec![item.clone()], receiving: Some(receiving.clone()), ..Default::default() };
+        let blocks = crate::station::run::as_was(Arc::new(shown), || station_lane(true, Tab::Shelf, Lang::Zh));
+        let Some(Block::Shelf { tiles, .. }) = blocks.get(1) else { panic!("the station's page is not its second block") };
+        assert_eq!(tiles.len(), 2);
+        assert_eq!((tiles[0].label.as_str(), tiles[0].about.as_str()), ("IMG_1.jpg", "正在接收 · 37%"));
+        assert_eq!((tiles[0].face.clone(), tiles[0].badge), (Face::Receiving { per_mille: 370 }, Some(Icon::Smartphone)));
+        assert_eq!(tiles[1].badge, None);
+        // Several: named by the first, and how many.
+        let several = crate::nearby::Receiving { files: vec![offered("a.jpg"), offered("b.jpg"), offered("c.jpg")], ..receiving };
+        assert_eq!(Tile::receiving(&several, Lang::Zh).label, "a.jpg 等 3 项");
+        assert_eq!(Tile::receiving(&several, Lang::En).label, "a.jpg and 2 more");
+        // Drawn: a ring, the part of it come over it, the mark on the corner.
+        let theme = Theme::new(Skin::Glass, false);
+        let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+        paint_face(&recorder, &theme, theme.ink("station"), &tiles[0], 0.0, 0.0, 80.0, 60.0, 1.0);
+        let ops: Vec<Op> = recorder.parts().into_iter().flat_map(|part| part.ops).collect();
+        let sweeps: Vec<f32> = ops.iter().filter_map(|op| if let Op::Arc { sweep, .. } = op { Some(*sweep) } else { None }).collect();
+        assert_eq!(sweeps.len(), 2);
+        assert!((sweeps[1] - std::f32::consts::TAU * 0.37).abs() < 1e-4, "{sweeps:?}");
+        assert!(ops.iter().any(|op| matches!(op, Op::Icon { icon: Icon::Smartphone, .. })));
+        // Come, from a computer: its mark.
+        let came = crate::station::shelf::Item {
+            what: crate::station::shelf::What::Came { files: vec![crate::station::shelf::Arrived { file: "n1-0.jpg".into(), name: "a.jpg".into() }] },
+            from: Some(crate::station::shelf::Device { alias: "Office PC".into(), kind: Some("desktop".into()), fingerprint: "CD".into() }),
+            ..item.clone()
+        };
+        let tile = Tile::of(&came, &crate::station::folder::Folder::own(), Lang::Zh, 0);
+        assert_eq!((tile.label.as_str(), tile.badge), ("a.jpg", Some(Icon::Monitor)));
+        assert!(tile.about.starts_with("文件 · 来自 Office PC"), "{}", tile.about);
+    }
+
+    /// What came from a device nearby comes in: its face fading in first, wholly there by a third of the way, then a
+    /// glow round it coming up and going; at rest, all of it there and no glow.
+    #[test]
+    fn what_came_fades_in_then_glows() {
+        assert_eq!(arriving(None), (1.0, 0.0));
+        let (shows, glow) = arriving(Some(0.0));
+        assert_eq!((shows, glow), (0.0, 0.0));
+        let (shows, glow) = arriving(Some(0.15));
+        assert!(shows > 0.0 && shows < 1.0 && glow == 0.0, "{shows} {glow}");
+        let glows: Vec<f32> = [0.35, 0.5, 0.8, 0.999].iter().map(|t| arriving(Some(*t)).1).collect();
+        assert!(arriving(Some(0.35)).0 == 1.0);
+        assert!(glows[0] < glows[1] && glows[1] > glows[2] && glows[2] > glows[3], "{glows:?}");
+        assert!(glows.iter().all(|glow| *glow <= 0.9));
     }
 
     /// What is chosen is told at a glance from what is under the pointer, in every skin, light and dark: on glass and
@@ -8259,7 +8406,7 @@ seven".into()));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let id = 0x5EED_0031;
-        let rows = [Tile { id, label: "Copied".into(), about: String::new(), face: Face::Link, pinned: false }];
+        let rows = [Tile { id, label: "Copied".into(), about: String::new(), face: Face::Link, pinned: false, badge: None }];
         let drawn = || {
             let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
             paint_copies(&recorder, &scene, theme.ink("station"), (0.0, 0.0, 324.0), &rows, Default::default(), ShelfView::List, STATION_TALL, &mut Vec::new());
@@ -8559,7 +8706,7 @@ seven".into()));
         let layout = Layout::with_columns(vec![processes[0].height(&theme)], 1, &theme);
         lists.push(("processes".to_string(), List::Processes, paint(&Nothing, &scene, &processes, &layout, Pass::Content)));
         let ink = theme.ink("station");
-        let tiles: Vec<Tile> = (1..=40).map(|id| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false }).collect();
+        let tiles: Vec<Tile> = (1..=40).map(|id| Tile { id, label: format!("{id}"), about: String::new(), face: Face::Link, pinned: false, badge: None }).collect();
         let rows: Vec<Lately> = (1..=40).map(|file| Lately { entry: crate::station::recent::Entry::File(crate::station::recent::Key { drive: 'C', file }), day: "Today", label: String::new(), about: String::new(), when: String::new(), path: std::path::PathBuf::new(), more: 0 }).collect();
         let room = (0.0, 100.0, 320.0);
         for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {

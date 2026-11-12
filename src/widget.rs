@@ -1323,6 +1323,14 @@ fn paint_readings(frame: &gfx::Frame, readings: &mut Readings, scene: &Scene, pi
             readings.morph = Some((now, Before::Drawn(from)));
         }
     }
+    // What is on its station otherwise than it was drawn (something came from a device nearby, or begins to, or was put
+    // on it or taken off): turning from how it was drawn.
+    let station_now = crate::station::run::shown();
+    if let Some(was) = readings.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !crate::panel::reduced_motion()) {
+        if readings.morph.is_none() {
+            readings.morph = Some((now, Before::Drawn(crate::station::run::as_was(was, || render::record(frame, scene, picture.lanes, &shown.layout, picture.small, 1.0, picture.at)))));
+        }
+    }
     let turning = readings.morph.as_ref().map(|(since, _)| morph::ease(now.duration_since(*since).as_secs_f32() / MORPH.as_secs_f32()));
     let old = match &readings.morph {
         Some((_, Before::Shown(old))) => Some((view::lanes_at(scene, |_| old.detail), placed(old), old.clone())),
@@ -1384,6 +1392,9 @@ struct Readings {
     morph_layer: Layer,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
+    /// What its station showed as it was last drawn: changed since, it turns from how that was drawn (as the panel
+    /// does: see `Panel::station_was`).
+    station_was: Option<std::sync::Arc<crate::station::run::Shown>>,
     /// The form it shows and the room it was taken in while sized: a form
     /// showing more comes back only with room to spare.
     taken: Option<arrange::Shown>,
@@ -1406,7 +1417,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -4349,6 +4360,7 @@ impl Widget {
         // What was just copied from what it shows of the station, marked so a moment.
         if shows(|hit| matches!(hit, view::Hit::Shelf(_) | view::Hit::Copied(_) | view::Hit::Recent(_))) {
             moving |= self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR);
+            moving |= self.thumbs.mark_arrived(now, view::arrived(), crate::station::run::ARRIVED_FOR);
         }
         // What is chosen together on what it shows of the station, marked so.
         self.thumbs.mark_chosen(crate::station::select::marked(self.window.hwnd.0 as isize));

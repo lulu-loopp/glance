@@ -141,7 +141,7 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if TOLD.set(Box::new(told)).is_err() {
         return;
     }
-    crate::station::run::ask(crate::station::run::Ask::Arrivals);
+    crate::station::run::ask(crate::station::run::Ask::Arrivals(None));
     std::thread::Builder::new().name("glance: nearby".into()).spawn(serve).expect("a thread started");
 }
 
@@ -186,15 +186,20 @@ fn heard(told: Told) {
     match told {
         Told::Ask { id, from, files } => change(|shown| shown.asks.push(Asking { id, from, files })),
         Told::Unasked { id } => change(|shown| shown.asks.retain(|asking| asking.id != id)),
+        // (What comes is shown on the station, by its thread: see `station::run::Shown::receiving`.)
         Told::Coming { session, from, files } => {
             let of = files.iter().map(|file| file.size).sum();
             change(|shown| shown.receiving = Some(Receiving { session, from, files, done: 0, of }));
+            crate::station::run::ask(crate::station::run::Ask::Receiving(shown().receiving));
         }
-        Told::Progress { session, done, of } => change(|shown| {
-            if let Some(receiving) = shown.receiving.as_mut().filter(|receiving| receiving.session == session) {
-                (receiving.done, receiving.of) = (done, of);
-            }
-        }),
+        Told::Progress { session, done, of } => {
+            change(|shown| {
+                if let Some(receiving) = shown.receiving.as_mut().filter(|receiving| receiving.session == session) {
+                    (receiving.done, receiving.of) = (done, of);
+                }
+            });
+            crate::station::run::ask(crate::station::run::Ask::Receiving(shown().receiving));
+        }
         Told::Came { session, short } => {
             if let Some(why) = short {
                 crate::journal::note(format!("nearby: a receiving ended short ({why})"));
@@ -204,7 +209,7 @@ fn heard(told: Told) {
                     shown.receiving = None;
                 }
             });
-            crate::station::run::ask(crate::station::run::Ask::Arrivals);
+            crate::station::run::ask(crate::station::run::Ask::Arrivals(Some(session)));
         }
         Told::Devices { devices } => change(|shown| shown.devices = devices),
         Told::Sending { job, state } => change(|shown| {
@@ -306,12 +311,13 @@ fn serve() {
             *DOWN.lock().unwrap() = Some(telling);
             change(|shown| shown.there = true);
             // (What came while it was not linked, taken in now.)
-            crate::station::run::ask(crate::station::run::Ask::Arrivals);
+            crate::station::run::ask(crate::station::run::Ask::Arrivals(None));
             listen(told);
         }
         // Gone: nothing to tell it, nothing it asked to answer, nothing coming.
         *DOWN.lock().unwrap() = None;
-        change(|shown| *shown = Shown { devices: Vec::new(), ..Shown::default() });
+        change(|shown| *shown = Shown::default());
+        crate::station::run::ask(crate::station::run::Ask::Receiving(None));
         unsafe {
             let _ = DisconnectNamedPipe(up);
             let _ = DisconnectNamedPipe(down);
