@@ -15,6 +15,13 @@ getrandom = "0.2"
 # The pairing code, shown as a QR code.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Nearby transfer, as LocalSend's protocol has it: HTTPS with a certificate of this PC's own making, its key known by
+# its SHA-256 (see `nearby`).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+# Announcing and hearing devices on every network this PC is on (LocalSend's multicast group, shared with a LocalSend
+# app on this PC).
+socket2 = { version = "0.5", features = ["all"] }
 
 [dependencies.windows]
 version = "0.62"
@@ -33,6 +40,11 @@ features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Networking_WinHttp",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Pipes",
+    "Win32_Security_Authorization",
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",

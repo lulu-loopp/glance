@@ -59,6 +59,11 @@ impl Default for Light {
 #[serde(default)]
 pub struct Config {
     pub port: u16,
+    /// Phones control this PC (the phone remote is on). Off, this helper runs for nearby transfer alone: what phones
+    /// ask is refused, but for what nearby transfer has of them (see `nearby` in main) and their unpairing.
+    pub remote: bool,
+    /// Nearby transfer: whether it is on, what this PC is called, the devices whose files are taken without asking.
+    pub nearby: crate::nearby::Kept,
     /// This PC, as the phone names it.
     pub name: String,
     /// The one key every phone shared, before each had its own: read once,
@@ -113,6 +118,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             port: PORT,
+            remote: true,
+            nearby: crate::nearby::Kept::default(),
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into()),
             key: String::new(),
             phones: Vec::new(),

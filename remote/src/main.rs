@@ -35,6 +35,7 @@ mod journal;
 mod keys;
 mod lights;
 mod media;
+mod nearby;
 mod power;
 mod reads;
 mod sign;
@@ -484,6 +485,7 @@ impl Helper {
             "volume": sound.map(|(level, _)| level),
             "muted": sound.map(|(_, muted)| muted),
             "idle_seconds": actions::tick().wrapping_sub(actions::last_input()) / 1000,
+            "nearby": nearby::run::told_to_phones(),
         })
     }
 
@@ -492,8 +494,25 @@ impl Helper {
         let failed = |error: String| (500, error);
         let asked: Value = if body.is_empty() { Value::Null } else { serde_json::from_slice(body).map_err(|_| (400, "the body is not JSON".to_string()))? };
         let on = || asked.get("on").and_then(Value::as_bool).ok_or((400, "\"on\" is missing".to_string()));
+        // The remote off (this helper runs for nearby transfer alone), a phone is answered only what nearby transfer
+        // has of it, and its unpairing.
+        if !self.config.remote && !path.starts_with("/v1/nearby") && path != "/v1/unpair" {
+            return Err((403, "the remote is off".into()));
+        }
         match (method, path) {
             ("GET", "/v1/state") => {}
+            // Where and as whom this PC receives nearby (its certificate's fingerprint, for the phone to pin).
+            ("GET", "/v1/nearby") => return Ok(nearby::run::told_to_phones()),
+            // The certificate the asking phone sends nearby by: trusted while the phone is paired (it told it signed
+            // with its key, which only it has), its files taken without asking.
+            ("POST", "/v1/nearby/trust") => {
+                let said = |name: &str| asked.get(name).and_then(Value::as_str).unwrap_or_default();
+                let phone = Config::load().phones.into_iter().find(|phone| phone.key == key).map(|phone| phone.id).ok_or((403, "not a paired phone".to_string()))?;
+                if !nearby::run::phone_trusted(&phone, said("fingerprint"), said("alias")).map_err(|error| failed(error.to_string()))? {
+                    return Err((400, "not a certificate's fingerprint".into()));
+                }
+                return Ok(nearby::run::told_to_phones());
+            }
             ("POST", "/v1/screen") => {
                 if on()? {
                     self.screens_on()
@@ -589,7 +608,7 @@ impl Helper {
             }
             _ => return Err((404, "no such thing to ask".into())),
         }
-        Ok(self.state())
+        Ok(if self.config.remote { self.state() } else { json!({ "name": self.config.name, "remote": false }) })
     }
 
     /// Reads one request from `stream`, checks it is the paired phone's,
@@ -638,7 +657,9 @@ impl Helper {
         if path == NIGHT_BY_KEY {
             let given = header("x-glance-key");
             let kept = Config::load().night_key;
-            let (status, answer) = if method != "POST" || !kept.as_deref().is_some_and(|kept| sign::is_key(given, kept)) {
+            let (status, answer) = if !self.config.remote {
+                (403, json!({ "error": "the remote is off" }))
+            } else if method != "POST" || !kept.as_deref().is_some_and(|kept| sign::is_key(given, kept)) {
                 journal::note(format!("refused {method} {path} from {}: not the night key", stream.peer_addr().map_or_else(|_| "?".into(), |from| from.ip().to_string())));
                 (401, json!({ "error": "forged" }))
             } else {
@@ -915,6 +936,22 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote nearby [on | off | alias NAME | forget FINGERPRINT | others ask|refuse | most FILE SENDING]:
+        // nearby transfer as kept changed so (taken by the helper as it next starts), then said as JSON.
+        Some("nearby") => {
+            say!("{}", nearby::run::asked(&std::env::args().skip(2).collect::<Vec<_>>())?);
+            return Ok(());
+        }
+        // glance-remote remote [on | off]: whether phones control this PC (taken by the helper as it next starts:
+        // off, it runs for nearby transfer alone), changed so, then said.
+        Some("remote") => {
+            let config = match std::env::args().nth(2).as_deref() {
+                Some(word @ ("on" | "off")) => Config::change(|config| config.remote = word == "on")?,
+                _ => config,
+            };
+            say!("{}", json!({ "remote": config.remote }));
+            return Ok(());
+        }
         // The phones paired with (and the pairings offered), in their order.
         Some("phones") => {
             for phone in &config.phones {
@@ -1101,7 +1138,7 @@ fn main() -> std::io::Result<()> {
         _ => {}
     }
     journal::note_crashes();
-    journal::note(format!("started: version {}, port {}, the screens put out the {:?} way", env!("CARGO_PKG_VERSION"), config.port, config.way()));
+    journal::note(format!("started: version {}, port {}, the screens put out the {:?} way, phones control this PC: {}, nearby transfer: {}", env!("CARGO_PKG_VERSION"), config.port, config.way(), config.remote, config.nearby.on));
     for monitor in display::monitors() {
         journal::note(format!("monitor: {} {}x{} at {},{}; says it is on: {:?}; brightness: {:?}", monitor.name, monitor.place.2, monitor.place.3, monitor.place.0, monitor.place.1, monitor.on, monitor.brightness));
     }
@@ -1143,60 +1180,69 @@ fn main() -> std::io::Result<()> {
     let session = sign::hex(&session);
     // (Kept once as this version keeps it: each phone with what it is told from the others by.)
     let _ = Config::change(|_| {});
+    if config.nearby.on {
+        if let Err(error) = nearby::run::start(&config.name) {
+            journal::note(format!("nearby transfer could not start: {error}"));
+        }
+    }
     let state = State { lights: lit_at_start(config.lights_raised, config.lit, lights::lit), ..State::default() };
     let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(config.colours.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
-    let following = helper.clone();
-    std::thread::spawn(move || {
-        let mut last = None;
-        // The makers' lighting programs seen running, by their numbers: others than last time, one has started or gone.
-        let mut rivals: Vec<u32> = Vec::new();
-        // When the lights are to be put back (see `put_back`): first as this helper starts with the PC.
-        let mut put_back_at = Config::load().lights_raised.then(|| std::time::Instant::now() + AFRESH);
-        loop {
-            std::thread::sleep(FOLLOW);
-            let now: Vec<u32> = actions::programs().into_iter().filter(|(_, name)| lights::RIVALS.iter().any(|rival| name.eq_ignore_ascii_case(rival))).map(|(number, _)| number).collect();
-            // (One gone counts too: it does not give the lights back as it goes.)
-            if now != rivals {
-                following.stale.store(true, std::sync::atomic::Ordering::SeqCst);
-                // (Lights that follow the heat are put in their colour again by the OpenRGB to come.)
-                last = None;
-                if Config::load().lights_raised {
-                    put_back_at = Some(std::time::Instant::now() + AFRESH);
+    // The lights following the heat, and night and dark screens ended at a touch: what phones control, with the
+    // remote off none of it (this helper runs for nearby transfer alone).
+    if helper.config.remote {
+        let following = helper.clone();
+        std::thread::spawn(move || {
+            let mut last = None;
+            // The makers' lighting programs seen running, by their numbers: others than last time, one has started or gone.
+            let mut rivals: Vec<u32> = Vec::new();
+            // When the lights are to be put back (see `put_back`): first as this helper starts with the PC.
+            let mut put_back_at = Config::load().lights_raised.then(|| std::time::Instant::now() + AFRESH);
+            loop {
+                std::thread::sleep(FOLLOW);
+                let now: Vec<u32> = actions::programs().into_iter().filter(|(_, name)| lights::RIVALS.iter().any(|rival| name.eq_ignore_ascii_case(rival))).map(|(number, _)| number).collect();
+                // (One gone counts too: it does not give the lights back as it goes.)
+                if now != rivals {
+                    following.stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // (Lights that follow the heat are put in their colour again by the OpenRGB to come.)
+                    last = None;
+                    if Config::load().lights_raised {
+                        put_back_at = Some(std::time::Instant::now() + AFRESH);
+                    }
                 }
+                rivals = now;
+                if put_back_at.is_some_and(|at| std::time::Instant::now() >= at) {
+                    put_back_at = None;
+                    following.put_back();
+                }
+                following.follow(&mut last);
             }
-            rivals = now;
-            if put_back_at.is_some_and(|at| std::time::Instant::now() >= at) {
-                put_back_at = None;
-                following.put_back();
+        });
+        // Night ends at the first touch of the mouse or the keyboard; and so do
+        // screens this helper keeps dark with their signal kept (Windows, which
+        // has them as on, wakes nothing).
+        let watching = helper.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(WATCH);
+            let woken = display::woken();
+            match woken {
+                display::Woken::No => continue,
+                // A report that said nothing is no touch: the screens Windows put on at it are put out again.
+                display::Woken::ByNothing => {
+                    journal::note(format!("the screens came on with nothing touched ({}): put out again", display::last_touch()));
+                    let _ = display::sleep();
+                    continue;
+                }
+                display::Woken::Touched => journal::note(format!("touched while the screens were out ({})", display::last_touch())),
+                display::Woken::Unasked => journal::note(format!("the screens came on unasked, nothing heard from ({}): left on", display::last_touch())),
             }
-            following.follow(&mut last);
-        }
-    });
-    // Night ends at the first touch of the mouse or the keyboard; and so do
-    // screens this helper keeps dark with their signal kept (Windows, which
-    // has them as on, wakes nothing).
-    let watching = helper.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(WATCH);
-        let woken = display::woken();
-        match woken {
-            display::Woken::No => continue,
-            // A report that said nothing is no touch: the screens Windows put on at it are put out again.
-            display::Woken::ByNothing => {
-                journal::note(format!("the screens came on with nothing touched ({}): put out again", display::last_touch()));
-                let _ = display::sleep();
-                continue;
+            let night = watching.state.lock().unwrap().night.is_some();
+            if night {
+                let _ = watching.night(false);
+            } else {
+                watching.screens_on();
             }
-            display::Woken::Touched => journal::note(format!("touched while the screens were out ({})", display::last_touch())),
-            display::Woken::Unasked => journal::note(format!("the screens came on unasked, nothing heard from ({}): left on", display::last_touch())),
-        }
-        let night = watching.state.lock().unwrap().night.is_some();
-        if night {
-            let _ = watching.night(false);
-        } else {
-            watching.screens_on();
-        }
-    });
+        });
+    }
     for stream in listener.incoming().flatten() {
         // (One for whom there is no room, or no thread to be had, is hung up on.)
         let Some(caller) = stream.peer_addr().ok().and_then(|from| helper.room(from.ip())) else { continue };
