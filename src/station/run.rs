@@ -57,6 +57,8 @@ pub enum Ask {
     CopyText(String, Option<Copied>),
     /// What is kept at hand opened, as the shell opens it (see `apps`).
     Launch(String),
+    /// What came from devices nearby taken in (see `nearby`).
+    Arrivals,
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -617,6 +619,7 @@ impl Station {
                         windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
                     }
                 }),
+                Ask::Arrivals => self.arrivals(),
                 Ask::CopyText(text, from) => {
                     self.copy(&Content::Text(text), false, from.into_iter().collect());
                 }
@@ -650,6 +653,29 @@ impl Station {
             }
         }
         self.show();
+    }
+
+    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, and into recent files; each
+    /// receipt taken away once what it holds is kept. One whose files cannot be kept now (the station is full, or
+    /// they cannot be moved) stays, with those after it, to be taken in again.
+    fn arrivals(&mut self) {
+        let Some(folder) = crate::nearby::helper_folder() else { return };
+        let inbox = folder.join("inbox");
+        for (path, receipt) in crate::nearby::receipts(&folder) {
+            let from = receipt.device();
+            let alias = from.alias.clone();
+            match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
+                Ok(taken) => {
+                    let listed: Vec<(std::path::PathBuf, u64)> = taken.iter().filter_map(|(arrived, size)| Some((self.keep.folder.named(&arrived.file, &arrived.name)?, *size))).collect();
+                    super::recent::arrived(&listed, &alias);
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(refused) => {
+                    crate::journal::note(format!("nearby: what came is not taken in now ({refused:?})"));
+                    break;
+                }
+            }
+        }
     }
 
     /// `id` as it is opened, shown in Explorer or dragged off: a picture of its own as its file (what Explorer and the

@@ -7,6 +7,7 @@
 
 use super::shelf::Shelf;
 use std::collections::{HashMap, HashSet};
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 pub struct Folder {
@@ -79,7 +80,7 @@ impl Folder {
     /// `zone` as where it came from: its name. (Not written whole: none.)
     fn written(&self, extension: &str, zone: Option<&[u8]>, write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>) -> std::io::Result<String> {
         std::fs::create_dir_all(&self.dir)?;
-        let extension: String = extension.chars().filter(char::is_ascii_alphanumeric).take(8).collect::<String>().to_ascii_lowercase();
+        let extension = Self::extension(extension);
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         for attempt in 0u32.. {
             let name = if extension.is_empty() { format!("{stamp:x}-{attempt}") } else { format!("{stamp:x}-{attempt}.{extension}") };
@@ -100,6 +101,72 @@ impl Folder {
             }
         }
         unreachable!("a name is found")
+    }
+
+    /// The name a file sent from a device nearby is kept by (see `adopt`): the `index`th of the sending `session`
+    /// (letters and digits: see `nearby`), of the kind `extension` says (letters and digits, else none). Never one
+    /// `written` gives (those start with a digit), and the same each time, so a sending taken in again finds what it
+    /// moved here already.
+    pub fn arrived_name(session: &str, index: usize, extension: &str) -> String {
+        let extension = Self::extension(extension);
+        if extension.is_empty() { format!("n{session}-{index}") } else { format!("n{session}-{index}.{extension}") }
+    }
+
+    /// An extension as the station's own files have one: letters and digits, at most 8, lower case.
+    fn extension(extension: &str) -> String {
+        extension.chars().filter(char::is_ascii_alphanumeric).take(8).collect::<String>().to_ascii_lowercase()
+    }
+
+    /// Moves the file at `source` into its own folder as `name` (see `arrived_name`): opened there and moved by its
+    /// handle, only where it is a plain file (no link of any kind on the way to it, nor a second name of it elsewhere)
+    /// at exactly that path. How large it is. A file that is not so is refused (`InvalidData`), and left where it is.
+    pub fn adopt(&self, source: &Path, name: &str) -> std::io::Result<u64> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FileRenameInfo, GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
+            FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_NONE, OPEN_EXISTING, SYNCHRONIZE,
+        };
+        let refused = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
+        std::fs::create_dir_all(&self.dir)?;
+        // (A folder opened too, to be told from a file.)
+        let opened = unsafe { CreateFileW(&HSTRING::from(source.as_os_str()), (DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, None) }.map_err(os_error)?;
+        let file = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+        let handle = HANDLE(file.as_raw_handle());
+        let mut facts = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(handle, &mut facts) }.map_err(os_error)?;
+        if facts.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {
+            return Err(refused("not a plain file"));
+        }
+        if facts.nNumberOfLinks != 1 {
+            return Err(refused("a file of more than one name"));
+        }
+        // Where it is, every link on the way followed: the path asked for, or another reached through a link.
+        let mut found = vec![0u16; 1024];
+        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut found, FILE_NAME_NORMALIZED) } as usize;
+        if length == 0 || length >= found.len() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let found = String::from_utf16_lossy(&found[..length]);
+        let found = match found.strip_prefix(r"\\?\UNC\") {
+            Some(shared) => format!(r"\\{shared}"),
+            None => found.strip_prefix(r"\\?\").unwrap_or(&found).to_string(),
+        };
+        if !found.eq_ignore_ascii_case(&source.to_string_lossy()) {
+            return Err(refused("not where it was said to be"));
+        }
+        // Moved by the handle checked: under the name Glance gives it, in its own folder.
+        let to: Vec<u16> = self.path(name).as_os_str().encode_wide().collect();
+        let size = std::mem::size_of::<FILE_RENAME_INFO>() + to.len() * 2;
+        let mut info = vec![0u64; size.div_ceil(8)];
+        unsafe {
+            let rename = info.as_mut_ptr() as *mut FILE_RENAME_INFO;
+            (*rename).FileNameLength = (to.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(to.as_ptr(), std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(), to.len());
+            SetFileInformationByHandle(handle, FileRenameInfo, info.as_ptr().cast(), size as u32).map_err(os_error)?;
+        }
+        Ok(u64::from(facts.nFileSizeHigh) << 32 | u64::from(facts.nFileSizeLow))
     }
 
     /// Where a kept file `name` is.
@@ -162,6 +229,18 @@ impl Folder {
                 self.delete(name);
             }
         }
+    }
+}
+
+/// A Windows call's error as the system's own error it stands for (a file not found is `NotFound`), where it stands for
+/// one.
+fn os_error(error: windows::core::Error) -> std::io::Error {
+    let code = error.code().0 as u32;
+    // (FACILITY_WIN32: the system's error in its low half.)
+    if code & 0xFFFF_0000 == 0x8007_0000 {
+        std::io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+    } else {
+        std::io::Error::other(error)
     }
 }
 

@@ -31,6 +31,26 @@ pub struct Item {
     /// The bytes of what the station keeps of it in its own folder (none for files only pointed to).
     #[serde(default)]
     pub own_bytes: u64,
+    /// The device nearby it was sent from (see `nearby`), where it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Device>,
+}
+
+/// A device nearby files came from, as it called itself, of what kind (LocalSend's `mobile`, `desktop`...), and by the
+/// fingerprint of its certificate (its own beyond doubt where it presented the certificate: see `nearby`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Device {
+    pub alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub fingerprint: String,
+}
+
+/// A file sent from a device nearby: its file's name in the station's own folder, and the name it was sent by.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Arrived {
+    pub file: String,
+    pub name: String,
 }
 
 /// What a thing on the station is.
@@ -56,6 +76,9 @@ pub enum What {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         words: bool,
     },
+    /// Files sent from a device nearby (see `Item::from`), together: those of one sending, and of those after it from
+    /// the same device within a minute. Each kept in its own folder, as it came.
+    Came { files: Vec<Arrived> },
 }
 
 impl What {
@@ -64,6 +87,7 @@ impl What {
         match self {
             What::Files { kept, .. } => kept.iter().map(String::as_str).collect(),
             What::Picture { file } | What::Saved { file, .. } => vec![file.as_str()],
+            What::Came { files } => files.iter().map(|arrived| arrived.file.as_str()).collect(),
             What::Text { .. } | What::Link { .. } => Vec::new(),
         }
     }
@@ -94,9 +118,10 @@ impl Filter {
                 What::Picture { .. } => true,
                 What::Files { paths, .. } => !paths.is_empty() && paths.iter().all(|path| picture(path)),
                 What::Saved { name, words, .. } => !words && picture(std::path::Path::new(name)),
+                What::Came { files } => !files.is_empty() && files.iter().all(|arrived| picture(std::path::Path::new(&arrived.name))),
                 What::Text { .. } | What::Link { .. } => false,
             },
-            Filter::Files => matches!(what, What::Files { .. } | What::Saved { words: false, .. }),
+            Filter::Files => matches!(what, What::Files { .. } | What::Saved { words: false, .. } | What::Came { .. }),
         }
     }
 }
@@ -128,6 +153,8 @@ pub struct Shelf {
 }
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+/// How soon after what came from a device what it sends next joins it (ms).
+pub const TOGETHER_MS: u64 = 60 * 1000;
 
 impl Shelf {
     /// Puts `what` on the shelf at `now_ms` (`own_bytes` of it kept in its own folder; see `room_for` first, for that
@@ -135,8 +162,37 @@ impl Shelf {
     pub fn put(&mut self, what: What, now_ms: u64, copied: bool, stays_here: bool, own_bytes: u64) -> u64 {
         let id = self.next;
         self.next += 1;
-        self.items.push(Item { id, what, added_ms: now_ms, pinned: false, copied, stays_here, own_bytes });
+        self.items.push(Item { id, what, added_ms: now_ms, pinned: false, copied, stays_here, own_bytes, from: None });
         id
+    }
+
+    /// Files sent from `from`, kept in its own folder (`own_bytes` of them, room made for them first), put on the shelf
+    /// at `now_ms`: with what came from that device last, where that came within `TOGETHER_MS` before and is not
+    /// pinned, else on their own. The number of what holds them.
+    pub fn arrived(&mut self, files: Vec<Arrived>, from: Device, now_ms: u64, own_bytes: u64) -> u64 {
+        let last = self.items.iter().rposition(|item| {
+            matches!(item.what, What::Came { .. }) && !item.pinned && item.from.as_ref().is_some_and(|device| device.fingerprint == from.fingerprint) && now_ms.saturating_sub(item.added_ms) <= TOGETHER_MS
+        });
+        match last {
+            // (Joined, it is as new as what joined it: the newest, last.)
+            Some(at) => {
+                let mut item = self.items.remove(at);
+                if let What::Came { files: held } = &mut item.what {
+                    held.extend(files);
+                }
+                item.added_ms = now_ms;
+                item.own_bytes += own_bytes;
+                item.from = Some(from);
+                let id = item.id;
+                self.items.push(item);
+                id
+            }
+            None => {
+                let id = self.put(What::Came { files }, now_ms, false, false, own_bytes);
+                self.items.last_mut().expect("just put").from = Some(from);
+                id
+            }
+        }
     }
 
     pub fn get(&self, id: u64) -> Option<&Item> {

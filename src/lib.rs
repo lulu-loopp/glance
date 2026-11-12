@@ -125,6 +125,8 @@ mod update;
 mod reports;
 #[cfg(windows)]
 mod station;
+#[cfg(windows)]
+mod nearby;
 
 mod notes;
 mod todo;
@@ -558,6 +560,8 @@ pub fn run() {
     station::run::start(|| app().controller.wake());
     station::thumbs::start(|| app().controller.wake());
     station::recent::start(|| app().controller.wake());
+    // Files sent from devices nearby, by the phone remote's helper (see `nearby`).
+    nearby::start(|| app().controller.wake());
     station::apps::follow(&app().settings.lock().unwrap().apps);
     notes::follow_settings(&app().settings.lock().unwrap());
     station::recent::follow_settings(&app().settings.lock().unwrap());

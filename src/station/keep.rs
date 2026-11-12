@@ -120,6 +120,51 @@ impl Keep {
         }
     }
 
+    /// The files of the sending `session` from `from` (each where it is, as it was sent, how large it said it is)
+    /// moved into its own folder and put on the shelf at `now_ms` (see `Shelf::arrived`), room made for them first:
+    /// those taken in (each with how large it is). One moved already (taken in before,
+    /// and the shelf not kept then) is taken as it is. One that is not a plain file where it was said to be is left
+    /// out (see `Folder::adopt`). One that cannot be moved now leaves the rest as they are, to be taken again.
+    pub fn arrived(&mut self, session: &str, files: &[(PathBuf, String, u64)], from: super::shelf::Device, now_ms: u64) -> Result<Vec<(super::shelf::Arrived, u64)>, Refused> {
+        let made = (|| {
+            self.room_for(files.iter().map(|(_, _, size)| size).sum())?;
+            let mut arrived = Vec::new();
+            let mut own_bytes = 0;
+            for (index, (source, name, _)) in files.iter().enumerate() {
+                let extension = std::path::Path::new(name).extension().and_then(|extension| extension.to_str()).unwrap_or_default();
+                let file = Folder::arrived_name(session, index, extension);
+                let size = match std::fs::metadata(self.folder.path(&file)) {
+                    Ok(moved) => moved.len(),
+                    Err(_) => match self.folder.adopt(source, &file) {
+                        Ok(size) => size,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                            crate::journal::note(format!("nearby: a file sent was left out ({error})"));
+                            continue;
+                        }
+                        Err(_) => return Err(Refused::Unwritten),
+                    },
+                };
+                own_bytes += size;
+                arrived.push((super::shelf::Arrived { file, name: name.clone() }, size));
+            }
+            Ok((arrived, own_bytes))
+        })();
+        let (arrived, own_bytes) = match made {
+            Ok(made) => made,
+            Err(refused) => {
+                self.refused = Some(refused);
+                return Err(refused);
+            }
+        };
+        self.refused = None;
+        if !arrived.is_empty() {
+            self.shelf.arrived(arrived.iter().map(|(arrived, _)| arrived.clone()).collect(), from, now_ms, own_bytes);
+            self.save();
+        }
+        Ok(arrived)
+    }
+
     /// `bytes` kept as a file of its own of the kind `extension` says (`untrusted`: marked as from the Internet), room
     /// made for them: its name.
     fn kept(&mut self, bytes: &[u8], extension: &str, untrusted: bool) -> Result<String, Refused> {
@@ -187,6 +232,7 @@ impl Keep {
             What::Picture { file } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
             What::Saved { file, words: true, .. } => Content::Text(std::fs::read_to_string(self.folder.path(file)).ok()?),
             What::Saved { file, name, words: false } => Content::Files(vec![self.folder.named(file, name)?]),
+            What::Came { files } => Content::Files(files.iter().map(|arrived| self.folder.named(&arrived.file, &arrived.name)).collect::<Option<Vec<PathBuf>>>()?),
         })
     }
 
@@ -343,6 +389,93 @@ mod tests {
         assert_eq!(keep.content_of(&keep.shelf.get(id).unwrap().clone()), Some(Content::Files(vec![keep.folder.path(file)])));
         keep.remove(item.id);
         assert!(!given[0].exists() && !given[0].parent().unwrap().exists());
+    }
+
+    /// A folder for files sent in a test, where it really is (as the helper's inbox is reached: see
+    /// `nearby::helper_folder`).
+    fn inbox(test: &str) -> PathBuf {
+        std::fs::create_dir_all(crate::settings::local_dir()).unwrap();
+        let dir = crate::nearby::real(&crate::settings::local_dir()).unwrap();
+        let inbox = dir.join(format!("inbox-{test}"));
+        let _ = std::fs::remove_dir_all(&inbox);
+        std::fs::create_dir_all(&inbox).unwrap();
+        inbox
+    }
+
+    fn device(fingerprint: &str) -> super::super::shelf::Device {
+        super::super::shelf::Device { alias: "Z Fold".into(), kind: Some("mobile".into()), fingerprint: fingerprint.into() }
+    }
+
+    /// Files sent are moved in under Glance's names, given by the names they were sent by, and what one device sends
+    /// within a minute joins what it sent before.
+    #[test]
+    fn files_sent_are_moved_in_and_join_within_a_minute() {
+        let inbox = inbox("join");
+        std::fs::write(inbox.join("a1.jpg"), b"one").unwrap();
+        std::fs::write(inbox.join("b2.png"), b"two!").unwrap();
+        let mut keep = keep("arrived", Rules::default());
+        let taken = keep.arrived("s1", &[(inbox.join("a1.jpg"), "照片.jpg".into(), 3)], device("AB"), 1_000).unwrap();
+        assert_eq!(taken.len(), 1);
+        assert!(!inbox.join("a1.jpg").exists(), "moved, not copied");
+        keep.arrived("s2", &[(inbox.join("b2.png"), "截图.png".into(), 4)], device("AB"), 30_000).unwrap();
+        assert_eq!(keep.shelf.items.len(), 1);
+        let item = keep.shelf.items[0].clone();
+        assert_eq!((item.own_bytes, item.added_ms, item.from.as_ref().map(|from| from.alias.as_str())), (7, 30_000, Some("Z Fold")));
+        let Some(Content::Files(given)) = keep.content_of(&item) else { panic!("files") };
+        assert_eq!(given.iter().map(|path| path.file_name().unwrap().to_string_lossy().into_owned()).collect::<Vec<_>>(), ["照片.jpg", "截图.png"]);
+        assert_eq!(std::fs::read(&given[1]).unwrap(), b"two!");
+        // Later, or from another device: on its own.
+        std::fs::write(inbox.join("c3.jpg"), b"3").unwrap();
+        keep.arrived("s3", &[(inbox.join("c3.jpg"), "c.jpg".into(), 1)], device("AB"), 30_000 + super::super::shelf::TOGETHER_MS + 1).unwrap();
+        std::fs::write(inbox.join("d4.jpg"), b"4").unwrap();
+        keep.arrived("s4", &[(inbox.join("d4.jpg"), "d.jpg".into(), 1)], device("CD"), 30_000 + super::super::shelf::TOGETHER_MS + 2).unwrap();
+        assert_eq!(keep.shelf.items.len(), 3);
+        // Taken off: its files go.
+        keep.remove(item.id);
+        assert!(!given[1].exists());
+    }
+
+    /// A sending taken in again (its receipt not taken away before Glance ended) finds what it moved in already, and
+    /// puts it on the shelf; a file not there is passed over.
+    #[test]
+    fn a_sending_taken_in_again_finds_what_was_moved() {
+        let inbox = inbox("again");
+        std::fs::write(inbox.join("a1.jpg"), b"one").unwrap();
+        let mut keep = keep("arrived-again", Rules::default());
+        let name = Folder::arrived_name("s1", 0, "jpg");
+        keep.folder.adopt(&inbox.join("a1.jpg"), &name).unwrap();
+        let files = [(inbox.join("a1.jpg"), "a.jpg".to_string(), 3), (inbox.join("gone.jpg"), "gone.jpg".to_string(), 9)];
+        let taken = keep.arrived("s1", &files, device("AB"), 0).unwrap();
+        assert_eq!(taken.iter().map(|(arrived, size)| (arrived.file.as_str(), *size)).collect::<Vec<_>>(), [(name.as_str(), 3)]);
+        assert_eq!(keep.shelf.own_bytes(), 3);
+    }
+
+    /// A file is moved in only as it is, where it was said to be: not one of two names, nor one reached through a
+    /// link to another folder.
+    #[test]
+    fn only_a_plain_file_where_it_was_said_to_be_is_moved_in() {
+        let inbox = inbox("plain");
+        let folder = Folder::at(crate::settings::local_dir().join("station-plain"));
+        std::fs::write(inbox.join("two.jpg"), b"x").unwrap();
+        std::fs::hard_link(inbox.join("two.jpg"), inbox.join("other.jpg")).unwrap();
+        let refused = folder.adopt(&inbox.join("two.jpg"), "n1-0.jpg").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+        assert!(inbox.join("two.jpg").exists(), "left where it was");
+        // Through a junction to a folder elsewhere.
+        let elsewhere = inbox.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("c.jpg"), b"c").unwrap();
+        let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(inbox.join("through")).arg(&elsewhere).output().unwrap();
+        assert!(made.status.success());
+        let refused = folder.adopt(&inbox.join("through").join("c.jpg"), "n1-1.jpg").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
+        assert!(elsewhere.join("c.jpg").exists());
+        // A folder is no file.
+        assert_eq!(folder.adopt(&elsewhere, "n1-2").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        // As it is: moved.
+        std::fs::write(inbox.join("plain.jpg"), b"p").unwrap();
+        assert_eq!(folder.adopt(&inbox.join("plain.jpg"), "n1-3.jpg").unwrap(), 1);
+        assert_eq!(std::fs::read(folder.path("n1-3.jpg")).unwrap(), b"p");
     }
 
     fn stream_of(path: &std::path::Path) -> PathBuf {

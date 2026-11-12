@@ -1022,6 +1022,8 @@ impl Lately {
         // Downloads.
         let folder = folder_named(&came.path);
         let from = match &came.site {
+            // (Sent from a device nearby: by that, for the folder it is kept in is Glance's own.)
+            _ if came.from.is_some() => format!("{} {}", lang.pick("来自", "from"), came.from.as_deref().unwrap_or_default()),
             Some(site) if came.downloaded => format!("{} {site}", lang.pick("来自", "from")),
             Some(site) => format!("{folder} · {} {site}", lang.pick("来自", "from")),
             None => folder,
@@ -1131,6 +1133,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
                 What::Picture { file } => (lang.pick("图片", "Picture").to_string(), Shows::File(folder.path(file)), false),
                 What::Saved { file, words: true, .. } => (lang.pick("文字", "Text").to_string(), Shows::Kept(folder.path(file)), true),
                 What::Saved { file, name, words: false } => (name.clone(), Shows::File(folder.path(file)), false),
+                What::Came { files } => (tile.label, shows_files(files.iter().map(|arrived| folder.path(&arrived.file)).collect()), false),
             };
             Some(Item { key: hit.key(), title, about: tile.about, shows, from, open: Some(if pastes { Ask::PasteOut(id) } else { Ask::Open(id) }), copy: Some(Ask::Copy(id)), pastes })
         }
@@ -1207,6 +1210,19 @@ impl Tile {
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
             What::Saved { file, name, words } => (name.clone(), if *words { lang.pick("文字", "Text") } else { lang.pick("文件", "File") }.into(), Face::Picture { path: folder.path(file), more: 0 }),
+            // (Where they came from said with what they are.)
+            What::Came { files } => {
+                let count = match files.len() {
+                    1 => lang.pick("文件", "File").to_string(),
+                    n => format!("{n} {}", lang.pick("个文件", "files")),
+                };
+                let kind = match &item.from {
+                    Some(device) => format!("{count} · {} {}", lang.pick("来自", "from"), device.alias),
+                    None => count,
+                };
+                let first = files.first();
+                (first.map_or_else(String::new, |arrived| arrived.name.clone()), kind, Face::Picture { path: first.map_or_else(Default::default, |arrived| folder.path(&arrived.file)), more: files.len().saturating_sub(1) })
+            }
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));
         Tile { id: item.id, label, about, face, pinned: item.pinned }
@@ -6507,7 +6523,7 @@ otepad.exe", "Notepad"),
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let file_at = file;
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0 };
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied, stays_here: false, own_bytes: 0, from: None };
         let items = || vec![
             item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
             item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
@@ -6524,7 +6540,7 @@ otepad.exe", "Notepad"),
         crate::station::thumbs::start(|| {});
         {
             use crate::station::recent::{Came, Kind};
-            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { key: crate::station::recent::Key { drive: 'C', file }, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string) };
+            let came = |file: u128, name: &str, ago_min: u64, bytes: u64, kind: Kind, site: Option<&str>| Came { key: crate::station::recent::Key { drive: 'C', file }, path: file_at(name), came_ms: now - ago_min * 60_000, bytes, kind, downloaded: site.is_some(), site: site.map(str::to_string), from: None };
             let mut files = vec![
                 came(1, "docs/images/banner-zh.webp", 3, 182_000, Kind::Screenshot, None),
                 came(2, "Cargo.toml", 25, 6_100_000, Kind::Archive, Some("github.com")),
@@ -6610,7 +6626,7 @@ otepad.exe", "Notepad"),
         }
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         let now = crate::station::now_ms();
-        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let item = |id: u64, what: What, copied: bool, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: false, copied, stays_here: false, own_bytes: 0, from: None };
         let items = || vec![
             item(10, What::Files { paths: vec![file("README.zh-CN.md")], kept: Vec::new() }, true, 2),
             item(11, What::Link { url: "https://glancepc.com/app".into() }, true, 9),
@@ -6624,7 +6640,7 @@ otepad.exe", "Notepad"),
             item(6, What::Files { paths: vec![file("docs/images/banner-zh.webp")], kept: Vec::new() }, false, 1),
         ];
         crate::station::thumbs::start(|| {});
-        let came = |at: u128, name: &str, ago_min: u64, kind: Kind| Came { key: Key { drive: 'C', file: at }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 64_000, kind, downloaded: false, site: None };
+        let came = |at: u128, name: &str, ago_min: u64, kind: Kind| Came { key: Key { drive: 'C', file: at }, path: file(name), came_ms: now - ago_min * 60_000, bytes: 64_000, kind, downloaded: false, site: None, from: None };
         crate::station::recent::pretend(vec![came(1, "docs/images/banner-zh.webp", 3, Kind::Screenshot), came(2, "Cargo.toml", 25, Kind::Archive), came(3, "README.zh-CN.md", 70, Kind::Document), came(4, "README.md", 200, Kind::Document)]);
         let recent = |at: u128| Hit::Recent(Entry::File(Key { drive: 'C', file: at }));
         // Each column: the page, how it shows, what is chosen on it, what is under the pointer, the last two, carried.
@@ -7003,7 +7019,7 @@ otepad.exe", "Notepad"),
         use crate::station::shelf::{Item, What};
         let folder = crate::station::folder::Folder::at(std::path::PathBuf::from("C:/station"));
         let now = 1_760_800_000_000;
-        let item = |what: What| Item { id: 1, what, added_ms: now - 5 * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
+        let item = |what: What| Item { id: 1, what, added_ms: now - 5 * 60_000, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None };
         let link = Tile::of(&item(What::Link { url: "https://example.com/a/b?c".into() }), &folder, Lang::En, now);
         assert_eq!((link.label.as_str(), &link.face, link.about.as_str()), ("example.com/a/b?c", &Face::Link, "Link · 5 min ago"));
         let files = Tile::of(&item(What::Files { paths: vec!["D:/x/report.pdf".into(), "D:/x/b.txt".into()], kept: Vec::new() }), &folder, Lang::Zh, now);
@@ -7394,6 +7410,7 @@ seven".into()));
             copied: false,
             stays_here: false,
             own_bytes: 0,
+            from: None,
         };
         let held = vec![saved(1, long), saved(2, "a.md")];
         crate::station::run::pretend(held.clone(), ShelfView::Cards);
@@ -7420,7 +7437,7 @@ seven".into()));
     #[test]
     fn a_pages_things_are_in_its_order() {
         use crate::station::shelf::{Filter, Item, What};
-        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None };
         let words = |text: &str| What::Text { text: text.into() };
         let items = vec![
             item(1, words("a"), false),
@@ -7465,7 +7482,7 @@ seven".into()));
     fn files_come_together_are_one_row() {
         use crate::station::recent::{Came, Entry, Filter, Key, Kind};
         let now = 1_760_800_000_000;
-        let came = |file: u128, path: &str, ago_s: u64, kind: Kind| Came { key: Key { drive: 'D', file }, path: std::path::PathBuf::from(path), came_ms: now - ago_s * 1000, bytes: 1_000_000, kind, downloaded: false, site: None };
+        let came = |file: u128, path: &str, ago_s: u64, kind: Kind| Came { key: Key { drive: 'D', file }, path: std::path::PathBuf::from(path), came_ms: now - ago_s * 1000, bytes: 1_000_000, kind, downloaded: false, site: None, from: None };
         let mut files: Vec<Came> = (1..=6).map(|file| came(file, &format!(r"D:\Phone\DCIM\{file}.jpg"), 600 - file as u64, Kind::Picture)).collect();
         files.push(came(9, r"D:\Documents\a.pdf", 60, Kind::Document));
         files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
@@ -8404,7 +8421,7 @@ seven".into()));
         crate::station::thumbs::start(|| {});
         let here = std::env::current_exe().unwrap();
         let gone = std::env::temp_dir().join("glance-no-such-file.png");
-        let item = |paths: Vec<std::path::PathBuf>, kept: Vec<String>| Item { id: 1, what: What::Files { paths, kept }, added_ms: 0, pinned: false, copied: true, stays_here: false, own_bytes: 0 };
+        let item = |paths: Vec<std::path::PathBuf>, kept: Vec<String>| Item { id: 1, what: What::Files { paths, kept }, added_ms: 0, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None };
         let folder = crate::station::folder::Folder::own();
         let about = |item: &Item| {
             // (Looked at on a thread of its own: asked till it answers.)
@@ -8429,7 +8446,7 @@ seven".into()));
     #[test]
     fn recently_copied_shows_what_its_filter_takes() {
         use crate::station::shelf::{Filter, Item, What};
-        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0 };
+        let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: id, pinned: false, copied, stays_here: false, own_bytes: 0, from: None };
         let items = [
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Picture { file: "2.png".into() }, true),

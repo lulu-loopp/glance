@@ -388,7 +388,7 @@ fn token_facts(token: HANDLE) -> Option<(String, u32)> {
 }
 
 /// Whether the process `pid` runs Glance's program `name` (`elevation::APP` or `elevation::SENSORS`) beside this one.
-fn runs(pid: u32, name: &str) -> bool {
+pub(crate) fn runs(pid: u32, name: &str) -> bool {
     unsafe {
         let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
         let ran = runs_program(process, name);

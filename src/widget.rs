@@ -5619,7 +5619,7 @@ mod tests {
     fn readings_merged_with_what_plays_are_found_as_it_plays() {
         let _device = gfx::held().unwrap();
         let _pretending = crate::pretending();
-        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0 };
+        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None };
         crate::station::run::pretend((1..=40).map(item).collect(), crate::settings::ShelfView::List);
         let theme = workbench_dressed(Theme::new(Skin::Fluent, false));
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));

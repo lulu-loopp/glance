@@ -76,8 +76,10 @@ fn glances() -> Result<(std::fs::File, std::fs::File), Option<String>> {
     use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
     // Glance allowed to learn who this is, never to act as it (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).
     const IDENTIFICATION_ONLY: u32 = 0x0011_0000;
-    let up = std::fs::OpenOptions::new().write(true).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(false)).map_err(|_| None)?;
-    let down = std::fs::OpenOptions::new().read(true).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(true)).map_err(|_| None)?;
+    // Only as much as each end needs, and Glance gives no more: writing data (FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
+    // SYNCHRONIZE), and reading (FILE_GENERIC_READ).
+    let up = std::fs::OpenOptions::new().access_mode(0x0010_0082).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(false)).map_err(|_| None)?;
+    let down = std::fs::OpenOptions::new().access_mode(0x0012_0089).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(true)).map_err(|_| None)?;
     let server = |file: &std::fs::File| {
         use std::os::windows::io::AsRawHandle;
         let mut process = 0u32;

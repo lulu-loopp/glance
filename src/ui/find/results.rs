@@ -422,17 +422,16 @@ fn held_row(item: &Item, query: &Query, lang: Lang) -> Option<Row> {
 /// What a thing on the station is called in a line: its file's name (and how many more were put there with it), the
 /// first line of its text, its web address, or what kind of thing it is.
 fn held_name(what: &Held, lang: Lang) -> String {
+    let first_of = |first: String, n: usize| match n {
+        0 | 1 => first,
+        n => match lang {
+            Lang::Zh => format!("{first} 等 {n} 项"),
+            Lang::En => format!("{first} and {} more", n - 1),
+        },
+    };
     match what {
-        Held::Files { paths, .. } => {
-            let first = paths.first().and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-            match paths.len() {
-                0 | 1 => first,
-                n => match lang {
-                    Lang::Zh => format!("{first} 等 {n} 项"),
-                    Lang::En => format!("{first} and {} more", n - 1),
-                },
-            }
-        }
+        Held::Files { paths, .. } => first_of(paths.first().and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), paths.len()),
+        Held::Came { files } => first_of(files.first().map(|arrived| arrived.name.clone()).unwrap_or_default(), files.len()),
         Held::Text { text } => text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().take(120).collect(),
         Held::Link { url } => url.clone(),
         Held::Picture { .. } => lang.pick("图片", "Picture").into(),
@@ -598,8 +597,8 @@ mod tests {
     fn glance_s_own_are_found_by_name_and_by_what_they_say() {
         let notes = [Note { name: "a.md".into(), text: "下周要做的事\n回复 Steam 的邮件".into(), colour: Default::default(), stamp: Default::default() }];
         let held = [
-            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0 },
-            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0 },
+            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None },
+            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None },
         ];
         assert_eq!(shown("steam", View::Glance, false, &notes, &held, &[]), ["https://store.steampowered.com", "下周要做的事"]);
         assert_eq!(shown("xiazhou", View::Glance, false, &notes, &held, &[]), ["下周要做的事"]);
@@ -610,7 +609,7 @@ mod tests {
 
     #[test]
     fn nothing_typed_shows_what_came_lately() {
-        let came = |path: &str, ms: u64, kind: FileKind| Came { key: recent::Key { drive: 'D', file: u128::from(ms) }, path: path.into(), came_ms: ms, bytes: 0, kind, downloaded: false, site: None };
+        let came = |path: &str, ms: u64, kind: FileKind| Came { key: recent::Key { drive: 'D', file: u128::from(ms) }, path: path.into(), came_ms: ms, bytes: 0, kind, downloaded: false, site: None, from: None };
         let lately = [came("D:\\a.png", 1, FileKind::Screenshot), came("D:\\b.pdf", 2, FileKind::Document)];
         assert_eq!(shown("", View::All, false, &[], &[], &lately), ["# 最近的文件", "b.pdf", "a.png"]);
         assert_eq!(shown("", View::Pictures, false, &[], &[], &lately), ["# 最近的文件", "a.png"]);
