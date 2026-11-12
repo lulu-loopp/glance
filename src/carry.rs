@@ -9,7 +9,8 @@
 //! own room into its place, the one pressed on top and up to two others behind it, each a little up, to the right and
 //! turned, and on their corner how many files land where they are let go (see `paint_stack`). Let go where nothing takes
 //! them, each flies back apart into its own room, one after another, drawn as its room draws it by the time it lands
-//! there (see `Flight`, `paint_tile`). Taken, they go in together.
+//! there (see `Flight`, `paint_tile`). Taken, they go in together: let go on a device nearby (see `station::send`),
+//! into its mark.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -91,9 +92,12 @@ const STAGGER: f32 = 0.03;
 const STAGGER_ALL: f32 = 0.15;
 /// How it fades as the program under it changes, and what a drop does comes and goes (stiffness, damping: see `Spring`).
 const FADING: (f32, f32) = (400.0, 36.0);
-/// Given over where it is let go: how long it takes, and how large it is by its end.
+/// Given over where it is let go: how long it takes, and how large it is by its end; and so let go on a device nearby,
+/// gone into its mark.
 const GIVEN: Duration = Duration::from_millis(180);
 const GIVEN_TO: f32 = 0.6;
+const SENT: Duration = Duration::from_millis(240);
+const SENT_TO: f32 = 0.18;
 
 thread_local! {
     /// What is carried now, on the panel's thread.
@@ -120,8 +124,10 @@ struct Carry {
     /// it was last drawn).
     flight: Flight,
     apart: Vec<f32>,
-    /// Given over where it was let go: since when.
+    /// Given over where it was let go: since when, and (let go on a device nearby) where the box of the one pressed
+    /// goes as it goes into the device's mark, and from where (its corner on the screen, physical px).
     given: Option<Instant>,
+    into: Option<((f32, f32), (f32, f32))>,
     last: Instant,
 }
 
@@ -161,6 +167,7 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
             flight,
             apart,
             given: None,
+            into: None,
             last: Instant::now(),
         });
     });
@@ -447,7 +454,9 @@ impl Carry {
                         self.corner = (cursor.x as f32 - grab.0, cursor.y as f32 - grab.1);
                         self.trail.push((now, cursor));
                         self.trail.retain(|(at, _)| now.saturating_duration_since(*at) <= LEAN_SPAN);
-                        let home = crate::panel::contains(&self.lifted.over, cursor);
+                        // (Over what it was lifted off, where nothing there takes it or says why not: a device nearby
+                        // on its strip does, see `station::send`.)
+                        let home = crate::panel::contains(&self.lifted.over, cursor) && !going.over.takes && going.over.says.is_none();
                         let (lift, seen, says) = wants(home, &going.over);
                         self.lift.target = lift;
                         self.seen.target = seen;
@@ -458,9 +467,11 @@ impl Carry {
                     }
                     self.lean.target = lean_of(&self.trail, px, now);
                 }
-                // Taken: given over where it was let go, their rooms as they were at once.
+                // Taken: given over where it was let go (into a device's mark, let go on one), their rooms as they
+                // were at once.
                 Some(Dragged::Taken) => {
                     self.given = Some(now);
+                    self.into = crate::station::send::into_device(self.lifted.drag).map(|at| (self.corner, (at.x as f32 - grab.0, at.y as f32 - grab.1)));
                     self.saying.target = 0.0;
                     crate::ui::view::land_tiles(self.lifted.carried.clone(), now);
                 }
@@ -493,7 +504,8 @@ impl Carry {
             crate::ui::view::land_tiles(self.lifted.carried.iter().copied().filter(|hit| !flown.contains(hit)).collect(), now);
             return false;
         }
-        let given = self.given.map(|since| (now.saturating_duration_since(since).as_secs_f32() / GIVEN.as_secs_f32()).min(1.0));
+        let takes = if self.into.is_some() { SENT } else { GIVEN };
+        let given = self.given.map(|since| (now.saturating_duration_since(since).as_secs_f32() / takes.as_secs_f32()).min(1.0));
         if given == Some(1.0) {
             return false;
         }
@@ -512,8 +524,13 @@ impl Carry {
         // given over (on the screen, DIPs).
         let about = (PAD + (self.lifted.from.x - tiles[0].at.x) as f32 / px, PAD + (self.lifted.from.y - tiles[0].at.y) as f32 / px);
         let eased = given * given;
-        let grown = (1.0 + LIFTED_BY * self.lift.value.max(0.0)) * (1.0 - (1.0 - GIVEN_TO) * eased);
-        let corner = (self.corner.0 / px - PAD, self.corner.1 / px - PAD);
+        let given_to = if self.into.is_some() { SENT_TO } else { GIVEN_TO };
+        let grown = (1.0 + LIFTED_BY * self.lift.value.max(0.0)) * (1.0 - (1.0 - given_to) * eased);
+        let at = match self.into {
+            Some((from, to)) => (from.0 + (to.0 - from.0) * eased, from.1 + (to.1 - from.1) * eased),
+            None => self.corner,
+        };
+        let corner = (at.0 / px - PAD, at.1 / px - PAD);
         let held = Matrix3x2::translation(-about.0, -about.1) * Matrix3x2::scale(grown, grown) * Matrix3x2::rotation(self.lean.value) * Matrix3x2::translation(about.0 + corner.0, about.1 + corner.1);
         let rooms: Vec<Room> = tiles.iter().zip(&plates).map(|(tile, plate)| (*plate, (tile.at.x as f32 / px - PAD, tile.at.y as f32 / px - PAD))).collect();
         let ways = self.flight.ways();

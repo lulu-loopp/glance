@@ -64,6 +64,8 @@ pub enum Ask {
     /// What came from a device nearby (these things on it) drawn as coming in from `at` on: carried onto the station,
     /// it comes in as it lands (see `ui::peek`).
     Landing(Vec<u64>, std::time::Instant),
+    /// A sending to a device nearby over (see `send`): its own files it held let go of.
+    Sent(u64),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -200,12 +202,14 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
 
 /// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where a page of the
 /// workbench is chosen (its tab), that page: a drag over it shows the page there (see `SHOW_PAGE`), and one let go
-/// on it goes where the page takes it (the station's, onto the station; the others take none).
+/// on it goes where the page takes it (the station's, onto the station; the others take none). On a device nearby
+/// on the strip (by its key, see `send::key_of`), sent to it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
     Pages(crate::ui::view::Tab),
+    Device(u64),
 }
 
 /// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
@@ -486,6 +490,8 @@ struct Station {
     /// What a device nearby is sending, and what came last, and when (see `Shown`).
     receiving: Option<crate::nearby::Receiving>,
     arrived: Option<(Vec<u64>, std::time::Instant)>,
+    /// Its own files each sending to a device nearby holds till it is over (see `send`), by the sending's number.
+    sending: std::collections::HashMap<u64, Vec<String>>,
 }
 
 thread_local! {
@@ -505,9 +511,11 @@ fn run(asks: Receiver<Ask>) {
             return;
         };
         let settings = crate::app().settings.lock().unwrap().station;
+        // (What an earlier Glance wrote to send, its sendings long over.)
+        let _ = std::fs::remove_dir_all(super::send::folder());
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -538,18 +546,29 @@ fn drag_off() {
     }
     let contents: Vec<Content> = leaving.iter().map(|one| one.content.clone()).collect();
     let dragged = super::drag::drag(&contents, leaving.iter().any(|one| one.stays_here), thread);
+    // Let go on a device nearby: sent to it, its own files held till the sending is over, and left on it.
+    let sent = if dragged == Some(super::drag::Dragged::Taken) { super::send::taken() } else { None };
     with_station(|station| {
-        for name in leaving.iter().flat_map(|one| &one.held) {
-            station.keep.folder.let_go(name);
+        let held = leaving.iter().flat_map(|one| one.held.iter().cloned());
+        match &sent {
+            Some((job, _)) => {
+                station.sending.insert(*job, held.collect());
+            }
+            None => held.for_each(|name| station.keep.folder.let_go(&name)),
         }
         let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
-        if remove && dragged == Some(super::drag::Dragged::Taken) {
+        if remove && dragged == Some(super::drag::Dragged::Taken) && sent.is_none() {
             for id in leaving.iter().filter_map(|one| one.id) {
                 station.keep.remove(id);
             }
         }
         station.show();
     });
+    // (Its files told apart on a thread of their own: a folder's are listed one by one, on a drive slow to answer
+    // perhaps.)
+    if let Some((job, to)) = sent {
+        std::thread::spawn(move || crate::nearby::send(job, &to, &super::send::outgoing(&contents, &super::send::folder_of(job))));
+    }
     // (Said once it is shown as it is after: taken off it, it is gone as it is put down, see `carry`.)
     super::drag::ended(dragged.unwrap_or(super::drag::Dragged::Not));
 }
@@ -672,6 +691,12 @@ impl Station {
                 }
                 Ask::Receiving(receiving) => self.receiving = receiving,
                 Ask::Landing(ids, at) => self.arrived = Some((ids, at)),
+                Ask::Sent(job) => {
+                    for name in self.sending.remove(&job).into_iter().flatten() {
+                        self.keep.folder.let_go(&name);
+                    }
+                    let _ = std::fs::remove_dir_all(super::send::folder_of(job));
+                }
                 Ask::CopyText(text, from) => {
                     self.copy(&Content::Text(text), false, from.into_iter().collect());
                 }

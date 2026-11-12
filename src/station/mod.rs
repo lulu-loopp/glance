@@ -12,6 +12,7 @@ pub mod keep;
 pub mod recent;
 pub mod run;
 pub mod select;
+pub mod send;
 pub mod shelf;
 pub mod thumbs;
 #[cfg(test)]

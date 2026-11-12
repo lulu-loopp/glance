@@ -773,7 +773,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (
             for (at, spot, said) in [(PAD, Spot::Decline, lang.pick("拒绝", "Decline")), (PAD + wide + 8.0, Spot::Accept, lang.pick("接收", "Accept"))] {
                 let lit = over == Some(spot);
                 let (ground, words) = if spot == Spot::Accept { (accent, super::view::ink_on(accent)) } else { (theme.track, theme.text) };
-                let ground = if lit { ground.alpha((ground.a * 0.82).max(0.0)) } else { ground };
+                let ground = if lit { ground.alpha(0.82) } else { ground };
                 canvas.fill_rounded(ground, at, y, wide, BUTTON, theme.control_radius.max(6.0));
                 if lit && spot == Spot::Decline {
                     canvas.fill_rounded(plate.highlight, at, y, wide, BUTTON, theme.control_radius.max(6.0));

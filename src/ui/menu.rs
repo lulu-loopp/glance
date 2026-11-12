@@ -513,10 +513,18 @@ pub struct Plate {
 
 /// A plate `width` × `height` from (`x`, `y`) drawn as a menu's sheet in `look` (its shadow, its edge), for a few choices
 /// shown as one (a note's format bar): what is drawn on it is to be drawn so.
-pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32)) -> Plate {
+pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, rect: (f32, f32, f32, f32)) -> Plate {
+    plate_seen(frame, look, rect, 1.0)
+}
+
+/// The same over what it covers (its sheet whole: nothing under it shows through), `seen` of it shown (0 none, 1 all)
+/// as it comes and goes; what is drawn on it to be shown as much.
+pub fn plate_seen(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32), seen: f32) -> Plate {
     let colours = Colours::new(look, false);
     let radius = colours.radius.min(height / 2.0);
-    paint_plate(frame, &colours, (x, y, width, height), radius);
+    let shown = |color: Color| color.alpha(seen);
+    let faded = Colours { sheet: Color { a: seen, ..colours.sheet }, stroke: shown(colours.stroke), rim: colours.rim.map(shown), shadow: shown(colours.shadow), ..colours };
+    paint_plate(frame, &faded, (x, y, width, height), radius);
     Plate { icon: colours.icon, highlight: colours.highlight, radius }
 }
 

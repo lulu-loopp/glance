@@ -801,8 +801,14 @@ impl Controller {
                     }
                     let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|press| press.hit)).or_else(|| widgets.shelf_pressed());
                     crate::ui::view::press_tile(pressed);
+                    // The devices nearby at a station's foot as something is dragged off it, and as what was let go on
+                    // one is sent (see `station::send`).
+                    let (strip_moved, strip_due) = crate::station::send::tick(now);
+                    if let Some(due) = strip_due {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
                     let tiles = crate::ui::view::tile_changes();
-                    if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() {
+                    if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() || strip_moved {
                         for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
                             panel.next_frame = now;
                         }

@@ -57,20 +57,21 @@ fn both(name: &str, answer: Option<Answer>, kept: Kept) -> Both {
 }
 
 /// Files named `names`, each of its own bytes, in a folder of the test's.
-fn files(name: &str, contents: &[(&str, &[u8])]) -> Vec<PathBuf> {
+/// Files written for sending, each named as it is told (a folder's file by its place in the folder).
+fn files(name: &str, contents: &[(&str, &[u8])]) -> Vec<link::Outgoing> {
     let dir = folder(&format!("{name}-files"));
     std::fs::create_dir_all(&dir).unwrap();
-    contents.iter().map(|(file, bytes)| {
-        let path = dir.join(file);
+    contents.iter().enumerate().map(|(at, (file, bytes))| {
+        let path = dir.join(format!("{at}"));
         std::fs::write(&path, bytes).unwrap();
-        path
+        link::Outgoing { path, name: file.to_string() }
     }).collect()
 }
 
-fn sent(both: &Both, paths: &[PathBuf]) -> Vec<send::State> {
+fn sent(both: &Both, files: &[link::Outgoing]) -> Vec<send::State> {
     let states = Arc::new(Heard { events: Mutex::default(), asked: Mutex::default(), answer: None });
     let told: Arc<dyn Told> = states.clone();
-    send::send(&both.sender, &both.me, &both.device, paths, 7, &told, &AtomicBool::new(false));
+    send::send(&both.sender, &both.me, &both.device, files, 7, &told, &AtomicBool::new(false));
     let events = states.events.lock().unwrap();
     events.iter().map(|event| match event {
         Event::Sending { job: 7, state } => state.clone(),
@@ -92,7 +93,8 @@ fn came(heard: &Heard) -> Option<(Sender, Vec<Came>, Option<String>)> {
 #[test]
 fn a_sending_asked_about_and_taken_comes_whole() {
     let both = both("taken", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });
-    let paths = files("taken", &[("IMG_20261112_143012.jpg", b"a photo's bytes"), ("notes.txt", b"words")]);
+    // (One of them sent from a folder, named by its place there: it comes by its own name.)
+    let paths = files("taken", &[("IMG_20261112_143012.jpg", b"a photo's bytes"), ("trip/notes.txt", b"words")]);
     let states = sent(&both, &paths);
     assert_eq!(states.first(), Some(&send::State::Waiting));
     assert_eq!(states.last(), Some(&send::State::Sent));

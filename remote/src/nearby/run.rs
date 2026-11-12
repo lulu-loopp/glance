@@ -87,7 +87,7 @@ impl Running {
                 self.discovery.announce();
                 self.told.tell(Event::Devices { devices: self.receiver.devices_now() });
             }
-            Command::Send { job, to, paths } => {
+            Command::Send { job, to, files } => {
                 let Some(device) = self.receiver.devices_now().into_iter().find(|device| device.fingerprint.eq_ignore_ascii_case(&to)) else {
                     self.told.tell(Event::Sending { job, state: send::State::Failed { why: "the device is not nearby".into() } });
                     return;
@@ -97,7 +97,7 @@ impl Running {
                 let running = self.clone();
                 std::thread::spawn(move || {
                     let told: Arc<dyn Told> = running.told.clone();
-                    send::send(&running.receiver.own, &running.receiver.info, &device, &paths, job, &told, &cancelled);
+                    send::send(&running.receiver.own, &running.receiver.info, &device, &files, job, &told, &cancelled);
                     running.jobs.lock().unwrap().remove(&job);
                 });
             }
@@ -174,7 +174,7 @@ pub fn asked(words: &[String]) -> std::io::Result<serde_json::Value> {
         (Some("on"), _) => change(&|kept| kept.on = true)?,
         (Some("off"), _) => change(&|kept| kept.on = false)?,
         (Some("alias"), name) => {
-            let name = name.map(|name| super::shown_name(name)).filter(|name| name != "file" && !name.trim().is_empty());
+            let name = name.map(super::shown_name).filter(|name| name != "file" && !name.trim().is_empty());
             change(&|kept| kept.alias = name.clone())?
         }
         (Some("forget"), Some(fingerprint)) => change(&|kept| kept.trusted.retain(|trusted| !trusted.fingerprint.eq_ignore_ascii_case(fingerprint)))?,

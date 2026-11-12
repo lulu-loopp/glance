@@ -280,6 +280,9 @@ impl Session {
     }
 }
 
+/// How what is kept for nearby transfer is changed (written to the helper's configuration).
+type Keeping = Box<dyn Fn(&dyn Fn(&mut Kept)) + Send + Sync>;
+
 /// This PC as a receiver: its certificate, what it keeps, where what comes is written, whom it tells.
 pub struct Receiver {
     pub own: tls::Own,
@@ -290,7 +293,7 @@ pub struct Receiver {
     receipts: PathBuf,
     told: Arc<dyn Told>,
     kept: Box<dyn Fn() -> Kept + Send + Sync>,
-    keep: Box<dyn Fn(&dyn Fn(&mut Kept)) + Send + Sync>,
+    keep: Keeping,
     /// The receiving going on, and whether a device is being asked about (another meanwhile is turned away).
     session: Mutex<Option<Session>>,
     asking: Mutex<bool>,

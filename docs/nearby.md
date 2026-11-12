@@ -105,7 +105,8 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
     - `failed {session, why}`
     - `devices [{id, alias, kind, ...}]` (when the list changes)
     - `sent {job, ...}` (progress and result of a send)
-  - Glance → helper: `send {job, to, paths}`, `cancel {job|session}`, `announce`
+  - Glance → helper: `send {job, to, files[{path, name}]}` (a folder sent as its files, each named by its place in
+    it, "folder/inner/file", as LocalSend names them), `cancel {job|session}`, `announce`
   - Everything the helper says is data, checked: a `came` file must be a plain name, and the file must exist in the
     station folder.
 - **Glance not running.** Unknown devices are refused, trusted ones taken. The helper writes each finished session
@@ -130,6 +131,13 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
   device's mark is a corner badge.
 - **Send strip.** It shows during a drag that started on the station, over the station's foot, with the devices from
   the helper's list. Hovering one says "发送到 <name>" on the drag's plate. Dropping sends.
+  - Each device is a drop target: a window of the station's thread over it (as the station's own catchers), up while
+    the station's drag is under way. It sets the drop description on what is dragged, so the plate says it as it says
+    Explorer's.
+  - The drag ends taken; the station's thread sends what it gave. Words, links and pictures with no file are written
+    as files first (as for a drag into a chat), in a folder of the sending's own, deleted as it ends.
+  - The device shows "等待对方接受", a ring, then a tick (or what became of it). The strip goes down 1.1 s after the
+    sending is over and the drag is over (2.4 s after one that did not go through).
 - **Settings page.** As listed above. Turning it on adds the firewall rule and the task (the same path as the remote).
 
 ## Android

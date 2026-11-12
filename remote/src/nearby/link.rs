@@ -24,11 +24,19 @@ const LOOKED_FOR_EVERY: Duration = Duration::from_secs(2);
 pub enum Command {
     /// The user's answer to `ask` number `id`.
     Answer { id: u64, take: bool, #[serde(default)] trust: bool },
-    /// Send the files at `paths` to the device `to` (its fingerprint), as sending `job`.
-    Send { job: u64, to: String, paths: Vec<PathBuf> },
+    /// Send `files` to the device `to` (its fingerprint), as sending `job`.
+    Send { job: u64, to: String, files: Vec<Outgoing> },
     Cancel { job: u64 },
     /// Announce this PC (Glance is about to show the devices nearby), and say which they are now.
     Announce,
+}
+
+/// A file to be sent: where it is, and the name the device is told (a folder's files named by their places in it,
+/// "folder/inner/file", as LocalSend names them).
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Outgoing {
+    pub path: PathBuf,
+    pub name: String,
 }
 
 pub struct Link {
@@ -188,5 +196,24 @@ impl Told for Link {
 
     fn tell(&self, event: Event) {
         self.write(&serde_json::to_value(event).expect("an event is written"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What Glance tells it to send (as Glance's `nearby::send_line` writes it) is read: each file where it is, and
+    /// the name the device is told.
+    #[test]
+    fn a_sending_glance_asks_for_is_read() {
+        let line = r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"}],"job":3,"kind":"send","to":"AB12"}"#;
+        match serde_json::from_str::<Command>(line).unwrap() {
+            Command::Send { job, to, files } => {
+                assert_eq!((job, to.as_str()), (3, "AB12"));
+                assert_eq!(files, [Outgoing { path: PathBuf::from(r"C:\Users\me\trip\a.jpg"), name: "trip/a.jpg".into() }]);
+            }
+            other => panic!("read as {other:?}"),
+        }
     }
 }

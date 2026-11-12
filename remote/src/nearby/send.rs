@@ -3,7 +3,6 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::link::Outgoing;
 use super::{http, tls, Device, Event, Info, Told, API};
 
 /// How long a device is given to be reached, and to answer what it is asked (but an offer, which waits on its user).
@@ -117,26 +117,25 @@ pub fn kind_of(name: &str) -> &'static str {
     }
 }
 
-/// Sends the files at `paths` to `device` as this PC (`own`, telling of itself as `me`), Glance told how it goes as
-/// sending `job`; given up where `cancelled` is set meanwhile.
-pub fn send(own: &tls::Own, me: &Info, device: &Device, paths: &[PathBuf], job: u64, told: &Arc<dyn Told>, cancelled: &AtomicBool) {
+/// Sends `files` to `device` as this PC (`own`, telling of itself as `me`), Glance told how it goes as sending `job`;
+/// given up where `cancelled` is set meanwhile.
+pub fn send(own: &tls::Own, me: &Info, device: &Device, files: &[Outgoing], job: u64, told: &Arc<dyn Told>, cancelled: &AtomicBool) {
     let tell = |state: State| told.tell(Event::Sending { job, state });
-    let state = match sending(own, me, device, paths, cancelled, &|state| tell(state)) {
+    let state = match sending(own, me, device, files, cancelled, &|state| tell(state)) {
         Ok(state) => state,
         Err(error) => State::Failed { why: error.to_string() },
     };
-    crate::journal::note(format!("nearby: sent {} files to {} ({}): {state:?}", paths.len(), device.alias, device.address));
+    crate::journal::note(format!("nearby: sent {} files to {} ({}): {state:?}", files.len(), device.alias, device.address));
     tell(state);
 }
 
-fn sending(own: &tls::Own, me: &Info, device: &Device, paths: &[PathBuf], cancelled: &AtomicBool, tell: &dyn Fn(State)) -> std::io::Result<State> {
+fn sending(own: &tls::Own, me: &Info, device: &Device, outgoing: &[Outgoing], cancelled: &AtomicBool, tell: &dyn Fn(State)) -> std::io::Result<State> {
     let host = device.address.to_string();
     // What each file is: its id (its place), its name, how large it is.
     let mut files = Vec::new();
-    for (at, path) in paths.iter().enumerate() {
-        let size = std::fs::metadata(path)?.len();
-        let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| format!("file{at}"));
-        files.push((format!("f{at}"), name, size, path));
+    for (at, file) in outgoing.iter().enumerate() {
+        let size = std::fs::metadata(&file.path)?.len();
+        files.push((format!("f{at}"), file.name.clone(), size, &file.path));
     }
     let named: serde_json::Map<String, Value> = files.iter().map(|(id, name, size, _)| (id.clone(), json!({ "id": id, "fileName": name, "size": size, "fileType": kind_of(name), "sha256": null, "preview": null }))).collect();
     tell(State::Waiting);

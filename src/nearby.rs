@@ -68,6 +68,13 @@ pub enum Sending {
     Failed { why: String },
 }
 
+impl Sending {
+    /// Whether it is over: sent, or not to be.
+    pub fn over(&self) -> bool {
+        !matches!(self, Sending::Waiting | Sending::Going { .. })
+    }
+}
+
 /// What the helper tells.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -153,13 +160,50 @@ pub fn answer(id: u64, take: bool, trust: bool) {
     command(&json!({ "kind": "answer", "id": id, "take": take, "trust": trust }));
 }
 
-/// The files at `paths` sent to the device `to` (its fingerprint), as sending `job`: whether the helper was there to
-/// be asked.
-pub fn send(job: u64, to: &str, paths: &[PathBuf]) -> bool {
+/// A number for a sending of this PC's, none other's.
+pub fn job() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `files` (each where it is, and the name the device is told) sent to the device `to` (its fingerprint), as sending
+/// `job` (see `job`). Nothing to send, or the helper not there to be asked, it failed at once. The station is told as
+/// it is over (see `station::run::Ask::Sent`).
+pub fn send(job: u64, to: &str, files: &[(PathBuf, String)]) {
+    if files.is_empty() {
+        sending(job, Sending::Failed { why: "nothing to send".into() });
+        return;
+    }
     change(|shown| {
         shown.sendings.insert(job, Sending::Waiting);
     });
-    command(&json!({ "kind": "send", "job": job, "to": to, "paths": paths }))
+    if !command(&send_line(job, to, files)) {
+        sending(job, Sending::Failed { why: "the helper is not there".into() });
+    }
+}
+
+/// What the helper is told to send `files` to `to` as sending `job` (see `send`).
+fn send_line(job: u64, to: &str, files: &[(PathBuf, String)]) -> serde_json::Value {
+    let files: Vec<serde_json::Value> = files.iter().map(|(path, name)| json!({ "path": path, "name": name })).collect();
+    json!({ "kind": "send", "job": job, "to": to, "files": files })
+}
+
+/// Sending `job` no longer shown (over, and shown so long enough).
+pub fn forget(job: u64) {
+    change(|shown| {
+        shown.sendings.remove(&job);
+    });
+}
+
+/// Sending `job` goes as `state`: shown so, and the station told where it is over.
+fn sending(job: u64, state: Sending) {
+    let over = state.over();
+    change(|shown| {
+        shown.sendings.insert(job, state);
+    });
+    if over {
+        crate::station::run::ask(crate::station::run::Ask::Sent(job));
+    }
 }
 
 pub fn cancel(job: u64) -> bool {
@@ -213,9 +257,7 @@ fn heard(told: Told) {
             crate::station::run::ask(crate::station::run::Ask::Arrivals(Some(session)));
         }
         Told::Devices { devices } => change(|shown| shown.devices = devices),
-        Told::Sending { job, state } => change(|shown| {
-            shown.sendings.insert(job, state);
-        }),
+        Told::Sending { job, state } => sending(job, state),
     }
 }
 
@@ -315,9 +357,14 @@ fn serve() {
             crate::station::run::ask(crate::station::run::Ask::Arrivals(None));
             listen(told);
         }
-        // Gone: nothing to tell it, nothing it asked to answer, nothing coming.
+        // Gone: nothing to tell it, nothing it asked to answer, nothing coming, and what it was sending not sent.
         *DOWN.lock().unwrap() = None;
-        change(|shown| *shown = Shown::default());
+        let going: Vec<u64> = shown().sendings.iter().filter(|(_, state)| !state.over()).map(|(job, _)| *job).collect();
+        let sendings = shown().sendings;
+        change(|shown| *shown = Shown { sendings, ..Shown::default() });
+        for job in going {
+            sending(job, Sending::Failed { why: "the helper went".into() });
+        }
         crate::station::run::ask(crate::station::run::Ask::Receiving(None));
         unsafe {
             let _ = DisconnectNamedPipe(up);
@@ -435,6 +482,14 @@ pub fn receipts(folder: &Path) -> Vec<(PathBuf, Receipt)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the helper is told to send, as it reads it (see its `link::Command::Send`): each file where it is, and
+    /// the name the device is told.
+    #[test]
+    fn a_sending_is_told_as_the_helper_reads_it() {
+        let files = [(PathBuf::from(r"C:\Users\me\trip\a.jpg"), "trip/a.jpg".to_string())];
+        assert_eq!(send_line(3, "AB12", &files).to_string(), r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"}],"job":3,"kind":"send","to":"AB12"}"#);
+    }
 
     fn receipt(session: &str, files: &[&str]) -> Receipt {
         Receipt {
