@@ -286,7 +286,8 @@ impl Session {
 /// How what is kept for nearby transfer is changed (written to the helper's configuration).
 type Keeping = Box<dyn Fn(&dyn Fn(&mut Kept)) + Send + Sync>;
 
-/// This PC as a receiver: its certificate, what it keeps, where what comes is written, whom it tells.
+/// This PC as a receiver: its certificate, what it says of itself (called as its computer is, but where what it keeps
+/// names it otherwise: see `me`), what it keeps, where what comes is written, whom it tells.
 pub struct Receiver {
     pub own: tls::Own,
     pub info: Info,
@@ -401,9 +402,16 @@ impl Receiver {
         }
     }
 
+    /// What this PC says of itself now: called as what it keeps names it, where that is a name (it may be renamed as it
+    /// runs: told so from then on), else as its computer is.
+    pub fn me(&self) -> Info {
+        let alias = (self.kept)().alias.filter(|alias| !alias.trim().is_empty());
+        Info { alias: alias.unwrap_or_else(|| self.info.alias.clone()), ..self.info.clone() }
+    }
+
     /// What this PC says of itself, as an answer to `register` and `info`.
     fn about(&self) -> String {
-        let info = &self.info;
+        let info = &self.me();
         json!({ "alias": info.alias, "version": VERSION, "deviceModel": info.device_model, "deviceType": info.device_type, "fingerprint": info.fingerprint, "download": false }).to_string()
     }
 

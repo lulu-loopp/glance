@@ -152,6 +152,12 @@ pub fn shown() -> Shown {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+/// For pictures: the devices nearby as if the helper had found these.
+#[cfg(all(test, feature = "studio"))]
+pub fn pretend_devices(devices: Vec<Device>) {
+    change(|shown| shown.devices = devices);
+}
+
 fn change(act: impl FnOnce(&mut Shown)) {
     act(SHOWN.lock().unwrap().get_or_insert_with(Shown::default));
     if let Some(told) = TOLD.get() {
@@ -236,6 +242,33 @@ pub fn cancel(job: u64) -> bool {
 /// The PIN the device of sending `job` asked for, given: offered again with it (the helper tells how that goes).
 pub fn pin(job: u64, pin: &str) -> bool {
     command(&json!({ "kind": "pin", "job": job, "pin": pin }))
+}
+
+/// The station's room for what comes (bytes, see `shelf::Shelf::room`): as last wanted, and as last told the helper.
+static ROOM: Mutex<(Option<u64>, Option<u64>)> = Mutex::new((None, None));
+/// Held while the helper is told it (once at a time: the latest wanted told last).
+static TELLING_ROOM: Mutex<()> = Mutex::new(());
+
+/// The most a sending to this PC may be, `bytes` (what the station has room for), told to the helper where it was told
+/// otherwise (on a thread of its own: the helper is a program run, see `phone::nearby_most`). An offer larger is
+/// refused up front.
+pub fn room(bytes: u64) {
+    {
+        let mut room = ROOM.lock().unwrap();
+        if room.0 == Some(bytes) {
+            return;
+        }
+        room.0 = Some(bytes);
+    }
+    std::thread::spawn(|| {
+        let _one = TELLING_ROOM.lock().unwrap();
+        let (wanted, told) = *ROOM.lock().unwrap();
+        if let Some(wanted) = wanted.filter(|wanted| told != Some(*wanted)) {
+            if crate::phone::nearby_most(wanted) {
+                ROOM.lock().unwrap().1 = Some(wanted);
+            }
+        }
+    });
 }
 
 /// This PC announced to the devices nearby, and which they are said again (the devices are about to be shown).

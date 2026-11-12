@@ -124,7 +124,7 @@ impl Discovery {
 
     /// This PC as it announces itself (`announce`: an announcement, which is answered; else an answer).
     fn told(&self, announce: bool) -> Vec<u8> {
-        let me = &self.receiver.info;
+        let me = &self.receiver.me();
         json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "announce": announce, "announcement": announce }).to_string().into_bytes()
     }
 
@@ -187,7 +187,7 @@ impl Discovery {
     /// Tells the device at `address` that announced `info` of this PC; where it cannot be reached so, answers in the
     /// group instead.
     fn register(&self, address: IpAddr, info: &Info) {
-        match send::register(&self.receiver.own, &self.receiver.info, address, info) {
+        match send::register(&self.receiver.own, &self.receiver.me(), address, info) {
             // (Its fingerprint as the connection proved it where it was pinned to it: as it announced.)
             Ok(answered) => {
                 let mut known = answered.clone();

@@ -72,6 +72,8 @@ pub enum Switch {
     Autostart,
     Remote,
     RaisedLights,
+    /// Nearby transfer (the same task as the phone remote's, and a way of its own through the firewall).
+    Nearby,
 }
 
 /// Where taking an update stands, as it travels.

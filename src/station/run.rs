@@ -854,6 +854,8 @@ impl Station {
     }
 
     fn show(&self) {
+        // (What a device nearby may send it, as it has room now.)
+        crate::nearby::room(self.keep.shelf.room(self.keep.rules));
         let settings = crate::app().settings.lock().unwrap().station;
         let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));

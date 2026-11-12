@@ -224,12 +224,20 @@ impl Shelf {
         gone
     }
 
+    /// The most it can make room for within `rules` (see `room_for`): all but what pinned things keep of their own.
+    pub fn room(&self, rules: Rules) -> u64 {
+        rules.most_bytes.saturating_sub(self.pinned_bytes())
+    }
+
+    fn pinned_bytes(&self) -> u64 {
+        self.items.iter().filter(|item| item.pinned).map(|item| item.own_bytes).sum()
+    }
+
     /// Makes room for `bytes` more of its own within `rules`: the oldest things not pinned that keep something of
     /// their own taken off till there is (what went); else, with no room even with all of those gone, nothing taken
     /// off, and `Full`.
     pub fn room_for(&mut self, bytes: u64, rules: Rules) -> Result<Vec<Item>, Full> {
-        let pinned: u64 = self.items.iter().filter(|item| item.pinned).map(|item| item.own_bytes).sum();
-        if pinned.saturating_add(bytes) > rules.most_bytes {
+        if bytes > self.room(rules) {
             return Err(Full);
         }
         let mut over = (self.own_bytes() + bytes).saturating_sub(rules.most_bytes);
@@ -320,6 +328,7 @@ mod tests {
     fn pinned_things_are_never_taken_off_for_room() {
         let rules = Rules { keep_days: 7, most_bytes: 100 };
         let mut shelf = Shelf::default();
+        assert_eq!(shelf.room(rules), 100);
         let pinned = shelf.put(picture("a"), 0, false, false, 80);
         shelf.pin(pinned, true);
         let loose = shelf.put(picture("b"), 1, false, false, 10);

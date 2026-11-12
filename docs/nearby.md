@@ -87,11 +87,10 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
   the helper, as they do for paired phones.
 - **Verified** (a client certificate was presented): auto-accept is sound.
 - **Claimed** (no client certificate, older LocalSend): the fingerprint in `info` is only what the sender says.
-  Someone else on the same network could claim it. LocalSend's own "quick save for favorites" has the same
-  weakness. What limits the harm:
-  - files only ever land in the station's folder, named by Glance and marked as from the Internet
-  - sizes are capped
-  - the settings say so in one line
+  Someone else on the same network could claim it (LocalSend's own "quick save for favorites" has that weakness).
+  Such a device is never trusted: it is asked about each time, and the notice offers no trust for it. Its files,
+  once taken, are handled as any: only in the station's folder, named by Glance, marked as from the Internet, and
+  capped in size.
 - **Glance's Android app** always presents its client certificate. Its fingerprint is told to the helper over the
   pairing channel (HMAC-signed with the phone's key), so the paired phone is trusted, verified, with no prompt.
 
@@ -100,7 +99,8 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
 - **`glance-remote.exe`** (runs as the user, never elevated) stays the only process that opens a port. It gains the
   module `nearby`: discovery, the HTTPS server, the client, and the trusted list. It runs while the remote or nearby
   transfer is on (its task starts it at sign-in). Nearby on with the remote off starts it with phone control off.
-  The firewall rule is the helper's program-scoped rule, local subnet only: TCP on its ports, UDP 53317.
+  The firewall rule "Glance Nearby" is the helper's program-scoped rule, local subnet only: TCP (any port: it
+  receives on another where 53317 is taken), and UDP 53317. The uninstaller removes it with the remote's.
 - **`glance.exe`** serves a named pipe `\\.\pipe\Glance.Nearby.<user SID>`:
   - DACL: the user and SYSTEM only. `PIPE_REJECT_REMOTE_CLIENTS`.
   - The helper connects and keeps the connection. Messages are JSON lines.
@@ -153,7 +153,31 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
   front; no input method), what is sent under it, 取消 and 发送. Enter or 发送 gives it; while it is tried the box
   takes nothing more. Turned down, the box shakes (360 ms), what was written is chosen, and "PIN 码不正确" shows under
   it. Escape or 取消 cancels the sending. The PIN is used for that offer only and never kept.
-- **Settings page.** As listed above. Turning it on adds the firewall rule and the task (the same path as the remote).
+- **Settings page "附近传输"** (its own page under 手机互联, the share icon), rows top to bottom:
+  - 接收附近设备的文件: the switch (off by default). Turned through the sensors' process, as the remote is
+    (`link::Switch::Nearby`, see `phone::set`): the helper told what it runs for (`remote on|off`, `nearby on|off`),
+    the firewall rule "Glance Nearby" (TCP on any port for the helper's program, UDP 53317, local subnet only) added
+    or removed beside "Glance Remote" as each is on, and the task kept while either is (run anew on every change:
+    a running helper is stopped and waited for first, so it takes the flags as it starts). Without the sensors'
+    process it is turned in Glance's own, as the remote is (the firewall then changed only where that has the rights).
+  - 这台电脑的名称: a box with the name devices see (the computer's name by default). Pressed, it is written in
+    place (the sensors' naming box: Enter or a press elsewhere keeps it, Escape leaves it). Named nothing or as the
+    computer is, the alias is cleared. Kept by the helper (`nearby alias`), which says it from then on without a
+    restart (`Receiver::me` reads it on each answer), and Glance has it announce itself at once.
+  - 来自未信任设备的文件: 每次询问 / 一律拒绝 (`nearby others ask|refuse`, read live by the helper).
+  - 在屏幕边缘提示: `Settings::nearby_notice`.
+  - 保存位置: "中转站文件夹", with 打开文件夹.
+  - 已信任的设备: each device with its kind's round icon. A paired phone's device says "已配对的 Glance 手机" and
+    "随配对保留" (unpaired, it goes). Another says "电脑 · M月D日起信任" with 移除 (`nearby forget`). None trusted:
+    a line on how one becomes trusted.
+  - While receiving is off, every row under the switch is dimmed and does nothing.
+  - The preview: a phone with LocalSend at its sending, listing the devices nearby as it would. This PC is first,
+    under its name as it is being written, and only while it receives ("这台电脑已关闭接收，不在列表中" otherwise).
+    Then the devices the helper has found.
+  - The helper is asked in turn on one thread of the window's. Its answer is shown once all asked are answered
+    (meanwhile, as changed). It is read again while the page shows, whenever its configuration has been written.
+- **Room.** The station tells the helper the most one sending (and one file) may be: all the station may keep less
+  what pinned things keep (`Shelf::room`), told whenever that changes (`nearby most`), in order, on a thread.
 
 ## Android
 

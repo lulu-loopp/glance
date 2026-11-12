@@ -36,15 +36,15 @@ pub struct Running {
 /// The nearby transfer this helper runs, once started.
 pub static RUNNING: OnceLock<Arc<Running>> = OnceLock::new();
 
-/// Starts nearby transfer, as this PC called `name` unless its configuration says otherwise: its receiver on its
-/// own port (another, where that one is taken), finding devices, and Glance told and asked.
+/// Starts nearby transfer, as this PC called `name` unless its configuration says otherwise (as it says each time: see
+/// `Receiver::me`): its receiver on its own port (another, where that one is taken), finding devices, and Glance told
+/// and asked.
 pub fn start(name: &str) -> std::io::Result<()> {
     let own = tls::Own::in_folder(&crate::config::folder())?;
     let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, super::OWN_PORT)).or_else(|_| TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
     let port = listener.local_addr()?.port();
-    let kept = kept_of(&Config::load());
     let info = Info {
-        alias: kept.alias.clone().filter(|alias| !alias.trim().is_empty()).unwrap_or_else(|| name.to_string()),
+        alias: name.to_string(),
         device_model: Some("Windows".into()),
         device_type: Some("desktop".into()),
         port: Some(port),
@@ -67,7 +67,7 @@ pub fn start(name: &str) -> std::io::Result<()> {
     let running = Arc::new(Running { receiver: receiver.clone(), discovery: discovery.clone(), told: link, jobs: Mutex::default() });
     let _ = made.set(running.clone());
     let _ = RUNNING.set(running);
-    crate::journal::note(format!("nearby: on, as \"{}\" on port {port}, fingerprint {}", receiver.info.alias, receiver.info.fingerprint));
+    crate::journal::note(format!("nearby: on, as \"{}\" on port {port}, fingerprint {}", receiver.me().alias, receiver.info.fingerprint));
     let serving = receiver.clone();
     std::thread::spawn(move || serving.serve(listener));
     std::thread::spawn(move || loop {
@@ -96,7 +96,7 @@ impl Running {
                 let running = self.clone();
                 std::thread::spawn(move || {
                     let told: Arc<dyn Told> = running.told.clone();
-                    send::send(&running.receiver.own, &running.receiver.info, &device, &files, job, &told, &going);
+                    send::send(&running.receiver.own, &running.receiver.me(), &device, &files, job, &told, &going);
                     running.jobs.lock().unwrap().remove(&job);
                 });
             }
@@ -148,7 +148,7 @@ pub fn told_to_phones() -> serde_json::Value {
     let running = RUNNING.get();
     json!({
         "on": running.is_some(),
-        "alias": running.map(|running| running.receiver.info.alias.clone()),
+        "alias": running.map(|running| running.receiver.me().alias),
         "port": running.and_then(|running| running.receiver.info.port),
         "fingerprint": running.map(|running| running.receiver.info.fingerprint.clone()),
     })

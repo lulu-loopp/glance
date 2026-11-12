@@ -1,12 +1,13 @@
-//! The phone remote, as Glance's settings turn it on and off and pair
-//! phones with it.
+//! The phone remote and nearby transfer, as Glance's settings turn them on
+//! and off, pair phones with the one and name this PC for the other.
 //!
-//! The remote itself is another program, `glance-remote.exe` beside this
-//! one: it runs as the user (never elevated), answers a paired phone on the
-//! local network, and is the only one of the two to open a port. Glance
-//! starts it (through a task of the user's own, which also starts it at
-//! sign-in), lets it through the firewall, and asks it for what the
-//! settings show: a pairing offered as a QR code, and the phones paired.
+//! Both are another program, `glance-remote.exe` beside this one: it runs as
+//! the user (never elevated), answers a paired phone on the local network
+//! and devices nearby (see `nearby`), and is the only one of the two to open
+//! a port. Glance starts it (through a task of the user's own, which also
+//! starts it at sign-in) while either is on, lets it through the firewall as
+//! each needs, and asks it for what the settings show: a pairing offered as a
+//! QR code, the phones paired, the devices trusted.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,10 @@ use crate::elevation;
 const PORT: u16 = 47631;
 /// The firewall rule that lets phones on the local network reach it.
 const RULE: &str = "Glance Remote";
+/// The firewall rule that lets devices nearby reach it (see `set`).
+const NEARBY_RULE: &str = "Glance Nearby";
+/// The port devices nearby say they are there on, to all the network (LocalSend's own).
+const NEARBY_PORT: u16 = 53317;
 /// A child program started without a window of its own.
 const NO_WINDOW: u32 = 0x0800_0000;
 /// Where the app is to be had: the page a phone is sent to by a QR code.
@@ -371,9 +376,11 @@ fn firewall(arguments: &[&str]) -> bool {
     Command::new(netsh()).args(["advfirewall", "firewall"]).args(arguments).creation_flags(NO_WINDOW).output().is_ok_and(|done| done.status.success())
 }
 
-/// The firewall closed to the remote again: for the uninstaller.
+/// The firewall closed to the remote and nearby transfer again: for the uninstaller.
 pub fn forget() {
-    firewall(&["delete", "rule", &format!("name={RULE}")]);
+    for rule in [RULE, NEARBY_RULE] {
+        firewall(&["delete", "rule", &format!("name={rule}")]);
+    }
 }
 
 /// The remote running, if it is on: asked of it as Glance starts. On a laptop, where the sensors run no OpenRGB (see
@@ -394,36 +401,163 @@ fn lowered_as_glance_starts(laptop: bool, raised: impl FnOnce() -> bool) -> bool
     laptop && raised()
 }
 
-/// Whether the remote is on: started at sign-in, by this account's task.
+/// Whether the remote is on: its helper started at sign-in, by this account's task, for phones to control this PC.
 pub fn on() -> bool {
+    running() && kept_flags().0
+}
+
+/// Whether nearby transfer is on: the helper started at sign-in, by this account's task, for devices nearby.
+pub fn nearby_on() -> bool {
+    running() && kept_flags().1
+}
+
+/// Whether this account's task starts the helper beside this Glance.
+fn running() -> bool {
     helper().is_some_and(|helper| elevation::remote_enabled(&helper))
 }
 
-/// Turns the remote on (its task made and run, the firewall opened to the
-/// local network for it alone) or off (stopped, its task and its rule
-/// gone): whether it is on then.
+/// What the helper keeps of what it runs for, as it starts: phones controlling this PC (unless told otherwise, they
+/// do), and nearby transfer (unless told so, not).
+fn kept_flags() -> (bool, bool) {
+    let config: Option<serde_json::Value> = remote_config().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok());
+    flags_of(config.as_ref())
+}
+
+fn flags_of(config: Option<&serde_json::Value>) -> (bool, bool) {
+    let flag = |at: &str, unsaid: bool| config.and_then(|config| config.pointer(at)).and_then(serde_json::Value::as_bool).unwrap_or(unsaid);
+    (flag("/remote", true), flag("/nearby/on", false))
+}
+
+/// Turns the remote on or off (see `set`): whether it is on then.
 pub fn turn(on: bool) -> bool {
-    let Some(helper) = helper() else { return false };
-    let name = format!("name={RULE}");
-    // (Whatever rule of that name there was goes first: one, and current.)
-    firewall(&["delete", "rule", &name]);
-    if on {
-        // (What phones ask of it, and their looking for it when its address has changed.)
-        for protocol in ["protocol=TCP", "protocol=UDP"] {
-            firewall(&["add", "rule", &name, "dir=in", "action=allow", protocol, &format!("localport={PORT}"), "remoteip=localsubnet", "profile=any", &format!("program={}", helper.display())]);
+    set(Some(on), None).0
+}
+
+/// Turns nearby transfer on or off (see `set`): whether it is on then.
+pub fn turn_nearby(on: bool) -> bool {
+    set(None, Some(on)).1
+}
+
+/// The helper set to run for phones (`remote`) and for devices nearby (`nearby`), each as asked, or else as it is:
+/// told what it runs for, the firewall opened to the local network for it as each needs (and closed as neither does),
+/// and its task made and run anew while either is on (so it takes what it was told), else stopped and gone. Whether
+/// each is on then.
+fn set(remote: Option<bool>, nearby: Option<bool>) -> (bool, bool) {
+    let Some(helper) = helper() else { return (false, false) };
+    let running = elevation::remote_enabled(&helper);
+    let kept = kept_flags();
+    let (remote, nearby) = (remote.unwrap_or(running && kept.0), nearby.unwrap_or(running && kept.1));
+    let word = |on: bool| if on { "on" } else { "off" };
+    let _ = asked(&helper, &["remote", word(remote)]);
+    let _ = asked(&helper, &["nearby", word(nearby)]);
+    let program = format!("program={}", helper.display());
+    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby)] {
+        let name = format!("name={rule}");
+        // (Whatever rule of that name there was goes first: one, and current.)
+        firewall(&["delete", "rule", &name]);
+        if !wanted {
+            continue;
+        }
+        let open = |protocol: &str, port: Option<u16>| {
+            let port = port.map(|port| format!("localport={port}"));
+            let mut arguments = vec!["add", "rule", &name, "dir=in", "action=allow", protocol];
+            arguments.extend(port.as_deref());
+            arguments.extend(["remoteip=localsubnet", "profile=any", &program]);
+            firewall(&arguments);
+        };
+        if rule == RULE {
+            // (What phones ask of it, and their looking for it when its address has changed.)
+            open("protocol=TCP", Some(PORT));
+            open("protocol=UDP", Some(PORT));
+        } else {
+            // (What devices send and ask of it, on the port it receives on, another where that one was taken; and
+            // their saying they are there.)
+            open("protocol=TCP", None);
+            open("protocol=UDP", Some(NEARBY_PORT));
         }
     }
-    let is_on = elevation::set_remote(&helper, on);
+    let is_on = elevation::set_remote(&helper, remote || nearby);
     // Ended while it kept the screens dark its own way, it has not put them back: it is asked to now.
     if !is_on {
         let _ = asked(&helper, &["restore"]);
     }
-    is_on
+    let kept = kept_flags();
+    (is_on && kept.0, is_on && kept.1)
+}
+
+/// Nearby transfer as the helper keeps it (see its `nearby`), what the settings show of it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct Nearby {
+    /// What this PC is called to devices nearby where it is named (none: as its computer is, `name`).
+    pub alias: Option<String>,
+    pub name: String,
+    pub trusted: Vec<Trusted>,
+    /// Devices not trusted are turned away, not asked about.
+    pub others_refused: bool,
+}
+
+impl Nearby {
+    /// What devices nearby see this PC called.
+    pub fn called(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// A device whose files are taken without asking: its certificate's fingerprint, what it calls itself, what it is,
+/// since when it is trusted (seconds since 1970; none known: 0), and the paired phone it is trusted by, where one told it.
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct Trusted {
+    pub fingerprint: String,
+    pub alias: String,
+    pub kind: Option<String>,
+    pub since: u64,
+    pub phone: Option<String>,
+}
+
+/// Nearby transfer as the helper keeps it, once it is told `words` (see its `nearby`: `alias NAME`, `forget
+/// FINGERPRINT`, `others ask|refuse`); none where it cannot be asked.
+pub fn nearby(words: &[&str]) -> Option<Nearby> {
+    let said = ask(&std::iter::once("nearby").chain(words.iter().copied()).collect::<Vec<_>>())?;
+    serde_json::from_str(&said).ok()
+}
+
+/// Tells the helper the most one sending to this PC may be (bytes; each of its files too): what the station has room
+/// for. Whether it was told.
+pub fn nearby_most(bytes: u64) -> bool {
+    let bytes = bytes.to_string();
+    ask(&["nearby", "most", &bytes, &bytes]).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the helper runs for, as it keeps it: phones control this PC unless it was told otherwise, and nearby
+    /// transfer is off unless it was told it is on.
+    #[test]
+    fn the_helper_runs_for_phones_unless_told_otherwise() {
+        let flags = |text: &str| flags_of(serde_json::from_str::<serde_json::Value>(text).ok().as_ref());
+        assert_eq!(flags_of(None), (true, false));
+        assert_eq!(flags("{}"), (true, false));
+        assert_eq!(flags(r#"{"remote": false, "nearby": {"on": true}}"#), (false, true));
+        assert_eq!(flags(r#"{"nearby": {"alias": "Desk"}}"#), (true, false));
+    }
+
+    /// Nearby transfer as the helper says it (see `run::said` there).
+    #[test]
+    fn nearby_transfer_is_read_as_the_helper_says_it() {
+        let said = r#"{"on":true,"alias":null,"name":"DESKTOP-9950X","fingerprint":"AB","port":53317,"trusted":[{"fingerprint":"CD","alias":"Galaxy Z Fold6","kind":"mobile","last":0,"since":1762905600,"phone":"p1"},{"fingerprint":"EF","alias":"MacBook","kind":"desktop","last":0,"since":0}],"others_refused":true}"#;
+        let nearby: Nearby = serde_json::from_str(said).unwrap();
+        assert_eq!(nearby.called(), "DESKTOP-9950X");
+        assert!(nearby.others_refused);
+        assert_eq!(nearby.trusted.len(), 2);
+        assert_eq!((nearby.trusted[0].phone.as_deref(), nearby.trusted[0].since), (Some("p1"), 1762905600));
+        assert_eq!(nearby.trusted[1].phone, None);
+        let named: Nearby = serde_json::from_str(r#"{"alias":"书房","name":"DESKTOP-9950X"}"#).unwrap();
+        assert_eq!(named.called(), "书房");
+    }
 
     /// On a laptop, a remote told to ask an OpenRGB the sensors run (which they run on no laptop) is told to run its
     /// own again as Glance starts. Elsewhere it is not asked.

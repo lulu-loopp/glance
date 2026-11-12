@@ -48,8 +48,8 @@ use windows::Win32::System::Registry::{
     REG_OPTION_NON_VOLATILE, RRF_RT_REG_SZ,
 };
 use windows::Win32::System::TaskScheduler::{
-    IExecAction, ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN,
-    TASK_LOGON_INTERACTIVE_TOKEN,
+    IExecAction, IRegisteredTask, ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN,
+    TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_RUNNING,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VARIANT;
@@ -1651,26 +1651,41 @@ pub fn remote_enabled(helper: &Path) -> bool {
     task_program(&remote_task()).is_some_and(|program| same_path(Path::new(&program), helper))
 }
 
-/// Turns the phone remote on (its task registered, and run now) or off
-/// (stopped, its task gone); returns whether it is on then.
+/// Turns the helper of the phone remote and nearby transfer on (its task registered, and run anew now: one running is
+/// stopped first, and takes what it was told as it starts again) or off (stopped, its task gone); returns whether it
+/// is on then.
 pub fn set_remote(helper: &Path, on: bool) -> bool {
     let name = remote_task();
     let Some(folder) = task_folder() else { return false };
     let none = VARIANT::default();
     unsafe {
+        if let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) {
+            stopped(&task);
+        }
         if on {
             let registered = folder.RegisterTask(&BSTR::from(name.as_str()), &BSTR::from(remote_task_xml(helper)), TASK_CREATE_OR_UPDATE.0, &none, &none, TASK_LOGON_INTERACTIVE_TOKEN, &none);
             if let Ok(task) = registered {
                 let _ = task.Run(&none);
             }
         } else {
-            if let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) {
-                let _ = task.Stop(0);
-            }
             delete_task(&name);
         }
     }
     remote_enabled(helper)
+}
+
+/// How long a task stopped is waited for to be over (its program ended, the ports it held let go).
+const STOPPED_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// `task` stopped, and waited for till it runs no more (a while at most: see `STOPPED_WITHIN`).
+fn stopped(task: &IRegisteredTask) {
+    unsafe {
+        let _ = task.Stop(0);
+        let until = std::time::Instant::now() + STOPPED_WITHIN;
+        while task.State().is_ok_and(|state| state == TASK_STATE_RUNNING) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 }
 
 // ---- The driver ----
