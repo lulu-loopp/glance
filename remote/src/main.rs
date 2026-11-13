@@ -46,7 +46,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use config::{Config, Effect, Light, Phone, Screens};
+use config::{Config, Effect, Light, Night, Phone, Screens};
 use serde_json::{json, Value};
 
 /// The most a request may be: none of the phone's is near it.
@@ -82,13 +82,6 @@ fn heat(celsius: i64) -> String {
         ((1.0 - k.min(4.0 - k).clamp(0.0, 1.0)) * 255.0).round() as u8
     };
     format!("{:02X}{:02X}{:02X}", channel(5.0), channel(3.0), channel(1.0))
-}
-
-/// Night mode: the power plan to go back to.
-struct Night {
-    power: Option<power::Before>,
-    /// Whether night muted the sound (it was not muted already): unmuted again as night ends.
-    muted: bool,
 }
 
 #[derive(Default)]
@@ -432,7 +425,10 @@ impl Helper {
             let muted = actions::volume().is_some_and(|(_, muted)| !muted) && actions::set_volume(None, Some(true)).is_ok();
             let power = power::save();
             let dark = self.screens_off();
-            self.state.lock().unwrap().night = Some(Night { power, muted });
+            let night = Night { power, muted };
+            // (Kept, so that night is ended by the next helper where this one ends first.)
+            let _ = Config::change(|config| config.night = Some(night.clone()));
+            self.state.lock().unwrap().night = Some(night);
             journal::note(format!("night began (lights: {}; screens: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "out"), dark.as_ref().map_or_else(|error| error.as_str(), |_| "out")));
             lit.and(dark)
         } else {
@@ -445,6 +441,7 @@ impl Helper {
             }
             self.screens_on();
             let lit = self.lights(true);
+            let _ = Config::change(|config| config.night = None);
             journal::note(format!("night ended (lights: {})", lit.as_ref().map_or_else(|error| error.as_str(), |_| "on")));
             lit
         }
@@ -1020,6 +1017,18 @@ fn main() -> std::io::Result<()> {
                 let dark = display::restore(&config.darkened);
                 Config::change(|config| config.darkened = dark)?;
             }
+            // Night it had on: the power plan and the sound as they were before it (the lights are no longer this
+            // helper's to set).
+            if let Some(night) = &config.night {
+                journal::note("night was left on by a helper that was ended: its power plan and sound put back");
+                if let Some(power) = night.power {
+                    power::restore(power);
+                }
+                if night.muted {
+                    let _ = actions::set_volume(None, Some(false));
+                }
+                Config::change(|config| config.night = None)?;
+            }
             return Ok(());
         }
         // glance-remote night-key [new|none]: the key night alone is put on and off by, said; made anew first (any
@@ -1187,6 +1196,13 @@ fn main() -> std::io::Result<()> {
     }
     let state = State { lights: lit_at_start(config.lights_raised, config.lit, lights::lit), ..State::default() };
     let helper = Arc::new(Helper { light: Mutex::new(config.light.clone()), colours: Mutex::new(config.colours.clone()), keys: Mutex::new(config.keys), phones: Mutex::new((None, Vec::new())), config, state: Mutex::new(state), lighting: Mutex::new(()), stale: std::sync::atomic::AtomicBool::new(false), nighting: Mutex::new(()), session, callers: Mutex::default() });
+    // Night a helper before this one put on and did not end (it was ended first): ended now, as the monitors it kept
+    // dark are put on again (above), the power plan, the sound and the lights as they were before it.
+    if let Some(left) = helper.config.night.clone() {
+        journal::note("night was left on by a helper that ended: ended");
+        helper.state.lock().unwrap().night = Some(left);
+        let _ = helper.night(false);
+    }
     // The lights following the heat, and night and dark screens ended at a touch: what phones control, with the
     // remote off none of it (this helper runs for nearby transfer alone).
     if helper.config.remote {

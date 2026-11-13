@@ -70,10 +70,11 @@ pub fn choose(id: &str) -> bool {
     power_plans().into_iter().find(|(plan, _)| format!("{plan:?}") == id).is_some_and(|(plan, _)| set_power_plan(plan))
 }
 
-/// What there was before the most saving way was gone to, to go back to.
+/// What there was before the most saving way was gone to, to go back to (each GUID as its number, so that it is kept).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Before {
-    Mode(GUID),
-    Plan(GUID),
+    Mode(u128),
+    Plan(u128),
 }
 
 /// Goes to the most saving way there is (the mode of best power
@@ -82,14 +83,14 @@ pub enum Before {
 pub fn save() -> Option<Before> {
     let saving = MODES[0].1;
     match mode_in_force() {
-        Some(now) => (now != saving && set_mode(saving)).then_some(Before::Mode(now)),
-        None => power_plan().filter(|plan| *plan != POWER_SAVER && set_power_plan(POWER_SAVER)).map(Before::Plan),
+        Some(now) => (now != saving && set_mode(saving)).then_some(Before::Mode(now.to_u128())),
+        None => power_plan().filter(|plan| *plan != POWER_SAVER && set_power_plan(POWER_SAVER)).map(|plan| Before::Plan(plan.to_u128())),
     }
 }
 
 pub fn restore(before: Before) {
     match before {
-        Before::Mode(mode) => set_mode(mode),
-        Before::Plan(plan) => set_power_plan(plan),
+        Before::Mode(mode) => set_mode(GUID::from_u128(mode)),
+        Before::Plan(plan) => set_power_plan(GUID::from_u128(plan)),
     };
 }
