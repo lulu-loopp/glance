@@ -97,6 +97,10 @@ enum Says {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Got {
     Files { count: usize, pictures: bool },
+    /// Folders sent (each with what is in it).
+    Folders { count: usize },
+    /// Folders and files sent together.
+    Items { count: usize },
     Link,
     Text,
 }
@@ -887,7 +891,17 @@ fn came_of(items: &[crate::station::shelf::Item], id: u64) -> Option<Says> {
     let item = items.iter().find(|item| item.id == id)?;
     let from = item.from.as_ref()?;
     let got = match &item.what {
-        What::Came { files } => Got::Files { count: files.len(), pictures: files.iter().all(|file| is_picture(&file.name)) },
+        What::Came { files } => {
+            use crate::station::shelf::Entry;
+            let entries = crate::station::shelf::entries(files);
+            if entries.iter().all(|entry| matches!(entry, Entry::Folder { .. })) {
+                Got::Folders { count: entries.len() }
+            } else if entries.iter().all(|entry| matches!(entry, Entry::File(_))) {
+                Got::Files { count: entries.len(), pictures: files.iter().all(|file| is_picture(&file.name)) }
+            } else {
+                Got::Items { count: entries.len() }
+            }
+        }
         What::Link { .. } => Got::Link,
         What::Text { .. } | What::Saved { words: true, .. } => Got::Text,
         _ => return None,
@@ -1065,6 +1079,11 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
             let title = match (got, lang) {
                 (Got::Files { count, pictures }, Lang::Zh) => format!("收到 {}", counted(*count, *pictures, lang)),
                 (Got::Files { count, pictures }, Lang::En) => format!("Received {}", counted(*count, *pictures, lang)),
+                (Got::Folders { count }, Lang::Zh) => format!("收到 {count} 个文件夹"),
+                (Got::Folders { count: 1 }, Lang::En) => "Received 1 folder".to_string(),
+                (Got::Folders { count }, Lang::En) => format!("Received {count} folders"),
+                (Got::Items { count }, Lang::Zh) => format!("收到 {count} 项"),
+                (Got::Items { count }, Lang::En) => format!("Received {count} items"),
                 (Got::Link, Lang::Zh) => "收到一个链接".to_string(),
                 (Got::Link, Lang::En) => "Received a link".to_string(),
                 (Got::Text, Lang::Zh) => "收到一段文字".to_string(),

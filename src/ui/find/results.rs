@@ -431,7 +431,15 @@ fn held_name(what: &Held, lang: Lang) -> String {
     };
     match what {
         Held::Files { paths, .. } => first_of(paths.first().and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), paths.len()),
-        Held::Came { files } => first_of(files.first().map(|arrived| arrived.name.clone()).unwrap_or_default(), files.len()),
+        Held::Came { files } => {
+            let entries = crate::station::shelf::entries(files);
+            let first = match entries.first() {
+                Some(crate::station::shelf::Entry::File(arrived)) => arrived.name.clone(),
+                Some(crate::station::shelf::Entry::Folder { name, .. }) => name.to_string(),
+                None => String::new(),
+            };
+            first_of(first, entries.len())
+        }
         Held::Text { text } => text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default().chars().take(120).collect(),
         Held::Link { url } => url.clone(),
         Held::Picture { .. } => lang.pick("图片", "Picture").into(),

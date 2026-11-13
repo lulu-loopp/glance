@@ -114,7 +114,7 @@ fn came(heard: &Heard) -> Option<(Sender, Vec<Came>, Option<String>)> {
 #[test]
 fn a_sending_asked_about_and_taken_comes_whole() {
     let both = both("taken", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });
-    // (One of them sent from a folder, named by its place there: it comes by its own name.)
+    // (One of them sent from a folder, named by its place there: it comes by that place, its folder kept.)
     let paths = files("taken", &[("IMG_20261112_143012.jpg", b"a photo's bytes"), ("trip/notes.txt", b"words")]);
     let states = sent(&both, &paths);
     assert_eq!(states.first(), Some(&send::State::Waiting));
@@ -129,12 +129,12 @@ fn a_sending_asked_about_and_taken_comes_whole() {
     assert!(short.is_none());
     let mut names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["IMG_20261112_143012.jpg", "notes.txt"]);
+    assert_eq!(names, ["IMG_20261112_143012.jpg", "trip/notes.txt"]);
     for file in &files {
         assert!(!file.file.contains(['/', '\\']) && file.file != file.name, "named by this PC");
         let path = both.receiver.inbox().join(&file.file);
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(bytes, if file.name == "notes.txt" { &b"words"[..] } else { &b"a photo's bytes"[..] });
+        assert_eq!(bytes, if file.name == "trip/notes.txt" { &b"words"[..] } else { &b"a photo's bytes"[..] });
         let zone = std::fs::read_to_string(format!("{}:Zone.Identifier", path.display())).unwrap();
         assert!(zone.contains("ZoneId=3"));
     }
@@ -292,6 +292,13 @@ fn names_given_are_only_names() {
     assert_eq!(shown_name("con<>:|?*.jpg"), "con.jpg");
     assert_eq!(shown_name(".."), "file");
     assert_eq!(shown_name("  "), "file");
+    // A file of a folder sent keeps its place in it, and never reaches out of the folder it is put in.
+    assert_eq!(shown_path("报价资料/图纸/外壳正视图.dwg"), "报价资料/图纸/外壳正视图.dwg");
+    assert_eq!(shown_path("../../Windows/./evil.exe"), "Windows/evil.exe");
+    assert_eq!(shown_path("C:\\a\\b.txt"), "C/a/b.txt");
+    assert_eq!(shown_path("a//b?/ c. /d.txt"), "a/b/c/d.txt");
+    assert_eq!(shown_path("../.."), "file");
+    assert_eq!(shown_path("一.jpg"), "一.jpg");
     assert_eq!(extension("a.JPG"), "jpg");
     assert_eq!(extension("a.tar.gz"), "gz");
     assert_eq!(extension("a.j p g"), "");

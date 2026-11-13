@@ -1160,7 +1160,7 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
                 What::Picture { file } => (lang.pick("图片", "Picture").to_string(), Shows::File(folder.path(file)), false),
                 What::Saved { file, words: true, .. } => (lang.pick("文字", "Text").to_string(), Shows::Kept(folder.path(file)), true),
                 What::Saved { file, name, words: false } => (name.clone(), Shows::File(folder.path(file)), false),
-                What::Came { files } => (tile.label, shows_files(files.iter().map(|arrived| folder.path(&arrived.file)).collect()), false),
+                What::Came { files } => (tile.label, shows_files(crate::station::shelf::entries(files).iter().map(|entry| entry_path(&folder, entry)).collect()), false),
             };
             Some(Item { key: hit.key(), title, about: tile.about, shows, from, open: Some(if pastes { Ask::PasteOut(id) } else { Ask::Open(id) }), copy: Some(Ask::Copy(id)), pastes })
         }
@@ -1175,6 +1175,15 @@ pub fn looked_at(hit: Hit, from: Option<windows::Win32::Foundation::RECT>, lang:
             Some(Item { key: hit.key(), title, about, shows: shows_files(paths.clone()), from, open: Some(Ask::Files(paths.clone(), FilesAct::Open)), copy: Some(Ask::Files(paths, FilesAct::Copy(Some(entry)))), pastes: false })
         }
         _ => None,
+    }
+}
+
+/// Where one of the files sent from devices nearby is as it is shown (see `shelf::entries`): a file by itself, as it is
+/// kept, a folder where it is given out.
+fn entry_path(folder: &crate::station::folder::Folder, entry: &crate::station::shelf::Entry) -> std::path::PathBuf {
+    match entry {
+        crate::station::shelf::Entry::File(arrived) => folder.path(&arrived.file),
+        crate::station::shelf::Entry::Folder { name, files } => folder.sent_folder_path(&files[0].file, name),
     }
 }
 
@@ -1246,18 +1255,28 @@ impl Tile {
             What::Link { url } => (url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string(), lang.pick("链接", "Link").into(), Face::Link),
             What::Picture { file } => (lang.pick("图片", "Picture").into(), lang.pick("图片", "Picture").into(), Face::Picture { path: folder.path(file), more: 0 }),
             What::Saved { file, name, words } => (name.clone(), if *words { lang.pick("文字", "Text") } else { lang.pick("文件", "File") }.into(), Face::Picture { path: folder.path(file), more: 0 }),
-            // (Where they came from said with what they are.)
+            // (Where they came from said with what they are: a folder sent, as that folder.)
             What::Came { files } => {
-                let count = match files.len() {
-                    1 => lang.pick("文件", "File").to_string(),
-                    n => format!("{n} {}", lang.pick("个文件", "files")),
+                use crate::station::shelf::Entry;
+                let entries = crate::station::shelf::entries(files);
+                let all_files = entries.iter().all(|entry| matches!(entry, Entry::File(_)));
+                let count = match (entries.as_slice(), all_files) {
+                    ([Entry::Folder { .. }], _) => lang.pick("文件夹", "Folder").to_string(),
+                    ([_], _) => lang.pick("文件", "File").to_string(),
+                    (all, true) => format!("{} {}", all.len(), lang.pick("个文件", "files")),
+                    (all, false) => format!("{} {}", all.len(), lang.pick("项", "items")),
                 };
                 let kind = match &item.from {
                     Some(device) => format!("{count} · {} {}", lang.pick("来自", "from"), device.alias),
                     None => count,
                 };
-                let first = files.first();
-                (first.map_or_else(String::new, |arrived| arrived.name.clone()), kind, Face::Picture { path: first.map_or_else(Default::default, |arrived| folder.path(&arrived.file)), more: files.len().saturating_sub(1) })
+                let label = match entries.first() {
+                    Some(Entry::File(arrived)) => arrived.name.clone(),
+                    Some(Entry::Folder { name, .. }) => name.to_string(),
+                    None => String::new(),
+                };
+                let path = entries.first().map_or_else(Default::default, |entry| entry_path(folder, entry));
+                (label, kind, Face::Picture { path, more: entries.len().saturating_sub(1) })
             }
         };
         let about = format!("{kind} · {}", text::since(item.added_ms, now, lang));

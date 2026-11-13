@@ -758,7 +758,16 @@ impl Station {
             }
             match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
                 Ok(taken) => {
-                    let listed: Vec<(std::path::PathBuf, u64)> = taken.iter().filter_map(|(arrived, size)| Some((self.keep.folder.named(&arrived.file, &arrived.name)?, *size))).collect();
+                    // (Each where it is given out: a file of a folder sent, in that folder.)
+                    let holder = match self.keep.shelf.items.last().map(|item| &item.what) {
+                        Some(super::shelf::What::Came { files }) => files.clone(),
+                        _ => Vec::new(),
+                    };
+                    let given = self.keep.given_each(&holder);
+                    let listed: Vec<(std::path::PathBuf, u64)> = taken
+                        .iter()
+                        .filter_map(|(arrived, size)| Some((given.get(holder.iter().position(|held| held == arrived)?)?.clone()?, *size)))
+                        .collect();
                     super::recent::arrived(&listed, &alias);
                     let _ = std::fs::remove_file(&path);
                     // (What holds them: the newest, last.)

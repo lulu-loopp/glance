@@ -235,19 +235,31 @@ fn random(bytes: usize) -> String {
 /// A name a sending gave a file, as it may be shown: its last part (no folder of the sender's), without what cannot
 /// stand in a name, at most 200 characters; nothing left, "file".
 pub fn shown_name(given: &str) -> String {
-    let last = given.rsplit(['/', '\\']).next().unwrap_or_default();
-    let kept: String = last.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).take(200).collect();
-    let kept = kept.trim().trim_end_matches('.').trim().to_string();
-    if kept.is_empty() || kept == "." || kept == ".." {
-        "file".to_string()
-    } else {
-        kept
-    }
+    let kept = shown_part(given.rsplit(['/', '\\']).next().unwrap_or_default());
+    if kept.is_empty() { "file".to_string() } else { kept }
 }
 
-/// The kind of file a name says (its extension: letters and digits, at most 8, small).
+/// A name a sending gave a file, as it is kept: its place in the folder it was sent in, where it was sent in one
+/// ("folder/inner/name", as LocalSend names the files of a folder), each part as a name may be (see `shown_part`), a
+/// part that names no folder of its own ("", ".", "..") left out, so that it never reaches out of the folder it is put
+/// in. Nothing left, "file".
+pub fn shown_path(given: &str) -> String {
+    let parts: Vec<String> = given.split(['/', '\\']).map(shown_part).filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() { "file".to_string() } else { parts.join("/") }
+}
+
+/// One part of a name a sending gave (a file's, or a folder's it is in), without what cannot stand in a name, at most
+/// 200 characters: nothing where nothing is left, or it names no folder of its own ("." or "..").
+fn shown_part(part: &str) -> String {
+    let kept: String = part.chars().filter(|c| !c.is_control() && !"<>:\"|?*".contains(*c)).take(200).collect();
+    let kept = kept.trim().trim_end_matches('.').trim().to_string();
+    if kept == "." || kept == ".." { String::new() } else { kept }
+}
+
+/// The kind of file a name says (the extension of its last part: letters and digits, at most 8, small).
 fn extension(name: &str) -> String {
-    let after = name.rsplit_once('.').map_or("", |(_, after)| after);
+    let last = name.rsplit('/').next().unwrap_or_default();
+    let after = last.rsplit_once('.').map_or("", |(_, after)| after);
     if after.chars().all(|c| c.is_ascii_alphanumeric()) && after.len() <= 8 {
         after.to_ascii_lowercase()
     } else {
@@ -523,7 +535,7 @@ impl Receiver {
             if size > most_file {
                 return Err((403, "a file too large"));
             }
-            let name = shown_name(file.get("fileName").and_then(Value::as_str).unwrap_or_default());
+            let name = shown_path(file.get("fileName").and_then(Value::as_str).unwrap_or_default());
             let kind = file.get("fileType").and_then(Value::as_str).unwrap_or("application/octet-stream").chars().take(100).collect();
             let sha256 = file.get("sha256").and_then(Value::as_str).filter(|hash| hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).map(str::to_ascii_lowercase);
             let words = message.as_ref().map(|words| words.chars().take(WORDS_SHOWN).collect());

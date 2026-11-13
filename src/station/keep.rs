@@ -3,7 +3,7 @@
 
 use super::clipboard::Content;
 use super::folder::Folder;
-use super::shelf::{Full, Item, Rules, Shelf, What};
+use super::shelf::{Arrived, Entry, Full, Item, Rules, Shelf, What};
 use std::path::PathBuf;
 
 /// The longest text kept on the shelf itself (UTF-8 bytes); longer, it is kept as a file of the station's own (the
@@ -159,10 +159,47 @@ impl Keep {
         };
         self.refused = None;
         if !arrived.is_empty() {
-            self.shelf.arrived(arrived.iter().map(|(arrived, _)| arrived.clone()).collect(), from, now_ms, own_bytes);
+            let id = self.shelf.arrived(arrived.iter().map(|(arrived, _)| arrived.clone()).collect(), from, now_ms, own_bytes);
             self.save();
+            // (The folders sent made as they are given out now: their tile shows them as folders.)
+            if let Some(What::Came { files }) = self.shelf.get(id).map(|item| &item.what) {
+                if self.given(files).is_none() {
+                    crate::journal::note("nearby: a folder sent could not be made as it is given out");
+                }
+            }
         }
         Ok(arrived)
+    }
+
+    /// The files sent from devices nearby `files` as they are given out (see `shelf::entries`): each sent by itself
+    /// under the name it came with, each folder sent as that folder. None where one cannot be.
+    pub fn given(&self, files: &[Arrived]) -> Option<Vec<PathBuf>> {
+        super::shelf::entries(files)
+            .into_iter()
+            .map(|entry| match entry {
+                Entry::File(arrived) => self.folder.named(&arrived.file, &arrived.name),
+                Entry::Folder { name, files } => self.folder.sent_folder(name, &files),
+            })
+            .collect()
+    }
+
+    /// Each of the files sent from devices nearby `files` where it is given out: by itself, or in its folder (see
+    /// `given`), in their order. None for one that cannot be.
+    pub fn given_each(&self, files: &[Arrived]) -> Vec<Option<PathBuf>> {
+        let entries = super::shelf::entries(files);
+        files
+            .iter()
+            .map(|arrived| match arrived.folder() {
+                None => self.folder.named(&arrived.file, &arrived.name),
+                Some(top) => {
+                    let first = entries.iter().find_map(|entry| match entry {
+                        Entry::Folder { name, files } if *name == top => files.first(),
+                        _ => None,
+                    })?;
+                    self.folder.sent_file(&self.folder.sent_folder_path(&first.file, top), arrived)
+                }
+            })
+            .collect()
     }
 
     /// The words sent as messages from `from` (see `nearby::Receipt::words`) put on the shelf at `now_ms`, each as words
@@ -264,7 +301,7 @@ impl Keep {
             What::Picture { file } => Content::Png(std::fs::read(self.folder.path(file)).ok()?),
             What::Saved { file, words: true, .. } => Content::Text(std::fs::read_to_string(self.folder.path(file)).ok()?),
             What::Saved { file, name, words: false } => Content::Files(vec![self.folder.named(file, name)?]),
-            What::Came { files } => Content::Files(files.iter().map(|arrived| self.folder.named(&arrived.file, &arrived.name)).collect::<Option<Vec<PathBuf>>>()?),
+            What::Came { files } => Content::Files(self.given(files)?),
         })
     }
 
@@ -465,6 +502,42 @@ mod tests {
         // Taken off: its files go.
         keep.remove(item.id);
         assert!(!given[1].exists());
+    }
+
+    /// A folder sent is one thing on the station, given out as that folder, its files each in its place in it (the
+    /// same files, not copies), beside a file sent by itself; taken off, the folder goes with its files.
+    #[test]
+    fn a_folder_sent_is_given_out_as_that_folder() {
+        let inbox = inbox("folder");
+        for (name, bytes) in [("a.pdf", &b"quote"[..]), ("b.dwg", b"front"), ("c.dwg", b"side"), ("d.txt", b"alone")] {
+            std::fs::write(inbox.join(name), bytes).unwrap();
+        }
+        let mut keep = keep("arrived-folder", Rules::default());
+        let sent = [
+            (inbox.join("a.pdf"), "报价资料/报价单 v3.pdf".to_string(), 5),
+            (inbox.join("b.dwg"), "报价资料/图纸/外壳正视图.dwg".to_string(), 5),
+            (inbox.join("d.txt"), "说明.txt".to_string(), 5),
+            (inbox.join("c.dwg"), "报价资料/图纸/外壳侧视图.dwg".to_string(), 4),
+        ];
+        keep.arrived("s1", &sent, device("AB"), 1_000).unwrap();
+        let item = keep.shelf.items[0].clone();
+        let What::Came { files } = &item.what else { panic!("came") };
+        assert_eq!(super::super::shelf::entries(files).len(), 2, "the folder, and the file by itself");
+        let Some(Content::Files(given)) = keep.content_of(&item) else { panic!("files") };
+        assert_eq!(given.len(), 2);
+        assert!(given[0].is_dir() && given[0].ends_with("报价资料"));
+        assert_eq!(std::fs::read(given[0].join("报价单 v3.pdf")).unwrap(), b"quote");
+        assert_eq!(std::fs::read(given[0].join("图纸").join("外壳正视图.dwg")).unwrap(), b"front");
+        assert_eq!(std::fs::read(given[0].join("图纸").join("外壳侧视图.dwg")).unwrap(), b"side");
+        assert_eq!(given[1].file_name().unwrap(), "说明.txt");
+        // Each file where it is given out: in its folder, or by itself.
+        let each = keep.given_each(files);
+        assert_eq!(each[1].as_deref(), Some(given[0].join("图纸").join("外壳正视图.dwg").as_path()));
+        assert_eq!(each[2].as_deref(), Some(given[1].as_path()));
+        // Given out again: the same.
+        assert_eq!(keep.content_of(&item), Some(Content::Files(given.clone())));
+        keep.remove(item.id);
+        assert!(!given[0].exists() && !given[1].exists());
     }
 
     /// A sending taken in again (its receipt not taken away before Glance ended) finds what it moved in already, and

@@ -292,7 +292,7 @@ pub fn turned(window: isize, page: Tab) {
 pub fn files_in(what: &super::shelf::What) -> usize {
     match what {
         super::shelf::What::Files { paths, .. } => paths.len(),
-        super::shelf::What::Came { files } => files.len(),
+        super::shelf::What::Came { files } => super::shelf::entries(files).len(),
         _ => 1,
     }
 }

@@ -46,11 +46,52 @@ pub struct Device {
     pub fingerprint: String,
 }
 
-/// A file sent from a device nearby: its file's name in the station's own folder, and the name it was sent by.
+/// A file sent from a device nearby: its file's name in the station's own folder, and the name it was sent by (its
+/// place in the folder it was sent in, where it was sent in one: "folder/inner/name").
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Arrived {
     pub file: String,
     pub name: String,
+}
+
+impl Arrived {
+    /// The folder it was sent in, where it was sent in one: the first part of the name it was sent by.
+    pub fn folder(&self) -> Option<&str> {
+        self.name.split_once('/').map(|(top, _)| top)
+    }
+}
+
+/// One of the files sent from devices nearby as they are given out (see `entries`): a file sent by itself, or a folder
+/// sent, by its name, with all of its files.
+#[derive(Debug, PartialEq)]
+pub enum Entry<'a> {
+    File(&'a Arrived),
+    Folder { name: &'a str, files: Vec<&'a Arrived> },
+}
+
+/// `files` as they are given out: each sent by itself as it is, and those sent in a folder as that folder, all of a
+/// folder's together where the first of them came.
+///
+/// ```text
+/// a.jpg, 资料/x.pdf, b.jpg, 资料/图/y.png  ->  a.jpg, 资料 (x.pdf, 图/y.png), b.jpg
+/// ```
+pub fn entries(files: &[Arrived]) -> Vec<Entry<'_>> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for arrived in files {
+        let Some(top) = arrived.folder() else {
+            entries.push(Entry::File(arrived));
+            continue;
+        };
+        let held = entries.iter_mut().find_map(|entry| match entry {
+            Entry::Folder { name, files } if *name == top => Some(files),
+            _ => None,
+        });
+        match held {
+            Some(files) => files.push(arrived),
+            None => entries.push(Entry::Folder { name: top, files: vec![arrived] }),
+        }
+    }
+    entries
 }
 
 /// What a thing on the station is.
@@ -118,7 +159,7 @@ impl Filter {
                 What::Picture { .. } => true,
                 What::Files { paths, .. } => !paths.is_empty() && paths.iter().all(|path| picture(path)),
                 What::Saved { name, words, .. } => !words && picture(std::path::Path::new(name)),
-                What::Came { files } => !files.is_empty() && files.iter().all(|arrived| picture(std::path::Path::new(&arrived.name))),
+                What::Came { files } => !files.is_empty() && entries(files).iter().all(|entry| matches!(entry, Entry::File(arrived) if picture(std::path::Path::new(&arrived.name)))),
                 What::Text { .. } | What::Link { .. } => false,
             },
             Filter::Files => matches!(what, What::Files { .. } | What::Saved { words: false, .. } | What::Came { .. }),

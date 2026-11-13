@@ -5,7 +5,7 @@
 //! A kept file being dragged out is held (`hold`) till the program it was dropped on has read it: taken off the shelf
 //! meanwhile, it goes as it is let go (`let_go`).
 
-use super::shelf::Shelf;
+use super::shelf::{Arrived, Shelf};
 use std::collections::{HashMap, HashSet};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -191,6 +191,34 @@ impl Folder {
         Some(link)
     }
 
+    /// Where the folder `name` sent from a device nearby is given out, the first of its files kept as `first` (see
+    /// `sent_folder`).
+    pub fn sent_folder_path(&self, first: &str, name: &str) -> PathBuf {
+        self.named_dir(first).join(part_name(name))
+    }
+
+    /// The folder `name` sent from a device nearby, its files kept as `files` (each by its place in it: see
+    /// `Arrived::name`), as it is given out (copied, opened, dragged off): the same files, linked to by their names, each
+    /// in its place, in a folder of that name beside the first of them, which goes with it. None where a link cannot be
+    /// made.
+    pub fn sent_folder(&self, name: &str, files: &[&Arrived]) -> Option<PathBuf> {
+        let root = self.sent_folder_path(&files.first()?.file, name);
+        for arrived in files {
+            self.sent_file(&root, arrived)?;
+        }
+        Some(root)
+    }
+
+    /// The kept file `arrived`, sent in the folder given out at `root` (see `sent_folder`), as it is given out there.
+    pub fn sent_file(&self, root: &Path, arrived: &Arrived) -> Option<PathBuf> {
+        let link = arrived.name.split('/').skip(1).fold(root.to_path_buf(), |path, part| path.join(part_name(part)));
+        if !link.exists() {
+            std::fs::create_dir_all(link.parent()?).ok()?;
+            std::fs::hard_link(self.path(&arrived.file), &link).ok()?;
+        }
+        Some(link)
+    }
+
     /// The folder holding the kept file `name` as it is given out (see `named`).
     fn named_dir(&self, name: &str) -> PathBuf {
         self.dir.join(NAMED).join(Path::new(name).file_name().unwrap_or_default())
@@ -230,6 +258,13 @@ impl Folder {
             }
         }
     }
+}
+
+/// A part of a name a file was sent by (a folder's it is in, or its own), as a name may hold it (see
+/// `os::file_name_of`): "_" where nothing of it is left.
+fn part_name(part: &str) -> String {
+    let kept = crate::os::file_name_of(part, 120);
+    if kept.is_empty() { "_".to_string() } else { kept }
 }
 
 /// A Windows call's error as the system's own error it stands for (a file not found is `NotFound`), where it stands for
