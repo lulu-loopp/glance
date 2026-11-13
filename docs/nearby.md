@@ -138,6 +138,14 @@ LocalSend app does that for now).
 - **Shelf.** `Item` gains `from: Option<Device>` (alias and kind) for the badge and the meta line. Arrivals from the
   same device within 60 s of the last one join that item (the files of one item). The station's room rules (expiry,
   room) apply as to anything kept.
+- **Folders sent.** A file of a folder comes named by its place in it ("folder/inner/name", as LocalSend and Glance's
+  app name them). The helper keeps that place (`nearby::shown_path`): each part cleaned as a name is, and a part
+  that names no folder of its own ("", ".", "..") left out, so nothing reaches out of where it is put. On the shelf
+  the files of one folder are one entry (`shelf::entries`): the tile is named after the folder and says "文件夹", the
+  edge notice says "收到 n 个文件夹" (folders and files together: "n 项"). Given out (copied, opened, dragged off), the
+  folder is made of hard links to the kept files, each in its place, under `named/<its first file>/<folder>`
+  (`Folder::sent_folder`), so it goes with the item. Each file of it goes to recent files where it is in that folder.
+  (Approved with the six kinds below, mockup 3qdZ2Lukg953DyDfq6mpyv.)
 - **Recent files.** It leaves out `AppData`, so arrivals are added to it directly (`recent::came`) with the device
   as their source.
 - **Edge notice.** A small layered window at the panel's edge, drawn in the skin like the plates. Its states:
@@ -263,9 +271,27 @@ there (the PC sent to now is named under the switch). Unpairing that PC turns it
 
 ### Android, by hand
 
-Two ways in: a tile "发送文件" on a PC's page ("照片和视频" through the system's photo picker, "文件" through its document
-picker, any number), and the system's share sheet, where Glance takes `SEND` and `SEND_MULTIPLE` of any type (words:
-`EXTRA_TEXT` where nothing else is shared). Only paired PCs are sent to, trusted by the certificate told over the
+Two ways in: a tile "发送文件" on a PC's page, and the system's share sheet, where Glance takes `SEND` and
+`SEND_MULTIPLE` of any type (words: `EXTRA_TEXT` where nothing else is shared).
+
+The tile opens a sheet of the six kinds LocalSend's Android app sends, three to a row in its order (approved
+2026-11-13, mockup 3qdZ2Lukg953DyDfq6mpyv, `Kinds.kt`). Each sends as it is chosen: there is no list to gather into.
+
+- **文件 and 照片和视频.** The system's document and photo pickers, any number.
+- **剪贴板.** Read once as it is chosen (Android says so in its own toast), shown before it goes with
+  "剪贴板中可能有密码等私密内容，发送前请确认。". Words or a link go as words. A picture alone is copied into the app's
+  cache as "剪贴板_<yyyy-MM-dd_HH-mm>.<its type>" and goes as that file (the clipboard may change before it is sent).
+  Files go as files. Nothing on it: "剪贴板中没有内容".
+- **文字.** Typed on a sheet over the keyboard, counted ("n 字"), "发送" faded while there is nothing.
+- **文件夹.** The system's folder picker (`OpenDocumentTree`, no storage permission). All of it is read through the
+  tree (each folder's files before the folders in it, by name) and shown: its name, "n 个文件 · m 个子文件夹 · size",
+  the first four by their place in it, the rest counted. Each file goes named "folder/inner/name". The service is
+  given the tree with prefix leave to read (not each file: a large folder would not fit in an intent), again on a
+  retry.
+- **应用.** A page of its own (`AppsActivity`), as a dialog lay under the gesture bar and the keyboard: search, "显示系统
+  应用" (off), a box for each app, "发送 n 个应用 · size" at the foot. Listing needs `QUERY_ALL_PACKAGES`. An app goes as
+  "<name> <version>.apk", one split into parts ("由 n 个安装包组成") as all of them in a folder "<name> <version>/". The
+  packages are files any app reads, sent by their paths. Only paired PCs are sent to, trusted by the certificate told over the
 pairing (the tile's sending tells it again each time, so a PC sent to by hand never asks). (`Hand.kt`,
 `HandSheet.kt`, `Nearby.kt`, which auto-send uses too.)
 
