@@ -36,7 +36,15 @@ The mockup's defaults were kept, because the owner did not choose otherwise:
    - the edge notice on/off
    - where files go (the station's folder)
 
-Not in v1: receiving text messages as notes, the reverse-download (browser) mode, and a PIN of this PC's own.
+7. **Words.** Text a device sends as a message (LocalSend's text) lands on the station as words: a web address alone
+   as a link, other text as text, and text too long for the shelf as a saved text file that is still words. The
+   notice says "收到一段文字" or "收到一个链接", and asking about a device not trusted shows the first words
+   ("想发送一段文字", "想发送一个链接").
+8. **Android, by hand.** The app sends chosen photos, videos and files, and what other apps share to it (words too),
+   to a paired PC's station (approved 2026-11-13, mockup BBWmD378gVMdRXrA8hhj9H). See "Android, by hand" below.
+
+Not yet: the reverse-download (browser) mode, a PIN of this PC's own, and the phone receiving from the PC (the
+LocalSend app does that for now).
 
 ## The protocol (LocalSend v2, as the protocol document and the app's source say)
 
@@ -252,6 +260,35 @@ there (the PC sent to now is named under the switch). Unpairing that PC turns it
     keeps what it took, and the rest is offered again later.
 - **The notice.** "已发到 <PC>" ("已将 N 项发到 <PC>", as many as went), a quiet notification that goes by itself after 6 s, where the
   notice is on and notifications are allowed.
+
+### Android, by hand
+
+Two ways in: a tile "发送文件" on a PC's page ("照片和视频" through the system's photo picker, "文件" through its document
+picker, any number), and the system's share sheet, where Glance takes `SEND` and `SEND_MULTIPLE` of any type (words:
+`EXTRA_TEXT` where nothing else is shared). Only paired PCs are sent to, trusted by the certificate told over the
+pairing (the tile's sending tells it again each time, so a PC sent to by hand never asks). (`Hand.kt`,
+`HandSheet.kt`, `Nearby.kt`, which auto-send uses too.)
+
+- **Which PC.** On a PC's page, that one. Shared from another app (`ShareActivity`, over that app, its own task): the
+  one paired, or, with several, a sheet "发送到" listing them, each reached first (`/v1/nearby`): the one sent to last
+  first, those not reached or not receiving last and not to be chosen. None paired: said so.
+- **One at a time.** A handing goes on in a foreground service (`HandService`, type dataSync), so it goes on when the
+  app is left: its notification says how far ("正在发送到 <PC>", n / m, bytes). Another shared meanwhile is told to
+  wait ("正在发送其他内容"), and the tile shows the one going on.
+- **Reading.** Each thing by its name, type and size as its provider says them (`OpenableColumns`), else as its file
+  is, and where neither is known, it is read once into the app's cache and sent from there. Words go as LocalSend's
+  message: one text "file" with the words as its preview, answered 204, nothing uploaded.
+- **Sending.** The PC is reached (looked for where it moved), off there: "<PC> 未开启附近传输" with how to turn it
+  on. A file larger than `most_file`, or all of them more than `most_sending`: said so, nothing sent. Then as many
+  as `most_files` at a time, each file's bytes counted as they go. 409 (the PC receiving another, auto-send's
+  among them): "正在等待 <PC> 完成其他接收", tried again every 2 s for up to 2 minutes.
+- **The sheet.** What goes (four listed, their pictures where they are photos or videos, the rest counted), each
+  with its bar, n / m and bytes under them, and "取消". All there: a tick, "已放入中转站" and what went where, gone by
+  itself 2 s later. Put away while it goes, it goes on, and opening its notification brings it back.
+- **Short.** "已发送 n 个，m 个未能发送" (or "未能发送到 <PC>") and why: not reached, broken off, the PC busy too long,
+  no room, too large, unreadable, refused. "重试" (where trying again may go) sends only what the PC does not have.
+  Told in a notification too where the app is not in front ("未能全部发送到 <PC>"), as all there is
+  ("已发送到 <PC>", gone after 6 s).
 
 Delivery is "within seconds when the phone and PC are on the same network". Doze may delay it, and away from the
 PC's network the backoff grows (a photo taken back on it sends what waits at once).

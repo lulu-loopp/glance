@@ -157,4 +157,54 @@
     <string name="auto_held_allow">允许</string>
     <string name="auto_held_late">上次的照片在打开本应用后才发出，系统仍在限制 Glance 在后台运行。请在系统的应用设置中允许其在后台运行，部分手机位于「耗电管理」。</string>
     <string name="auto_held_settings">设置</string>
+    <!-- What is handed to a PC by hand. -->
+    <string name="hand_tile">发送文件</string>
+    <string name="hand_tile_what">照片、视频或任意文件，放入这台电脑的中转站</string>
+    <string name="hand_tile_off">这台电脑未开启附近传输</string>
+    <string name="hand_off_title">%1$s 未开启附近传输</string>
+    <string name="hand_to">发送到 %1$s</string>
+    <string name="hand_media">照片和视频</string>
+    <string name="hand_media_what">从相册中选择</string>
+    <string name="hand_files">文件</string>
+    <string name="hand_files_what">从文件管理中选择任意文件</string>
+    <string name="hand_choose">发送到</string>
+    <string name="hand_pc_looking">正在连接</string>
+    <string name="hand_pc_ready">已连接</string>
+    <string name="hand_pc_last">已连接 · 上次发送到这里</string>
+    <string name="hand_pc_off">未开启附近传输</string>
+    <string name="hand_pc_away">未连接</string>
+    <string name="hand_reaching">正在连接 %1$s</string>
+    <string name="hand_waiting">正在等待 %1$s 完成其他接收</string>
+    <string name="hand_going">正在发送到 %1$s</string>
+    <string name="hand_count">%1$d / %2$d · %3$s / %4$s</string>
+    <plurals name="hand_more">
+        <item quantity="other">以及另外 %1$d 个</item>
+    </plurals>
+    <string name="hand_sent">已放入中转站</string>
+    <plurals name="hand_sent_photos">
+        <item quantity="other">%1$d 张照片已放入 %2$s 的中转站。</item>
+    </plurals>
+    <plurals name="hand_sent_files">
+        <item quantity="other">%1$d 个文件已放入 %2$s 的中转站。</item>
+    </plurals>
+    <string name="hand_sent_words">文字已放入 %1$s 的中转站。</string>
+    <string name="hand_sent_link">链接已放入 %1$s 的中转站。</string>
+    <string name="hand_failed">未能发送到 %1$s</string>
+    <string name="hand_failed_some">已发送 %1$d 个，%2$d 个未能发送</string>
+    <string name="hand_why_unreached">无法连接到 %1$s。请确认电脑已开机，并与手机处于同一网络。</string>
+    <string name="hand_why_broken">与 %1$s 的连接已中断。请确认电脑仍在运行，并与手机处于同一网络，然后重试。</string>
+    <string name="hand_why_busy">%1$s 一直在接收其他文件，请稍后重试。</string>
+    <string name="hand_why_room">%1$s 的中转站空间不足，无法放入这些文件。可在电脑上清理中转站后重试。</string>
+    <string name="hand_why_large">「%1$s」超过了电脑允许的单个文件大小。</string>
+    <string name="hand_why_unread">无法读取「%1$s」。</string>
+    <string name="hand_why_refused">电脑上拒绝了这次发送。</string>
+    <string name="hand_retry">重试</string>
+    <string name="hand_none_title">尚未配对电脑</string>
+    <string name="hand_none_what">请先打开 Glance 应用，与电脑配对后再分享。</string>
+    <string name="hand_busy_title">正在发送其他内容</string>
+    <string name="hand_busy_what">上一次发送完成后才能再次分享，进度可在通知中查看。</string>
+    <string name="hand_channel">发送文件</string>
+    <string name="hand_sent_to">已发送到 %1$s</string>
+    <string name="hand_failed_to">未能全部发送到 %1$s</string>
+    <string name="hand_failed_open">打开 Glance 以重试</string>
 </resources>

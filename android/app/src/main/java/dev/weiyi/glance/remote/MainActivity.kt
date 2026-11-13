@@ -8,6 +8,8 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -102,6 +104,11 @@ import kotlin.math.min
 private val WIDE = 600.dp
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** Opened from a handing's notification: its sheet is shown again. */
+        const val HANDING = "handing"
+    }
+
     /** A pairing link this activity was opened with, till it is taken. */
     private var opened by mutableStateOf<String?>(null)
 
@@ -110,6 +117,7 @@ class MainActivity : ComponentActivity() {
         // Dark behind the system's bars too, their icons light.
         enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         opened = intent?.dataString
+        if (intent?.getBooleanExtra(HANDING, false) == true) Hand.bringBack()
         // New photos sent by themselves: noticed again where they are (an app stopped by its user loses its jobs).
         kotlin.concurrent.thread(name = "auto-send-resume") { AutoSend.resume(applicationContext) }
         setContent {
@@ -122,6 +130,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         opened = intent.dataString
+        if (intent.getBooleanExtra(HANDING, false)) Hand.bringBack()
     }
 }
 
@@ -238,6 +247,8 @@ private fun App(opened: String?, taken: () -> Unit) {
             }
         }
     }
+    // What is handed to a PC, as it goes.
+    HandSheet()
     // Which PC is to be unpaired is asked by its name.
     unpairing?.let { at ->
         val which = pcs.getOrNull(at) ?: return@let
@@ -420,6 +431,10 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     // How many things have been asked: what a look answers is stale if one was asked meanwhile.
     val asked = remember { intArrayOf(0) }
     var sleepAsked by remember { mutableStateOf(false) }
+    // Whether the PC receives from devices nearby (none: not known yet), and what is asked of handing it something.
+    var receives by remember { mutableStateOf<Boolean?>(null) }
+    var handing by remember { mutableStateOf(false) }
+    var offTold by remember { mutableStateOf(false) }
     var level by remember { mutableFloatStateOf(0f) }
     var sliding by remember { mutableStateOf(false) }
     var part by remember { mutableStateOf(Part.Cpu) }
@@ -491,6 +506,18 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
             delay(if (silent != null && failure == null) 400 else 1500)
         }
     }
+    // Whether it receives from devices nearby, asked once it answers (and again as it is looked at anew).
+    val answered = state != null && failure == null
+    LaunchedEffect(pc, answered) {
+        if (answered) receives = withContext(Dispatchers.IO) { Nearby.reach(context, pc)?.on }
+    }
+    // What is handed to it: chosen with the system's own pickers (photos and videos, or any files), then sent.
+    val media = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris -> if (uris.isNotEmpty()) Hand.start(context, pc, uris) }
+    val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> if (uris.isNotEmpty()) Hand.start(context, pc, uris) }
+    if (handing) {
+        KindSheet(pc, dismiss = { handing = false }, media = { media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }, files = { documents.launch(arrayOf("*/*")) })
+    }
+    if (offTold) Tell(stringResource(R.string.hand_off_title, pc.name), stringResource(R.string.auto_pc_off), stringResource(R.string.close)) { offTold = false }
     // Sleep says what it means first.
     if (sleepAsked) {
         Ask(stringResource(R.string.sleep_title), listOf(stringResource(R.string.sleep_what), stringResource(R.string.sleep_instead)), stringResource(R.string.sleep), stringResource(R.string.cancel), dismiss = { sleepAsked = false }) { act("sleep", "/v1/sleep") }
@@ -569,6 +596,18 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 if (busy == "lights") working else when (lights) { true -> if (now.coloursThere) stringResource(R.string.lights_on, effectName(now.light.effect)) else stringResource(R.string.lights_plain_on); false -> stringResource(R.string.lights_off); null -> stringResource(R.string.lights_unknown) },
                 lit = lights != false, enabled = reached, modifier = Modifier.weight(1f).fillMaxHeight(),
             ) { act("lights", "/v1/lights", on(lights == false)) { it.copy(lights = lights == false) } }
+        }
+        // What is handed to it, onto its station; where it does not receive from devices nearby, said so.
+        Tile(
+            Sign.UPLOAD, stringResource(R.string.hand_tile), stringResource(if (receives == false) R.string.hand_tile_off else R.string.hand_tile_what),
+            lit = false, enabled = reached, modifier = Modifier.fillMaxWidth(),
+        ) {
+            when {
+                // (One going on: its sheet, again.)
+                Hand.now.value?.over == false -> Hand.bringBack()
+                receives == false -> offTold = true
+                else -> handing = true
+            }
         }
         // The PC's power plan, as it is and to choose: what night changes of it is seen here.
         if (shown["power"] != false && now.power.size > 1) {

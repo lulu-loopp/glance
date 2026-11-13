@@ -18,6 +18,9 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- To ask that the app not be held in the background (frozen, it cannot send what was taken). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- What is handed to a PC by hand goes on when the app is left, its progress in a notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- The short notice that photos were sent (it can be turned off). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -48,6 +51,30 @@
                 <data android:scheme="glance" android:host="pair" />
             </intent-filter>
         </activity>
+
+        <!-- What another app shares (photos, videos, files, words), handed to a paired PC: over that app, in a task of
+             its own, gone once its sheet is put away. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Glance.Over"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- What is handed to a PC, sent as it goes on when the app is left. -->
+        <service android:name=".HandService" android:exported="false" android:foregroundServiceType="dataSync" />
 
         <!-- The scanner, upright as the rest is. -->
         <activity

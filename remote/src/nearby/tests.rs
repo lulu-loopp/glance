@@ -398,7 +398,7 @@ fn a_pin_asked_for_is_given_and_tried_again() {
 
 /// Words sent as a message (one text "file", its words as its preview) are taken as words: asked about as any sending
 /// is (Glance shown their first words), answered 204 (nothing to upload), nothing written into the inbox, and written
-/// down for Glance as a receiving of their own; from a device trusted, while another sending is being received too.
+/// down for Glance as a receiving of their own. From a device trusted they come while another sending is received too.
 #[test]
 fn words_sent_come_as_words() {
     let both = both("words", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });

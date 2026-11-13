@@ -732,7 +732,7 @@ impl Station {
         self.show();
     }
 
-    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, files into recent files too;
+    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, files into recent files too,
     /// each receipt taken away once what it holds is kept. One whose files or words cannot be kept now (the station is
     /// full, or they cannot be moved) stays, with those after it, to be taken in again.
     fn arrivals(&mut self) {

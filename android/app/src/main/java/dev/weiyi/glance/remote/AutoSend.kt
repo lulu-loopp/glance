@@ -26,8 +26,6 @@ import org.json.JSONObject
 import java.io.IOException
 import java.math.BigInteger
 import java.net.Socket
-import java.net.URL
-import java.net.URLEncoder
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -37,8 +35,6 @@ import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
 import java.util.Date
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.X509ExtendedKeyManager
 import javax.net.ssl.X509TrustManager
@@ -103,7 +99,7 @@ object Own {
  * Talks on only to the PC that presents the certificate of [fingerprint] (its name and issuer say nothing: every
  * device signs its own). The fingerprint is the one the PC told over the signed pairing channel.
  */
-private class Pinned(private val fingerprint: String) : X509TrustManager {
+internal class Pinned(private val fingerprint: String) : X509TrustManager {
     override fun checkServerTrusted(chain: Array<out X509Certificate>, authType: String?) {
         if (chain.isEmpty() || !Own.fingerprint(chain[0]).equals(fingerprint, ignoreCase = true)) throw CertificateException("not the certificate the PC told")
     }
@@ -137,9 +133,6 @@ object AutoSend {
      * (s): its watch is told within 8 s. Found later, the system held the app there.
      */
     private const val LATE = 60L
-
-    /** What a PC's user said in refusing a sending (see the helper's `prepare`): it is not offered again. */
-    private val REFUSALS = setOf("refused", "not taken from devices not trusted")
 
     /** Held while what is kept is changed, and while the sending job is taken up or let go. */
     private val lock = Any()
@@ -175,7 +168,7 @@ object AutoSend {
     fun held(context: Context) = kept(context).getBoolean("held", false)
 
     /** Whether the app is in front now (its jobs run then wherever it is held otherwise). */
-    private fun inFront(): Boolean {
+    fun inFront(): Boolean {
         val info = ActivityManager.RunningAppProcessInfo()
         ActivityManager.getMyMemoryState(info)
         return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
@@ -419,128 +412,28 @@ object AutoSend {
         kept(context).edit().putString("queue", JSONArray(queue(context).map { it.name }.filter { it !in names }).toString()).commit()
     }
 
-    /** Where [pc] receives, as it says over the signed channel: looked for on the network where it is not at its address. */
-    private fun nearby(context: Context, pc: Pc): Pair<Pc, JSONObject>? {
-        try {
-            return pc to pc.said("/v1/nearby")
-        } catch (failed: Failure.Failed) {
-            return null
-        } catch (failure: Failure) {
-            // Not answered, or answered by one that does not know this phone's key (another machine at its old
-            // address): the PC itself is looked for.
-        }
-        val host = pc.find()?.takeIf { it != pc.host } ?: return null
-        Pcs.move(context, pc.key, host)
-        val moved = pc.copy(host = host)
-        return try { moved to moved.said("/v1/nearby") } catch (failure: Failure) { null }
-    }
-
     private fun sendOnce(context: Context, paired: Pc, batch: List<Entry>, run: Run): Sent {
         val files = batch.associateWith { going(context, it) }
         done(context, files.filterValues { it == null }.keys.toList())
         val going = files.values.filterNotNull()
         if (going.isEmpty()) return Sent.Done
-        val (pc, nearby) = nearby(context, paired) ?: return Sent.Again
-        val port = nearby.optInt("port")
-        val fingerprint = nearby.optString("fingerprint")
-        if (!nearby.optBoolean("on") || port !in 1..65535 || fingerprint.length != 64) return Sent.Again
+        val at = Nearby.reach(context, paired)?.takeIf { it.on } ?: return Sent.Again
         // As much as the PC has room for, in their order (what is larger waits till it has), and as many as one sending holds.
-        val mostFile = nearby.optLong("most_file")
-        val mostSending = if (nearby.isNull("most_sending")) Long.MAX_VALUE else nearby.optLong("most_sending")
-        val mostFiles = nearby.optInt("most_files")
         var total = 0L
-        val fit = going.filter { file -> (file.size <= mostFile && total + file.size <= mostSending).also { if (it) total += file.size } }.take(mostFiles)
+        val fit = going.filter { file -> (file.size <= at.mostFile && total + file.size <= at.mostSending).also { if (it) total += file.size } }.take(at.mostFiles)
         if (fit.isEmpty() || run.stopped) return Sent.Again
-        val tls = SSLContext.getInstance("TLS").apply { init(arrayOf(Own.Presenting()), arrayOf(Pinned(fingerprint)), null) }
-        fun open(path: String): HttpsURLConnection = (URL("https://${pc.host}:$port/api/localsend/v2$path").openConnection() as HttpsURLConnection).apply {
-            sslSocketFactory = tls.socketFactory
-            // (The certificate is pinned: the name it is reached by says nothing.)
-            setHostnameVerifier { _, _ -> true }
-            connectTimeout = 4000
-            readTimeout = 60_000
-            setRequestProperty("Connection", "close")
-        }
-        // The offer: as one sending.
-        val offer = JSONObject()
-            .put("info", JSONObject().put("alias", Own.alias(context)).put("version", "2.1").put("deviceModel", Build.MODEL).put("deviceType", "mobile")
-                .put("fingerprint", Own.fingerprint()).put("port", 53317).put("protocol", "https").put("download", false))
-            .put("files", JSONObject().apply { for (file in fit) put(file.entry.name, JSONObject().put("id", file.entry.name).put("fileName", file.name).put("size", file.size).put("fileType", file.type)) })
-        val (status, answer) = try {
-            val asking = open("/prepare-upload")
-            try {
-                asking.requestMethod = "POST"
-                asking.doOutput = true
-                asking.setRequestProperty("Content-Type", "application/json")
-                asking.outputStream.use { it.write(offer.toString().toByteArray()) }
-                val status = asking.responseCode
-                status to ((if (status < 400) asking.inputStream else asking.errorStream)?.bufferedReader()?.use { it.readText() } ?: "")
-            } finally {
-                asking.disconnect()
-            }
-        } catch (failed: IOException) {
-            return Sent.Again
-        }
-        val said = runCatching { JSONObject(answer) }.getOrNull()
-        when {
-            status == 200 && said != null -> {}
-            // Nothing wanted of them.
-            status == 204 -> return Sent.Done.also { done(context, fit.map { it.entry }) }
-            // Refused by the PC's user (or a PIN wanted, which Glance never wants): given up.
-            status == 401 || (status == 403 && said?.optString("message") in REFUSALS) -> return Sent.Done.also { done(context, fit.map { it.entry }) }
-            // Busy receiving another, without room since it said, or anything else: later.
-            else -> return Sent.Again
-        }
-        val session = said!!.optString("sessionId")
-        val tokens = said.optJSONObject("files") ?: JSONObject()
-        fun cancel() = runCatching { open("/cancel?sessionId=${URLEncoder.encode(session, "UTF-8")}").apply { requestMethod = "POST" }.let { it.responseCode; it.disconnect() } }
+        val byId = fit.associateBy { it.entry.name }
+        val things = fit.map { file -> Nearby.Thing(file.entry.name, file.name, file.type, file.size) { context.contentResolver.openInputStream(file.entry.uri) ?: throw IOException("gone") } }
         var sent = 0
-        var whole = true
-        for (file in fit) {
-            val token = tokens.optString(file.entry.name)
-            // (One the PC does not want is not sent: it has it.)
-            if (token.isEmpty()) {
-                done(context, listOf(file.entry))
-                continue
-            }
-            val query = listOf("sessionId" to session, "fileId" to file.entry.name, "token" to token).joinToString("&") { (name, value) -> "$name=${URLEncoder.encode(value, "UTF-8")}" }
-            val ok = !run.stopped && try {
-                val upload = open("/upload?$query")
-                try {
-                    upload.requestMethod = "POST"
-                    upload.doOutput = true
-                    upload.setFixedLengthStreamingMode(file.size)
-                    upload.setRequestProperty("Content-Type", "application/octet-stream")
-                    val from = context.contentResolver.openInputStream(file.entry.uri) ?: throw IOException("gone")
-                    from.use { input ->
-                        upload.outputStream.use { output ->
-                            val some = ByteArray(64 * 1024)
-                            while (true) {
-                                if (run.stopped) throw IOException("stopped")
-                                val read = input.read(some)
-                                if (read < 0) break
-                                output.write(some, 0, read)
-                            }
-                        }
-                    }
-                    upload.responseCode == 200
-                } finally {
-                    upload.disconnect()
-                }
-            } catch (failed: IOException) {
-                false
-            }
-            if (!ok) {
-                // The PC keeps what it took of this sending; the rest is offered again later.
-                cancel()
-                whole = false
-                break
-            }
-            // Taken: it leaves the queue at once, so that it is not sent again whatever comes next.
-            done(context, listOf(file.entry))
+        // Taken: it leaves the queue at once, so that it is not sent again whatever comes next.
+        val ended = Nearby.send(context, at, things, { run.stopped }) { thing ->
+            done(context, listOf(byId.getValue(thing.id).entry))
             sent++
         }
-        if (sent > 0 && notice(context)) tell(context, pc.name, sent)
-        return if (whole) Sent.Done else Sent.Again
+        // Refused by the PC's user: given up. Anything else not sent whole: what is left is offered again later.
+        if (ended == Nearby.Ended.Refused) done(context, fit.map { it.entry })
+        if (sent > 0 && notice(context)) tell(context, at.pc.name, sent)
+        return if (ended == Nearby.Ended.Sent || ended == Nearby.Ended.Refused) Sent.Done else Sent.Again
     }
 
     /** That [count] went to [pc]: a notice that goes by itself after a while. */

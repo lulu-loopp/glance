@@ -158,4 +158,57 @@
     <string name="auto_held_allow">Allow</string>
     <string name="auto_held_late">The last photos were sent only once the app was opened, as the system still limits Glance in the background. Allow it to run in the background in the system\'s settings for the app (on some phones under battery usage).</string>
     <string name="auto_held_settings">Settings</string>
+    <!-- What is handed to a PC by hand. -->
+    <string name="hand_tile">Send files</string>
+    <string name="hand_tile_what">Photos, videos or any files, into this PC\'s station</string>
+    <string name="hand_tile_off">Nearby transfer is off on this PC</string>
+    <string name="hand_off_title">Nearby transfer is off on %1$s</string>
+    <string name="hand_to">Send to %1$s</string>
+    <string name="hand_media">Photos and videos</string>
+    <string name="hand_media_what">Choose from the gallery</string>
+    <string name="hand_files">Files</string>
+    <string name="hand_files_what">Choose any files</string>
+    <string name="hand_choose">Send to</string>
+    <string name="hand_pc_looking">Connecting</string>
+    <string name="hand_pc_ready">Connected</string>
+    <string name="hand_pc_last">Connected · Sent here last</string>
+    <string name="hand_pc_off">Nearby transfer is off</string>
+    <string name="hand_pc_away">Not connected</string>
+    <string name="hand_reaching">Connecting to %1$s</string>
+    <string name="hand_waiting">Waiting for %1$s to finish receiving</string>
+    <string name="hand_going">Sending to %1$s</string>
+    <string name="hand_count">%1$d / %2$d · %3$s / %4$s</string>
+    <plurals name="hand_more">
+        <item quantity="one">and %1$d more</item>
+        <item quantity="other">and %1$d more</item>
+    </plurals>
+    <string name="hand_sent">In the station</string>
+    <plurals name="hand_sent_photos">
+        <item quantity="one">%1$d photo is in the station of %2$s.</item>
+        <item quantity="other">%1$d photos are in the station of %2$s.</item>
+    </plurals>
+    <plurals name="hand_sent_files">
+        <item quantity="one">%1$d file is in the station of %2$s.</item>
+        <item quantity="other">%1$d files are in the station of %2$s.</item>
+    </plurals>
+    <string name="hand_sent_words">The text is in the station of %1$s.</string>
+    <string name="hand_sent_link">The link is in the station of %1$s.</string>
+    <string name="hand_failed">Could not send to %1$s</string>
+    <string name="hand_failed_some">%1$d sent, %2$d not sent</string>
+    <string name="hand_why_unreached">Could not connect to %1$s. Make sure the PC is on and on the same network as this phone.</string>
+    <string name="hand_why_broken">The connection to %1$s was lost. Make sure the PC is still running and on the same network as this phone, then try again.</string>
+    <string name="hand_why_busy">%1$s kept receiving other files. Try again later.</string>
+    <string name="hand_why_room">The station of %1$s does not have room for these files. Clear some of it on the PC, then try again.</string>
+    <string name="hand_why_large">"%1$s" is larger than the PC takes as one file.</string>
+    <string name="hand_why_unread">"%1$s" could not be read.</string>
+    <string name="hand_why_refused">The PC turned down this sending.</string>
+    <string name="hand_retry">Try again</string>
+    <string name="hand_none_title">No PC paired</string>
+    <string name="hand_none_what">Open the Glance app and pair with a PC first, then share again.</string>
+    <string name="hand_busy_title">Sending something else</string>
+    <string name="hand_busy_what">Share again once the last sending is done. Its progress is in the notifications.</string>
+    <string name="hand_channel">Sending files</string>
+    <string name="hand_sent_to">Sent to %1$s</string>
+    <string name="hand_failed_to">Not all sent to %1$s</string>
+    <string name="hand_failed_open">Open Glance to try again</string>
 </resources>

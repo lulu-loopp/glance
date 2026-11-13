@@ -497,7 +497,7 @@ pub struct CameFile {
 
 impl Receipt {
     /// Whether it holds only what the helper writes: a sending's number and its files' names in the inbox of letters
-    /// and digits (with an extension of them), so none names anything but a file of the inbox, or words and no files;
+    /// and digits (with an extension of them), so none names anything but a file of the inbox, or words and no files,
     /// within bounds.
     fn sound(&self) -> bool {
         let plain = |text: &str, most: usize| !text.is_empty() && text.len() <= most && text.bytes().all(|byte| byte.is_ascii_alphanumeric());

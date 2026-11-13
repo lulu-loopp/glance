@@ -84,6 +84,15 @@ object Sign {
     const val PREVIOUS = "M18 6v12l-9-6zM6.5 6v12"
     const val NEXT = "M6 6v12l9-6zM17.5 6v12"
     const val BRIGHT = "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+    // What is handed to a PC (Lucide's upload, image, file, link, pilcrow, monitor, check, circle-alert).
+    const val UPLOAD = "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"
+    const val IMAGE = "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 7a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM21 15l-3.1-3.1a2 2 0 0 0-2.8 0L6 21"
+    const val FILE = "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4"
+    const val LINK = "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"
+    const val TEXT = "M13 4v16M17 4v16M19 4H9.5a4.5 4.5 0 0 0 0 9H13"
+    const val MONITOR = "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4"
+    const val CHECK = "M20 6L9 17l-5-5"
+    const val ALERT = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM12 8v4M12 16h.01"
 }
 
 @Composable

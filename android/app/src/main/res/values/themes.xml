@@ -6,6 +6,13 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
+    <!-- Over another app (what it shares): nothing of its own but the sheet it draws. -->
+    <style name="Theme.Glance.Over" parent="Theme.Glance">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
     <color name="ground">#0E1116</color>
     <color name="mark_ground">#14181E</color>
 </resources>
