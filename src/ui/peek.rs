@@ -1180,7 +1180,7 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             // A picture's mark where the picture will be, and a bar of how much has come.
             canvas.fill_rounded(theme.track, PAD, PAD, THUMB, THUMB, 10.0);
             canvas.icon(Icon::Image, Point { x: PAD + THUMB / 2.0, y: PAD + THUMB / 2.0 }, 20.0, theme.text3);
-            text_beside(canvas, theme, title_font, &title, &under);
+            text_beside(canvas, theme, title_font, &title, &under, &receiving.from.alias);
             let done = if receiving.of == 0 { 0.0 } else { (receiving.done as f64 / receiving.of as f64).clamp(0.0, 1.0) as f32 };
             let y = PAD + THUMB + SPACE;
             canvas.fill_rounded(theme.track, PAD, y, inner, BAR, BAR / 2.0);
@@ -1190,14 +1190,14 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             spots.push((0.0, 0.0, WIDE, height, Spot::Body));
         }
         // (Its picture carried off it: the room it left.)
-        Says::Came { .. } if away => {
+        Says::Came { from, .. } if away => {
             super::view::paint_kept_room(canvas, theme, (PAD, PAD, THUMB, THUMB));
-            text_beside(canvas, theme, title_font, &title, &under);
+            text_beside(canvas, theme, title_font, &title, &under, from);
             spots.push((0.0, 0.0, WIDE, height, Spot::Body));
         }
-        Says::Came { id, .. } => {
+        Says::Came { id, from, .. } => {
             whole = super::view::paint_kept_face(canvas, theme, *id, (PAD, PAD, THUMB, THUMB), 1.0, lang).unwrap_or(true);
-            text_beside(canvas, theme, title_font, &title, &under);
+            text_beside(canvas, theme, title_font, &title, &under, from);
             spots.push((0.0, 0.0, WIDE, height, Spot::Body));
         }
     }
@@ -1228,13 +1228,27 @@ fn buttons(canvas: &dyn Canvas, theme: &Theme, (accent, highlight): (super::canv
     }
 }
 
-/// A title and the line under it beside the picture.
-fn text_beside(canvas: &dyn Canvas, theme: &Theme, title_font: super::canvas::Font, title: &str, under: &str) {
+/// A title and the line under it beside the picture, the device's `name` in that line cut short where it must be (see
+/// `fitted`).
+fn text_beside(canvas: &dyn Canvas, theme: &Theme, title_font: super::canvas::Font, title: &str, under: &str, name: &str) {
     let left = PAD + THUMB + 12.0;
     let room = WIDE - left - PAD;
     let top = PAD + (THUMB - 36.0) / 2.0;
     canvas.text(title, title_font, theme.text, left, top, room, Align::Start);
-    canvas.text(under, theme.small, theme.text2, left, top + 19.0, room, Align::Start);
+    canvas.text(&fitted(canvas, theme.small, room, under, name), theme.small, theme.text2, left, top + 19.0, room, Align::Start);
+}
+
+/// `line` as it is written in `font` within `room` (DIPs): where it is wider, the device's `name` in it cut short, ended
+/// by "…", as far as it must be, so that what is said after the name (where it went, how much) is still read.
+fn fitted(canvas: &dyn Canvas, font: super::canvas::Font, room: f32, line: &str, name: &str) -> String {
+    let Some(at) = line.find(name).filter(|_| !name.is_empty() && canvas.measure(line, font) > room) else { return line.to_string() };
+    let (before, after) = (&line[..at], &line[at + name.len()..]);
+    let chars: Vec<char> = name.chars().collect();
+    (1..chars.len())
+        .rev()
+        .map(|keep| format!("{before}{}…{after}", chars[..keep].iter().collect::<String>().trim_end()))
+        .find(|short| canvas.measure(short, font) <= room)
+        .unwrap_or_else(|| format!("{before}…{after}"))
 }
 
 #[cfg(test)]
@@ -1348,6 +1362,7 @@ mod pictures {
             ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false, false)),
             ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, false)),
             ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, true)),
+            ("came-long", Says::Came { id: 7, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), files: 2, pictures: true }, (None, false, false)),
             ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false)),
             ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false, false)),
         ];
