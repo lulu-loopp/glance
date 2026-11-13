@@ -170,7 +170,6 @@
     <string name="hand_text">文字</string>
     <string name="hand_folder">文件夹</string>
     <string name="hand_apps">应用</string>
-    <string name="hand_new">新</string>
     <string name="hand_send">发送</string>
     <string name="hand_reading">正在读取</string>
     <string name="hand_text_to">发送文字到 %1$s</string>

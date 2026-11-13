@@ -3,6 +3,14 @@ package dev.weiyi.glance.remote
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -28,10 +36,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -69,8 +76,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -79,14 +84,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** What may be handed to a PC, as LocalSend's Android app has them, in its order: its sign, its name, and whether it is new. */
-enum class Kind(val sign: String, val title: Int, val new: Boolean) {
-    Files(Sign.FILE, R.string.hand_files, false),
-    Media(Sign.IMAGE, R.string.hand_media, false),
-    Clipboard(Sign.CLIPBOARD, R.string.hand_clipboard, true),
-    Text(Sign.LINES, R.string.hand_text, true),
-    Folder(Sign.FOLDER, R.string.hand_folder, true),
-    Apps(Sign.APPS, R.string.hand_apps, true),
+/** What may be handed to a PC, as LocalSend's Android app has them, in its order: its sign and its name. */
+enum class Kind(val sign: String, val title: Int) {
+    Files(Sign.FILE, R.string.hand_files),
+    Media(Sign.IMAGE, R.string.hand_media),
+    Clipboard(Sign.CLIPBOARD, R.string.hand_clipboard),
+    Text(Sign.LINES, R.string.hand_text),
+    Folder(Sign.FOLDER, R.string.hand_folder),
+    Apps(Sign.APPS, R.string.hand_apps),
 }
 
 /** The type an app's package is sent as. */
@@ -94,15 +99,6 @@ private const val PACKAGE = "application/vnd.android.package-archive"
 
 /** The most files of a folder, or of the clipboard, listed before it is sent, the rest counted. */
 private const val LISTED = 4
-
-private fun kept(context: Context) = context.getSharedPreferences("hand", Context.MODE_PRIVATE)
-
-/** The kinds chosen once at least (a new one is marked as new till then). */
-private fun tried(context: Context): Set<String> = kept(context).getStringSet("tried", null).orEmpty()
-
-private fun tryOut(context: Context, kind: Kind) {
-    kept(context).edit().putStringSet("tried", tried(context) + kind.name).apply()
-}
 
 /**
  * What is handed to [pc]: chosen among six kinds on a sheet (shown while [asked], [done] told as it is put away). Files
@@ -125,11 +121,11 @@ fun Handing(pc: Pc, asked: Boolean, done: () -> Unit) {
     if (asked) {
         KindSheet(pc, done) { kind ->
             done()
-            tryOut(context, kind)
             when (kind) {
                 Kind.Files -> documents.launch(arrayOf("*/*"))
                 Kind.Media -> media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 Kind.Folder -> folders.launch(null)
+                Kind.Apps -> context.startActivity(Intent(context, AppsActivity::class.java).putExtra(AppsActivity.PC, pc.key))
                 else -> open = kind
             }
         }
@@ -139,22 +135,19 @@ fun Handing(pc: Pc, asked: Boolean, done: () -> Unit) {
         Kind.Text -> TextSheet(pc, close)
         Kind.Clipboard -> ClipSheet(pc, close)
         Kind.Folder -> tree?.let { FolderSheet(pc, it, close) }
-        Kind.Apps -> AppsPage(pc, close)
         else -> {}
     }
 }
 
-/** The six kinds, three to a row: a new one marked till it is chosen once. */
+/** The six kinds, three to a row. */
 @Composable
 private fun KindSheet(pc: Pc, dismiss: () -> Unit, choose: (Kind) -> Unit) {
-    val context = LocalContext.current
-    val tried = remember { tried(context) }
     Sheet(dismiss) {
         SheetTitle(stringResource(R.string.hand_to, pc.name))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             for (row in Kind.entries.chunked(3)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    for (kind in row) KindTile(kind, kind.new && kind.name !in tried, Modifier.weight(1f)) { choose(kind) }
+                    for (kind in row) KindTile(kind, Modifier.weight(1f)) { choose(kind) }
                 }
             }
         }
@@ -163,13 +156,13 @@ private fun KindSheet(pc: Pc, dismiss: () -> Unit, choose: (Kind) -> Unit) {
 }
 
 @Composable
-private fun KindTile(kind: Kind, new: Boolean, modifier: Modifier, press: () -> Unit) {
-    Box(modifier.clip(RoundedCornerShape(14.dp)).background(Card2).clickable(role = Role.Button, onClick = press)) {
-        Column(Modifier.fillMaxWidth().padding(start = 6.dp, top = 16.dp, end = 6.dp, bottom = 13.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Sign(kind.sign, Ink, size = 22.dp)
-            Text(stringResource(kind.title), fontSize = 13.sp, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        if (new) Text(stringResource(R.string.hand_new), fontSize = 10.sp, color = Accent, modifier = Modifier.align(Alignment.TopEnd).padding(top = 6.dp, end = 8.dp))
+private fun KindTile(kind: Kind, modifier: Modifier, press: () -> Unit) {
+    Column(
+        modifier.clip(RoundedCornerShape(14.dp)).background(Card2).clickable(role = Role.Button, onClick = press).padding(start = 6.dp, top = 16.dp, end = 6.dp, bottom = 13.dp),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Sign(kind.sign, Ink, size = 22.dp)
+        Text(stringResource(kind.title), fontSize = 13.sp, color = Ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -481,14 +474,11 @@ private fun fileName(name: String) = name.map { if (it < ' ' || it in "\\/:*?\"<
 private fun apps(context: Context): List<App> {
     val manager = context.packageManager
     val order = Collator.getInstance()
-    return manager.getInstalledApplications(0).map { info ->
-        val version = try {
-            manager.getPackageInfo(info.packageName, 0).versionName
-        } catch (gone: Exception) {
-            null
-        }
+    // (Each with its version, asked of the system once for all of them.)
+    return manager.getInstalledPackages(0).mapNotNull { found ->
+        val info = found.applicationInfo ?: return@mapNotNull null
         val files = listOf(info.sourceDir) + info.splitSourceDirs.orEmpty()
-        App(info.packageName, info.loadLabel(manager).toString(), version, files.map(::File), info.flags and ApplicationInfo.FLAG_SYSTEM != 0)
+        App(found.packageName, info.loadLabel(manager).toString(), found.versionName, files.map(::File), info.flags and ApplicationInfo.FLAG_SYSTEM != 0)
     }.sortedWith(compareBy(order) { it.name })
 }
 
@@ -505,63 +495,62 @@ private fun icon(context: Context, id: String, side: Int): ImageBitmap? = try {
 
 /**
  * The apps on this phone, to choose among and send to [pc] as their packages: found by name, the system's own shown only
- * when asked, each chosen with a box. An app split into parts says so, and all of them are sent.
+ * when asked, each chosen with a box. An app split into parts says so, and all of them are sent. A page of its own
+ * ([AppsActivity]), [dismiss] told as it is left.
  */
 @Composable
-private fun AppsPage(pc: Pc, dismiss: () -> Unit) {
+fun AppsPage(pc: Pc, dismiss: () -> Unit) {
     val context = LocalContext.current
     val all by produceState<List<App>?>(null) { value = withContext(Dispatchers.IO) { apps(context) } }
     var search by rememberSaveable { mutableStateOf("") }
     var system by rememberSaveable { mutableStateOf(false) }
     val chosen = remember { mutableStateListOf<String>() }
-    Dialog(onDismissRequest = dismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        Box(Modifier.fillMaxSize().background(Ground).statusBarsPadding().navigationBarsPadding().imePadding()) {
-            Column(Modifier.fillMaxSize()) {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    SignButton(Sign.BACK, stringResource(R.string.back), tint = Ink, press = dismiss)
-                    Text(stringResource(R.string.hand_apps_title), fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+    Box(Modifier.fillMaxSize().background(Ground).safeDrawingPadding()) {
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                SignButton(Sign.BACK, stringResource(R.string.back), tint = Ink, press = dismiss)
+                Text(stringResource(R.string.hand_apps_title), fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = Ink)
+            }
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 4.dp).fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp)).background(Card).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Sign(Sign.SEARCH, Dim, size = 18.dp)
+                Box(Modifier.weight(1f)) {
+                    if (search.isEmpty()) Text(stringResource(R.string.hand_apps_search), fontSize = 14.sp, color = Dim)
+                    BasicTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(color = Ink, fontSize = 14.sp), cursorBrush = SolidColor(Accent))
                 }
-                Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 4.dp).fillMaxWidth().heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp)).background(Card).padding(horizontal = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Sign(Sign.SEARCH, Dim, size = 18.dp)
-                    Box(Modifier.weight(1f)) {
-                        if (search.isEmpty()) Text(stringResource(R.string.hand_apps_search), fontSize = 14.sp, color = Dim)
-                        BasicTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, textStyle = TextStyle(color = Ink, fontSize = 14.sp), cursorBrush = SolidColor(Accent))
-                    }
-                }
-                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.hand_apps_system), fontSize = 14.sp, color = Dim, modifier = Modifier.weight(1f))
-                    Toggle(system, stringResource(R.string.hand_apps_system)) { system = it }
-                }
-                val found = all
-                if (found == null) {
-                    Text(stringResource(R.string.hand_reading), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
-                } else {
-                    val words = search.trim()
-                    val shown = found.filter { (system || !it.system) && (words.isEmpty() || it.name.contains(words, ignoreCase = true) || it.id.contains(words, ignoreCase = true)) }
-                    if (shown.isEmpty()) Text(stringResource(R.string.hand_apps_none), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
-                    LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 88.dp)) {
-                        items(shown, key = { it.id }) { app ->
-                            AppRow(app, app.id in chosen) { if (app.id in chosen) chosen.remove(app.id) else chosen.add(app.id) }
-                        }
+            }
+            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.hand_apps_system), fontSize = 14.sp, color = Dim, modifier = Modifier.weight(1f))
+                Toggle(system, stringResource(R.string.hand_apps_system)) { system = it }
+            }
+            val found = all
+            if (found == null) {
+                Text(stringResource(R.string.hand_reading), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+            } else {
+                val words = search.trim()
+                val shown = found.filter { (system || !it.system) && (words.isEmpty() || it.name.contains(words, ignoreCase = true) || it.id.contains(words, ignoreCase = true)) }
+                if (shown.isEmpty()) Text(stringResource(R.string.hand_apps_none), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp))
+                LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 88.dp)) {
+                    items(shown, key = { it.id }) { app ->
+                        AppRow(app, app.id in chosen) { if (app.id in chosen) chosen.remove(app.id) else chosen.add(app.id) }
                     }
                 }
             }
-            val sending = all.orEmpty().filter { it.id in chosen }
-            if (sending.isNotEmpty()) {
-                Row(
-                    Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(14.dp)).background(Accent)
-                        .clickable(role = Role.Button) {
-                            Hand.start(context, pc, sending.flatMap { it.picks() })
-                            dismiss()
-                        }.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(pluralStringResource(R.plurals.hand_apps_send, sending.size, sending.size), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    Text(Hand.size(sending.sumOf { it.size }), color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp)
-                }
+        }
+        val sending = all.orEmpty().filter { it.id in chosen }
+        if (sending.isNotEmpty()) {
+            Row(
+                Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth().heightIn(min = 52.dp).clip(RoundedCornerShape(14.dp)).background(Accent)
+                    .clickable(role = Role.Button) {
+                        Hand.start(context, pc, sending.flatMap { it.picks() })
+                        dismiss()
+                    }.padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(pluralStringResource(R.plurals.hand_apps_send, sending.size, sending.size), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(Hand.size(sending.sumOf { it.size }), color = Color.White.copy(alpha = 0.9f), fontSize = 14.sp)
             }
         }
     }
@@ -589,5 +578,23 @@ private fun AppRow(app: App, chosen: Boolean, press: () -> Unit) {
             ) { if (chosen) Sign(Sign.CHECK, Color.White, size = 15.dp) }
         }
         Rule()
+    }
+}
+
+/** The page apps are chosen on to be sent to a paired PC (its key given as [PC]): gone once they are sent, or it is left. */
+class AppsActivity : ComponentActivity() {
+    companion object {
+        const val PC = "pc"
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
+        val pc = Pcs.all(this).firstOrNull { it.key == intent.getStringExtra(PC) } ?: return finish()
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.Black, background = Ground, surface = Card, onBackground = Ink, onSurface = Ink)) {
+                AppsPage(pc) { finish() }
+            }
+        }
     }
 }

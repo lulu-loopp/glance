@@ -171,7 +171,6 @@
     <string name="hand_text">Text</string>
     <string name="hand_folder">Folder</string>
     <string name="hand_apps">Apps</string>
-    <string name="hand_new">New</string>
     <string name="hand_send">Send</string>
     <string name="hand_reading">Reading</string>
     <string name="hand_text_to">Send text to %1$s</string>
