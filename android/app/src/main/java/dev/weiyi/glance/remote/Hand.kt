@@ -36,6 +36,13 @@ object Hand {
     private const val BUSY_FOR = 120_000L
     private const val AGAIN = 2_000L
 
+    /**
+     * One thing given to be sent: where it is (given this app to read, or a file of this phone's any app reads: an app's
+     * package), and what the PC is told of it where that is to be other than its provider says (a folder's: by its
+     * place in the folder, "folder/inner/name"), with its size and type as they were found.
+     */
+    class Pick(val uri: Uri, val name: String? = null, val size: Long? = null, val type: String? = null)
+
     /** One thing handed over: what the PC is told of it, how it is read, and where it was given (to show it). */
     class Handed(val thing: Nearby.Thing, val uri: Uri?) {
         val picture get() = thing.type.startsWith("image/")
@@ -75,8 +82,8 @@ object Hand {
 
     /**
      * A handing: to which PC, what (what is known of it yet: nothing while it is read), how it goes, how many bytes of it
-     * went (and of each thing, by its id), which things the PC has, the one a failure names, and whether its sheet was
-     * put away.
+     * went (and of each thing, by its id), which things the PC has, the one a failure names, whether its sheet was put
+     * away, and the folders what it sends is read through (given leave to read again where it is tried again).
      */
     data class Job(
         val number: Int,
@@ -88,6 +95,7 @@ object Hand {
         val taken: Set<String> = emptySet(),
         val named: String? = null,
         val away: Boolean = false,
+        val trees: List<Uri> = emptyList(),
     ) {
         val total get() = things.sumOf { it.thing.size }
         val over get() = state is State.Sent || state is State.Failed || state is State.Cancelled
@@ -102,8 +110,11 @@ object Hand {
     /** The handing going on, or the last one, till it is put away. */
     val now: StateFlow<Job?> = shown
 
-    /** What [HandService] sends next, as it was given: the PC, and the things, or where they are and words. */
-    private class Given(val pc: Pc, val uris: List<Uri>, val words: String?, val things: List<Handed>?)
+    /**
+     * What [HandService] sends next, as it was given: the PC, and the things, or where they are (and the folders they
+     * are in, read through them) and words.
+     */
+    private class Given(val pc: Pc, val picks: List<Pick>, val trees: List<Uri>, val words: String?, val things: List<Handed>?)
 
     @Volatile
     private var given: Given? = null
@@ -117,20 +128,20 @@ object Hand {
     fun last(context: Context): String? = kept(context).getString("last", null)
 
     /**
-     * [uris] (as they were given: readable by this app) or [words] handed to [pc]: sent from now on. Whether they are
-     * (not while another handing goes on: one at a time).
+     * [picks] (readable by this app, those of a folder chosen through its tree among [trees]) or [words] handed to [pc]:
+     * sent from now on. Whether they are (not while another handing goes on: one at a time).
      */
-    fun start(context: Context, pc: Pc, uris: List<Uri>, words: String? = null): Boolean {
+    fun start(context: Context, pc: Pc, picks: List<Pick>, words: String? = null, trees: List<Uri> = emptyList()): Boolean {
         if (shown.value?.over == false) return false
         // (What an earlier handing read into the cache is no longer wanted: it is not tried again now.)
         File(context.cacheDir, "hand").deleteRecursively()
-        return begin(context, Given(pc, uris, words, null))
+        return begin(context, Given(pc, picks, trees, words, null))
     }
 
     /** What of the last handing the PC does not have, sent to it again. */
     fun retry(context: Context) {
         val job = shown.value?.takeIf { it.state is State.Failed } ?: return
-        begin(context, Given(job.pc, emptyList(), null, job.left))
+        begin(context, Given(job.pc, emptyList(), job.trees, null, job.left))
     }
 
     private fun begin(context: Context, what: Given): Boolean {
@@ -138,12 +149,16 @@ object Hand {
         stopped = false
         given = what
         kept(context).edit().putString("last", what.pc.key).apply()
-        shown.value = Job(++numbers, what.pc, what.things.orEmpty(), State.Reaching)
-        // (The places given are handed to the service with leave to read them: it reads them while it runs.)
+        shown.value = Job(++numbers, what.pc, what.things.orEmpty(), State.Reaching, trees = what.trees)
+        // (The places given are handed to the service with leave to read them, a folder with leave to read all in it,
+        // its things not named one by one: it reads them while it runs. A file of this phone's needs no leave.)
         val intent = Intent(context, HandService::class.java)
-        if (what.uris.isNotEmpty()) {
-            intent.clipData = ClipData.newRawUri("", what.uris[0]).apply { what.uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
+        val places = what.things?.mapNotNull { it.uri } ?: what.picks.map { it.uri }
+        val granted = what.trees + places.filter { place -> place.scheme == "content" && what.trees.none { place.toString().startsWith("$it/") } }
+        if (granted.isNotEmpty()) {
+            intent.clipData = ClipData.newRawUri("", granted[0]).apply { granted.drop(1).forEach { addItem(ClipData.Item(it)) } }
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            if (what.trees.isNotEmpty()) intent.addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
         }
         context.startForegroundService(intent)
         return true
@@ -177,7 +192,7 @@ object Hand {
         val number = job.number
         val context = service.applicationContext
         val ended = try {
-            val things = what.things ?: read(context, what.uris, what.words)
+            val things = what.things ?: read(context, what.picks, what.words)
             change(number) { it.copy(things = things) }
             sendAll(context, what.pc, things, number, service)
         } catch (unread: Unreadable) {
@@ -191,16 +206,24 @@ object Hand {
     /** One that could not be read, by its name. */
     private class Unreadable(val name: String) : Exception()
 
-    /** What is at [uris] (or [words]) as things to send: each by its name, type and size, read as it is sent. */
-    private fun read(context: Context, uris: List<Uri>, words: String?): List<Handed> {
+    /**
+     * What is at [picks] (or [words]) as things to send: each by its name, type and size (as it was found, else as its
+     * provider says), read as it is sent.
+     */
+    private fun read(context: Context, picks: List<Pick>, words: String?): List<Handed> {
         if (words != null) return listOf(Handed(Nearby.Thing.words(UUID.randomUUID().toString(), words), null))
         val resolver = context.contentResolver
-        return uris.mapIndexed { at, uri ->
-            val (name, size) = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { rows ->
-                if (rows.moveToFirst()) rows.getString(0) to (if (rows.isNull(1)) null else rows.getLong(1)) else null to null
-            } ?: (null to null)
+        return picks.mapIndexed { at, pick ->
+            val uri = pick.uri
+            val (name, size) = if (pick.name != null && pick.size != null) {
+                pick.name to pick.size
+            } else {
+                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { rows ->
+                    if (rows.moveToFirst()) rows.getString(0) to (if (rows.isNull(1)) null else rows.getLong(1)) else null to null
+                }?.let { (named, sized) -> (pick.name ?: named) to (pick.size ?: sized) } ?: (pick.name to pick.size)
+            }
             val shown = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "file"
-            val type = resolver.getType(uri) ?: "application/octet-stream"
+            val type = pick.type ?: resolver.getType(uri) ?: typeOf(shown)
             val id = "${at}_${UUID.randomUUID()}"
             // Its size as its provider says it, else as its file is. Where neither is known, it is read once into this
             // app's cache, and sent from there.
@@ -338,6 +361,10 @@ object Hand {
         job.photos -> context.resources.getQuantityString(R.plurals.hand_sent_photos, job.things.size, job.things.size, job.pc.name)
         else -> context.resources.getQuantityString(R.plurals.hand_sent_files, job.things.size, job.things.size, job.pc.name)
     }
+
+    /** The type a file is taken for by its name's extension, where nothing says it. */
+    fun typeOf(name: String): String =
+        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.', "").lowercase()) ?: "application/octet-stream"
 
     /** Whether [words] are a web address alone (as the station on the PC takes them: a link). */
     fun isLink(words: String) = (words.startsWith("https://") || words.startsWith("http://")) && words.length > "https://".length && words.none { it.isWhitespace() }

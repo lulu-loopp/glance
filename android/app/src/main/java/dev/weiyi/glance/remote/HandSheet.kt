@@ -93,7 +93,7 @@ fun Sheet(dismiss: () -> Unit, content: @Composable () -> Unit) {
 
 /** What a sheet is of, at its top. */
 @Composable
-private fun SheetTitle(text: String) = Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 8.dp))
+fun SheetTitle(text: String) = Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 8.dp))
 
 /** A row to choose on a sheet: its sign in a square, its name and what it is under it. */
 @Composable
@@ -105,19 +105,7 @@ private fun Choice(sign: String, title: String, detail: String, enabled: Boolean
 
 /** The words at the foot of a sheet, at its right. */
 @Composable
-private fun SheetWords(content: @Composable () -> Unit) = Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) { content() }
-
-/** What is handed to [pc]: photos and videos, or files, each chosen by the system's own picker. */
-@Composable
-fun KindSheet(pc: Pc, dismiss: () -> Unit, media: () -> Unit, files: () -> Unit) {
-    Sheet(dismiss) {
-        SheetTitle(stringResource(R.string.hand_to, pc.name))
-        Choice(Sign.IMAGE, stringResource(R.string.hand_media), stringResource(R.string.hand_media_what)) { dismiss(); media() }
-        Rule()
-        Choice(Sign.FILE, stringResource(R.string.hand_files), stringResource(R.string.hand_files_what)) { dismiss(); files() }
-        SheetWords { Words(stringResource(R.string.cancel), Dim, Modifier.padding(horizontal = 8.dp), press = dismiss) }
-    }
-}
+fun SheetWords(content: @Composable () -> Unit) = Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End)) { content() }
 
 /** How a PC on the list to choose among stands: being reached, reached (receiving or not), or not reached. */
 private enum class Standing { Looking, Ready, Off, Away }
@@ -327,7 +315,7 @@ private fun Shared(uris: List<Uri>, words: String?, finish: () -> Unit) {
         else -> when (val pc = chosen) {
             null -> PcSheet(pcs, finish) { chosen = it }
             else -> LaunchedEffect(pc) {
-                if (Hand.start(context, pc, uris, words)) begun = true else busy = true
+                if (Hand.start(context, pc, uris.map { Hand.Pick(it) }, words)) begun = true else busy = true
             }
         }
     }

@@ -105,6 +105,7 @@
     <string name="sleep_what">电脑上的所有活动都将暂停，包括下载、远程连接和正在运行的程序。进入睡眠后无法通过手机唤醒，需在电脑上按键盘或电源键。</string>
     <string name="sleep_instead">如仅需关闭屏幕与灯光并保持电脑运行，请使用夜间模式。</string>
     <string name="cancel">取消</string>
+    <string name="ok">好</string>
     <string name="cpu">CPU</string>
     <string name="gpu">显卡</string>
     <string name="ram">内存</string>
@@ -159,14 +160,51 @@
     <string name="auto_held_settings">设置</string>
     <!-- What is handed to a PC by hand. -->
     <string name="hand_tile">发送文件</string>
-    <string name="hand_tile_what">照片、视频或任意文件，放入这台电脑的中转站</string>
+    <string name="hand_tile_what">照片、视频、文字或任意文件，放入这台电脑的中转站</string>
     <string name="hand_tile_off">这台电脑未开启附近传输</string>
     <string name="hand_off_title">%1$s 未开启附近传输</string>
     <string name="hand_to">发送到 %1$s</string>
     <string name="hand_media">照片和视频</string>
-    <string name="hand_media_what">从相册中选择</string>
     <string name="hand_files">文件</string>
-    <string name="hand_files_what">从文件管理中选择任意文件</string>
+    <string name="hand_clipboard">剪贴板</string>
+    <string name="hand_text">文字</string>
+    <string name="hand_folder">文件夹</string>
+    <string name="hand_apps">应用</string>
+    <string name="hand_new">新</string>
+    <string name="hand_send">发送</string>
+    <string name="hand_reading">正在读取</string>
+    <string name="hand_text_to">发送文字到 %1$s</string>
+    <plurals name="hand_text_count">
+        <item quantity="other">%1$d 字</item>
+    </plurals>
+    <string name="hand_clip_title">发送剪贴板内容</string>
+    <string name="hand_clip_hint">剪贴板中可能有密码等私密内容，发送前请确认。</string>
+    <string name="hand_clip_none_title">剪贴板中没有内容</string>
+    <string name="hand_clip_none_what">复制文字、链接或图片后再试。</string>
+    <string name="hand_clip_link">链接</string>
+    <string name="hand_clip_picture">图片 · %1$d × %2$d · %3$s</string>
+    <string name="hand_clip_as">将以“%1$s”放入中转站。</string>
+    <string name="hand_clip_name">剪贴板_%1$s</string>
+    <plurals name="hand_clip_files">
+        <item quantity="other">%1$d 个文件 · %2$s</item>
+    </plurals>
+    <string name="hand_folder_to">发送文件夹到 %1$s</string>
+    <plurals name="hand_folder_files">
+        <item quantity="other">%1$d 个文件</item>
+    </plurals>
+    <plurals name="hand_folder_folders">
+        <item quantity="other">%1$d 个子文件夹</item>
+    </plurals>
+    <string name="hand_apps_title">选择应用</string>
+    <string name="hand_apps_search">搜索应用</string>
+    <string name="hand_apps_system">显示系统应用</string>
+    <string name="hand_apps_none">没有符合条件的应用</string>
+    <plurals name="hand_apps_split">
+        <item quantity="other">由 %1$d 个安装包组成</item>
+    </plurals>
+    <plurals name="hand_apps_send">
+        <item quantity="other">发送 %1$d 个应用</item>
+    </plurals>
     <string name="hand_choose">发送到</string>
     <string name="hand_pc_looking">正在连接</string>
     <string name="hand_pc_ready">已连接</string>

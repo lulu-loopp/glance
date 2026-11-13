@@ -8,8 +8,6 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -511,12 +509,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
     LaunchedEffect(pc, answered) {
         if (answered) receives = withContext(Dispatchers.IO) { Nearby.reach(context, pc)?.on }
     }
-    // What is handed to it: chosen with the system's own pickers (photos and videos, or any files), then sent.
-    val media = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { uris -> if (uris.isNotEmpty()) Hand.start(context, pc, uris) }
-    val documents = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> if (uris.isNotEmpty()) Hand.start(context, pc, uris) }
-    if (handing) {
-        KindSheet(pc, dismiss = { handing = false }, media = { media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) }, files = { documents.launch(arrayOf("*/*")) })
-    }
+    // What is handed to it: chosen among its kinds, then sent.
+    Handing(pc, handing) { handing = false }
     if (offTold) Tell(stringResource(R.string.hand_off_title, pc.name), stringResource(R.string.auto_pc_off), stringResource(R.string.close)) { offTold = false }
     // Sleep says what it means first.
     if (sleepAsked) {
