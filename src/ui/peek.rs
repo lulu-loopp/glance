@@ -38,7 +38,7 @@ use crate::settings::{Edge, Part, Places};
 const WIDE: f32 = 288.0;
 const PAD: f32 = 14.0;
 const GAP: f32 = 12.0;
-const ROOM: f32 = 16.0;
+const ROOM: f32 = super::menu::SHADOW;
 /// How far over the middle of a side edge its top stands (DIPs).
 const ABOVE_MIDDLE: f32 = 60.0;
 /// Its rows (DIPs): the device's, the picture's beside what is told, a file offered, the line saying how many more,
@@ -1351,9 +1351,9 @@ mod tests {
         let contact = Contact { monitor: RECT { left: 0, top: 0, right: 2560, bottom: 1440 }, work: RECT { left: 0, top: 0, right: 2560, bottom: 1392 }, scale: 1.5 };
         let place = placed(contact, Edge::Right, (WIDE, 100.0), None);
         assert_eq!(place.plate, RECT { left: 2560 - 18 - 432, top: 1392 / 2 - 90, right: 2560 - 18, bottom: 1392 / 2 - 90 + 150 });
-        assert_eq!((place.window.right, place.window.left, place.window.top), (2560, place.plate.left - 24, place.plate.top - 24));
+        assert_eq!((place.window.right, place.window.left, place.window.top), (2560, place.plate.left - 45, place.plate.top - 45));
         let place = placed(contact, Edge::Left, (WIDE, 100.0), None);
-        assert_eq!((place.plate.left, place.window.left, place.window.right), (18, 0, 18 + 432 + 24));
+        assert_eq!((place.plate.left, place.window.left, place.window.right), (18, 0, 18 + 432 + 45));
         let place = placed(contact, Edge::Top, (WIDE, 100.0), None);
         assert_eq!((place.plate.top, place.window.top, place.plate.left), (18, 0, (2560 - 432) / 2));
         let mut places = Places::default();
