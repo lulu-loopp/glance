@@ -17,7 +17,9 @@ use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_V};
+use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
+use windows_numerics::Matrix3x2;
 
 use super::canvas::{Align, Canvas, Font, Point};
 use super::gfx::{self, Frame, Gfx, Surface};
@@ -71,6 +73,8 @@ const FLIGHT: Duration = Duration::from_millis(520);
 /// still be told (it came while a panel was up, or a game was in front: no longer news after that).
 const STAYS: Duration = Duration::from_secs(4);
 const FRESH: Duration = Duration::from_secs(10);
+/// How long what came is told still after its picture was dragged off it into a program that took it.
+const GIVEN_STAYS: Duration = Duration::from_millis(1200);
 /// How often it looks whether the pointer is still on it, while that holds it.
 const LOOK_EVERY: Duration = Duration::from_millis(120);
 
@@ -210,6 +214,15 @@ pub struct Peek {
     trust: (u64, bool),
     pressed: Option<Spot>,
     over: Option<Spot>,
+    /// Where what came was pressed (physical px), while it is: moved far enough, its picture is dragged off it into
+    /// another program as the station's things are (see `lift`).
+    held: Option<POINT>,
+    /// The picture dragged off it, while it is carried: the drag's number and the thing it is (see `station::drag`).
+    lifting: Option<(u64, u64)>,
+    /// Its picture's room drawn empty (the picture carried), as last drawn.
+    away: bool,
+    /// What its picture draws, as last drawn (DIPs from the picture's corner): what is carried as it is dragged off.
+    face: Vec<super::morph::Part>,
     /// Its parts a press does something on, as last drawn (DIPs, from its plate's corner).
     spots: Vec<(f32, f32, f32, f32, Spot)>,
     flight: Option<Flight>,
@@ -254,9 +267,27 @@ impl Peek {
                 due = Some(Duration::ZERO);
             }
         }
-        // What came going back in its time, but while the pointer is on it.
+        // Its picture carried off it: its room empty meanwhile. Put back, what came is told a while yet (a little, where
+        // a program took it).
+        if let Some((drag, id)) = self.lifting {
+            let away = crate::ui::view::away_tiles().contains(&crate::ui::view::Hit::Shelf(id));
+            let shown = matches!(self.plate, Some(Says::Came { id: shown, .. }) if shown == id);
+            if (away && shown) != self.away {
+                self.away = away && shown;
+                self.stale = true;
+            }
+            if !away {
+                let going = crate::station::drag::going();
+                let taken = going.drag == drag && going.ended == Some(crate::station::drag::Dragged::Taken);
+                self.lifting = None;
+                if self.until.is_some() {
+                    self.until = Some(now + if taken { GIVEN_STAYS } else { STAYS });
+                }
+            }
+        }
+        // What came going back in its time, but while the pointer is on it, or it is pressed, or its picture carried.
         if let (Some(until), None) = (self.until, self.sliding) {
-            if self.pointer_on() {
+            if self.pointer_on() || self.held.is_some() || self.lifting.is_some() {
                 self.until = Some(until.max(now + LOOK_EVERY));
             }
             match self.until {
@@ -440,6 +471,8 @@ impl Peek {
         self.out = 0.0;
         self.over = None;
         self.pressed = None;
+        self.held = None;
+        self.away = false;
         if let Some(drawn) = self.drawn.as_mut() {
             drawn.window.hide();
             drawn.hidden();
@@ -477,10 +510,28 @@ impl Peek {
                     self.over = over;
                     self.stale = true;
                 }
+                // What came pressed and moved far enough: its picture dragged off it (the button still down: a press
+                // whose letting go it did not hear is over).
+                if let Some(from) = self.held {
+                    if msg.wParam.0 & MK_LBUTTON.0 as usize == 0 {
+                        self.let_go_of_press();
+                    } else if crate::mouse::cursor_position().is_some_and(|now| crate::station::run::drag_begins(from, now)) {
+                        self.lift(from);
+                    }
+                }
                 None
             }
             WM_LBUTTONDOWN => {
                 self.pressed = at.and_then(|at| self.spot_at(at));
+                // What came, pressed: drawn in a little, the pointer kept as it moves off it (its picture may be
+                // dragged off).
+                if self.pressed == Some(Spot::Body) && matches!(self.plate, Some(Says::Came { .. })) && self.lifting.is_none() {
+                    self.held = crate::mouse::cursor_position();
+                    if let Some(drawn) = self.drawn.as_ref() {
+                        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(drawn.window.hwnd) };
+                    }
+                    self.stale = true;
+                }
                 // In the PIN's box: the caret where it was pressed, the keys taken again where they were given away.
                 if let (Some(Spot::Field), Some((x, _))) = (self.pressed, at) {
                     let place = self.places.iter().min_by(|a, b| (a.1 - x).abs().total_cmp(&(b.1 - x).abs())).map(|place| place.0);
@@ -494,6 +545,7 @@ impl Peek {
                 None
             }
             WM_LBUTTONUP => {
+                self.let_go_of_press();
                 let pressed = self.pressed.take();
                 let spot = at.and_then(|at| self.spot_at(at)).filter(|spot| Some(*spot) == pressed)?;
                 self.pressed_on(spot, now)
@@ -540,6 +592,40 @@ impl Peek {
             }
             _ => None,
         }
+    }
+
+    /// What came no longer pressed: drawn as it was, the pointer let go of.
+    fn let_go_of_press(&mut self) {
+        if self.held.take().is_some() {
+            if let Some(drawn) = self.drawn.as_ref() {
+                super::window::let_go_of_capture(drawn.window.hwnd);
+            }
+            self.stale = true;
+        }
+    }
+
+    /// What came, pressed at `from` (physical px) and moved far enough: its picture dragged off it into another
+    /// program, as a thing on the station is (the station gives it, see `station::drag_off`), carried as it is drawn
+    /// there (see `carry`), its room left empty; let go where nothing takes it, back into its room.
+    fn lift(&mut self, from: POINT) {
+        self.let_go_of_press();
+        self.pressed = None;
+        let (Some(Says::Came { id, .. }), Some(place), Some(drawn)) = (self.plate.clone(), self.place, self.drawn.as_ref()) else { return };
+        if self.face.is_empty() {
+            return;
+        }
+        let carried = vec![crate::ui::view::Hit::Shelf(id)];
+        let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+        let Some(drag) = crate::station::drag_off(&carried, thread) else { return };
+        let thumb = self.thumb_on_screen(place);
+        let (skin, dark, _) = look();
+        let tile = crate::carry::Tile { hit: carried[0], parts: self.face.clone(), home: None, size: (THUMB, THUMB), at: POINT { x: thumb.left, y: thumb.top } };
+        let count = crate::station::select::landing(&carried);
+        let lifted = crate::carry::Lifted { carried, count, drag, tiles: vec![tile], from, px: place.contact.scale, over: place.plate, window: drawn.window.hwnd, look: super::menu::Look::of(skin, dark) };
+        crate::carry::begin(&drawn.gfx, lifted);
+        self.lifting = Some((drag, id));
+        self.away = true;
+        self.stale = true;
     }
 
     /// The keys taken for the PIN's box (its window brought to the front with them), where they are not yet.
@@ -664,7 +750,11 @@ impl Peek {
         let mut whole = true;
         let mut spots = Vec::new();
         let mut places = Vec::new();
-        let (over, trust) = (self.over, self.trust.1);
+        let (over, trust, away) = (self.over, self.trust.1, self.away);
+        // (Pressed to be dragged off: drawn in a little round its middle.)
+        let held = if self.held.is_some() { super::view::PRESSED_IN } else { 1.0 };
+        let plate = (WIDE, tall(&says));
+        let mut face = Vec::new();
         let now = Instant::now();
         let field = self.written.as_ref().map(|written| Field {
             typing: &written.typing,
@@ -674,9 +764,16 @@ impl Peek {
             trying: written.trying,
         });
         let done = surface.draw(&drawn.gfx, size, scale, |frame| {
-            frame.origin(corner.0 + dx, corner.1 + dy);
-            whole = paint(frame, &theme, lang, &says, (over, trust), field.as_ref(), &mut spots, &mut places);
+            let middle = (plate.0 / 2.0, plate.1 / 2.0);
+            frame.place(Matrix3x2::translation(-middle.0, -middle.1) * Matrix3x2::scale(held, held) * Matrix3x2::translation(corner.0 + dx + middle.0, corner.1 + dy + middle.1));
+            whole = paint(frame, &theme, lang, &says, (over, trust, away), field.as_ref(), &mut spots, &mut places);
             frame.origin(0.0, 0.0);
+            // What its picture draws, kept to be carried as it is dragged off.
+            if let (Says::Came { id, .. }, false) = (&says, away) {
+                let recorder = super::morph::Recorder::new(frame, 1.0, (0.0, 0.0));
+                super::view::paint_kept_face(&recorder, &theme, *id, (0.0, 0.0, THUMB, THUMB), 1.0, lang);
+                face = recorder.parts();
+            }
         });
         if let Err(error) = &done {
             if !gfx::failed("nearby notice", &drawn.gfx, Some(error)) {
@@ -687,6 +784,9 @@ impl Peek {
         drawn.surface = Some(surface);
         self.spots = spots;
         self.places = places;
+        if !face.is_empty() {
+            self.face = face;
+        }
         drawn.window.show();
         // (A PIN asked for: written at once, out, without a press first.)
         if self.written.as_ref().is_some_and(|written| !written.keys) && self.sliding.is_none_or(|(_, out, _)| out) {
@@ -961,7 +1061,7 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
 /// trusted or not (`trust`), a PIN's box as `field` is; its parts a press does something on put in `spots`, and where
 /// in the PIN's box each place between its characters is in `places`. Whether all of it was drawn (its picture made).
 #[allow(clippy::too_many_arguments)]
-fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (Option<Spot>, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
+fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, away): (Option<Spot>, bool, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
     let canvas: &dyn Canvas = frame;
     let height = tall(says);
     let plate = super::menu::plate(canvas, super::menu::Look::of(theme.skin, theme.dark), (0.0, 0.0, WIDE, height));
@@ -1087,6 +1187,12 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust): (
             if done > 0.0 {
                 canvas.fill_rounded(ink.trace, PAD, y, (inner * done).max(BAR), BAR, BAR / 2.0);
             }
+            spots.push((0.0, 0.0, WIDE, height, Spot::Body));
+        }
+        // (Its picture carried off it: the room it left.)
+        Says::Came { .. } if away => {
+            super::view::paint_kept_room(canvas, theme, (PAD, PAD, THUMB, THUMB));
+            text_beside(canvas, theme, title_font, &title, &under);
             spots.push((0.0, 0.0, WIDE, height, Spot::Body));
         }
         Says::Came { id, .. } => {
@@ -1237,12 +1343,13 @@ mod pictures {
         let photo = offered("IMG_20261112_143012.jpg", "image/jpeg", 3_500_000);
         let many = vec![photo.clone(), offered("会议纪要.docx", "", 86_000), offered("第三季度报表.xlsx", "", 1_200_000), offered("IMG_2.jpg", "image/jpeg", 2_900_000), offered("录音.m4a", "audio/mp4", 8_400_000)];
         let states = [
-            ("ask", Says::Ask(Asking { id: 1, from: sender(true), files: vec![photo.clone()] }), (Some(Spot::Accept), true)),
-            ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false)),
-            ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false)),
-            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false)),
-            ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false)),
-            ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false)),
+            ("ask", Says::Ask(Asking { id: 1, from: sender(true), files: vec![photo.clone()] }), (Some(Spot::Accept), true, false)),
+            ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false, false)),
+            ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false, false)),
+            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, false)),
+            ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, true)),
+            ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false)),
+            ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false, false)),
         ];
         let mut written = Typing::most(PIN_MOST);
         written.put(&"1234".encode_utf16().collect::<Vec<u16>>());

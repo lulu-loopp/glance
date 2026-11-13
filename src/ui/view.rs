@@ -881,8 +881,9 @@ fn held_room(frame: &dyn Canvas, theme: &Theme, held: Held, (x, y, w, h): (f32, 
     }
 }
 
-/// How large a note's card pressed to be pulled off the panel is drawn, of its box.
-const PRESSED_IN: f32 = 0.97;
+/// How large a note's card pressed to be pulled off the panel is drawn, of its box (and the notice at the edge, pressed
+/// to drag its picture off: see `peek`).
+pub(crate) const PRESSED_IN: f32 = 0.97;
 
 /// A thing on a station's lane (a thing on it, copied lately, a file come lately) as it is held to be dragged off it:
 /// pressed, one at a time, as the pointer holds one. Carried off it by Glance (see `carry`), with what is chosen with
@@ -4843,6 +4844,14 @@ pub(crate) fn paint_kept_face(frame: &dyn Canvas, theme: &Theme, id: u64, (x, y,
     };
     paint_face(frame, theme, theme.ink("station"), &tile, x, y, w, h, shows);
     Some(whole)
+}
+
+/// The room a thing's face drawn at (`x`, `y`), `w` × `h` (see `paint_kept_face`) leaves as it is carried off: outlined,
+/// as a room on a station's lane is.
+pub(crate) fn paint_kept_room(frame: &dyn Canvas, theme: &Theme, (x, y, w, h): (f32, f32, f32, f32)) {
+    let radius = face_round(theme, w.min(h));
+    frame.fill_rounded(theme.text.alpha(0.03), x, y, w, h, radius);
+    frame.stroke_rounded_dashed(theme.text.alpha(0.22), x, y, w, h, radius, 1.5);
 }
 
 /// The file or folder at `path` by Windows' own icon for it, `side` wide round `centre` (asked for at as many pixels as
