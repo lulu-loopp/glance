@@ -1,5 +1,6 @@
 package dev.weiyi.glance.remote
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,6 +16,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
@@ -130,6 +132,12 @@ object AutoSend {
      */
     private const val BEFORE = 24 * 60 * 60L
 
+    /**
+     * How long after it was added a photo the camera took is found at most where the app is let be in the background
+     * (s): its watch is told within 8 s. Found later, the system held the app there.
+     */
+    private const val LATE = 60L
+
     /** What a PC's user said in refusing a sending (see the helper's `prepare`): it is not offered again. */
     private val REFUSALS = setOf("refused", "not taken from devices not trusted")
 
@@ -159,6 +167,20 @@ object AutoSend {
 
     fun notice(context: Context) = kept(context).getBoolean("notice", true)
 
+    /**
+     * Whether the photos taken lately were found only long after ([LATE]), so that the system holds the app in the
+     * background where it said it lets it be there (some, as ColorOS, keep a setting of their own): until one is found in
+     * time with the app not in front.
+     */
+    fun held(context: Context) = kept(context).getBoolean("held", false)
+
+    /** Whether the app is in front now (its jobs run then wherever it is held otherwise). */
+    private fun inFront(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(info)
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
     private fun now() = System.currentTimeMillis() / 1000
 
     /** The permission the phone's [kind] of media (`i` pictures, `v` videos) are read by. */
@@ -172,6 +194,18 @@ object AutoSend {
     fun readable(context: Context, kind: Char) = context.checkSelfPermission(permission(kind)) == PackageManager.PERMISSION_GRANTED
 
     /**
+     * Whether the system lets this app be in the background as it needs to: where it is optimised for the battery,
+     * the system may hold it there (some, as ColorOS, freeze it), and its jobs do not run till it is opened.
+     */
+    fun unheld(context: Context) = context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+
+    /** What asks its user to let this app be in the background ([unheld]): the system's own question. */
+    fun letGo(context: Context) = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}"))
+
+    /** The system's settings for this app: where a system holding it otherwise ([held]) lets it be in the background. */
+    fun settings(context: Context) = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${context.packageName}"))
+
+    /**
      * Sends to [pc] from now on (what was taken before is not sent): the PC asked where it receives, and told this
      * phone's certificate. Blocks: not from the main thread. Throws what asking the PC throws, and [Off] where the PC
      * does not receive.
@@ -180,7 +214,7 @@ object AutoSend {
         if (!pc.said("/v1/nearby").optBoolean("on")) throw Off
         pc.said("/v1/nearby/trust", JSONObject().put("fingerprint", Own.fingerprint()).put("alias", Own.alias(context)))
         synchronized(lock) {
-            kept(context).edit().putString("to", pc.key).putLong("since", now()).putLong("looked_i", now()).putLong("looked_v", now()).putLong("videos_since", now()).remove("seen").remove("queue").commit()
+            kept(context).edit().putString("to", pc.key).putLong("since", now()).putLong("looked_i", now()).putLong("looked_v", now()).putLong("videos_since", now()).remove("seen").remove("queue").remove("held").commit()
             // (What was being sent to another PC is not.)
             sender?.stopped = true
             context.getSystemService(JobScheduler::class.java).cancel(SEND)
@@ -274,16 +308,23 @@ object AutoSend {
         val kinds = listOf('i' to since) + if (videos(context) && readable(context, 'v')) listOf('v' to maxOf(since, kept(context).getLong("videos_since", start))) else listOf()
         val screenshots = screenshots(context)
         val edit = kept(context).edit()
+        // Whether a photo the camera took was found long after it was added, and whether one was found in time.
+        var late = false
+        var prompt = false
         for ((kind, from) in kinds) {
             for (added in added(context, kind, maxOf(from, kept(context).getLong("looked_$kind", start) - BEFORE))) {
                 if (seen.has(added.entry.name)) continue
                 seen.put(added.entry.name, added.at)
                 if (added.camera || (added.screen && screenshots)) queue += added.entry.name
+                // (Pictures alone: a video is added as it begins to be taken.)
+                if (added.camera && kind == 'i') if (start - added.at > LATE) late = true else prompt = true
             }
             // (What of it was added before its next look goes back to is forgotten: it is not looked at again.)
             seen.keys().asSequence().filter { it[0] == kind && seen.getLong(it) < start - BEFORE }.toList().forEach(seen::remove)
             edit.putLong("looked_$kind", start)
         }
+        // Found late, the app was held. Found in time with the app not in front, it is not (in front, its jobs run anyway).
+        if (late) edit.putBoolean("held", true) else if (prompt && !inFront()) edit.putBoolean("held", false)
         edit.putString("seen", seen.toString()).putString("queue", JSONArray(queue).toString()).commit()
         if (queue.isNotEmpty() && sender.let { it == null || it.stopped }) send(context)
     }

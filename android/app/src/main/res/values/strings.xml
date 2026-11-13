@@ -153,4 +153,9 @@
     <string name="auto_denied">Without access to photos, nothing can be sent. Access can be allowed for Glance in the system settings.</string>
     <string name="auto_no_access">Paused: Glance may no longer see all photos. Allow access to all photos in the system settings to go on.</string>
     <string name="auto_videos_denied">Without access to videos, they cannot be sent. Access can be allowed for Glance in the system settings.</string>
+    <string name="auto_held">Running in the background</string>
+    <string name="auto_held_what">The system currently limits Glance in the background, so new photos are sent only once the app is opened.</string>
+    <string name="auto_held_allow">Allow</string>
+    <string name="auto_held_late">The last photos were sent only once the app was opened, as the system still limits Glance in the background. Allow it to run in the background in the system\'s settings for the app (on some phones under battery usage).</string>
+    <string name="auto_held_settings">Settings</string>
 </resources>

@@ -195,6 +195,15 @@ there (the PC sent to now is named under the switch). Unpairing that PC turns it
   - The phone's certificate is told it, `POST /v1/nearby/trust {fingerprint, alias}`: the PC trusts it while the
     phone is paired. The alias is the name the phone's user gave it (`Settings.Global.DEVICE_NAME`).
   - What was taken before is not sent.
+  - Where the app is optimised for the battery, the system's own question is asked
+    (`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`): held in the background, its jobs do not run. Not let go, the card
+    keeps a row "后台运行" saying photos go only once the app is opened, with "允许" to ask again.
+  - Some systems keep a setting of their own and hold the app where it was let go (ColorOS: 耗电管理 › 完全允许后台行为),
+    which no API tells. So it is seen as it happens: a camera photo found more than 60 s after it was added means the
+    app was held (its watch is told within 8 s); one found in time with the app not in front means it is not (in front,
+    its jobs run anyway, so that proves nothing). Videos do not count: one is added as it begins. Held, the row says
+    the last photos went only once the app was opened, with "设置" opening the system's settings for the app. Opening
+    the settings page looks at what came meanwhile, so it is known there at once.
 - **Client certificate.** An EC P-256 key in the Android KeyStore (`glance-nearby`, never leaving it), with the
   self-signed certificate the key store makes for it (CN=Glance, 20 years). Fingerprint: SHA-256 of its DER, capital
   hex. Presented whenever the phone sends (`Own.Presenting`).
@@ -240,6 +249,11 @@ there (the PC sent to now is named under the switch). Unpairing that PC turns it
 
 Delivery is "within seconds when the phone and PC are on the same network". Doze may delay it, and away from the
 PC's network the backoff grows (a photo taken back on it sends what waits at once).
+
+Seen on an OPPO Find N6 (ColorOS 17, 2026-11-12): with the app optimised for the battery, its process is frozen in
+the background (the log's `Hans ... blackList` holds its uid), and the content-trigger job, every constraint met, is
+never made ready (`Restricted due to: unknown:104`, then `Ready: false` with each flag true) till the app is opened,
+when the photo goes at once. Hence the question above.
 
 ## Order of work
 

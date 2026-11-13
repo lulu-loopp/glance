@@ -152,4 +152,9 @@
     <string name="auto_denied">未获得访问照片的权限，无法自动发送。可在系统设置中为 Glance 开启此权限。</string>
     <string name="auto_no_access">已暂停：Glance 无法访问全部照片。请在系统设置中允许访问全部照片后继续。</string>
     <string name="auto_videos_denied">未获得访问视频的权限，无法发送视频。可在系统设置中为 Glance 开启此权限。</string>
+    <string name="auto_held">后台运行</string>
+    <string name="auto_held_what">系统目前限制 Glance 在后台运行，新照片须待打开本应用后才会发出。</string>
+    <string name="auto_held_allow">允许</string>
+    <string name="auto_held_late">上次的照片在打开本应用后才发出，系统仍在限制 Glance 在后台运行。请在系统的应用设置中允许其在后台运行，部分手机位于「耗电管理」。</string>
+    <string name="auto_held_settings">设置</string>
 </resources>

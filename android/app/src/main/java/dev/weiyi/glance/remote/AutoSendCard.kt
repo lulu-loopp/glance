@@ -28,8 +28,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * New photos sent by themselves to [pc] (one of [pcs], those paired): turned on, the photos asked for (and the notice),
- * the PC asked whether it receives and told this phone's certificate; then what else is sent, and whether it is told.
- * Sent to another PC, it says so: turned on here, it is sent here instead.
+ * the PC asked whether it receives and told this phone's certificate, then the system asked to let the app be in the
+ * background; then what else is sent, and whether it is told. Sent to another PC, it says so: turned on here, it is
+ * sent here instead. Held in the background, it says so, and asks again.
  */
 @Composable
 fun AutoSendCard(pc: Pc, pcs: List<Pc>) {
@@ -51,12 +52,25 @@ fun AutoSendCard(pc: Pc, pcs: List<Pc>) {
     val movies = AutoSend.permission('v')
     // Whether the photos may be read: taken away in the system's settings, nothing is sent till they may again.
     var readable by remember { mutableStateOf(granted(photos)) }
+    // Whether the system lets the app be in the background: held there, nothing is sent till it is opened.
+    var unheld by remember { mutableStateOf(AutoSend.unheld(context)) }
+    val lettingGo = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { unheld = AutoSend.unheld(context) }
+    fun letGo() = lettingGo.launch(AutoSend.letGo(context))
+    // Whether photos were found only long after they were taken, where the system said it lets the app be.
+    var held by remember { mutableStateOf(AutoSend.held(context)) }
     // Back from elsewhere (the system's settings, perhaps), it is read again as it is now.
     LifecycleResumeEffect(pc.key) {
         to = AutoSend.to(context)
         val was = readable
         readable = granted(photos)
+        unheld = AutoSend.unheld(context)
+        held = AutoSend.held(context)
         if (readable && !was && to != null) kotlin.concurrent.thread(name = "auto-send-resume") { AutoSend.resume(context.applicationContext) }
+        // What was taken meanwhile is looked at: found long after it was taken, the system held the app.
+        if (to != null && readable) scope.launch {
+            withContext(Dispatchers.IO) { AutoSend.look(context.applicationContext) }
+            held = AutoSend.held(context)
+        }
         onPauseOrDispose {}
     }
     // Android 14 on lets its user give some photos alone: then new ones are not seen.
@@ -106,7 +120,9 @@ fun AutoSendCard(pc: Pc, pcs: List<Pc>) {
                 }
                 turning = false
                 to = AutoSend.to(context)
+                held = AutoSend.held(context)
                 trouble = failed
+                if (failed == null && !AutoSend.unheld(context)) letGo()
             }
         }
     }
@@ -132,6 +148,17 @@ fun AutoSendCard(pc: Pc, pcs: List<Pc>) {
                 }
             }
             if (on) {
+                // Held in the background: the system's question where it was not let be, else its settings for the app.
+                if (readable && (!unheld || held)) {
+                    Rule()
+                    Line(stringResource(R.string.auto_held), stringResource(if (unheld) R.string.auto_held_late else R.string.auto_held_what)) {
+                        if (unheld) {
+                            Words(stringResource(R.string.auto_held_settings), Accent) { context.startActivity(AutoSend.settings(context)) }
+                        } else {
+                            Words(stringResource(R.string.auto_held_allow), Accent, press = ::letGo)
+                        }
+                    }
+                }
                 Rule()
                 Line(stringResource(R.string.auto_screenshots), null) {
                     Toggle(screenshots, stringResource(R.string.auto_screenshots)) { AutoSend.setScreenshots(context, it); screenshots = it }
