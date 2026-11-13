@@ -384,8 +384,8 @@ fn made() -> Option<(windows::Win32::Foundation::HANDLE, windows::Win32::Foundat
 /// Serves the helper, as it comes and goes: what it tells heard, what it is told written.
 fn serve() {
     use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_PIPE_CONNECTED, HANDLE};
-    use windows::Win32::System::Pipes::{ConnectNamedPipe, DisconnectNamedPipe, GetNamedPipeClientProcessId};
+    use windows::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+    use windows::Win32::System::Pipes::{DisconnectNamedPipe, GetNamedPipeClientProcessId};
     use windows::Win32::System::Threading::GetCurrentProcess;
     let Some((up, down)) = made() else {
         crate::journal::note("nearby: its pipes could not be made (another Glance has them?); nearby transfer is not shown");
@@ -394,10 +394,9 @@ fn serve() {
     // (The same reason not noted again each time the helper comes.)
     let mut noted = None;
     loop {
-        let connected = [up, down].into_iter().all(|pipe| match unsafe { ConnectNamedPipe(pipe, None) } {
-            Ok(()) => true,
-            Err(error) => error.code() == ERROR_PIPE_CONNECTED.to_hresult(),
-        });
+        // (The helper opens the one and at once the other: the other not opened soon after the one, both are let go
+        // of, so that the one is free for the helper to open again.)
+        let connected = opened(up) && opened_within(down, WHOLE_WITHIN);
         // Believed only from the helper beside this Glance, one process at both ends.
         let (mut one, mut other) = (0u32, 0u32);
         let why = if !connected {
@@ -452,6 +451,40 @@ fn serve() {
 
 /// The helper's program, beside Glance's.
 const HELPER: &str = "glance-remote.exe";
+
+/// How long after one of the pipes is opened the other is waited for.
+const WHOLE_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Waits for `pipe` (its server's end) to be opened: whether it was.
+fn opened(pipe: windows::Win32::Foundation::HANDLE) -> bool {
+    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    match unsafe { ConnectNamedPipe(pipe, None) } {
+        Ok(()) => true,
+        Err(error) => error.code() == ERROR_PIPE_CONNECTED.to_hresult(),
+    }
+}
+
+/// Waits `within` that at most for `pipe` to be opened: whether it was. A wait has no time limit of its own: it is
+/// waited on a thread of its own, which does nothing else, its wait cancelled once the time is over (again and again
+/// till it ends, in case it had not begun).
+fn opened_within(pipe: windows::Win32::Foundation::HANDLE, within: std::time::Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::IO::CancelSynchronousIo;
+    let raw = pipe.0 as usize;
+    let (done, came) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        let _ = done.send(opened(HANDLE(raw as *mut _)));
+    });
+    let whole = came.recv_timeout(within).unwrap_or(false);
+    while !waiting.is_finished() {
+        let _ = unsafe { CancelSynchronousIo(HANDLE(waiting.as_raw_handle())) };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = waiting.join();
+    whole
+}
 
 /// Hears what the helper tells on `told`, a line each, till it goes (or tells a line too long to be one).
 fn listen(told: std::fs::File) {
@@ -617,6 +650,46 @@ mod tests {
         BufReader::new(unsafe { std::fs::File::from_raw_handle(up.0) }).read_line(&mut heard).unwrap();
         assert!(matches!(serde_json::from_str::<Told>(&heard).unwrap(), Told::Unasked { id: 4 }));
         drop(unsafe { std::fs::File::from_raw_handle(down.0) });
+    }
+
+    /// One of the pipes opened and not the other: the other is waited for no longer than it is to be, and both let go
+    /// of, one opening both after that is taken whole.
+    #[test]
+    fn one_pipe_opened_alone_is_let_go_of() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::core::HSTRING;
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows::Win32::Storage::FileSystem::{PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND};
+        use windows::Win32::System::Pipes::{CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT};
+        let name = |end: &str| format!(r"\\.\pipe\dev.weiyi.glance.nearby.whole.{}.{end}", std::process::id());
+        let make = |end: &str, access| unsafe { CreateNamedPipeW(&HSTRING::from(name(end)), access, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 1 << 16, 1 << 16, 0, None) };
+        let (up, down) = (make("up", PIPE_ACCESS_INBOUND), make("down", PIPE_ACCESS_OUTBOUND));
+        let open_up = || std::fs::OpenOptions::new().access_mode(0x0010_0082).open(name("up"));
+        let open_down = || std::fs::OpenOptions::new().access_mode(0x0012_0089).open(name("down"));
+        // The one alone: not whole, in about the time given.
+        let alone = open_up().expect("the one opened");
+        let began = std::time::Instant::now();
+        assert!(opened(up));
+        assert!(!opened_within(down, std::time::Duration::from_millis(300)), "not whole");
+        assert!(began.elapsed() < std::time::Duration::from_secs(2), "not waited for longer: {:?}", began.elapsed());
+        drop(alone);
+        unsafe {
+            let _ = DisconnectNamedPipe(up);
+            let _ = DisconnectNamedPipe(down);
+        }
+        // Then both, as the helper opens them (each busy till it is waited on, waited for), as they are served: whole.
+        let (up_at, down_at) = (up.0 as usize, down.0 as usize);
+        let serving = std::thread::spawn(move || opened(HANDLE(up_at as *mut _)) && opened_within(HANDLE(down_at as *mut _), std::time::Duration::from_secs(2)));
+        let when_free = |end: &str| unsafe { WaitNamedPipeW(&HSTRING::from(name(end)), 2000) }.as_bool();
+        assert!(when_free("up"));
+        let _telling = open_up().expect("opened again");
+        assert!(when_free("down"));
+        let _told = open_down().expect("the other opened");
+        assert!(serving.join().unwrap(), "whole");
+        unsafe {
+            let _ = CloseHandle(up);
+            let _ = CloseHandle(down);
+        }
     }
 
     /// What the helper tells is read as it writes it, the receipts too.

@@ -17,6 +17,8 @@ use super::{Answer, Asked, Event, Told, ASKED_FOR};
 
 /// How often Glance's pipes are looked for while it is not there.
 const LOOKED_FOR_EVERY: Duration = Duration::from_secs(2);
+/// How long a pipe of Glance's that is there and busy is waited for (ms).
+const BUSY_FOR: u32 = 2000;
 
 /// What Glance asks of this helper.
 #[derive(Clone, Debug, Deserialize)]
@@ -82,14 +84,28 @@ fn user_sid() -> Option<String> {
 /// Glance's program beside this one serving them, why they are not kept to.
 fn glances() -> Result<(std::fs::File, std::fs::File), Option<String>> {
     use std::os::windows::fs::OpenOptionsExt;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{ERROR_PIPE_BUSY, HANDLE};
+    use windows::Win32::System::Pipes::{GetNamedPipeServerProcessId, WaitNamedPipeW};
     // Glance allowed to learn who this is, never to act as it (SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION).
     const IDENTIFICATION_ONLY: u32 = 0x0011_0000;
+    // A pipe there and busy (Glance waits on the one and then on the other, so the other is busy till Glance has the
+    // one, and a pipe let go of is till Glance waits on it again) is waited for, and opened then.
+    let open = |name: PathBuf, access: u32| {
+        let opening = || std::fs::OpenOptions::new().access_mode(access).security_qos_flags(IDENTIFICATION_ONLY).open(&name);
+        match opening() {
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
+                let _ = unsafe { WaitNamedPipeW(&HSTRING::from(name.as_os_str()), BUSY_FOR) };
+                opening()
+            }
+            opened => opened,
+        }
+    };
     // Only as much as each end needs, and Glance gives no more: writing data (FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
     // SYNCHRONIZE), and reading (FILE_GENERIC_READ).
-    let up = std::fs::OpenOptions::new().access_mode(0x0010_0082).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(false)).map_err(|_| None)?;
-    let down = std::fs::OpenOptions::new().access_mode(0x0012_0089).security_qos_flags(IDENTIFICATION_ONLY).open(pipe(true)).map_err(|_| None)?;
+    let up = open(pipe(false), 0x0010_0082).map_err(|_| None)?;
+    // (The one opened and not the other: why, as it is not how Glance serves them.)
+    let down = open(pipe(true), 0x0012_0089).map_err(|error| Some(format!("the one it is told by not opened ({error})")))?;
     let server = |file: &std::fs::File| {
         use std::os::windows::io::AsRawHandle;
         let mut process = 0u32;
