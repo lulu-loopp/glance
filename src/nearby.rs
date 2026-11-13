@@ -30,13 +30,25 @@ pub struct Sender {
     pub address: IpAddr,
 }
 
-/// A file as a sending offers it.
+/// A file as a sending offers it: where the sending is words (a message), their first words too.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Offered {
     pub name: String,
     pub size: u64,
     #[serde(rename = "type", default)]
     pub kind: String,
+    #[serde(default)]
+    pub words: Option<String>,
+}
+
+impl Offered {
+    /// The words of a sending of `files` that is words (one "file", sent as a message), where it is.
+    pub fn words_of(files: &[Offered]) -> Option<&str> {
+        match files {
+            [one] => one.words.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 /// A device seen nearby, to be sent to.
@@ -146,6 +158,8 @@ const MOST: u64 = 8 << 20;
 /// The most files one receipt may hold, and the longest name or alias kept of what it says.
 const MOST_FILES: usize = 10_000;
 const MOST_NAME: usize = 1_000;
+/// The most words a receipt may hold (UTF-8 bytes: as much as the helper takes in a sending's offer).
+const MOST_WORDS: usize = 8 << 20;
 
 /// What nearby transfer shows now.
 pub fn shown() -> Shown {
@@ -324,10 +338,12 @@ fn heard(told: Told) {
 
 // ---- The pipes ----
 
-/// The pipes' names, this user's: the one the helper tells by, and the one it is told by (as it names them).
+/// The pipes' names, this user's: the one the helper tells by, and the one it is told by (as it names them). A test's
+/// are its own, so that it never meets the Glance running.
 fn names() -> Option<(String, String)> {
     let sid = crate::elevation::user_sid()?;
-    Some((format!(r"\\.\pipe\dev.weiyi.glance.nearby.{sid}.up"), format!(r"\\.\pipe\dev.weiyi.glance.nearby.{sid}.down")))
+    let test = if cfg!(test) { format!(".test{}", std::process::id()) } else { String::new() };
+    Some((format!(r"\\.\pipe\dev.weiyi.glance.nearby.{sid}{test}.up"), format!(r"\\.\pipe\dev.weiyi.glance.nearby.{sid}{test}.down")))
 }
 
 /// Glance's ends of the two pipes: made for this user alone (and the system), the first of their names (nothing else
@@ -460,12 +476,15 @@ fn listen(told: std::fs::File) {
 // ---- What came ----
 
 /// A receiving the helper wrote down as it ended: the sending, from whom, the files that came whole (each by its name
-/// in the inbox, the name it was sent by, how large it is), and when it ended (seconds since 1970).
+/// in the inbox, the name it was sent by, how large it is), or the words that came (a message: never with files), and
+/// when it ended (seconds since 1970).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Receipt {
     pub session: String,
     pub from: Sender,
     pub files: Vec<CameFile>,
+    #[serde(default)]
+    pub words: Vec<String>,
     pub at: u64,
 }
 
@@ -478,14 +497,16 @@ pub struct CameFile {
 
 impl Receipt {
     /// Whether it holds only what the helper writes: a sending's number and its files' names in the inbox of letters
-    /// and digits (with an extension of them), so none names anything but a file of the inbox; within bounds.
+    /// and digits (with an extension of them), so none names anything but a file of the inbox, or words and no files;
+    /// within bounds.
     fn sound(&self) -> bool {
         let plain = |text: &str, most: usize| !text.is_empty() && text.len() <= most && text.bytes().all(|byte| byte.is_ascii_alphanumeric());
         let file = |name: &str| match name.split_once('.') {
             Some((stem, extension)) => plain(stem, 64) && plain(extension, 8),
             None => plain(name, 64),
         };
-        plain(&self.session, 64) && self.files.len() <= MOST_FILES && self.files.iter().all(|came| file(&came.file))
+        let words: usize = self.words.iter().map(String::len).sum();
+        plain(&self.session, 64) && self.files.len() <= MOST_FILES && self.files.iter().all(|came| file(&came.file)) && words <= MOST_WORDS && (self.words.is_empty() || self.files.is_empty())
     }
 
     /// The device it came from, as the station keeps it.
@@ -557,6 +578,7 @@ mod tests {
             session: session.into(),
             from: Sender { alias: "Z Fold".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() },
             files: files.iter().map(|file| CameFile { file: (*file).into(), name: "照片.jpg".into(), size: 3 }).collect(),
+            words: Vec::new(),
             at: 1,
         }
     }
@@ -570,6 +592,11 @@ mod tests {
         }
         assert!(!receipt("..", &["a.jpg"]).sound());
         assert!(!receipt("", &["a.jpg"]).sound());
+        // Words, and no files with them.
+        let words = Receipt { words: vec!["https://example.com".into()], ..receipt("c3d4", &[]) };
+        assert!(words.sound());
+        assert!(!Receipt { words: vec!["x".into()], ..receipt("c3d4", &["0f3a9c.jpg"]) }.sound());
+        assert!(!Receipt { words: vec!["x".repeat(MOST_WORDS + 1)], ..receipt("c3d4", &[]) }.sound());
     }
 
     /// The pipes are made once (none made again while they are), and the helper opens them as it does (writing the

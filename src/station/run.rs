@@ -732,9 +732,9 @@ impl Station {
         self.show();
     }
 
-    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, and into recent files; each
-    /// receipt taken away once what it holds is kept. One whose files cannot be kept now (the station is full, or
-    /// they cannot be moved) stays, with those after it, to be taken in again.
+    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, files into recent files too;
+    /// each receipt taken away once what it holds is kept. One whose files or words cannot be kept now (the station is
+    /// full, or they cannot be moved) stays, with those after it, to be taken in again.
     fn arrivals(&mut self) {
         let Some(folder) = crate::nearby::helper_folder() else { return };
         let inbox = folder.join("inbox");
@@ -742,6 +742,20 @@ impl Station {
         for (path, receipt) in crate::nearby::receipts(&folder) {
             let from = receipt.device();
             let alias = from.alias.clone();
+            // (Words: each a thing of its own, never with files.)
+            if !receipt.words.is_empty() {
+                match self.keep.words_arrived(&receipt.words, &from, super::now_ms()) {
+                    Ok(ids) => {
+                        let _ = std::fs::remove_file(&path);
+                        came.extend(ids);
+                        continue;
+                    }
+                    Err(refused) => {
+                        crate::journal::note(format!("nearby: words that came are not taken in now ({refused:?})"));
+                        break;
+                    }
+                }
+            }
             match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
                 Ok(taken) => {
                     let listed: Vec<(std::path::PathBuf, u64)> = taken.iter().filter_map(|(arrived, size)| Some((self.keep.folder.named(&arrived.file, &arrived.name)?, *size))).collect();

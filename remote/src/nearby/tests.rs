@@ -170,7 +170,12 @@ fn a_sending_refused_comes_to_nothing() {
 
 /// A plain request on a TLS connection that presents no certificate: what a receiver answers, by its status and body.
 fn without_certificate(both: &Both, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
-    let config = both.sender.client_anonymous(&both.receiver.own.fingerprint);
+    posted(both, path, body, false)
+}
+
+/// The same, presenting the sender's certificate where `presenting`.
+fn posted(both: &Both, path: &str, body: &[u8], presenting: bool) -> (u16, Vec<u8>) {
+    let config = if presenting { both.sender.client(&both.receiver.own.fingerprint).unwrap() } else { both.sender.client_anonymous(&both.receiver.own.fingerprint) };
     let socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, both.device.port)).unwrap();
     let tls = rustls::ClientConnection::new(config, rustls::pki_types::ServerName::IpAddress(both.device.address.into())).unwrap();
     let mut stream = rustls::StreamOwned::new(tls, socket);
@@ -389,4 +394,34 @@ fn a_pin_asked_for_is_given_and_tried_again() {
     let began = Instant::now();
     assert_eq!(send_giving(Vec::new()).last(), Some(&send::State::Cancelled));
     assert!(began.elapsed() < Duration::from_secs(3));
+}
+
+/// Words sent as a message (one text "file", its words as its preview) are taken as words: asked about as any sending
+/// is (Glance shown their first words), answered 204 (nothing to upload), nothing written into the inbox, and written
+/// down for Glance as a receiving of their own; from a device trusted, while another sending is being received too.
+#[test]
+fn words_sent_come_as_words() {
+    let both = both("words", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });
+    let words = "https://example.com/a?b=1";
+    let offer = |words: &str| json!({ "info": { "alias": "Galaxy Z Fold6", "version": "2.1", "fingerprint": both.sender.fingerprint, "deviceType": "mobile" }, "files": { "m": { "id": "m", "fileName": "m.txt", "size": words.len(), "fileType": "text/plain", "preview": words } } }).to_string();
+    let (status, _) = posted(&both, "/prepare-upload", offer(words).as_bytes(), true);
+    assert_eq!(status, 204);
+    let asked = both.heard.asked.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].files[0].words.as_deref(), Some(words));
+    let (from, files, short) = came(&both.heard).expect("told what came");
+    assert_eq!(from.fingerprint, both.sender.fingerprint);
+    assert!(files.is_empty() && short.is_none());
+    assert!(std::fs::read_dir(both.receiver.inbox()).map_or(true, |mut entries| entries.next().is_none()), "nothing uploaded");
+    let receipts = || -> Vec<Receipt> { std::fs::read_dir(Receipt::folder(both.receiver.inbox())).unwrap().flatten().map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap()).collect() };
+    let written = receipts();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].words, [words]);
+    assert!(written[0].files.is_empty());
+    // Trusted now: words sent while files are being received come too, unasked.
+    let files_offer = json!({ "info": { "alias": "Galaxy Z Fold6", "version": "2.1", "fingerprint": both.sender.fingerprint, "deviceType": "mobile" }, "files": { "a": { "id": "a", "fileName": "a.jpg", "size": 3, "fileType": "image/jpeg" } } }).to_string();
+    assert_eq!(posted(&both, "/prepare-upload", files_offer.as_bytes(), true).0, 200);
+    assert_eq!(posted(&both, "/prepare-upload", offer("second").as_bytes(), true).0, 204);
+    assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
+    assert_eq!(receipts().iter().filter(|receipt| receipt.words == ["second"]).count(), 1);
 }

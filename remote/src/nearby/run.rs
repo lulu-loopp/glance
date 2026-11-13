@@ -134,10 +134,12 @@ pub fn phone_trusted(phone: &str, fingerprint: &str, alias: &str) -> std::io::Re
     let alias = super::shown_name(alias);
     Config::change(|config| {
         let trusted = &mut config.nearby.trusted;
-        // (One phone, one certificate: what it told before goes.)
+        // (One phone, one certificate: what it told before goes. Told again, it is trusted since it first was, and
+        // last sent when it did.)
+        let now = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let (last, since) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone) && trusted.fingerprint.eq_ignore_ascii_case(&fingerprint)).map_or((0, now), |was| (was.last, was.since));
         trusted.retain(|trusted| trusted.phone.as_deref() != Some(phone) && !trusted.fingerprint.eq_ignore_ascii_case(&fingerprint));
-        let since = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last: 0, since, phone: Some(phone.to_string()) });
+        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last, since, phone: Some(phone.to_string()) });
     })?;
     Ok(true)
 }

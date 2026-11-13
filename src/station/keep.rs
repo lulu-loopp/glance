@@ -165,6 +165,38 @@ impl Keep {
         Ok(arrived)
     }
 
+    /// The words sent as messages from `from` (see `nearby::Receipt::words`) put on the shelf at `now_ms`, each as words
+    /// given are (a link, text, or text too long for the shelf saved as words), from that device: their numbers. All or
+    /// none (what was kept of those made before one that cannot be, removed).
+    pub fn words_arrived(&mut self, words: &[String], from: &super::shelf::Device, now_ms: u64) -> Result<Vec<u64>, Refused> {
+        let mut made = Vec::new();
+        for one in words {
+            match self.made(Content::Text(one.clone())) {
+                Ok(what) => made.push(what),
+                Err(refused) => {
+                    for (what, _) in &made {
+                        self.folder.remove(what.own_files());
+                    }
+                    self.refused = Some(refused);
+                    return Err(refused);
+                }
+            }
+        }
+        self.refused = None;
+        let ids: Vec<u64> = made
+            .into_iter()
+            .map(|(what, own_bytes)| {
+                let id = self.shelf.put(what, now_ms, false, false, own_bytes);
+                self.shelf.items.last_mut().expect("just put").from = Some(from.clone());
+                id
+            })
+            .collect();
+        if !ids.is_empty() {
+            self.save();
+        }
+        Ok(ids)
+    }
+
     /// `bytes` kept as a file of its own of the kind `extension` says (`untrusted`: marked as from the Internet), room
     /// made for them: its name.
     fn kept(&mut self, bytes: &[u8], extension: &str, untrusted: bool) -> Result<String, Refused> {
@@ -244,7 +276,7 @@ impl Keep {
 }
 
 /// Whether `text` is a web address alone (one, nothing round it).
-pub(super) fn is_link(text: &str) -> bool {
+pub(crate) fn is_link(text: &str) -> bool {
     (text.starts_with("https://") || text.starts_with("http://")) && text.len() > "https://".len() && !text.chars().any(char::is_whitespace)
 }
 

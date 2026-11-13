@@ -96,7 +96,8 @@ pub struct Sender {
     pub address: IpAddr,
 }
 
-/// A file as a sending names it.
+/// A file as a sending names it: where the sending is words (a message: see `Receiver::prepare`), its first words
+/// too, as they may be shown (at most `WORDS_SHOWN` characters).
 #[derive(Clone, Debug, Serialize)]
 pub struct Offered {
     pub id: String,
@@ -104,7 +105,12 @@ pub struct Offered {
     pub size: u64,
     #[serde(rename = "type")]
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub words: Option<String>,
 }
+
+/// How much of the words a message sends Glance is given to show as it asks.
+const WORDS_SHOWN: usize = 200;
 
 /// What Glance is asked: whether to take what a device not trusted sends.
 #[derive(Clone, Debug, Serialize)]
@@ -495,7 +501,9 @@ impl Receiver {
     }
 
     /// A sending offered (`prepare-upload`): taken (trusted, or the user says so), a receiving begun and each file's
-    /// token given; else why not.
+    /// token given; else why not. A message (LocalSend's way of sending words: one text "file" whose words are given
+    /// whole as its preview) is taken as words: nothing of it is uploaded (answered 204), and it is written down for
+    /// Glance at once (see `message`).
     fn prepare(&self, body: &[u8], from: IpAddr, verified: Option<String>) -> Result<(u16, String), Refused> {
         let asked: Value = serde_json::from_slice(body).map_err(|_| (400, "not a sending"))?;
         let info: Info = asked.get("info").cloned().and_then(|info| serde_json::from_value(info).ok()).ok_or((400, "no info of the sender"))?;
@@ -505,6 +513,10 @@ impl Receiver {
         }
         let kept = (self.kept)();
         let (most_file, most_sending) = self.limits();
+        let message = match (offered.len(), offered.values().next()) {
+            (1, Some(file)) if file.get("fileType").and_then(Value::as_str).is_some_and(|kind| kind.starts_with("text/")) => file.get("preview").and_then(Value::as_str).filter(|words| !words.trim().is_empty()).map(str::to_string),
+            _ => None,
+        };
         let mut files = Vec::new();
         for (id, file) in offered {
             let size = file.get("size").and_then(Value::as_u64).ok_or((400, "a file with no size"))?;
@@ -514,7 +526,8 @@ impl Receiver {
             let name = shown_name(file.get("fileName").and_then(Value::as_str).unwrap_or_default());
             let kind = file.get("fileType").and_then(Value::as_str).unwrap_or("application/octet-stream").chars().take(100).collect();
             let sha256 = file.get("sha256").and_then(Value::as_str).filter(|hash| hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).map(str::to_ascii_lowercase);
-            files.push((Offered { id: id.chars().take(200).collect(), name, size, kind }, sha256));
+            let words = message.as_ref().map(|words| words.chars().take(WORDS_SHOWN).collect());
+            files.push((Offered { id: id.chars().take(200).collect(), name, size, kind, words }, sha256));
         }
         if files.is_empty() {
             return Ok((204, String::new()));
@@ -534,8 +547,9 @@ impl Receiver {
         if sender.fingerprint.is_empty() {
             return Err((400, "no fingerprint"));
         }
-        // One receiving at a time (another, or one being asked about, turns this away): the sender may try again.
-        {
+        // One receiving at a time (another, or one being asked about, turns this away): the sender may try again. (A
+        // message is no receiving: it comes whole with its offer.)
+        if message.is_none() {
             let mut session = self.session.lock().unwrap();
             if session.as_ref().is_some_and(|going| going.touched.elapsed() > IDLE) {
                 let stale = session.take().unwrap();
@@ -568,6 +582,10 @@ impl Receiver {
             }
         } else {
             (self.keep)(&|kept: &mut Kept| kept.trust(&sender));
+        }
+        if let Some(words) = message {
+            self.message(sender, words);
+            return Ok((204, String::new()));
         }
         let id = random(16);
         let mut tokens = serde_json::Map::new();
@@ -728,12 +746,24 @@ impl Receiver {
         // Written down before Glance is told: what came is Glance's to take in, told or not (it may not be there, or
         // go before it has kept it).
         if !came.is_empty() {
-            let receipt = Receipt { session: session.id.clone(), from: session.from.clone(), files: came.clone(), at: seconds() };
+            let receipt = Receipt { session: session.id.clone(), from: session.from.clone(), files: came.clone(), words: Vec::new(), at: seconds() };
             if let Err(error) = receipt.write(&self.receipts) {
                 crate::journal::note(format!("nearby: the receipt of {} cannot be written ({error})", session.id));
             }
         }
         self.told.tell(Event::Came { session: session.id, from: session.from, files: came, short });
+    }
+
+    /// The words `from` sent as a message, taken: written down for Glance as a receiving of their own (with no files),
+    /// and Glance told so.
+    fn message(&self, from: Sender, words: String) {
+        let id = random(16);
+        crate::journal::note(format!("nearby: from {} ({}): words came", from.alias, from.address));
+        let receipt = Receipt { session: id.clone(), from: from.clone(), files: Vec::new(), words: vec![words], at: seconds() };
+        if let Err(error) = receipt.write(&self.receipts) {
+            crate::journal::note(format!("nearby: the receipt of {id} cannot be written ({error})"));
+        }
+        self.told.tell(Event::Came { session: id, from, files: Vec::new(), short: None });
     }
 
     /// A receiving nothing has come for in `IDLE`, given up (what came of it is told): looked at now and then.
@@ -753,13 +783,16 @@ impl Receiver {
     }
 }
 
-/// A receiving that ended with files come, written down for Glance (see `Receiver::end`): Glance takes each file in
-/// once (by the session and the file), and deletes the receipt once what it took in is kept.
+/// A receiving that ended with files come, or words (a message: see `Receiver::message`), written down for Glance
+/// (see `Receiver::end`): Glance takes each file in once (by the session and the file), and deletes the receipt once
+/// what it took in is kept.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub session: String,
     pub from: Sender,
     pub files: Vec<Came>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
     pub at: u64,
 }
 

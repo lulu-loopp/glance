@@ -85,11 +85,20 @@ enum Says {
     Ask(Asking),
     /// What a device sends, as it comes.
     Coming(Receiving),
-    /// What came (the thing `id` on the station), from whom, how many files, and whether all are pictures.
-    Came { id: u64, from: String, kind: Option<String>, files: usize, pictures: bool },
+    /// What came (the thing `id` on the station), from whom, and what it is.
+    Came { id: u64, from: String, kind: Option<String>, got: Got },
     /// The device of sending `job` asks for a PIN: what it calls itself, what is sent (said), and how many PINs given it
     /// turned down.
     Pin { job: u64, to: String, what: String, tried: u32 },
+}
+
+/// What came from a device: files (how many, and whether all are pictures), or words sent as a message (a web address
+/// alone, or text).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Got {
+    Files { count: usize, pictures: bool },
+    Link,
+    Text,
 }
 
 /// A part of it a press does something on.
@@ -874,11 +883,16 @@ impl Peek {
 
 /// What came, as the thing `id` on the station is, told (none: not on it, or not from a device).
 fn came_of(items: &[crate::station::shelf::Item], id: u64) -> Option<Says> {
+    use crate::station::shelf::What;
     let item = items.iter().find(|item| item.id == id)?;
-    let crate::station::shelf::What::Came { files } = &item.what else { return None };
     let from = item.from.as_ref()?;
-    let pictures = files.iter().all(|file| is_picture(&file.name));
-    Some(Says::Came { id, from: from.alias.clone(), kind: from.kind.clone(), files: files.len(), pictures })
+    let got = match &item.what {
+        What::Came { files } => Got::Files { count: files.len(), pictures: files.iter().all(|file| is_picture(&file.name)) },
+        What::Link { .. } => Got::Link,
+        What::Text { .. } | What::Saved { words: true, .. } => Got::Text,
+        _ => return None,
+    };
+    Some(Says::Came { id, from: from.alias.clone(), kind: from.kind.clone(), got })
 }
 
 /// Whether a file named `name` is a picture, by its extension.
@@ -1029,11 +1043,15 @@ fn counted(count: usize, pictures: bool, lang: Lang) -> String {
 fn words(says: &Says, lang: Lang) -> (String, String) {
     match says {
         Says::Ask(asking) => {
-            let what = counted(asking.files.len(), all_pictures(&asking.files), lang);
-            (asking.from.alias.clone(), match lang {
-                Lang::Zh => format!("想发送 {what}"),
-                Lang::En => format!("Wants to send {what}"),
-            })
+            let said = match (Offered::words_of(&asking.files), lang) {
+                (Some(words), Lang::Zh) if crate::station::keep::is_link(words.trim()) => "想发送一个链接".to_string(),
+                (Some(_), Lang::Zh) => "想发送一段文字".to_string(),
+                (Some(words), Lang::En) if crate::station::keep::is_link(words.trim()) => "Wants to send a link".to_string(),
+                (Some(_), Lang::En) => "Wants to send text".to_string(),
+                (None, Lang::Zh) => format!("想发送 {}", counted(asking.files.len(), all_pictures(&asking.files), lang)),
+                (None, Lang::En) => format!("Wants to send {}", counted(asking.files.len(), all_pictures(&asking.files), lang)),
+            };
+            (asking.from.alias.clone(), said)
         }
         Says::Coming(receiving) => {
             let what = counted(receiving.files.len(), all_pictures(&receiving.files), lang);
@@ -1043,11 +1061,18 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
                 Lang::En => (format!("Receiving {what}"), format!("From {} · {of}", receiving.from.alias)),
             }
         }
-        Says::Came { from, files, pictures, .. } => {
-            let what = counted(*files, *pictures, lang);
+        Says::Came { from, got, .. } => {
+            let title = match (got, lang) {
+                (Got::Files { count, pictures }, Lang::Zh) => format!("收到 {}", counted(*count, *pictures, lang)),
+                (Got::Files { count, pictures }, Lang::En) => format!("Received {}", counted(*count, *pictures, lang)),
+                (Got::Link, Lang::Zh) => "收到一个链接".to_string(),
+                (Got::Link, Lang::En) => "Received a link".to_string(),
+                (Got::Text, Lang::Zh) => "收到一段文字".to_string(),
+                (Got::Text, Lang::En) => "Received text".to_string(),
+            };
             match lang {
-                Lang::Zh => (format!("收到 {what}"), format!("来自 {from} · 已放入中转站")),
-                Lang::En => (format!("Received {what}"), format!("From {from} · In the station")),
+                Lang::Zh => (title, format!("来自 {from} · 已放入中转站")),
+                Lang::En => (title, format!("From {from} · In the station")),
             }
         }
         Says::Pin { to, .. } => match lang {
@@ -1085,15 +1110,27 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             canvas.text(&under, theme.small, theme.text2, left, PAD + 19.0, inner - HEAD - 10.0, Align::Start);
             // What it would send: each file on a row of its own (its mark, its name, its size), the rest counted.
             let mut y = PAD + HEAD + SPACE;
+            // (Words: their first line, by the mark of a link or of text, with no size.)
             for file in asking.files.iter().take(LISTED) {
                 canvas.fill_rounded(theme.track, PAD, y + 2.0, inner, FILE_ROW - 4.0, 8.0);
-                let mark = if file.kind.starts_with("image/") || is_picture(&file.name) { Icon::Image } else { Icon::File };
+                let words = file.words.as_deref().map(|words| words.trim().lines().next().unwrap_or_default());
+                let mark = match words {
+                    Some(words) if crate::station::keep::is_link(words) => Icon::Link,
+                    Some(_) => Icon::Pilcrow,
+                    None if file.kind.starts_with("image/") || is_picture(&file.name) => Icon::Image,
+                    None => Icon::File,
+                };
                 canvas.icon(mark, Point { x: PAD + 15.0, y: y + FILE_ROW / 2.0 }, 14.0, theme.text2);
-                let size = size_of_bytes(file.size);
-                let size_w = canvas.measure(&size, theme.small) + 1.0;
                 let middle = canvas.line_in(theme.small, y, FILE_ROW);
-                canvas.text(&file.name, theme.small, theme.text, PAD + 30.0, middle, inner - 30.0 - size_w - 16.0, Align::Start);
-                canvas.text(&size, theme.small, theme.text3, PAD + inner - 8.0 - size_w, middle, size_w, Align::Start);
+                match words {
+                    Some(words) => canvas.text(words, theme.small, theme.text, PAD + 30.0, middle, inner - 30.0 - 8.0, Align::Start),
+                    None => {
+                        let size = size_of_bytes(file.size);
+                        let size_w = canvas.measure(&size, theme.small) + 1.0;
+                        canvas.text(&file.name, theme.small, theme.text, PAD + 30.0, middle, inner - 30.0 - size_w - 16.0, Align::Start);
+                        canvas.text(&size, theme.small, theme.text3, PAD + inner - 8.0 - size_w, middle, size_w, Align::Start);
+                    }
+                }
                 y += FILE_ROW;
             }
             if asking.files.len() > LISTED {
@@ -1260,7 +1297,7 @@ mod tests {
     }
 
     fn offered(name: &str, kind: &str, size: u64) -> Offered {
-        Offered { name: name.into(), size, kind: kind.into() }
+        Offered { name: name.into(), size, kind: kind.into(), words: None }
     }
 
     /// What it says, in Chinese and in English: a device's asking by its name and what it would send (photos where
@@ -1274,9 +1311,16 @@ mod tests {
         assert_eq!(words(&Says::Ask(mixed), Lang::En).1, "Wants to send 2 files");
         let coming = Receiving { session: "s".into(), from: sender(true), files: vec![photo], done: 0, of: 3_400_000 };
         assert_eq!(words(&Says::Coming(coming), Lang::Zh), ("正在接收 1 张照片".to_string(), "来自 Z Fold · 3.2 MB".to_string()));
-        let came = Says::Came { id: 4, from: "Z Fold".into(), kind: None, files: 3, pictures: true };
+        let came = Says::Came { id: 4, from: "Z Fold".into(), kind: None, got: Got::Files { count: 3, pictures: true } };
         assert_eq!(words(&came, Lang::Zh), ("收到 3 张照片".to_string(), "来自 Z Fold · 已放入中转站".to_string()));
         assert_eq!(words(&came, Lang::En).0, "Received 3 photos");
+        // Words sent: a link, or text, asked about and come.
+        let link = Offered { words: Some("https://example.com/a".into()), ..offered("m.txt", "text/plain", 21) };
+        assert_eq!(words(&Says::Ask(Asking { id: 5, from: sender(true), files: vec![link] }), Lang::Zh).1, "想发送一个链接");
+        let text = Offered { words: Some("会议改到周四".into()), ..offered("m.txt", "text/plain", 18) };
+        assert_eq!(words(&Says::Ask(Asking { id: 6, from: sender(true), files: vec![text] }), Lang::En).1, "Wants to send text");
+        assert_eq!(words(&Says::Came { id: 7, from: "Z Fold".into(), kind: None, got: Got::Link }, Lang::Zh).0, "收到一个链接");
+        assert_eq!(words(&Says::Came { id: 8, from: "Z Fold".into(), kind: None, got: Got::Text }, Lang::Zh).0, "收到一段文字");
     }
 
     /// Sizes said as Explorer says them, a decimal under ten.
@@ -1350,19 +1394,22 @@ mod pictures {
         use crate::station::shelf::{Device, Item, What};
         let photo = std::path::PathBuf::from(r"C:\Windows\Web\Screen\img100.jpg");
         let from = Device { alias: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), fingerprint: "AB".into() };
-        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from) };
-        crate::station::run::pretend(vec![item], crate::settings::ShelfView::Cards);
+        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from.clone()) };
+        let link = Item { id: 8, what: What::Link { url: "https://glancepc.com/app".into() }, from: Some(from), ..item.clone() };
+        crate::station::run::pretend(vec![item, link], crate::settings::ShelfView::Cards);
         let sender = |verified: bool| crate::nearby::Sender { alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified, address: "10.0.0.5".parse().unwrap() };
-        let offered = |name: &str, kind: &str, size: u64| Offered { name: name.into(), size, kind: kind.into() };
+        let offered = |name: &str, kind: &str, size: u64| Offered { name: name.into(), size, kind: kind.into(), words: None };
         let photo = offered("IMG_20261112_143012.jpg", "image/jpeg", 3_500_000);
         let many = vec![photo.clone(), offered("会议纪要.docx", "", 86_000), offered("第三季度报表.xlsx", "", 1_200_000), offered("IMG_2.jpg", "image/jpeg", 2_900_000), offered("录音.m4a", "audio/mp4", 8_400_000)];
         let states = [
             ("ask", Says::Ask(Asking { id: 1, from: sender(true), files: vec![photo.clone()] }), (Some(Spot::Accept), true, false)),
             ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false, false)),
+            ("ask-words", Says::Ask(Asking { id: 3, from: sender(true), files: vec![Offered { words: Some("会议改到周四下午三点，在三楼的大会议室".into()), ..offered("m.txt", "text/plain", 54) }] }), (None, true, false)),
             ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false, false)),
-            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, false)),
-            ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), files: 1, pictures: true }, (Some(Spot::Body), false, true)),
-            ("came-long", Says::Came { id: 7, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), files: 2, pictures: true }, (None, false, false)),
+            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, false)),
+            ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, true)),
+            ("came-long", Says::Came { id: 7, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), got: Got::Files { count: 2, pictures: true } }, (None, false, false)),
+            ("came-link", Says::Came { id: 8, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Link }, (None, false, false)),
             ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false)),
             ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false, false)),
         ];

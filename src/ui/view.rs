@@ -8580,7 +8580,7 @@ seven".into()));
     fn what_comes_from_a_device_nearby_is_shown_first_as_it_comes() {
         use crate::ui::morph::{Op, Recorder};
         let from = |kind: &str| crate::nearby::Sender { alias: "Z Fold".into(), model: None, kind: Some(kind.into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
-        let offered = |name: &str| crate::nearby::Offered { name: name.into(), size: 100, kind: "image/jpeg".into() };
+        let offered = |name: &str| crate::nearby::Offered { name: name.into(), size: 100, kind: "image/jpeg".into(), words: None };
         let receiving = crate::nearby::Receiving { session: "s1".into(), from: from("mobile"), files: vec![offered("IMG_1.jpg")], done: 37, of: 100 };
         let item = crate::station::shelf::Item {
             id: 4,
