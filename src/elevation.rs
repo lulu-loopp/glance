@@ -49,7 +49,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::TaskScheduler::{
     IExecAction, IRegisteredTask, ITaskFolder, ITaskService, TaskScheduler, TASK_CREATE_OR_UPDATE, TASK_ENUM_HIDDEN,
-    TASK_LOGON_INTERACTIVE_TOKEN, TASK_STATE_RUNNING,
+    TASK_LOGON_INTERACTIVE_TOKEN,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::System::Variant::VARIANT;
@@ -857,7 +857,7 @@ fn end_programs_in(folder: &Path) -> bool {
     use windows::Win32::Foundation::WAIT_OBJECT_0;
     let Ok(folder) = std::fs::canonicalize(folder) else { return true };
     loop {
-        let running = running_from(&folder);
+        let running = running(|file| file.parent().and_then(|parent| std::fs::canonicalize(parent).ok()).is_some_and(|parent| parent == folder));
         if running.is_empty() {
             return true;
         }
@@ -879,8 +879,9 @@ fn end_programs_in(folder: &Path) -> bool {
     }
 }
 
-/// The processes of Glance's programs whose file is in `folder` (as resolved), opened to be ended and waited for.
-fn running_from(folder: &Path) -> Vec<HANDLE> {
+/// The processes of Glance's programs whose file is as `ours` wants (its path as Windows names it), opened to be ended
+/// and waited for.
+fn running(ours: impl Fn(&Path) -> bool) -> Vec<HANDLE> {
     use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
     let mut found = Vec::new();
@@ -897,8 +898,7 @@ fn running_from(folder: &Path) -> Vec<HANDLE> {
                     let mut size = path.len() as u32;
                     let named = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(path.as_mut_ptr()), &mut size).is_ok();
                     let file = PathBuf::from(String::from_utf16_lossy(&path[..size as usize]));
-                    let ours = named && file.parent().and_then(|parent| std::fs::canonicalize(parent).ok()).is_some_and(|parent| parent == folder);
-                    if ours {
+                    if named && ours(&file) {
                         found.push(process);
                     } else {
                         let _ = CloseHandle(process);
@@ -1660,7 +1660,7 @@ pub fn set_remote(helper: &Path, on: bool) -> bool {
     let none = VARIANT::default();
     unsafe {
         if let Ok(task) = folder.GetTask(&BSTR::from(name.as_str())) {
-            stopped(&task);
+            stopped(&task, helper);
         }
         if on {
             let registered = folder.RegisterTask(&BSTR::from(name.as_str()), &BSTR::from(remote_task_xml(helper)), TASK_CREATE_OR_UPDATE.0, &none, &none, TASK_LOGON_INTERACTIVE_TOKEN, &none);
@@ -1675,15 +1675,20 @@ pub fn set_remote(helper: &Path, on: bool) -> bool {
 }
 
 /// How long a task stopped is waited for to be over (its program ended, the ports it held let go).
-const STOPPED_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+const STOPPED_WITHIN_MS: u32 = 5_000;
 
-/// `task` stopped, and waited for till it runs no more (a while at most: see `STOPPED_WITHIN`).
-fn stopped(task: &IRegisteredTask) {
+/// `task`, which runs `program`, stopped, and waited for till that program has ended (a while at most: see
+/// `STOPPED_WITHIN_MS`). The task's state is not what is waited for: it leaves "running" as the Task Scheduler asks the
+/// program to end, and a program started again at once found the old one still holding its port (2026-11-12).
+fn stopped(task: &IRegisteredTask, program: &Path) {
+    use windows::Win32::System::Threading::WaitForSingleObject;
+    // (Opened before it is stopped: what is waited for is that very process, whatever starts after.)
+    let running = running(|file| same_path(file, program));
     unsafe {
         let _ = task.Stop(0);
-        let until = std::time::Instant::now() + STOPPED_WITHIN;
-        while task.State().is_ok_and(|state| state == TASK_STATE_RUNNING) && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        for process in running {
+            WaitForSingleObject(process, STOPPED_WITHIN_MS);
+            let _ = CloseHandle(process);
         }
     }
 }

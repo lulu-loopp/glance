@@ -155,10 +155,18 @@ impl Config {
     }
 }
 
-/// The folder what the helper keeps is in.
+/// The folder what the helper keeps is in (its configuration, its log, its certificate).
+#[cfg(not(test))]
 pub fn folder() -> PathBuf {
     let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
     roaming.join("dev.weiyi.glance.remote")
+}
+
+/// In tests, a folder of the test run's own: they never read nor write the user's (on 2026-11-12 the nearby tests'
+/// lines were found in the user's log).
+#[cfg(test)]
+pub fn folder() -> PathBuf {
+    std::env::temp_dir().join(format!("glance-remote-tests-{}", std::process::id()))
 }
 
 fn path() -> PathBuf {
