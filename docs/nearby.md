@@ -135,6 +135,12 @@ Not in v1: receiving text messages as notes, the reverse-download (browser) mode
 - **Edge notice.** A small layered window at the panel's edge, drawn in the skin like the plates. Its states:
   request, receiving, received. Pressed, it opens the panel, and the picture is carried to the station's head (the
   carry window used by drags). It is not shown while a game is in front.
+  - Received, its picture is dragged off it into any program as a station's thing is (approved mockup
+    https://claude.ai/artifact/SNAdNfgttk327DHukW3cet): pressed, the plate is drawn at 0.97, and moved past the
+    system's drag distance, the station gives the item (`station::drag_off`) and `carry` carries the picture as the
+    notice drew it, its room left outlined (`view::paint_kept_room`). Taken, the files are copied and stay on the
+    station, and the notice goes 1.2 s later. Not taken, the picture flies back and the notice stays its 4 s again.
+    It stays out while pressed or carried.
 - **Station tile.** It has a receiving state with a ring, and its picture comes in through the existing morph. The
   device's mark is a corner badge.
 - **Send strip.** It shows during a drag that started on the station, over the station's foot, with the devices from
