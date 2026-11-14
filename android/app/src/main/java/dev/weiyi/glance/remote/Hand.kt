@@ -8,11 +8,13 @@ import android.app.Service
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.Process
 import android.provider.OpenableColumns
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -151,14 +153,19 @@ object Hand {
         kept(context).edit().putString("last", what.pc.key).apply()
         shown.value = Job(++numbers, what.pc, what.things.orEmpty(), State.Reaching, trees = what.trees)
         // (The places given are handed to the service with leave to read them, a folder with leave to read all in it,
-        // its things not named one by one: it reads them while it runs. A file of this phone's needs no leave.)
+        // its things not named one by one: it reads them while it runs. A file of this phone's needs no leave. Only
+        // the leave this app was given is handed on: one it was not given (an app that shared without it, or given
+        // for a while that is over) would stop the service from being started at all, where what cannot be read is
+        // told as such as it is read.)
         val intent = Intent(context, HandService::class.java)
         val places = what.things?.mapNotNull { it.uri } ?: what.picks.map { it.uri }
-        val granted = what.trees + places.filter { place -> place.scheme == "content" && what.trees.none { place.toString().startsWith("$it/") } }
+        val leave = { place: Uri -> context.checkUriPermission(place, Process.myPid(), Process.myUid(), Intent.FLAG_GRANT_READ_URI_PERMISSION) == PackageManager.PERMISSION_GRANTED }
+        val trees = what.trees.filter(leave)
+        val granted = trees + places.filter { place -> place.scheme == "content" && trees.none { place.toString().startsWith("$it/") } && leave(place) }
         if (granted.isNotEmpty()) {
             intent.clipData = ClipData.newRawUri("", granted[0]).apply { granted.drop(1).forEach { addItem(ClipData.Item(it)) } }
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            if (what.trees.isNotEmpty()) intent.addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            if (trees.isNotEmpty()) intent.addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
         }
         context.startForegroundService(intent)
         return true
@@ -215,12 +222,15 @@ object Hand {
         val resolver = context.contentResolver
         return picks.mapIndexed { at, pick ->
             val uri = pick.uri
+            // (Its provider refusing to say: not to be read by this app.)
             val (name, size) = if (pick.name != null && pick.size != null) {
                 pick.name to pick.size
-            } else {
+            } else try {
                 resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { rows ->
                     if (rows.moveToFirst()) rows.getString(0) to (if (rows.isNull(1)) null else rows.getLong(1)) else null to null
                 }?.let { (named, sized) -> (pick.name ?: named) to (pick.size ?: sized) } ?: (pick.name to pick.size)
+            } catch (refused: SecurityException) {
+                throw Unreadable(pick.name ?: uri.lastPathSegment ?: "file")
             }
             val shown = name?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment ?: "file"
             val type = pick.type ?: resolver.getType(uri) ?: typeOf(shown)
