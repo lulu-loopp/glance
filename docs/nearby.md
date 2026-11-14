@@ -457,14 +457,17 @@ Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (
 
 ### Sending from the PC
 
-- **发送** (the right of 附近传输): "选择" with 文件, 文件夹, 文字, 剪贴板; "已选择 n 项 · size" with 清除 and each item's ×;
-  "附近的设备"; "附近设备上显示为 <name>" with 更改 (to 设备).
+- **发送** (the right of 附近传输), top to bottom:
+  - "选择" with 文件, 文件夹, 文字, 剪贴板
+  - "已选择 n 项 · size" with 清除 and each item's ×
+  - "附近的设备"
+  - "附近设备上显示为 <name>" with 更改 (to 设备)
   - 文件 and 文件夹: the system's pickers (several files at once). Files or folders dropped on the pane from Explorer
     join too ("松开以添加到发送" over the pane while they are over it).
   - 文字: a box opens in the pane (no window), "输入要发送的文字", "n 字", 取消 and 添加.
   - 剪贴板: read once as it is pressed: words go as words, a picture as a PNG, files as those files, nothing:
     "剪贴板中没有内容".
-  - What is chosen stays after a sending, to send it to another device; 清除 or × take it away.
+  - What is chosen stays after a sending, to send it to another device. 清除 or × take it away.
   - The devices: paired phones first, then Glance PCs and other LocalSend devices found, each with its tags. Pressed
     with something chosen, it is sent: a bar along the card's foot and the percent, "等待对方接受" (with ×) where the
     device's user is asked, "已发送" with a tick. Nothing chosen: "选择内容后，点设备即可发送". A paired phone not
