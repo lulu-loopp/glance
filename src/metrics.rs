@@ -97,6 +97,8 @@ pub struct Sampler {
     cpu_time: Option<PDH_HCOUNTER>,
     cpu_utility: Option<PDH_HCOUNTER>,
     cpu_performance: Option<PDH_HCOUNTER>,
+    /// The processor's nominal clock (MHz): what `cpu_performance` is a share of.
+    cpu_nominal: Option<PDH_HCOUNTER>,
     /// Each logical processor's performance and nominal clock, and, on a
     /// processor with cores of more than one kind, its kind (see `Cores`).
     cores: Cores,
@@ -111,8 +113,6 @@ pub struct Sampler {
     system_times: Option<(u64, u64)>,
     processes: ProcessTable,
     slow: Slow,
-    /// The processor's base clock (MHz), as the registry says; none where it does not.
-    base_mhz: Option<f64>,
     adapters: Vec<Adapter>,
     /// The GPU makers' libraries, on a thread of their own (none for a sampler of the meanwhile), what they read of
     /// each adapter, as last taken (see `sample_gpus`), and what the adapters' looking up through them has come to.
@@ -230,6 +230,9 @@ impl Sampler {
         let cpu_time = add(w!(r"\Processor Information(*)\% Processor Time"));
         let cpu_utility = add(w!(r"\Processor Information(_Total)\% Processor Utility"));
         let cpu_performance = add(w!(r"\Processor Information(_Total)\% Processor Performance"));
+        // (Not the registry's ~MHz: on Intel's Core Ultra laptops it holds a clock far above the nominal one the
+        // performance is counted against, and the clock read from it came to 8 and 10 GHz.)
+        let cpu_nominal = add(w!(r"\Processor Information(_Total)\Processor Frequency"));
         let cores = Cores {
             classes: Cores::kinds_of_this_machine(),
             performance: add(w!(r"\Processor Information(*)\% Processor Performance")),
@@ -317,6 +320,7 @@ impl Sampler {
             cpu_time,
             cpu_utility,
             cpu_performance,
+            cpu_nominal,
             cores,
             gpu_engine,
             gpu_dedicated,
@@ -327,7 +331,6 @@ impl Sampler {
             system_times: system_times(),
             processes,
             slow: Slow::default(),
-            base_mhz: Some(reg_dword(cpu_key, w!("~MHz")) as f64).filter(|mhz| *mhz > 0.0),
             from_libraries: Vec::new(),
             adapters,
             libraries,
@@ -501,9 +504,10 @@ impl Sampler {
             (total > 0).then(|| ((busy - busy_before) as f64 / total as f64 * 100.0) as f32)
         });
         self.system_times = times;
-        // (Without the performance counter, or the base clock, the clock is not read: shown as its base, it looked
-        // read when it was not.)
+        // The clock now, the nominal clock times the share of it the processors ran at, as Task Manager's speed is.
+        // (Without either counter the clock is not read: shown as its nominal, it looked read when it was not.)
         let performance = counter(self.cpu_performance).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100));
+        let nominal = counter(self.cpu_nominal).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)).filter(|mhz| *mhz > 0.0);
         let utility = counter(self.cpu_utility).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE_NOCAP100)).map(|utility| utility as f32);
 
         // The driver installed meanwhile: what reads through it, not had without it, opened now.
@@ -556,7 +560,7 @@ impl Sampler {
             cpu,
             cpu_utility: utility,
             threads,
-            ghz: self.base_mhz.zip(performance).map(|(base, performance)| (base * performance / 100_000.0) as f32),
+            ghz: nominal.zip(performance).map(|(nominal, performance)| (nominal * performance / 100_000.0) as f32),
             kinds_ghz,
             threads_ghz,
             memory: MemorySample {
@@ -2148,6 +2152,22 @@ mod tests {
         let since = last_boot().expect("the last start in the event log");
         assert!(since <= unsafe { GetTickCount64() } + 1000, "{since} ms ago, the tick count {}", unsafe { GetTickCount64() });
         assert!(sample.system.uptime_s.abs_diff(since / 1000) <= 2);
+    }
+
+    #[test]
+    #[ignore = "reads this machine's processors' clocks; run with --ignored"]
+    fn reads_the_clock_as_its_processors_run() {
+        let mut sampler = Sampler::meanwhile();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let sample = sampler.sample(false, false, false, std::time::Duration::from_secs(1)).expect("a valid sample after one interval");
+        let ghz = sample.ghz.expect("the clock read");
+        // The whole processor's clock among its logical processors' own (each its nominal clock times its share of
+        // it, read apart from the whole's): not above the fastest of them, and near their average.
+        let threads: Vec<f32> = sample.threads_ghz.iter().flatten().copied().collect();
+        let (fastest, average) = (threads.iter().copied().fold(0.0, f32::max), threads.iter().sum::<f32>() / threads.len() as f32);
+        println!("{ghz} GHz, its processors' {average} GHz on average, {fastest} at the most");
+        assert!((0.4..8.0).contains(&ghz) && ghz <= fastest * 1.05);
+        assert!((ghz - average).abs() <= average * 0.25);
     }
 }
 
