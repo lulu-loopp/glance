@@ -51,6 +51,15 @@ const TRUST_ROW: f32 = 20.0;
 const BUTTON: f32 = 32.0;
 const BAR: f32 = 4.0;
 const SPACE: f32 = 10.0;
+/// Words sent, as what came: the most lines of them shown beside their mark (the rest on the station), the room
+/// between them and the row under them (where they came from, and the button that copies them), how tall that row is,
+/// and the room round what is on the button.
+const WORDS_LINES: u32 = 2;
+const WORDS_GAP: f32 = 6.0;
+const COPY_ROW: f32 = 26.0;
+const COPY_PAD: f32 = 10.0;
+/// How long words copied from it are told still, as "Copied" (held while the pointer is on it).
+const COPIED_STAYS: Duration = Duration::from_millis(1200);
 /// A PIN's box, the line under it (what is sent, or that the PIN was not right), the room before its words, the size of
 /// its words and the room between them (spelled out, as a PIN is read); the most a PIN may hold (UTF-16 units).
 const FIELD: f32 = 34.0;
@@ -92,17 +101,17 @@ enum Says {
     Pin { job: u64, to: String, what: String, tried: u32 },
 }
 
-/// What came from a device: files (how many, and whether all are pictures), or words sent as a message (a web address
-/// alone, or text).
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// What came from a device: files (how many, and whether all are pictures), or words sent as a message.
+#[derive(Clone, Debug, PartialEq)]
 enum Got {
     Files { count: usize, pictures: bool },
     /// Folders sent (each with what is in it).
     Folders { count: usize },
     /// Folders and files sent together.
     Items { count: usize },
-    Link,
-    Text,
+    /// Words: whether they are a web address alone, as much of them as is shown (`WORDS_LINES` lines at most, see
+    /// `shown_words`), and how tall that is (DIPs).
+    Words { link: bool, shown: String, tall: f32 },
 }
 
 /// A part of it a press does something on.
@@ -115,6 +124,8 @@ enum Spot {
     Accept,
     /// The box a PIN is written in.
     Field,
+    /// The button that copies words that came.
+    Copy,
 }
 
 /// What it asks of the panel's thread.
@@ -141,6 +152,7 @@ struct Place {
 struct Flight {
     from: RECT,
     id: u64,
+    got: Got,
     began: Instant,
     to: Option<RECT>,
 }
@@ -234,6 +246,8 @@ pub struct Peek {
     lifting: Option<(u64, u64)>,
     /// Its picture's room drawn empty (the picture carried), as last drawn.
     away: bool,
+    /// The words that came were copied from it (it says so till it goes).
+    copied: bool,
     /// What its picture draws, as last drawn (DIPs from the picture's corner): what is carried as it is dragged off.
     face: Vec<super::morph::Part>,
     /// Its parts a press does something on, as last drawn (DIPs, from its plate's corner).
@@ -388,6 +402,7 @@ impl Peek {
     fn change(&mut self, wanted: Option<Says>, now: Instant, panels: &[(RECT, Edge, RECT)]) {
         let was = std::mem::replace(&mut self.says, wanted.clone());
         self.pressed = None;
+        self.copied = false;
         self.stale = true;
         // A PIN asked for: written in a box of its own (kept as more of them are turned down, which shakes it); none
         // asked for now, the keys given back.
@@ -486,6 +501,7 @@ impl Peek {
         self.pressed = None;
         self.held = None;
         self.away = false;
+        self.copied = false;
         if let Some(drawn) = self.drawn.as_mut() {
             drawn.window.hide();
             drawn.hidden();
@@ -594,14 +610,23 @@ impl Peek {
                 self.says = None;
                 Some(open_at(place))
             }
-            (Spot::Body, Says::Came { id, .. }) => {
+            (Spot::Body, Says::Came { id, got, .. }) => {
                 // The picture carried off it onto the station's face, the panel opened under it.
                 let thumb = self.thumb_on_screen(place);
                 self.says = None;
                 self.until = None;
                 self.sliding = None;
-                self.flight = Some(Flight { from: thumb, id, began: now, to: None });
+                self.flight = Some(Flight { from: thumb, id, got, began: now, to: None });
                 Some(open_at(place))
+            }
+            // Words that came copied, all of them, as the station copies them; said, and gone a little after.
+            (Spot::Copy, Says::Came { id, got: Got::Words { .. }, .. }) => {
+                crate::station::run::ask(crate::station::run::Ask::Copy(id));
+                self.copied = true;
+                if self.until.is_some() {
+                    self.until = Some(now + COPIED_STAYS);
+                }
+                None
             }
             _ => None,
         }
@@ -763,7 +788,7 @@ impl Peek {
         let mut whole = true;
         let mut spots = Vec::new();
         let mut places = Vec::new();
-        let (over, trust, away) = (self.over, self.trust.1, self.away);
+        let (over, trust, away, copied) = (self.over, self.trust.1, self.away, self.copied);
         // (Pressed to be dragged off: drawn in a little round its middle.)
         let held = if self.held.is_some() { super::view::PRESSED_IN } else { 1.0 };
         let plate = (WIDE, tall(&says));
@@ -779,12 +804,12 @@ impl Peek {
         let done = surface.draw(&drawn.gfx, size, scale, |frame| {
             let middle = (plate.0 / 2.0, plate.1 / 2.0);
             frame.place(Matrix3x2::translation(-middle.0, -middle.1) * Matrix3x2::scale(held, held) * Matrix3x2::translation(corner.0 + dx + middle.0, corner.1 + dy + middle.1));
-            whole = paint(frame, &theme, lang, &says, (over, trust, away), field.as_ref(), &mut spots, &mut places);
+            whole = paint(frame, &theme, lang, &says, (over, trust, away, copied), field.as_ref(), &mut spots, &mut places);
             frame.origin(0.0, 0.0);
             // What its picture draws, kept to be carried as it is dragged off.
-            if let (Says::Came { id, .. }, false) = (&says, away) {
+            if let (Says::Came { id, got, .. }, false) = (&says, away) {
                 let recorder = super::morph::Recorder::new(frame, 1.0, (0.0, 0.0));
-                super::view::paint_kept_face(&recorder, &theme, *id, (0.0, 0.0, THUMB, THUMB), 1.0, lang);
+                paint_thumb(&recorder, &theme, *id, got, (0.0, 0.0, THUMB, THUMB), lang);
                 face = recorder.parts();
             }
         });
@@ -823,7 +848,7 @@ impl Peek {
             }
             flight.to = Some(to);
         }
-        let (id, from, to) = (flight.id, flight.from, flight.to);
+        let (id, got, from, to) = (flight.id, flight.got.clone(), flight.from, flight.to);
         if t >= 1.0 {
             self.flight = None;
             self.hide();
@@ -854,7 +879,7 @@ impl Peek {
             let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
             let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
             unsafe { frame.dc.PushLayer(&layer, None) };
-            super::view::paint_kept_face(frame, &theme, id, (0.0, 0.0, w, h), 1.0, lang);
+            paint_thumb(frame, &theme, id, &got, (0.0, 0.0, w, h), lang);
             unsafe { frame.dc.PopLayer() };
         });
         if done.is_ok() {
@@ -902,11 +927,43 @@ fn came_of(items: &[crate::station::shelf::Item], id: u64) -> Option<Says> {
                 Got::Items { count: entries.len() }
             }
         }
-        What::Link { .. } => Got::Link,
-        What::Text { .. } | What::Saved { words: true, .. } => Got::Text,
+        What::Link { .. } | What::Text { .. } | What::Saved { words: true, .. } => {
+            // (Laid out as they are drawn: in the skin's words, as many lines as fit beside the mark.)
+            let (link, words) = shown_words(&item.what)?;
+            let (skin, dark, _) = look();
+            let (shown, tall) = gfx::at_pointer().ok()?.wrapped_within(&words, Theme::new(skin, dark).body, WORDS_WIDE, WORDS_LINES);
+            Got::Words { link, shown, tall }
+        }
         _ => return None,
     };
     Some(Says::Came { id, from: from.alias.clone(), kind: from.kind.clone(), got })
+}
+
+/// How wide words that came are written beside their mark (DIPs).
+const WORDS_WIDE: f32 = WIDE - 2.0 * PAD - THUMB - 12.0;
+/// The most characters of words that came looked at to show (more never fit in `WORDS_LINES` lines).
+const WORDS_LOOKED_AT: usize = 400;
+
+/// Words that came, as the notice shows them: whether they are a web address alone, and they themselves, on one line
+/// (the station's tile's way: a web address without its scheme or a last "/", text with each run of spaces and line
+/// breaks one space), their start only (see `WORDS_LOOKED_AT`). Text too long to be kept on the shelf is read from its
+/// file, as much of it as is shown. None for anything else (or such a file no longer there).
+fn shown_words(what: &crate::station::shelf::What) -> Option<(bool, String)> {
+    use crate::station::shelf::What;
+    use std::io::Read;
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(WORDS_LOOKED_AT).collect::<String>();
+    match what {
+        What::Link { url } => Some((true, url.split("://").nth(1).unwrap_or(url).trim_end_matches('/').to_string())),
+        What::Text { text } => Some((false, one_line(text))),
+        What::Saved { file, words: true, .. } => {
+            // (At most four bytes a character: its start cut where a character ends.)
+            let mut start = Vec::new();
+            std::fs::File::open(crate::station::folder::Folder::own().path(file)).ok()?.take(4 * WORDS_LOOKED_AT as u64).read_to_end(&mut start).ok()?;
+            let whole = std::str::from_utf8(&start).map_or_else(|cut| cut.valid_up_to(), |_| start.len());
+            Some((false, one_line(std::str::from_utf8(&start[..whole]).ok()?)))
+        }
+        _ => None,
+    }
 }
 
 /// Whether a file named `name` is a picture, by its extension.
@@ -1003,6 +1060,7 @@ fn tall(says: &Says) -> f32 {
             PAD + HEAD + SPACE + listed as f32 * FILE_ROW + more + SPACE + trust + BUTTON + PAD
         }
         Says::Coming(_) => PAD + THUMB + SPACE + BAR + PAD,
+        Says::Came { got: Got::Words { tall, .. }, .. } => PAD + (tall + WORDS_GAP + COPY_ROW).max(THUMB) + PAD,
         Says::Came { .. } => PAD + THUMB + PAD,
         Says::Pin { .. } => PAD + HEAD + SPACE + FIELD + FIELD_LINE + SPACE + BUTTON + PAD,
     }
@@ -1084,14 +1142,14 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
                 (Got::Folders { count }, Lang::En) => format!("Received {count} folders"),
                 (Got::Items { count }, Lang::Zh) => format!("收到 {count} 项"),
                 (Got::Items { count }, Lang::En) => format!("Received {count} items"),
-                (Got::Link, Lang::Zh) => "收到一个链接".to_string(),
-                (Got::Link, Lang::En) => "Received a link".to_string(),
-                (Got::Text, Lang::Zh) => "收到一段文字".to_string(),
-                (Got::Text, Lang::En) => "Received text".to_string(),
+                // (Words: they themselves, what they are said under them.)
+                (Got::Words { shown, .. }, _) => shown.clone(),
             };
-            match lang {
-                Lang::Zh => (title, format!("来自 {from} · 已放入中转站")),
-                Lang::En => (title, format!("From {from} · In the station")),
+            match (got, lang) {
+                (Got::Words { link, .. }, Lang::Zh) => (title, format!("{} · 来自 {from}", if *link { "链接" } else { "文字" })),
+                (Got::Words { link, .. }, Lang::En) => (title, format!("{} · From {from}", if *link { "Link" } else { "Text" })),
+                (_, Lang::Zh) => (title, format!("来自 {from} · 已放入中转站")),
+                (_, Lang::En) => (title, format!("From {from} · In the station")),
             }
         }
         Says::Pin { to, .. } => match lang {
@@ -1102,10 +1160,11 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
 }
 
 /// Draws `says` on its plate from the frame's origin, `over` the part the pointer is on and the asking's device to be
-/// trusted or not (`trust`), a PIN's box as `field` is; its parts a press does something on put in `spots`, and where
-/// in the PIN's box each place between its characters is in `places`. Whether all of it was drawn (its picture made).
+/// trusted or not (`trust`), what came's picture carried off it or not (`away`) and its words copied or not (`copied`),
+/// a PIN's box as `field` is; its parts a press does something on put in `spots`, and where in the PIN's box each place
+/// between its characters is in `places`. Whether all of it was drawn (its picture made).
 #[allow(clippy::too_many_arguments)]
-fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, away): (Option<Spot>, bool, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
+fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, away, copied): (Option<Spot>, bool, bool, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
     let canvas: &dyn Canvas = frame;
     let height = tall(says);
     let plate = super::menu::plate(canvas, super::menu::Look::of(theme.skin, theme.dark), (0.0, 0.0, WIDE, height));
@@ -1245,6 +1304,32 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
             }
             spots.push((0.0, 0.0, WIDE, height, Spot::Body));
         }
+        // Words: their mark, they themselves beside it (as many lines as fit), and under them what they are, from whom,
+        // and the button that copies them (it says when it has).
+        Says::Came { id, from, got: got @ Got::Words { tall, .. }, .. } => {
+            if away {
+                super::view::paint_kept_room(canvas, theme, (PAD, PAD, THUMB, THUMB));
+            } else {
+                paint_thumb(canvas, theme, *id, got, (PAD, PAD, THUMB, THUMB), lang);
+            }
+            let left = PAD + THUMB + 12.0;
+            frame.text_wrapped(&title, theme.body, theme.text, left, PAD, WORDS_WIDE);
+            let y = PAD + tall + WORDS_GAP;
+            spots.push((0.0, 0.0, WIDE, height, Spot::Body));
+            let (said, mark, ink) = if copied { (lang.pick("已复制", "Copied"), Icon::Check, accent) } else { (lang.pick("复制", "Copy"), Icon::Copy, theme.text) };
+            let said_w = canvas.measure(said, theme.small);
+            let wide = (COPY_PAD + 14.0 + 5.0 + said_w + COPY_PAD).ceil();
+            let x = WIDE - PAD - wide;
+            canvas.fill_rounded(theme.track, x, y, wide, COPY_ROW, COPY_ROW / 2.0);
+            if over == Some(Spot::Copy) {
+                canvas.fill_rounded(plate.highlight, x, y, wide, COPY_ROW, COPY_ROW / 2.0);
+            }
+            canvas.icon(mark, Point { x: x + COPY_PAD + 7.0, y: y + COPY_ROW / 2.0 }, 14.0, ink);
+            canvas.text(said, theme.small, ink, x + COPY_PAD + 14.0 + 5.0, canvas.line_in(theme.small, y, COPY_ROW), said_w + 1.0, Align::Start);
+            spots.push((x, y, wide, COPY_ROW, Spot::Copy));
+            let room = x - 8.0 - left;
+            canvas.text(&fitted(canvas, theme.small, room, &under, from), theme.small, theme.text2, left, canvas.line_in(theme.small, y, COPY_ROW), room, Align::Start);
+        }
         // (Its picture carried off it: the room it left.)
         Says::Came { from, .. } if away => {
             super::view::paint_kept_room(canvas, theme, (PAD, PAD, THUMB, THUMB));
@@ -1262,6 +1347,21 @@ fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, aw
         canvas.fill_rounded(plate.highlight, 0.0, 0.0, WIDE, height, plate.radius);
     }
     whole
+}
+
+/// The picture of what came, the thing `id` on the station, in `rect`: words by their mark (a web address's, or
+/// text's) on the track, as big for the picture as it is in the notice; anything else as its face on the station is.
+/// Whether all of it was drawn (its picture made).
+fn paint_thumb(canvas: &dyn Canvas, theme: &Theme, id: u64, got: &Got, (x, y, w, h): (f32, f32, f32, f32), lang: Lang) -> bool {
+    match got {
+        Got::Words { link, .. } => {
+            let scale = w / THUMB;
+            canvas.fill_rounded(theme.track, x, y, w, h, 10.0 * scale);
+            canvas.icon(if *link { Icon::Link } else { Icon::Text }, Point { x: x + w / 2.0, y: y + h / 2.0 }, 20.0 * scale, theme.text2);
+            true
+        }
+        _ => super::view::paint_kept_face(canvas, theme, id, (x, y, w, h), 1.0, lang).unwrap_or(true),
+    }
 }
 
 /// Its two buttons at `y`, side by side, named `said`: the one that turns it down (`Spot::Decline`, on the track) and the
@@ -1338,8 +1438,34 @@ mod tests {
         assert_eq!(words(&Says::Ask(Asking { id: 5, from: sender(true), files: vec![link] }), Lang::Zh).1, "想发送一个链接");
         let text = Offered { words: Some("会议改到周四".into()), ..offered("m.txt", "text/plain", 18) };
         assert_eq!(words(&Says::Ask(Asking { id: 6, from: sender(true), files: vec![text] }), Lang::En).1, "Wants to send text");
-        assert_eq!(words(&Says::Came { id: 7, from: "Z Fold".into(), kind: None, got: Got::Link }, Lang::Zh).0, "收到一个链接");
-        assert_eq!(words(&Says::Came { id: 8, from: "Z Fold".into(), kind: None, got: Got::Text }, Lang::Zh).0, "收到一段文字");
+        // Words come: they themselves, and under them what they are and from whom.
+        let came = |link: bool, shown: &str| Says::Came { id: 7, from: "Z Fold".into(), kind: None, got: Got::Words { link, shown: shown.into(), tall: 19.0 } };
+        assert_eq!(words(&came(true, "glancepc.com/app"), Lang::Zh), ("glancepc.com/app".to_string(), "链接 · 来自 Z Fold".to_string()));
+        assert_eq!(words(&came(false, "会议改到周四"), Lang::Zh), ("会议改到周四".to_string(), "文字 · 来自 Z Fold".to_string()));
+        assert_eq!(words(&came(false, "Moved to room 3"), Lang::En).1, "Text · From Z Fold");
+    }
+
+    /// Words that came are shown on one line as the station's tile names them: a web address without its scheme or its
+    /// last "/", text with its runs of spaces and its line breaks one space each, no more of it than is looked at.
+    /// Anything else is not words.
+    #[test]
+    fn words_that_came_are_shown_on_one_line() {
+        use crate::station::shelf::What;
+        assert_eq!(shown_words(&What::Link { url: "https://glancepc.com/download/".into() }), Some((true, "glancepc.com/download".to_string())));
+        let text = What::Text { text: "  会议改到\n\n3 号会议室，\t记得带报价单 \r\n".into() };
+        assert_eq!(shown_words(&text), Some((false, "会议改到 3 号会议室， 记得带报价单".to_string())));
+        let long = What::Text { text: "字".repeat(WORDS_LOOKED_AT + 50) };
+        assert_eq!(shown_words(&long).unwrap().1.chars().count(), WORDS_LOOKED_AT);
+        assert_eq!(shown_words(&What::Picture { file: "a.png".into() }), None);
+    }
+
+    /// Words that came make it as tall as their lines and the row under them, never less than the picture beside them.
+    #[test]
+    fn words_that_came_make_it_as_tall_as_their_lines() {
+        let came = |tall: f32| Says::Came { id: 7, from: "Z Fold".into(), kind: None, got: Got::Words { link: false, shown: "x".into(), tall } };
+        assert_eq!(tall(&came(38.0)), PAD + 38.0 + WORDS_GAP + COPY_ROW + PAD);
+        assert_eq!(tall(&came(38.0)) - tall(&came(19.0)), 19.0);
+        assert_eq!(tall(&came(0.0)), PAD + THUMB + PAD);
     }
 
     /// Sizes said as Explorer says them, a decimal under ten.
@@ -1420,17 +1546,25 @@ mod pictures {
         let offered = |name: &str, kind: &str, size: u64| Offered { name: name.into(), size, kind: kind.into(), words: None };
         let photo = offered("IMG_20261112_143012.jpg", "image/jpeg", 3_500_000);
         let many = vec![photo.clone(), offered("会议纪要.docx", "", 86_000), offered("第三季度报表.xlsx", "", 1_200_000), offered("IMG_2.jpg", "image/jpeg", 2_900_000), offered("录音.m4a", "audio/mp4", 8_400_000)];
+        let gfx = gfx::for_main_screen().unwrap();
+        let theme = Theme::new(Skin::Glass, false);
+        let said = |link: bool, words: &str| {
+            let (shown, tall) = gfx.wrapped_within(words, theme.body, WORDS_WIDE, WORDS_LINES);
+            Got::Words { link, shown, tall }
+        };
         let states = [
-            ("ask", Says::Ask(Asking { id: 1, from: sender(true), files: vec![photo.clone()] }), (Some(Spot::Accept), true, false)),
-            ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false, false)),
-            ("ask-words", Says::Ask(Asking { id: 3, from: sender(true), files: vec![Offered { words: Some("会议改到周四下午三点，在三楼的大会议室".into()), ..offered("m.txt", "text/plain", 54) }] }), (None, true, false)),
-            ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false, false)),
-            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, false)),
-            ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, true)),
-            ("came-long", Says::Came { id: 7, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), got: Got::Files { count: 2, pictures: true } }, (None, false, false)),
-            ("came-link", Says::Came { id: 8, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Link }, (None, false, false)),
-            ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false)),
-            ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false, false)),
+            ("ask", Says::Ask(Asking { id: 1, from: sender(true), files: vec![photo.clone()] }), (Some(Spot::Accept), true, false, false)),
+            ("ask-many", Says::Ask(Asking { id: 2, from: sender(false), files: many }), (None, false, false, false)),
+            ("ask-words", Says::Ask(Asking { id: 3, from: sender(true), files: vec![Offered { words: Some("会议改到周四下午三点，在三楼的大会议室".into()), ..offered("m.txt", "text/plain", 54) }] }), (None, true, false, false)),
+            ("coming", Says::Coming(Receiving { session: "s".into(), from: sender(true), files: vec![photo.clone()], done: 1_300_000, of: 3_500_000 }), (None, false, false, false)),
+            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, false, false)),
+            ("came-carried", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (Some(Spot::Body), false, true, false)),
+            ("came-long", Says::Came { id: 7, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), got: Got::Files { count: 2, pictures: true } }, (None, false, false, false)),
+            ("came-link", Says::Came { id: 8, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: said(true, "glancepc.com/app") }, (None, false, false, false)),
+            ("came-text", Says::Came { id: 9, from: "Weiyi 的 Galaxy Z Fold8".into(), kind: Some("mobile".into()), got: said(false, "明天上午十点的会议改到 3 号会议室，记得带上打印好的报价单和两份样品，以及上次会议的纪要。") }, (Some(Spot::Copy), false, false, false)),
+            ("came-text-copied", Says::Came { id: 9, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: said(false, "Moved to room 3") }, (None, false, false, true)),
+            ("pin", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false, false)),
+            ("pin-wrong", Says::Pin { job: 1, to: "iPhone 15".into(), what: "IMG_2041.jpg · 3.4 MB".into(), tried: 1 }, (None, false, false, false)),
         ];
         let mut written = Typing::most(PIN_MOST);
         written.put(&"1234".encode_utf16().collect::<Vec<u16>>());
@@ -1438,7 +1572,6 @@ mod pictures {
         wrong.put(&"0000".encode_utf16().collect::<Vec<u16>>());
         wrong.go(0, false);
         wrong.go(4, true);
-        let gfx = gfx::for_main_screen().unwrap();
         let out = std::path::PathBuf::from(format!("{}/target/peek", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
         let scale = 1.5;
