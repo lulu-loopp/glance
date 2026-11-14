@@ -395,3 +395,123 @@ Taken:
 
 Left as they are: the register flow and the version string ("2.1", which current senders accept; register answers
 lack port and protocol, so the announcement's are kept).
+
+## Both ways (approved 2026-11-14)
+
+The owner approved two mockups the same evening: sending from the PC to any device
+(https://claude.ai/artifact/D5fiJk4RMCAhFdaGLYPEaT, v3) and the settings split by "who" and "what"
+(https://claude.ai/artifact/M5oSvc9feEx5mKwSqeRaeg, v3). Every Glance PC and every Glance phone is a whole LocalSend
+device: PC to phone, PC to PC and phone to phone all go. Decided with the owner: the phone receives in the background
+only where its user turns that on (off by default), and turning it on asks the system not to optimise the app for
+the battery.
+
+### Who is who
+
+- **Paired** (a Glance phone, by the pairing code): it may control this PC, and its files are taken without asking.
+  Pairing includes trust. Each paired phone has two switches, both on as it pairs:
+  - 控制这台电脑: screens, lights, volume, brightness and the power mode. Off, the phone only reads how the PC is (the
+    helper answers its state, and refuses every control with 403).
+  - 直接接收文件: off, what it sends is asked about like any device's.
+- **Trusted** (any LocalSend device, another Glance PC among them): only its files are taken without asking. A PC is
+  never paired with a PC (the remote is for phones). A device becomes trusted by "以后直接接收这台设备的文件" as it
+  sends, or by "信任" in the list of devices found nearby: the helper then reaches it (`/api/localsend/v2/info`,
+  pinned to the fingerprint it announced: the handshake proves it holds that certificate) and trusts that
+  fingerprint. What it sends later is taken only on that certificate presented, as before.
+- **This PC's name** is one: what the phone shows and what LocalSend devices see (`Config::name`). The nearby alias
+  kept so far becomes it once, and is dropped.
+
+### Pairing code
+
+One code for the app and for a phone's camera: the remote's page with the key after the `#`,
+`http://<address>:<port>/#k=<key>&n=<name>` (the name escaped). A browser opens the page and pairs by the key, as the
+web pairing did. The app takes such a link as it took `glance://pair?h&p&k&n` (still read, for older PCs): the
+address and port from the link, the key and name from after the `#`. The page has "下载 Glance APP" for Android phones
+(glancepc.com/app). The app's own download code is a row of its own in settings.
+
+### Settings (PC)
+
+Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (was 手机互联), **附近传输**, 通用.
+
+- **设备** (no preview: one column).
+  - 这台电脑的名称: the box, as nearby's was, now for both.
+  - 添加手机, "显示配对码": the code under the row, "安卓手机：在 Glance APP 中点“添加电脑”扫描。" /
+    "iPhone 或未装 APP 的手机：用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕。" / "10 分钟内有效，仅供一部手机使用".
+  - Glance 手机 APP, "显示下载二维码": glancepc.com/app.
+  - 设备 (n 台): paired phones (and phones paired by the web page), then trusted devices. Each: its kind's round icon,
+    its name, "已配对 · Glance 手机" / "已配对 · 网页" / "已信任 · Glance 电脑 · M月D日起" / "已信任 · LocalSend · M月D日起",
+    and what it may do as tags: 可控制这台电脑 or 仅查看状态, 直接接收文件. A paired phone opens (a chevron) to its two
+    switches and 解除配对, which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，
+    请再次添加手机。"). A trusted device has 移除, without asking (it is asked about again when it sends). A web-paired
+    phone has no files switch (a page cannot send).
+  - 附近发现的设备 (n 台): what discovery found that is neither, each with 信任. None: "附近没有其他设备".
+  - Notes under the lists as the mockup has them.
+- **手机遥控**: 开启手机遥控, RGB 灯光控制, 内存灯光控制, 关屏时保持显示器连接, then "已配对 n 部手机" with 管理设备
+  (to 设备). The phone preview stays.
+- **附近传输**: 接收附近设备的文件, 来自未信任设备的文件, 在屏幕边缘提示, 保存位置, then "已信任 n 台设备" with 管理设备.
+  - 保存位置: 中转站 (as before, "放在中转站，随中转站的保留期限清理") or 选择文件夹… (the system's folder picker).
+    A folder chosen: "以原名存入此文件夹。中转站中同时列出，移除或到期只去掉那一项，文件保留", with 打开. The files are
+    adopted into that folder under the names they came with (made plain names, a folder's inner places kept, "name (1)"
+    where taken), and the station's item points at them as a `Files` item does (not kept: removing or expiry leaves
+    them). The station's room no longer bounds what is offered then: the folder's drive does (its free space less 1 GB).
+  - The preview is replaced by **发送** (below).
+
+### Sending from the PC
+
+- **发送** (the right of 附近传输): "选择" with 文件, 文件夹, 文字, 剪贴板; "已选择 n 项 · size" with 清除 and each item's ×;
+  "附近的设备"; "附近设备上显示为 <name>" with 更改 (to 设备).
+  - 文件 and 文件夹: the system's pickers (several files at once). Files or folders dropped on the pane from Explorer
+    join too ("松开以添加到发送" over the pane while they are over it).
+  - 文字: a box opens in the pane (no window), "输入要发送的文字", "n 字", 取消 and 添加.
+  - 剪贴板: read once as it is pressed: words go as words, a picture as a PNG, files as those files, nothing:
+    "剪贴板中没有内容".
+  - What is chosen stays after a sending, to send it to another device; 清除 or × take it away.
+  - The devices: paired phones first, then Glance PCs and other LocalSend devices found, each with its tags. Pressed
+    with something chosen, it is sent: a bar along the card's foot and the percent, "等待对方接受" (with ×) where the
+    device's user is asked, "已发送" with a tick. Nothing chosen: "选择内容后，点设备即可发送". A paired phone not
+    receiving is dimmed, "未开启接收", and pressing it says "在手机上打开 Glance，或在 App 中开启“后台接收”".
+- **Explorer's 发送到**: a shortcut "Glance 附近传输" in the user's SendTo folder (made while Glance is installed,
+  removed by the uninstaller), running `glance.exe --send <paths…>`: settings open at 附近传输 with those in 已选择.
+- **The workbench**: 最近复制, 最近文件 and 中转站 each have "发送到" in their menu (several chosen: all of them), with a
+  submenu of every device that can be sent to, paired first, those not reached dimmed with why. (The menu gains
+  submenus for this.) A copied item goes as the clipboard does: words, a picture as PNG, files.
+- **Dragging**: a drag from any of the three, or of files from Explorer over the panel, raises "发送到" at the panel's
+  foot (the station's strip, moved to the panel and made common): the devices across, dropped on one, sent, its ring
+  of progress, the strip down 1.1 s after. Never there otherwise.
+- **Sending while not receiving**: allowed. The helper runs for it (started as it is wanted, the firewall rule with
+  it) and announces itself to find devices. While receiving is off it answers `register` and `info` but refuses
+  every `prepare-upload` (403).
+
+### Android
+
+- **A whole LocalSend device.** While receiving (the app in front, or 后台接收 on) it serves LocalSend v2 over HTTPS on
+  53317 (another where taken) with the `glance-nearby` key and its certificate, asking for a client certificate
+  without requiring one, and announces itself by multicast (a `MulticastLock` held), answering others' announcements
+  by `register`. It keeps the devices it hears for the send sheet.
+- **Who it takes from.** A paired PC (its nearby fingerprint, from `/v1/nearby`, presented as its client certificate)
+  without asking. A device trusted on this phone (verified only) without asking. Anyone else per "来自未信任设备的文件":
+  每次询问 (default) or 一律拒绝. Asking is a notification, "<device> 请求发送", what and how large, with 拒绝, 接收 and
+  始终接收 (始终接收 only where it presented its certificate), answered within 60 s or refused.
+- **Where it goes.** Pictures to `Pictures/Glance`, videos to `Movies/Glance` (both in the gallery's "Glance"), other
+  files and folders to `Download/Glance` (a folder's inner places kept), all through MediaStore. Words are no file: a
+  notification shows them (three lines) with 复制, and they are kept in 最近收到.
+- **Notifications.** Receiving: "正在接收「name」" (or n 项), from whom, a bar, 取消. Received: "已收到「name」", "来自 X ·
+  已存入相册" or "· 已存入 下载/Glance", the picture where it is one, 打开. Words: "收到文字", 复制 ("已复制").
+- **后台接收** (off): on, a foreground service (type connectedDevice) keeps receiving, with a quiet notification, and
+  the system is asked not to optimise the app for the battery (the question auto-send asks). Off, the app receives
+  only while it is open.
+- **Settings.** "已配对的电脑" becomes **设备** (+ 添加电脑): paired PCs ("已配对 · 可控制这台电脑、直接接收文件", 解除配对)
+  and trusted devices ("已信任 · 直接接收文件", 移除). A section **附近传输**: 后台接收, 来自未信任设备的文件, 本机名称 (the
+  device's name by default), 最近收到 (the last 20, pressed to open, words to copy).
+- **Sending.** The send sheet lists paired PCs ("已配对的电脑") and then "附近的设备" found (looking while it is open). A
+  device not paired is sent to as LocalSend sends: "等待对方接受", its PIN asked for on a 401, refused said so.
+- **The pairing scanner** takes the new code (above).
+
+### Order of work
+
+1. This design (here).
+2. PC: one name, the pairing code, per-phone switches in the helper, trusting a device found.
+3. PC: the settings split (设备, 手机遥控, 附近传输 with 保存位置).
+4. PC: the 发送 pane, Explorer's 发送到, sending while not receiving.
+5. PC: the menu's submenus, "发送到" in the three lists, the strip at the panel's foot for any drag.
+6. Android: the server, discovery, receiving, notifications, settings, the send sheet, the scanner.
+7. Tests both ways, then a live test with the Fold and another PC (the 270KP).
