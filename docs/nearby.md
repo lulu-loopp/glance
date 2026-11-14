@@ -38,8 +38,11 @@ The mockup's defaults were kept, because the owner did not choose otherwise:
 
 7. **Words.** Text a device sends as a message (LocalSend's text) lands on the station as words: a web address alone
    as a link, other text as text, and text too long for the shelf as a saved text file that is still words. The
-   notice says "收到一段文字" or "收到一个链接", and asking about a device not trusted shows the first words
-   ("想发送一段文字", "想发送一个链接").
+   notice shows the words themselves, two lines at most (a link without its scheme, the rest cut short with "…"),
+   by a mark of text or of a link, "文字 · 来自 <device>" or "链接 · 来自 <device>" under them, and a button "复制" that
+   copies all of them as the station does: it says "已复制" and the notice goes 1.2 s later, held while the pointer is
+   on it (approved 2026-11-14, mockup Y2oGbrLvJWnZYVxTwiAhsP). Asking about a device not trusted shows the first
+   words ("想发送一段文字", "想发送一个链接").
 8. **Android, by hand.** The app sends chosen photos, videos and files, and what other apps share to it (words too),
    to a paired PC's station (approved 2026-11-13, mockup BBWmD378gVMdRXrA8hhj9H). See "Android, by hand" below.
 
