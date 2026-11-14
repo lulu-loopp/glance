@@ -58,7 +58,8 @@ pub fn dragging() -> bool {
 
 /// Where drops are caught now (and the parts of each): each station and quick launch shown, and where a station's page
 /// is chosen, as much of it as no other window covers, and each edge of each screen that holds the workbench while it
-/// shows a station, as a strip.
+/// shows a station, as a strip. The devices nearby on a station's strip last (see `send`): made last, they are over
+/// the station they are on.
 fn wanted() -> Vec<Wanted> {
     let mut wanted: Vec<Wanted> = super::run::areas()
         .into_iter()
@@ -67,6 +68,7 @@ fn wanted() -> Vec<Wanted> {
             (!parts.is_empty()).then_some((area, parts, None, lands, Some(window)))
         })
         .collect();
+    wanted.sort_by_key(|(.., lands, _)| matches!(lands, Lands::Device(_)));
     let (places, station) = {
         let settings = crate::app().settings.lock().unwrap();
         (settings.places().clone(), crate::ui::prefs::module_on_in(&settings.view, "workbench", "station"))
@@ -185,9 +187,10 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
 }
 
 impl Catchers {
-    /// Up where drops are wanted while something is dragged; none else. What each sees goes to `run::caught`.
+    /// Up where drops are wanted while something is dragged (by another program, or off the station: see
+    /// `drag::under_way`); none else. What each sees goes to `run::caught`, or (a device nearby's) is sent there.
     pub fn follow(&mut self) {
-        let wanted = if dragging() { wanted() } else { Vec::new() };
+        let wanted = if dragging() || super::drag::under_way() { wanted() } else { Vec::new() };
         let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands, over), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands && *over == up.over);
         if same {
             return;
@@ -244,10 +247,11 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         let _ = SetWindowPos(window, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         let told = move |dragged: Dragged| super::run::caught(dragged, edge, lands, over);
         // (What is kept at hand may be given a file off the station; the station, none of its own again; a page other
-        // than the station's, nothing, only told it comes.)
+        // than the station's, nothing, only told it comes; a device nearby, what is dragged off the station, sent.)
         let target = match lands {
             Lands::Apps => Target::new(told),
             Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
+            Lands::Device(key) => super::send::ToDevice::over(key, rect),
             _ => Target::not_own(told),
         };
         if RegisterDragDrop(window, &target).is_err() {

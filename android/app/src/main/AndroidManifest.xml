@@ -8,6 +8,25 @@
     <!-- Only to hand a newer version of this app, downloaded from Glance's site, to the system to install (it asks
          the user first). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Only with new photos sent to a PC by themselves (off till turned on): to see what the camera added, and send
+         it. A partial choice of photos (Android 14) is declared so that it is known as one: then nothing is sent. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- To ask that the app not be held in the background (frozen, it cannot send what was taken). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- What is handed to a PC by hand goes on when the app is left, its progress in a notification. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Only on the page where apps are chosen to be sent to a PC: to list the apps on the phone. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission"
+        xmlns:tools="http://schemas.android.com/tools" />
+    <!-- The short notice that photos were sent (it can be turned off). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- The PC is asked over the local network, in plain HTTP: each request
          is signed with the key shared at pairing, which never travels. -->
@@ -37,6 +56,37 @@
             </intent-filter>
         </activity>
 
+        <!-- What another app shares (photos, videos, files, words), handed to a paired PC: over that app, in a task of
+             its own, gone once its sheet is put away. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Glance.Over"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- The page apps are chosen on to be sent to a PC. -->
+        <activity
+            android:name=".AppsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden" />
+
+        <!-- What is handed to a PC, sent as it goes on when the app is left. -->
+        <service android:name=".HandService" android:exported="false" android:foregroundServiceType="dataSync" />
+
         <!-- The scanner, upright as the rest is. -->
         <activity
             android:name="com.journeyapps.barcodescanner.CaptureActivity"
@@ -47,6 +97,17 @@
 
         <!-- What the system's installer answers as a newer version is handed to it. -->
         <receiver android:name=".Installed" android:exported="false" />
+
+        <!-- New photos noticed, and sent to the PC, the app not opened. -->
+        <service android:name=".PhotoWatch" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name=".PhotoSend" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- As the phone starts, they are noticed again (only the system sends these). -->
+        <receiver android:name=".Booted" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- Night mode from the quick settings, the app not opened. -->
         <service

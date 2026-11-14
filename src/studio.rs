@@ -657,7 +657,7 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
     let doc = made(if zh { "会议纪要.docx" } else { "Meeting notes.docx" }, None)?;
     let folder = made(if zh { "项目资料" } else { "Project files" }, None)?;
     let now = crate::station::now_ms();
-    let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0 };
+    let item = |id: u64, what: What, ago_min: u64| Item { id, what, added_ms: now - ago_min * 60_000, pinned: id == 2, copied: false, stays_here: false, own_bytes: 0, from: None };
     // What was copied lately, the oldest first as the station keeps it.
     let copied = |id: u64, what: What, ago_min: u64| Item { copied: true, pinned: false, ..item(id, what, ago_min) };
     let text = |text: &str| What::Text { text: text.into() };
@@ -696,6 +696,7 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
         kind,
         downloaded: site.is_some(),
         site: site.map(String::from),
+        from: None,
     };
     let (downloads, pictures, shots, documents) = if zh { ("下载", "图片", "屏幕截图", "文档") } else { ("Downloads", "Pictures", "Screenshots", "Documents") };
     let screen = r"C:\Windows\Web\Screen";

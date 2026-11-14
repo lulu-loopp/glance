@@ -57,6 +57,15 @@ pub enum Ask {
     CopyText(String, Option<Copied>),
     /// What is kept at hand opened, as the shell opens it (see `apps`).
     Launch(String),
+    /// What came from devices nearby taken in (see `nearby`), and (`Some`) the sending that ended, no longer coming.
+    Arrivals(Option<String>),
+    /// What a device nearby is sending, as it comes (none: nothing, or the helper gone).
+    Receiving(Option<crate::nearby::Receiving>),
+    /// What came from a device nearby (these things on it) drawn as coming in from `at` on: carried onto the station,
+    /// it comes in as it lands (see `ui::peek`).
+    Landing(Vec<u64>, std::time::Instant),
+    /// A sending to a device nearby over (see `send`): its own files it held let go of.
+    Sent(u64),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -82,6 +91,10 @@ pub enum Copied {
     Item(u64),
     Recent(super::recent::Entry),
 }
+
+/// How long what came from a device nearby is shown coming in (see `Shown::arrived`): its picture fading in, then a
+/// glow round it.
+pub const ARRIVED_FOR: std::time::Duration = std::time::Duration::from_millis(1100);
 
 /// How long what was copied is marked so (see `Shown::copied`).
 pub const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1400);
@@ -121,6 +134,35 @@ pub struct Shown {
     /// What was last put on the clipboard from where it shows (several, put there together), and when (the clipboard
     /// took it): marked copied there for `COPIED_FOR`.
     pub copied: Option<(Vec<Copied>, std::time::Instant)>,
+    /// What a device nearby is sending, as it comes: shown first on it, till it has come.
+    pub receiving: Option<crate::nearby::Receiving>,
+    /// What last came from devices nearby (its number on it), and when: shown coming in for `ARRIVED_FOR`.
+    pub arrived: Option<(Vec<u64>, std::time::Instant)>,
+}
+
+impl Shown {
+    /// Whether what is on it, in its order, is other than what `before` showed: a thing put on it, taken off, moved, or
+    /// something coming from a device nearby, or come. (What was copied lately is not: it comes as anything is copied,
+    /// and on a page of its own.)
+    pub fn moved_from(&self, before: &Shown) -> bool {
+        let order = |shown: &Shown| shown.items.iter().filter(|item| !item.copied).map(|item| item.id).collect::<Vec<u64>>();
+        let coming = |shown: &Shown| shown.receiving.as_ref().map(|receiving| receiving.session.clone());
+        order(self) != order(before) || coming(self) != coming(before)
+    }
+}
+
+thread_local! {
+    /// What this thread draws the station as, for a moment (see `as_was`).
+    static AS_WAS: std::cell::RefCell<Option<Arc<Shown>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What `draw` gives, the station drawn as `was` showed it (what a drawing turns from, as it changed since: see
+/// `render::Turn`).
+pub fn as_was<T>(was: Arc<Shown>, draw: impl FnOnce() -> T) -> T {
+    let before = AS_WAS.with(|as_was| as_was.borrow_mut().replace(was));
+    let drawn = draw();
+    AS_WAS.with(|as_was| *as_was.borrow_mut() = before);
+    drawn
 }
 
 /// Its window's message: asked something (see `ask`).
@@ -160,12 +202,14 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
 
 /// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where a page of the
 /// workbench is chosen (its tab), that page: a drag over it shows the page there (see `SHOW_PAGE`), and one let go
-/// on it goes where the page takes it (the station's, onto the station; the others take none).
+/// on it goes where the page takes it (the station's, onto the station; the others take none). On a device nearby
+/// on the strip (by its key, see `send::key_of`), sent to it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
     Pages(crate::ui::view::Tab),
+    Device(u64),
 }
 
 /// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
@@ -264,6 +308,9 @@ thread_local! {
 
 /// What the station shows now.
 pub fn shown() -> Arc<Shown> {
+    if let Some(was) = AS_WAS.with(|as_was| as_was.borrow().clone()) {
+        return was;
+    }
     #[cfg(any(test, feature = "studio"))]
     if let Some(pretended) = PRETENDED.with(|pretended| pretended.borrow().clone()) {
         return pretended;
@@ -274,7 +321,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None, receiving: None, arrived: None })));
 }
 
 /// For tests: what is pretended (see `pretend`) just put on the clipboard as `copied` (see `Shown::copied`).
@@ -440,6 +487,11 @@ struct Station {
     /// What is to be dragged off it, asked, and the thread it was pressed on (dragged once it is done answering: see
     /// `drag_off`).
     dragging: Option<(Vec<Given>, u32)>,
+    /// What a device nearby is sending, and what came last, and when (see `Shown`).
+    receiving: Option<crate::nearby::Receiving>,
+    arrived: Option<(Vec<u64>, std::time::Instant)>,
+    /// Its own files each sending to a device nearby holds till it is over (see `send`), by the sending's number.
+    sending: std::collections::HashMap<u64, Vec<String>>,
 }
 
 thread_local! {
@@ -459,9 +511,11 @@ fn run(asks: Receiver<Ask>) {
             return;
         };
         let settings = crate::app().settings.lock().unwrap().station;
+        // (What an earlier Glance wrote to send, its sendings long over.)
+        let _ = std::fs::remove_dir_all(super::send::folder());
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -492,18 +546,29 @@ fn drag_off() {
     }
     let contents: Vec<Content> = leaving.iter().map(|one| one.content.clone()).collect();
     let dragged = super::drag::drag(&contents, leaving.iter().any(|one| one.stays_here), thread);
+    // Let go on a device nearby: sent to it, its own files held till the sending is over, and left on it.
+    let sent = if dragged == Some(super::drag::Dragged::Taken) { super::send::taken() } else { None };
     with_station(|station| {
-        for name in leaving.iter().flat_map(|one| &one.held) {
-            station.keep.folder.let_go(name);
+        let held = leaving.iter().flat_map(|one| one.held.iter().cloned());
+        match &sent {
+            Some((job, _)) => {
+                station.sending.insert(*job, held.collect());
+            }
+            None => held.for_each(|name| station.keep.folder.let_go(&name)),
         }
         let remove = crate::app().settings.lock().unwrap().station.remove_after_drag;
-        if remove && dragged == Some(super::drag::Dragged::Taken) {
+        if remove && dragged == Some(super::drag::Dragged::Taken) && sent.is_none() {
             for id in leaving.iter().filter_map(|one| one.id) {
                 station.keep.remove(id);
             }
         }
         station.show();
     });
+    // (Its files told apart on a thread of their own: a folder's are listed one by one, on a drive slow to answer
+    // perhaps.)
+    if let Some((job, to)) = sent {
+        std::thread::spawn(move || crate::nearby::send(job, &to, &super::send::outgoing(&contents, &super::send::folder_of(job))));
+    }
     // (Said once it is shown as it is after: taken off it, it is gone as it is put down, see `carry`.)
     super::drag::ended(dragged.unwrap_or(super::drag::Dragged::Not));
 }
@@ -617,6 +682,21 @@ impl Station {
                         windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &windows::core::HSTRING::from(target.as_str()), None, None, windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
                     }
                 }),
+                Ask::Arrivals(ended) => {
+                    self.arrivals();
+                    // (Shown coming till what came is on it: the two in one showing.)
+                    if self.receiving.as_ref().is_some_and(|receiving| Some(&receiving.session) == ended.as_ref()) {
+                        self.receiving = None;
+                    }
+                }
+                Ask::Receiving(receiving) => self.receiving = receiving,
+                Ask::Landing(ids, at) => self.arrived = Some((ids, at)),
+                Ask::Sent(job) => {
+                    for name in self.sending.remove(&job).into_iter().flatten() {
+                        self.keep.folder.let_go(&name);
+                    }
+                    let _ = std::fs::remove_dir_all(super::send::folder_of(job));
+                }
                 Ask::CopyText(text, from) => {
                     self.copy(&Content::Text(text), false, from.into_iter().collect());
                 }
@@ -650,6 +730,61 @@ impl Station {
             }
         }
         self.show();
+    }
+
+    /// What came from devices nearby (each receipt the helper wrote) taken onto the shelf, files into recent files too,
+    /// each receipt taken away once what it holds is kept. One whose files or words cannot be kept now (the station is
+    /// full, or they cannot be moved) stays, with those after it, to be taken in again.
+    fn arrivals(&mut self) {
+        let Some(folder) = crate::nearby::helper_folder() else { return };
+        let inbox = folder.join("inbox");
+        let mut came = Vec::new();
+        for (path, receipt) in crate::nearby::receipts(&folder) {
+            let from = receipt.device();
+            let alias = from.alias.clone();
+            // (Words: each a thing of its own, never with files.)
+            if !receipt.words.is_empty() {
+                match self.keep.words_arrived(&receipt.words, &from, super::now_ms()) {
+                    Ok(ids) => {
+                        let _ = std::fs::remove_file(&path);
+                        came.extend(ids);
+                        continue;
+                    }
+                    Err(refused) => {
+                        crate::journal::note(format!("nearby: words that came are not taken in now ({refused:?})"));
+                        break;
+                    }
+                }
+            }
+            match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
+                Ok(taken) => {
+                    // (Each where it is given out: a file of a folder sent, in that folder.)
+                    let holder = match self.keep.shelf.items.last().map(|item| &item.what) {
+                        Some(super::shelf::What::Came { files }) => files.clone(),
+                        _ => Vec::new(),
+                    };
+                    let given = self.keep.given_each(&holder);
+                    let listed: Vec<(std::path::PathBuf, u64)> = taken
+                        .iter()
+                        .filter_map(|(arrived, size)| Some((given.get(holder.iter().position(|held| held == arrived)?)?.clone()?, *size)))
+                        .collect();
+                    super::recent::arrived(&listed, &alias);
+                    let _ = std::fs::remove_file(&path);
+                    // (What holds them: the newest, last.)
+                    if !taken.is_empty() {
+                        came.extend(self.keep.shelf.items.last().map(|item| item.id));
+                    }
+                }
+                Err(refused) => {
+                    crate::journal::note(format!("nearby: what came is not taken in now ({refused:?})"));
+                    break;
+                }
+            }
+        }
+        if !came.is_empty() {
+            came.dedup();
+            self.arrived = Some((came, std::time::Instant::now()));
+        }
     }
 
     /// `id` as it is opened, shown in Explorer or dragged off: a picture of its own as its file (what Explorer and the
@@ -742,8 +877,10 @@ impl Station {
     }
 
     fn show(&self) {
+        // (What a device nearby may send it, as it has room now.)
+        crate::nearby::room(self.keep.shelf.room(self.keep.rules));
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone() };
+        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
@@ -753,6 +890,29 @@ impl Station {
 
 #[cfg(test)]
 mod tests {
+    /// The station drawn turns from how it was when what is kept at hand is in another order, or something else
+    /// begins to come from a device nearby (or it has come); what is copied meanwhile, and how much has come, are not
+    /// turned for.
+    #[test]
+    fn the_station_turns_as_what_it_keeps_moves() {
+        use super::Shown;
+        use crate::station::shelf::{Item, What};
+        let item = |id: u64, copied: bool| Item { id, what: What::Text { text: id.to_string() }, added_ms: 0, pinned: false, copied, stays_here: false, own_bytes: 0, from: None };
+        let sender = crate::nearby::Sender { alias: "Z Fold".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
+        let receiving = |session: &str, done: u64| crate::nearby::Receiving { session: session.into(), from: sender.clone(), files: Vec::new(), done, of: 100 };
+        let shown = |items: Vec<Item>, coming: Option<crate::nearby::Receiving>| Shown { items, receiving: coming, ..Default::default() };
+        let was = shown(vec![item(1, false), item(2, false)], None);
+        assert!(!shown(vec![item(1, false), item(2, false)], None).moved_from(&was));
+        assert!(!shown(vec![item(1, false), item(9, true), item(2, false)], None).moved_from(&was));
+        assert!(shown(vec![item(2, false), item(1, false)], None).moved_from(&was));
+        assert!(shown(vec![item(1, false)], None).moved_from(&was));
+        let coming = shown(vec![item(1, false), item(2, false)], Some(receiving("s1", 10)));
+        assert!(coming.moved_from(&was));
+        assert!(!shown(vec![item(1, false), item(2, false)], Some(receiving("s1", 60))).moved_from(&coming));
+        assert!(shown(vec![item(1, false), item(2, false)], Some(receiving("s2", 0))).moved_from(&coming));
+        assert!(shown(vec![item(3, false), item(1, false), item(2, false)], None).moved_from(&coming));
+    }
+
     /// Words copied lately, opened: a text file of them, named by their first line, that holds them whole (marked
     /// UTF-8, as Notepad reads Chinese right); the same words twice, the same file.
     #[test]

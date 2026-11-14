@@ -146,7 +146,7 @@ impl Drawn {
 /// A sheet's plate in `colours`, `radius` round: its shadow, its ground, its edge, and (glass's) the light along its top,
 /// as its lanes are lit.
 fn paint_plate(frame: &dyn Canvas, colours: &Colours, (x, y, width, height): (f32, f32, f32, f32), radius: f32) {
-    frame.shadow(colours.shadow, x, y, width, height, radius, 12.0, 6.0);
+    frame.shadow(colours.shadow, x, y, width, height, radius, SHADOW_BLUR, SHADOW_DROP);
     frame.fill_rounded(colours.sheet, x, y, width, height, radius);
     frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, width, height, radius, 1.0);
     if let Some(rim) = colours.rim {
@@ -181,8 +181,12 @@ const RADIUS: f32 = 8.0;
 const ICON: f32 = 16.0;
 const TEXT_LEFT: f32 = 44.0;
 const MIN_WIDTH: f32 = 200.0;
-/// Room round the sheet for its shadow.
-const SHADOW: f32 = 16.0;
+/// The shadow under the sheet: how blurred (the Gaussian's deviation) and how far down it falls.
+const SHADOW_BLUR: f32 = 12.0;
+const SHADOW_DROP: f32 = 6.0;
+/// Room round the sheet for its shadow: as far as it reaches (twice its blur's deviation, past how far down it falls,
+/// as `theme::room` has it), so that a window it is drawn in never cuts it off.
+pub const SHADOW: f32 = 2.0 * SHADOW_BLUR + SHADOW_DROP;
 
 /// Counts menus shown and gone: a capture of the desktop taken while one
 /// was up may hold it (see `Panel::collect_behind`).
@@ -513,10 +517,18 @@ pub struct Plate {
 
 /// A plate `width` × `height` from (`x`, `y`) drawn as a menu's sheet in `look` (its shadow, its edge), for a few choices
 /// shown as one (a note's format bar): what is drawn on it is to be drawn so.
-pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32)) -> Plate {
+pub fn plate(frame: &dyn super::canvas::Canvas, look: Look, rect: (f32, f32, f32, f32)) -> Plate {
+    plate_seen(frame, look, rect, 1.0)
+}
+
+/// The same over what it covers (its sheet whole: nothing under it shows through), `seen` of it shown (0 none, 1 all)
+/// as it comes and goes; what is drawn on it to be shown as much.
+pub fn plate_seen(frame: &dyn super::canvas::Canvas, look: Look, (x, y, width, height): (f32, f32, f32, f32), seen: f32) -> Plate {
     let colours = Colours::new(look, false);
     let radius = colours.radius.min(height / 2.0);
-    paint_plate(frame, &colours, (x, y, width, height), radius);
+    let shown = |color: Color| color.alpha(seen);
+    let faded = Colours { sheet: Color { a: seen, ..colours.sheet }, stroke: shown(colours.stroke), rim: colours.rim.map(shown), shadow: shown(colours.shadow), ..colours };
+    paint_plate(frame, &faded, (x, y, width, height), radius);
     Plate { icon: colours.icon, highlight: colours.highlight, radius }
 }
 

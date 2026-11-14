@@ -860,6 +860,9 @@ pub struct Settings {
     /// The times of day a to-do's time is chosen from (`HH:MM`, in order), as the user keeps them (see `ui::todo`).
     #[serde(default = "todo_times")]
     pub todo_times: Vec<String>,
+    /// Whether what a device nearby sends is told at the screen's edge while the panel is put away (see `ui::peek`): a
+    /// device asking to send is asked about there either way.
+    pub nearby_notice: bool,
     pub view: serde_json::Value,
 }
 
@@ -1011,6 +1014,7 @@ impl Default for Settings {
             notes_view: NotesView::Deck,
             notes_source: false,
             todo_times: todo_times(),
+            nearby_notice: true,
             view: serde_json::Value::Null,
         }
     }

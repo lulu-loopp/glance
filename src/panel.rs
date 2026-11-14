@@ -627,6 +627,8 @@ impl Controller {
         // again at the next sample.
         let mut overlay: Option<Overlay> = None;
         let mut widgets = crate::widget::Widgets::default();
+        // The notice at the edge for nearby transfer (see `ui::peek`).
+        let mut peek = crate::ui::peek::Peek::default();
         let draw_overlay = |overlay: &mut Option<Overlay>, panels: &[Panel]| {
             let playing = self.playing();
             let wanted = self.overlay_wanted();
@@ -799,8 +801,14 @@ impl Controller {
                     }
                     let pressed = panels.iter().find_map(|panel| panel.shelf_press.map(|press| press.hit)).or_else(|| widgets.shelf_pressed());
                     crate::ui::view::press_tile(pressed);
+                    // The devices nearby at a station's foot as something is dragged off it, and as what was let go on
+                    // one is sent (see `station::send`).
+                    let (strip_moved, strip_due) = crate::station::send::tick(now);
+                    if let Some(due) = strip_due {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
                     let tiles = crate::ui::view::tile_changes();
-                    if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() {
+                    if std::mem::replace(&mut tiles_drawn, tiles) != tiles || crate::ui::view::tile_landing() || strip_moved {
                         for panel in panels.iter_mut().filter(|panel| panel.is_shown()) {
                             panel.next_frame = now;
                         }
@@ -819,6 +827,17 @@ impl Controller {
                     self.widget_put_away.store(widgets.any_put_away(), Ordering::Relaxed);
                     self.widget_processes.store(widgets.any_showing_processes(), Ordering::Relaxed);
                     self.set_seen(&self.widgets_seen, widgets.any_seen());
+                }
+                // The notice at the edge: what a device nearby asks, sends, sent, told; carried onto the station's face where a
+                // panel draws it.
+                {
+                    let panel_up = panels.iter().any(Panel::is_shown);
+                    let face = |id: u64| panels.iter().filter(|panel| panel.is_shown()).find_map(|panel| panel.face_on_screen(Hit::Shelf(id)));
+                    let at_edges: Vec<(RECT, Edge, RECT)> = panels.iter().filter_map(Panel::at_edge).collect();
+                    let seen = crate::ui::peek::Seen { panel_up, game: &fullscreen_game, face: &face, panels: &at_edges };
+                    if let Some(due) = peek.tick(now, &seen) {
+                        wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
+                    }
                 }
                 if !pinned_at.is_empty() && self.history.latest().is_some() {
                     for (point, edge) in std::mem::take(&mut pinned_at) {
@@ -1035,6 +1054,40 @@ impl Controller {
                     seam_armed = false;
                 }
             };
+            // The notice at the edge: the pointer over it, a press on it, the keys (a PIN written in it); pressed where
+            // it tells what comes or came, the panel opened where it stands (where the panel is kept moved away from its
+            // edge, there).
+            if peek.owns(msg.hwnd) {
+                match msg.message {
+                    WM_KEYDOWN | windows::Win32::UI::WindowsAndMessaging::WM_CHAR => {
+                        // (Its characters, as the keyboard's layout makes them of the keys.)
+                        if msg.message == WM_KEYDOWN {
+                            let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg) };
+                        }
+                        peek.handle(&msg, now);
+                        continue;
+                    }
+                    WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                        if let Some(crate::ui::peek::Act::Open { edge, at }) = peek.handle(&msg, now) {
+                            if self.config.lock().unwrap().panel_at.is_some() {
+                                let target = self.hand_target(&mut panels, last_place);
+                                self.open_by_hand(&mut panels[target], last_place, now);
+                                last_place = panels[target].place().or(last_place);
+                            } else if let Some(contact) = monitor_at(at) {
+                                let target = panel_for(&mut panels, self, contact.monitor, edge);
+                                panels[target].open(at, contact, edge, None, false, now);
+                                last_place = Some((at, edge));
+                            }
+                        }
+                        continue;
+                    }
+                    crate::ui::window::SCREENS_CHANGED => {
+                        peek.screens_changed();
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             match msg.message {
                 // The shortcut and the tray: the panel of the edge last opened (see `hand_target`), opened, or (the
                 // shortcut) closed where it is up.
@@ -2458,6 +2511,8 @@ struct Panel<'a> {
     /// Where clicks and wheel turns land, from the panel's corner, and
     /// where that corner is in the window (DIPs).
     hits: Vec<HitBox>,
+    /// Where each thing on its station has its face, as `hits` are (see `view::faces`).
+    faces: Vec<(Hit, view::Rect)>,
     /// Where its settings' button was as the settings were asked from it, while they are (see `settings_here`).
     settings_from: Option<RECT>,
     corner: (f32, f32),
@@ -2467,6 +2522,9 @@ struct Panel<'a> {
     turn: render::Turn,
     /// What it drew as a thing was carried off its station (see `render::Away`).
     away: render::Away,
+    /// What its station showed as it was last drawn: changed since (something came from a device nearby, or begins to,
+    /// or was put on it or taken off), it turns from how that was drawn (none: not drawn since it opened).
+    station_was: Option<std::sync::Arc<crate::station::run::Shown>>,
     /// The bar, from the panel's corner (DIPs): a pinned panel is dragged by it.
     bar: view::Rect,
     /// Torn off as it was dragged: the widget to make (its form, scale and
@@ -2617,11 +2675,13 @@ impl<'a> Panel<'a> {
             held: None,
             style: String::new(),
             hits: Vec::new(),
+            faces: Vec::new(),
             settings_from: None,
             corner: (0.0, 0.0),
             was_sized: false,
             turn: render::Turn::default(),
             away: render::Away::default(),
+            station_was: None,
             bar: view::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             tear: None,
             tear_music: None,
@@ -2680,6 +2740,12 @@ impl<'a> Panel<'a> {
     /// Where it is up at its edge: along it where it centres, and the edge (none, moved away from it, or hidden).
     fn place(&self) -> Option<(POINT, Edge)> {
         self.placement.as_ref().filter(|_| self.is_shown() && !self.floating()).map(|placement| (placement.anchor, self.edge))
+    }
+
+    /// Where it is up at its edge: its screen, its edge, and the panel at rest (physical px) (none, moved away from it,
+    /// or hidden).
+    fn at_edge(&self) -> Option<(RECT, Edge, RECT)> {
+        self.placement.as_ref().filter(|_| self.is_shown() && !self.floating()).map(|placement| (placement.contact.monitor, self.edge, placement.panel))
     }
 
     /// The settings changed: what is shown, and how.
@@ -3024,6 +3090,8 @@ impl<'a> Panel<'a> {
             crate::ui::beside::close();
         }
         self.end_drag();
+        // (Opened again, it starts from what it shows then.)
+        self.station_was = None;
         // (Going back to its own size: there at once, and kept.)
         self.step_restore(Instant::now(), true);
         self.let_go_todo();
@@ -3574,11 +3642,22 @@ impl<'a> Panel<'a> {
 
     /// Where `hit` shows on the screen (physical px), as the panel was just drawn.
     fn hit_on_screen(&self, hit: Hit) -> Option<RECT> {
+        let (x, y, w, h, _) = self.hits.iter().find(|(.., at)| *at == hit)?;
+        self.box_on_screen((*x, *y, *w, *h))
+    }
+
+    /// Where the thing on its station pressed as `hit` has its face on the screen (physical px), as it was last drawn.
+    fn face_on_screen(&self, hit: Hit) -> Option<RECT> {
+        let (_, face) = self.faces.iter().find(|(at, _)| *at == hit)?;
+        self.box_on_screen((face.x, face.y, face.w, face.h))
+    }
+
+    /// Where a box drawn at (`x`, `y`), `w` × `h` from its corner (DIPs, as `hits` are) is on the screen (physical px).
+    fn box_on_screen(&self, (x, y, w, h): (f32, f32, f32, f32)) -> Option<RECT> {
         let placement = self.placement.as_ref()?;
         let (px, window) = (placement.px, placement.window);
         let screen = |at: f32, from: f32, origin: i32| origin + ((at + from) * px).round() as i32;
-        let (x, y, w, h, _) = self.hits.iter().find(|(.., at)| *at == hit)?;
-        Some(RECT { left: screen(*x, self.corner.0, window.left), top: screen(*y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
+        Some(RECT { left: screen(x, self.corner.0, window.left), top: screen(y, self.corner.1, window.top), right: screen(x + w, self.corner.0, window.left), bottom: screen(y + h, self.corner.1, window.top) })
     }
 
     /// The pointer moved with a thing on its station pressed: far enough, it is dragged off (by the station, which
@@ -4213,6 +4292,8 @@ impl<'a> Panel<'a> {
         let thumbs_moving = self.thumbs.choose(now, &view::choices(self.tab)) | thumbs_moving;
         // (What was just copied from it, marked so a moment.)
         let thumbs_moving = self.thumbs.mark_copied(now, view::copied(), crate::station::run::COPIED_FOR) | thumbs_moving;
+        // (What just came from a device nearby, coming in.)
+        let thumbs_moving = self.thumbs.mark_arrived(now, view::arrived(), crate::station::run::ARRIVED_FOR) | thumbs_moving;
         // (What is chosen together on it, marked so.)
         self.thumbs.mark_chosen(crate::station::select::marked(self.window.hwnd.0 as isize));
         // What is kept at hand: the one held where it would go, the others making room; one let go, kept where it went
@@ -4251,10 +4332,14 @@ impl<'a> Panel<'a> {
             (hit, carried, drag, from, boxes)
         });
         let mut lifted = None;
+        // What its station showed as last drawn, where it shows otherwise now (see `station_was`).
+        let station_now = crate::station::run::shown();
+        let station_was = self.station_was.replace(station_now.clone()).filter(|was| station_now.moved_from(was) && !reduced_motion());
         let away = &mut self.away;
         let surface = self.surface.as_mut().unwrap();
         surface.offset(offset);
         let drawing = began.elapsed();
+        view::faces();
         let painted = surface.draw(&self.gfx, size, px, |frame| {
             frame.origin(0.0, 0.0);
             if let Some((hit, carried, _, _, boxes)) = &lifting {
@@ -4274,7 +4359,11 @@ impl<'a> Panel<'a> {
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
             // carried (its room outlined) into how it is drawn now.
             let gone_from = away.follow(|| render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))).filter(|_| turn.is_none());
-            let turn = match gone_from {
+            // What is on its station otherwise than it was drawn (something came, or begins to come, or was put on
+            // it or taken off): turning from how it was drawn, each thing moving to where it is now, what came fading
+            // in. (One under way, or laid out anew, turns on as it does.)
+            let changed_from = || station_was.filter(|_| turn.is_none()).map(|was| crate::station::run::as_was(was, || render::record(frame, &scene, &lanes, &layout, None, 1.0, (0.0, 0.0))));
+            let turn = match gone_from.or_else(changed_from) {
                 Some(from) => {
                     turning.begin(now, from);
                     Some(0.0)
@@ -4343,8 +4432,11 @@ impl<'a> Panel<'a> {
         if grounded {
             self.gfx.clear_caches();
         }
+        // (Its own faces: what another window of this thread drew meanwhile was let go of as it began.)
+        let faces = view::faces();
         if let Some(hits) = hits {
             self.hits = hits;
+            self.faces = faces;
             self.follow_settings();
             self.hover_again();
         }

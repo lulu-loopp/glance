@@ -809,6 +809,32 @@ impl Gfx {
         (x, metrics.top)
     }
 
+    /// `text` as it is written in lines `width` wide in `font` (see `wrapped`), no more than `most` of them: all of it,
+    /// else the most of its start that fits with an ellipsis after it (cut in characters, as `canvas::fitted` cuts one
+    /// line). And how tall that is.
+    pub fn wrapped_within(&self, text: &str, font: Font, width: f32, most: u32) -> (String, f32) {
+        let laid = |text: &str| {
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            unsafe { self.wrapped(text, font, width).GetMetrics(&mut metrics).unwrap() };
+            (metrics.lineCount, metrics.height)
+        };
+        let (lines, height) = laid(text);
+        if lines <= most {
+            return (text.to_string(), height);
+        }
+        // (The most characters that fit: halving between none and all of them.)
+        let ends: Vec<usize> = text.char_indices().map(|(at, c)| at + c.len_utf8()).collect();
+        let cut = |count: usize| format!("{}…", text[..count.checked_sub(1).map_or(0, |last| ends[last])].trim_end());
+        let (mut fits, mut over) = (0, ends.len());
+        while over - fits > 1 {
+            let middle = (fits + over) / 2;
+            if laid(&cut(middle)).0 <= most { fits = middle } else { over = middle }
+        }
+        let shown = cut(fits);
+        let height = laid(&shown).1;
+        (shown, height)
+    }
+
     /// How tall `text` is laid out in lines `width` wide.
     pub fn wrapped_height(&self, text: &str, font: Font, width: f32) -> f32 {
         let mut metrics = DWRITE_TEXT_METRICS::default();
@@ -3223,6 +3249,29 @@ pub(crate) fn threads_now() -> usize {
 #[cfg(test)]
 mod tests {
     use super::room;
+
+    /// Words kept to so many lines: all of them where they fit, as tall as they are; else the most of their start that
+    /// fits with an ellipsis after it, in no more lines, one more character of them not fitting.
+    #[test]
+    fn words_kept_to_so_many_lines_end_in_an_ellipsis() {
+        let _device = super::held().unwrap();
+        let gfx = super::Gfx::new().expect("graphics");
+        let font = crate::ui::theme::Theme::new(crate::ui::theme::Skin::Glass, false).body;
+        let lines = |text: &str| {
+            let mut metrics = windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_METRICS::default();
+            unsafe { gfx.wrapped(text, font, 200.0).GetMetrics(&mut metrics).unwrap() };
+            metrics.lineCount
+        };
+        let (shown, one) = gfx.wrapped_within("会议改到 3 号会议室", font, 200.0, 2);
+        assert_eq!((shown.as_str(), one), ("会议改到 3 号会议室", gfx.wrapped_height("会议改到 3 号会议室", font, 200.0)));
+        for long in ["明天上午十点的会议改到 3 号会议室，记得带上打印好的报价单和两份样品，以及上次会议的纪要。".repeat(3), "The meeting has moved to room three tomorrow morning at ten, so bring the printed quote and both samples along with you.".to_string()] {
+            let (shown, tall) = gfx.wrapped_within(&long, font, 200.0, 2);
+            assert!(shown.ends_with('…') && lines(&shown) == 2 && tall > one, "{shown}");
+            let kept = shown.trim_end_matches('…').chars().count();
+            let more: String = long.chars().take(kept + 1).collect();
+            assert!(lines(&format!("{}…", more.trim_end())) > 2 || more.trim_end().chars().count() <= kept, "{shown}");
+        }
+    }
 
     /// A line of words set in a box stands with its ink across the middle of the box as it is drawn, at any scale and
     /// wherever on a pixel the box falls, to under a pixel: half a pixel, the most a baseline put on a whole pixel can

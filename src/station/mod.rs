@@ -12,6 +12,7 @@ pub mod keep;
 pub mod recent;
 pub mod run;
 pub mod select;
+pub mod send;
 pub mod shelf;
 pub mod thumbs;
 #[cfg(test)]
@@ -32,6 +33,10 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             let again = last.is_some_and(|(was, at)| was == id && at.elapsed() <= double);
             *last = (!again).then(|| (id, std::time::Instant::now()));
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
+        }
+        // A device on the strip a sending to goes on: that sending cancelled.
+        Hit::SendTo(key) => {
+            send::cancel(key);
         }
         // The notes shown another way (their head's views).
         Hit::NotesShow(view) => {
@@ -85,7 +90,7 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     let lang = crate::update::language();
     let (opens, in_explorer) = match &item.what {
         What::Text { .. } | What::Link { .. } => (true, false),
-        What::Files { .. } | What::Picture { .. } | What::Saved { .. } => (true, true),
+        What::Files { .. } | What::Picture { .. } | What::Saved { .. } | What::Came { .. } => (true, true),
     };
     let mut rows: Vec<(Choice, &'static str, Icon, bool)> = vec![(Choice::Copy, lang.pick("复制", "Copy"), Icon::Clipboard, false)];
     if opens {
@@ -163,7 +168,7 @@ pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec
     let item = |id: u64| items.iter().find(|item| item.id == id);
     let ids: Vec<u64> = hits.iter().filter_map(|hit| if let Hit::Shelf(id) | Hit::Copied(id) = hit { Some(*id) } else { None }).collect();
     let recent = hits.iter().any(|hit| matches!(hit, Hit::Recent(_)));
-    let files = recent || ids.iter().filter_map(|id| item(*id)).any(|item| matches!(item.what, shelf::What::Files { .. } | shelf::What::Picture { .. } | shelf::What::Saved { words: false, .. }));
+    let files = recent || ids.iter().filter_map(|id| item(*id)).any(|item| matches!(item.what, shelf::What::Files { .. } | shelf::What::Picture { .. } | shelf::What::Saved { words: false, .. } | shelf::What::Came { .. }));
     let mut choices = vec![ManyChoice::Copy];
     if files {
         choices.push(ManyChoice::Show);
@@ -435,7 +440,7 @@ mod tests {
     #[test]
     fn the_menu_of_things_chosen_together_offers_what_all_may_do() {
         use shelf::{Item, What};
-        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0 };
+        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None };
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Link { url: "https://a.b".into() }, false),

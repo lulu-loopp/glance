@@ -193,9 +193,12 @@ private fun mac(key: ByteArray, parts: List<String>, body: ByteArray): String {
  * thread. A long wait is allowed: the PC may be starting its lighting
  * program.
  */
-fun Pc.ask(path: String, body: JSONObject? = null): PcState = ask(path, body, again = true)
+fun Pc.ask(path: String, body: JSONObject? = null): PcState = PcState.from(said(path, body))
 
-private fun Pc.ask(path: String, body: JSONObject?, again: Boolean): PcState {
+/** What the PC answers [path] (see [ask]), as it says it. */
+fun Pc.said(path: String, body: JSONObject? = null): JSONObject = said(path, body, again = true)
+
+private fun Pc.said(path: String, body: JSONObject?, again: Boolean): JSONObject {
     val secret = unhex(key)
     val method = if (body == null) "GET" else "POST"
     val sent = body?.toString()?.toByteArray() ?: ByteArray(0)
@@ -250,11 +253,11 @@ private fun Pc.ask(path: String, body: JSONObject?, again: Boolean): PcState {
             status == 401 && !signed -> throw Failure.Refused
             // Whatever else is not signed is not the PC's.
             !signed -> throw Failure.Unreachable
-            status == 200 -> PcState.from(json)
+            status == 200 -> json
             // Not of now, as the PC has it: asked again, for the run it says it is and by its clock.
             status == 401 && json.optString("error") == "stale" && again -> {
                 told[key] = json.optString("session") to (json.optLong("time") - System.currentTimeMillis() / 1000)
-                ask(path, body, again = false)
+                said(path, body, again = false)
             }
             status == 401 -> throw Failure.Refused
             else -> throw Failure.Failed(json.optString("error", status.toString()))

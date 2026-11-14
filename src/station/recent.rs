@@ -69,6 +69,10 @@ pub struct Came {
     pub downloaded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
+    /// The device nearby it was sent from (see `arrived`): kept in the station's own folder, where no file is found
+    /// by its drive's journal, and listed while it is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
 }
 
 /// Which of them a page shows: all; those downloaded; screenshots; documents; pictures and videos.
@@ -468,6 +472,11 @@ impl Kept {
             return self.files.len() != before;
         }
         let had = self.files.iter().position(|came| came.key == key);
+        // (One sent from a device nearby is listed as it was sent, whatever is done to it in the station's folder,
+        // till it goes: see `recheck`.)
+        if had.is_some_and(|at| self.files[at].from.is_some()) {
+            return false;
+        }
         let come = change.reason & (CREATED | RENAMED_TO) != 0 && now.saturating_sub(change.at_ms) <= KEEP_MS;
         // (Made hidden, the system's or passing since it was listed: no longer listed.)
         if change.attributes & reasons::NOT_LISTED != 0 {
@@ -499,7 +508,7 @@ impl Kept {
             }
             (Some((kind, downloaded)), None) => {
                 let site = site(&path);
-                self.files.push(Came { key, path, came_ms: made_ms, bytes, kind, downloaded, site });
+                self.files.push(Came { key, path, came_ms: made_ms, bytes, kind, downloaded, site, from: None });
                 self.files.sort_by_key(|came| std::cmp::Reverse(came.came_ms));
                 self.files.truncate(MOST);
                 true
@@ -523,7 +532,8 @@ impl Kept {
 
     /// The files kept that `scope` shows, each on the drive its letter last was.
     fn shown(&self, scope: &Scope) -> Vec<Came> {
-        self.files.iter().filter(|came| !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
+        // (Those sent from a device nearby are in no folder the user chose to list or not.)
+        self.files.iter().filter(|came| came.from.is_some() || !outside(scope, &self.volumes, came.key.drive, &came.path)).cloned().collect()
     }
 
     /// What was listed from the drives `outside` (by their letters and volumes), what waits to be tried on them, and
@@ -576,6 +586,12 @@ impl Kept {
     fn recheck(&mut self, places: &Places, look: impl Fn(Key) -> Looked, out: &dyn Fn(&Path) -> bool, which: impl Fn(&Came) -> bool) -> bool {
         let mut changed = false;
         self.files.retain_mut(|came| {
+            // (One sent from a device nearby, by where it is kept.)
+            if came.from.is_some() {
+                let keep = came.path.exists();
+                changed |= !keep;
+                return keep;
+            }
             if !which(came) {
                 return true;
             }
@@ -719,6 +735,40 @@ pub fn pretend(files: Vec<Came>) {
     PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(files)));
 }
 
+/// The files sent from a device nearby that are to be listed, as `arrived` was told of them.
+static ARRIVED: Mutex<Vec<Came>> = Mutex::new(Vec::new());
+
+/// Files sent from the device nearby called `from` (each where it is kept, as it was sent, and how large it is): listed
+/// as they came (see `Came::from`), while the list is on.
+#[cfg(windows)]
+pub fn arrived(files: &[(PathBuf, u64)], from: &str) {
+    if !on() {
+        return;
+    }
+    let now = super::now_ms();
+    let came: Vec<Came> = files
+        .iter()
+        .filter_map(|(path, bytes)| {
+            let key = key_of(path)?;
+            let kind = kind_of_extension(&path.extension().map(|extension| extension.to_string_lossy().to_lowercase()).unwrap_or_default());
+            Some(Came { key, path: path.clone(), came_ms: now, bytes: *bytes, kind, downloaded: false, site: None, from: Some(from.to_string()) })
+        })
+        .collect();
+    ARRIVED.lock().unwrap().extend(came);
+}
+
+/// Which file is at `path`: its drive's letter, and its number there (as the drive's journal numbers it).
+#[cfg(windows)]
+fn key_of(path: &Path) -> Option<Key> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO};
+    let drive = path.to_string_lossy().chars().next().filter(char::is_ascii_alphabetic)?.to_ascii_uppercase();
+    let file = std::fs::File::open(path).ok()?;
+    let mut info = FILE_ID_INFO::default();
+    unsafe { GetFileInformationByHandleEx(windows::Win32::Foundation::HANDLE(file.as_raw_handle()), FileIdInfo, std::ptr::addr_of_mut!(info).cast(), std::mem::size_of::<FILE_ID_INFO>() as u32) }.ok()?;
+    Some(Key { drive, file: u128::from_le_bytes(info.FileId.Identifier) })
+}
+
 /// Starts following the drives on a thread of its own; `told` is called whenever the list changed.
 pub fn start(told: impl Fn() + Send + Sync + 'static) {
     if TOLD.set(Box::new(told)).is_err() {
@@ -800,6 +850,13 @@ fn follow() {
         let out_on = |letter: char, path: &Path| out(path) || outside(&scope, &volumes, letter, path);
         let now = super::now_ms();
         let mut changed = kept.age(now) | let_go;
+        // Those sent from a device nearby, listed (each once).
+        for came in std::mem::take(&mut *ARRIVED.lock().unwrap()) {
+            kept.files.retain(|listed| listed.key != came.key);
+            kept.files.insert(0, came);
+            kept.files.truncate(MOST);
+            changed = true;
+        }
         let mut folder_renamed = false;
         let mut files_moved = false;
         let mut more = false;
@@ -1286,7 +1343,7 @@ mod tests {
     /// large as it is now.
     #[test]
     fn looks_for_each_file_again() {
-        let came = |drive: char, file: u128, path: &str, kind: Kind, downloaded: bool| Came { key: Key { drive, file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind, downloaded, site: None };
+        let came = |drive: char, file: u128, path: &str, kind: Kind, downloaded: bool| Came { key: Key { drive, file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind, downloaded, site: None, from: None };
         let mut kept = Kept {
             files: vec![
                 came('D', 1, r"D:\a\one.pdf", Kind::Document, false),
@@ -1333,7 +1390,7 @@ mod tests {
         assert!(!moved_where_left_out(&Looked::Gone, out));
         assert!(!moved_where_left_out(&Looked::Unknown, out));
 
-        let came = |file: u128, path: &str| Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind: Kind::Document, downloaded: false, site: None };
+        let came = |file: u128, path: &str| Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms: 1, bytes: 1, kind: Kind::Document, downloaded: false, site: None, from: None };
         let mut kept = Kept { files: vec![came(1, r"D:\stays\one.pdf"), came(2, r"D:\went\two.pdf")], ..Kept::default() };
         let looked = std::cell::RefCell::new(Vec::new());
         let look = |key: Key| {
@@ -1545,7 +1602,7 @@ mod tests {
 
     /// A file come, as the bursts' rule takes it: its folder, its name, when it came (ms), how large it is, what it is.
     fn come(file: u128, path: &str, came_ms: u64, bytes: u64, kind: Kind) -> Came {
-        Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms, bytes, kind, downloaded: false, site: None }
+        Came { key: Key { drive: 'D', file }, path: PathBuf::from(path), came_ms, bytes, kind, downloaded: false, site: None, from: None }
     }
 
     /// `files` newest first, as the list keeps them.

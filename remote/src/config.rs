@@ -6,6 +6,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Night mode as it is to be ended: the power plan or mode to go back to, and whether night muted the sound (it was
+/// not muted already), to be unmuted again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Night {
+    pub power: Option<crate::power::Before>,
+    pub muted: bool,
+}
+
 /// The port the helper listens on unless another is kept.
 const PORT: u16 = 47631;
 /// How many LEDs a header for addressable strips is taken to have while
@@ -59,6 +67,11 @@ impl Default for Light {
 #[serde(default)]
 pub struct Config {
     pub port: u16,
+    /// Phones control this PC (the phone remote is on). Off, this helper runs for nearby transfer alone: what phones
+    /// ask is refused, but for what nearby transfer has of them (see `nearby` in main) and their unpairing.
+    pub remote: bool,
+    /// Nearby transfer: whether it is on, what this PC is called, the devices whose files are taken without asking.
+    pub nearby: crate::nearby::Kept,
     /// This PC, as the phone names it.
     pub name: String,
     /// The one key every phone shared, before each had its own: read once,
@@ -104,6 +117,9 @@ pub struct Config {
     /// each as it is to be put back: one that ends before it has put them
     /// back does so when it next starts.
     pub darkened: Vec<crate::display::Darkened>,
+    /// Night, while this helper has it on, as it is to be ended: one that ends before it has ended it has it ended
+    /// when the next starts.
+    pub night: Option<Night>,
     /// A key that puts night on and off and does nothing else (hex, 32 bytes), where one is kept: for a phone's
     /// shortcut, which cannot sign what it asks (see `night_key` in main). Made on this PC by hand, never offered.
     pub night_key: Option<String>,
@@ -113,6 +129,8 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             port: PORT,
+            remote: true,
+            nearby: crate::nearby::Kept::default(),
             name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into()),
             key: String::new(),
             phones: Vec::new(),
@@ -129,6 +147,7 @@ impl Default for Config {
             screens: Screens::default(),
             screens_chosen: false,
             darkened: Vec::new(),
+            night: None,
             night_key: None,
         }
     }
@@ -148,10 +167,18 @@ impl Config {
     }
 }
 
-/// The folder what the helper keeps is in.
+/// The folder what the helper keeps is in (its configuration, its log, its certificate).
+#[cfg(not(test))]
 pub fn folder() -> PathBuf {
     let roaming = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default();
     roaming.join("dev.weiyi.glance.remote")
+}
+
+/// In tests, a folder of the test run's own: they never read nor write the user's (on 2026-11-12 the nearby tests'
+/// lines were found in the user's log).
+#[cfg(test)]
+pub fn folder() -> PathBuf {
+    std::env::temp_dir().join(format!("glance-remote-tests-{}", std::process::id()))
 }
 
 fn path() -> PathBuf {
@@ -291,5 +318,23 @@ impl Config {
         let beside = path.with_extension("json.new");
         std::fs::write(&beside, serde_json::to_string_pretty(self).unwrap())?;
         std::fs::rename(beside, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Night is kept as it is to be ended (a power mode's GUID whole), and a configuration kept before night was
+    /// kept reads as having none.
+    #[test]
+    fn night_is_kept_as_it_is_to_be_ended() {
+        let mode = windows::core::GUID::from_u128(0x961cc777_2547_4f9d_8174_7d86181b8a7a);
+        let kept = Config { night: Some(Night { power: Some(crate::power::Before::Mode(mode.to_u128())), muted: true }), ..Config::default() };
+        let read: Config = serde_json::from_str(&serde_json::to_string_pretty(&kept).unwrap()).unwrap();
+        assert_eq!(read.night, kept.night);
+        assert!(matches!(read.night, Some(Night { power: Some(crate::power::Before::Mode(number)), .. }) if windows::core::GUID::from_u128(number) == mode));
+        let before: Config = serde_json::from_str(r#"{"port":47631}"#).unwrap();
+        assert_eq!(before.night, None);
     }
 }

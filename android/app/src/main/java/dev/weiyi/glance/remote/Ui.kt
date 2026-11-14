@@ -84,6 +84,21 @@ object Sign {
     const val PREVIOUS = "M18 6v12l-9-6zM6.5 6v12"
     const val NEXT = "M6 6v12l9-6zM17.5 6v12"
     const val BRIGHT = "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+    // What is handed to a PC (Lucide's upload, image, file, link, pilcrow, monitor, check, circle-alert).
+    const val UPLOAD = "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"
+    const val IMAGE = "M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM9 7a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM21 15l-3.1-3.1a2 2 0 0 0-2.8 0L6 21"
+    const val FILE = "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4"
+    const val LINK = "M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"
+    const val TEXT = "M13 4v16M17 4v16M19 4H9.5a4.5 4.5 0 0 0 0 9H13"
+    const val MONITOR = "M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM8 21h8M12 17v4"
+    const val CHECK = "M20 6L9 17l-5-5"
+    // The kinds of things handed to a PC (Lucide's clipboard, text, folder, layout-grid), and search.
+    const val CLIPBOARD = "M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"
+    const val LINES = "M21 6H3M15 12H3M17 18H3"
+    const val FOLDER = "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z"
+    const val APPS = "M4 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM15 3h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM15 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1zM4 14h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-5a1 1 0 0 1 1-1z"
+    const val SEARCH = "M11 3a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM21 21l-4.3-4.3"
+    const val ALERT = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM12 8v4M12 16h.01"
 }
 
 @Composable
@@ -222,6 +237,20 @@ fun Rule() = Box(Modifier.fillMaxWidth().height(1.dp).background(Hair))
 fun Words(text: String, color: Color, modifier: Modifier = Modifier, size: Float = 14f, weight: FontWeight = FontWeight.Normal, enabled: Boolean = true, press: () -> Unit) {
     Box(modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled, role = Role.Button, onClick = press), contentAlignment = Alignment.Center) {
         Text(text, color = if (enabled) color else Faint, fontSize = size.sp, fontWeight = weight, maxLines = 1)
+    }
+}
+
+/** Something the app has to say (why it could not do what was asked), and a word to put it away. */
+@Composable
+fun Tell(title: String, text: String, close: String, dismiss: () -> Unit) {
+    Dialog(onDismissRequest = dismiss) {
+        Column(Modifier.widthIn(max = 328.dp).clip(RoundedCornerShape(24.dp)).background(Card2).padding(start = 24.dp, top = 24.dp, end = 12.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(title, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(end = 12.dp))
+            Text(text, fontSize = 14.sp, lineHeight = 22.sp, color = Dim, modifier = Modifier.padding(end = 12.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                Words(close, Ink, Modifier.padding(horizontal = 4.dp).widthIn(min = 56.dp), size = 15f, weight = FontWeight.SemiBold, press = dismiss)
+            }
+        }
     }
 }
 

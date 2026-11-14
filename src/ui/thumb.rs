@@ -41,6 +41,8 @@ pub struct Dots<K> {
     apps: Apps,
     /// What was just copied, marked so (see `copied`): by the keys it shows as, and how clear the mark is.
     copied: Option<(Vec<K>, f32)>,
+    /// What just came from a device nearby, coming in (see `arrived`): by the keys it shows as, and how far through.
+    arrived: Option<(Vec<K>, f32)>,
     /// What is chosen together, marked so (see `chosen`), by the keys it shows as.
     chosen: Vec<K>,
 }
@@ -129,7 +131,7 @@ pub struct Slid<K> {
 
 impl<K: Copy + PartialEq> Dots<K> {
     pub const fn new() -> Self {
-        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None }, copied: None, chosen: Vec::new() }
+        Dots { now: Vec::new(), at: None, slides: Vec::new(), apps: Apps { order: Vec::new(), moves: Vec::new(), held: None }, copied: None, arrived: None, chosen: Vec::new() }
     }
 
     /// What is chosen together now (see `station::select`), by the keys it shows as: each marked so as it is drawn.
@@ -158,6 +160,21 @@ impl<K: Copy + PartialEq> Dots<K> {
             (since < 1.0).then_some((keys, clear.max(0.0)))
         });
         self.copied.is_some()
+    }
+
+    /// What just came from a device nearby, as of `now` (when, and the keys it shows as), coming in for `lasts`:
+    /// whether it still is (more frames wanted).
+    pub fn mark_arrived(&mut self, now: Instant, arrived: Option<(Instant, Vec<K>)>, lasts: std::time::Duration) -> bool {
+        self.arrived = arrived.and_then(|(at, keys)| {
+            let since = now.saturating_duration_since(at).as_secs_f32() / lasts.as_secs_f32();
+            (since < 1.0).then_some((keys, since))
+        });
+        self.arrived.is_some()
+    }
+
+    /// How far through coming in `key` is, as it just came from a device nearby (none: it is not).
+    pub fn arrived(&self, key: K) -> Option<f32> {
+        self.arrived.as_ref().filter(|(keys, _)| keys.contains(&key)).map(|(_, through)| *through)
     }
 
     /// How clear the mark of `key` copied is now (0: not marked).
@@ -349,6 +366,25 @@ impl<K: Copy + PartialEq> Default for Dots<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What just came from a device nearby is marked by each key it shows as, from naught to whole over its time, and
+    /// no longer after (nothing more wanted); what else shows is never marked.
+    #[test]
+    fn what_came_is_marked_through_its_coming() {
+        let start = Instant::now();
+        let lasts = std::time::Duration::from_millis(1000);
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut marks: Dots<u8> = Dots::new();
+        assert!(!marks.mark_arrived(start, None, lasts));
+        assert_eq!(marks.arrived(1), None);
+        let came = || Some((start, vec![1, 2]));
+        assert!(marks.mark_arrived(start, came(), lasts));
+        assert_eq!((marks.arrived(1), marks.arrived(2), marks.arrived(3)), (Some(0.0), Some(0.0), None));
+        assert!(marks.mark_arrived(at(250), came(), lasts));
+        assert!((marks.arrived(2).unwrap() - 0.25).abs() < 1e-4);
+        assert!(!marks.mark_arrived(at(1000), came(), lasts));
+        assert_eq!(marks.arrived(1), None);
+    }
 
     /// What was just copied is marked by each key it shows as: the mark comes on quickly, holds, fades at the end and
     /// is gone after (nothing more wanted); what else shows is never marked.

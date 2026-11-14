@@ -15,6 +15,10 @@ pub enum Icon {
     Game,
     Pin,
     Close,
+    /// A padlock: what is asked for before something goes (a PIN).
+    Lock,
+    /// Three points joined: what goes to and from devices nearby (Lucide's share-2).
+    Share,
     Settings,
     Check,
     Pointer,
@@ -56,6 +60,8 @@ pub enum Icon {
     Search,
     Palette,
     Smartphone,
+    /// A computer, as a device nearby that is not a phone (Lucide's monitor).
+    Monitor,
     /// A notice of Glance's site (Lucide's megaphone).
     Megaphone,
     PencilRuler,
@@ -83,6 +89,8 @@ pub enum Icon {
     Heading2,
     Heading3,
     Pilcrow,
+    /// Words (Lucide's text): what the nearby notice shows for text sent.
+    Text,
     /// What a note's writing menu does in a table's cell: a row added above it or below it, a column left of it or right
     /// of it (Lucide's arrow-up-to-line, arrow-down-to-line, arrow-left-to-line, arrow-right-to-line).
     ArrowUpToLine,
@@ -186,6 +194,7 @@ impl Icon {
             Icon::Heading2 => &["M4 12h8", "M4 18V6", "M12 18V6", "M21 18h-4c0-4 4-3 4-6 0-1.5-2-2.5-4-1"],
             Icon::Heading3 => &["M4 12h8", "M4 18V6", "M12 18V6", "M17.5 10.5c1.7-1 3.5 0 3.5 1.5a2 2 0 0 1-2 2", "M17 17.5c2 1.5 4 .3 4-1.5a2 2 0 0 0-2-2"],
             Icon::Pilcrow => &["M13 4v16", "M17 4v16", "M19 4H9.5a4.5 4.5 0 0 0 0 9H13"],
+            Icon::Text => &["M15 18H3", "M17 6H3", "M21 12H3"],
             Icon::ArrowUpToLine => &["M5 3h14", "m18 13-6-6-6 6", "M12 7v14"],
             Icon::ArrowDownToLine => &["M12 17V3", "m6 11 6 6 6-6", "M19 21H5"],
             Icon::ArrowLeftToLine => &["M3 19V5", "m13 6-6 6 6 6", "M7 12h14"],
@@ -197,6 +206,8 @@ impl Icon {
                 "M8 2v3", "M2 8h3", "M16 19v3", "M19 16h3",
             ],
             Icon::Close => &["M18 6 6 18", "m6 6 12 12"],
+            Icon::Lock => &["M5 11h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z", "M7 11V7a5 5 0 0 1 10 0v4"],
+            Icon::Share => &["M21 5a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M9 12a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "M21 19a3 3 0 1 1-6 0a3 3 0 1 1 6 0z", "m8.59 13.51 6.83 3.98", "m15.41 6.51-6.82 3.98"],
             Icon::Send => &[
                 "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
                 "m21.854 2.147-10.94 10.939",
@@ -238,6 +249,7 @@ impl Icon {
                 "m15 5 4 4",
             ],
             Icon::Smartphone => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h0.01"],
+            Icon::Monitor => &["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M8 21h8", "M12 17v4"],
             Icon::Megaphone => &[
                 "M11 6a13 13 0 0 0 8.4-2.8A1 1 0 0 1 21 4v12a1 1 0 0 1-1.6.8A13 13 0 0 0 11 14H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z",
                 "M6 14a12 12 0 0 0 2.4 7.2 2 2 0 0 0 3.2-2.4A8 8 0 0 1 10 14",
@@ -495,7 +507,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

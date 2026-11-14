@@ -105,6 +105,7 @@
     <string name="sleep_what">Everything on the PC stops: downloads, remote connections, programs at work. Asleep, it cannot be woken from the phone; press a key or the power button on the PC.</string>
     <string name="sleep_instead">To turn off only the screens and the lights and leave the PC running, use night mode.</string>
     <string name="cancel">Cancel</string>
+    <string name="ok">OK</string>
     <string name="cpu">CPU</string>
     <string name="gpu">Graphics</string>
     <string name="ram">Memory</string>
@@ -132,4 +133,125 @@
     <string name="newer_installing">Confirm the installation in the window the system shows</string>
     <string name="newer_failed">The download did not finish. Tap to try again</string>
     <string name="keys_level">How bright</string>
+    <string name="auto_send">Send new photos to this PC automatically</string>
+    <string name="auto_send_what">Sent within seconds of being taken, without opening this app. Only while on the same network as the PC.</string>
+    <string name="auto_send_elsewhere">Currently sent to %1$s. Turning this on sends to this PC instead.</string>
+    <string name="auto_screenshots">Include screenshots</string>
+    <string name="auto_videos">Include videos</string>
+    <string name="auto_notice">Show a notice after sending</string>
+    <string name="auto_sent">Sent to %1$s</string>
+    <plurals name="auto_sent_many">
+        <item quantity="one">Sent %2$d item to %1$s</item>
+        <item quantity="other">Sent %2$d items to %1$s</item>
+    </plurals>
+    <string name="auto_channel">Photos sent to a PC</string>
+    <string name="auto_failed">Automatic sending could not be turned on</string>
+    <string name="auto_pc_off">Nearby sharing is off on this PC. On the PC, turn on Glance Settings › Nearby sharing › Receive files from devices nearby first.</string>
+    <string name="auto_unreachable">This PC could not be reached. Make sure the phone and the PC are on the same network and the PC is on.</string>
+    <string name="auto_refused">This PC no longer accepts this phone. Pair it again.</string>
+    <string name="auto_said">The PC could not do it: %1$s</string>
+    <string name="auto_partial">Glance may only see some of your photos, so it cannot notice new ones. Allow access to all photos in the system settings, then turn this on again.</string>
+    <string name="auto_denied">Without access to photos, nothing can be sent. Access can be allowed for Glance in the system settings.</string>
+    <string name="auto_no_access">Paused: Glance may no longer see all photos. Allow access to all photos in the system settings to go on.</string>
+    <string name="auto_videos_denied">Without access to videos, they cannot be sent. Access can be allowed for Glance in the system settings.</string>
+    <string name="auto_held">Running in the background</string>
+    <string name="auto_held_what">The system currently limits Glance in the background, so new photos are sent only once the app is opened.</string>
+    <string name="auto_held_allow">Allow</string>
+    <string name="auto_held_late">The last photos were sent only once the app was opened, as the system still limits Glance in the background. Allow it to run in the background in the system\'s settings for the app (on some phones under battery usage).</string>
+    <string name="auto_held_settings">Settings</string>
+    <!-- What is handed to a PC by hand. -->
+    <string name="hand_tile">Send files</string>
+    <string name="hand_tile_what">Photos, videos, text or any files, into this PC\'s station</string>
+    <string name="hand_tile_off">Nearby transfer is off on this PC</string>
+    <string name="hand_off_title">Nearby transfer is off on %1$s</string>
+    <string name="hand_to">Send to %1$s</string>
+    <string name="hand_media">Photos and videos</string>
+    <string name="hand_files">Files</string>
+    <string name="hand_clipboard">Clipboard</string>
+    <string name="hand_text">Text</string>
+    <string name="hand_folder">Folder</string>
+    <string name="hand_apps">Apps</string>
+    <string name="hand_send">Send</string>
+    <string name="hand_reading">Reading</string>
+    <string name="hand_text_to">Send text to %1$s</string>
+    <plurals name="hand_text_count">
+        <item quantity="one">%1$d character</item>
+        <item quantity="other">%1$d characters</item>
+    </plurals>
+    <string name="hand_clip_title">Send the clipboard content</string>
+    <string name="hand_clip_hint">The clipboard may hold passwords or other private content. Check it before sending.</string>
+    <string name="hand_clip_none_title">The clipboard is empty</string>
+    <string name="hand_clip_none_what">Copy text, a link or an image, then try again.</string>
+    <string name="hand_clip_link">Link</string>
+    <string name="hand_clip_picture">Image · %1$d × %2$d · %3$s</string>
+    <string name="hand_clip_as">It goes into the station as “%1$s”.</string>
+    <string name="hand_clip_name">clipboard_%1$s</string>
+    <plurals name="hand_clip_files">
+        <item quantity="one">%1$d file · %2$s</item>
+        <item quantity="other">%1$d files · %2$s</item>
+    </plurals>
+    <string name="hand_folder_to">Send a folder to %1$s</string>
+    <plurals name="hand_folder_files">
+        <item quantity="one">%1$d file</item>
+        <item quantity="other">%1$d files</item>
+    </plurals>
+    <plurals name="hand_folder_folders">
+        <item quantity="one">%1$d subfolder</item>
+        <item quantity="other">%1$d subfolders</item>
+    </plurals>
+    <string name="hand_apps_title">Choose apps</string>
+    <string name="hand_apps_search">Search apps</string>
+    <string name="hand_apps_system">Show system apps</string>
+    <string name="hand_apps_none">No apps match</string>
+    <plurals name="hand_apps_split">
+        <item quantity="one">Made of %1$d package</item>
+        <item quantity="other">Made of %1$d packages</item>
+    </plurals>
+    <plurals name="hand_apps_send">
+        <item quantity="one">Send %1$d app</item>
+        <item quantity="other">Send %1$d apps</item>
+    </plurals>
+    <string name="hand_choose">Send to</string>
+    <string name="hand_pc_looking">Connecting</string>
+    <string name="hand_pc_ready">Connected</string>
+    <string name="hand_pc_last">Connected · Sent here last</string>
+    <string name="hand_pc_off">Nearby transfer is off</string>
+    <string name="hand_pc_away">Not connected</string>
+    <string name="hand_reaching">Connecting to %1$s</string>
+    <string name="hand_waiting">Waiting for %1$s to finish receiving</string>
+    <string name="hand_going">Sending to %1$s</string>
+    <string name="hand_count">%1$d / %2$d · %3$s / %4$s</string>
+    <plurals name="hand_more">
+        <item quantity="one">and %1$d more</item>
+        <item quantity="other">and %1$d more</item>
+    </plurals>
+    <string name="hand_sent">In the station</string>
+    <plurals name="hand_sent_photos">
+        <item quantity="one">%1$d photo is in the station of %2$s.</item>
+        <item quantity="other">%1$d photos are in the station of %2$s.</item>
+    </plurals>
+    <plurals name="hand_sent_files">
+        <item quantity="one">%1$d file is in the station of %2$s.</item>
+        <item quantity="other">%1$d files are in the station of %2$s.</item>
+    </plurals>
+    <string name="hand_sent_words">The text is in the station of %1$s.</string>
+    <string name="hand_sent_link">The link is in the station of %1$s.</string>
+    <string name="hand_failed">Could not send to %1$s</string>
+    <string name="hand_failed_some">%1$d sent, %2$d not sent</string>
+    <string name="hand_why_unreached">Could not connect to %1$s. Make sure the PC is on and on the same network as this phone.</string>
+    <string name="hand_why_broken">The connection to %1$s was lost. Make sure the PC is still running and on the same network as this phone, then try again.</string>
+    <string name="hand_why_busy">%1$s kept receiving other files. Try again later.</string>
+    <string name="hand_why_room">The station of %1$s does not have room for these files. Clear some of it on the PC, then try again.</string>
+    <string name="hand_why_large">"%1$s" is larger than the PC takes as one file.</string>
+    <string name="hand_why_unread">"%1$s" could not be read.</string>
+    <string name="hand_why_refused">The PC turned down this sending.</string>
+    <string name="hand_retry">Try again</string>
+    <string name="hand_none_title">No PC paired</string>
+    <string name="hand_none_what">Open the Glance app and pair with a PC first, then share again.</string>
+    <string name="hand_busy_title">Sending something else</string>
+    <string name="hand_busy_what">Share again once the last sending is done. Its progress is in the notifications.</string>
+    <string name="hand_channel">Sending files</string>
+    <string name="hand_sent_to">Sent to %1$s</string>
+    <string name="hand_failed_to">Not all sent to %1$s</string>
+    <string name="hand_failed_open">Open Glance to try again</string>
 </resources>

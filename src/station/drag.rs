@@ -35,28 +35,30 @@ pub enum Dragged {
 }
 
 /// How the drag off the station asked for last goes: its number (see `announce`), what is under the pointer (see
-/// `Over`), and how it ended (none: under way).
+/// `Over`), how it ended (none: under way), and whether what is dragged may not leave this PC (see
+/// `shelf::Item::stays_here`: sent to no device, see `send`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Going {
     pub drag: u64,
     pub over: Over,
     pub ended: Option<Dragged>,
+    pub stays_here: bool,
 }
 
 /// What is under the pointer as something is dragged off the station: whether a drop there would be taken, and what the
-/// program there says it does (as it says it, in its own language).
+/// program there says it does (as it says it, in its own language), or why it would not take it, where it says.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Over {
     pub takes: bool,
     pub says: Option<String>,
 }
 
-static GOING: std::sync::Mutex<Going> = std::sync::Mutex::new(Going { drag: 0, over: Over { takes: false, says: None }, ended: Some(Dragged::Not) });
+static GOING: std::sync::Mutex<Going> = std::sync::Mutex::new(Going { drag: 0, over: Over { takes: false, says: None }, ended: Some(Dragged::Not), stays_here: false });
 
 /// A drag off the station asked for: its number, as it is followed (see `going`).
 pub fn announce() -> u64 {
     let mut going = GOING.lock().unwrap();
-    *going = Going { drag: going.drag + 1, over: Over::default(), ended: None };
+    *going = Going { drag: going.drag + 1, over: Over::default(), ended: None, stays_here: false };
     going.drag
 }
 
@@ -94,6 +96,7 @@ pub fn drag(given: &[Content], stays_here: bool, pressed_on: u32) -> Option<Drag
 /// As `drag`, its input this thread's.
 fn drag_here(given: &[Content], stays_here: bool) -> Option<Dragged> {
     let data = data_of(&self::given(given, stays_here, &dragged_folder())?)?;
+    GOING.lock().unwrap().stays_here = stays_here;
     unsafe {
         let source: IDropSource = Source { data: data.clone(), said: Default::default() }.into();
         let mut effect = DROPEFFECT_NONE;
@@ -235,7 +238,7 @@ fn as_file(content: &Content) -> Option<(String, Vec<u8>)> {
 /// `given` all as files: files where they are, the rest written as its file (see `as_file`) in `folder`, in a folder
 /// of its own there (named by what it holds: the same, the same file), its name unlike those of the others dragged
 /// (see `unlike`). None where one could not be written.
-fn as_paths(given: &[Content], folder: &std::path::Path) -> Option<Vec<std::path::PathBuf>> {
+pub(super) fn as_paths(given: &[Content], folder: &std::path::Path) -> Option<Vec<std::path::PathBuf>> {
     let taken: Vec<String> = given.iter().flat_map(|content| if let Content::Files(paths) = content { paths.iter().filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned())).collect() } else { Vec::new() }).collect();
     let made: Vec<(String, Vec<u8>)> = given.iter().filter_map(as_file).collect();
     let names = unlike(made.iter().map(|(name, _)| name.clone()).collect(), &taken);
@@ -343,10 +346,10 @@ unsafe fn global(bytes: &[u8]) -> Option<HGLOBAL> {
 #[cfg(test)]
 mod tests {
     /// What Explorer says a drop does, as it sets it: its words, the place named where it says `%1`; none where it took
-    /// it back (as it does by turns over one folder) or said nothing.
+    /// it back (as it does by turns over one folder) or said nothing. Why none is taken, said as such.
     #[test]
     fn says_what_a_drop_does_as_the_program_said_it() {
-        use windows::Win32::UI::Shell::{DROPDESCRIPTION, DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGETYPE};
+        use windows::Win32::UI::Shell::{DROPDESCRIPTION, DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGE_NONE, DROPIMAGETYPE};
         let described = |kind: DROPIMAGETYPE, message: &str, insert: &str| {
             let (mut words, mut place) = ([0u16; 260], [0u16; 260]);
             for (to, unit) in words.iter_mut().zip(message.encode_utf16()) {
@@ -357,12 +360,14 @@ mod tests {
             }
             super::said_by(&DROPDESCRIPTION { r#type: kind, szMessage: words, szInsert: place })
         };
-        assert_eq!(described(DROPIMAGE_COPY, "复制到 %1", "下载"), Some("复制到 下载".into()));
-        assert_eq!(described(DROPIMAGE_COPY, "Copy to %1", "dropdir"), Some("Copy to dropdir".into()));
-        assert_eq!(described(DROPIMAGE_COPY, "Copy", ""), Some("Copy".into()));
+        let does = |said: &str| Some((false, said.to_string()));
+        assert_eq!(described(DROPIMAGE_COPY, "复制到 %1", "下载"), does("复制到 下载"));
+        assert_eq!(described(DROPIMAGE_COPY, "Copy to %1", "dropdir"), does("Copy to dropdir"));
+        assert_eq!(described(DROPIMAGE_COPY, "Copy", ""), does("Copy"));
         assert_eq!(described(DROPIMAGE_INVALID, "", ""), None);
         assert_eq!(described(DROPIMAGE_INVALID, "Copy to %1", "dropdir"), None);
         assert_eq!(described(DROPIMAGE_COPY, "", "dropdir"), None);
+        assert_eq!(described(DROPIMAGE_NONE, "不可发送", ""), Some((true, "不可发送".into())));
     }
 
     /// What a drop does is said on through the moments the program says nothing, over the same window taking it still;
@@ -654,9 +659,12 @@ impl IDropSource_Impl for Source_Impl {
             Ok(()) => unsafe { GetAncestor(WindowFromPoint(cursor), GA_ROOT) }.0 as isize,
             Err(_) => 0,
         };
+        let described = description(&self.data);
+        // (Not taken there, what it says is why: said, where it says it, as a program says what it does.)
+        let why = described.clone().filter(|(refusing, _)| *refusing && !takes).map(|(_, why)| why);
         let mut said = self.said.borrow_mut();
-        *said = kept_said(&said, window, takes, description(&self.data));
-        GOING.lock().unwrap().over = Over { takes, says: said.1.clone().filter(|_| takes) };
+        *said = kept_said(&said, window, takes, described.filter(|(refusing, _)| !refusing).map(|(_, said)| said));
+        GOING.lock().unwrap().over = Over { takes, says: said.1.clone().filter(|_| takes).or(why) };
         windows::Win32::Foundation::DRAGDROP_S_USEDEFAULTCURSORS
     }
 }
@@ -670,8 +678,9 @@ fn kept_said(was: &(isize, Option<String>), window: isize, takes: bool, said: Op
     (window, said.or(kept))
 }
 
-/// What the program under the pointer says a drop does, as it set it on what is dragged (none, or one it took back).
-fn description(data: &IDataObject) -> Option<String> {
+/// What the program under the pointer says a drop does, as it set it on what is dragged (none, or one it took back), and
+/// whether it says why it takes none (see `said_by`).
+fn description(data: &IDataObject) -> Option<(bool, String)> {
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
     use windows::Win32::System::Memory::GlobalSize;
     use windows::Win32::System::Ole::ReleaseStgMedium;
@@ -690,11 +699,37 @@ fn description(data: &IDataObject) -> Option<String> {
     said_by(&read?)
 }
 
-/// What a drop description says: its words, `%1` in them the place it names (none where it is taken back, or empty).
-fn said_by(description: &windows::Win32::UI::Shell::DROPDESCRIPTION) -> Option<String> {
-    use windows::Win32::UI::Shell::DROPIMAGE_INVALID;
+/// What a drop description says: whether it says no drop is taken there (`DROPIMAGE_NONE`: why), and its words, `%1`
+/// in them the place it names (none where it is taken back, or empty).
+fn said_by(description: &windows::Win32::UI::Shell::DROPDESCRIPTION) -> Option<(bool, String)> {
+    use windows::Win32::UI::Shell::{DROPIMAGE_INVALID, DROPIMAGE_NONE};
     let words = |units: &[u16]| String::from_utf16_lossy(&units[..units.iter().position(|&unit| unit == 0).unwrap_or(units.len())]);
     let (kind, message, insert) = (description.r#type, description.szMessage, description.szInsert);
     let message = words(&message);
-    (kind != DROPIMAGE_INVALID && !message.is_empty()).then(|| message.replace("%1", &words(&insert)))
+    (kind != DROPIMAGE_INVALID && !message.is_empty()).then(|| (kind == DROPIMAGE_NONE, message.replace("%1", &words(&insert))))
+}
+
+/// `said` set on `data` (what is dragged) as what a drop where the pointer is does (`kind`: as the cursor would show
+/// it), `%1` in it `insert`: `DROPIMAGE_INVALID` takes what was said back (see `said_by`).
+pub(super) fn describe(data: &IDataObject, kind: windows::Win32::UI::Shell::DROPIMAGETYPE, said: &str, insert: &str) {
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::Win32::UI::Shell::DROPDESCRIPTION;
+    // (Its words as long as it holds, ended by a zero.)
+    let units = |words: &str| {
+        let mut units = [0u16; 260];
+        for (to, unit) in units.iter_mut().zip(words.encode_utf16().take(259)) {
+            *to = unit;
+        }
+        units
+    };
+    let description = DROPDESCRIPTION { r#type: kind, szMessage: units(said), szInsert: units(insert) };
+    let bytes = unsafe { std::slice::from_raw_parts((&description as *const DROPDESCRIPTION).cast::<u8>(), std::mem::size_of::<DROPDESCRIPTION>()) };
+    let Some(memory) = (unsafe { global(bytes) }) else { return };
+    let format = unsafe { RegisterClipboardFormatW(windows::core::w!("DropDescription")) } as u16;
+    let asked = FORMATETC { cfFormat: format, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+    let medium = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: memory }, pUnkForRelease: std::mem::ManuallyDrop::new(None) };
+    // (The data object owns it from here: not taken, it is let go of here.)
+    if unsafe { data.SetData(&asked, &medium, true) }.is_err() {
+        let _ = unsafe { GlobalFree(Some(memory)) };
+    }
 }
