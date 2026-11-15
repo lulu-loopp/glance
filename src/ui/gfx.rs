@@ -235,6 +235,17 @@ impl std::fmt::Display for Luid {
     }
 }
 
+impl Gfx {
+    /// What it draws on, as a report's lines about frames say it: the card's number, as the line said when the device
+    /// was made on it (see `on_adapter`), or that it draws in software.
+    pub fn drawing_on(&self) -> String {
+        match (self.adapter, &self.software) {
+            (Some(card), None) => format!("on {card}"),
+            _ => "in software".to_string(),
+        }
+    }
+}
+
 /// The adapter the device `d3d` was made on (None: not to be asked).
 pub fn adapter_of(d3d: &ID3D11Device) -> Option<Luid> {
     let dxgi: IDXGIDevice = d3d.cast().ok()?;
@@ -2881,6 +2892,9 @@ pub struct Surface {
 pub struct Took {
     pub given: std::time::Duration,
     pub painted: std::time::Duration,
+    /// Of `painted`, its drawing's ending: what was drawn handed to the card (Direct2D's `EndDraw`), whatever that
+    /// waited for there, on the card or in its driver. The rest is what drawing it took of the processor.
+    pub ended: std::time::Duration,
     pub handed: std::time::Duration,
 }
 
@@ -2945,10 +2959,11 @@ impl Surface {
         let began = std::time::Instant::now();
         // Drawn apart first, and put on the surface only once drawn whole (see `Frame::apart`): failing, the surface
         // is not touched, and shows what it showed.
-        let mut given = std::time::Duration::ZERO;
+        let (mut given, mut drawn) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
         let frame = Frame::whole(gfx, self.size, scale, |frame| {
             given = began.elapsed();
             paint(frame);
+            drawn = began.elapsed();
         })?;
         let painted = began.elapsed();
         let mut offset = POINT::default();
@@ -2968,7 +2983,7 @@ impl Surface {
         if let Some(footprint) = &mut self.footprint {
             footprint.shown(showing);
         }
-        self.took = Took { given, painted: painted - given, handed: began.elapsed() - painted };
+        self.took = Took { given, painted: painted - given, ended: painted - drawn, handed: began.elapsed() - painted };
         Ok(())
     }
 

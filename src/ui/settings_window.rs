@@ -6151,9 +6151,9 @@ impl Ui {
         let took = began.elapsed();
         if took > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            let (given, handed) = (surface.took.given, surface.took.handed);
+            let (given, ended, handed, card) = (surface.took.given, surface.took.ended, surface.took.handed, gfx.drawing_on());
             crate::widget::note_sparingly("settings frame", || {
-                format!("settings: a frame took {:.1} ms (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1})", ms(took), ms(given), ms(took.saturating_sub(given + handed)), ms(handed))
+                format!("settings: a frame took {:.1} ms (its surface given in {:.1}, painted {:.1} (its drawing ended in {:.1}), handed to the compositor {:.1}, {card})", ms(took), ms(given), ms(took.saturating_sub(given + handed)), ms(ended), ms(handed))
             });
         }
         self.surface = Some(surface);

@@ -4846,10 +4846,10 @@ impl Widget {
         let whole = started.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            let form = self.content.key();
+            let (form, card) = (self.content.key(), self.gfx.drawing_on());
             let took = self.frame_took;
             note_sparingly("slow", || {
-                format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}; {form})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.handed))
+                format!("widget: a frame took {:.1} ms: laid out {:.1}, the desktop taken {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1} (its drawing ended in {:.1}), handed to the compositor {:.1}; {form}, {card})", ms(whole), ms(laid_out), ms(taken - laid_out), ms(whole - taken), ms(took.given), ms(took.painted), ms(took.ended), ms(took.handed))
             });
         }
         // (The lyrics gliding to the next line are drawn every frame too, and the glass easing to how frosted it is.)
