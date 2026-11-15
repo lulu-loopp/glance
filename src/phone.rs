@@ -440,47 +440,59 @@ pub fn nearby_on() -> bool {
     running() && kept_flags().1
 }
 
+/// Whether the helper runs to send to devices nearby while it does not receive (see `nearby::want_to_send`).
+pub fn sending_on() -> bool {
+    running() && kept_flags().2
+}
+
 /// Whether this account's task starts the helper beside this Glance.
 fn running() -> bool {
     helper().is_some_and(|helper| elevation::remote_enabled(&helper))
 }
 
 /// What the helper keeps of what it runs for, as it starts: phones controlling this PC (unless told otherwise, they
-/// do), and nearby transfer (unless told so, not).
-fn kept_flags() -> (bool, bool) {
+/// do), nearby transfer receiving (unless told so, not), and nearby transfer run to send alone (unless told so, not).
+fn kept_flags() -> (bool, bool, bool) {
     let config: Option<serde_json::Value> = remote_config().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok());
     flags_of(config.as_ref())
 }
 
-fn flags_of(config: Option<&serde_json::Value>) -> (bool, bool) {
+fn flags_of(config: Option<&serde_json::Value>) -> (bool, bool, bool) {
     let flag = |at: &str, unsaid: bool| config.and_then(|config| config.pointer(at)).and_then(serde_json::Value::as_bool).unwrap_or(unsaid);
-    (flag("/remote", true), flag("/nearby/on", false))
+    (flag("/remote", true), flag("/nearby/on", false), flag("/nearby/send", false))
 }
 
 /// Turns the remote on or off (see `set`): whether it is on then.
 pub fn turn(on: bool) -> bool {
-    set(Some(on), None).0
+    set(Some(on), None, None).0
 }
 
 /// Turns nearby transfer on or off (see `set`): whether it is on then.
 pub fn turn_nearby(on: bool) -> bool {
-    set(None, Some(on)).1
+    set(None, Some(on), None).1
 }
 
-/// The helper set to run for phones (`remote`) and for devices nearby (`nearby`), each as asked, or else as it is:
-/// told what it runs for, the firewall opened to the local network for it as each needs (and closed as neither does),
-/// and its task made and run anew while either is on (so it takes what it was told), else stopped and gone. Whether
-/// each is on then.
-fn set(remote: Option<bool>, nearby: Option<bool>) -> (bool, bool) {
-    let Some(helper) = helper() else { return (false, false) };
+/// Turns the helper's running to send to devices nearby on or off (see `set`): whether it runs for that then.
+pub fn turn_sending(on: bool) -> bool {
+    set(None, None, Some(on)).2
+}
+
+/// The helper set to run for phones (`remote`), for devices nearby to send to it (`nearby`), and to send to devices
+/// nearby while they may not (`send`), each as asked, or else as it is: told what it runs for, the firewall opened to
+/// the local network for it as each needs (devices nearby find it alike, sending or receiving; closed as none does),
+/// and its task made and run anew while any is on (so it takes what it was told), else stopped and gone. Whether each
+/// is on then.
+fn set(remote: Option<bool>, nearby: Option<bool>, send: Option<bool>) -> (bool, bool, bool) {
+    let Some(helper) = helper() else { return (false, false, false) };
     let running = elevation::remote_enabled(&helper);
     let kept = kept_flags();
-    let (remote, nearby) = (remote.unwrap_or(running && kept.0), nearby.unwrap_or(running && kept.1));
+    let (remote, nearby, send) = (remote.unwrap_or(running && kept.0), nearby.unwrap_or(running && kept.1), send.unwrap_or(running && kept.2));
     let word = |on: bool| if on { "on" } else { "off" };
     let _ = asked(&helper, &["remote", word(remote)]);
     let _ = asked(&helper, &["nearby", word(nearby)]);
+    let _ = asked(&helper, &["nearby", "send", word(send)]);
     let program = format!("program={}", helper.display());
-    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby)] {
+    for (rule, wanted) in [(RULE, remote), (NEARBY_RULE, nearby || send)] {
         let name = format!("name={rule}");
         // (Whatever rule of that name there was goes first: one, and current.)
         firewall(&["delete", "rule", &name]);
@@ -505,13 +517,13 @@ fn set(remote: Option<bool>, nearby: Option<bool>) -> (bool, bool) {
             open("protocol=UDP", Some(NEARBY_PORT));
         }
     }
-    let is_on = elevation::set_remote(&helper, remote || nearby);
+    let is_on = elevation::set_remote(&helper, remote || nearby || send);
     // Ended while it kept the screens dark its own way, it has not put them back: it is asked to now.
     if !is_on {
         let _ = asked(&helper, &["restore"]);
     }
     let kept = kept_flags();
-    (is_on && kept.0, is_on && kept.1)
+    (is_on && kept.0, is_on && kept.1, is_on && kept.2)
 }
 
 /// Nearby transfer as the helper keeps it (see its `nearby`), what the settings show of it: what this PC is called (to
@@ -558,14 +570,15 @@ mod tests {
     use super::*;
 
     /// What the helper runs for, as it keeps it: phones control this PC unless it was told otherwise, and nearby
-    /// transfer is off unless it was told it is on.
+    /// transfer receives, or runs to send alone, only where it was told so.
     #[test]
     fn the_helper_runs_for_phones_unless_told_otherwise() {
         let flags = |text: &str| flags_of(serde_json::from_str::<serde_json::Value>(text).ok().as_ref());
-        assert_eq!(flags_of(None), (true, false));
-        assert_eq!(flags("{}"), (true, false));
-        assert_eq!(flags(r#"{"remote": false, "nearby": {"on": true}}"#), (false, true));
-        assert_eq!(flags(r#"{"nearby": {"alias": "Desk"}}"#), (true, false));
+        assert_eq!(flags_of(None), (true, false, false));
+        assert_eq!(flags("{}"), (true, false, false));
+        assert_eq!(flags(r#"{"remote": false, "nearby": {"on": true}}"#), (false, true, false));
+        assert_eq!(flags(r#"{"nearby": {"alias": "Desk"}}"#), (true, false, false));
+        assert_eq!(flags(r#"{"remote": false, "nearby": {"on": false, "send": true}}"#), (false, false, true));
     }
 
     /// Nearby transfer as the helper says it (see `run::said` there).

@@ -180,6 +180,12 @@ pub fn pretend_devices(devices: Vec<Device>) {
     change(|shown| shown.devices = devices);
 }
 
+/// For pictures: this PC's sendings as if the helper had told these.
+#[cfg(all(test, feature = "studio"))]
+pub fn pretend_sendings(sendings: HashMap<u64, Sending>) {
+    change(|shown| shown.sendings = sendings);
+}
+
 fn change(act: impl FnOnce(&mut Shown)) {
     act(SHOWN.lock().unwrap().get_or_insert_with(Shown::default));
     if let Some(told) = TOLD.get() {
@@ -195,6 +201,7 @@ pub fn start(told: impl Fn() + Send + Sync + 'static) {
     }
     crate::station::run::ask(crate::station::run::Ask::Arrivals(None));
     std::thread::Builder::new().name("glance: nearby".into()).spawn(serve).expect("a thread started");
+    std::thread::Builder::new().name("glance: nearby let go".into()).spawn(sending_let_go).expect("a thread started");
 }
 
 /// The answer to what the helper asked (`id`): whether to take it, and whether to take what that device sends from
@@ -306,6 +313,76 @@ pub fn trust(fingerprint: &str) -> bool {
         });
     }
     told
+}
+
+/// How long the helper is kept running to send after sending was last wanted (see `want_to_send`), and how often that
+/// is looked at.
+const SENDING_KEPT: std::time::Duration = std::time::Duration::from_secs(60);
+const SENDING_LOOKED_AT: std::time::Duration = std::time::Duration::from_secs(5);
+/// After the helper could not be run to send, how long till it is tried again (while still wanted).
+const SENDING_TRIED_AGAIN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// When sending was last wanted (see `want_to_send`), and whether a thread keeps the helper running for it.
+static SENDING_WANTED: Mutex<(Option<std::time::Instant>, bool)> = Mutex::new((None, false));
+
+/// Sending to devices nearby wanted now (where it can be chosen: the settings' sending pane shows, say): this PC found
+/// by them and they by it while receiving is off too. The helper is run for it (see `phone::turn_sending`, through the
+/// sensors: the firewall wants their rights) while it is wanted, and let go a while after it last was, no sending of
+/// this PC's under way then.
+pub fn want_to_send() {
+    let mut wanted = SENDING_WANTED.lock().unwrap();
+    wanted.0 = Some(std::time::Instant::now());
+    if wanted.1 {
+        return;
+    }
+    wanted.1 = true;
+    std::thread::Builder::new().name("glance: nearby sending".into()).spawn(keep_sending).expect("a thread started");
+}
+
+/// Keeps the helper running to send while that is wanted (see `want_to_send`): run for it where it runs for nothing
+/// that finds devices (receiving off), and let go once it is wanted no longer, the thread ending with it.
+fn keep_sending() {
+    use crate::link::Switch;
+    // (Whether the helper runs is asked of Task Scheduler.)
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+    let mut tried: Option<std::time::Instant> = None;
+    loop {
+        let wanted = |at: Option<std::time::Instant>| at.is_some_and(|at| at.elapsed() < SENDING_KEPT) || shown().sendings.values().any(|state| !state.over());
+        if !wanted(SENDING_WANTED.lock().unwrap().0) {
+            if crate::phone::sending_on() {
+                crate::source::switch(Switch::NearbySend, false);
+            }
+            // (Wanted again meanwhile: kept, by this thread still.)
+            let mut held = SENDING_WANTED.lock().unwrap();
+            if !wanted(held.0) {
+                held.1 = false;
+                return;
+            }
+            continue;
+        }
+        let runs = crate::phone::nearby_on() || crate::phone::sending_on();
+        if !runs && tried.is_none_or(|at| at.elapsed() >= SENDING_TRIED_AGAIN) {
+            tried = Some(std::time::Instant::now());
+            crate::source::switch(Switch::NearbySend, true);
+        }
+        std::thread::sleep(SENDING_LOOKED_AT);
+    }
+}
+
+/// The helper no longer run to send where it was left so (Glance ended while sending was wanted): as Glance starts,
+/// nothing wants it yet. (Through the sensors, once they are reached: their rights close the firewall.)
+fn sending_let_go() {
+    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
+    if !crate::phone::sending_on() {
+        return;
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !crate::source::linked() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if !SENDING_WANTED.lock().unwrap().1 {
+        crate::source::switch(crate::link::Switch::NearbySend, false);
+    }
 }
 
 /// This PC announced to the devices nearby, and which they are said again (the devices are about to be shown).

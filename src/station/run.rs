@@ -203,13 +203,15 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
 /// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where a page of the
 /// workbench is chosen (its tab), that page: a drag over it shows the page there (see `SHOW_PAGE`), and one let go
 /// on it goes where the page takes it (the station's, onto the station; the others take none). On a device nearby
-/// on the strip (by its key, see `send::key_of`), sent to it.
+/// on the strip (by its key, see `send::key_of`), sent to it. On the settings' sending pane, chosen there to send
+/// (see `ui::settings_window::dragged_in`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
     Pages(crate::ui::view::Tab),
     Device(u64),
+    Send,
 }
 
 /// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
@@ -220,6 +222,12 @@ pub const SHOW_PAGE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 20;
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does; one
 /// over where a page is chosen in `window` shows that page there.
 pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands, window: Option<HWND>) {
+    if lands == Lands::Send {
+        if let Some(window) = window {
+            crate::ui::settings_window::dragged_in(window, dragged);
+        }
+        return;
+    }
     if lands == Lands::Apps {
         // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
         ask(Ask::AppsOver(matches!(dragged, Dragged::Over(_))));

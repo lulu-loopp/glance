@@ -300,7 +300,7 @@ pub fn adopt_to(source: &Path, to: &Path) -> std::io::Result<u64> {
     }
     // (Copied whole, it is taken even where the original stays: the helper's inbox is emptied of what it no longer
     // holds as it next starts.)
-    let gone = FILE_DISPOSITION_INFO { DeleteFile: true.into() };
+    let gone = FILE_DISPOSITION_INFO { DeleteFile: true };
     if let Err(error) = unsafe { SetFileInformationByHandle(HANDLE(from.as_raw_handle()), FileDispositionInfo, std::ptr::addr_of!(gone).cast(), std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32) } {
         crate::journal::note(format!("station: a file sent, copied to another drive, stayed where it came ({error})"));
     }

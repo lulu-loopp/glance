@@ -249,7 +249,7 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         // (What is kept at hand may be given a file off the station; the station, none of its own again; a page other
         // than the station's, nothing, only told it comes; a device nearby, what is dragged off the station, sent.)
         let target = match lands {
-            Lands::Apps => Target::new(told),
+            Lands::Apps | Lands::Send => Target::new(told),
             Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
             Lands::Device(key) => super::send::ToDevice::over(key, rect),
             _ => Target::not_own(told),

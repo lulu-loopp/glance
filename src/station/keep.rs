@@ -197,10 +197,9 @@ impl Keep {
                 None => Ok(dir.to_path_buf()),
                 Some((top, inner)) => match folders.iter().find(|(name, _)| name == top) {
                     Some((_, made)) => Ok(made.clone()),
-                    None => super::folder::new_folder(dir, top).map(|made| {
+                    None => super::folder::new_folder(dir, top).inspect(|made| {
                         folders.push((top.clone(), made.clone()));
                         shelved.push(made.clone());
-                        made
                     }),
                 }
                 .map(|top| inner.iter().fold(top, |path, part| path.join(part))),

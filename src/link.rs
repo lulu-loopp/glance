@@ -74,6 +74,8 @@ pub enum Switch {
     RaisedLights,
     /// Nearby transfer (the same task as the phone remote's, and a way of its own through the firewall).
     Nearby,
+    /// Nearby transfer run to send alone, receiving off (see `nearby::want_to_send`): the same task and way.
+    NearbySend,
 }
 
 /// Where taking an update stands, as it travels.

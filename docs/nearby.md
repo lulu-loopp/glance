@@ -467,13 +467,19 @@ Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (
   - 文字: a box opens in the pane (no window), "输入要发送的文字", "n 字", 取消 and 添加.
   - 剪贴板: read once as it is pressed: words go as words, a picture as a PNG, files as those files, nothing:
     "剪贴板中没有内容".
-  - What is chosen stays after a sending, to send it to another device. 清除 or × take it away.
+  - What is chosen stays after a sending, to send it to another device. 清除 or × take it away. Four are listed,
+    the rest counted ("另有 n 项"). The pane scrolls by the wheel where it is taller than the window, its foot (what
+    this PC is called) staying. Words being written stay as the window loses the front, and are put by as the page
+    is left (written on as 文字 is pressed again).
+  - Drops reach the pane through the station's catchers (the settings' thread cannot take OLE drops): the window
+    tells the station where the pane is as it draws it, and a catcher over it takes what is let go.
   - The devices: paired phones first, then Glance PCs and other LocalSend devices found, each with its tags. Pressed
     with something chosen, it is sent: a bar along the card's foot and the percent, "等待对方接受" (with ×) where the
     device's user is asked, "已发送" with a tick. Nothing chosen: "选择内容后，点设备即可发送". A paired phone not
     receiving is dimmed, "未开启接收", and pressing it says "在手机上打开 Glance，或在 App 中开启“后台接收”".
-- **Explorer's 发送到**: a shortcut "Glance 附近传输" in the user's SendTo folder (made while Glance is installed,
-  removed by the uninstaller), running `glance.exe --send <paths…>`: settings open at 附近传输 with those in 已选择.
+- **Explorer's 发送到**: a shortcut "Glance 附近传输" ("Glance Nearby" in English) in the installing user's SendTo
+  folder (made by the installer, removed by the uninstaller), running `glance.exe --send <paths…>`: settings open at
+  附近传输 with those in 已选择. A Glance running already is given the paths by `WM_COPYDATA` to its tray window.
 - **The workbench**: 最近复制, 最近文件 and 中转站 each have "发送到" in their menu (several chosen: all of them), with a
   submenu of every device that can be sent to, paired first, those not reached dimmed with why. (The menu gains
   submenus for this.) A copied item goes as the clipboard does: words, a picture as PNG, files.
@@ -482,7 +488,10 @@ Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (
   of progress, the strip down 1.1 s after. Never there otherwise.
 - **Sending while not receiving**: allowed. The helper runs for it (started as it is wanted, the firewall rule with
   it) and announces itself to find devices. While receiving is off it answers `register` and `info` but refuses
-  every `prepare-upload` (403).
+  every `prepare-upload` (403). Wanted while the 发送 pane shows (and, later, the strip and the menus): Glance asks
+  the sensors to turn `Switch::NearbySend` on (the helper's `nearby send on`, the firewall rule, its task run anew),
+  and off again a minute after it was last wanted with no sending under way. A Glance that ended while it was on
+  turns it off as it starts.
 
 ### Android
 

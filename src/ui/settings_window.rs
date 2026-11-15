@@ -72,6 +72,8 @@ use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitiv
 pub(crate) mod guide;
 mod layout_page;
 mod reads;
+mod send;
+pub(crate) use send::dragged_in;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
 use crate::update;
@@ -400,6 +402,15 @@ pub fn open_at_updates(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Updates), place });
 }
 
+/// What was given to send to devices nearby (from Explorer's Send to), till the window takes it (see `To::Send`).
+static TO_SEND: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Opens the window (as `open`) at nearby transfer's page, `paths` chosen there to send: from Explorer's Send to.
+pub fn open_to_send(paths: Vec<std::path::PathBuf>) {
+    TO_SEND.lock().unwrap().extend(paths);
+    open_at(Asked { to: Some(To::Send), place: None });
+}
+
 /// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
 /// and shown by the guide as it comes up.
 pub fn open_guide() {
@@ -415,6 +426,8 @@ enum To {
     /// The guide begun (see `guide`).
     Guide,
     Updates,
+    /// Nearby transfer's page, what was given to send chosen there (see `open_to_send`).
+    Send,
 }
 
 impl Asked {
@@ -434,6 +447,7 @@ impl To {
             Some(To::Reports) => 3,
             Some(To::Guide) => 4,
             Some(To::Updates) => 5,
+            Some(To::Send) => 6,
         }
     }
 
@@ -444,6 +458,7 @@ impl To {
             3 => Some(To::Reports),
             4 => Some(To::Guide),
             5 => Some(To::Updates),
+            6 => Some(To::Send),
             _ => None,
         }
     }
@@ -459,6 +474,7 @@ fn open_at(asked: Asked) {
             Some(To::Reports) => Some(TO_REPORTS),
             Some(To::Guide) => Some(TO_GUIDE),
             Some(To::Updates) => Some(TO_UPDATES),
+            Some(To::Send) => Some(send::TO_SEND_PAGE),
             None => None,
         };
         if let Some(message) = message {
@@ -813,6 +829,9 @@ fn tick(now: Instant) -> Option<Duration> {
         ui.follow_when_free();
         // (The window left as it is under the guide's dialog, the guide alone drawn.)
         ui.take_in();
+        if ui.send_tick(now) {
+            ui.next_frame = now;
+        }
         let held = ui.guide_holds_window();
         if now >= ui.next_frame && !held {
             ui.draw(now);
@@ -822,6 +841,7 @@ fn tick(now: Instant) -> Option<Duration> {
         // (Drawn or not, the desktops wanted read: see `draw`.)
         ui.read_wanted();
         let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
+        let next = if ui.send_watching() { next.min(now + send::WATCH_EVERY) } else { next };
         next.saturating_duration_since(now)
     })
 }
@@ -1413,6 +1433,8 @@ enum Keys {
 enum Named {
     Sensor(String, String),
     ThisPc,
+    /// Words to send to devices nearby (see `send`): on lines of their own, kept till added or left.
+    Words,
 }
 
 /// Something being named in its row (see `Named`): the words written, since when its caret blinks, whether the input
@@ -1528,6 +1550,17 @@ enum Target {
     OpenStation,
     /// Opens the menu of where what comes from devices nearby goes: the station, or a folder chosen.
     KeptIn,
+    /// The sending pane's (see `send`): what to choose by (0 files, 1 a folder, 2 words written, 3 the clipboard), what
+    /// is chosen cleared or one of it taken away (by its number), a device sent to (by its fingerprint), a sending
+    /// cancelled, the devices looked for again, the words written added or left.
+    SendKind(u8),
+    SendClear,
+    SendRemove(u64),
+    SendTo(String),
+    SendCancel(u64),
+    SendRefresh,
+    SendWordsAdd,
+    SendWordsCancel,
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
@@ -2025,6 +2058,8 @@ struct Ui {
     choosing_kept: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
     /// A menu up (where what devices nearby send goes), run by this window's thread (see `menu_message`).
     menu: Option<super::menu::Menu>,
+    /// Nearby transfer's sending pane (see `send`).
+    send: send::Pane,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
     phone: PhonePage,
@@ -2315,6 +2350,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             choosing_folders: None,
             choosing_kept: None,
             menu: None,
+            send: send::Pane::default(),
             laptop: crate::laptop::this_machine(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
@@ -2489,6 +2525,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.turn_as_asked(To::Updates));
             LRESULT(0)
         }
+        send::TO_SEND_PAGE => {
+            with_ui(|ui| ui.turn_as_asked(To::Send));
+            LRESULT(0)
+        }
         GUIDE_TOLD => {
             with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
@@ -2593,6 +2633,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             }
             LRESULT(0)
         }
+        send::SEND_DRAGGED => {
+            with_ui(|ui| ui.send_dragged(wparam.0));
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
             let (x, y) = point(lparam);
             with_ui(|ui| {
@@ -2681,7 +2725,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| {
                 ui.record(None);
-                ui.end_rename(true);
+                if !ui.writing_words() {
+                    ui.end_rename(true);
+                }
             });
             if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
                 leave_the_front(hwnd);
@@ -3193,11 +3239,17 @@ impl Ui {
                 flash.retarget(0.0, FLASH.0, FLASH.1, Instant::now());
                 self.motion.insert("flash:notice".into(), flash);
             }
+            To::Send => {
+                let paths = std::mem::take(&mut *TO_SEND.lock().unwrap());
+                self.send.add_paths(paths);
+                self.turn_to(Page::Nearby);
+            }
         }
     }
 
     fn turn_to(&mut self, page: Page) {
         if page != self.page {
+            self.put_words_by();
             self.page = page;
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -4219,6 +4271,10 @@ impl Ui {
                 }
                 nearby.name = name.clone();
                 self.ask_nearby(vec!["name".into(), name]);
+                return;
+            }
+            Named::Words => {
+                self.send.add_words(written);
                 return;
             }
             Named::Sensor(_, name) => name,
@@ -5283,7 +5339,7 @@ impl Ui {
         // the name is kept.
         if self.renaming.is_some() {
             if self.over_rename() {
-                let at = self.rename_caret_at(x);
+                let at = if self.writing_words() { self.words_caret_at(x, y) } else { self.rename_caret_at(x) };
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
                 if let Some(renaming) = self.renaming.as_mut() {
                     renaming.typing.go(at, shift);
@@ -5292,7 +5348,9 @@ impl Ui {
                 self.next_frame = Instant::now();
                 return;
             }
-            self.end_rename(true);
+            if !self.writing_words() {
+                self.end_rename(true);
+            }
         }
         if self.page == Page::Phone && self.press_phone(x, y) {
             return;
@@ -5612,6 +5670,14 @@ impl Ui {
                 }
                 self.ask_nearby(vec!["forget".into(), fingerprint]);
             }
+            Target::SendKind(_)
+            | Target::SendClear
+            | Target::SendRemove(_)
+            | Target::SendTo(_)
+            | Target::SendCancel(_)
+            | Target::SendRefresh
+            | Target::SendWordsAdd
+            | Target::SendWordsCancel => self.send_press(target),
             Target::KeptIn => self.open_kept_menu(),
             Target::OpenStation => {
                 let folder = self.settings.nearby_folder.clone().unwrap_or_else(|| crate::settings::local_dir().join(crate::station::folder::OWN));
@@ -5685,7 +5751,7 @@ impl Ui {
                 },
                 Row::Quit => vec![Target::Quit],
                 Row::Guide => vec![Target::Guide],
-                Row::Pair if !(self.remote || self.nearby_on) && !self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::Pairing) => vec![],
+                Row::Pair if !(self.remote || self.nearby_on || self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::Pairing)) => vec![],
                 Row::Pair => vec![Target::Pair],
                 Row::GetApp => vec![Target::GetApp],
                 Row::PcName => vec![Target::PcName],
@@ -5723,6 +5789,9 @@ impl Ui {
             return true;
         }
         // A sensor being named takes the keys (but Tab, which keeps its name and goes on: see `rename_key`).
+        if self.writing_words() && !alt {
+            return self.words_key(key, shift);
+        }
         if self.renaming.is_some() && !alt && self.rename_key(key, shift) {
             return true;
         }
@@ -5880,6 +5949,9 @@ impl Ui {
         if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Phone && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
             self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
             self.next_frame = Instant::now();
+            return;
+        }
+        if self.send_wheel(delta) {
             return;
         }
         if !(NAV..NAV + self.pane()).contains(&x) {
@@ -6136,10 +6208,12 @@ impl Ui {
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
+        self.send.area = None;
         let creep = {
             let _timed = crate::perf::Timed::start("settings preview", String::new);
             if self.page == Page::Devices { None } else { self.paint_preview(frame, &palette, width, height) }
         };
+        self.tell_send_area();
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         {
             let _timed = crate::perf::Timed::start("settings list", String::new);
@@ -7154,62 +7228,6 @@ impl Ui {
         true
     }
 
-    /// Nearby transfer's preview: a phone with LocalSend open at its sending, in a phone's outline (as `paint_phone`
-    /// draws one), listing the devices nearby as it would: this PC under its name (as it is being written), while it
-    /// receives, and the others found.
-    fn paint_nearby(&self, frame: &Frame, area: Rect) {
-        let (bezel, margin) = (10.0, 24.0);
-        let (wide, tall) = super::phone_art::SCREEN;
-        let k = ((area.h - 2.0 * margin - 2.0 * bezel) / tall).min((area.w - 2.0 * margin - 2.0 * bezel) / wide).min(1.0);
-        if k <= 0.0 {
-            return;
-        }
-        let (w, h) = (wide * k, tall * k);
-        let (x, y) = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
-        fill(frame, Color::hex(0x15181D, 1.0), x - bezel, y - bezel, w + 2.0 * bezel, h + 2.0 * bezel, 26.0 * k + bezel);
-        // (LocalSend's light screen, as a phone in a light theme shows it.)
-        const SCREEN: Color = Color::hex(0xF4F6F9, 1.0);
-        const INK: Color = Color::hex(0x1C2230, 1.0);
-        const DIM: Color = Color::hex(0x6B7586, 1.0);
-        const TILE: Color = Color::hex(0xE7EDF8, 1.0);
-        const BLUE: Color = Color::hex(0x2F6FDB, 1.0);
-        fill(frame, SCREEN, x, y, w, h, 26.0 * k);
-        let lang = self.lang;
-        let at = |dp: f32| dp * k;
-        let side = x + at(22.0);
-        let room = w - at(44.0);
-        text_centred(frame, pick(lang, "发送", "Send"), Font::new(Family::Segoe, at(25.0), 600.0), INK, side, y + at(68.0), room, Align::Start);
-        text_centred(frame, pick(lang, "附近的设备", "Nearby devices"), Font::new(Family::Segoe, at(16.0), 400.0), DIM, side, y + at(96.0), room, Align::Start);
-        let mut top = y + at(120.0);
-        let device = |top: f32, icon: Icon, name: &str, under: &str| {
-            let tall = at(70.0);
-            fill(frame, Color::hex(0x000000, 0.05), side, top + at(1.5), room, tall, at(18.0));
-            fill(frame, Color::hex(0xFFFFFF, 1.0), side, top, room, tall, at(18.0));
-            let tile = at(50.0);
-            fill(frame, TILE, side + at(10.0), top + (tall - tile) / 2.0, tile, tile, at(14.0));
-            frame.icon(icon, Point { x: side + at(10.0) + tile / 2.0, y: top + tall / 2.0 }, at(24.0), BLUE);
-            let words = side + at(10.0) + tile + at(14.0);
-            let words_room = side + room - at(12.0) - words;
-            text_centred(frame, name, Font::new(Family::Segoe, at(18.0), 600.0), INK, words, top + tall / 2.0 - at(10.0), words_room, Align::Start);
-            text_centred(frame, under, Font::new(Family::Segoe, at(15.0), 400.0), DIM, words, top + tall / 2.0 + at(12.0), words_room, Align::Start);
-            top + tall + at(12.0)
-        };
-        if self.nearby_on {
-            top = device(top, Icon::Monitor, &self.pc_called(), "Windows · Glance");
-        }
-        for found in crate::nearby::shown().devices {
-            let mobile = found.kind.as_deref() == Some("mobile");
-            let under = found.model.clone().unwrap_or_else(|| if mobile { pick(lang, "手机", "Phone") } else { pick(lang, "电脑", "Computer") }.to_string());
-            top = device(top, if mobile { Icon::Smartphone } else { Icon::Monitor }, &found.alias, &under);
-        }
-        if !self.nearby_on {
-            let said = pick(lang, "这台电脑已关闭接收，不在列表中", "This PC does not receive, and is not listed");
-            let font = Font::new(Family::Segoe, at(16.0), 400.0);
-            let said_w = frame.gfx.measure(said, font).min(room);
-            text_centred(frame, said, font, DIM, side + (room - said_w) / 2.0, top + at(48.0), room, Align::Start);
-        }
-    }
-
     /// Asks the remote, on a thread of its own (it answers when it has done it: the window goes on meanwhile).
     fn ask_phone(&mut self, method: &str, path: &str, body: String) {
         let link = self.phone.link.get_or_insert_with(|| {
@@ -7558,12 +7576,16 @@ impl Ui {
         let lang = self.lang;
         let x0 = NAV + self.pane();
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
-        let title = if self.page == Page::Layout { pick(lang, "屏幕", "Screens") } else { pick(lang, "预览", "Preview") };
+        let title = match self.page {
+            Page::Layout => pick(lang, "屏幕", "Screens"),
+            Page::Nearby => pick(lang, "发送", "Send"),
+            _ => pick(lang, "预览", "Preview"),
+        };
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = match self.page {
             Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "The screens as Windows arranges them, over your wallpaper"),
             Page::Phone => pick(lang, "手机上的 Glance", "Glance on the phone"),
-            Page::Nearby => pick(lang, "附近设备上看到的这台电脑", "This PC as devices nearby see it"),
+            Page::Nearby => pick(lang, "选择内容，再点要发送到的设备", "Choose what to send, then the device to send it to"),
             Page::Music => pick(lang, "正在播放的内容", "What plays now"),
             _ => pick(lang, "实时数据", "Live readings"),
         };
@@ -7577,7 +7599,7 @@ impl Ui {
         }
         // (The panel's and the music's previews frame what of the screen they show: see `shown_of`.)
         let overlay = self.page == Page::Monitor && self.tab == Tab::Overlay;
-        if matches!(self.page, Page::Layout | Page::Phone | Page::Nearby) {
+        if matches!(self.page, Page::Layout | Page::Phone) {
             fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
             stroke_inside(frame, area, 8.0, palette.card_stroke);
         }
@@ -7593,7 +7615,7 @@ impl Ui {
             return self.paint_layout(frame, palette, area, Instant::now());
         }
         if self.page == Page::Nearby {
-            self.paint_nearby(frame, area);
+            self.paint_send(frame, palette, area, Instant::now());
             return None;
         }
         // The phone's page: the phone app as a phone shows it, in a phone's outline.
@@ -8289,6 +8311,47 @@ mod pictures {
                 }
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &picture()).unwrap();
                 with_ui(|ui| ui.end_rename(false));
+            }
+            // The sending pane: files, a folder and words chosen, a sending to each device going its own way (one
+            // going, one waited on, one sent); the words being written; something dragged over it.
+            for name in ["nearby-send", "nearby-writing", "nearby-drop"] {
+                with_ui(|ui| {
+                    ui.turn_to(Page::Nearby);
+                    pretend_nearby(ui, true);
+                    let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR")));
+                    let sendings = vec![
+                        ("AA", crate::nearby::Sending::Going { done: 6_200_000, of: 14_000_000 }),
+                        ("DD", crate::nearby::Sending::Waiting),
+                        ("BB", crate::nearby::Sending::Sent),
+                    ];
+                    send::pretend(ui, vec![file("Cargo.toml"), file("README.md"), file("docs"), file("icons/128x128@2x.png")], "会议改到周四下午三点，地点在二楼小会议室", sendings);
+                    if name == "nearby-writing" {
+                        ui.activate(Target::SendKind(2));
+                        if let Some(renaming) = ui.renaming.as_mut() {
+                            renaming.typing.put(&"晚上七点在楼下见\n记得带上充电器和那本书".encode_utf16().collect::<Vec<u16>>());
+                        }
+                    }
+                    ui.send.over = name == "nearby-drop";
+                });
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+                with_ui(|ui| {
+                    ui.end_rename(false);
+                    ui.send = send::Pane::default();
+                    crate::nearby::pretend_sendings(HashMap::new());
+                });
             }
             // A notice of Glance's site, at the top of the updates, with its link and without.
             for (name, link) in [("general-notice", Some("https://glancepc.com/#download")), ("general-notice-plain", None)] {
