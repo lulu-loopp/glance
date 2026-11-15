@@ -60,6 +60,9 @@ pub struct Device {
     pub model: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
+    /// It said it is Glance's (a PC's or a phone's), not only LocalSend's.
+    #[serde(default)]
+    pub glance: bool,
 }
 
 /// How a sending of this PC's goes.
@@ -115,6 +118,8 @@ enum Told {
     Came { session: String, short: Option<String> },
     Devices { devices: Vec<Device> },
     Sending { job: u64, state: Sending },
+    /// A device found, trusted (what the helper keeps says so now), or why not.
+    Trusted { fingerprint: String, why_not: Option<String> },
 }
 
 /// A device's sending the user is asked about.
@@ -146,6 +151,9 @@ pub struct Shown {
     pub sendings: HashMap<u64, Sending>,
     /// What each sending sends, to whom.
     pub outgoing: HashMap<u64, Outgoing>,
+    /// The devices found that are being trusted (see `trust`), by their fingerprints: none while the helper reaches
+    /// one, and why not where it could not be.
+    pub trusting: HashMap<String, Option<String>>,
 }
 
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
@@ -285,6 +293,21 @@ pub fn room(bytes: u64) {
     });
 }
 
+/// The device found nearby by `fingerprint` trusted, once the helper has reached it and it proved it holds that
+/// certificate (how that goes: `Shown::trusting`). Whether the helper was there to be told.
+pub fn trust(fingerprint: &str) -> bool {
+    change(|shown| {
+        shown.trusting.insert(fingerprint.to_string(), None);
+    });
+    let told = command(&json!({ "kind": "trust", "fingerprint": fingerprint }));
+    if !told {
+        change(|shown| {
+            shown.trusting.insert(fingerprint.to_string(), Some("the helper is not there".into()));
+        });
+    }
+    told
+}
+
 /// This PC announced to the devices nearby, and which they are said again (the devices are about to be shown).
 pub fn announce() -> bool {
     command(&json!({ "kind": "announce" }))
@@ -333,6 +356,15 @@ fn heard(told: Told) {
         }
         Told::Devices { devices } => change(|shown| shown.devices = devices),
         Told::Sending { job, state } => sending(job, state),
+        // (Trusted, it is gone from those being trusted: the settings read what the helper keeps again as it changes.)
+        Told::Trusted { fingerprint, why_not } => change(|shown| match why_not {
+            Some(why) => {
+                shown.trusting.insert(fingerprint, Some(why));
+            }
+            None => {
+                shown.trusting.remove(&fingerprint);
+            }
+        }),
     }
 }
 

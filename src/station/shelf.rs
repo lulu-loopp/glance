@@ -211,15 +211,37 @@ impl Shelf {
     /// at `now_ms`: with what came from that device last, where that came within `TOGETHER_MS` before and is not
     /// pinned, else on their own. The number of what holds them.
     pub fn arrived(&mut self, files: Vec<Arrived>, from: Device, now_ms: u64, own_bytes: u64) -> u64 {
+        self.came(What::Came { files }, from, now_ms, own_bytes)
+    }
+
+    /// Files sent from `from` that went to the folder chosen for them (see `Keep::arrived_into`), put on the shelf at
+    /// `now_ms` where they are (each file, and each folder sent: `paths`), none kept of its own: joined as `arrived`
+    /// joins them. The number of what holds them.
+    pub fn arrived_at(&mut self, paths: Vec<PathBuf>, from: Device, now_ms: u64) -> u64 {
+        self.came(What::Files { paths, kept: Vec::new() }, from, now_ms, 0)
+    }
+
+    /// What came from `from` (`what`: files kept, or files where they went) put on the shelf at `now_ms`: with what came
+    /// from that device last as the same, where that came within `TOGETHER_MS` before and is not pinned, else on its
+    /// own.
+    fn came(&mut self, what: What, from: Device, now_ms: u64, own_bytes: u64) -> u64 {
         let last = self.items.iter().rposition(|item| {
-            matches!(item.what, What::Came { .. }) && !item.pinned && item.from.as_ref().is_some_and(|device| device.fingerprint == from.fingerprint) && now_ms.saturating_sub(item.added_ms) <= TOGETHER_MS
+            std::mem::discriminant(&item.what) == std::mem::discriminant(&what) && !item.pinned && item.from.as_ref().is_some_and(|device| device.fingerprint == from.fingerprint) && now_ms.saturating_sub(item.added_ms) <= TOGETHER_MS
         });
         match last {
             // (Joined, it is as new as what joined it: the newest, last.)
             Some(at) => {
                 let mut item = self.items.remove(at);
-                if let What::Came { files: held } = &mut item.what {
-                    held.extend(files);
+                match (&mut item.what, what) {
+                    (What::Came { files: held }, What::Came { files }) => held.extend(files),
+                    (What::Files { paths: held, .. }, What::Files { paths, .. }) => {
+                        for path in paths {
+                            if !held.contains(&path) {
+                                held.push(path);
+                            }
+                        }
+                    }
+                    _ => unreachable!("joined only with what is of its kind"),
                 }
                 item.added_ms = now_ms;
                 item.own_bytes += own_bytes;
@@ -229,7 +251,7 @@ impl Shelf {
                 id
             }
             None => {
-                let id = self.put(What::Came { files }, now_ms, false, false, own_bytes);
+                let id = self.put(what, now_ms, false, false, own_bytes);
                 self.items.last_mut().expect("just put").from = Some(from);
                 id
             }

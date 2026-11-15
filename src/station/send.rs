@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn a_device_grows_under_the_pointer() {
         let now = Instant::now();
-        let device = Device { fingerprint: "AB".into(), alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()) };
+        let device = Device { fingerprint: "AB".into(), alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()), glance: false };
         let mut strip = Strip::new(1, now);
         strip.chips.push(Chip { device, job: None });
         let key = key_of("ab");
@@ -535,7 +535,7 @@ mod tests {
         assert!(up(400, &strip) < 0.5);
         assert_eq!(up(520, &strip), 0.0);
         strip.falls = None;
-        let device = Device { fingerprint: "AB".into(), alias: "Fold".into(), model: None, kind: None };
+        let device = Device { fingerprint: "AB".into(), alias: "Fold".into(), model: None, kind: None, glance: false };
         strip.chips.push(Chip { device, job: Some((9, None)) });
         let mut sendings = std::collections::HashMap::new();
         assert_eq!(strip.shown(now, true, &sendings).chips[0].sending, Some((Sending::Waiting, 0.0)));

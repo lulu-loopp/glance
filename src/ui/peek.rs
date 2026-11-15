@@ -927,6 +927,17 @@ fn came_of(items: &[crate::station::shelf::Item], id: u64) -> Option<Says> {
                 Got::Items { count: entries.len() }
             }
         }
+        // (Gone to the folder chosen for them: each file, and each folder sent, where it is.)
+        What::Files { paths, .. } => {
+            let folders = paths.iter().filter(|path| path.is_dir()).count();
+            if folders == paths.len() {
+                Got::Folders { count: folders }
+            } else if folders == 0 {
+                Got::Files { count: paths.len(), pictures: paths.iter().all(|path| is_picture(&path.to_string_lossy())) }
+            } else {
+                Got::Items { count: paths.len() }
+            }
+        }
         What::Link { .. } | What::Text { .. } | What::Saved { words: true, .. } => {
             // (Laid out as they are drawn: in the skin's words, as many lines as fit beside the mark.)
             let (link, words) = shown_words(&item.what)?;

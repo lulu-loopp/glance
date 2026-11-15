@@ -247,10 +247,10 @@ fn code(rows: &mut dyn Iterator<Item = &str>) -> Option<Code> {
     (!cells.is_empty() && cells.iter().all(|row| row.len() == cells.len())).then_some(Code(cells))
 }
 
-/// A pairing offered to one phone, as the QR code it scans: with the app,
-/// or (`web`) with its camera, which opens the remote's page in its browser.
-pub fn offer(web: bool) -> Option<Code> {
-    let said = ask(if web { &["pair", "web", "cells"] } else { &["pair", "cells"] })?;
+/// A pairing offered to one phone, as the QR code it scans: with the app, or with its camera, which opens the remote's
+/// page in its browser (the same code for both).
+pub fn offer() -> Option<Code> {
+    let said = ask(&["pair", "cells"])?;
     // (The link itself, then the code's rows.)
     code(&mut said.lines().skip(1))
 }
@@ -322,22 +322,40 @@ pub fn said(method: &str, path: &str, body: &str) -> Option<serde_json::Value> {
     (lines.next()?.trim() == "200").then(|| serde_json::from_str(lines.next()?).ok()).flatten()
 }
 
-/// Where the remote's page for a phone's browser is (a browser paired by
-/// it before opens it again there): none while this PC is on no network.
-pub fn web_address() -> Option<String> {
-    ask(&["address"]).map(|said| said.trim().to_string()).filter(|address| !address.is_empty())
-}
-
 /// What the remote finds on this PC (its lights, its monitors, what else
 /// it can set), as lines for a report; none where this Glance has no remote.
 pub fn report() -> Option<String> {
     ask(&["report"])
 }
 
-/// A phone paired with: what the remote tells it from the others by, and what it calls itself.
+/// A phone paired with: what the remote tells it from the others by, what it calls itself, whether it may control
+/// this PC, whether what it sends is taken without asking, and whether it is a phone's browser (paired by the remote's
+/// page, sending nothing).
+#[derive(Clone, Debug, PartialEq)]
 pub struct Phone {
     pub id: String,
     pub name: String,
+    pub control: bool,
+    pub files: bool,
+    pub web: bool,
+}
+
+/// What a paired phone may do, each by a switch of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum May {
+    /// Control this PC (off, it only reads how the PC is).
+    Control,
+    /// Send without being asked about.
+    Files,
+}
+
+/// The phone the remote tells from the others by `id` let do `what`, or not (`on`).
+pub fn let_phone(id: &str, what: May, on: bool) {
+    let what = match what {
+        May::Control => "control",
+        May::Files => "files",
+    };
+    let _ = ask(&["phone", id, what, if on { "on" } else { "off" }]);
 }
 
 /// The phones paired with, as the remote keeps them (pairings offered and not yet taken are not among them).
@@ -345,8 +363,19 @@ pub fn phones() -> Vec<Phone> {
     let kept = remote_config();
     let config: Option<serde_json::Value> = kept.and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok());
     let Some(list) = config.as_ref().and_then(|config| config.get("phones")).and_then(|phones| phones.as_array()) else { return Vec::new() };
+    phones_of(list)
+}
+
+/// The phones paired with among `list` (as the remote keeps them): what is not said of one, as a phone paired before
+/// it was said is (it may do both, and is no browser).
+fn phones_of(list: &[serde_json::Value]) -> Vec<Phone> {
     let text = |phone: &serde_json::Value, name: &str| phone.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string();
-    list.iter().filter(|phone| phone.get("offered_till").is_none_or(|till| till.is_null())).map(|phone| Phone { id: text(phone, "id"), name: text(phone, "name") }).filter(|phone| !phone.id.is_empty()).collect()
+    let flag = |phone: &serde_json::Value, name: &str, unsaid: bool| phone.get(name).and_then(serde_json::Value::as_bool).unwrap_or(unsaid);
+    list.iter()
+        .filter(|phone| phone.get("offered_till").is_none_or(|till| till.is_null()))
+        .map(|phone| Phone { id: text(phone, "id"), name: text(phone, "name"), control: flag(phone, "control", true), files: flag(phone, "files", true), web: flag(phone, "web", false) })
+        .filter(|phone| !phone.id.is_empty())
+        .collect()
 }
 
 /// Where the remote keeps what it was told for this user, the phones paired among it.
@@ -485,23 +514,15 @@ fn set(remote: Option<bool>, nearby: Option<bool>) -> (bool, bool) {
     (is_on && kept.0, is_on && kept.1)
 }
 
-/// Nearby transfer as the helper keeps it (see its `nearby`), what the settings show of it.
+/// Nearby transfer as the helper keeps it (see its `nearby`), what the settings show of it: what this PC is called (to
+/// phones and devices nearby alike), the devices trusted, whether devices not trusted are turned away rather than
+/// asked about.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct Nearby {
-    /// What this PC is called to devices nearby where it is named (none: as its computer is, `name`).
-    pub alias: Option<String>,
     pub name: String,
     pub trusted: Vec<Trusted>,
-    /// Devices not trusted are turned away, not asked about.
     pub others_refused: bool,
-}
-
-impl Nearby {
-    /// What devices nearby see this PC called.
-    pub fn called(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.name)
-    }
 }
 
 /// A device whose files are taken without asking: its certificate's fingerprint, what it calls itself, what it is,
@@ -514,10 +535,12 @@ pub struct Trusted {
     pub kind: Option<String>,
     pub since: u64,
     pub phone: Option<String>,
+    /// It said it is Glance's (a PC's or a phone's), not only LocalSend's.
+    pub glance: bool,
 }
 
-/// Nearby transfer as the helper keeps it, once it is told `words` (see its `nearby`: `alias NAME`, `forget
-/// FINGERPRINT`, `others ask|refuse`); none where it cannot be asked.
+/// Nearby transfer as the helper keeps it, once it is told `words` (see its `nearby`: `name NAME`, `forget
+/// FINGERPRINT`, `others ask|refuse`), none where it cannot be asked.
 pub fn nearby(words: &[&str]) -> Option<Nearby> {
     let said = ask(&std::iter::once("nearby").chain(words.iter().copied()).collect::<Vec<_>>())?;
     serde_json::from_str(&said).ok()
@@ -548,15 +571,24 @@ mod tests {
     /// Nearby transfer as the helper says it (see `run::said` there).
     #[test]
     fn nearby_transfer_is_read_as_the_helper_says_it() {
-        let said = r#"{"on":true,"alias":null,"name":"DESKTOP-9950X","fingerprint":"AB","port":53317,"trusted":[{"fingerprint":"CD","alias":"Galaxy Z Fold6","kind":"mobile","last":0,"since":1762905600,"phone":"p1"},{"fingerprint":"EF","alias":"MacBook","kind":"desktop","last":0,"since":0}],"others_refused":true}"#;
+        let said = r#"{"on":true,"send":false,"name":"DESKTOP-9950X","fingerprint":"AB","port":53317,"trusted":[{"fingerprint":"CD","alias":"Galaxy Z Fold6","kind":"mobile","last":0,"since":1762905600,"phone":"p1"},{"fingerprint":"EF","alias":"MacBook","kind":"desktop","last":0,"since":0}],"others_refused":true}"#;
         let nearby: Nearby = serde_json::from_str(said).unwrap();
-        assert_eq!(nearby.called(), "DESKTOP-9950X");
+        assert_eq!(nearby.name, "DESKTOP-9950X");
         assert!(nearby.others_refused);
         assert_eq!(nearby.trusted.len(), 2);
         assert_eq!((nearby.trusted[0].phone.as_deref(), nearby.trusted[0].since), (Some("p1"), 1762905600));
         assert_eq!(nearby.trusted[1].phone, None);
-        let named: Nearby = serde_json::from_str(r#"{"alias":"书房","name":"DESKTOP-9950X"}"#).unwrap();
-        assert_eq!(named.called(), "书房");
+    }
+
+    /// The phones paired, as the remote keeps them: an offer not taken is none, and a phone paired before its switches
+    /// were kept may do both and is no browser.
+    #[test]
+    fn phones_are_read_with_what_they_may_do() {
+        let list: Vec<serde_json::Value> = serde_json::from_str(r#"[{"id":"a","name":"Fold"},{"id":"b","name":"iPhone (web)","control":false,"files":false,"web":true},{"id":"c","offered_till":99}]"#).unwrap();
+        let phones = phones_of(&list);
+        assert_eq!(phones.len(), 2);
+        assert!(phones[0].control && phones[0].files && !phones[0].web);
+        assert!(!phones[1].control && !phones[1].files && phones[1].web);
     }
 
     /// On a laptop, a remote told to ask an OpenRGB the sensors run (which they run on no laptop) is told to run its

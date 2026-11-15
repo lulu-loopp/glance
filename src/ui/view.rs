@@ -1245,6 +1245,11 @@ impl Tile {
                     (n, false) => format!("{n} {}", lang.pick("个文件", "files")),
                     (n, true) => format!("{n} {}", lang.pick("个文件已不存在", "files no longer exist")),
                 };
+                // (Sent from a device nearby to the folder chosen for them: from whom said with it.)
+                let kind = match &item.from {
+                    Some(device) => format!("{kind} · {} {}", lang.pick("来自", "from"), device.alias),
+                    None => kind,
+                };
                 (name, kind, Face::Picture { path: first, more: paths.len().saturating_sub(1) })
             }
             What::Text { text } => (

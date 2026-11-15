@@ -514,6 +514,7 @@ fn run(asks: Receiver<Ask>) {
         // (What an earlier Glance wrote to send, its sendings long over.)
         let _ = std::fs::remove_dir_all(super::send::folder());
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
+        keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
         STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
@@ -756,6 +757,23 @@ impl Station {
                     }
                 }
             }
+            // (To the folder the user chose for them: where they went, the station keeping none.)
+            if let Some(dir) = self.keep.nearby_folder.clone() {
+                match self.keep.arrived_into(&dir, &receipt.files_in(&inbox), from, super::now_ms()) {
+                    Ok(taken) => {
+                        super::recent::arrived(&taken, &alias);
+                        let _ = std::fs::remove_file(&path);
+                        if !taken.is_empty() {
+                            came.extend(self.keep.shelf.items.last().map(|item| item.id));
+                        }
+                        continue;
+                    }
+                    Err(refused) => {
+                        crate::journal::note(format!("nearby: what came is not taken in now ({refused:?})"));
+                        break;
+                    }
+                }
+            }
             match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
                 Ok(taken) => {
                     // (Each where it is given out: a file of a folder sent, in that folder.)
@@ -819,6 +837,7 @@ impl Station {
         let settings = crate::app().settings.lock().unwrap().station;
         self.keep.rules = settings.rules();
         self.keep.always_copy = settings.always_copy;
+        self.keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         let listen = settings.history;
         if listen != self.listening {
             let done = unsafe { if listen { AddClipboardFormatListener(self.window) } else { RemoveClipboardFormatListener(self.window) } };
@@ -878,7 +897,7 @@ impl Station {
 
     fn show(&self) {
         // (What a device nearby may send it, as it has room now.)
-        crate::nearby::room(self.keep.shelf.room(self.keep.rules));
+        crate::nearby::room(self.keep.room_offered());
         let settings = crate::app().settings.lock().unwrap().station;
         let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));

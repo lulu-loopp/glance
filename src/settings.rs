@@ -863,6 +863,10 @@ pub struct Settings {
     /// Whether what a device nearby sends is told at the screen's edge while the panel is put away (see `ui::peek`): a
     /// device asking to send is asked about there either way.
     pub nearby_notice: bool,
+    /// Where what devices nearby send goes, under the names it came with, where the user chose a folder for it (none:
+    /// kept by the station, see `station::keep`).
+    #[serde(default)]
+    pub nearby_folder: Option<std::path::PathBuf>,
     pub view: serde_json::Value,
 }
 
@@ -1015,6 +1019,7 @@ impl Default for Settings {
             notes_source: false,
             todo_times: todo_times(),
             nearby_notice: true,
+            nearby_folder: None,
             view: serde_json::Value::Null,
         }
     }
