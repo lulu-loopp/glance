@@ -105,22 +105,29 @@ class MainActivity : ComponentActivity() {
     companion object {
         /** Opened from a handing's notification: its sheet is shown again. */
         const val HANDING = "handing"
+
+        /** Opened from a notification of what came from a device nearby: the settings are shown, with what came. */
+        const val SETTINGS = "settings"
     }
 
     /** A pairing link this activity was opened with, till it is taken. */
     private var opened by mutableStateOf<String?>(null)
+
+    /** Whether this activity was opened to show the settings, till they are shown. */
+    private var toSettings by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Dark behind the system's bars too, their icons light.
         enableEdgeToEdge(SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         opened = intent?.dataString
+        toSettings = intent?.getBooleanExtra(SETTINGS, false) == true
         if (intent?.getBooleanExtra(HANDING, false) == true) Hand.bringBack()
         // New photos sent by themselves: noticed again where they are (an app stopped by its user loses its jobs).
         kotlin.concurrent.thread(name = "auto-send-resume") { AutoSend.resume(applicationContext) }
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Accent, onPrimary = Color.Black, background = Ground, surface = Card, onBackground = Ink, onSurface = Ink)) {
-                Surface(Modifier.fillMaxSize(), color = Ground) { App(opened) { opened = null } }
+                Surface(Modifier.fillMaxSize(), color = Ground) { App(opened, toSettings, taken = { opened = null }, shownSettings = { toSettings = false }) }
             }
         }
     }
@@ -128,6 +135,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         opened = intent.dataString
+        toSettings = intent.getBooleanExtra(SETTINGS, false)
         if (intent.getBooleanExtra(HANDING, false)) Hand.bringBack()
     }
 }
@@ -136,7 +144,7 @@ class MainActivity : ComponentActivity() {
 private enum class Page { Home, Settings, Pairing }
 
 @Composable
-private fun App(opened: String?, taken: () -> Unit) {
+private fun App(opened: String?, toSettings: Boolean, taken: () -> Unit, shownSettings: () -> Unit) {
     val context = LocalContext.current
     var pcs by remember { mutableStateOf(Pcs.all(context)) }
     var chosen by remember { mutableIntStateOf(Pcs.chosen(context)) }
@@ -178,6 +186,12 @@ private fun App(opened: String?, taken: () -> Unit) {
     LaunchedEffect(opened) {
         opened?.let(Pc::fromLink)?.let(pair)
         taken()
+    }
+    LaunchedEffect(toSettings) {
+        if (toSettings) {
+            page = Page.Settings
+            shownSettings()
+        }
     }
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let(take) }
     val prompt = stringResource(R.string.scan_prompt)
@@ -353,18 +367,10 @@ private fun SettingsPage(
                 }
             }
         }
-        val paired: @Composable () -> Unit = {
-            Text(stringResource(R.string.paired_pcs), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
-            Panel {
-                Column {
-                    pcs.forEachIndexed { at, pc ->
-                        Line(pc.name, pc.host, note = stringResource(R.string.looking_at).takeIf { at == chosen }) { Words(stringResource(R.string.unpair), Bad) { unpair(at) } }
-                        Rule()
-                    }
-                    Words(stringResource(R.string.add_pc), Accent, Modifier.padding(top = 4.dp), size = 15f, press = add)
-                }
-            }
-        }
+        // The PCs paired and the devices trusted, receiving from devices nearby, and what came lately.
+        val devices: @Composable () -> Unit = { DevicesCard(pcs, chosen, add, unpair) }
+        val nearby: @Composable () -> Unit = { NearbyCard() }
+        val recent: @Composable () -> Unit = { RecentCard() }
         val showing: @Composable () -> Unit = {
             Text(stringResource(R.string.shows), color = Dim, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 16.dp, top = 8.dp))
             Panel {
@@ -387,12 +393,22 @@ private fun SettingsPage(
             val gap = Arrangement.spacedBy(12.dp)
             if (maxWidth >= WIDE) {
                 Row(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Column(Modifier.weight(1f), verticalArrangement = gap) { paired(); sending(); about() }
-                    Column(Modifier.weight(1f), verticalArrangement = gap) { showing() }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) {
+                        devices()
+                        nearby()
+                        sending()
+                        about()
+                    }
+                    Column(Modifier.weight(1f), verticalArrangement = gap) {
+                        recent()
+                        showing()
+                    }
                 }
             } else {
                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 24.dp), verticalArrangement = gap) {
-                    paired()
+                    devices()
+                    nearby()
+                    recent()
                     sending()
                     showing()
                     about()
@@ -458,6 +474,8 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
         if (body == null && asked[0] != before) return
         state = answer
         failure = null
+        // Kept for the list of devices in the settings, which says what this PC lets this phone do.
+        Pcs.knowControl(context, pc.key, answer.control)
         if (!sliding) answer.volume?.let { level = it.toFloat() }
     }
 
@@ -572,11 +590,15 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 if (fans.isNotEmpty()) Text(fans.joinToString("　"), color = Dim, fontSize = 12.5.sp)
             }
         }
-        Tile(
+        // A PC that lets this phone only look at it: said so, and nothing it may not be asked offered (what is handed
+        // to it stays, being taken as from any device trusted).
+        val controls = now.control
+        if (!controls) Panel { Text(stringResource(R.string.read_only), color = Dim, fontSize = 14.sp, lineHeight = 21.sp) }
+        if (controls) Tile(
             Sign.NIGHT, stringResource(R.string.night), if (busy == "night") working else stringResource(if (night) R.string.night_on else R.string.night_how),
             lit = night, enabled = reached, big = true, modifier = Modifier.fillMaxWidth(),
         ) { act("night", "/v1/night", on(!night)) { it.copy(night = !night, screen = night, lights = night) } }
-        Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (controls) Row(Modifier.height(IntrinsicSize.Min), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             // Lit while the screens are on: pressed, they go off, and on again.
             val screen = now.screen
             Tile(
@@ -603,6 +625,7 @@ private fun Control(pc: Pc, shown: Map<String, Boolean>, colours: List<String>, 
                 else -> handing = true
             }
         }
+        if (!controls) return@cards
         // The PC's power plan, as it is and to choose: what night changes of it is seen here.
         if (shown["power"] != false && now.power.size > 1) {
             Panel {

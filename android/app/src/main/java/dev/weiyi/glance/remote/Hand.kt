@@ -22,14 +22,37 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /**
- * What its user hands over to a paired PC by hand: photos, videos and files chosen in the app, or what is shared to it
- * from another app (words too), sent onto that PC's station as nearby transfer sends ([Nearby]). One handing at a time,
- * sent by a service of its own ([HandService]) that goes on when the app is left, its progress in a notification.
+ * What its user hands over by hand: photos, videos and files chosen in the app, or what is shared to it from another
+ * app (words too), sent onto a paired PC's station, or to a device found nearby, as nearby transfer sends ([Nearby]).
+ * One handing at a time, sent by a service of its own ([HandService]) that goes on when the app is left, its progress
+ * in a notification.
  */
 object Hand {
+    /** Whom a handing goes to: a paired PC (onto its station), or a device found nearby ([Found]). */
+    sealed interface To {
+        /** What it is known by (a PC's key, a device's fingerprint), and its name. */
+        val key: String
+        val name: String
+
+        data class Paired(val pc: Pc) : To {
+            override val key get() = pc.key
+            override val name get() = pc.name
+        }
+
+        data class Device(val device: Found.Device) : To {
+            override val key get() = device.fingerprint
+            override val name get() = device.alias
+        }
+    }
+
+    /** How long a device's user is given to give the PIN it asks for (ms). */
+    private const val PIN_FOR = 120_000L
+
     private const val CHANNEL = "hand"
     const val GOING = 7311
     private const val OVER = 7312
@@ -74,8 +97,12 @@ object Hand {
     sealed interface State {
         /** Being read, and the PC reached. */
         data object Reaching : State
-        /** The PC is receiving another sending: waited for. */
+        /** The PC (or device) is receiving another sending: waited for. */
         data object Waiting : State
+        /** Offered to a device whose user is asked: waited for. */
+        data object Asking : State
+        /** The device asks for its PIN ([give]): how many given it turned down so far. */
+        data class Pin(val tried: Int) : State
         data object Going : State
         data object Sent : State
         data class Failed(val why: Why) : State
@@ -83,13 +110,14 @@ object Hand {
     }
 
     /**
-     * A handing: to which PC, what (what is known of it yet: nothing while it is read), how it goes, how many bytes of it
-     * went (and of each thing, by its id), which things the PC has, the one a failure names, whether its sheet was put
-     * away, and the folders what it sends is read through (given leave to read again where it is tried again).
+     * A handing: to which PC or device, what (what is known of it yet: nothing while it is read), how it goes, how many
+     * bytes of it went (and of each thing, by its id), which things the PC has, the one a failure names, whether its
+     * sheet was put away, and the folders what it sends is read through (given leave to read again where it is tried
+     * again).
      */
     data class Job(
         val number: Int,
-        val pc: Pc,
+        val to: To,
         val things: List<Handed>,
         val state: State,
         val done: Long = 0,
@@ -116,42 +144,49 @@ object Hand {
      * What [HandService] sends next, as it was given: the PC, and the things, or where they are (and the folders they
      * are in, read through them) and words.
      */
-    private class Given(val pc: Pc, val picks: List<Pick>, val trees: List<Uri>, val words: String?, val things: List<Handed>?)
+    private class Given(val to: To, val picks: List<Pick>, val trees: List<Uri>, val words: String?, val things: List<Handed>?)
 
     @Volatile
     private var given: Given? = null
+    /** What stops the handing going on, and the PIN given for it. */
     @Volatile
-    private var stopped = false
+    private var stop = Nearby.Stop()
+    private val pins = LinkedBlockingQueue<String>()
     private var numbers = 0
 
     private fun kept(context: Context) = context.getSharedPreferences("hand", Context.MODE_PRIVATE)
 
-    /** The PC last handed to, by its key. */
+    /** The PC (or device) last handed to, by its key. */
     fun last(context: Context): String? = kept(context).getString("last", null)
 
     /**
      * [picks] (readable by this app, those of a folder chosen through its tree among [trees]) or [words] handed to [pc]:
      * sent from now on. Whether they are (not while another handing goes on: one at a time).
      */
-    fun start(context: Context, pc: Pc, picks: List<Pick>, words: String? = null, trees: List<Uri> = emptyList()): Boolean {
+    fun start(context: Context, pc: Pc, picks: List<Pick>, words: String? = null, trees: List<Uri> = emptyList()): Boolean = start(context, To.Paired(pc), picks, words, trees)
+
+    /** The same, to [to]: a paired PC, or a device found nearby. */
+    fun start(context: Context, to: To, picks: List<Pick>, words: String? = null, trees: List<Uri> = emptyList()): Boolean {
         if (shown.value?.over == false) return false
         // (What an earlier handing read into the cache is no longer wanted: it is not tried again now.)
         File(context.cacheDir, "hand").deleteRecursively()
-        return begin(context, Given(pc, picks, trees, words, null))
+        return begin(context, Given(to, picks, trees, words, null))
     }
 
-    /** What of the last handing the PC does not have, sent to it again. */
+    /** What of the last handing the PC (or device) does not have, sent to it again. */
     fun retry(context: Context) {
         val job = shown.value?.takeIf { it.state is State.Failed } ?: return
-        begin(context, Given(job.pc, emptyList(), job.trees, null, job.left))
+        begin(context, Given(job.to, emptyList(), job.trees, null, job.left))
     }
 
     private fun begin(context: Context, what: Given): Boolean {
         if (shown.value?.over == false) return false
-        stopped = false
+        stop = Nearby.Stop()
+        pins.clear()
         given = what
-        kept(context).edit().putString("last", what.pc.key).apply()
-        shown.value = Job(++numbers, what.pc, what.things.orEmpty(), State.Reaching, trees = what.trees)
+        // (The PC handed to last is listed first next time. A device nearby is not kept: it is found anew.)
+        if (what.to is To.Paired) kept(context).edit().putString("last", what.to.key).apply()
+        shown.value = Job(++numbers, what.to, what.things.orEmpty(), State.Reaching, trees = what.trees)
         // (The places given are handed to the service with leave to read them, a folder with leave to read all in it,
         // its things not named one by one: it reads them while it runs. A file of this phone's needs no leave. Only
         // the leave this app was given is handed on: one it was not given (an app that shared without it, or given
@@ -173,7 +208,12 @@ object Hand {
 
     /** The handing going on, cancelled: what the PC has stays there. */
     fun cancel() {
-        stopped = true
+        stop.stop()
+    }
+
+    /** The PIN the device the handing goes to asked for, given (for this offer only: never kept). */
+    fun give(pin: String) {
+        pins.offer(pin)
     }
 
     /** Its sheet put away: going on, it goes on, told in the notification. */
@@ -201,7 +241,10 @@ object Hand {
         val ended = try {
             val things = what.things ?: read(context, what.picks, what.words)
             change(number) { it.copy(things = things) }
-            sendAll(context, what.pc, things, number, service)
+            when (val to = what.to) {
+                is To.Paired -> sendAll(context, to.pc, things, number, service)
+                is To.Device -> sendAll(context, to.device, things, number, service)
+            }
         } catch (unread: Unreadable) {
             change(number) { it.copy(named = unread.name) }
             State.Failed(Why.Unread)
@@ -280,7 +323,7 @@ object Hand {
             val since = System.currentTimeMillis()
             while (true) {
                 change(number) { it.copy(state = State.Going) }
-                val ended = Nearby.send(context, at, batch.map { it.thing }, { stopped }, { thing, done ->
+                val ended = Nearby.send(context, at.at, batch.map { it.thing }, stop, moved = { thing, done ->
                     moved[thing.id] = done
                     val now = System.currentTimeMillis()
                     if (now - told >= 200) {
@@ -300,9 +343,10 @@ object Hand {
                         change(number) { it.copy(state = State.Waiting) }
                         service.going(shown.value)
                         Thread.sleep(AGAIN)
-                        if (stopped) return State.Cancelled
+                        if (stop.stopped) return State.Cancelled
                     }
-                    Nearby.Ended.Refused -> return State.Failed(Why.Refused)
+                    // (A paired PC asks for no PIN: one that does is taken as turning it down.)
+                    Nearby.Ended.Refused, Nearby.Ended.Pin -> return State.Failed(Why.Refused)
                     Nearby.Ended.NoRoom -> return State.Failed(Why.NoRoom)
                     Nearby.Ended.Broken -> return State.Failed(Why.Broken)
                     Nearby.Ended.Stopped -> return State.Cancelled
@@ -310,6 +354,70 @@ object Hand {
             }
         }
         return State.Sent
+    }
+
+    /**
+     * [things] sent to [device] (found nearby, not paired) as LocalSend sends, as handing [number] tells: offered, its
+     * user asked ("waiting" told once the device held the offer a second), a PIN it asks for asked of this phone's user
+     * ([give]) and offered again with it, then sent. How it ended.
+     */
+    private fun sendAll(context: Context, device: Found.Device, things: List<Handed>, number: Int, service: HandService): State {
+        val at = Nearby.At(device.address, device.port, device.https, device.fingerprint, glance = false)
+        val sizes = things.associate { it.thing.id to it.thing.size }
+        val moved = HashMap<String, Long>()
+        var told = 0L
+        var pin: String? = null
+        var tried = 0
+        val since = System.currentTimeMillis()
+        while (true) {
+            val ended = Nearby.send(context, at, things.map { it.thing }, stop, pin, held = {
+                change(number) { it.copy(state = State.Asking) }
+                service.going(shown.value)
+            }, moved = { thing, done ->
+                moved[thing.id] = done
+                val now = System.currentTimeMillis()
+                if (now - told >= 200) {
+                    told = now
+                    change(number) { it.copy(state = State.Going, done = moved.values.sum(), moved = moved.toMap()) }
+                    service.going(shown.value)
+                }
+            }) { thing ->
+                moved[thing.id] = sizes.getValue(thing.id)
+                change(number) { it.copy(state = State.Going, taken = it.taken + thing.id, done = moved.values.sum(), moved = moved.toMap()) }
+                service.going(shown.value)
+            }
+            when (ended) {
+                Nearby.Ended.Sent -> return State.Sent
+                Nearby.Ended.Pin -> {
+                    if (pin != null) tried++
+                    change(number) { it.copy(state = State.Pin(tried)) }
+                    service.going(shown.value)
+                    pin = given(stop) ?: return if (stop.stopped) State.Cancelled else State.Failed(Why.Refused)
+                    change(number) { it.copy(state = State.Reaching) }
+                }
+                Nearby.Ended.Busy -> {
+                    if (System.currentTimeMillis() - since > BUSY_FOR) return State.Failed(Why.Busy)
+                    change(number) { it.copy(state = State.Waiting) }
+                    service.going(shown.value)
+                    Thread.sleep(AGAIN)
+                    if (stop.stopped) return State.Cancelled
+                }
+                Nearby.Ended.Refused, Nearby.Ended.NoRoom -> return State.Failed(Why.Refused)
+                Nearby.Ended.Broken -> return State.Failed(if (moved.isEmpty()) Why.Unreached else Why.Broken)
+                Nearby.Ended.Stopped -> return State.Cancelled
+            }
+        }
+    }
+
+    /** The PIN given ([give]), waited for till [PIN_FOR]: none where the handing was stopped meanwhile, or none was given. */
+    private fun given(stop: Nearby.Stop): String? {
+        val until = System.currentTimeMillis() + PIN_FOR
+        while (!stop.stopped) {
+            val left = until - System.currentTimeMillis()
+            if (left <= 0) return null
+            pins.poll(minOf(left, 200L), TimeUnit.MILLISECONDS)?.let { return it }
+        }
+        return null
     }
 
     // ---- Its notification ----
@@ -325,9 +433,11 @@ object Hand {
     fun going(context: Context, job: Job?): Notification {
         channel(context)
         val title = when (job?.state) {
-            State.Waiting -> context.getString(R.string.hand_waiting, job.pc.name)
-            null, State.Reaching -> context.getString(R.string.hand_reaching, job?.pc?.name.orEmpty())
-            else -> context.getString(R.string.hand_going, job.pc.name)
+            State.Waiting -> context.getString(R.string.hand_waiting, job.to.name)
+            State.Asking -> context.getString(R.string.hand_asking, job.to.name)
+            is State.Pin -> context.getString(R.string.pin_title, job.to.name)
+            null, State.Reaching -> context.getString(R.string.hand_reaching, job?.to?.name.orEmpty())
+            else -> context.getString(R.string.hand_going, job.to.name)
         }
         val builder = Notification.Builder(context, CHANNEL)
             .setSmallIcon(R.drawable.ic_hand)
@@ -350,8 +460,8 @@ object Hand {
         if (AutoSend.inFront() || job.state is State.Cancelled || !notices.areNotificationsEnabled()) return
         channel(context)
         val (title, text) = when (val state = job.state) {
-            State.Sent -> context.getString(R.string.hand_sent_to, job.pc.name) to said(context, job)
-            is State.Failed -> context.getString(R.string.hand_failed_to, job.pc.name) to context.getString(R.string.hand_failed_open)
+            State.Sent -> context.getString(R.string.hand_sent_to, job.to.name) to said(context, job)
+            is State.Failed -> context.getString(R.string.hand_failed_to, job.to.name) to context.getString(R.string.hand_failed_open)
             else -> return
         }
         val builder = Notification.Builder(context, CHANNEL)
@@ -366,10 +476,12 @@ object Hand {
 
     /** What went where, said as its sheet and notification say it once it is all there. */
     fun said(context: Context, job: Job): String = when {
-        job.words && job.things[0].thing.words?.trim()?.let(::isLink) == true -> context.getString(R.string.hand_sent_link, job.pc.name)
-        job.words -> context.getString(R.string.hand_sent_words, job.pc.name)
-        job.photos -> context.resources.getQuantityString(R.plurals.hand_sent_photos, job.things.size, job.things.size, job.pc.name)
-        else -> context.resources.getQuantityString(R.plurals.hand_sent_files, job.things.size, job.things.size, job.pc.name)
+        // (A device not paired keeps what it took where it keeps things: said only to have gone there.)
+        job.to is To.Device -> context.getString(R.string.hand_sent_to, job.to.name)
+        job.words && job.things[0].thing.words?.trim()?.let(::isLink) == true -> context.getString(R.string.hand_sent_link, job.to.name)
+        job.words -> context.getString(R.string.hand_sent_words, job.to.name)
+        job.photos -> context.resources.getQuantityString(R.plurals.hand_sent_photos, job.things.size, job.things.size, job.to.name)
+        else -> context.resources.getQuantityString(R.plurals.hand_sent_files, job.things.size, job.things.size, job.to.name)
     }
 
     /** The type a file is taken for by its name's extension, where nothing says it. */

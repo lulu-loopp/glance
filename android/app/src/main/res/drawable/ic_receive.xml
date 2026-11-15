@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A tray (Lucide's inbox), for the notices of what comes from devices nearby (tinted by the system). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M22,12 L16,12 L14,15 L10,15 L8,12 L2,12 M5.45,5.11 L2,12 L2,18 A2,2 0 0 0 4,20 L20,20 A2,2 0 0 0 22,18 L22,12 L18.55,5.11 A2,2 0 0 0 16.76,4 L7.24,4 A2,2 0 0 0 5.45,5.11 Z"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

@@ -10,6 +10,12 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -48,6 +54,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -95,12 +104,26 @@ fun Sheet(dismiss: () -> Unit, content: @Composable () -> Unit) {
 @Composable
 fun SheetTitle(text: String) = Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Ink, modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 8.dp))
 
-/** A row to choose on a sheet: its sign in a square, its name and what it is under it. */
+/** A row to choose on a sheet: its sign in a square, its name and what it is under it, and how it stands at its right. */
 @Composable
-private fun Choice(sign: String, title: String, detail: String, enabled: Boolean = true, press: () -> Unit) {
+private fun Choice(sign: String, title: String, detail: String, enabled: Boolean = true, right: @Composable () -> Unit = {}, press: () -> Unit) {
     Line(title, detail, Modifier.clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled, role = Role.Button, onClick = press).padding(horizontal = 4.dp).alpha(if (enabled) 1f else 0.45f), lead = {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Card2), contentAlignment = Alignment.Center) { Sign(sign, Ink, size = 20.dp) }
-    }) {}
+    }, right = right)
+}
+
+/** What a sheet's part is of, small, with a turning arc beside it while it is still looked for. */
+@Composable
+private fun SheetPart(text: String, looking: Boolean = false) {
+    Row(Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(text, fontSize = 12.sp, color = Dim, fontWeight = FontWeight.Medium)
+        if (looking) {
+            val turn by rememberInfiniteTransition(label = "looking").animateFloat(0f, 360f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "turn")
+            Canvas(Modifier.size(12.dp)) {
+                rotate(turn) { drawArc(Dim, 0f, 270f, false, style = Stroke(1.5.dp.toPx(), cap = StrokeCap.Round)) }
+            }
+        }
+    }
 }
 
 /** The words at the foot of a sheet, at its right. */
@@ -110,9 +133,17 @@ fun SheetWords(content: @Composable () -> Unit) = Row(Modifier.fillMaxWidth().pa
 /** How a PC on the list to choose among stands: being reached, reached (receiving or not), or not reached. */
 private enum class Standing { Looking, Ready, Off, Away }
 
-/** Which of the paired PCs [pcs] is handed to: each reached first (the one handed to last first, those not reached last). */
+/** How long the sheet to send from says it is looking before it says nothing is nearby (ms). */
+private const val LOOKING_FOR = 4000L
+
+/**
+ * Where what is shared is sent ("发送到"): the paired PCs [pcs] first, each reached first (the one handed to last first,
+ * those not reached last), then the devices found nearby (looked for while this is open: this phone announced, and
+ * those that answer listed as they do). A device chosen is sent to here, how it goes said beside it ("等待对方接受", how
+ * far, "已发送"), its PIN asked for where it wants one. All there, the sheet goes 2 s later.
+ */
 @Composable
-fun PcSheet(pcs: List<Pc>, dismiss: () -> Unit, choose: (Pc) -> Unit) {
+fun SendSheet(pcs: List<Pc>, dismiss: () -> Unit, choosePc: (Pc) -> Unit, chooseDevice: (Found.Device) -> Unit) {
     val context = LocalContext.current
     val last = remember { Hand.last(context) }
     val standing = remember { mutableStateMapOf<String, Standing>() }
@@ -126,9 +157,31 @@ fun PcSheet(pcs: List<Pc>, dismiss: () -> Unit, choose: (Pc) -> Unit) {
             }.awaitAll()
         }
     }
+    // Looked for while open: this phone announced, and what answers listed (not the paired PCs: they are above).
+    var looked by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        Receiver.announce()
+        delay(LOOKING_FOR)
+        looked = true
+    }
+    val heard by Receiver.devices.collectAsState()
+    val paired = remember(pcs) { Pcs.fingerprints(context).filterKeys { key -> pcs.any { it.key == key } }.values.map { it.uppercase() }.toSet() }
+    val nearby = heard.filter { it.fingerprint.uppercase() !in paired }
+    val job by Hand.now.collectAsState()
+    // The sending begun here to a device: once all there, the sheet goes a moment later.
+    var begun by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(job?.number, job?.state) {
+        val now = job ?: return@LaunchedEffect
+        if (now.number == begun && now.state == Hand.State.Sent) {
+            delay(SAID_FOR)
+            Hand.putAway()
+            dismiss()
+        }
+    }
     val ordered = pcs.sortedWith(compareBy<Pc>({ standing[it.key] == Standing.Away || standing[it.key] == Standing.Off }, { it.key != last }))
     Sheet(dismiss) {
         SheetTitle(stringResource(R.string.hand_choose))
+        if (ordered.isNotEmpty()) SheetPart(stringResource(R.string.send_paired))
         ordered.forEachIndexed { at, pc ->
             if (at > 0) Rule()
             val stands = standing[pc.key] ?: Standing.Looking
@@ -138,9 +191,38 @@ fun PcSheet(pcs: List<Pc>, dismiss: () -> Unit, choose: (Pc) -> Unit) {
                 Standing.Off -> stringResource(R.string.hand_pc_off)
                 Standing.Away -> stringResource(R.string.hand_pc_away)
             }
-            Choice(Sign.MONITOR, pc.name, detail, enabled = stands == Standing.Ready) { choose(pc) }
+            Choice(Sign.MONITOR, pc.name, detail, enabled = stands == Standing.Ready) { choosePc(pc) }
+        }
+        SheetPart(stringResource(R.string.send_nearby), looking = true)
+        if (nearby.isEmpty()) Text(stringResource(if (looked) R.string.send_none else R.string.send_looking), fontSize = 13.sp, color = Dim, modifier = Modifier.padding(start = 4.dp, top = 4.dp, bottom = 8.dp))
+        nearby.forEachIndexed { at, device ->
+            if (at > 0) Rule()
+            val mine = job?.takeIf { it.to.key == device.fingerprint && it.number == begun }
+            // (One at a time: while a sending goes, the others wait, and the one it goes to says how it goes.)
+            val going = job?.over == false
+            Choice(signOf(device.type), device.alias, deviceTags(device.glance, device.model, device.type), enabled = !going || mine != null, right = { mine?.let { DeviceStanding(it) } }) {
+                if (!going) {
+                    chooseDevice(device)
+                    begun = Hand.now.value?.takeIf { it.to.key == device.fingerprint && !it.over }?.number
+                }
+            }
         }
         SheetWords { Words(stringResource(R.string.cancel), Dim, Modifier.padding(horizontal = 8.dp), press = dismiss) }
+    }
+    job?.takeIf { it.number == begun }?.let { PinAsk(it) }
+}
+
+/** How a sending to a device found nearby stands, said beside it. */
+@Composable
+private fun DeviceStanding(job: Hand.Job) {
+    when (val state = job.state) {
+        Hand.State.Reaching -> StatusWords(stringResource(R.string.send_connecting))
+        Hand.State.Asking, is Hand.State.Pin -> StatusWords(stringResource(R.string.send_asking))
+        Hand.State.Waiting -> StatusWords(stringResource(R.string.send_waiting))
+        Hand.State.Going -> StatusWords("${(job.done * 100 / job.total.coerceAtLeast(1)).coerceIn(0, 100)}%", Accent)
+        Hand.State.Sent -> StatusWords(stringResource(R.string.send_sent), Good)
+        Hand.State.Cancelled -> {}
+        is Hand.State.Failed -> StatusWords(stringResource(if (state.why == Hand.Why.Refused) R.string.send_refused else R.string.send_failed), Bad)
     }
 }
 
@@ -172,18 +254,18 @@ fun HandSheet(gone: () -> Unit = {}) {
             is Hand.State.Failed -> {
                 val sent = shown.taken.size
                 val title = when {
-                    state.why == Hand.Why.Off -> stringResource(R.string.hand_off_title, shown.pc.name)
+                    state.why == Hand.Why.Off -> stringResource(R.string.hand_off_title, shown.to.name)
                     sent > 0 -> stringResource(R.string.hand_failed_some, sent, shown.things.size - sent)
-                    else -> stringResource(R.string.hand_failed, shown.pc.name)
+                    else -> stringResource(R.string.hand_failed, shown.to.name)
                 }
                 val why = when (state.why) {
-                    Hand.Why.Unreached -> stringResource(R.string.hand_why_unreached, shown.pc.name)
-                    Hand.Why.Broken -> stringResource(R.string.hand_why_broken, shown.pc.name)
-                    Hand.Why.Busy -> stringResource(R.string.hand_why_busy, shown.pc.name)
-                    Hand.Why.NoRoom -> stringResource(R.string.hand_why_room, shown.pc.name)
+                    Hand.Why.Unreached -> stringResource(R.string.hand_why_unreached, shown.to.name)
+                    Hand.Why.Broken -> stringResource(R.string.hand_why_broken, shown.to.name)
+                    Hand.Why.Busy -> stringResource(R.string.hand_why_busy, shown.to.name)
+                    Hand.Why.NoRoom -> stringResource(R.string.hand_why_room, shown.to.name)
                     Hand.Why.TooLarge -> stringResource(R.string.hand_why_large, shown.named.orEmpty())
                     Hand.Why.Unread -> stringResource(R.string.hand_why_unread, shown.named.orEmpty())
-                    Hand.Why.Refused -> stringResource(R.string.hand_why_refused)
+                    Hand.Why.Refused -> if (shown.to is Hand.To.Device) stringResource(R.string.hand_why_refused_device, shown.to.name) else stringResource(R.string.hand_why_refused)
                     Hand.Why.Off -> stringResource(R.string.auto_pc_off)
                 }
                 // (Tried again where trying again may go: not what the PC refused, nor what is too large or unread.)
@@ -195,9 +277,11 @@ fun HandSheet(gone: () -> Unit = {}) {
             }
             else -> {
                 val title = when (state) {
-                    Hand.State.Waiting -> stringResource(R.string.hand_waiting, shown.pc.name)
-                    Hand.State.Going -> stringResource(R.string.hand_going, shown.pc.name)
-                    else -> stringResource(R.string.hand_reaching, shown.pc.name)
+                    Hand.State.Waiting -> stringResource(R.string.hand_waiting, shown.to.name)
+                    Hand.State.Asking -> stringResource(R.string.hand_asking, shown.to.name)
+                    is Hand.State.Pin -> stringResource(R.string.pin_title, shown.to.name)
+                    Hand.State.Going -> stringResource(R.string.hand_going, shown.to.name)
+                    else -> stringResource(R.string.hand_reaching, shown.to.name)
                 }
                 SheetTitle(title)
                 for (handed in shown.things.take(LISTED)) Going(handed, shown)
@@ -209,6 +293,7 @@ fun HandSheet(gone: () -> Unit = {}) {
             }
         }
     }
+    PinAsk(shown)
 }
 
 /** How a handing ended: its sign in a round, what is said of it, and what may be done then. */
@@ -303,20 +388,19 @@ class ShareActivity : ComponentActivity() {
 private fun Shared(uris: List<Uri>, words: String?, finish: () -> Unit) {
     val context = LocalContext.current
     val pcs = remember { Pcs.all(context) }
-    var chosen by remember { mutableStateOf(pcs.singleOrNull()) }
-    // Whether the handing was begun (once: not again as the screen turns), and whether another went on then.
+    val picks = remember(uris) { uris.map { Hand.Pick(it) } }
+    // Whether a handing to a paired PC was begun (once: not again as the screen turns), and whether another went on then.
+    // A device nearby is sent to on the sheet itself, which says how it goes.
     var begun by rememberSaveable { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     when {
-        pcs.isEmpty() -> Tell(stringResource(R.string.hand_none_title), stringResource(R.string.hand_none_what), stringResource(R.string.close), finish)
         uris.isEmpty() && words == null -> LaunchedEffect(Unit) { finish() }
         busy -> Tell(stringResource(R.string.hand_busy_title), stringResource(R.string.hand_busy_what), stringResource(R.string.close), finish)
         begun -> HandSheet(gone = finish)
-        else -> when (val pc = chosen) {
-            null -> PcSheet(pcs, finish) { chosen = it }
-            else -> LaunchedEffect(pc) {
-                if (Hand.start(context, pc, uris.map { Hand.Pick(it) }, words)) begun = true else busy = true
-            }
-        }
+        else -> SendSheet(
+            pcs, finish,
+            choosePc = { pc -> if (Hand.start(context, pc, picks, words)) begun = true else busy = true },
+            chooseDevice = { device -> if (!Hand.start(context, Hand.To.Device(device), picks, words)) busy = true },
+        )
     }
 }
