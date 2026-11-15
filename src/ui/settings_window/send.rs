@@ -235,26 +235,21 @@ impl Ui {
     /// found that are no paired phone, Glance's first.
     fn send_devices(&self, shown: &crate::nearby::Shown) -> Vec<SendDevice> {
         let lang = self.lang;
-        let trusted = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter());
-        let found_of = |fingerprint: &str| shown.devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(fingerprint));
-        let model = |device: Option<&crate::nearby::Device>| device.and_then(|device| device.model.clone()).filter(|model| !model.trim().is_empty());
-        let mut devices: Vec<SendDevice> = Vec::new();
-        for phone in self.phones.iter().filter(|phone| !phone.web) {
-            let Some(fingerprint) = trusted.clone().find(|trusted| trusted.phone.as_deref() == Some(phone.id.as_str())).map(|trusted| trusted.fingerprint.clone()) else { continue };
-            let found = found_of(&fingerprint);
-            let name = found.map(|device| device.alias.clone()).filter(|alias| !alias.is_empty()).unwrap_or_else(|| phone.name.clone());
-            let tags = std::iter::once(pick(lang, "已配对", "Paired").to_string()).chain(model(found)).collect();
-            devices.push(SendDevice { fingerprint, name, icon: Icon::Smartphone, tags, found: found.is_some() });
-        }
-        let mut others: Vec<&crate::nearby::Device> = shown.devices.iter().filter(|device| !devices.iter().any(|known| known.fingerprint.eq_ignore_ascii_case(&device.fingerprint))).collect();
-        others.sort_by_key(|device| (!device.glance, device.alias.to_lowercase()));
-        for device in others {
-            let name = if device.alias.is_empty() { pick(lang, "未命名的设备", "Unnamed device").to_string() } else { device.alias.clone() };
-            let maker = if device.glance { "Glance" } else { "LocalSend" };
-            let tags = std::iter::once(maker.to_string()).chain(model(Some(device))).collect();
-            devices.push(SendDevice { fingerprint: device.fingerprint.clone(), name, icon: kind_icon(device.kind.as_deref()), tags, found: true });
-        }
-        devices
+        let trusted = self.nearby.as_ref().map_or(&[][..], |nearby| &nearby.trusted[..]);
+        crate::nearby::targets(&shown.devices, &self.phones, trusted)
+            .into_iter()
+            .map(|target| {
+                let maker = if target.paired {
+                    pick(lang, "已配对", "Paired")
+                } else if target.glance {
+                    "Glance"
+                } else {
+                    "LocalSend"
+                };
+                let name = if target.name.is_empty() { pick(lang, "未命名的设备", "Unnamed device").to_string() } else { target.name };
+                SendDevice { icon: Icon::of_device(target.kind.as_deref()), tags: std::iter::once(maker.to_string()).chain(target.model).collect(), fingerprint: target.fingerprint, name, found: target.found }
+            })
+            .collect()
     }
 
     /// The pane taken up as the window ticks: the folders measured, what was let go on it, the choosers closed, the

@@ -131,6 +131,15 @@ pub enum Icon {
 }
 
 impl Icon {
+    /// What stands for a device of LocalSend's `kind`: a phone, a laptop, else a monitor.
+    pub fn of_device(kind: Option<&str>) -> Icon {
+        match kind {
+            Some("mobile") => Icon::Smartphone,
+            Some("laptop") => Icon::Laptop,
+            _ => Icon::Monitor,
+        }
+    }
+
     /// Lucide's path data for it ("cpu", "gpu", "memory-stick", "hard-drive",
     /// "arrow-down-up", "gamepad-2", "pin", "x", "settings", "check",
     /// "mouse-pointer-2", "panel-right", "undo-2", "refresh-cw", "power", "layers", "clock", "image-plus", "skip-back", "play", "pause", "skip-forward",

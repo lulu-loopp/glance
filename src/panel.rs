@@ -804,6 +804,10 @@ impl Controller {
                     // The devices nearby at a station's foot as something is dragged off it, and as what was let go on
                     // one is sent (see `station::send`).
                     let (strip_moved, strip_due) = crate::station::send::tick(now);
+                    // The devices a menu's "发送到" lists, again as they are found (see `station::send::menu_row`).
+                    if let Some((open, of)) = menu.as_mut() {
+                        of.devices_again(open);
+                    }
                     if let Some(due) = strip_due {
                         wait = Some(wait.map_or(due, |wait: Duration| wait.min(due)));
                     }
@@ -1910,6 +1914,27 @@ enum MenuFor {
     Note(String, Vec<crate::ui::note::Choice>),
     /// Things on a station's lane chosen together, and what each row does (see `station::many_menu`).
     Many(Vec<Hit>, Vec<crate::station::ManyChoice>),
+}
+
+impl MenuFor {
+    /// The devices its "发送到" lists (where it has one), listed again in `open` where they changed: what each of them
+    /// is chosen as with them (after all its own rows: see `Menu::sub_choice`).
+    fn devices_again(&mut self, open: &mut crate::ui::menu::Menu) {
+        use crate::station::{Choice, ManyChoice, RecentChoice};
+        fn again<C: PartialEq>(open: &mut crate::ui::menu::Menu, choices: &mut Vec<C>, row: C, to: fn(u64) -> C) {
+            let Some(at) = choices.iter().position(|choice| *choice == row) else { return };
+            let Some((more, keys)) = crate::station::send::menu_row_again() else { return };
+            choices.truncate(open.rows());
+            choices.extend(keys.into_iter().map(to));
+            open.set_more(at, more);
+        }
+        match self {
+            MenuFor::Station(_, choices, _) => again(open, choices, Choice::Send, Choice::SendTo),
+            MenuFor::Many(_, choices) => again(open, choices, ManyChoice::Send, ManyChoice::SendTo),
+            MenuFor::Recent(_, choices) => again(open, choices, RecentChoice::Send, RecentChoice::SendTo),
+            _ => {}
+        }
+    }
 }
 
 impl Controller {

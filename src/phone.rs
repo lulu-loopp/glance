@@ -551,6 +551,16 @@ pub struct Trusted {
     pub glance: bool,
 }
 
+/// The devices trusted, as the helper keeps them (read where it keeps them, not asked: none kept, none).
+pub fn trusted_kept() -> Vec<Trusted> {
+    let config: Option<serde_json::Value> = remote_config().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|text| serde_json::from_str(&text).ok());
+    trusted_of(config.as_ref())
+}
+
+fn trusted_of(config: Option<&serde_json::Value>) -> Vec<Trusted> {
+    config.and_then(|config| config.pointer("/nearby/trusted")).and_then(|trusted| serde_json::from_value(trusted.clone()).ok()).unwrap_or_default()
+}
+
 /// Nearby transfer as the helper keeps it, once it is told `words` (see its `nearby`: `name NAME`, `forget
 /// FINGERPRINT`, `others ask|refuse`), none where it cannot be asked.
 pub fn nearby(words: &[&str]) -> Option<Nearby> {
@@ -579,6 +589,17 @@ mod tests {
         assert_eq!(flags(r#"{"remote": false, "nearby": {"on": true}}"#), (false, true, false));
         assert_eq!(flags(r#"{"nearby": {"alias": "Desk"}}"#), (true, false, false));
         assert_eq!(flags(r#"{"remote": false, "nearby": {"on": false, "send": true}}"#), (false, false, true));
+    }
+
+    /// The devices trusted are read as the helper keeps them, what else it keeps of them passed over; none kept, none.
+    #[test]
+    fn the_devices_trusted_are_read_as_the_helper_keeps_them() {
+        let config: serde_json::Value = serde_json::from_str(r#"{"nearby": {"on": true, "trusted": [{"fingerprint": "CD", "alias": "Fold", "kind": "mobile", "last": 5, "since": 9, "phone": "p1", "glance": true}]}}"#).unwrap();
+        let trusted = trusted_of(Some(&config));
+        assert_eq!(trusted.len(), 1);
+        assert_eq!((trusted[0].fingerprint.as_str(), trusted[0].phone.as_deref(), trusted[0].glance), ("CD", Some("p1"), true));
+        assert!(trusted_of(None).is_empty());
+        assert!(trusted_of(Some(&serde_json::json!({"remote": true}))).is_empty());
     }
 
     /// Nearby transfer as the helper says it (see `run::said` there).

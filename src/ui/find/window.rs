@@ -1322,7 +1322,7 @@ impl Finder {
             What::Item(_) => choices.push((Act::Copy, lang.pick("复制", "Copy"), Icon::Copy)),
             _ => {}
         }
-        let items = choices.iter().map(|(_, label, icon)| Item { label, mark: Some(Mark::Icon(*icon)), checked: false, rule_before: false }).collect();
+        let items = choices.iter().map(|(_, label, icon)| Item::new(*label, Some(Mark::Icon(*icon)), false, false)).collect();
         if let Some(menu) = Menu::open_at(items, Look::of(self.skin, self.dark), at, false, false) {
             self.menu = Some((menu, choices.into_iter().map(|(act, ..)| act).collect(), row));
         }

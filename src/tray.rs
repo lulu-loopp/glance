@@ -364,7 +364,7 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     choices.push((SETTINGS, if zh { "设置" } else { "Settings" }, Icon::Settings, false));
     choices.push((CHECK, if zh { "检查更新" } else { "Check for updates" }, Icon::Update, false));
     choices.push((QUIT, if zh { "退出 Glance" } else { "Quit Glance" }, Icon::Quit, true));
-    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
+    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
     let Some(menu) = Menu::open_at(items, crate::ui::menu::Look::system(), POINT { x, y }, true, over_the_panel) else {

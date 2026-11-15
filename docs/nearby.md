@@ -483,12 +483,26 @@ Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (
 - **The workbench**: 最近复制, 最近文件 and 中转站 each have "发送到" in their menu (several chosen: all of them), with a
   submenu of every device that can be sent to, paired first, those not reached dimmed with why. (The menu gains
   submenus for this.) A copied item goes as the clipboard does: words, a picture as PNG, files.
+  - As built: the row sits above the menu's rule (above 移除 or 不再列出这个文件夹). Each device has its kind's icon,
+    its name and a line under it: "已配对的手机", "Glance · <model>" or "LocalSend · <model>". Dimmed rows are
+    "未开启接收" (a paired phone not found), "正在发送" (a sending to it under way) and "正在查找附近的设备" (none found
+    yet). Something that may not leave this PC dims the row itself: "此内容不可发送到其他设备".
+  - The list follows the devices as they are found while the menu is up. A choice in the submenu is told after all
+    the menu's own rows (`Menu::sub_choice`).
+  - Choosing a device sends through the station's thread (`Ask::SendTo`), its own files held till the sending is over.
+    The strip rises to show it, as a drop on it does.
+  - The devices are known from the helper's file (paired phones, and the certificates they told) and from discovery,
+    one list for the menus and the 发送 pane (`nearby::targets`).
 - **Dragging**: a drag from any of the three, or of files from Explorer over the panel, raises "发送到" at the panel's
   foot (the station's strip, moved to the panel and made common): the devices across, dropped on one, sent, its ring
   of progress, the strip down 1.1 s after. Never there otherwise.
+  - As built: an Explorer drag counts from the moment the station's catchers see it over a lane, and ends when no
+    drag is seen any more. A drop on a device reads what it gives as a drop on the station does, and sends it.
+  - A device being sent to takes nothing more till its sending is over ("正在发送，请稍候" on what is dragged).
 - **Sending while not receiving**: allowed. The helper runs for it (started as it is wanted, the firewall rule with
   it) and announces itself to find devices. While receiving is off it answers `register` and `info` but refuses
-  every `prepare-upload` (403). Wanted while the 发送 pane shows (and, later, the strip and the menus): Glance asks
+  every `prepare-upload` (403). Wanted while the 发送 pane shows, as a menu with "发送到" opens, and as
+  something is dragged off a station or from another program over one: Glance asks
   the sensors to turn `Switch::NearbySend` on (the helper's `nearby send on`, the firewall rule, its task run anew),
   and off again a minute after it was last wanted with no sending under way. A Glance that ended while it was on
   turns it off as it starts.

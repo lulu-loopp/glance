@@ -66,6 +66,8 @@ pub enum Ask {
     Landing(Vec<u64>, std::time::Instant),
     /// A sending to a device nearby over (see `send`): its own files it held let go of.
     Sent(u64),
+    /// What is given sent to the device nearby of this key (see `send::key_of`), as chosen in a menu's "发送到".
+    SendTo(Vec<Given>, u64),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -227,6 +229,10 @@ pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Land
             crate::ui::settings_window::dragged_in(window, dragged);
         }
         return;
+    }
+    // Something from another program over a station: the devices nearby rise at its foot (see `send::foreign`).
+    if matches!(lands, Lands::Station | Lands::Pages(_)) && matches!(dragged, Dragged::Over(_)) && !super::drag::under_way() {
+        super::send::foreign(true);
     }
     if lands == Lands::Apps {
         // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
@@ -673,6 +679,7 @@ impl Station {
                 Ask::Over(over) => self.over = over,
                 Ask::AppsOver(over) => self.apps_over = over,
                 Ask::DragOut(given, thread) => self.dragging = Some((given, thread)),
+                Ask::SendTo(given, key) => self.send_to(given, key),
                 Ask::Files(paths, act) => match act {
                     FilesAct::Copy(entry) => {
                         self.copy(&Content::Files(paths), false, entry.map(Copied::Recent).into_iter().collect());
@@ -822,6 +829,27 @@ impl Station {
             super::shelf::What::Picture { file } => Some(Content::Files(vec![self.keep.folder.path(file)])),
             _ => self.keep.content_of(item),
         }
+    }
+
+    /// What is `given` sent to the device nearby of `key` (see `send::key_of`), where it is found: its own files held
+    /// till the sending is over (see `Ask::Sent`), the strip showing how it goes (see `send::sent_from_menu`), its files
+    /// told apart on a thread of their own. Nothing where something of it may not leave this PC, or nothing of it is
+    /// there.
+    fn send_to(&mut self, given: Vec<Given>, key: u64) {
+        let Some(to) = crate::nearby::targets_now().into_iter().find(|target| target.found && super::send::key_of(&target.fingerprint) == key).map(|target| target.fingerprint) else { return };
+        let leaving: Vec<Leaving> = given.into_iter().filter_map(|given| self.leaving(given)).collect();
+        let held: Vec<String> = leaving.iter().flat_map(|one| one.held.iter().cloned()).collect();
+        if leaving.is_empty() || leaving.iter().any(|one| one.stays_here) {
+            for name in &held {
+                self.keep.folder.let_go(name);
+            }
+            return;
+        }
+        let contents: Vec<Content> = leaving.into_iter().map(|one| one.content).collect();
+        let job = crate::nearby::job();
+        self.sending.insert(job, held);
+        super::send::sent_from_menu(job, &to);
+        std::thread::spawn(move || crate::nearby::send(job, &to, &super::send::outgoing(&contents, &super::send::folder_of(job))));
     }
 
     /// What `given` dragged off it gives (see `drag_off`), its own files held meanwhile: none where it is no longer

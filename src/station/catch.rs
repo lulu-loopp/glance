@@ -190,7 +190,12 @@ impl Catchers {
     /// Up where drops are wanted while something is dragged (by another program, or off the station: see
     /// `drag::under_way`); none else. What each sees goes to `run::caught`, or (a device nearby's) is sent there.
     pub fn follow(&mut self) {
-        let wanted = if dragging() || super::drag::under_way() { wanted() } else { Vec::new() };
+        let dragged = dragging() || super::drag::under_way();
+        // (No drag at all: none from another program over a station either, see `send::foreign`.)
+        if !dragged {
+            super::send::foreign(false);
+        }
+        let wanted = if dragged { wanted() } else { Vec::new() };
         let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands, over), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands && *over == up.over);
         if same {
             return;

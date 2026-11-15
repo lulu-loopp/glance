@@ -3193,7 +3193,7 @@ impl Ui {
                 }
                 (Icon::Smartphone, tags)
             }
-            Known::Trusted(fingerprint) => (kind_icon(self.trusted(fingerprint).and_then(|trusted| trusted.kind.as_deref())), vec![files]),
+            Known::Trusted(fingerprint) => (Icon::of_device(self.trusted(fingerprint).and_then(|trusted| trusted.kind.as_deref())), vec![files]),
         }
     }
 
@@ -3430,8 +3430,8 @@ impl Ui {
         let lang = self.lang;
         let folder = self.settings.nearby_folder.is_some();
         let items = vec![
-            super::menu::Item { label: pick(lang, "中转站", "Station"), mark: Some(super::menu::Mark::Icon(Icon::Inbox)), checked: !folder, rule_before: false },
-            super::menu::Item { label: pick(lang, "选择文件夹…", "Choose a folder…"), mark: Some(super::menu::Mark::Icon(Icon::Folder)), checked: folder, rule_before: false },
+            super::menu::Item::new(pick(lang, "中转站", "Station"), Some(super::menu::Mark::Icon(Icon::Inbox)), !folder, false),
+            super::menu::Item::new(pick(lang, "选择文件夹…", "Choose a folder…"), Some(super::menu::Mark::Icon(Icon::Folder)), folder, false),
         ];
         let mut at = windows::Win32::Foundation::POINT { x: (rect.x * self.scale).round() as i32, y: ((rect.y + rect.h + 4.0) * self.scale).round() as i32 };
         unsafe {
@@ -6819,7 +6819,7 @@ impl Ui {
                     for (text, target, kind) in buttons {
                         right = self.button(frame, palette, &text, right, cy, target, kind, &hovered) - 8.0;
                     }
-                    device_round(frame, palette, kind_icon(kind.as_deref()), left + ROW_SIDE + DEVICE_ROUND / 2.0, cy, true);
+                    device_round(frame, palette, Icon::of_device(kind.as_deref()), left + ROW_SIDE + DEVICE_ROUND / 2.0, cy, true);
                     let words_left = left + ROW_SIDE + DEVICE_ROOM;
                     field_label_in(frame, (palette.text, palette.text2), &name, Some(&detail), label, hint, words_left, cy, right - 8.0 - words_left);
                 }
@@ -8030,14 +8030,6 @@ fn day_said(lang: Lang, at: u64) -> String {
 }
 
 /// The icon of a device of LocalSend's `kind` ("mobile", "desktop", "laptop", "web", "headless", "server").
-fn kind_icon(kind: Option<&str>) -> Icon {
-    match kind {
-        Some("mobile") => Icon::Smartphone,
-        Some("laptop") => Icon::Laptop,
-        _ => Icon::Monitor,
-    }
-}
-
 /// What a device of LocalSend's `kind` is, in a word.
 fn kind_word(lang: Lang, kind: Option<&str>) -> &'static str {
     match kind {

@@ -879,10 +879,10 @@ impl Overlay {
         use crate::ui::icons::Icon;
         use crate::ui::menu::{Item, Menu};
         let items = vec![
-            Item { label: if zh { "锁定位置" } else { "Lock position" }, mark: Some(crate::ui::menu::Mark::Icon(Icon::Pin)), checked: self.locked, rule_before: false },
-            Item { label: if zh { "鼠标穿透" } else { "Let clicks through" }, mark: Some(crate::ui::menu::Mark::Icon(Icon::Pointer)), checked: self.through, rule_before: false },
-            Item { label: if zh { "关闭悬浮窗" } else { "Close the overlay" }, mark: Some(crate::ui::menu::Mark::Icon(Icon::Close)), checked: false, rule_before: false },
-            Item { label: if zh { "设置…" } else { "Settings…" }, mark: Some(crate::ui::menu::Mark::Icon(Icon::Settings)), checked: false, rule_before: true },
+            Item::new(if zh { "锁定位置" } else { "Lock position" }, Some(crate::ui::menu::Mark::Icon(Icon::Pin)), self.locked, false),
+            Item::new(if zh { "鼠标穿透" } else { "Let clicks through" }, Some(crate::ui::menu::Mark::Icon(Icon::Pointer)), self.through, false),
+            Item::new(if zh { "关闭悬浮窗" } else { "Close the overlay" }, Some(crate::ui::menu::Mark::Icon(Icon::Close)), false, false),
+            Item::new(if zh { "设置…" } else { "Settings…" }, Some(crate::ui::menu::Mark::Icon(Icon::Settings)), false, true),
         ];
         Menu::open(items, crate::ui::menu::Look::system(), over_the_panel)
     }

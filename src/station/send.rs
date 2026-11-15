@@ -1,9 +1,10 @@
 //! What is on the station sent to devices nearby (see `nearby`, `docs/nearby.md`): while something is dragged off a
-//! station, the devices seen nearby rise at its foot (the strip, drawn by `view` from `shown`), each a place to drop on
-//! (a window catching drops over it on the station's thread, see `catch` and `ToDevice`). Let go on one, what is dragged
-//! is sent to it, the station's own files of it held till the sending is over (see `run::drag_off`), and the device
-//! shows how it goes: waiting on its user, a ring of how much has gone, a tick. The strip goes down a moment after all
-//! it sent is over, the drag over.
+//! station, or from another program over one, the devices seen nearby rise at its foot (the strip, drawn by `view` from
+//! `shown`), each a place to drop on (a window catching drops over it on the station's thread, see `catch` and
+//! `ToDevice`). Let go on one, what is dragged is sent to it, the station's own files of it held till the sending is
+//! over (see `run::drag_off`), and the device shows how it goes: waiting on its user, a ring of how much has gone, a
+//! tick. The strip goes down a moment after all it sent is over, the drag over. What is sent from a menu's "发送到"
+//! (see `menu_row`) raises it as well, to show how that goes.
 //!
 //! What may not leave this PC (see `shelf::Item::stays_here`) is sent nowhere: the devices are dimmed as it is dragged,
 //! and the plate under the pointer says why over one.
@@ -21,7 +22,10 @@ use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGE_NONE};
 
 use super::clipboard::Content;
-use crate::nearby::{Device, Sending};
+use crate::nearby::{Device, Sending, Target};
+use crate::ui::icons::Icon;
+use crate::ui::menu::{Item, Mark};
+use crate::ui::text::Lang;
 
 /// How long the strip takes to rise, and to go down.
 const RISE: Duration = Duration::from_millis(260);
@@ -76,6 +80,28 @@ struct Dropped {
 
 static STRIP: Mutex<Option<Strip>> = Mutex::new(None);
 static DROPPED: Mutex<Option<Dropped>> = Mutex::new(None);
+
+/// What the strip rises for besides a drag off a station (whose numbers count up from 1, see `drag::announce`): what
+/// was sent from a menu, and (with a number of their own after it) drags from other programs over a station.
+const FROM_MENU: u64 = 1 << 63;
+/// The drag from another program over a station now (its number, see `FROM_MENU`), while it goes on.
+static FOREIGN: Mutex<Option<u64>> = Mutex::new(None);
+
+/// A drag from another program over a station (`over`), or no drag from one any more: the strip rises for it, as
+/// for one off a station, and the devices nearby are looked for (see `nearby::want_to_send`).
+pub fn foreign(over: bool) {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let mut held = FOREIGN.lock().unwrap();
+    if over == held.is_some() {
+        return;
+    }
+    *held = over.then(|| FROM_MENU | COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    drop(held);
+    if over {
+        crate::nearby::want_to_send();
+    }
+    crate::app().controller.wake();
+}
 
 /// The strip as it is drawn: how far up it is (0 down, 1 up), whether what is dragged now may be let go on its
 /// devices (a drag under way, what is dragged free to leave), whether it may not (dimmed), and its devices.
@@ -141,6 +167,19 @@ impl Strip {
         Strip { drag, rose: now, chips: Vec::new(), stays_here: false, over: None, left: None, falls: None, asked: now, announced: 0, into: None, drawn: None }
     }
 
+    /// Rising again at `now`, from as far up as it is (going down: no more).
+    fn rise_again(&mut self, now: Instant) {
+        // (Risen `t` of its time, it is `1 - (1 - t)³` up: see `eased`.)
+        let up = self.up(now).clamp(0.0, 1.0);
+        self.rose = now.checked_sub(RISE.mul_f32(1.0 - (1.0 - up).cbrt())).unwrap_or(now);
+        self.falls = None;
+    }
+
+    /// Whether `chip` is being sent to (a sending of its not over: one not told of yet is waiting), as `sendings` say.
+    fn busy(chip: &Chip, sendings: &std::collections::HashMap<u64, Sending>) -> bool {
+        Self::sending(chip, sendings).is_some_and(|state| !state.over())
+    }
+
     /// How far up it is at `now`.
     fn up(&self, now: Instant) -> f32 {
         match self.falls {
@@ -183,25 +222,29 @@ impl Strip {
 /// again), and when it is to be looked at next at the latest (none: when told of something).
 pub fn tick(now: Instant) -> (bool, Option<Duration>) {
     let going = super::drag::going();
+    let foreign = *FOREIGN.lock().unwrap();
     let nearby = crate::nearby::shown();
-    let under_way = going.ended.is_none();
+    // The drag under way: off a station, or else from another program over one (what may leave this PC, all of it).
+    let (drag, under_way, stays_here) = match (going.ended, foreign) {
+        (None, _) => (going.drag, true, going.stays_here),
+        (Some(_), Some(foreign)) => (foreign, true, false),
+        (Some(_), None) => (going.drag, false, false),
+    };
     let mut held = STRIP.lock().unwrap();
-    if under_way && nearby.there && held.as_ref().is_none_or(|strip| strip.drag != going.drag) {
+    if under_way && nearby.there && held.as_ref().is_none_or(|strip| strip.drag != drag) {
         match held.as_mut() {
             // (Up still, or going down: up again, from as far up as it is, for this drag too.)
             Some(strip) => {
-                // (Risen `t` of its time, it is `1 - (1 - t)³` up: see `eased`.)
-                let up = strip.up(now).clamp(0.0, 1.0);
-                strip.rose = now.checked_sub(RISE.mul_f32(1.0 - (1.0 - up).cbrt())).unwrap_or(now);
-                (strip.drag, strip.falls, strip.asked, strip.announced, strip.into) = (going.drag, None, now, 0, None);
+                strip.rise_again(now);
+                (strip.drag, strip.asked, strip.announced, strip.into) = (drag, now, 0, None);
             }
-            None => *held = Some(Strip::new(going.drag, now)),
+            None => *held = Some(Strip::new(drag, now)),
         }
     }
     let Some(strip) = held.as_mut() else { return (false, None) };
-    let open = under_way && going.drag == strip.drag;
+    let open = under_way && drag == strip.drag;
     if open {
-        strip.stays_here = going.stays_here;
+        strip.stays_here = stays_here;
     }
     // Its devices: those seen nearby, in the order they were first seen; one gone kept while it is sent to.
     strip.chips.retain(|chip| chip.job.is_some() || nearby.devices.iter().any(|device| device.fingerprint == chip.device.fingerprint));
@@ -302,19 +345,161 @@ fn over(key: u64, on: bool, now: Instant) {
     crate::app().controller.wake();
 }
 
-/// What is dragged let go on the device `key` on the strip (its mark's middle at `at` on the screen): sent to it as a
-/// sending numbered now, shown on it at once; the station's thread sends it once the drag is over (see `taken`). None
-/// where that device is no longer there.
+/// The sending `job` shown on `chip` (what it showed before, over, forgotten).
+fn shows_job(chip: &mut Chip, job: u64) {
+    if let Some((was, _)) = chip.job.replace((job, None)) {
+        crate::nearby::forget(was);
+    }
+}
+
+/// What is dragged off the station let go on the device `key` on the strip (its mark's middle at `at` on the screen):
+/// sent to it as a sending numbered now, shown on it at once; the station's thread sends it once the drag is over (see
+/// `taken`). None where that device is no longer there.
 fn dropped(key: u64, at: POINT) -> bool {
     let drag = super::drag::going().drag;
     let mut held = STRIP.lock().unwrap();
     let Some(strip) = held.as_mut() else { return false };
     let Some(chip) = strip.chips.iter_mut().find(|chip| key_of(&chip.device.fingerprint) == key) else { return false };
     let job = crate::nearby::job();
-    chip.job = Some((job, None));
+    shows_job(chip, job);
+    let to = chip.device.fingerprint.clone();
     strip.into = Some((drag, at));
-    *DROPPED.lock().unwrap() = Some(Dropped { drag, job, to: chip.device.fingerprint.clone() });
+    *DROPPED.lock().unwrap() = Some(Dropped { drag, job, to });
     true
+}
+
+/// What another program's drag gave (`given`) let go on the device `key` on the strip: sent to it as a sending
+/// numbered now, shown on it at once (its files told apart on a thread of their own). None where it gave nothing, or
+/// that device is no longer there.
+fn dropped_from_elsewhere(key: u64, given: Vec<Content>) -> bool {
+    if given.is_empty() {
+        return false;
+    }
+    let mut held = STRIP.lock().unwrap();
+    let Some(chip) = held.as_mut().and_then(|strip| strip.chips.iter_mut().find(|chip| key_of(&chip.device.fingerprint) == key)) else { return false };
+    let job = crate::nearby::job();
+    shows_job(chip, job);
+    let to = chip.device.fingerprint.clone();
+    drop(held);
+    std::thread::spawn(move || crate::nearby::send(job, &to, &outgoing(&given, &folder_of(job))));
+    true
+}
+
+/// The sending `job` to the device `to` (its fingerprint), sent from a menu (see `menu_row`): shown on the strip,
+/// risen for it (from as far up as it is), and going down a moment after it is over, as one let go there.
+pub fn sent_from_menu(job: u64, to: &str) {
+    let now = Instant::now();
+    let Some(device) = crate::nearby::shown().devices.into_iter().find(|device| device.fingerprint.eq_ignore_ascii_case(to)) else { return };
+    let mut held = STRIP.lock().unwrap();
+    let strip = held.get_or_insert_with(|| Strip::new(FROM_MENU, now));
+    if strip.falls.is_some() {
+        strip.rise_again(now);
+    }
+    let at = match strip.chips.iter().position(|chip| chip.device.fingerprint == device.fingerprint) {
+        Some(at) => at,
+        None => {
+            strip.chips.push(Chip { device, job: None });
+            strip.chips.len() - 1
+        }
+    };
+    shows_job(&mut strip.chips[at], job);
+    drop(held);
+    crate::app().controller.wake();
+}
+
+/// The devices sent to now, by their fingerprints: from the settings' pane (as `shown` says) and on the strip.
+fn busy_now(shown: &crate::nearby::Shown) -> Vec<String> {
+    let mut busy = crate::nearby::sending_to(shown);
+    if let Some(strip) = STRIP.lock().unwrap().as_ref() {
+        busy.extend(strip.chips.iter().filter(|chip| Strip::busy(chip, &shown.sendings)).map(|chip| chip.device.fingerprint.to_ascii_lowercase()));
+    }
+    for to in &mut busy {
+        to.make_ascii_lowercase();
+    }
+    busy.sort();
+    busy.dedup();
+    busy
+}
+
+/// What the "发送到" of the menu up lists (see `menu_row`): the phones paired and the certificates trusted as it
+/// opened, and the devices and those sent to as it last listed them.
+struct Listed {
+    phones: Vec<crate::phone::Phone>,
+    trusted: Vec<crate::phone::Trusted>,
+    targets: Vec<Target>,
+    busy: Vec<String>,
+}
+
+static LISTED: Mutex<Option<Listed>> = Mutex::new(None);
+
+/// A menu's "发送到" (of what is on the station, copied lately, or come lately: `stays_here`, what may not leave this
+/// PC is among it): the row, opening the devices it may be sent to (see `nearby::targets`), and those devices' keys
+/// (see `key_of`) in their order there, what each of them is chosen as. The devices are looked for as it opens (see
+/// `nearby::want_to_send`), and listed again as they are found (see `menu_row_again`). What may not leave this PC:
+/// the row dimmed, saying so, opening none.
+pub fn menu_row(stays_here: bool) -> (Item<'static>, Vec<u64>) {
+    let lang = crate::update::language();
+    let mut row = Item::new(lang.pick("发送到", "Send to"), Some(Mark::Icon(Icon::Send)), false, false);
+    if stays_here {
+        (row.detail, row.dimmed) = (Some(lang.pick("此内容不可发送到其他设备", "This may not leave this PC").into()), true);
+        *LISTED.lock().unwrap() = None;
+        return (row, Vec::new());
+    }
+    crate::nearby::want_to_send();
+    crate::nearby::announce();
+    let (phones, trusted) = (crate::phone::phones(), crate::phone::trusted_kept());
+    let shown = crate::nearby::shown();
+    let targets = crate::nearby::targets(&shown.devices, &phones, &trusted);
+    let busy = busy_now(&shown);
+    let keys;
+    (row.more, keys) = device_rows(&targets, &busy, lang);
+    *LISTED.lock().unwrap() = Some(Listed { phones, trusted, targets, busy });
+    (row, keys)
+}
+
+/// The devices the "发送到" of the menu up lists (see `menu_row`), where they changed since it last listed them (found,
+/// gone, sent to, a sending over): what it opens now, and their keys. None where they did not.
+pub fn menu_row_again() -> Option<(Vec<Item<'static>>, Vec<u64>)> {
+    let mut held = LISTED.lock().unwrap();
+    let listed = held.as_mut()?;
+    let shown = crate::nearby::shown();
+    let targets = crate::nearby::targets(&shown.devices, &listed.phones, &listed.trusted);
+    let busy = busy_now(&shown);
+    if targets == listed.targets && busy == listed.busy {
+        return None;
+    }
+    (listed.targets, listed.busy) = (targets, busy);
+    Some(device_rows(&listed.targets, &listed.busy, crate::update::language()))
+}
+
+/// The rows of `targets` in a menu's "发送到", and their keys: each with its kind's mark, its name and, under it, what it
+/// is (a paired phone, Glance's or LocalSend's, its model); one being sent to (`busy`, by lowercase fingerprints), or
+/// not reached, dimmed, saying so. None yet: a dimmed row saying they are looked for.
+fn device_rows(targets: &[Target], busy: &[String], lang: Lang) -> (Vec<Item<'static>>, Vec<u64>) {
+    if targets.is_empty() {
+        let mut looking = Item::new(lang.pick("正在查找附近的设备", "Looking for devices nearby"), Some(Mark::Icon(Icon::Search)), false, false);
+        looking.dimmed = true;
+        return (vec![looking], Vec::new());
+    }
+    targets
+        .iter()
+        .map(|target| {
+            let name = if target.name.is_empty() { lang.pick("未命名的设备", "Unnamed device").to_string() } else { target.name.clone() };
+            let mut row = Item::new(name, Some(Mark::Icon(Icon::of_device(target.kind.as_deref()))), false, false);
+            let maker = if target.glance { "Glance" } else { "LocalSend" };
+            let (detail, dimmed) = if busy.contains(&target.fingerprint.to_ascii_lowercase()) {
+                (lang.pick("正在发送", "Sending").to_string(), true)
+            } else if !target.found {
+                (lang.pick("未开启接收", "Not receiving").to_string(), true)
+            } else if target.paired {
+                (lang.pick("已配对的手机", "Paired phone").to_string(), false)
+            } else {
+                (target.model.as_ref().map_or_else(|| maker.to_string(), |model| format!("{maker} · {model}")), false)
+            };
+            (row.detail, row.dimmed) = (Some(detail.into()), dimmed);
+            (row, key_of(&target.fingerprint))
+        })
+        .unzip()
 }
 
 /// The sending to the device `key` on the strip cancelled, where one goes on (pressed there): whether one did.
@@ -410,23 +595,28 @@ impl ToDevice {
     }
 }
 
-/// What the device `key` on the strip calls itself, where it is on it.
-fn alias_of(key: u64) -> Option<String> {
-    STRIP.lock().unwrap().as_ref()?.chips.iter().find(|chip| key_of(&chip.device.fingerprint) == key).map(|chip| chip.device.alias.clone())
+/// What the device `key` on the strip calls itself, where it is on it, and whether it is being sent to.
+fn alias_of(key: u64) -> Option<(String, bool)> {
+    let sendings = crate::nearby::shown().sendings;
+    STRIP.lock().unwrap().as_ref()?.chips.iter().find(|chip| key_of(&chip.device.fingerprint) == key).map(|chip| (chip.device.alias.clone(), Strip::busy(chip, &sendings)))
 }
 
 impl IDropTarget_Impl for ToDevice_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let going = super::drag::going();
-        let under_way = going.ended.is_none();
+        // Off a station (what may leave this PC), or from another program, what the station would take.
+        let own = going.ended.is_none();
+        let foreign = !own && FOREIGN.lock().unwrap().is_some() && data.as_ref().is_some_and(super::drop::takes);
         let alias = alias_of(self.key);
-        self.takes.set(under_way && !going.stays_here && alias.is_some());
+        // (Being sent to: given nothing more till it is over.)
+        self.takes.set((own && !going.stays_here || foreign) && alias.as_ref().is_some_and(|(_, busy)| !busy));
         over(self.key, true, std::time::Instant::now());
         if let Some(data) = data.as_ref() {
             let lang = crate::update::language_in(&crate::app().settings.lock().unwrap().view);
             match alias {
-                Some(alias) if self.takes.get() => super::drag::describe(data, DROPIMAGE_COPY, lang.pick("发送到 %1", "Send to %1"), &alias),
-                _ if under_way && going.stays_here => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This may not leave this PC"), ""),
+                Some((alias, _)) if self.takes.get() => super::drag::describe(data, DROPIMAGE_COPY, lang.pick("发送到 %1", "Send to %1"), &alias),
+                Some(_) if own && going.stays_here => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("此内容不可发送到其他设备", "This may not leave this PC"), ""),
+                Some((_, true)) => super::drag::describe(data, DROPIMAGE_NONE, lang.pick("正在发送，请稍候", "Sending, a moment please"), ""),
                 _ => {}
             }
             *self.data.borrow_mut() = Some(data.clone());
@@ -445,9 +635,15 @@ impl IDropTarget_Impl for ToDevice_Impl {
         Ok(())
     }
 
-    fn Drop(&self, _: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
+    fn Drop(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
         let offered = unsafe { *effect };
-        let sent = self.takes.get() && offered.0 & DROPEFFECT_COPY.0 != 0 && dropped(self.key, self.at);
+        let copies = self.takes.get() && offered.0 & DROPEFFECT_COPY.0 != 0;
+        // (Off a station: sent once its drag is over, by the station's thread. From another program: read now.)
+        let sent = copies
+            && match super::drag::going().ended {
+                None => dropped(self.key, self.at),
+                Some(_) => data.as_ref().is_some_and(|data| dropped_from_elsewhere(self.key, super::drop::read(data))),
+            };
         self.gone();
         unsafe { *effect = if sent { DROPEFFECT_COPY } else { DROPEFFECT_NONE } };
         Ok(())
@@ -519,6 +715,26 @@ mod tests {
         assert!(at(90, true, &strip).grown > 0.0 && at(90, true, &strip).grown < 1.0);
         assert_eq!(at(200, true, &strip).grown, 0.0);
         assert!(!at(200, false, &strip).lit);
+    }
+
+    /// A menu's "发送到" lists each device with what it is under its name; one not reached, or being sent to, dimmed and
+    /// saying so; none yet, a dimmed row saying they are looked for. Each is chosen by its key.
+    #[test]
+    fn a_menu_lists_the_devices_to_send_to() {
+        let target = |fingerprint: &str, name: &str, paired: bool, glance: bool, found: bool, model: Option<&str>| Target { fingerprint: fingerprint.into(), name: name.into(), kind: Some(if paired { "mobile" } else { "desktop" }.into()), model: model.map(str::to_string), paired, glance, found };
+        let targets = [target("AA", "Fold", true, true, true, None), target("BB", "Pixel", true, true, false, None), target("CC", "Study", false, true, true, Some("Windows")), target("DD", "", false, false, true, None)];
+        let (rows, keys) = device_rows(&targets, &["cc".to_string()], Lang::Zh);
+        let said: Vec<(String, String, bool)> = rows.iter().map(|row| (row.label.to_string(), row.detail.as_deref().unwrap_or_default().to_string(), row.dimmed)).collect();
+        assert_eq!(
+            said,
+            [("Fold".into(), "已配对的手机".into(), false), ("Pixel".into(), "未开启接收".into(), true), ("Study".into(), "正在发送".into(), true), ("未命名的设备".into(), "LocalSend".into(), false)]
+        );
+        assert_eq!(keys, [key_of("aa"), key_of("bb"), key_of("cc"), key_of("dd")]);
+        let (rows, keys) = device_rows(&targets[2..3], &[], Lang::Zh);
+        assert_eq!(rows[0].detail.as_deref(), Some("Glance · Windows"));
+        assert!(!rows[0].dimmed && keys.len() == 1);
+        let (rows, keys) = device_rows(&[], &[], Lang::Zh);
+        assert!(rows.len() == 1 && rows[0].dimmed && keys.is_empty());
     }
 
     /// The strip rises over its time and goes down over its; a sending to a device is shown waiting till it is told

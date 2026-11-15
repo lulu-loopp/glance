@@ -211,6 +211,51 @@ pub fn answer(id: u64, take: bool, trust: bool) {
     command(&json!({ "kind": "answer", "id": id, "take": take, "trust": trust }));
 }
 
+/// A device this PC may send to: its fingerprint, what it calls itself (a paired phone not found, what it was paired
+/// as; nothing said, empty), its kind and model (as LocalSend says them), whether it is a phone paired with this PC,
+/// whether it is Glance's, and whether it is found nearby now (one not found is not reached: a paired phone not
+/// receiving).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    pub fingerprint: String,
+    pub name: String,
+    pub kind: Option<String>,
+    pub model: Option<String>,
+    pub paired: bool,
+    pub glance: bool,
+    pub found: bool,
+}
+
+/// The devices this PC may send to, as `devices` are found nearby: the phones paired (`phones`, those a browser is
+/// paired as left out: a page receives nothing), each by the certificate it told (`trusted`), found or not; then the
+/// others found, Glance's first, by name.
+pub fn targets(devices: &[Device], phones: &[crate::phone::Phone], trusted: &[crate::phone::Trusted]) -> Vec<Target> {
+    let found_of = |fingerprint: &str| devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(fingerprint));
+    let model = |device: Option<&Device>| device.and_then(|device| device.model.clone()).filter(|model| !model.trim().is_empty());
+    let mut targets: Vec<Target> = Vec::new();
+    for phone in phones.iter().filter(|phone| !phone.web) {
+        let Some(fingerprint) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone.id.as_str())).map(|trusted| trusted.fingerprint.clone()) else { continue };
+        let found = found_of(&fingerprint);
+        let name = found.map(|device| device.alias.clone()).filter(|alias| !alias.is_empty()).unwrap_or_else(|| phone.name.clone());
+        targets.push(Target { fingerprint, name, kind: Some("mobile".into()), model: model(found), paired: true, glance: true, found: found.is_some() });
+    }
+    let mut others: Vec<&Device> = devices.iter().filter(|device| !targets.iter().any(|target| target.fingerprint.eq_ignore_ascii_case(&device.fingerprint))).collect();
+    others.sort_by_key(|device| (!device.glance, device.alias.to_lowercase()));
+    targets.extend(others.into_iter().map(|device| Target { fingerprint: device.fingerprint.clone(), name: device.alias.clone(), kind: device.kind.clone(), model: model(Some(device)), paired: false, glance: device.glance, found: true }));
+    targets
+}
+
+/// The devices this PC may send to now (see `targets`): the phones paired and the certificates trusted as the helper
+/// keeps them, the devices as they are found.
+pub fn targets_now() -> Vec<Target> {
+    targets(&shown().devices, &crate::phone::phones(), &crate::phone::trusted_kept())
+}
+
+/// The devices a sending of this PC's goes to now, by their fingerprints (as `shown` says).
+pub fn sending_to(shown: &Shown) -> Vec<String> {
+    shown.outgoing.iter().filter(|(job, _)| shown.sendings.get(job).is_none_or(|state| !state.over())).map(|(_, outgoing)| outgoing.to.clone()).collect()
+}
+
 /// A number for a sending of this PC's, none other's.
 pub fn job() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
