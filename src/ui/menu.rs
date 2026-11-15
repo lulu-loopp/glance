@@ -279,6 +279,9 @@ pub struct Menu {
     /// into by the right arrow, or the pointer).
     sub: Option<(usize, Box<Menu>)>,
     in_sub: bool,
+    /// Where the pointer was last told to be (in its window's px): Windows tells it again where it has not moved, as
+    /// a window under it changes, which is no move of its (the keys' choice is kept).
+    pointer: Option<(i32, i32)>,
     /// Shown till it goes (see `life`): counted before its surface is made, so that it is let go of after it.
     _showing: super::life::Showing,
 }
@@ -347,7 +350,7 @@ impl Menu {
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
         let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, room, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), sub: None, in_sub: false, _showing: showing };
+        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, room, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), sub: None, in_sub: false, pointer: None, _showing: showing };
         if !menu.draw() {
             menu.window.destroy();
             return None;
@@ -401,25 +404,32 @@ impl Menu {
         // Where the pointer is in the choices up beside it, where it is on their sheet.
         let in_sub = self.sub.as_ref().map(|(_, sub)| (x + self.rect.left - sub.rect.left, y + self.rect.top - sub.rect.top)).filter(|(sx, sy)| self.sub.as_ref().is_some_and(|(_, sub)| sub.inside(*sx, *sy)));
         match msg.message {
-            WM_MOUSEMOVE => match in_sub {
-                Some((sx, sy)) => {
-                    self.in_sub = true;
-                    self.sub_light(|sub| sub.row_at(sx, sy))
-                }
-                None => {
-                    let row = self.row_at(x, y);
-                    if row.is_some() {
-                        self.in_sub = false;
-                        self.follow_sub(row);
+            WM_MOUSEMOVE if self.pointer == Some((x, y)) => Handled::Taken,
+            WM_MOUSEMOVE => {
+                self.pointer = Some((x, y));
+                match in_sub {
+                    Some((sx, sy)) => {
+                        self.in_sub = true;
+                        self.sub_light(|sub| sub.row_at(sx, sy))
                     }
-                    if let Some((_, sub)) = self.sub.as_mut() {
-                        if sub.lit.is_some() && row.is_none() {
-                            return Handled::Taken;
+                    None => {
+                        let row = self.row_at(x, y);
+                        // (Back on its own choices: the keys there, and nothing lit beside it.)
+                        if row.is_some() {
+                            if std::mem::take(&mut self.in_sub) {
+                                self.sub_light(|_| None);
+                            }
+                            self.follow_sub(row);
                         }
+                        if let Some((_, sub)) = self.sub.as_mut() {
+                            if sub.lit.is_some() && row.is_none() {
+                                return Handled::Taken;
+                            }
+                        }
+                        self.light(row)
                     }
-                    self.light(row)
                 }
-            },
+            }
             // A press outside leaves it; inside, the choice is made as the button comes up.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.inside(x, y) && in_sub.is_none() => Handled::Done(None),
             WM_LBUTTONUP | WM_RBUTTONUP if in_sub.is_some() => {
