@@ -5,15 +5,18 @@ import android.os.Build
 import org.json.JSONObject
 import java.io.IOException
 import java.io.InputStream
+import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
+import java.util.Timer
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
+import kotlin.concurrent.schedule
 
 /**
- * Sending to a paired PC as LocalSend sends (see `docs/nearby.md`): the PC's receiver is found over what it is paired
- * by, pinned by its certificate's fingerprint, and offered files, or words as a message, by this phone's own
- * certificate (see [Own]). New photos sent by themselves ([AutoSend]) and what its user hands over ([Hand]) go so.
+ * Sending as LocalSend sends (see `docs/nearby.md`): to a paired PC, found over what it is paired by, or to any device
+ * found nearby ([Found]), each pinned by its certificate's fingerprint and offered files, or words as a message, by
+ * this phone's own certificate (see [Own]). New photos sent by themselves ([AutoSend]) and what its user hands over
+ * ([Hand]) go so.
  */
 object Nearby {
     /**
@@ -27,43 +30,55 @@ object Nearby {
         }
     }
 
+    /**
+     * Where a device receives: its address and port, over HTTPS (pinned to [fingerprint]) or plain HTTP, and whether it
+     * is a paired Glance PC (whose turning down is told apart from its want of room).
+     */
+    class At(val host: String, val port: Int, val https: Boolean, val fingerprint: String, val glance: Boolean)
+
     /** Where a PC receives, as it says (see the helper's `told_to_phones`): reached at [pc], which may have moved. */
     class Receiving(val pc: Pc, private val said: JSONObject) {
         val on get() = said.optBoolean("on") && port in 1..65535 && fingerprint.length == 64
         val port get() = said.optInt("port")
-        val fingerprint: String get() = said.optString("fingerprint")
+        val fingerprint: String get() = if (said.isNull("fingerprint")) "" else said.optString("fingerprint")
         /** The most one file may be, all of one sending (none said: no more than any), and how many files one holds. */
         val mostFile get() = said.optLong("most_file")
         val mostSending get() = if (said.isNull("most_sending")) Long.MAX_VALUE else said.optLong("most_sending")
         val mostFiles get() = said.optInt("most_files").coerceAtLeast(1)
+        val at get() = At(pc.host, port, true, fingerprint, glance = true)
     }
 
     /**
      * Where [pc] receives, as it says over the signed channel: looked for on the network where it is not at its address
-     * (and kept where it is found). None where it is not reached, or says nothing of it (an older Glance).
+     * (and kept where it is found). None where it is not reached, or says nothing of it (an older Glance). The
+     * fingerprint it says is kept: what it sends is taken by that certificate.
      */
     fun reach(context: Context, pc: Pc): Receiving? {
-        try {
-            return Receiving(pc, pc.said("/v1/nearby"))
+        val said = try {
+            Receiving(pc, pc.said("/v1/nearby"))
         } catch (failed: Failure.Failed) {
             return null
         } catch (failure: Failure) {
             // Not answered, or answered by one that does not know this phone's key (another machine at its old
             // address): the PC itself is looked for.
+            val host = pc.find()?.takeIf { it != pc.host } ?: return null
+            Pcs.move(context, pc.key, host)
+            val moved = pc.copy(host = host)
+            try { Receiving(moved, moved.said("/v1/nearby")) } catch (failure: Failure) { return null }
         }
-        val host = pc.find()?.takeIf { it != pc.host } ?: return null
-        Pcs.move(context, pc.key, host)
-        val moved = pc.copy(host = host)
-        return try { Receiving(moved, moved.said("/v1/nearby")) } catch (failure: Failure) { null }
+        if (said.fingerprint.length == 64) Pcs.know(context, pc.key, said.fingerprint.uppercase())
+        return said
     }
 
     /** How a sending went. */
     enum class Ended {
         /** All of it taken (words told, files uploaded, or nothing of it wanted). */
         Sent,
-        /** Turned down by the PC's user (or a PIN asked for, which Glance never asks). */
+        /** Turned down by the device's user. */
         Refused,
-        /** The PC is receiving another sending: it may be tried again in a moment. */
+        /** The device asks for a PIN (the one given, if any, was not right). */
+        Pin,
+        /** The device is receiving another sending: it may be tried again in a moment. */
         Busy,
         /** More than the PC has room for, or a file larger than it takes. */
         NoRoom,
@@ -74,67 +89,119 @@ object Nearby {
     }
 
     /**
-     * Offers [things] to [at] as one sending, from this phone (calling itself [Own.alias]), and sends each the PC wants:
-     * [took] told of each as the PC has it (a thing it does not want is told so too: it has it), [moved] of the bytes of
-     * each as they go. [stopped] is asked as it goes: once it is true, the sending is cancelled.
+     * What stops a sending from elsewhere: once [stop] is called, what it waits on is given up (the connection it waits
+     * on ended) and it is cancelled.
      */
-    fun send(context: Context, at: Receiving, things: List<Thing>, stopped: () -> Boolean, moved: (Thing, Long) -> Unit = { _, _ -> }, took: (Thing) -> Unit): Ended {
-        val tls = SSLContext.getInstance("TLS").apply { init(arrayOf(Own.Presenting()), arrayOf(Pinned(at.fingerprint)), null) }
-        fun open(path: String): HttpsURLConnection = (URL("https://${at.pc.host}:${at.port}/api/localsend/v2$path").openConnection() as HttpsURLConnection).apply {
-            sslSocketFactory = tls.socketFactory
-            // (The certificate is pinned: the name it is reached by says nothing.)
-            setHostnameVerifier { _, _ -> true }
+    open class Stop {
+        @Volatile
+        var stopped = false
+            private set
+
+        @Volatile
+        private var open: HttpURLConnection? = null
+
+        fun stop() {
+            stopped = true
+            open?.disconnect()
+        }
+
+        /** [connection] used by [use], ended where this is stopped meanwhile. */
+        fun <T> through(connection: HttpURLConnection, use: () -> T): T {
+            open = connection
+            try {
+                if (stopped) throw IOException("stopped")
+                return use()
+            } finally {
+                open = null
+                connection.disconnect()
+            }
+        }
+    }
+
+    /** How long a device's user is given to take what is offered, and how long its holding it is not yet told. */
+    private const val OFFER_MS = 120_000
+    private const val HELD_MS = 1000L
+
+    /**
+     * Offers [things] to [at] as one sending, from this phone (calling itself [Own.alias]), and sends each the device
+     * wants: [took] told of each as it has it (a thing it does not want is told so too: it has it), [moved] of the
+     * bytes of each as they go, [held] once the device held the offer a second unanswered (its user is asked). [pin]
+     * goes with the offer where the device asked for one. Once [stop] is stopped, the sending is cancelled.
+     */
+    fun send(
+        context: Context, at: At, things: List<Thing>, stop: Stop, pin: String? = null, held: () -> Unit = {},
+        moved: (Thing, Long) -> Unit = { _, _ -> }, took: (Thing) -> Unit,
+    ): Ended {
+        val tls = if (at.https) SSLContext.getInstance("TLS").apply { init(arrayOf(Own.Presenting()), arrayOf(Pinned(at.fingerprint)), null) } else null
+        val host = if (at.host.contains(':')) "[${at.host}]" else at.host
+        fun open(path: String, wait: Int = 60_000): HttpURLConnection = (URL("${if (at.https) "https" else "http"}://$host:${at.port}${Lan.API}$path").openConnection() as HttpURLConnection).apply {
+            if (this is HttpsURLConnection && tls != null) {
+                sslSocketFactory = tls.socketFactory
+                // (The certificate is pinned: the name it is reached by says nothing.)
+                setHostnameVerifier { _, _ -> true }
+            }
             connectTimeout = 4000
-            readTimeout = 60_000
+            readTimeout = wait
             setRequestProperty("Connection", "close")
+        }
+        fun cancel(session: String?) = runCatching {
+            val connection = open(if (session == null) "/cancel" else "/cancel?sessionId=${Lan.escaped(session)}", 10_000).apply { requestMethod = "POST" }
+            try { connection.responseCode } finally { connection.disconnect() }
         }
         // The offer: as one sending.
         val offer = JSONObject()
-            .put("info", JSONObject().put("alias", Own.alias(context)).put("version", "2.1").put("deviceModel", Build.MODEL).put("deviceType", "mobile")
-                .put("fingerprint", Own.fingerprint()).put("port", 53317).put("protocol", "https").put("download", false))
+            .put("info", Receiver.me(context).copy(announce = false).toJson())
             .put("files", JSONObject().apply {
                 for (thing in things) put(thing.id, JSONObject().put("id", thing.id).put("fileName", thing.name).put("size", thing.size).put("fileType", thing.type).apply { thing.words?.let { put("preview", it) } })
             })
-        if (stopped()) return Ended.Stopped
+        if (stop.stopped) return Ended.Stopped
+        val holding = Timer(true)
         val (status, answer) = try {
-            val asking = open("/prepare-upload")
-            try {
+            val asking = open(if (pin == null) "/prepare-upload" else "/prepare-upload?pin=${Lan.escaped(pin)}", OFFER_MS)
+            holding.schedule(HELD_MS) { held() }
+            stop.through(asking) {
                 asking.requestMethod = "POST"
                 asking.doOutput = true
                 asking.setRequestProperty("Content-Type", "application/json")
                 asking.outputStream.use { it.write(offer.toString().toByteArray()) }
                 val status = asking.responseCode
                 status to ((if (status < 400) asking.inputStream else asking.errorStream)?.bufferedReader()?.use { it.readText() } ?: "")
-            } finally {
-                asking.disconnect()
             }
         } catch (failed: IOException) {
+            // Stopped while the device's user is asked (no session yet): told so, which a device takes as its sender's.
+            if (stop.stopped) {
+                cancel(null)
+                return Ended.Stopped
+            }
             return Ended.Broken
+        } finally {
+            holding.cancel()
         }
         val said = runCatching { JSONObject(answer) }.getOrNull()
         when {
             status == 200 && said != null -> {}
             // Nothing wanted of them (words are told whole with the offer).
             status == 204 -> return Ended.Sent.also { things.forEach(took) }
-            status == 401 || (status == 403 && said?.optString("message") in REFUSALS) -> return Ended.Refused
+            status == 401 -> return Ended.Pin
+            // (A device that is not Glance turns down by 403 alone. A paired PC says why: its user, or its room.)
+            status == 403 && (!at.glance || said?.optString("message") in REFUSALS) -> return Ended.Refused
             status == 403 -> return Ended.NoRoom
-            status == 409 -> return Ended.Busy
+            status == 409 || status == 429 -> return Ended.Busy
             else -> return Ended.Broken
         }
         val session = said!!.optString("sessionId")
         val tokens = said.optJSONObject("files") ?: JSONObject()
-        fun cancel() = runCatching { open("/cancel?sessionId=${URLEncoder.encode(session, "UTF-8")}").apply { requestMethod = "POST" }.let { it.responseCode; it.disconnect() } }
         for (thing in things) {
             val token = tokens.optString(thing.id)
-            // (One the PC does not want is not sent: it has it.)
+            // (One the device does not want is not sent: it has it.)
             if (token.isEmpty()) {
                 took(thing)
                 continue
             }
-            val query = listOf("sessionId" to session, "fileId" to thing.id, "token" to token).joinToString("&") { (name, value) -> "$name=${URLEncoder.encode(value, "UTF-8")}" }
-            val ok = !stopped() && try {
+            val query = listOf("sessionId" to session, "fileId" to thing.id, "token" to token).joinToString("&") { (name, value) -> "$name=${Lan.escaped(value)}" }
+            val ok = !stop.stopped && try {
                 val upload = open("/upload?$query")
-                try {
+                stop.through(upload) {
                     upload.requestMethod = "POST"
                     upload.doOutput = true
                     upload.setFixedLengthStreamingMode(thing.size)
@@ -145,7 +212,7 @@ object Nearby {
                             val some = ByteArray(64 * 1024)
                             var done = 0L
                             while (true) {
-                                if (stopped()) throw IOException("stopped")
+                                if (stop.stopped) throw IOException("stopped")
                                 val read = input.read(some)
                                 if (read < 0) break
                                 output.write(some, 0, read)
@@ -155,8 +222,6 @@ object Nearby {
                         }
                     }
                     upload.responseCode == 200
-                } finally {
-                    upload.disconnect()
                 }
             } catch (failed: IOException) {
                 false
@@ -165,9 +230,9 @@ object Nearby {
                 false
             }
             if (!ok) {
-                // The PC keeps what it took of this sending.
-                cancel()
-                return if (stopped()) Ended.Stopped else Ended.Broken
+                // The device keeps what it took of this sending.
+                cancel(session)
+                return if (stop.stopped) Ended.Stopped else Ended.Broken
             }
             took(thing)
         }
@@ -175,5 +240,5 @@ object Nearby {
     }
 
     /** What a PC's user said in refusing a sending (see the helper's `prepare`). */
-    private val REFUSALS = setOf("refused", "not taken from devices not trusted")
+    private val REFUSALS = setOf(Lan.REFUSED, Lan.NOT_TRUSTED)
 }

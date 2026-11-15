@@ -77,10 +77,13 @@ object Own {
 
     fun fingerprint(certificate: X509Certificate): String = MessageDigest.getInstance("SHA-256").digest(certificate.encoded).joinToString("") { "%02X".format(it) }
 
-    /** What this phone is called, as its user named it (else as it is made). */
-    fun alias(context: Context): String = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() } ?: Phone.name
+    /** What this phone is called nearby: as it was named in the app's settings, else as its user named it (else as it is made). */
+    fun alias(context: Context): String = Kept.alias(context) ?: named(context)
 
-    /** Presents the certificate to whoever asks for one. */
+    /** What this phone's user named it (else as it is made). */
+    fun named(context: Context): String = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)?.takeIf { it.isNotBlank() } ?: Phone.name
+
+    /** Presents the certificate to whoever asks for one, sending, and to whoever connects, receiving. */
     class Presenting : X509ExtendedKeyManager() {
         private val certificate = certificate()
         private val key = key()
@@ -90,8 +93,10 @@ object Own {
         override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?) = arrayOf(ALIAS)
         override fun getCertificateChain(alias: String?) = arrayOf(certificate)
         override fun getPrivateKey(alias: String?) = key
-        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? = null
-        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? = null
+        // (Received on, it is this phone's certificate too: LocalSend's senders pin it by its fingerprint.)
+        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?) = ALIAS
+        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?) = ALIAS
+        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?) = arrayOf(ALIAS)
     }
 }
 
@@ -138,10 +143,7 @@ object AutoSend {
     private val lock = Any()
 
     /** One run of the sending job: told when it is to end (the system wants it to, or what it sends for changed). */
-    class Run {
-        @Volatile
-        var stopped = false
-    }
+    class Run : Nearby.Stop()
 
     /** The run sending now, if one is: it takes what is queued meanwhile before it ends. */
     private var sender: Run? = null
@@ -209,7 +211,7 @@ object AutoSend {
         synchronized(lock) {
             kept(context).edit().putString("to", pc.key).putLong("since", now()).putLong("looked_i", now()).putLong("looked_v", now()).putLong("videos_since", now()).remove("seen").remove("queue").remove("held").commit()
             // (What was being sent to another PC is not.)
-            sender?.stopped = true
+            sender?.stop()
             context.getSystemService(JobScheduler::class.java).cancel(SEND)
         }
         arm(context)
@@ -222,7 +224,7 @@ object AutoSend {
     fun turnOff(context: Context) {
         synchronized(lock) {
             kept(context).edit().remove("to").remove("seen").remove("queue").commit()
-            sender?.stopped = true
+            sender?.stop()
             val jobs = context.getSystemService(JobScheduler::class.java)
             jobs.cancel(WATCH)
             jobs.cancel(SEND)
@@ -426,14 +428,16 @@ object AutoSend {
         val things = fit.map { file -> Nearby.Thing(file.entry.name, file.name, file.type, file.size) { context.contentResolver.openInputStream(file.entry.uri) ?: throw IOException("gone") } }
         var sent = 0
         // Taken: it leaves the queue at once, so that it is not sent again whatever comes next.
-        val ended = Nearby.send(context, at, things, { run.stopped }) { thing ->
+        val ended = Nearby.send(context, at.at, things, run) { thing ->
             done(context, listOf(byId.getValue(thing.id).entry))
             sent++
         }
-        // Refused by the PC's user: given up. Anything else not sent whole: what is left is offered again later.
-        if (ended == Nearby.Ended.Refused) done(context, fit.map { it.entry })
+        // Refused by the PC's user (or a PIN asked for, which this sending cannot give): given up. Anything else not
+        // sent whole: what is left is offered again later.
+        val refused = ended == Nearby.Ended.Refused || ended == Nearby.Ended.Pin
+        if (refused) done(context, fit.map { it.entry })
         if (sent > 0 && notice(context)) tell(context, at.pc.name, sent)
-        return if (ended == Nearby.Ended.Sent || ended == Nearby.Ended.Refused) Sent.Done else Sent.Again
+        return if (ended == Nearby.Ended.Sent || refused) Sent.Done else Sent.Again
     }
 
     /** That [count] went to [pc]: a notice that goes by itself after a while. */
@@ -484,15 +488,19 @@ class PhotoSend : JobService() {
     }
 
     override fun onStopJob(params: JobParameters): Boolean {
-        run?.stopped = true
+        run?.stop()
         return true
     }
 }
 
-/** As the phone starts (and as the app is updated), what is taken is noticed again: the system forgets it. */
+/**
+ * As the phone starts (and as the app is updated), what is taken is noticed again: the system forgets it. Receiving
+ * in the background (后台接收) starts again too.
+ */
 class Booted : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        if (Kept.background(context)) ReceiveService.start(context)
         val pending = goAsync()
         thread(name = "auto-send-boot") {
             AutoSend.resume(context)
