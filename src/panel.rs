@@ -4472,11 +4472,11 @@ impl<'a> Panel<'a> {
         let whole = began.elapsed();
         if whole > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            let what = format!("{:?}, {} lanes, {}x{} px{}{}", self.part, lanes.len(), size.0, size.1, if by_hand { ", sized by hand" } else { "" }, if moving { ", moving" } else { "" });
+            let what = format!("{:?}, {} lanes, {}x{} px{}{}, {}", self.part, lanes.len(), size.0, size.1, if by_hand { ", sized by hand" } else { "" }, if moving { ", moving" } else { "" }, self.gfx.drawing_on());
             crate::widget::note_sparingly("panel frame", || {
                 format!(
-                    "panel: a frame took {:.1} ms: laid out {:.1}, made ready {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1}), after {:.1}; {what}",
-                    ms(whole), ms(laid_out), ms(drawing - laid_out), ms(drew - drawing), ms(took.given), ms(took.painted), ms(took.handed), ms(whole - drew)
+                    "panel: a frame took {:.1} ms: laid out {:.1}, made ready {:.1}, drawn {:.1} (its surface given in {:.1}, painted {:.1} (its drawing ended in {:.1}), handed to the compositor {:.1}), after {:.1}; {what}",
+                    ms(whole), ms(laid_out), ms(drawing - laid_out), ms(drew - drawing), ms(took.given), ms(took.painted), ms(took.ended), ms(took.handed), ms(whole - drew)
                 )
             });
         }
