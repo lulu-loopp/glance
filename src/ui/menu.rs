@@ -145,19 +145,6 @@ impl Drawn {
     }
 }
 
-/// A choice lit as the pointer came onto it (as `msg` told), drawing it taking `drawn`: where it showed later than a
-/// frame of the screen after (the message waiting to be seen, or the drawing slow), noted how long each took, and
-/// whether among the choices beside one (`beside`).
-fn slow_light(msg: &MSG, drawn: std::time::Duration, beside: bool) {
-    let waited = unsafe { windows::Win32::System::SystemInformation::GetTickCount() }.wrapping_sub(msg.time);
-    let drawn = drawn.as_secs_f32() * 1000.0;
-    if waited as f32 + drawn < 30.0 {
-        return;
-    }
-    let among = if beside { "beside one" } else { "its own" };
-    crate::widget::note_sparingly("menu", || format!("menu: a choice ({among}) lit {:.0} ms after the pointer came onto it: its move waited {waited} ms to be seen, drawn in {drawn:.1} ms", waited as f32 + drawn));
-}
-
 /// A sheet's plate in `colours`, `radius` round: its shadow, its ground, its edge, and (glass's) the light along its top,
 /// as its lanes are lit.
 fn paint_plate(frame: &dyn Canvas, colours: &Colours, (x, y, width, height): (f32, f32, f32, f32), radius: f32) {
@@ -397,9 +384,7 @@ impl Menu {
         if let Some((_, sub)) = self.sub.take() {
             sub.close();
         }
-        let made = std::time::Instant::now();
         self.follow_sub(Some(row));
-        crate::widget::note_sparingly("menu-again", || format!("menu: the choices beside one made again as they changed, in {:.1} ms", made.elapsed().as_secs_f32() * 1000.0));
         if in_sub && self.sub.is_some() {
             self.in_sub = true;
             self.sub_light(|sub| lit.filter(|at| *at < sub.items.len()));
@@ -422,8 +407,7 @@ impl Menu {
             WM_MOUSEMOVE if self.pointer == Some((x, y)) => Handled::Taken,
             WM_MOUSEMOVE => {
                 self.pointer = Some((x, y));
-                let (lit, drawing) = (self.lights(), std::time::Instant::now());
-                let handled = match in_sub {
+                match in_sub {
                     Some((sx, sy)) => {
                         self.in_sub = true;
                         self.sub_light(|sub| sub.row_at(sx, sy))
@@ -444,11 +428,7 @@ impl Menu {
                         }
                         self.light(row)
                     }
-                };
-                if self.lights() != lit {
-                    slow_light(msg, drawing.elapsed(), self.in_sub);
                 }
-                handled
             }
             // A press outside leaves it; inside, the choice is made as the button comes up.
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.inside(x, y) && in_sub.is_none() => Handled::Done(None),
@@ -511,11 +491,6 @@ impl Menu {
             VK_RETURN if self.lit.is_some() => Handled::Done(self.lit),
             _ => Handled::Taken,
         }
-    }
-
-    /// The choices lit: its own, and that beside it.
-    fn lights(&self) -> (Option<usize>, Option<usize>) {
-        (self.lit, self.sub.as_ref().and_then(|(_, sub)| sub.lit))
     }
 
     /// The choice after `from` (before it, `up`) that can be chosen, round from the other end (none lit: the first, or
