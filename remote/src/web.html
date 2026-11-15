@@ -57,6 +57,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 .keys { display: flex; gap: 4px; } .keys button, .text { font: inherit; color: var(--ink); background: none; border: 0; min-width: 44px; height: 44px; border-radius: 50%; padding: 0; display: grid; place-items: center; }
 .note.small { font-size: 12px; color: var(--faint); }
 .keys button.main { background: var(--card2); } .text { color: var(--dim); font-size: 13px; border-radius: 12px; height: 32px; }
+.app { color: var(--ink); text-decoration: none; gap: 4px; } .app b { color: var(--accent); font-weight: 600; }
 .ask { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; padding: 24px; }
 .ask div { background: var(--card2); border-radius: 24px; padding: 24px 24px 12px; max-width: 328px; display: grid; gap: 12px; }
 .ask h3 { margin: 0; font-size: 19px; } .ask p { margin: 0; color: var(--dim); font-size: 14px; line-height: 1.6; }
@@ -68,6 +69,7 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
 <div class="card" id="unpaired" hidden><b id="unpaired-title"></b><span class="note" id="unpaired-how"></span></div>
 <div class="card rig" id="rig" hidden><div id="rig-drawing"></div><div class="reads" id="rig-reads"></div></div>
 <main id="main" hidden></main>
+<a class="card app" id="app" href="https://glancepc.com/app" hidden><b id="app-title"></b><span class="note" id="app-how"></span></a>
 <script>
 "use strict";
 // ---- words, in the phone's language
@@ -122,7 +124,7 @@ const signed = (parts, body) => hex(hmac(unhex(key), new TextEncoder().encode(pa
 async function ask(path, body, again = true) {
   const method = body ? "POST" : "GET", sent = body ? JSON.stringify(body) : "", time = String(Math.floor(Date.now() / 1000) + told.ahead), nonce = random(8), name = encodeURIComponent(called + " (web)");
   const sign = signed([method, path, time, nonce, phone, name, told.session], sent);
-  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name } });
+  const answer = await fetch(path, { method, body: body ? sent : undefined, cache: "no-store", headers: { "X-Glance-Time": time, "X-Glance-Nonce": nonce, "X-Glance-Sign": sign, "X-Glance-Session": told.session, "X-Glance-Phone": phone, "X-Glance-Name": name, "X-Glance-Browser": "1" } });
   const text = await answer.text();
   const own = signed(["answer", nonce, String(answer.status)], text) === answer.headers.get("X-Glance-Sign");
   let json = {};
@@ -161,7 +163,7 @@ function unpaired(title) {
   document.getElementById("rig").hidden = true;
   document.getElementById("unpaired").hidden = false;
   document.getElementById("unpaired-title").textContent = title;
-  document.getElementById("unpaired-how").textContent = t("请在电脑上打开 Glance 的手机遥控，生成网页配对码，并用本手机扫描。", "On the PC, open Glance's remote control, show the code for the web page, and scan it with this phone.");
+  document.getElementById("unpaired-how").textContent = t("请在电脑上打开 Glance 设置中的“设备”页面，点击“显示配对码”，并用本手机的相机扫描。", "On the PC, open the Devices page of Glance's settings, press Show pairing code, and scan it with this phone's camera.");
 }
 
 const EFFECTS = [["steady", t("常亮", "Steady")], ["breathing", t("呼吸", "Breathing")], ["rainbow", t("彩虹", "Rainbow")], ["heat", t("跟随温度", "By heat")]];
@@ -211,6 +213,13 @@ function draw() {
       box.append(el("b", "", read.temp != null ? read.temp + "°" : read.load != null ? read.load + "%" : "—"), el("small", "", read.temp != null && read.load != null ? `${name} ${read.load}%` : name));
       row.append(box);
     }
+  }
+  // A phone the PC lets only read how it is: shown so, with nothing to press.
+  if (state.control === false) {
+    const c = card(t("仅查看状态", "Status only"));
+    c.append(el("span", "note", t("电脑已将此手机设为仅查看状态，无法从此处控制电脑。", "The PC lets this phone only see how it is: it cannot be controlled from here.")));
+    main.append(c);
+    return;
   }
   const tiles = el("div", "tiles");
   tiles.append(
@@ -410,6 +419,12 @@ async function look() {
   if (busy || document.hidden) return;
   try { const answer = await ask("/v1/state"); if (!busy) { state = answer; said(t("已连接", "Connected"), "good"); draw(); } }
   catch (error) { if (!busy) failed(error); }
+}
+// The app, offered to an Android phone (it has what a page cannot: sending files, the PC's notices).
+if (/Android/.test(navigator.userAgent)) {
+  document.getElementById("app").hidden = false;
+  document.getElementById("app-title").textContent = t("下载 Glance APP", "Get the Glance app");
+  document.getElementById("app-how").textContent = t("安装后可在手机与电脑之间互传文件，并使用完整的遥控功能。", "With it, the phone and the PC send each other files, and the whole remote is there.");
 }
 if (!key) { said(""); unpaired(t("此浏览器尚未与电脑配对", "This browser is not paired with the PC")); }
 else { said(t("正在连接…", "Reaching it…")); look(); setInterval(look, 2000); document.addEventListener("visibilitychange", look); }

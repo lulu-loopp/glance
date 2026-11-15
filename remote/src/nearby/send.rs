@@ -167,7 +167,7 @@ fn asked(mut stream: impl Read + Write, method: &str, path: &str, host: &str, bo
 
 /// This PC as it tells of itself to another (with its port and protocol, which an answer leaves out).
 fn mine(me: &Info) -> Value {
-    json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false })
+    json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "glance": true })
 }
 
 /// Tells the device at `address` (which announced `info`) of this PC (`register`): what it says of itself back.
@@ -177,6 +177,20 @@ pub fn register(own: &tls::Own, me: &Info, address: IpAddr, info: &Info) -> std:
     let (status, body) = asked(stream, "POST", "/register", &address.to_string(), mine(me).to_string().as_bytes())?;
     if status != 200 {
         return Err(std::io::Error::other(format!("register answered {status}")));
+    }
+    serde_json::from_slice(&body).map_err(std::io::Error::other)
+}
+
+/// What `device` says of itself (`info`), reached pinned to the fingerprint it announced: the handshake proves it holds
+/// that certificate. One that speaks plain HTTP proves nothing, and is not asked.
+pub fn proven(own: &tls::Own, device: &Device) -> std::io::Result<Info> {
+    if !device.https {
+        return Err(std::io::Error::other("it does not speak HTTPS"));
+    }
+    let stream = connect(own, device.address, device.port, true, &device.fingerprint, ANSWER)?;
+    let (status, body) = asked(stream, "GET", "/info", &device.address.to_string(), b"")?;
+    if status != 200 {
+        return Err(std::io::Error::other(format!("info answered {status}")));
     }
     serde_json::from_slice(&body).map_err(std::io::Error::other)
 }

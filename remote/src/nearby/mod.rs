@@ -68,6 +68,9 @@ pub struct Info {
     pub download: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub announce: Option<bool>,
+    /// It is Glance's (a PC's or a phone's), as it says beside what LocalSend's devices say (which they pass over).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub glance: bool,
 }
 
 /// A device known on the network: what it said of itself, where it was, when it was last heard.
@@ -80,6 +83,8 @@ pub struct Device {
     pub address: IpAddr,
     pub port: u16,
     pub https: bool,
+    /// It said it is Glance's (see `Info::glance`).
+    pub glance: bool,
     #[serde(skip)]
     pub heard: Instant,
 }
@@ -94,6 +99,9 @@ pub struct Sender {
     pub fingerprint: String,
     pub verified: bool,
     pub address: IpAddr,
+    /// It said it is Glance's (see `Info::glance`).
+    #[serde(default)]
+    pub glance: bool,
 }
 
 /// A file as a sending names it: where the sending is words (a message: see `Receiver::prepare`), its first words
@@ -152,6 +160,8 @@ pub enum Event {
     Devices { devices: Vec<Device> },
     /// A sending of this PC's: how it goes.
     Sending { job: u64, state: send::State },
+    /// A device found nearby that Glance asked to trust (see `link::Command::Trust`): trusted, or why not.
+    Trusted { fingerprint: String, why_not: Option<String> },
 }
 
 /// What tells Glance and asks it.
@@ -170,8 +180,16 @@ pub trait Told: Send + Sync {
 pub struct Kept {
     /// Receiving is on.
     pub on: bool,
-    /// What this PC is called to others (none: its computer name).
+    /// Sending is wanted while receiving is not on: the helper runs nearby transfer for it, and every sending offered
+    /// to this PC is refused.
+    pub send: bool,
+    /// What this PC was called to others before it had one name (`Config::name`): read once, to become that name, and
+    /// not written again.
+    #[serde(skip_serializing)]
     pub alias: Option<String>,
+    /// What this PC is called, to others as to phones (`Config::name`, put here by `run::kept_of`: not kept here).
+    #[serde(skip)]
+    pub name: String,
     pub trusted: Vec<Trusted>,
     /// Devices not trusted are turned away, not asked about.
     pub others_refused: bool,
@@ -196,6 +214,8 @@ pub struct Trusted {
     /// trusted while that phone is paired, and no longer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
+    /// It said it is Glance's (see `Info::glance`), as it was trusted.
+    pub glance: bool,
 }
 
 impl Kept {
@@ -207,16 +227,25 @@ impl Kept {
     /// `sender` trusted from now on, where it presented its certificate (else it cannot be: nothing changes); trusted
     /// already, its name and when it last sent kept.
     pub fn trust(&mut self, sender: &Sender) {
-        if !sender.verified {
-            return;
+        if sender.verified {
+            self.trust_proven(&sender.fingerprint, &sender.alias, sender.kind.clone(), sender.glance, true);
         }
+    }
+
+    /// The device that proved it holds the certificate of `fingerprint` (it presented it as it sent, or as this PC
+    /// reached it pinned to it), called `alias`, of `kind`, Glance's or not (`glance`), trusted from now on. Trusted
+    /// already, its name kept, and, where it `sent`, when it last did.
+    pub fn trust_proven(&mut self, fingerprint: &str, alias: &str, kind: Option<String>, glance: bool, sent: bool) {
         let now = seconds();
-        match self.trusted.iter_mut().find(|trusted| trusted.fingerprint.eq_ignore_ascii_case(&sender.fingerprint)) {
+        match self.trusted.iter_mut().find(|trusted| trusted.fingerprint.eq_ignore_ascii_case(fingerprint)) {
             Some(trusted) => {
-                trusted.alias = sender.alias.clone();
-                trusted.last = now;
+                trusted.alias = alias.to_string();
+                trusted.glance |= glance;
+                if sent {
+                    trusted.last = now;
+                }
             }
-            None => self.trusted.push(Trusted { fingerprint: sender.fingerprint.to_ascii_uppercase(), alias: sender.alias.clone(), kind: sender.kind.clone(), last: now, since: now, phone: None }),
+            None => self.trusted.push(Trusted { fingerprint: fingerprint.to_ascii_uppercase(), alias: alias.to_string(), kind, last: if sent { now } else { 0 }, since: now, phone: None, glance }),
         }
     }
 }
@@ -434,17 +463,17 @@ impl Receiver {
         (file, sending)
     }
 
-    /// What this PC says of itself now: called as what it keeps names it, where that is a name (it may be renamed as it
-    /// runs: told so from then on), else as its computer is.
+    /// What this PC says of itself now: called by its name (`Kept::name`), where that is one (it may be renamed as it
+    /// runs: told so from then on), else as it was started.
     pub fn me(&self) -> Info {
-        let alias = (self.kept)().alias.filter(|alias| !alias.trim().is_empty());
-        Info { alias: alias.unwrap_or_else(|| self.info.alias.clone()), ..self.info.clone() }
+        let name = (self.kept)().name;
+        Info { alias: if name.trim().is_empty() { self.info.alias.clone() } else { name }, ..self.info.clone() }
     }
 
     /// What this PC says of itself, as an answer to `register` and `info`.
     fn about(&self) -> String {
         let info = &self.me();
-        json!({ "alias": info.alias, "version": VERSION, "deviceModel": info.device_model, "deviceType": info.device_type, "fingerprint": info.fingerprint, "download": false }).to_string()
+        json!({ "alias": info.alias, "version": VERSION, "deviceModel": info.device_model, "deviceType": info.device_type, "fingerprint": info.fingerprint, "download": false, "glance": true }).to_string()
     }
 
     fn asked(&self, method: &str, path: &str, head: &http::Head, body: &[u8], from: IpAddr, verified: Option<String>) -> Result<Option<(u16, String)>, Refused> {
@@ -490,6 +519,7 @@ impl Receiver {
             address,
             port: info.port.unwrap_or(PORT),
             https: info.protocol.as_deref() != Some("http"),
+            glance: info.glance,
             heard: Instant::now(),
         };
         let changed = {
@@ -524,6 +554,10 @@ impl Receiver {
             return Err((400, "too many files"));
         }
         let kept = (self.kept)();
+        // (Running to send alone, this PC takes nothing.)
+        if !kept.on {
+            return Err((403, "not receiving"));
+        }
         let (most_file, most_sending) = self.limits();
         let message = match (offered.len(), offered.values().next()) {
             (1, Some(file)) if file.get("fileType").and_then(Value::as_str).is_some_and(|kind| kind.starts_with("text/")) => file.get("preview").and_then(Value::as_str).filter(|words| !words.trim().is_empty()).map(str::to_string),
@@ -555,6 +589,7 @@ impl Receiver {
             fingerprint: verified.clone().unwrap_or_else(|| info.fingerprint.to_ascii_uppercase()),
             verified: verified.is_some(),
             address: from,
+            glance: info.glance,
         };
         if sender.fingerprint.is_empty() {
             return Err((400, "no fingerprint"));

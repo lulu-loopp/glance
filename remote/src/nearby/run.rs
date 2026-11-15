@@ -110,16 +110,40 @@ impl Running {
                     going.give_pin(pin);
                 }
             }
+            Command::Trust { fingerprint } => {
+                let running = self.clone();
+                std::thread::spawn(move || {
+                    let why_not = running.trust(&fingerprint).err();
+                    if let Some(why) = &why_not {
+                        crate::journal::note(format!("nearby: {fingerprint} not trusted: {why}"));
+                    }
+                    running.told.tell(Event::Trusted { fingerprint, why_not });
+                });
+            }
             // (Answers are the link's own.)
             Command::Answer { .. } => {}
         }
     }
 }
 
-/// What `config` keeps for nearby transfer, as it holds now: the devices of phones no longer paired not trusted.
+impl Running {
+    /// The device found nearby by `fingerprint` trusted, once it proved it holds that certificate (see `send::proven`).
+    fn trust(&self, fingerprint: &str) -> Result<(), String> {
+        let device = self.receiver.devices_now().into_iter().find(|device| device.fingerprint.eq_ignore_ascii_case(fingerprint)).ok_or("the device is not nearby")?;
+        let info = send::proven(&self.receiver.own, &device).map_err(|error| error.to_string())?;
+        let alias = super::shown_name(&info.alias);
+        Config::change(|config| config.nearby.trust_proven(&device.fingerprint, &alias, info.device_type.clone().or(device.kind.clone()), info.glance || device.glance, false)).map_err(|error| error.to_string())?;
+        crate::journal::note(format!("nearby: {alias} ({}) trusted, as found", device.address));
+        Ok(())
+    }
+}
+
+/// What `config` keeps for nearby transfer, as it holds now: called by this PC's name; the devices of phones no longer
+/// paired, or whose files are to be asked about (see `Phone::files`), not trusted.
 pub fn kept_of(config: &Config) -> Kept {
     let mut kept = config.nearby.clone();
-    kept.trusted.retain(|trusted| trusted.phone.as_ref().is_none_or(|id| config.phones.iter().any(|phone| &phone.id == id && phone.device.is_some())));
+    kept.name = config.name.clone();
+    kept.trusted.retain(|trusted| trusted.phone.as_ref().is_none_or(|id| config.phones.iter().any(|phone| &phone.id == id && phone.device.is_some() && phone.files)));
     kept
 }
 
@@ -139,7 +163,7 @@ pub fn phone_trusted(phone: &str, fingerprint: &str, alias: &str) -> std::io::Re
         let now = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
         let (last, since) = trusted.iter().find(|trusted| trusted.phone.as_deref() == Some(phone) && trusted.fingerprint.eq_ignore_ascii_case(&fingerprint)).map_or((0, now), |was| (was.last, was.since));
         trusted.retain(|trusted| trusted.phone.as_deref() != Some(phone) && !trusted.fingerprint.eq_ignore_ascii_case(&fingerprint));
-        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last, since, phone: Some(phone.to_string()) });
+        trusted.push(super::Trusted { fingerprint: fingerprint.clone(), alias: alias.clone(), kind: Some("mobile".into()), last, since, phone: Some(phone.to_string()), glance: true });
     })?;
     Ok(true)
 }
@@ -154,21 +178,21 @@ pub fn told_to_phones() -> serde_json::Value {
         "most_file": limits.map(|(file, _)| file),
         "most_sending": limits.and_then(|(_, sending)| sending),
         "most_files": super::MOST_FILES,
-        "on": running.is_some(),
+        "on": running.is_some() && kept_of(&Config::load()).on,
         "alias": running.map(|running| running.receiver.me().alias),
         "port": running.and_then(|running| running.receiver.info.port),
         "fingerprint": running.map(|running| running.receiver.info.fingerprint.clone()),
     })
 }
 
-/// What nearby transfer is, as Glance's settings show it: whether it is on, what this PC is called (and would be by
-/// default), its fingerprint, its port (where it runs), the devices trusted, whether others are turned away.
+/// What nearby transfer is, as Glance's settings show it: whether it receives, whether it runs to send, what this PC
+/// is called, its fingerprint, its port (where it runs), the devices trusted, whether others are turned away.
 pub fn said(config: &Config) -> serde_json::Value {
     let kept = &kept_of(config);
     let fingerprint = tls::Own::in_folder(&crate::config::folder()).map(|own| own.fingerprint).ok();
     json!({
         "on": kept.on,
-        "alias": kept.alias,
+        "send": kept.send,
         "name": config.name,
         "fingerprint": fingerprint,
         "port": RUNNING.get().and_then(|running| running.receiver.info.port),
@@ -177,17 +201,22 @@ pub fn said(config: &Config) -> serde_json::Value {
     })
 }
 
-/// `glance-remote nearby [on | off | alias NAME | forget FINGERPRINT | others ask|refuse | most FILE SENDING]`: what is
-/// kept changed as said, then (or with nothing said) said as `said` has it.
+/// `glance-remote nearby [on | off | send on|off | name NAME | forget FINGERPRINT | others ask|refuse | most FILE
+/// SENDING]`: what is kept changed as said, then (or with nothing said) said as `said` has it. A name that is none (or
+/// nothing at all) names this PC as its computer is.
 pub fn asked(words: &[String]) -> std::io::Result<serde_json::Value> {
     let word = |at: usize| words.get(at).map(String::as_str);
     let change = |with: &dyn Fn(&mut Kept)| Config::change(|config| with(&mut config.nearby)).map(|_| ());
     match (word(0), word(1)) {
         (Some("on"), _) => change(&|kept| kept.on = true)?,
         (Some("off"), _) => change(&|kept| kept.on = false)?,
-        (Some("alias"), name) => {
-            let name = name.map(super::shown_name).filter(|name| name != "file" && !name.trim().is_empty());
-            change(&|kept| kept.alias = name.clone())?
+        (Some("send"), Some(how)) => {
+            let wanted = how == "on";
+            change(&|kept| kept.send = wanted)?
+        }
+        (Some("name"), name) => {
+            let name = name.filter(|name| !name.trim().is_empty()).map(super::shown_name).unwrap_or_else(computer_name);
+            Config::change(|config| config.name = name.clone())?;
         }
         (Some("forget"), Some(fingerprint)) => change(&|kept| kept.trusted.retain(|trusted| !trusted.fingerprint.eq_ignore_ascii_case(fingerprint)))?,
         (Some("others"), Some(how)) => {
@@ -206,6 +235,11 @@ pub fn asked(words: &[String]) -> std::io::Result<serde_json::Value> {
     Ok(said(&Config::load()))
 }
 
+/// This computer's name, as Windows has it.
+pub fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,11 +252,22 @@ mod tests {
         let trusted = |fingerprint: &str, phone: Option<&str>| super::super::Trusted { fingerprint: fingerprint.into(), phone: phone.map(str::to_string), ..Default::default() };
         let mut config = Config::default();
         config.nearby.trusted = vec![trusted("AA", None), trusted("BB", Some("one")), trusted("CC", Some("two")), trusted("DD", Some("offered"))];
+        config.nearby.trusted.push(trusted("EE", Some("asked")));
         config.phones = vec![
             Phone { id: "one".into(), device: Some("phone".into()), ..Default::default() },
             Phone { id: "offered".into(), offered_till: Some(u64::MAX), ..Default::default() },
+            // (Paired, but what it sends is asked about: see `Phone::files`.)
+            Phone { id: "asked".into(), device: Some("other".into()), files: false, ..Default::default() },
         ];
         let kept: Vec<String> = kept_of(&config).trusted.into_iter().map(|trusted| trusted.fingerprint).collect();
         assert_eq!(kept, ["AA", "BB"]);
+    }
+
+    /// The PC's name is the one the helper keeps, nearby too.
+    #[test]
+    fn nearby_is_called_by_the_pcs_name() {
+        let mut config = Config::default();
+        config.name = "书房".into();
+        assert_eq!(kept_of(&config).name, "书房");
     }
 }

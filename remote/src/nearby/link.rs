@@ -33,6 +33,9 @@ pub enum Command {
     Pin { job: u64, pin: String },
     /// Announce this PC (Glance is about to show the devices nearby), and say which they are now.
     Announce,
+    /// Trust the device found nearby whose fingerprint is `fingerprint`, once it is reached pinned to it (told as
+    /// `Event::Trusted`).
+    Trust { fingerprint: String },
 }
 
 /// A file to be sent: where it is, and the name the device is told (a folder's files named by their places in it,

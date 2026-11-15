@@ -125,7 +125,7 @@ impl Discovery {
     /// This PC as it announces itself (`announce`: an announcement, which is answered; else an answer).
     fn told(&self, announce: bool) -> Vec<u8> {
         let me = &self.receiver.me();
-        json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "announce": announce, "announcement": announce }).to_string().into_bytes()
+        json!({ "alias": me.alias, "version": super::VERSION, "deviceModel": me.device_model, "deviceType": me.device_type, "fingerprint": me.fingerprint, "port": me.port, "protocol": "https", "download": false, "announce": announce, "announcement": announce, "glance": true }).to_string().into_bytes()
     }
 
     /// Sends `what` to the group on every network.

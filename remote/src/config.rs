@@ -131,7 +131,7 @@ impl Default for Config {
             port: PORT,
             remote: true,
             nearby: crate::nearby::Kept::default(),
-            name: std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into()),
+            name: crate::nearby::run::computer_name(),
             key: String::new(),
             phones: Vec::new(),
             openrgb: None,
@@ -189,7 +189,7 @@ fn path() -> PathBuf {
 const OFFERED_FOR: u64 = 600;
 
 /// A phone paired with, by the key that is its alone.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Phone {
     /// What it is told from the others by, to whoever lists them: the name
@@ -205,6 +205,19 @@ pub struct Phone {
     pub device: Option<String>,
     /// Offered and not yet taken: when the offer ends (seconds since 1970).
     pub offered_till: Option<u64>,
+    /// It may control this PC (off, it only reads how the PC is: every control it asks is refused).
+    pub control: bool,
+    /// What it sends nearby is taken without asking (off, it is asked about as any device's is).
+    pub files: bool,
+    /// It is a phone's browser, paired by the remote's page (it sends nothing nearby).
+    pub web: bool,
+}
+
+impl Default for Phone {
+    /// Paired, a phone may do both: control this PC, and send to it without being asked about.
+    fn default() -> Self {
+        Phone { id: String::new(), key: String::new(), name: String::new(), device: None, offered_till: None, control: true, files: true, web: false }
+    }
 }
 
 /// Held while the configuration is read, changed and kept again: by one
@@ -243,6 +256,10 @@ impl Config {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(error) => return Err(error),
         };
+        // What nearby transfer called this PC, before it had one name: its name from now on.
+        if let Some(alias) = config.nearby.alias.take().filter(|alias| !alias.trim().is_empty()) {
+            config.name = alias;
+        }
         if crate::sign::key(&config.key).is_some() && !config.phones.iter().any(|phone| phone.key == config.key) {
             config.phones.push(Phone { key: std::mem::take(&mut config.key), ..Phone::default() });
         }
@@ -336,5 +353,27 @@ mod tests {
         assert!(matches!(read.night, Some(Night { power: Some(crate::power::Before::Mode(number)), .. }) if windows::core::GUID::from_u128(number) == mode));
         let before: Config = serde_json::from_str(r#"{"port":47631}"#).unwrap();
         assert_eq!(before.night, None);
+    }
+
+    /// A phone paired before it had switches may do both (control, send without asking), and is no browser.
+    #[test]
+    fn a_phone_paired_before_switches_may_do_both() {
+        let phone: Phone = serde_json::from_str(r#"{"id":"a","key":"00","name":"Fold","device":"d"}"#).unwrap();
+        assert!(phone.control && phone.files && !phone.web);
+    }
+
+    /// What nearby transfer called this PC becomes its one name, and is not kept again.
+    #[test]
+    fn the_nearby_alias_becomes_the_name() {
+        let _ = std::fs::remove_file(path());
+        std::fs::create_dir_all(folder()).unwrap();
+        std::fs::write(path(), r#"{"name":"DESKTOP","nearby":{"on":true,"alias":"书房"}}"#).unwrap();
+        let config = Config::read().unwrap();
+        assert_eq!((config.name.as_str(), config.nearby.alias.as_deref()), ("书房", None));
+        let kept = serde_json::to_string(&config).unwrap();
+        assert!(!kept.contains("alias"), "{kept}");
+        std::fs::write(path(), r#"{"name":"DESKTOP","nearby":{"alias":"  "}}"#).unwrap();
+        assert_eq!(Config::read().unwrap().name, "DESKTOP", "a name of nothing is none");
+        let _ = std::fs::remove_file(path());
     }
 }
