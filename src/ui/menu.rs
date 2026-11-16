@@ -76,15 +76,11 @@ impl Drawn {
     /// blurred and its colour lifted as its lanes are, Windows 11's as its acrylic is (each where the system frosts what
     /// is behind a window), the rest drawn alone.
     pub fn new(gfx: &Rc<gfx::Gfx>, hwnd: HWND, look: Look) -> windows::core::Result<Drawn> {
-        use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
-        let glass = match look.skin {
-            Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
-            Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
-            _ => None,
-        };
-        if let Some(mut frosted) = glass.and_then(|(frosting, _)| super::glass::Frosted::new(gfx, hwnd, frosting).ok()) {
-            frosted.set_frost(glass.map_or(1.0, |(_, frost)| frost));
-            return Ok(Drawn::Frosted(frosted));
+        if let Some((frosting, frost)) = frosting(look) {
+            if let Ok(mut frosted) = super::glass::Frosted::new(gfx, hwnd, frosting) {
+                frosted.set_frost(frost);
+                return Ok(Drawn::Frosted(frosted));
+            }
         }
         Surface::new(gfx, hwnd).map(Drawn::Plain)
     }
@@ -108,28 +104,18 @@ impl Drawn {
         match self {
             Drawn::Plain(surface) => surface.draw(gfx, size, px, |frame| {
                 frame.origin(room, room);
-                let colours = Colours::new(look, false);
-                paint_plate(frame, &colours, (0.0, 0.0, width, height), colours.radius.min(height / 2.0));
+                let _ = sheet(frame, look, (0.0, 0.0, width, height), false);
                 on(frame, false);
                 words(frame, false);
             }),
             Drawn::Frosted(frosted) => {
-                let colours = Colours::new(look, true);
-                let radius = colours.radius.min(height / 2.0);
+                let radius = sheet_radius(look, true, height);
                 let pane = (room * px, room * px, width * px, height * px, radius * px);
-                let glass = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark));
-                let halo = glass.as_ref().map(|theme| theme.legibility);
+                let halo = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark).legibility);
                 frosted.draw(gfx, size, px, pane, |frame| {
                     frame.origin(room, room);
-                    match &glass {
-                        Some(theme) => {
-                            let piece = super::view::Rect { x: 0.0, y: 0.0, w: width, h: height };
-                            if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
-                                gfx::failed("menu", gfx, Some(&error));
-                            }
-                            frame.origin(room, room);
-                        }
-                        None => paint_plate(frame, &colours, (0.0, 0.0, width, height), radius),
+                    if let Err(error) = sheet(frame, look, (0.0, 0.0, width, height), true) {
+                        gfx::failed("menu", gfx, Some(&error));
                     }
                     on(frame, true);
                     let laid = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, width, height), px, halo, |frame| {
@@ -143,6 +129,44 @@ impl Drawn {
             }
         }
     }
+}
+
+/// How what is drawn in `look` over the screen is frosted, where the system frosts what is behind a window: glass's
+/// blurred and its colour lifted as its lanes are, as frosted as the glass it is opened on is drawn; Windows 11's as
+/// its acrylic is; the rest not (chart paper's sheets are whole).
+pub fn frosting(look: Look) -> Option<((f32, f32), f32)> {
+    use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
+    match look.skin {
+        Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
+        Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
+        _ => None,
+    }
+}
+
+/// How round a sheet `height` tall in `look` is (DIPs), over the screen `frosted` or not.
+pub fn sheet_radius(look: Look, frosted: bool, height: f32) -> f32 {
+    Colours::new(look, frosted).radius.min(height / 2.0)
+}
+
+/// A sheet (`x`, `y`, `width`, `height`) in `look`, as a menu's is, from where the frame is placed: over the screen
+/// `frosted` by the compositor (see `Drawn`), glass's a piece of the glass it is opened on (its shadows, its tint as
+/// frosted as that glass is, the light inside its edge and along it), Windows 11's a little clear over its acrylic;
+/// else whole over what it covers. What is drawn on it is to be drawn as the plate it gives says.
+pub fn sheet(frame: &gfx::Frame, look: Look, (x, y, width, height): (f32, f32, f32, f32), frosted: bool) -> windows::core::Result<Plate> {
+    let colours = Colours::new(look, frosted);
+    let radius = colours.radius.min(height / 2.0);
+    match (frosted, look.skin) {
+        (true, Some(super::theme::Skin::Glass)) => {
+            let theme = super::theme::Theme::new(super::theme::Skin::Glass, look.dark);
+            let mut placed = windows_numerics::Matrix3x2::default();
+            unsafe { frame.dc.GetTransform(&mut placed) };
+            let drawn = super::skins::glass_sheet(frame, &theme, super::view::Rect { x, y, w: width, h: height }, radius, look.frost);
+            unsafe { frame.dc.SetTransform(&placed) };
+            drawn?;
+        }
+        _ => paint_plate(frame, &colours, (x, y, width, height), radius),
+    }
+    Ok(Plate { icon: colours.icon, highlight: colours.highlight, radius })
 }
 
 /// A sheet's plate in `colours`, `radius` round: its shadow, its ground, its edge, and (glass's) the light along its top,
