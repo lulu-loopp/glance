@@ -1,7 +1,6 @@
 package dev.weiyi.glance.remote
 
 import android.content.Context
-import android.net.Uri
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -13,15 +12,8 @@ import javax.crypto.spec.SecretKeySpec
 /** The PC paired with: where it is, the key shared with it, and its name. */
 data class Pc(val host: String, val port: Int, val key: String, val name: String) {
     companion object {
-        /** A pairing link, as the PC's QR code holds it: `glance://pair?h=…&p=…&k=…&n=…`. */
-        fun fromLink(link: String): Pc? {
-            val uri = runCatching { Uri.parse(link.trim()) }.getOrNull() ?: return null
-            if (uri.scheme != "glance" || uri.host != "pair") return null
-            val host = uri.getQueryParameter("h")?.takeIf { it.isNotBlank() } ?: return null
-            val port = uri.getQueryParameter("p")?.toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
-            val key = uri.getQueryParameter("k")?.takeIf { it.length == 64 && it.all { c -> c.isDigit() || c in 'a'..'f' } } ?: return null
-            return Pc(host, port, key, uri.getQueryParameter("n") ?: host)
-        }
+        /** A pairing link, as the PC's QR code holds it (see [Lan.pairing]). */
+        fun fromLink(link: String): Pc? = Lan.pairing(link)
     }
 
     fun toJson(): JSONObject = JSONObject().put("host", host).put("port", port).put("key", key).put("name", name)
@@ -79,8 +71,39 @@ object Pcs {
 
     fun remove(context: Context, at: Int) {
         val list = all(context).toMutableList()
+        val gone = list.getOrNull(at)
         if (at in list.indices) list.removeAt(at)
         keep(context, list, (at - 1).coerceAtLeast(0))
+        if (gone != null) {
+            val left = fingerprints(context).also { it.remove(gone.key) }
+            kept(context).edit().putString("nearby", JSONObject(left.toMap()).toString()).remove("control_${gone.key.take(16)}").apply()
+        }
+    }
+
+    /**
+     * The fingerprint of the certificate each paired PC receives and sends by (by its key), as it last said over what
+     * they are paired by (`/v1/nearby`): what it sends is taken by that certificate without asking.
+     */
+    fun fingerprints(context: Context): MutableMap<String, String> {
+        val kept = runCatching { JSONObject(kept(context).getString("nearby", "{}")!!) }.getOrElse { JSONObject() }
+        return kept.keys().asSequence().associateWith { kept.optString(it) }.filterValues { it.length == 64 }.toMutableMap()
+    }
+
+    /** Whether the PC with that key let this phone control it, as it last said (see [PcState.control]). */
+    fun controls(context: Context, key: String): Boolean = kept(context).getBoolean("control_${key.take(16)}", true)
+
+    fun knowControl(context: Context, key: String, control: Boolean) {
+        if (controls(context, key) != control) kept(context).edit().putBoolean("control_${key.take(16)}", control).apply()
+    }
+
+    /** The PC with that key said it receives and sends by the certificate of [fingerprint]. */
+    fun know(context: Context, key: String, fingerprint: String) {
+        synchronized(this) {
+            val all = fingerprints(context)
+            if (all[key] == fingerprint) return
+            all[key] = fingerprint
+            kept(context).edit().putString("nearby", JSONObject(all.toMap()).toString()).apply()
+        }
     }
 }
 
@@ -126,6 +149,11 @@ data class PcState(
     val keepsColours: Boolean = false, val colours: List<String>? = null,
     /** A laptop: drawn as one, its lights called what they are (the light under its keys). */
     val laptop: Boolean = false,
+    /**
+     * Whether this phone may control the PC: its owner may have it only read how the PC is (then every control is
+     * refused). An older PC that does not say lets every paired phone control it.
+     */
+    val control: Boolean = true,
 ) {
     companion object {
         fun from(json: JSONObject) = PcState(
@@ -135,6 +163,7 @@ data class PcState(
             coloursThere = json.optBoolean("colours_there", true),
             keepsColours = json.has("colours"),
             laptop = json.optBoolean("laptop"),
+            control = json.optBoolean("control", true),
             colours = json.optJSONArray("colours")?.let { list -> (0 until list.length()).map { list.optString(it).uppercase() }.filter { it.length == 6 } },
             keys = json.optJSONObject("keys")?.let { Keys(it.int("level"), it.optInt("most", 3)) },
             media = json.optJSONObject("media")?.let { Media(it.optString("title"), it.optString("artist"), it.optString("app"), it.optBoolean("playing")) },
@@ -208,7 +237,8 @@ private fun Pc.said(path: String, body: JSONObject?, again: Boolean): JSONObject
     val name = java.net.URLEncoder.encode(Phone.name, "UTF-8").replace("+", "%20")
     val sign = mac(secret, listOf(method, path, time, nonce, Phone.id, name, session), sent)
     val connection = try {
-        (URL("http://$host:$port$path").openConnection() as HttpURLConnection).apply {
+        // (An address of IPv6 in brackets, as a URL takes it.)
+        (URL("http://${if (host.contains(':')) "[$host]" else host}:$port$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 2500
             readTimeout = 60000

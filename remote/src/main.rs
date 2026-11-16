@@ -327,7 +327,7 @@ impl Helper {
     /// One asked from this PC itself (`here`), as this PC, is taken by
     /// this PC's own key (see `Config::local`), which no other address may
     /// use.
-    fn admit(&self, request: &sign::Request, here: bool) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
+    fn admit(&self, request: &sign::Request, here: bool, browser: bool) -> Result<Admitted, (sign::Refused, Option<[u8; 32]>)> {
         if request.phone == LOCAL {
             let secret = Config::load().local.as_deref().and_then(sign::key).filter(|_| here).ok_or((sign::Refused::Forged, None))?;
             let at = sign::verify(&secret, request).map_err(|refused| (refused, None))?;
@@ -364,14 +364,21 @@ impl Helper {
             return refused(why);
         }
         let key = phone.key.clone();
-        // (A request that names no phone leaves the key as it is.)
-        if phone.device.is_none() && !request.phone.is_empty() {
+        // (A request that names no phone leaves the key as it is. A browser is known as one from its first asking, or,
+        // paired before browsers said so, from the first that says it.)
+        let taken = phone.device.is_none() && !request.phone.is_empty();
+        if taken || (browser && !phone.web) {
             let (device, name) = (request.phone.to_string(), unescaped(request.name));
             let changed = Config::change(|config| {
                 // A phone paired anew is that phone still: what it was paired by before is gone.
-                config.phones.retain(|phone| phone.device.as_deref() != Some(device.as_str()));
+                if taken {
+                    config.phones.retain(|phone| phone.device.as_deref() != Some(device.as_str()));
+                }
                 if let Some(phone) = config.phones.iter_mut().find(|phone| phone.key == key) {
-                    *phone = Phone { id: phone.id.clone(), key: key.clone(), name, device: Some(device), offered_till: None };
+                    if taken {
+                        (phone.name, phone.device, phone.offered_till) = (name, Some(device), None);
+                    }
+                    phone.web |= browser;
                 }
             });
             if let Ok(config) = changed {
@@ -459,7 +466,8 @@ impl Helper {
         let state = self.state.lock().unwrap();
         let sound = actions::volume();
         json!({
-            "name": self.config.name,
+            // (Renamed in Glance's settings as this helper runs: read as it is now.)
+            "name": Config::load().name,
             "version": env!("CARGO_PKG_VERSION"),
             "lights": lights,
             // Whether there is the program the lights are set by at all (none: the phone has no lights to show).
@@ -495,6 +503,11 @@ impl Helper {
         // has of it, and its unpairing.
         if !self.config.remote && !path.starts_with("/v1/nearby") && path != "/v1/unpair" {
             return Err((403, "the remote is off".into()));
+        }
+        // A phone that may only read how this PC is (see `Phone::control`): answered that too, and nothing it asks done.
+        let reads_only = !key.is_empty() && Config::load().phones.iter().any(|phone| phone.key == key && !phone.control);
+        if reads_only && !(method == "GET" && path == "/v1/state") && !path.starts_with("/v1/nearby") && path != "/v1/unpair" {
+            return Err((403, "this phone may not control this PC".into()));
         }
         match (method, path) {
             ("GET", "/v1/state") => {}
@@ -605,7 +618,10 @@ impl Helper {
             }
             _ => return Err((404, "no such thing to ask".into())),
         }
-        Ok(if self.config.remote { self.state() } else { json!({ "name": self.config.name, "remote": false }) })
+        let mut answer = if self.config.remote { self.state() } else { json!({ "name": Config::load().name, "remote": false }) };
+        // (Whether the phone asking may control this PC, for it to show so.)
+        answer["control"] = json!(!reads_only);
+        Ok(answer)
     }
 
     /// Reads one request from `stream`, checks it is the paired phone's,
@@ -667,7 +683,7 @@ impl Helper {
                         let done = self.night(on);
                         journal::note(format!("asked {path} by the night key, on {on}: {}", done.as_ref().map_or_else(|error| error.as_str(), |_| "done")));
                         match done {
-                            Ok(()) => (200, json!({ "name": self.config.name, "night": on })),
+                            Ok(()) => (200, json!({ "name": Config::load().name, "night": on })),
                             Err(error) => (500, json!({ "error": error })),
                         }
                     }
@@ -691,7 +707,7 @@ Connection: close
         let nonce = header("x-glance-nonce");
         let request = sign::Request { method, path, time: header("x-glance-time"), nonce, sign: header("x-glance-sign"), phone: header("x-glance-phone"), name: header("x-glance-name"), session: header("x-glance-session"), body: &body };
         let here = stream.peer_addr().is_ok_and(|from| from.ip().is_loopback());
-        let (status, answer, secret) = match self.admit(&request, here) {
+        let (status, answer, secret) = match self.admit(&request, here, header("x-glance-browser") == "1") {
             // (With which run this is, and what time it has: a phone that had them wrong asks again by them.)
             Err((refused, secret)) => {
                 // (Not of now is how every phone's first asking of a run is refused: nothing to note.)
@@ -769,16 +785,11 @@ fn page(config: &Config) -> Option<String> {
     Some(format!("http://{}:{}/", address()?, config.port))
 }
 
-/// What a phone needs to pair, as the link its QR code holds: where this
-/// PC is, and a key offered to the phone that takes it.
-/// The same for a phone's browser: the page's address, the key after the
-/// `#` (which a browser keeps to itself: it is never sent).
-fn pairing_web(config: &Config, key: &str) -> String {
-    format!("{}#k={key}", page(config).unwrap_or_default())
-}
-
+/// What a phone needs to pair, as the link its QR code holds, the same for the app and for a phone's camera: the
+/// page's address (where this PC is: the app takes it from there, a browser opens the page), then, after the `#` (which
+/// a browser keeps to itself: it is never sent), the key offered to the phone that takes it and this PC's name.
 fn pairing(config: &Config, key: &str) -> String {
-    format!("glance://pair?h={}&p={}&k={key}&n={}", address().unwrap_or_default(), config.port, escaped(&config.name))
+    format!("{}#k={key}&n={}", page(config).unwrap_or_default(), escaped(&config.name))
 }
 
 /// What this PC calls itself, asking its own helper (see `Helper::admit`).
@@ -850,20 +861,26 @@ fn main() -> std::io::Result<()> {
     let _ = unsafe { windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let config = Config::load();
     match std::env::args().nth(1).as_deref() {
-        // glance-remote pair [web] [cells]: a pairing offered, as its link
-        // (for a phone's browser rather than the app, with "web"). With
-        // "cells", the link's QR code follows as rows of 1 and 0 (for
-        // Glance to draw); without, it follows drawn in the console's
-        // characters, to be scanned off the screen (written to a file, the
-        // key in it was left on the disk).
+        // glance-remote pair withdraw ID: the pairing offered of that name (as `pair cells` said it) taken back, where
+        // no phone has taken it yet (one that has stays paired).
+        Some("pair") if std::env::args().nth(2).as_deref() == Some("withdraw") => {
+            Config::withdraw(&std::env::args().nth(3).unwrap_or_default())?;
+            return Ok(());
+        }
+        // glance-remote pair [cells]: a pairing offered, as its link (for the app and a phone's browser alike). With
+        // "cells", the offer's name comes first (what it is taken back by: see `pair withdraw`), and the link's QR code
+        // follows the link as rows of 1 and 0 (for Glance to draw); without, it follows drawn in the console's
+        // characters, to be scanned off the screen (written to a file, the key in it was left on the disk).
         Some("pair") => {
             let asked = |word: &str| std::env::args().skip(2).any(|given| given == word);
-            let key = Config::offer()?;
-            let link = if asked("web") { pairing_web(&config, &key) } else { pairing(&config, &key) };
-            say!("{link}");
+            let (key, id) = Config::offer()?;
+            let link = pairing(&config, &key);
             if asked("cells") {
+                say!("{id}");
+                say!("{link}");
                 say!("{}", cells(&link)?.trim_end());
             } else {
+                say!("{link}");
                 let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
                 say!("{}", code.render::<qrcode::render::unicode::Dense1x2>().dark_color(qrcode::render::unicode::Dense1x2::Light).light_color(qrcode::render::unicode::Dense1x2::Dark).quiet_zone(true).build());
             }
@@ -961,6 +978,21 @@ fn main() -> std::io::Result<()> {
             }
             return Ok(());
         }
+        // glance-remote phone ID control|files on|off: what the phone of that name (as `phones` lists them) may do.
+        Some("phone") => {
+            let argument = |at: usize| std::env::args().nth(at).unwrap_or_default();
+            let (id, what, on) = (argument(2), argument(3), argument(4) == "on");
+            Config::change(|config| {
+                if let Some(phone) = config.phones.iter_mut().find(|phone| phone.id == id) {
+                    match what.as_str() {
+                        "control" => phone.control = on,
+                        "files" => phone.files = on,
+                        _ => {}
+                    }
+                }
+            })?;
+            return Ok(());
+        }
         // glance-remote unpair ID: the phone of that name (as `phones` lists them), paired no more.
         Some("unpair") => {
             if let Some(id) = std::env::args().nth(2) {
@@ -1001,11 +1033,6 @@ fn main() -> std::io::Result<()> {
                     say!("{error}");
                 }
             }
-            return Ok(());
-        }
-        // glance-remote address: where the page is that a phone's browser, paired by it before, opens again.
-        Some("address") => {
-            say!("{}", page(&config).unwrap_or_default());
             return Ok(());
         }
         // glance-remote restore: the helper that listens has been ended (the remote turned off, Glance being
@@ -1189,7 +1216,8 @@ fn main() -> std::io::Result<()> {
     let session = sign::hex(&session);
     // (Kept once as this version keeps it: each phone with what it is told from the others by.)
     let _ = Config::change(|_| {});
-    if config.nearby.on {
+    // (Receiving, or wanted to send alone: see `Kept::send`.)
+    if config.nearby.on || config.nearby.send {
         if let Err(error) = nearby::run::start(&config.name) {
             journal::note(format!("nearby transfer could not start: {error}"));
         }

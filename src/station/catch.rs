@@ -190,7 +190,12 @@ impl Catchers {
     /// Up where drops are wanted while something is dragged (by another program, or off the station: see
     /// `drag::under_way`); none else. What each sees goes to `run::caught`, or (a device nearby's) is sent there.
     pub fn follow(&mut self) {
-        let wanted = if dragging() || super::drag::under_way() { wanted() } else { Vec::new() };
+        let dragged = dragging() || super::drag::under_way();
+        // (No drag at all: none from another program over a station either, see `send::foreign`.)
+        if !dragged {
+            super::send::foreign(false);
+        }
+        let wanted = if dragged { wanted() } else { Vec::new() };
         let same = wanted.len() == self.up.len() && wanted.iter().zip(&self.up).all(|((rect, parts, edge, lands, over), up)| *rect == up.rect && *parts == up.parts && *edge == up.edge && *lands == up.lands && *over == up.over);
         if same {
             return;
@@ -249,7 +254,7 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         // (What is kept at hand may be given a file off the station; the station, none of its own again; a page other
         // than the station's, nothing, only told it comes; a device nearby, what is dragged off the station, sent.)
         let target = match lands {
-            Lands::Apps => Target::new(told),
+            Lands::Apps | Lands::Send => Target::new(told),
             Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
             Lands::Device(key) => super::send::ToDevice::over(key, rect),
             _ => Target::not_own(told),

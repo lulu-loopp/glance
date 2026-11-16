@@ -82,6 +82,8 @@ LangString InstallFailed ${LANG_SIMPCHINESE} "无法将文件写入安装文件�
 LangString InstallFailed ${LANG_ENGLISH} "The files could not be written to the installation folder, and installation has stopped. The version installed before is unchanged."
 LangString RemoveFailed ${LANG_SIMPCHINESE} "以下文件夹中的部分文件未能删除。Glance 仍保留在已安装的应用中，关闭占用这些文件的程序后，可再次卸载。$\r$\n$INSTDIR"
 LangString RemoveFailed ${LANG_ENGLISH} "Some files in the following folder could not be removed. Glance remains among the installed apps, and can be uninstalled again once the programs using these files are closed.$\r$\n$INSTDIR"
+LangString SendToName ${LANG_SIMPCHINESE} "Glance 附近传输"
+LangString SendToName ${LANG_ENGLISH} "Glance Nearby"
 LangString BackToDefaultOk ${LANG_SIMPCHINESE} "点击“确定”后将恢复为默认位置：$PROGRAMFILES64\${NAME}"
 LangString BackToDefaultOk ${LANG_ENGLISH} "Clicking OK returns to the default location: $PROGRAMFILES64\${NAME}"
 LangString SettingsLeft ${LANG_SIMPCHINESE} "Glance 的设置文件正被其他程序占用，未能删除。可稍后手动删除以下文件夹：$\r$\n$APPDATA\dev.weiyi.glance"
@@ -262,6 +264,13 @@ Section "Glance"
 
   SetShellVarContext all
   CreateShortcut "$SMPROGRAMS\${NAME}.lnk" "$INSTDIR\${EXE}"
+  ; Explorer's Send to, for the user installing: what is chosen there sent to
+  ; devices nearby (Glance opens its settings at nearby transfer with it).
+  ; Under either language's name, the other's gone.
+  SetShellVarContext current
+  Delete "$SENDTO\Glance 附近传输.lnk"
+  Delete "$SENDTO\Glance Nearby.lnk"
+  CreateShortcut "$SENDTO\$(SendToName).lnk" "$INSTDIR\${EXE}" "--send"
 
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${NAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
@@ -319,5 +328,8 @@ Section "Uninstall"
   ${EndIf}
   SetShellVarContext all
   Delete "$SMPROGRAMS\${NAME}.lnk"
+  SetShellVarContext current
+  Delete "$SENDTO\Glance 附近传输.lnk"
+  Delete "$SENDTO\Glance Nearby.lnk"
   DeleteRegKey HKLM "${UNINSTALL_KEY}"
 SectionEnd

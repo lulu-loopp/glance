@@ -21,7 +21,9 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::station::drag::{Dragged, Over};
 use crate::ui::canvas::{Align, Canvas, Color, Point};
-use crate::ui::gfx::{Frame, Gfx, Surface};
+use crate::ui::gfx::{Frame, Gfx};
+use crate::ui::glass::{Pane, Sheet};
+use crate::ui::menu::Drawn as Shown;
 use crate::ui::morph::Part;
 use crate::ui::motion::Spring;
 use crate::ui::view::Hit;
@@ -108,7 +110,8 @@ struct Carry {
     lifted: Lifted,
     window: Window,
     gfx: Rc<Gfx>,
-    surface: Option<Surface>,
+    /// What its window shows: over the screen frosted where its look frosts what is behind (see `menu::Drawn`).
+    shown: Option<Shown>,
     /// How lifted it is (0 at rest, 1 in hand), how it leans (degrees), how much of it shows, how much of what a drop
     /// does is said, and that.
     lift: Spring,
@@ -135,15 +138,16 @@ struct Carry {
 /// of what it is lifted off) till it is carried onto a screen another adapter drives: each of its tiles flying from its
 /// room into its place in the stack.
 pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
+    put_back(&lifted.carried);
     CARRIED.with_borrow_mut(|carried| {
-        if let Some(was) = carried.take() {
-            crate::ui::view::land_tiles(was.lifted.carried, Instant::now());
-        }
-        let Ok(mut window) = Window::new() else { return };
+        // (Over the screen frosted where its look is, as a menu's sheet is: on a window the compositor draws what is
+        // behind into, which a layered one is not.)
+        let window = if crate::ui::menu::frosting(lifted.look).is_some() { Window::see_through() } else { Window::new() };
+        let Ok(mut window) = window else { return };
         window.set_click_through(true);
         // (Never in what a widget sees behind it: it is in hand, not part of the desktop.)
         crate::ui::scene::leave_out(window.hwnd, true);
-        let surface = Surface::new(gfx, window.hwnd).ok();
+        let shown = Shown::new(gfx, window.hwnd, lifted.look).ok();
         crate::ui::view::press_tile(None);
         crate::ui::view::carry_tiles(lifted.carried.clone());
         let corner = (lifted.tiles[0].at.x as f32, lifted.tiles[0].at.y as f32);
@@ -156,7 +160,7 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
             lifted,
             window,
             gfx: gfx.clone(),
-            surface,
+            shown,
             lift,
             lean: Spring::at(0.0, LEANING.0, LEANING.1),
             seen: Spring::at(1.0, FADING.0, FADING.1),
@@ -171,6 +175,16 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
             last: Instant::now(),
         });
     });
+}
+
+/// What is carried put back where it was lifted off at once (another drag begins: see `station::drag_off`): those of
+/// it lifted again (`again`) drawn full in their rooms at once, as they are lifted from there as they are drawn there
+/// (else drawn as the outline of a room left, flying back into it still), the rest landing in theirs.
+pub fn put_back(again: &[Hit]) {
+    let Some(was) = CARRIED.with_borrow_mut(|carried| carried.take()) else { return };
+    let (lifted, landing): (Vec<Hit>, Vec<Hit>) = was.lifted.carried.iter().partition(|hit| again.contains(hit));
+    crate::ui::view::settle_tiles(&lifted);
+    crate::ui::view::land_tiles(landing, Instant::now());
 }
 
 /// What is carried a step on to `now`, drawn: when next to (none, nothing carried).
@@ -565,55 +579,115 @@ impl Carry {
         }
         self.window.place_keeping(rect);
         // On the device for the screen it is carried onto (see `gfx::on_screen`): what is drawn of it is no device's,
-        // and its surface is made anew there as it crosses onto a screen another adapter drives.
+        // and its surface is made anew there as it crosses onto a screen another adapter drives (frosted, what shows
+        // takes up the device it is next drawn on itself).
         if let Ok(gfx) = crate::ui::gfx::for_area(rect) {
             if !Rc::ptr_eq(&gfx, &self.gfx) {
-                self.surface = None;
-                self.surface = Surface::new(&gfx, self.window.hwnd).ok();
+                if matches!(self.shown, Some(Shown::Plain(_)) | None) {
+                    self.shown = None;
+                    self.shown = Shown::new(&gfx, self.window.hwnd, look).ok();
+                }
                 self.gfx = gfx;
             }
         }
-        let Some(surface) = self.surface.as_mut() else { return };
         let pixels = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
         // (What is on the screen at its window's corner, drawn at its frame's.)
         let origin = Matrix3x2::translation(-rect.left as f32 / px, -rect.top as f32 / px);
-        let _ = surface.draw(&self.gfx, pixels, px, |frame| {
-            faded(frame, 1.0 - eased, || {
-                // The backmost first, the one on top last.
-                for at in (0..tiles.len()).rev().filter(|at| shows(*at)) {
+        // What it draws, each over the one before: each thing shown, the backmost first and the one on top last, then
+        // the count on their corner and what a drop does.
+        let order: Vec<usize> = (0..tiles.len()).rev().filter(|at| shows(*at)).collect();
+        let (shown_now, files) = (self.seen.value, self.lifted.count);
+        // The `piece`th of them, the window's corner where `origin` places it, over the screen `frosted` or not.
+        let paint = |frame: &Frame, piece: usize, origin: Matrix3x2, frosted: bool| {
+            faded(frame, 1.0 - eased, || match order.get(piece) {
+                Some(&at) => {
                     frame.place(drawn[at].placed * origin);
-                    faded(frame, drawn[at].seen, || paint_tile(frame, look, &tiles[at].parts, tiles[at].home.as_deref(), plates[at], lift, drawn[at].lifted));
+                    faded(frame, drawn[at].seen, || paint_tile(frame, look, frosted, &tiles[at].parts, tiles[at].home.as_deref(), plates[at], lift, drawn[at].lifted));
                 }
-                if let Some((placed, _, shows)) = count.filter(|count| count.2 > 0.0) {
-                    frame.place(placed * origin);
-                    faded(frame, shows * self.seen.value, || paint_count(frame, look, self.lifted.count, (0.0, 0.0)));
+                None => {
+                    if let Some((placed, _, shows)) = count.filter(|count| count.2 > 0.0) {
+                        frame.place(placed * origin);
+                        faded(frame, shows * shown_now, || paint_count(frame, look, files, (0.0, 0.0)));
+                    }
                 }
             });
-            if says_wide > 0.0 {
+            if piece == order.len() && says_wide > 0.0 {
                 faded(frame, saying * seen, || {
                     frame.place(Matrix3x2::translation(says_at.0, says_at.1) * origin);
-                    paint_says(frame, look, says);
+                    paint_says(frame, look, frosted, says);
                 });
             }
-        });
+        };
+        let gfx = self.gfx.clone();
+        match self.shown.as_mut() {
+            None => {}
+            Some(Shown::Plain(surface)) => {
+                let _ = surface.draw(&gfx, pixels, px, |frame| {
+                    for piece in 0..=order.len() {
+                        paint(frame, piece, origin, false);
+                    }
+                });
+            }
+            // Each a sheet of its own over the screen frosted, under the next: a plate frosts what is behind the
+            // window, and hides the plates under it as a pane of glass laid on another does; it shows as much of the
+            // screen frosted as it shows of itself.
+            Some(Shown::Frosted(frosted)) => {
+                let sheets: Vec<Sheet> = (0..=order.len())
+                    .map(|piece| {
+                        let (boxes, pane) = match order.get(piece) {
+                            Some(&at) => {
+                                let (x, y, w, h) = plate_of(plates[at], drawn[at].lifted);
+                                let pane = Pane::placed(drawn[at].placed * origin, (x, y, w, h), crate::ui::menu::sheet_radius(look, true, h), px, (1.0 - eased) * drawn[at].seen * drawn[at].lifted);
+                                (vec![(drawn[at].placed, plates[at])], Some(pane))
+                            }
+                            None => {
+                                let mut boxes: Vec<Boxed> = count.iter().map(|(placed, wide, _)| (*placed, (*wide, COUNT_TALL))).collect();
+                                let pane = (says_wide > 0.0).then(|| {
+                                    let placed = Matrix3x2::translation(says_at.0, says_at.1);
+                                    boxes.push((placed, (says_wide, SAYS_TALL)));
+                                    Pane::placed(placed * origin, (0.0, 0.0, says_wide, SAYS_TALL), crate::ui::menu::sheet_radius(look, true, SAYS_TALL), px, saying * seen)
+                                });
+                                (boxes, pane)
+                            }
+                        };
+                        // (As much of the window as it reaches over, with room round it for its shadows.)
+                        let reach = match boxes.is_empty() {
+                            true => (0, 0, 1, 1),
+                            false => {
+                                let on = window_rect(reach_of(&boxes), px);
+                                (on.left - rect.left, on.top - rect.top, (on.right - on.left) as u32, (on.bottom - on.top) as u32)
+                            }
+                        };
+                        Sheet { pane, reach }
+                    })
+                    .collect();
+                let _ = frosted.draw_sheets(&gfx, pixels, px, &sheets, |piece, frame| {
+                    let (left, top, ..) = sheets[piece].reach;
+                    paint(frame, piece, origin * Matrix3x2::translation(-left as f32 / px, -top as f32 / px), true);
+                });
+            }
+        }
     }
 }
 
 /// A thing carried, its plate `plate` large (DIPs) from where the frame is placed, `lifted` of the way from its room
 /// (see `placements`): its shadow under it as lifted as it is (`lift` in hand), its plate in the look of what it was
-/// lifted off, drawn in to its own box and fading as it comes to its room, and on it what was drawn of it there
+/// lifted off (over the screen `frosted`, as a menu's sheet is: see `menu::sheet`), drawn in to its own box and
+/// fading as it comes to its room, and on it what was drawn of it there
 /// (`parts`), turning into what its room draws of it (`home`, where that is otherwise: see `looks_of`). In its room,
 /// just what its room draws.
-fn paint_tile(frame: &Frame, look: crate::ui::menu::Look, parts: &[Part], home: Option<&[Part]>, plate: (f32, f32), lift: f32, lifted: f32) {
+#[allow(clippy::too_many_arguments)]
+fn paint_tile(frame: &Frame, look: crate::ui::menu::Look, frosted: bool, parts: &[Part], home: Option<&[Part]>, plate: (f32, f32), lift: f32, lifted: f32) {
     let (x, y, w, h) = plate_of(plate, lifted);
     let shadow = lifted_shadow(lift * lifted);
     if shadow.dark > 0.0 {
-        let radius = look_theme(look).radius.min(h / 2.0);
-        frame.shadow(Color::hex(0, shadow.dark), x, y, w, h, radius, shadow.blur, shadow.drop);
+        frame.shadow(Color::hex(0, shadow.dark), x, y, w, h, crate::ui::menu::sheet_radius(look, frosted, h), shadow.blur, shadow.drop);
     }
     if lifted > 0.0 {
         faded(frame, lifted, || {
-            crate::ui::menu::plate(frame, look, (x, y, w, h));
+            if let Err(error) = crate::ui::menu::sheet(frame, look, (x, y, w, h), frosted) {
+                frame.fail(error);
+            }
         });
     }
     let mut placed = Matrix3x2::default();
@@ -644,7 +718,7 @@ pub(crate) fn paint_stack(frame: &Frame, look: crate::ui::menu::Look, tiles: &[(
     unsafe { frame.dc.GetTransform(&mut placed) };
     for (at, (parts, plate)) in tiles.iter().enumerate().take(shown).rev() {
         unsafe { frame.dc.SetTransform(&(slot(at, shown, *plate, Matrix3x2::identity()) * placed)) };
-        faded(frame, seen_of(at, shown, 1.0), || paint_tile(frame, look, parts, None, *plate, lift, 1.0));
+        faded(frame, seen_of(at, shown, 1.0), || paint_tile(frame, look, false, parts, None, *plate, lift, 1.0));
     }
     unsafe { frame.dc.SetTransform(&placed) };
     if let Some(count) = count {
@@ -679,12 +753,15 @@ fn count_colours(theme: &crate::ui::theme::Theme) -> (Color, Color) {
 }
 
 /// What a drop does (`says`), on a plate of its own from where the frame is placed, in the look of what it was lifted
-/// off: a plus before it, as a copy is.
-fn paint_says(frame: &Frame, look: crate::ui::menu::Look, says: &str) {
+/// off (over the screen `frosted` or not): a plus before it, as a copy is.
+fn paint_says(frame: &Frame, look: crate::ui::menu::Look, frosted: bool, says: &str) {
     let theme = look_theme(look);
     let font = theme.small;
     let wide = frame.measure(says, font) + 14.0 + 20.0;
-    let plate = crate::ui::menu::plate(frame, look, (0.0, 0.0, wide, SAYS_TALL));
+    let plate = match crate::ui::menu::sheet(frame, look, (0.0, 0.0, wide, SAYS_TALL), frosted) {
+        Ok(plate) => plate,
+        Err(error) => return frame.fail(error),
+    };
     frame.icon(crate::ui::icons::Icon::Add, Point { x: 14.0, y: SAYS_TALL / 2.0 }, 13.0, plate.highlight);
     frame.text(says, font, theme.text, 24.0, frame.line_in(font, 0.0, SAYS_TALL), wide - 24.0, Align::Start);
 }
@@ -923,6 +1000,33 @@ mod tests {
         assert!((reach.0 - 100.0).abs() < 1e-3 && (reach.1 - 50.0).abs() < 1e-3 && (reach.2 - 400.0).abs() < 1e-3 && (reach.3 - 330.0).abs() < 1e-3, "{reach:?}");
         let rect = window_rect((100.0, 50.0, 400.0, 330.0), 1.5);
         assert_eq!((rect.left, rect.top, rect.right, rect.bottom), (90, 15, 660, 555));
+    }
+
+    /// Things carried, put back as another drag begins before they landed: those lifted again are in their rooms at
+    /// once and drawn full there (no longer the outlines of rooms left, which a lift from there drew as what it
+    /// carried), the rest landing in theirs.
+    #[test]
+    fn what_is_lifted_again_before_it_landed_is_in_its_room_at_once() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let _holding = crate::ui::view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gfx = Rc::new(Gfx::new().expect("graphics"));
+        let (again, other) = (Hit::Shelf(918_001), Hit::Shelf(918_002));
+        let lift = |carried: Vec<Hit>| {
+            crate::ui::view::carry_tiles(carried.clone());
+            let tile = Tile { hit: carried[0], parts: Vec::new(), home: None, size: (40.0, 30.0), at: POINT { x: 0, y: 0 } };
+            let look = crate::ui::menu::Look::of(crate::ui::theme::Skin::Paper, false);
+            begin(&gfx, Lifted { carried, count: 1, drag: 0, tiles: vec![tile], from: POINT { x: 5, y: 5 }, px: 1.0, over: RECT::default(), window: HWND::default(), look });
+        };
+        lift(vec![again, other]);
+        assert_eq!(crate::ui::view::away_tiles(), [again, other]);
+        put_back(&[again]);
+        assert!(crate::ui::view::away_tiles().is_empty(), "back in their rooms");
+        assert!(crate::ui::view::tile_landing(), "the other one landing in its room");
+        crate::ui::view::settle_tiles(&[other]);
+        lift(vec![again]);
+        put_back(&[again]);
+        assert!(crate::ui::view::away_tiles().is_empty() && !crate::ui::view::tile_landing(), "lifted again: in its room at once, drawn full");
+        assert!(CARRIED.with_borrow(|carried| carried.is_none()));
     }
 
     /// The plates behind the one on top draw what each of them is, each its own: carried together, a red thing on top

@@ -117,56 +117,10 @@ impl Folder {
         extension.chars().filter(char::is_ascii_alphanumeric).take(8).collect::<String>().to_ascii_lowercase()
     }
 
-    /// Moves the file at `source` into its own folder as `name` (see `arrived_name`): opened there and moved by its
-    /// handle, only where it is a plain file (no link of any kind on the way to it, nor a second name of it elsewhere)
-    /// at exactly that path. How large it is. A file that is not so is refused (`InvalidData`), and left where it is.
+    /// Moves the file at `source` into its own folder as `name` (see `arrived_name`, and `adopt_to`).
     pub fn adopt(&self, source: &Path, name: &str) -> std::io::Result<u64> {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-        use windows::core::HSTRING;
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::Storage::FileSystem::{
-            CreateFileW, FileRenameInfo, GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-            FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_NONE, OPEN_EXISTING, SYNCHRONIZE,
-        };
-        let refused = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
         std::fs::create_dir_all(&self.dir)?;
-        // (A folder opened too, to be told from a file.)
-        let opened = unsafe { CreateFileW(&HSTRING::from(source.as_os_str()), (DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, None) }.map_err(os_error)?;
-        let file = unsafe { OwnedHandle::from_raw_handle(opened.0) };
-        let handle = HANDLE(file.as_raw_handle());
-        let mut facts = BY_HANDLE_FILE_INFORMATION::default();
-        unsafe { GetFileInformationByHandle(handle, &mut facts) }.map_err(os_error)?;
-        if facts.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {
-            return Err(refused("not a plain file"));
-        }
-        if facts.nNumberOfLinks != 1 {
-            return Err(refused("a file of more than one name"));
-        }
-        // Where it is, every link on the way followed: the path asked for, or another reached through a link.
-        let mut found = vec![0u16; 1024];
-        let length = unsafe { GetFinalPathNameByHandleW(handle, &mut found, FILE_NAME_NORMALIZED) } as usize;
-        if length == 0 || length >= found.len() {
-            return Err(std::io::Error::last_os_error());
-        }
-        let found = String::from_utf16_lossy(&found[..length]);
-        let found = match found.strip_prefix(r"\\?\UNC\") {
-            Some(shared) => format!(r"\\{shared}"),
-            None => found.strip_prefix(r"\\?\").unwrap_or(&found).to_string(),
-        };
-        if !found.eq_ignore_ascii_case(&source.to_string_lossy()) {
-            return Err(refused("not where it was said to be"));
-        }
-        // Moved by the handle checked: under the name Glance gives it, in its own folder.
-        let to: Vec<u16> = self.path(name).as_os_str().encode_wide().collect();
-        let size = std::mem::size_of::<FILE_RENAME_INFO>() + to.len() * 2;
-        let mut info = vec![0u64; size.div_ceil(8)];
-        unsafe {
-            let rename = info.as_mut_ptr() as *mut FILE_RENAME_INFO;
-            (*rename).FileNameLength = (to.len() * 2) as u32;
-            std::ptr::copy_nonoverlapping(to.as_ptr(), std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(), to.len());
-            SetFileInformationByHandle(handle, FileRenameInfo, info.as_ptr().cast(), size as u32).map_err(os_error)?;
-        }
-        Ok(u64::from(facts.nFileSizeHigh) << 32 | u64::from(facts.nFileSizeLow))
+        adopt_to(source, &self.path(name))
     }
 
     /// Where a kept file `name` is.
@@ -279,6 +233,143 @@ fn os_error(error: windows::core::Error) -> std::io::Error {
     }
 }
 
+/// Moves the file at `source` to `to` (a file there already: `AlreadyExists`, nothing moved): opened where it is and
+/// moved by its handle, only where it is a plain file (no link of any kind on the way to it, nor a second name of it
+/// elsewhere) at exactly that path. How large it is. A file that is not so is refused (`InvalidData`), and left where
+/// it is. To another drive (where it cannot be renamed), it is copied there from that handle, marked as from the
+/// Internet, and deleted by it.
+pub fn adopt_to(source: &Path, to: &Path) -> std::io::Result<u64> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::core::HSTRING;
+    use windows::Win32::Foundation::{ERROR_NOT_SAME_DEVICE, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO, FILE_SHARE_NONE, OPEN_EXISTING, SYNCHRONIZE,
+    };
+    let refused = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
+    // (A folder opened too, to be told from a file.)
+    let opened = unsafe { CreateFileW(&HSTRING::from(source.as_os_str()), (DELETE | FILE_READ_ATTRIBUTES | FILE_READ_DATA | SYNCHRONIZE).0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, None) }.map_err(os_error)?;
+    let file = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+    let handle = HANDLE(file.as_raw_handle());
+    let mut facts = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(handle, &mut facts) }.map_err(os_error)?;
+    if facts.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0 {
+        return Err(refused("not a plain file"));
+    }
+    if facts.nNumberOfLinks != 1 {
+        return Err(refused("a file of more than one name"));
+    }
+    // Where it is, every link on the way followed: the path asked for, or another reached through a link.
+    let mut found = vec![0u16; 1024];
+    let length = unsafe { GetFinalPathNameByHandleW(handle, &mut found, FILE_NAME_NORMALIZED) } as usize;
+    if length == 0 || length >= found.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    let found = String::from_utf16_lossy(&found[..length]);
+    let found = match found.strip_prefix(r"\\?\UNC\") {
+        Some(shared) => format!(r"\\{shared}"),
+        None => found.strip_prefix(r"\\?\").unwrap_or(&found).to_string(),
+    };
+    if !found.eq_ignore_ascii_case(&source.to_string_lossy()) {
+        return Err(refused("not where it was said to be"));
+    }
+    let size = u64::from(facts.nFileSizeHigh) << 32 | u64::from(facts.nFileSizeLow);
+    // Moved by the handle checked (not over a file there).
+    let wide: Vec<u16> = to.as_os_str().encode_wide().collect();
+    let length = std::mem::size_of::<FILE_RENAME_INFO>() + wide.len() * 2;
+    let mut info = vec![0u64; length.div_ceil(8)];
+    let renamed = unsafe {
+        let rename = info.as_mut_ptr() as *mut FILE_RENAME_INFO;
+        (*rename).FileNameLength = (wide.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(), wide.len());
+        SetFileInformationByHandle(handle, FileRenameInfo, info.as_ptr().cast(), length as u32)
+    };
+    match renamed {
+        Ok(()) => return Ok(size),
+        Err(error) if error.code() != ERROR_NOT_SAME_DEVICE.to_hresult() => return Err(os_error(error)),
+        Err(_) => {}
+    }
+    // To another drive: copied from what was checked (a new file there, removed again where it is not written whole).
+    let mut from = std::fs::File::from(file);
+    let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(to)?;
+    let written = std::io::copy(&mut from, &mut out).and_then(|_| out.sync_all()).and_then(|()| std::fs::write(stream(to), INTERNET));
+    drop(out);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(to);
+        return Err(error);
+    }
+    // (Copied whole, it is taken even where the original stays: the helper's inbox is emptied of what it no longer
+    // holds as it next starts.)
+    let gone = FILE_DISPOSITION_INFO { DeleteFile: true };
+    if let Err(error) = unsafe { SetFileInformationByHandle(HANDLE(from.as_raw_handle()), FileDispositionInfo, std::ptr::addr_of!(gone).cast(), std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32) } {
+        crate::journal::note(format!("station: a file sent, copied to another drive, stayed where it came ({error})"));
+    }
+    Ok(size)
+}
+
+/// A folder of its own named `name` (a plain name) in `dir`, made now: `name`, else "name (1)", "name (2)"... where a
+/// file or folder of that name is there. Where it is.
+pub fn new_folder(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    for attempt in 0u32.. {
+        let path = dir.join(numbered(name, attempt, false));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("a name is found")
+}
+
+/// The file at `source` moved into `dir` as `name` (a plain name), else as "name (1).ext", "name (2).ext"... where a
+/// file or folder of that name is there (see `adopt_to`): where it is now, and how large it is.
+pub fn adopt_named(source: &Path, dir: &Path, name: &str) -> std::io::Result<(PathBuf, u64)> {
+    std::fs::create_dir_all(dir)?;
+    for attempt in 0u32.. {
+        let to = dir.join(numbered(name, attempt, true));
+        // (A folder of that name is no file the rename would refuse to replace.)
+        if to.is_dir() {
+            continue;
+        }
+        match adopt_to(source, &to) {
+            Ok(size) => return Ok((to, size)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("a name is found")
+}
+
+/// `name` as the `attempt`th of its name: itself first, then "name (n)", the number before the extension of a file's
+/// (`file`) name ("photo (1).jpg").
+fn numbered(name: &str, attempt: u32, file: bool) -> String {
+    if attempt == 0 {
+        return name.to_string();
+    }
+    let (stem, extension) = match name.rfind('.').filter(|&dot| file && dot > 0) {
+        Some(dot) => name.split_at(dot),
+        None => (name, ""),
+    };
+    format!("{stem} ({attempt}){extension}")
+}
+
+/// Each part of `name` ("folder/inner/file", as a file sent from a device nearby is named) as a plain name (see
+/// `part_name`).
+pub fn parts_of(name: &str) -> Vec<String> {
+    name.split('/').map(part_name).collect()
+}
+
+/// How much is free on the drive of `dir` (or of the nearest folder above it that is there), none where it cannot be
+/// told.
+pub fn free_space(dir: &Path) -> Option<u64> {
+    let there = dir.ancestors().find(|folder| folder.is_dir())?;
+    let wide: Vec<u16> = there.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free = 0u64;
+    unsafe { windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(windows::core::PCWSTR(wide.as_ptr()), Some(&mut free), None, None) }.ok()?;
+    Some(free)
+}
+
 /// The stream of the file at `path` that says where it came from.
 fn stream(path: &Path) -> PathBuf {
     let mut stream = path.as_os_str().to_owned();
@@ -290,6 +381,17 @@ fn stream(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use crate::station::shelf::What;
+
+    /// A name taken, the next: numbered before a file's extension, after a folder's whole name.
+    #[test]
+    fn names_taken_are_numbered() {
+        assert_eq!(numbered("a.jpg", 0, true), "a.jpg");
+        assert_eq!(numbered("a.jpg", 2, true), "a (2).jpg");
+        assert_eq!(numbered("archive.tar.gz", 1, true), "archive.tar (1).gz");
+        assert_eq!(numbered(".env", 1, true), ".env (1)");
+        assert_eq!(numbered("v1.2", 1, false), "v1.2 (1)");
+        assert_eq!(parts_of("Trip/day1/CON.jpg").len(), 3);
+    }
 
     fn folder(test: &str) -> Folder {
         let dir = crate::settings::local_dir().join(format!("station-{test}"));

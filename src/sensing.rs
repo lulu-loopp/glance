@@ -153,6 +153,7 @@ pub fn run() {
             && tell(&Told::Buttons { down: crate::mouse::buttons_held(), pressed: false })
             && tell(&Told::Switched { switch: Switch::Remote, on: crate::phone::on() })
             && tell(&Told::Switched { switch: Switch::Nearby, on: crate::phone::nearby_on() })
+            && tell(&Told::Switched { switch: Switch::NearbySend, on: crate::phone::sending_on() })
             && tell(&Told::Switched { switch: Switch::RaisedLights, on: crate::openrgb::on() });
         // What it is asked, heard on a thread of its own; a report is said by the reading loop, the rest done here.
         let (report_wanted, report_asked) = mpsc::channel::<()>();
@@ -182,6 +183,9 @@ pub fn run() {
                         }
                         Asked::Switch { switch: Switch::Nearby, on } => {
                             tell(&Told::Switched { switch: Switch::Nearby, on: crate::phone::turn_nearby(on) });
+                        }
+                        Asked::Switch { switch: Switch::NearbySend, on } => {
+                            tell(&Told::Switched { switch: Switch::NearbySend, on: crate::phone::turn_sending(on) });
                         }
                         // On a thread of its own (a download may take a while): what else is asked meanwhile is done.
                         Asked::Install(release) => {

@@ -5,8 +5,9 @@
 //! while no panel is up, what comes is told as it comes, and what came by its picture. Pressed then, the panel opens
 //! where the station is, and the picture is carried onto its face there.
 //!
-//! A plate drawn as the panel's skin draws its plates (see `menu::plate`), slid out of the edge of the pointer's screen
-//! that opens the workbench, in a window of the panel's thread. What came goes back in after a while, held while the
+//! A plate drawn as the panel's skin draws its plates (see `menu::sheet`: on glass and Windows 11, over the screen
+//! frosted as a menu is), slid out of the edge of the pointer's screen that opens the workbench, in a window of the
+//! panel's thread. What came goes back in after a while, held while the
 //! pointer is on it. Nothing of it is shown while a game is in front: a device asking meanwhile is asked once the game
 //! is left (it waits a minute for its answer).
 
@@ -22,7 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{MSG, WM_CHAR, WM_KEYDOWN, WM_LBUTT
 use windows_numerics::Matrix3x2;
 
 use super::canvas::{Align, Canvas, Font, Point};
-use super::gfx::{self, Frame, Gfx, Surface};
+use super::gfx::{self, Frame, Gfx};
+use super::glass::{Pane, Sheet};
 use super::icons::Icon;
 use super::life::{Lives, Showing};
 use super::text::Lang;
@@ -157,12 +159,40 @@ struct Flight {
     to: Option<RECT>,
 }
 
-/// Its window, what it draws with there, and its being shown on that device (see `life`).
+/// Its window, what it draws with there (over the screen frosted where the look it was made for frosts what is
+/// behind: see `menu::Drawn`), and its being shown on that device (see `life`).
 struct Drawn {
     window: Window,
     gfx: Rc<Gfx>,
-    surface: Option<Surface>,
+    surface: Option<(super::menu::Drawn, super::menu::Look)>,
     showing: Option<Showing>,
+}
+
+impl Drawn {
+    /// What it draws with, made for `look` (anew where it was made for another, its skin since changed): taken out
+    /// of it while it is drawn.
+    fn take_surface(&mut self, look: super::menu::Look) -> windows::core::Result<(super::menu::Drawn, super::menu::Look)> {
+        match self.surface.take().filter(|(_, made)| *made == look) {
+            Some(made) => Ok(made),
+            None => super::menu::Drawn::new(&self.gfx, self.window.hwnd, look).map(|made| (made, look)),
+        }
+    }
+}
+
+/// Draws one frame on `surface`, `size` (physical px) at `scale`: what `paint` draws (told whether it is over the
+/// screen frosted), over the screen frosted where `pane` is.
+fn draw_on(surface: &mut super::menu::Drawn, gfx: &Rc<Gfx>, size: (u32, u32), scale: f32, pane: Option<Pane>, paint: impl FnOnce(&Frame, bool)) -> windows::core::Result<()> {
+    match surface {
+        super::menu::Drawn::Plain(surface) => surface.draw(gfx, size, scale, |frame| paint(frame, false)),
+        super::menu::Drawn::Frosted(frosted) => {
+            let mut paint = Some(paint);
+            frosted.draw_sheets(gfx, size, scale, &[Sheet { pane, reach: (0, 0, size.0, size.1) }], |_, frame| {
+                if let Some(paint) = paint.take() {
+                    paint(frame, true);
+                }
+            })
+        }
+    }
 }
 
 impl Lives for Drawn {
@@ -175,8 +205,10 @@ impl Lives for Drawn {
     }
 
     fn let_go_of_shown(&mut self) {
-        if let Some(surface) = &mut self.surface {
-            surface.release(&self.gfx);
+        match &mut self.surface {
+            Some((super::menu::Drawn::Plain(surface), _)) => surface.release(&self.gfx),
+            Some((super::menu::Drawn::Frosted(frosted), _)) => frosted.release(),
+            None => {}
         }
     }
 
@@ -461,7 +493,8 @@ impl Peek {
     fn make(&mut self, place: Place) -> bool {
         let Ok(gfx) = gfx::for_area(place.window) else { return false };
         if self.drawn.is_none() {
-            let Ok(window) = Window::new() else { return false };
+            // (One the compositor draws what is behind into, for the skins that frost it: a layered one it does not.)
+            let Ok(window) = Window::see_through() else { return false };
             self.drawn = Some(Drawn { window, gfx: gfx.clone(), surface: None, showing: None });
         }
         let drawn = self.drawn.as_mut().unwrap();
@@ -779,11 +812,8 @@ impl Peek {
             Edge::Top => -((place.plate.bottom - place.window.top) as f32 / scale + ROOM),
         };
         let (dx, dy) = if place.edge == Edge::Top { (0.0, back) } else { (back, 0.0) };
-        let surface = match drawn.surface.take() {
-            Some(surface) => Ok(surface),
-            None => Surface::new(&drawn.gfx, drawn.window.hwnd),
-        };
-        let Ok(mut surface) = surface else { return true };
+        let look = super::menu::Look::of(skin, dark);
+        let Ok(mut surface) = drawn.take_surface(look) else { return true };
         drawn.shown();
         let mut whole = true;
         let mut spots = Vec::new();
@@ -801,10 +831,12 @@ impl Peek {
             shaken: written.shaken.map_or(0.0, |shaken| shaken_by(now.saturating_duration_since(shaken))),
             trying: written.trying,
         });
-        let done = surface.draw(&drawn.gfx, size, scale, |frame| {
-            let middle = (plate.0 / 2.0, plate.1 / 2.0);
-            frame.place(Matrix3x2::translation(-middle.0, -middle.1) * Matrix3x2::scale(held, held) * Matrix3x2::translation(corner.0 + dx + middle.0, corner.1 + dy + middle.1));
-            whole = paint(frame, &theme, lang, &says, (over, trust, away, copied), field.as_ref(), &mut spots, &mut places);
+        let middle = (plate.0 / 2.0, plate.1 / 2.0);
+        let placed = Matrix3x2::translation(-middle.0, -middle.1) * Matrix3x2::scale(held, held) * Matrix3x2::translation(corner.0 + dx + middle.0, corner.1 + dy + middle.1);
+        let pane = Pane::placed(placed, (0.0, 0.0, plate.0, plate.1), super::menu::sheet_radius(look, true, plate.1), scale, 1.0);
+        let done = draw_on(&mut surface.0, &drawn.gfx, size, scale, Some(pane), |frame, frosted| {
+            frame.place(placed);
+            whole = paint(frame, &theme, lang, &says, (over, trust, away, copied), frosted, field.as_ref(), &mut spots, &mut places);
             frame.origin(0.0, 0.0);
             // What its picture draws, kept to be carried as it is dragged off.
             if let (Says::Came { id, got, .. }, false) = (&says, away) {
@@ -867,15 +899,12 @@ impl Peek {
         let drawn = self.drawn.as_mut()?;
         let scale = self.place.map_or(1.0, |place| place.contact.scale);
         let size = ((rect.right - rect.left).max(1) as u32, (rect.bottom - rect.top).max(1) as u32);
-        let surface = match drawn.surface.take() {
-            Some(surface) => Ok(surface),
-            None => Surface::new(&drawn.gfx, drawn.window.hwnd),
-        };
-        let Ok(mut surface) = surface else { return Some(Duration::ZERO) };
         let (skin, dark, lang) = look();
+        let Ok(mut surface) = drawn.take_surface(super::menu::Look::of(skin, dark)) else { return Some(Duration::ZERO) };
         let theme = Theme::new(skin, dark);
         let (w, h) = (size.0 as f32 / scale, size.1 as f32 / scale);
-        let done = surface.draw(&drawn.gfx, size, scale, |frame| {
+        // (Its picture alone, nothing of it frosted.)
+        let done = draw_on(&mut surface.0, &drawn.gfx, size, scale, None, |frame, _| {
             let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
             let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
             unsafe { frame.dc.PushLayer(&layer, None) };
@@ -925,6 +954,17 @@ fn came_of(items: &[crate::station::shelf::Item], id: u64) -> Option<Says> {
                 Got::Files { count: entries.len(), pictures: files.iter().all(|file| is_picture(&file.name)) }
             } else {
                 Got::Items { count: entries.len() }
+            }
+        }
+        // (Gone to the folder chosen for them: each file, and each folder sent, where it is.)
+        What::Files { paths, .. } => {
+            let folders = paths.iter().filter(|path| path.is_dir()).count();
+            if folders == paths.len() {
+                Got::Folders { count: folders }
+            } else if folders == 0 {
+                Got::Files { count: paths.len(), pictures: paths.iter().all(|path| is_picture(&path.to_string_lossy())) }
+            } else {
+                Got::Items { count: paths.len() }
             }
         }
         What::Link { .. } | What::Text { .. } | What::Saved { words: true, .. } => {
@@ -1159,15 +1199,21 @@ fn words(says: &Says, lang: Lang) -> (String, String) {
     }
 }
 
-/// Draws `says` on its plate from the frame's origin, `over` the part the pointer is on and the asking's device to be
+/// Draws `says` on its plate from the frame's origin (over the screen `frosted` or not: see `menu::sheet`), `over` the part the pointer is on and the asking's device to be
 /// trusted or not (`trust`), what came's picture carried off it or not (`away`) and its words copied or not (`copied`),
 /// a PIN's box as `field` is; its parts a press does something on put in `spots`, and where in the PIN's box each place
 /// between its characters is in `places`. Whether all of it was drawn (its picture made).
 #[allow(clippy::too_many_arguments)]
-fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, away, copied): (Option<Spot>, bool, bool, bool), field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
+fn paint(frame: &Frame, theme: &Theme, lang: Lang, says: &Says, (over, trust, away, copied): (Option<Spot>, bool, bool, bool), frosted: bool, field: Option<&Field>, spots: &mut Vec<(f32, f32, f32, f32, Spot)>, places: &mut Vec<(usize, f32)>) -> bool {
     let canvas: &dyn Canvas = frame;
     let height = tall(says);
-    let plate = super::menu::plate(canvas, super::menu::Look::of(theme.skin, theme.dark), (0.0, 0.0, WIDE, height));
+    let plate = match super::menu::sheet(frame, super::menu::Look::of(theme.skin, theme.dark), (0.0, 0.0, WIDE, height), frosted) {
+        Ok(plate) => plate,
+        Err(error) => {
+            frame.fail(error);
+            return true;
+        }
+    };
     let accent = match theme.skin {
         Skin::Paper => theme.text,
         _ => super::theme::accent(theme.dark),
@@ -1591,7 +1637,7 @@ mod pictures {
                                     &"pin-wrong" => Some(Field { typing: &wrong, keys: true, caret: false, shaken: -4.0, trying: false }),
                                     _ => None,
                                 };
-                                paint(frame, &theme, Lang::Zh, says, *state, field.as_ref(), &mut Vec::new(), &mut Vec::new());
+                                paint(frame, &theme, Lang::Zh, says, *state, false, field.as_ref(), &mut Vec::new(), &mut Vec::new());
                             })
                             .unwrap();
                         if pass == 1 {

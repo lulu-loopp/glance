@@ -394,7 +394,10 @@ pub fn run() {
     // what a folder is, Glance could start unasked there), 1 a folder above
     // can be changed by others, 2 the folder cannot be vouched for, 3 it is
     // a link or a root, 4 the files could not be put there or taken away.
-    let args: Vec<String> = std::env::args().collect();
+    // (Read as they are: a path to send, below, need not be Unicode whole.)
+    let args: Vec<String> = std::env::args_os().map(|arg| arg.to_string_lossy().into_owned()).collect();
+    // What Explorer's Send to (the installer's shortcut there) gives to send to devices nearby, as it gave them.
+    let to_send: Option<Vec<std::path::PathBuf>> = (args.get(1).map(String::as_str) == Some("--send")).then(|| std::env::args_os().skip(2).map(std::path::PathBuf::from).collect());
     let code = |kind: elevation::InstallFolder| match kind {
         elevation::InstallFolder::Holds => 0,
         elevation::InstallFolder::Open => 1,
@@ -482,7 +485,7 @@ pub fn run() {
     // never shown elevated. The desktop's shell is asked to start Glance as the user, and the sensors are started for
     // it. Only where the shell itself runs elevated (UAC turned off) is there no other way, and Glance runs whole, as
     // it always did; and a start the shell made that is elevated all the same is not handed over again.
-    let handed_off = std::env::args().any(|arg| arg == handoff::HANDED_OFF);
+    let handed_off = std::env::args_os().any(|arg| arg == handoff::HANDED_OFF);
     if elevation::is_elevated() && !handed_off {
         let exe = std::env::current_exe().expect("own path");
         let mut asked = handoff::start_as_user(&exe.to_string_lossy(), handoff::HANDED_OFF);
@@ -505,15 +508,20 @@ pub fn run() {
             }
         }
     }
-    // One Glance at a time: starting it again opens its settings.
+    // One Glance at a time: starting it again opens its settings (with what it was given to send, at the page that
+    // sends it).
+    let ask_the_first = |to_send: Option<Vec<std::path::PathBuf>>| match to_send {
+        Some(paths) => tray::ask_to_send(&paths),
+        None => tray::ask_for_settings(),
+    };
     if already_running() {
-        tray::ask_for_settings();
+        ask_the_first(to_send);
         return;
     }
     // Two starts at once: the later one asks the first for its settings.
     let _single = unsafe { CreateMutexW(None, true, SINGLE_INSTANCE) };
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        tray::ask_for_settings();
+        ask_the_first(to_send);
         return;
     }
 
@@ -562,6 +570,10 @@ pub fn run() {
     station::recent::start(|| app().controller.wake());
     // Files sent from devices nearby, by the phone remote's helper (see `nearby`).
     nearby::start(|| app().controller.wake());
+    // Started to send what Explorer gave: the settings at nearby transfer's page, that chosen there.
+    if let Some(paths) = to_send {
+        ui::settings_window::open_to_send(paths);
+    }
     station::apps::follow(&app().settings.lock().unwrap().apps);
     notes::follow_settings(&app().settings.lock().unwrap());
     station::recent::follow_settings(&app().settings.lock().unwrap());

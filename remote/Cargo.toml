@@ -69,3 +69,10 @@ features = [
 opt-level = "s"
 lto = true
 strip = true
+
+# Built quickly to try a change on this PC (`cargo build --profile fast`, into target/fast), as the app is.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

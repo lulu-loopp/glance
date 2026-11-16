@@ -4,13 +4,16 @@
 use super::clipboard::Content;
 use super::folder::Folder;
 use super::shelf::{Arrived, Entry, Full, Item, Rules, Shelf, What};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The longest text kept on the shelf itself (UTF-8 bytes); longer, it is kept as a file of the station's own (the
 /// shelf is written whole at each change).
 const TEXT_MOST: usize = 16 << 10;
 /// The most things copied kept in Recently copied, not pinned (the oldest go first).
 const COPIED_MOST: usize = 200;
+
+/// How much a drive is left with by what devices nearby send to a folder of the user's (as the helper leaves its own).
+const ROOM_LEFT: u64 = 1 << 30;
 
 /// Why what was given was not taken.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +36,9 @@ pub struct Keep {
     pub rules: Rules,
     /// Files put on it kept as a copy too.
     pub always_copy: bool,
+    /// Where files sent from devices nearby go, under the names they came with, where the user chose a folder for them
+    /// (none: kept by the station itself, see `arrived`).
+    pub nearby_folder: Option<PathBuf>,
     /// Why what was last given could not be taken, where it could not.
     pub refused: Option<Refused>,
 }
@@ -40,7 +46,7 @@ pub struct Keep {
 impl Keep {
     /// The station as it was last saved in `folder`.
     pub fn open(folder: Folder, rules: Rules, always_copy: bool) -> Keep {
-        Keep { shelf: folder.load(), folder, rules, always_copy, refused: None }
+        Keep { shelf: folder.load(), folder, rules, always_copy, nearby_folder: None, refused: None }
     }
 
     /// Takes `content` onto the shelf at `now_ms` (`copied`: as it was copied, into Recently copied; `stays_here`: see
@@ -169,6 +175,73 @@ impl Keep {
             }
         }
         Ok(arrived)
+    }
+
+    /// The files of the sending from `from` (each where it is, as it was sent, how large it said it is) moved into
+    /// `dir` under the names they came with (made plain names, and a name there taken: "name (1)"), a folder sent made
+    /// there as a folder of its own (see `folder::new_folder`), and put on the shelf where they are at `now_ms` (see
+    /// `Shelf::arrived_at`): each taken in, where it is now and how large. The station keeps none of them: taken off
+    /// it, or gone with time, they stay. One no longer where it was said to be (taken in before) or not a plain file
+    /// is left out (see `folder::adopt_to`). One that cannot be moved now leaves the rest where they are, to be taken
+    /// again: those moved before it put on the shelf all the same.
+    pub fn arrived_into(&mut self, dir: &Path, files: &[(PathBuf, String, u64)], from: super::shelf::Device, now_ms: u64) -> Result<Vec<(PathBuf, u64)>, Refused> {
+        let mut folders: Vec<(String, PathBuf)> = Vec::new();
+        let mut taken = Vec::new();
+        let mut shelved = Vec::new();
+        let mut refused = None;
+        for (source, name, _) in files {
+            let mut parts = super::folder::parts_of(name);
+            let file = parts.pop().unwrap_or_default();
+            // (In a folder sent: that folder made as the first of its files comes, once for the sending.)
+            let place = match parts.split_first() {
+                None => Ok(dir.to_path_buf()),
+                Some((top, inner)) => match folders.iter().find(|(name, _)| name == top) {
+                    Some((_, made)) => Ok(made.clone()),
+                    None => super::folder::new_folder(dir, top).inspect(|made| {
+                        folders.push((top.clone(), made.clone()));
+                        shelved.push(made.clone());
+                    }),
+                }
+                .map(|top| inner.iter().fold(top, |path, part| path.join(part))),
+            };
+            let moved = place.and_then(|place| super::folder::adopt_named(source, &place, &file));
+            match moved {
+                Ok((path, size)) => {
+                    if parts.is_empty() {
+                        shelved.push(path.clone());
+                    }
+                    taken.push((path, size));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                    crate::journal::note(format!("nearby: a file sent was left out ({error})"));
+                    continue;
+                }
+                Err(error) => {
+                    crate::journal::note(format!("nearby: a file sent could not be put in the folder chosen ({error})"));
+                    refused = Some(Refused::Unwritten);
+                    break;
+                }
+            }
+        }
+        if !shelved.is_empty() {
+            self.shelf.arrived_at(shelved, from, now_ms);
+            self.save();
+        }
+        self.refused = refused;
+        match refused {
+            Some(refused) => Err(refused),
+            None => Ok(taken),
+        }
+    }
+
+    /// How much a device nearby may send now: what the station has room for, or, where what is sent goes to a folder of
+    /// the user's, what that folder's drive has free, short of `ROOM_LEFT`.
+    pub fn room_offered(&self) -> u64 {
+        match &self.nearby_folder {
+            Some(dir) => super::folder::free_space(dir).unwrap_or(0).saturating_sub(ROOM_LEFT),
+            None => self.shelf.room(self.rules),
+        }
     }
 
     /// The files sent from devices nearby `files` as they are given out (see `shelf::entries`): each sent by itself
@@ -581,6 +654,69 @@ mod tests {
         std::fs::write(inbox.join("plain.jpg"), b"p").unwrap();
         assert_eq!(folder.adopt(&inbox.join("plain.jpg"), "n1-3.jpg").unwrap(), 1);
         assert_eq!(std::fs::read(folder.path("n1-3.jpg")).unwrap(), b"p");
+    }
+
+    /// Files sent go to the folder chosen for them under the names they came with (a name there taken, numbered; a
+    /// folder sent made as a folder of its own), the shelf pointing at them: taken off it, they stay. What the same
+    /// device sends within a minute joins it. To another drive, they are copied there, marked as from the Internet.
+    #[test]
+    fn files_sent_go_to_the_folder_chosen() {
+        let inbox = crate::settings::local_dir().join("keep-into-inbox");
+        let _ = std::fs::remove_dir_all(&inbox);
+        std::fs::create_dir_all(&inbox).unwrap();
+        // (The folder chosen on this test's drive, then on the build's: another drive where the build is on one.)
+        let elsewhere = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("keep-into-{}", std::process::id()));
+        for chosen in [crate::settings::local_dir().join("keep-into-chosen"), elsewhere] {
+            let _ = std::fs::remove_dir_all(&chosen);
+            std::fs::create_dir_all(chosen.join("Trip")).unwrap();
+            std::fs::write(chosen.join("照片.jpg"), b"mine").unwrap();
+            let mut sent = Vec::new();
+            for (at, name, bytes) in [("1", "照片.jpg", &b"one"[..]), ("2", "Trip/day1/a.jpg", b"two"), ("3", "Trip/b.jpg", b"three")] {
+                std::fs::write(inbox.join(at), bytes).unwrap();
+                // (Marked as the helper marks what it takes in.)
+                std::fs::write(stream_of(&inbox.join(at)), b"[ZoneTransfer]
+ZoneId=3
+").unwrap();
+                sent.push((inbox.join(at), name.to_string(), bytes.len() as u64));
+            }
+            let mut keep = keep("into", Rules::default());
+            let taken = keep.arrived_into(&chosen, &sent, device("AB"), 1_000).unwrap();
+            let numbered = chosen.join("照片 (1).jpg");
+            let folder = chosen.join("Trip (1)");
+            assert_eq!(taken, [(numbered.clone(), 3), (folder.join("day1").join("a.jpg"), 3), (folder.join("b.jpg"), 5)]);
+            assert_eq!(std::fs::read(chosen.join("照片.jpg")).unwrap(), b"mine", "what was there is left as it was");
+            assert_eq!(std::fs::read(&numbered).unwrap(), b"one");
+            assert!(!inbox.join("1").exists(), "moved, not copied");
+            assert!(std::fs::read_to_string(stream_of(&numbered)).unwrap().contains("ZoneId=3"));
+            let item = keep.shelf.items[0].clone();
+            assert_eq!(item.what, What::Files { paths: vec![numbered.clone(), folder.clone()], kept: Vec::new() });
+            assert_eq!((item.own_bytes, item.from.as_ref().map(|from| from.fingerprint.as_str())), (0, Some("AB")));
+            // Sent again within a minute: with it.
+            std::fs::write(inbox.join("4"), b"four").unwrap();
+            keep.arrived_into(&chosen, &[(inbox.join("4"), "照片.jpg".into(), 4)], device("AB"), 30_000).unwrap();
+            assert_eq!(keep.shelf.items.len(), 1);
+            let What::Files { paths, .. } = &keep.shelf.items[0].what else { panic!("files") };
+            assert_eq!(paths.last(), Some(&chosen.join("照片 (2).jpg")));
+            // Taken off: the files stay.
+            keep.remove(item.id);
+            assert!(numbered.exists() && folder.join("b.jpg").exists());
+            // Taken in again (moved before): nothing more.
+            assert_eq!(keep.arrived_into(&chosen, &sent, device("AB"), 40_000).unwrap(), []);
+            let _ = std::fs::remove_dir_all(&chosen);
+        }
+    }
+
+    /// While what is sent goes to a folder chosen, as much may be sent as its drive has free, short of a gigabyte.
+    #[test]
+    fn a_folder_chosen_offers_its_drive() {
+        let mut keep = keep("into-room", Rules::default());
+        assert_eq!(keep.room_offered(), keep.shelf.room(keep.rules));
+        let chosen = crate::settings::local_dir().join("keep-into-room-chosen");
+        keep.nearby_folder = Some(chosen.join("not made yet"));
+        std::fs::create_dir_all(&chosen).unwrap();
+        let free = super::super::folder::free_space(&chosen).unwrap();
+        let offered = keep.room_offered();
+        assert!(offered <= free.saturating_sub(ROOM_LEFT) && offered + (64 << 20) >= free.saturating_sub(ROOM_LEFT));
     }
 
     fn stream_of(path: &std::path::Path) -> PathBuf {

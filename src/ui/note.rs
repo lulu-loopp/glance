@@ -274,7 +274,7 @@ pub fn writing_menu(lang: Lang, spot: Spot) -> (Vec<super::menu::Item<'static>>,
             (Write::Heading(0), lang.pick("正文", "Body text"), Icon::Pilcrow, false),
         ]);
     }
-    let items = rows.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(Mark::Icon(*icon)), false, *rule_before)).collect();
     (items, rows.into_iter().map(|(write, ..)| Choice::Write(write)).collect())
 }
 
@@ -294,7 +294,7 @@ pub fn menu(lang: Lang, colour: crate::notes::Colour, named: bool, stuck: bool) 
         }
         rows.push((Choice::TakeAway, lang.pick("删除（移到回收站）", "Delete (to the Recycle Bin)"), Mark::Icon(Icon::Trash), false, false));
     }
-    let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item { label, mark: Some(*mark), checked: *checked, rule_before: *rule_before }).collect();
+    let items = rows.iter().map(|(_, label, mark, checked, rule_before)| Item::new(*label, Some(*mark), *checked, *rule_before)).collect();
     (items, rows.into_iter().map(|(choice, ..)| choice).collect())
 }
 
@@ -2535,18 +2535,18 @@ mod tests {
         use crate::notes::edit::Block;
         let (items, choices) = writing_menu(super::Lang::Zh, Spot::default());
         assert_eq!(items.len(), choices.len());
-        assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入待办事项", "插入表格", "插入代码块", "插入分隔线", "插入链接", "一级标题", "二级标题", "三级标题", "正文"]);
+        assert_eq!(items.iter().map(|item| item.label.to_string()).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入待办事项", "插入表格", "插入代码块", "插入分隔线", "插入链接", "一级标题", "二级标题", "三级标题", "正文"]);
         assert_eq!(choices[4], Choice::Write(Write::Insert(Block::Table)));
         assert_eq!(choices[11], Choice::Write(Write::Heading(0)));
         assert_eq!(items.iter().filter(|item| item.rule_before).count(), 2);
-        let labels = |spot: Spot| writing_menu(super::Lang::Zh, spot).0.iter().map(|item| item.label).collect::<Vec<_>>();
+        let labels = |spot: Spot| writing_menu(super::Lang::Zh, spot).0.iter().map(|item| item.label.to_string()).collect::<Vec<_>>();
         assert_eq!(labels(Spot { in_cell: false, link: Some(true) })[7..10], ["编辑链接", "复制链接地址", "移除链接"]);
         assert_eq!(labels(Spot { in_cell: false, link: Some(false) })[7..9], ["编辑链接", "复制链接地址"]);
         assert_eq!(labels(Spot { in_cell: false, link: Some(false) })[9], "一级标题");
         // (In a table's cell: cut, copy, paste, a link, and what is done to its rows, its columns and itself.)
         let (items, choices) = writing_menu(super::Lang::Zh, Spot { in_cell: true, link: None });
         assert_eq!(items.len(), choices.len());
-        assert_eq!(items.iter().map(|item| item.label).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入链接", "在上方插入行", "在下方插入行", "在左侧插入列", "在右侧插入列", "删除行", "删除列", "删除表格"]);
+        assert_eq!(items.iter().map(|item| item.label.to_string()).collect::<Vec<_>>(), ["剪切", "复制", "粘贴", "插入链接", "在上方插入行", "在下方插入行", "在左侧插入列", "在右侧插入列", "删除行", "删除列", "删除表格"]);
         assert_eq!(choices[10], Choice::Write(Write::Table(crate::notes::table::Change::TakeTable)));
         assert_eq!(items.iter().filter(|item| item.rule_before).count(), 3);
         assert_eq!(labels(Spot { in_cell: true, link: Some(true) })[3..6], ["编辑链接", "复制链接地址", "移除链接"]);

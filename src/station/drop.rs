@@ -130,7 +130,7 @@ fn asked(format: u16, index: i32, tymed: i32) -> FORMATETC {
 }
 
 /// Whether `data` holds something the station takes.
-fn takes(data: &IDataObject) -> bool {
+pub(super) fn takes(data: &IDataObject) -> bool {
     let formats = formats();
     [formats.files, formats.nameless, formats.png, formats.link, formats.text]
         .into_iter()
@@ -139,7 +139,7 @@ fn takes(data: &IDataObject) -> bool {
 
 /// What `data` gives: its files where it has paths; else its files with none (read now); else its picture, its web
 /// address, or its text.
-fn read(data: &IDataObject) -> Vec<Content> {
+pub(super) fn read(data: &IDataObject) -> Vec<Content> {
     let formats = formats();
     if let Some(paths) = memory(data, formats.files, -1).map(|bytes| paths_of(&bytes)) {
         return vec![Content::Files(paths)];

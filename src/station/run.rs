@@ -66,6 +66,8 @@ pub enum Ask {
     Landing(Vec<u64>, std::time::Instant),
     /// A sending to a device nearby over (see `send`): its own files it held let go of.
     Sent(u64),
+    /// What is given sent to the device nearby of this key (see `send::key_of`), as chosen in a menu's "发送到".
+    SendTo(Vec<Given>, u64),
 }
 
 /// What is done with files not on the station (see `Ask::Files`): put on the clipboard (copied from the files come
@@ -203,13 +205,15 @@ pub fn areas() -> Vec<(HWND, windows::Win32::Foundation::RECT, Lands)> {
 /// Where what is dropped goes: onto the station, or into what is kept at hand (see `apps`). Over where a page of the
 /// workbench is chosen (its tab), that page: a drag over it shows the page there (see `SHOW_PAGE`), and one let go
 /// on it goes where the page takes it (the station's, onto the station; the others take none). On a device nearby
-/// on the strip (by its key, see `send::key_of`), sent to it.
+/// on the strip (by its key, see `send::key_of`), sent to it. On the settings' sending pane, chosen there to send
+/// (see `ui::settings_window::dragged_in`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lands {
     Station,
     Apps,
     Pages(crate::ui::view::Tab),
     Device(u64),
+    Send,
 }
 
 /// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
@@ -220,6 +224,16 @@ pub const SHOW_PAGE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 20;
 /// told it by message): a drag over a strip along `edge` opens the station there, as a push into the edge does; one
 /// over where a page is chosen in `window` shows that page there.
 pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Lands, window: Option<HWND>) {
+    if lands == Lands::Send {
+        if let Some(window) = window {
+            crate::ui::settings_window::dragged_in(window, dragged);
+        }
+        return;
+    }
+    // Something from another program over a station: the devices nearby rise at its foot (see `send::foreign`).
+    if matches!(lands, Lands::Station | Lands::Pages(_)) && matches!(dragged, Dragged::Over(_)) && !super::drag::under_way() {
+        super::send::foreign(true);
+    }
     if lands == Lands::Apps {
         // Over it: what is kept at hand says it takes what is let go (see `Shown::apps_over`); gone, no more.
         ask(Ask::AppsOver(matches!(dragged, Dragged::Over(_))));
@@ -514,6 +528,7 @@ fn run(asks: Receiver<Ask>) {
         // (What an earlier Glance wrote to send, its sendings long over.)
         let _ = std::fs::remove_dir_all(super::send::folder());
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
+        keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
         STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
@@ -664,6 +679,7 @@ impl Station {
                 Ask::Over(over) => self.over = over,
                 Ask::AppsOver(over) => self.apps_over = over,
                 Ask::DragOut(given, thread) => self.dragging = Some((given, thread)),
+                Ask::SendTo(given, key) => self.send_to(given, key),
                 Ask::Files(paths, act) => match act {
                     FilesAct::Copy(entry) => {
                         self.copy(&Content::Files(paths), false, entry.map(Copied::Recent).into_iter().collect());
@@ -756,6 +772,23 @@ impl Station {
                     }
                 }
             }
+            // (To the folder the user chose for them: where they went, the station keeping none.)
+            if let Some(dir) = self.keep.nearby_folder.clone() {
+                match self.keep.arrived_into(&dir, &receipt.files_in(&inbox), from, super::now_ms()) {
+                    Ok(taken) => {
+                        super::recent::arrived(&taken, &alias);
+                        let _ = std::fs::remove_file(&path);
+                        if !taken.is_empty() {
+                            came.extend(self.keep.shelf.items.last().map(|item| item.id));
+                        }
+                        continue;
+                    }
+                    Err(refused) => {
+                        crate::journal::note(format!("nearby: what came is not taken in now ({refused:?})"));
+                        break;
+                    }
+                }
+            }
             match self.keep.arrived(&receipt.session, &receipt.files_in(&inbox), from, super::now_ms()) {
                 Ok(taken) => {
                     // (Each where it is given out: a file of a folder sent, in that folder.)
@@ -798,6 +831,27 @@ impl Station {
         }
     }
 
+    /// What is `given` sent to the device nearby of `key` (see `send::key_of`), where it is found: its own files held
+    /// till the sending is over (see `Ask::Sent`), the strip showing how it goes (see `send::sent_from_menu`), its files
+    /// told apart on a thread of their own. Nothing where something of it may not leave this PC, or nothing of it is
+    /// there.
+    fn send_to(&mut self, given: Vec<Given>, key: u64) {
+        let Some(to) = crate::nearby::targets_now().into_iter().find(|target| target.found && super::send::key_of(&target.fingerprint) == key).map(|target| target.fingerprint) else { return };
+        let leaving: Vec<Leaving> = given.into_iter().filter_map(|given| self.leaving(given)).collect();
+        let held: Vec<String> = leaving.iter().flat_map(|one| one.held.iter().cloned()).collect();
+        if leaving.is_empty() || leaving.iter().any(|one| one.stays_here) {
+            for name in &held {
+                self.keep.folder.let_go(name);
+            }
+            return;
+        }
+        let contents: Vec<Content> = leaving.into_iter().map(|one| one.content).collect();
+        let job = crate::nearby::job();
+        self.sending.insert(job, held);
+        super::send::sent_from_menu(job, &to);
+        std::thread::spawn(move || crate::nearby::send(job, &to, &super::send::outgoing(&contents, &super::send::folder_of(job))));
+    }
+
     /// What `given` dragged off it gives (see `drag_off`), its own files held meanwhile: none where it is no longer
     /// on it. (Files not its own: given where they are, never taken off anything.)
     fn leaving(&mut self, given: Given) -> Option<Leaving> {
@@ -819,6 +873,7 @@ impl Station {
         let settings = crate::app().settings.lock().unwrap().station;
         self.keep.rules = settings.rules();
         self.keep.always_copy = settings.always_copy;
+        self.keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         let listen = settings.history;
         if listen != self.listening {
             let done = unsafe { if listen { AddClipboardFormatListener(self.window) } else { RemoveClipboardFormatListener(self.window) } };
@@ -878,7 +933,7 @@ impl Station {
 
     fn show(&self) {
         // (What a device nearby may send it, as it has room now.)
-        crate::nearby::room(self.keep.shelf.room(self.keep.rules));
+        crate::nearby::room(self.keep.room_offered());
         let settings = crate::app().settings.lock().unwrap().station;
         let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));

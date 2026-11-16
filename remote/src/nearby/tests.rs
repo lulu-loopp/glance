@@ -68,7 +68,7 @@ fn thinking(name: &str, answer: Option<Answer>, thinks: Duration, kept: Kept) ->
     std::thread::spawn(move || serving.serve(listener));
     let sender = tls::Own::in_folder(&dir.join("sender")).unwrap();
     let me = Info { alias: "Galaxy Z Fold6".into(), device_model: Some("Samsung".into()), device_type: Some("mobile".into()), fingerprint: sender.fingerprint.clone(), port: Some(1), ..Info::default() };
-    let device = Device { fingerprint: receiver.own.fingerprint.clone(), alias: "Glance PC".into(), model: None, kind: None, address: IpAddr::from([127, 0, 0, 1]), port, https: true, heard: Instant::now() };
+    let device = Device { fingerprint: receiver.own.fingerprint.clone(), alias: "Glance PC".into(), model: None, kind: None, address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: true, heard: Instant::now() };
     Both { receiver, heard, kept, sender, me, device }
 }
 
@@ -191,8 +191,8 @@ fn posted(both: &Both, path: &str, body: &[u8], presenting: bool) -> (u16, Vec<u
 /// (presenting none) is asked about, and, taken with "trust" asked for, is trusted no more for that (it cannot be).
 #[test]
 fn a_fingerprint_only_said_is_never_trusted() {
-    let both = both("claimed", Some(Answer { take: true, trust: true }), Kept::default());
-    let mut sender = Sender { alias: "Fold".into(), model: None, kind: None, fingerprint: both.sender.fingerprint.clone(), verified: true, address: IpAddr::from([127, 0, 0, 1]) };
+    let both = both("claimed", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });
+    let mut sender = Sender { alias: "Fold".into(), model: None, kind: None, fingerprint: both.sender.fingerprint.clone(), verified: true, address: IpAddr::from([127, 0, 0, 1]), glance: false };
     both.kept.lock().unwrap().trust(&sender);
     let offer = json!({ "info": { "alias": "Fold", "version": "2.1", "fingerprint": both.sender.fingerprint, "deviceType": "mobile" }, "files": { "a": { "id": "a", "fileName": "a.jpg", "size": 1, "fileType": "image/jpeg" } } }).to_string();
     let (status, body) = without_certificate(&both, "/prepare-upload", offer.as_bytes());
@@ -213,7 +213,7 @@ fn a_fingerprint_only_said_is_never_trusted() {
 /// not, is refused (403); a second offer while one is being received waits its turn (409).
 #[test]
 fn files_not_as_offered_are_refused() {
-    let both = both("checked", Some(Answer { take: true, trust: false }), Kept::default());
+    let both = both("checked", Some(Answer { take: true, trust: false }), Kept { on: true, ..Kept::default() });
     let wrong_hash = "0".repeat(64);
     let offer = json!({ "info": { "alias": "Fold", "fingerprint": both.sender.fingerprint }, "files": { "a": { "id": "a", "fileName": "a.jpg", "size": 5, "fileType": "image/jpeg", "sha256": wrong_hash }, "b": { "id": "b", "fileName": "b.jpg", "size": 3, "fileType": "image/jpeg" } } }).to_string();
     let (status, body) = without_certificate(&both, "/prepare-upload", offer.as_bytes());
@@ -237,7 +237,7 @@ fn files_not_as_offered_are_refused() {
 /// may be.
 #[test]
 fn offers_are_taken_within_the_limits_told() {
-    let both = both("limits", None, Kept { most_file: Some(6), most_sending: Some(10), ..Kept::default() });
+    let both = both("limits", None, Kept { on: true, most_file: Some(6), most_sending: Some(10), ..Kept::default() });
     assert_eq!(both.receiver.limits(), (6, Some(10)));
     let offer = |sizes: &[u64]| {
         let files: serde_json::Map<String, Value> = sizes.iter().enumerate().map(|(at, size)| (at.to_string(), json!({ "id": at.to_string(), "fileName": "a.jpg", "size": size, "fileType": "image/jpeg" }))).collect();
@@ -250,6 +250,28 @@ fn offers_are_taken_within_the_limits_told() {
     // Within them, it goes on to be asked about (its user answers nothing: refused then, but asked).
     assert_eq!(without_certificate(&both, "/prepare-upload", offer(&[6, 4]).as_bytes()).0, 403);
     assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
+}
+
+/// Running to send alone (receiving off), this PC answers who it is but takes nothing, not even from a device trusted,
+/// and asks its user nothing.
+#[test]
+fn not_receiving_takes_nothing() {
+    let both = both("not-receiving", Some(Answer { take: true, trust: true }), Kept { send: true, ..Kept::default() });
+    (both.receiver.keep)(&|kept: &mut Kept| kept.trusted.push(super::Trusted { fingerprint: both.sender.fingerprint.clone(), ..Default::default() }));
+    let offer = json!({ "info": { "alias": "Fold", "fingerprint": both.sender.fingerprint }, "files": { "a": { "id": "a", "fileName": "a.jpg", "size": 1, "fileType": "image/jpeg" } } }).to_string();
+    assert_eq!(without_certificate(&both, "/prepare-upload", offer.as_bytes()).0, 403);
+    assert!(both.heard.asked.lock().unwrap().is_empty());
+    let info = json!({ "alias": "Fold", "version": "2.1", "fingerprint": both.sender.fingerprint, "port": 53317 }).to_string();
+    assert_eq!(without_certificate(&both, "/register", info.as_bytes()).0, 200);
+}
+
+/// What this PC is called to devices nearby is its one name, as it is now.
+#[test]
+fn called_by_its_one_name() {
+    let both = both("named", None, Kept { name: "书房".into(), ..Kept::default() });
+    assert_eq!(both.receiver.me().alias, "书房");
+    (both.receiver.keep)(&|kept: &mut Kept| kept.name = String::new());
+    assert_eq!(both.receiver.me().alias, "Glance PC", "no name: as it was started");
 }
 
 /// A device that registers is known (by the fingerprint it said, presenting no certificate), and told of this PC.
@@ -284,6 +306,28 @@ fn a_receiver_of_another_certificate_is_not_sent_to() {
     assert!(both.heard.asked.lock().unwrap().is_empty());
 }
 
+/// A device found is trusted only once it proves the certificate it announced: reached pinned to it, it says who it
+/// is, and one that holds another (or speaks plain HTTP) proves nothing.
+#[test]
+fn a_device_found_proves_its_certificate() {
+    let both = both("proven", None, Kept::default());
+    let info = send::proven(&both.sender, &both.device).unwrap();
+    assert_eq!(info.alias, "Glance PC");
+    let mut other = both.device.clone();
+    other.fingerprint = "00".repeat(32);
+    assert!(send::proven(&both.sender, &other).is_err());
+    let mut plain = both.device.clone();
+    plain.https = false;
+    assert!(send::proven(&both.sender, &plain).is_err());
+    let mut kept = Kept::default();
+    assert!(info.glance, "a Glance PC says it is one");
+    kept.trust_proven(&both.device.fingerprint.to_ascii_lowercase(), &info.alias, Some("desktop".into()), info.glance, false);
+    assert!(kept.trusted[0].glance);
+    let sender = Sender { alias: "Glance PC".into(), model: None, kind: None, fingerprint: both.device.fingerprint.clone(), verified: true, address: both.device.address, glance: true };
+    assert!(kept.trusts(&sender));
+    assert!(!kept.trusts(&Sender { verified: false, ..sender }), "only on its certificate presented");
+}
+
 /// Names a sending gives are shown without any folder of the sender's, nor what cannot stand in a name.
 #[test]
 fn names_given_are_only_names() {
@@ -309,7 +353,7 @@ fn names_given_are_only_names() {
 /// asking is taken back from its user.
 #[test]
 fn a_sending_cancelled_while_its_user_is_asked_is_taken_back() {
-    let both = thinking("withdrawn", Some(Answer { take: true, trust: false }), Duration::from_secs(20), Kept::default());
+    let both = thinking("withdrawn", Some(Answer { take: true, trust: false }), Duration::from_secs(20), Kept { on: true, ..Kept::default() });
     let paths = files("withdrawn", &[("a.jpg", b"x")]);
     let job = Arc::new(send::Job::default());
     let cancelling = job.clone();
@@ -348,7 +392,7 @@ fn asking_for_a_pin(own: &tls::Own) -> Device {
             });
         }
     });
-    Device { fingerprint: own.fingerprint.clone(), alias: "iPhone 15".into(), model: None, kind: Some("mobile".into()), address: IpAddr::from([127, 0, 0, 1]), port, https: true, heard: Instant::now() }
+    Device { fingerprint: own.fingerprint.clone(), alias: "iPhone 15".into(), model: None, kind: Some("mobile".into()), address: IpAddr::from([127, 0, 0, 1]), port, https: true, glance: false, heard: Instant::now() }
 }
 
 /// Gives the PINs in `given`, one each time a PIN is asked for (cancels the sending where none is left), and keeps the

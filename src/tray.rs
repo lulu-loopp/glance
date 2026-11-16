@@ -25,6 +25,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 
 use crate::settings::Shortcut;
 
+/// What another start of Glance gives the running one by `WM_COPYDATA` (its `dwData`): paths to send to devices
+/// nearby (UTF-16, each ended by a nought), from Explorer's Send to.
+const SEND_PATHS: usize = 0x474C_5344;
+
 /// The icon's messages to its window, and another start of Glance asking
 /// for the settings.
 const NOTIFY: u32 = WM_APP + 1;
@@ -137,6 +141,17 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             crate::show_settings(None);
             LRESULT(0)
         }
+        // Paths another start was given to send (see `ask_to_send`): chosen in the settings to send.
+        windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA => {
+            let data = unsafe { &*(lparam.0 as *const windows::Win32::System::DataExchange::COPYDATASTRUCT) };
+            if data.dwData != SEND_PATHS || data.lpData.is_null() {
+                return LRESULT(0);
+            }
+            let units = unsafe { std::slice::from_raw_parts(data.lpData as *const u16, data.cbData as usize / 2) };
+            let paths = units.split(|unit| *unit == 0).filter(|path| !path.is_empty()).map(|path| std::path::PathBuf::from(<std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(path))).collect();
+            crate::ui::settings_window::open_to_send(paths);
+            LRESULT(1)
+        }
         FOLLOW_SETTINGS => {
             register_hotkey(hwnd);
             let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &with_state(icon_data(hwnd))) };
@@ -203,6 +218,7 @@ pub fn run() {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
         // A start without administrator rights may ask too.
         let _ = ChangeWindowMessageFilterEx(hwnd, SHOW_SETTINGS, MSGFLT_ALLOW, None);
+        let _ = ChangeWindowMessageFilterEx(hwnd, windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA, MSGFLT_ALLOW, None);
         add_icon(hwnd);
         register_hotkey(hwnd);
         // A first start since an update says so, from the icon now there.
@@ -225,6 +241,27 @@ pub fn ask_for_settings() {
         // the running Glance may too.
         let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
         let _ = unsafe { PostMessageW(Some(hwnd), SHOW_SETTINGS, WPARAM(0), LPARAM(0)) };
+    }
+}
+
+/// Asks the running Glance to open its settings with `paths` chosen to send to devices nearby (see `SEND_PATHS`),
+/// waiting a while for it to take them.
+pub fn ask_to_send(paths: &[std::path::PathBuf]) {
+    use std::os::windows::ffi::OsStrExt;
+    let Ok(hwnd) = (unsafe { FindWindowW(TRAY_CLASS, None) }) else { return };
+    let units: Vec<u16> = paths.iter().flat_map(|path| path.as_os_str().encode_wide().chain([0])).collect();
+    let data = windows::Win32::System::DataExchange::COPYDATASTRUCT { dwData: SEND_PATHS, cbData: (units.len() * 2) as u32, lpData: units.as_ptr() as *mut _ };
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+        let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageTimeoutW(
+            hwnd,
+            windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&data as *const _ as isize),
+            windows::Win32::UI::WindowsAndMessaging::SMTO_ABORTIFHUNG,
+            10_000,
+            None,
+        );
     }
 }
 
@@ -327,7 +364,7 @@ pub fn open_menu(x: i32, y: i32, over_the_panel: bool) -> Option<(crate::ui::men
     choices.push((SETTINGS, if zh { "设置" } else { "Settings" }, Icon::Settings, false));
     choices.push((CHECK, if zh { "检查更新" } else { "Check for updates" }, Icon::Update, false));
     choices.push((QUIT, if zh { "退出 Glance" } else { "Quit Glance" }, Icon::Quit, true));
-    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item { label, mark: Some(crate::ui::menu::Mark::Icon(*icon)), checked: false, rule_before: *rule_before }).collect();
+    let items: Vec<Item<'static>> = choices.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     MENU_UP.store(true, Ordering::Relaxed);
     show_tip(false);
     let Some(menu) = Menu::open_at(items, crate::ui::menu::Look::system(), POINT { x, y }, true, over_the_panel) else {

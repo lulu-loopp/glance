@@ -3,12 +3,14 @@
 //! row for each choice with its icon, a light highlight under the pointer, a
 //! tick for a choice that is on, thin rules between groups. Shown at the pointer, it is up until a choice is made or
 //! it is left (a click elsewhere, Esc, Alt, another window to the front),
-//! as a system menu is.
+//! as a system menu is. A choice may open choices of its own beside it (a chevron after it), shown while it is lit; a
+//! choice may say more under it, and may be shown dimmed, not to be chosen (what is under it saying why).
 
+use std::borrow::Cow;
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, IsIconic, PostMessageW, SetForegroundWindow, MSG, SC_RESTORE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SYSCOMMAND, WM_SYSKEYDOWN,
@@ -74,15 +76,11 @@ impl Drawn {
     /// blurred and its colour lifted as its lanes are, Windows 11's as its acrylic is (each where the system frosts what
     /// is behind a window), the rest drawn alone.
     pub fn new(gfx: &Rc<gfx::Gfx>, hwnd: HWND, look: Look) -> windows::core::Result<Drawn> {
-        use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
-        let glass = match look.skin {
-            Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
-            Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
-            _ => None,
-        };
-        if let Some(mut frosted) = glass.and_then(|(frosting, _)| super::glass::Frosted::new(gfx, hwnd, frosting).ok()) {
-            frosted.set_frost(glass.map_or(1.0, |(_, frost)| frost));
-            return Ok(Drawn::Frosted(frosted));
+        if let Some((frosting, frost)) = frosting(look) {
+            if let Ok(mut frosted) = super::glass::Frosted::new(gfx, hwnd, frosting) {
+                frosted.set_frost(frost);
+                return Ok(Drawn::Frosted(frosted));
+            }
         }
         Surface::new(gfx, hwnd).map(Drawn::Plain)
     }
@@ -106,28 +104,18 @@ impl Drawn {
         match self {
             Drawn::Plain(surface) => surface.draw(gfx, size, px, |frame| {
                 frame.origin(room, room);
-                let colours = Colours::new(look, false);
-                paint_plate(frame, &colours, (0.0, 0.0, width, height), colours.radius.min(height / 2.0));
+                let _ = sheet(frame, look, (0.0, 0.0, width, height), false);
                 on(frame, false);
                 words(frame, false);
             }),
             Drawn::Frosted(frosted) => {
-                let colours = Colours::new(look, true);
-                let radius = colours.radius.min(height / 2.0);
+                let radius = sheet_radius(look, true, height);
                 let pane = (room * px, room * px, width * px, height * px, radius * px);
-                let glass = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark));
-                let halo = glass.as_ref().map(|theme| theme.legibility);
+                let halo = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark).legibility);
                 frosted.draw(gfx, size, px, pane, |frame| {
                     frame.origin(room, room);
-                    match &glass {
-                        Some(theme) => {
-                            let piece = super::view::Rect { x: 0.0, y: 0.0, w: width, h: height };
-                            if let Err(error) = super::skins::glass_sheet(frame, theme, piece, radius, look.frost) {
-                                gfx::failed("menu", gfx, Some(&error));
-                            }
-                            frame.origin(room, room);
-                        }
-                        None => paint_plate(frame, &colours, (0.0, 0.0, width, height), radius),
+                    if let Err(error) = sheet(frame, look, (0.0, 0.0, width, height), true) {
+                        gfx::failed("menu", gfx, Some(&error));
                     }
                     on(frame, true);
                     let laid = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, width, height), px, halo, |frame| {
@@ -141,6 +129,44 @@ impl Drawn {
             }
         }
     }
+}
+
+/// How what is drawn in `look` over the screen is frosted, where the system frosts what is behind a window: glass's
+/// blurred and its colour lifted as its lanes are, as frosted as the glass it is opened on is drawn; Windows 11's as
+/// its acrylic is; the rest not (chart paper's sheets are whole).
+pub fn frosting(look: Look) -> Option<((f32, f32), f32)> {
+    use super::skins::{ACRYLIC_BLUR, ACRYLIC_SATURATION, FROST_BLUR, GLASS_SATURATION};
+    match look.skin {
+        Some(super::theme::Skin::Glass) => Some(((FROST_BLUR, GLASS_SATURATION), look.frost)),
+        Some(super::theme::Skin::Fluent) => Some(((ACRYLIC_BLUR, ACRYLIC_SATURATION), 1.0)),
+        _ => None,
+    }
+}
+
+/// How round a sheet `height` tall in `look` is (DIPs), over the screen `frosted` or not.
+pub fn sheet_radius(look: Look, frosted: bool, height: f32) -> f32 {
+    Colours::new(look, frosted).radius.min(height / 2.0)
+}
+
+/// A sheet (`x`, `y`, `width`, `height`) in `look`, as a menu's is, from where the frame is placed: over the screen
+/// `frosted` by the compositor (see `Drawn`), glass's a piece of the glass it is opened on (its shadows, its tint as
+/// frosted as that glass is, the light inside its edge and along it), Windows 11's a little clear over its acrylic;
+/// else whole over what it covers. What is drawn on it is to be drawn as the plate it gives says.
+pub fn sheet(frame: &gfx::Frame, look: Look, (x, y, width, height): (f32, f32, f32, f32), frosted: bool) -> windows::core::Result<Plate> {
+    let colours = Colours::new(look, frosted);
+    let radius = colours.radius.min(height / 2.0);
+    match (frosted, look.skin) {
+        (true, Some(super::theme::Skin::Glass)) => {
+            let theme = super::theme::Theme::new(super::theme::Skin::Glass, look.dark);
+            let mut placed = windows_numerics::Matrix3x2::default();
+            unsafe { frame.dc.GetTransform(&mut placed) };
+            let drawn = super::skins::glass_sheet(frame, &theme, super::view::Rect { x, y, w: width, h: height }, radius, look.frost);
+            unsafe { frame.dc.SetTransform(&placed) };
+            drawn?;
+        }
+        _ => paint_plate(frame, &colours, (x, y, width, height), radius),
+    }
+    Ok(Plate { icon: colours.icon, highlight: colours.highlight, radius })
 }
 
 /// A sheet's plate in `colours`, `radius` round: its shadow, its ground, its edge, and (glass's) the light along its top,
@@ -164,17 +190,47 @@ pub enum Mark {
 /// How large a colour's dot is across (DIPs): as a note's dot by its name, a little smaller than an icon.
 const DOT: f32 = 12.0;
 
-/// One choice: what it says, what stands before it, whether it is on (ticked), and
-/// whether a rule sets it off from the choices before it.
+/// One choice: what it says (and, smaller, under it), what stands before it, whether it is on (ticked), whether a rule
+/// sets it off from the choices before it, whether it is shown dimmed (not to be chosen), and the choices it opens
+/// beside it (none: it is chosen itself).
+#[derive(Clone)]
 pub struct Item<'a> {
-    pub label: &'a str,
+    pub label: Cow<'a, str>,
+    pub detail: Option<Cow<'a, str>>,
     pub mark: Option<Mark>,
     pub checked: bool,
     pub rule_before: bool,
+    pub dimmed: bool,
+    pub more: Vec<Item<'a>>,
 }
 
-/// Its measures (DIPs), as Windows 11's menus have them.
+impl<'a> Item<'a> {
+    /// A choice saying `label`, `mark` before it, ticked where `checked`, a rule before it where `rule_before`.
+    pub fn new(label: impl Into<Cow<'a, str>>, mark: Option<Mark>, checked: bool, rule_before: bool) -> Item<'a> {
+        Item { label: label.into(), detail: None, mark, checked, rule_before, dimmed: false, more: Vec::new() }
+    }
+
+    /// How tall its row is: taller where it says more under it.
+    fn tall(&self) -> f32 {
+        if self.detail.is_some() {
+            ROW_TWO
+        } else {
+            ROW
+        }
+    }
+
+    /// Whether it can be chosen, or lit: not dimmed.
+    fn open(&self) -> bool {
+        !self.dimmed
+    }
+}
+
+/// Its measures (DIPs), as Windows 11's menus have them; a row saying more under its words, and the size of those.
 const ROW: f32 = 32.0;
+const ROW_TWO: f32 = 46.0;
+const DETAIL: f32 = 12.0;
+/// How far a menu of choices opened beside one comes over the menu it is opened from (DIPs).
+const SUB_OVER: f32 = 2.0;
 const RULE: f32 = 9.0;
 const INSET: f32 = 4.0;
 const RADIUS: f32 = 8.0;
@@ -201,6 +257,11 @@ impl Look {
             Some(skin @ (super::theme::Skin::Glass | super::theme::Skin::Paper)) => Font { size: FONT.size, weight: FONT.weight, ..super::theme::Theme::new(skin, self.dark).body },
             _ => FONT,
         }
+    }
+
+    /// What is said under a choice is written in: its face, smaller.
+    fn detail_font(self) -> Font {
+        Font { size: DETAIL, ..self.font() }
     }
 }
 
@@ -238,6 +299,13 @@ pub struct Menu {
     with_the_panel: bool,
     /// Its choices as drawn on glass, ringed by the glass's halo as the lanes' words are (see `draw`).
     choices: gfx::Layer,
+    /// The choices one of its own opens, up beside it (which, and that menu), and whether the keys go to them (moved
+    /// into by the right arrow, or the pointer).
+    sub: Option<(usize, Box<Menu>)>,
+    in_sub: bool,
+    /// Where the pointer was last told to be (in its window's px): Windows tells it again where it has not moved, as
+    /// a window under it changes, which is no move of its (the keys' choice is kept).
+    pointer: Option<(i32, i32)>,
     /// Shown till it goes (see `life`): counted before its surface is made, so that it is let go of after it.
     _showing: super::life::Showing,
 }
@@ -253,47 +321,18 @@ impl Menu {
     /// Shows `items` with a corner at `at` (physical px), its bottom there for `above` (as a menu from the taskbar
     /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
     pub fn open_at(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
-        let contact = crate::mouse::monitor_at(at)?;
-        // (On the device for its screen: see `gfx::on_screen`.)
-        let gfx = gfx::for_area(contact.monitor).ok()?;
-        let showing = super::life::Showing::of(&gfx);
-        let window = Window::activating().ok()?;
-        let surface = match Drawn::new(&gfx, window.hwnd, look) {
-            Ok(surface) => surface,
-            Err(error) => {
-                window.destroy();
-                gfx::failed("menu", &gfx, Some(&error));
-                return None;
-            }
-        };
-        let scale = look.px(contact.scale);
-        let sheet = Sheet::new(&gfx, &items, look);
-        let room = surface.room(look);
         // At the pointer, turned back where it would leave its screen.
-        let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.height + 2.0 * room) * scale) as i32);
-        let margin = (room * scale) as i32;
-        let work = contact.work;
-        let mut left = at.x - margin;
-        if left + w - margin > work.right {
-            left = at.x - w + margin;
-        }
-        let mut top = at.y - margin;
-        if above || top + h - margin > work.bottom {
-            top = at.y - h + margin;
-        }
-        let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
-        let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
-        let rect = RECT { left, top, right: left + w, bottom: top + h };
-        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, room, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), _showing: showing };
-        if !menu.draw() {
-            menu.window.destroy();
-            return None;
-        }
-        menu.window.place(rect);
-        menu.window.show();
-        // Up, and gone: a widget that took the desktop with it there takes it again.
-        crate::widget::own_window_changed(rect);
-        SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut menu = Menu::made(items, look, at, Window::activating(), with_the_panel, |(w, h), margin, _, work| {
+            let mut left = at.x - margin;
+            if left + w - margin > work.right {
+                left = at.x - w + margin;
+            }
+            let mut top = at.y - margin;
+            if above || top + h - margin > work.bottom {
+                top = at.y - h + margin;
+            }
+            (left, top)
+        })?;
         // In front, with the keyboard and the mouse, as a system menu is: its keys come to it, not to the program
         // behind; a click anywhere comes to it too; and it is left as anything else comes to the front.
         menu.before = unsafe { GetForegroundWindow() };
@@ -308,42 +347,227 @@ impl Menu {
         Some(menu)
     }
 
-    /// Whether `hwnd` is its window.
-    pub fn owns(&self, hwnd: HWND) -> bool {
-        self.window.hwnd == hwnd
+    /// A menu of `items` in `look`, its window (`window`) made, drawn and put where `place` says from its size and the
+    /// room round its sheet for its shadow (physical px), the scale it is drawn at and the work area of the screen
+    /// `at` is on (its top left corner, kept on that screen), and shown, not yet in front. None where it could not be.
+    fn made(items: Vec<Item<'static>>, look: Look, at: POINT, window: windows::core::Result<Window>, with_the_panel: bool, place: impl FnOnce((i32, i32), i32, f32, RECT) -> (i32, i32)) -> Option<Menu> {
+        let contact = crate::mouse::monitor_at(at)?;
+        // (On the device for its screen: see `gfx::on_screen`.)
+        let gfx = gfx::for_area(contact.monitor).ok()?;
+        let showing = super::life::Showing::of(&gfx);
+        let window = window.ok()?;
+        let surface = match Drawn::new(&gfx, window.hwnd, look) {
+            Ok(surface) => surface,
+            Err(error) => {
+                window.destroy();
+                gfx::failed("menu", &gfx, Some(&error));
+                return None;
+            }
+        };
+        let scale = look.px(contact.scale);
+        let sheet = Sheet::new(&gfx, &items, look);
+        let room = surface.room(look);
+        let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.height + 2.0 * room) * scale) as i32);
+        let margin = (room * scale) as i32;
+        let work = contact.work;
+        let (left, top) = place((w, h), margin, scale, work);
+        let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
+        let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
+        let rect = RECT { left, top, right: left + w, bottom: top + h };
+        let mut menu = Menu { gfx, window, surface, items, sheet, look, scale, room, size: (w, h), rect, lit: None, before: HWND::default(), with_the_panel, choices: gfx::Layer::default(), sub: None, in_sub: false, pointer: None, _showing: showing };
+        if !menu.draw() {
+            menu.window.destroy();
+            return None;
+        }
+        menu.window.place(rect);
+        menu.window.show();
+        // Up, and gone: a widget that took the desktop with it there takes it again.
+        crate::widget::own_window_changed(rect);
+        SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(menu)
     }
 
-    /// Takes a message for its window, if it is one of its own.
+    /// Whether `hwnd` is its window (or that of the choices up beside it).
+    pub fn owns(&self, hwnd: HWND) -> bool {
+        self.window.hwnd == hwnd || self.sub.as_ref().is_some_and(|(_, sub)| sub.owns(hwnd))
+    }
+
+    /// How many choices are its own (those opened beside them not counted).
+    pub fn rows(&self) -> usize {
+        self.items.len()
+    }
+
+    /// The choices its choice `row` opens now `more` (as what they list changed while it is up): drawn so beside it at
+    /// once, where they are up, the same one lit (as far as there is one).
+    pub fn set_more(&mut self, row: usize, more: Vec<Item<'static>>) {
+        self.items[row].more = more;
+        if self.sub.as_ref().is_none_or(|(at, _)| *at != row) {
+            return;
+        }
+        let (in_sub, lit) = (self.in_sub, self.sub.as_ref().and_then(|(_, sub)| sub.lit));
+        if let Some((_, sub)) = self.sub.take() {
+            sub.close();
+        }
+        self.follow_sub(Some(row));
+        if in_sub && self.sub.is_some() {
+            self.in_sub = true;
+            self.sub_light(|sub| lit.filter(|at| *at < sub.items.len()));
+        }
+    }
+
+    /// What a choice made in the choices that the choice `row` opens is told as, the `at`th of them: after all the
+    /// menu's own, the first choice `row` opens right after those of the choices before it that open some.
+    pub fn sub_choice(items: &[Item], row: usize, at: usize) -> usize {
+        items.len() + items[..row].iter().map(|item| item.more.len()).sum::<usize>() + at
+    }
+
+    /// Takes a message for its window, if it is one of its own. (The mouse is its window's while it is up, the
+    /// choices beside it too: where the pointer is, is told it as its window has it.)
     pub fn handle(&mut self, msg: &MSG) -> Handled {
         let (x, y) = ((msg.lParam.0 & 0xFFFF) as i16 as i32, ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32);
+        // Where the pointer is in the choices up beside it, where it is on their sheet.
+        let in_sub = self.sub.as_ref().map(|(_, sub)| (x + self.rect.left - sub.rect.left, y + self.rect.top - sub.rect.top)).filter(|(sx, sy)| self.sub.as_ref().is_some_and(|(_, sub)| sub.inside(*sx, *sy)));
         match msg.message {
+            WM_MOUSEMOVE if self.pointer == Some((x, y)) => Handled::Taken,
             WM_MOUSEMOVE => {
-                let row = self.row_at(x, y);
-                self.light(row)
+                self.pointer = Some((x, y));
+                match in_sub {
+                    Some((sx, sy)) => {
+                        self.in_sub = true;
+                        self.sub_light(|sub| sub.row_at(sx, sy))
+                    }
+                    None => {
+                        let row = self.row_at(x, y);
+                        // (Back on its own choices: the keys there, and nothing lit beside it.)
+                        if row.is_some() {
+                            if std::mem::take(&mut self.in_sub) {
+                                self.sub_light(|_| None);
+                            }
+                            self.follow_sub(row);
+                        }
+                        if let Some((_, sub)) = self.sub.as_mut() {
+                            if sub.lit.is_some() && row.is_none() {
+                                return Handled::Taken;
+                            }
+                        }
+                        self.light(row)
+                    }
+                }
             }
             // A press outside leaves it; inside, the choice is made as the button comes up.
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.inside(x, y) => Handled::Done(None),
-            WM_LBUTTONUP | WM_RBUTTONUP if self.inside(x, y) => self.row_at(x, y).map_or(Handled::Taken, |row| Handled::Done(Some(row))),
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP => Handled::Taken,
-            WM_KEYDOWN => match VIRTUAL_KEY(msg.wParam.0 as u16) {
-                VK_ESCAPE => Handled::Done(None),
-                key @ (VK_UP | VK_DOWN) => {
-                    let n = self.items.len();
-                    let row = Some(match (self.lit, key == VK_UP) {
-                        (None, true) => n - 1,
-                        (None, false) => 0,
-                        (Some(i), true) => (i + n - 1) % n,
-                        (Some(i), false) => (i + 1) % n,
-                    });
-                    self.light(row)
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN if !self.inside(x, y) && in_sub.is_none() => Handled::Done(None),
+            WM_LBUTTONUP | WM_RBUTTONUP if in_sub.is_some() => {
+                let (sx, sy) = in_sub.unwrap_or_default();
+                let Some((row, sub)) = self.sub.as_ref() else { return Handled::Taken };
+                match sub.row_at(sx, sy).filter(|at| sub.items[*at].open()) {
+                    Some(at) => Handled::Done(Some(Menu::sub_choice(&self.items, *row, at))),
+                    None => Handled::Taken,
                 }
-                VK_RETURN if self.lit.is_some() => Handled::Done(self.lit),
+            }
+            WM_LBUTTONUP | WM_RBUTTONUP if self.inside(x, y) => match self.row_at(x, y) {
+                Some(row) if self.items[row].open() && self.items[row].more.is_empty() => Handled::Done(Some(row)),
                 _ => Handled::Taken,
             },
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP => Handled::Taken,
+            WM_KEYDOWN => self.key(VIRTUAL_KEY(msg.wParam.0 as u16)),
             // Alt, as with a system menu, or the mouse taken from it.
             WM_SYSKEYDOWN | CAPTURE_LOST => Handled::Done(None),
             _ => Handled::Not,
         }
+    }
+
+    /// A key down: the arrows go up and down among the choices that can be chosen (in those beside it, where the keys
+    /// are there), the right arrow and Enter into the choices a choice opens, the left arrow and Esc out of them again
+    /// (Esc leaves it, where they are not up); Enter makes the choice lit.
+    fn key(&mut self, key: VIRTUAL_KEY) -> Handled {
+        if self.in_sub {
+            return match key {
+                VK_ESCAPE | VK_LEFT => {
+                    self.in_sub = false;
+                    if let Some((_, sub)) = self.sub.as_mut() {
+                        sub.light(None);
+                    }
+                    Handled::Taken
+                }
+                VK_UP | VK_DOWN => self.sub_light(|sub| sub.step(sub.lit, key == VK_UP)),
+                VK_RETURN => match self.sub.as_ref().and_then(|(row, sub)| Some((*row, sub.lit?))) {
+                    Some((row, at)) => Handled::Done(Some(Menu::sub_choice(&self.items, row, at))),
+                    None => Handled::Taken,
+                },
+                _ => Handled::Taken,
+            };
+        }
+        match key {
+            VK_ESCAPE => Handled::Done(None),
+            VK_UP | VK_DOWN => {
+                let row = self.step(self.lit, key == VK_UP);
+                self.follow_sub(row);
+                self.light(row)
+            }
+            VK_RIGHT | VK_RETURN if self.lit.is_some_and(|row| !self.items[row].more.is_empty()) => {
+                self.follow_sub(self.lit);
+                if self.sub.is_none() {
+                    return Handled::Taken;
+                }
+                self.in_sub = true;
+                self.sub_light(|sub| sub.step(None, false))
+            }
+            VK_RETURN if self.lit.is_some() => Handled::Done(self.lit),
+            _ => Handled::Taken,
+        }
+    }
+
+    /// The choice after `from` (before it, `up`) that can be chosen, round from the other end (none lit: the first, or
+    /// the last); none where none can be.
+    fn step(&self, from: Option<usize>, up: bool) -> Option<usize> {
+        let n = self.items.len();
+        (1..=n)
+            .map(|k| match (from, up) {
+                (None, true) => n - k,
+                (None, false) => k - 1,
+                (Some(i), true) => (i + n * 2 - k) % n,
+                (Some(i), false) => (i + k) % n,
+            })
+            .find(|row| self.items[*row].open())
+    }
+
+    /// The choices `row` opens up beside it (those up of another closed first), where it opens some; none where it
+    /// opens none.
+    fn follow_sub(&mut self, row: Option<usize>) {
+        if self.sub.as_ref().map(|(at, _)| *at) == row.filter(|row| !self.items[*row].more.is_empty()) {
+            return;
+        }
+        if let Some((_, sub)) = self.sub.take() {
+            sub.close();
+        }
+        self.in_sub = false;
+        let Some(row) = row.filter(|row| !self.items[*row].more.is_empty() && self.items[*row].open()) else { return };
+        let Some(beside) = self.row_on_screen(row) else { return };
+        let (inset, over) = ((INSET * self.scale).round() as i32, (SUB_OVER * self.scale).round() as i32);
+        let sub = Menu::made(self.items[row].more.clone(), self.look, POINT { x: beside.right, y: beside.top }, Window::new(), self.with_the_panel, |(w, _), margin, _, work| {
+            // Beside the menu's sheet, its first choice level with the one it is opened from: on its right, or its
+            // left where the right would leave the screen.
+            let right = beside.right - over - margin;
+            let left = if right + w - margin > work.right { beside.left + over + margin - w } else { right };
+            (left, beside.top - inset - margin)
+        });
+        if let Some(sub) = sub {
+            self.sub = Some((row, Box::new(sub)));
+        }
+    }
+
+    /// The choice that `which` says, in the choices up beside it, lit (the keys there): those closed where they could
+    /// not be drawn so.
+    fn sub_light(&mut self, which: impl FnOnce(&Menu) -> Option<usize>) -> Handled {
+        let Some((_, sub)) = self.sub.as_mut() else { return Handled::Taken };
+        let row = which(sub);
+        if let Handled::Done(_) = sub.light(row) {
+            if let Some((_, sub)) = self.sub.take() {
+                sub.close();
+            }
+            self.in_sub = false;
+        }
+        Handled::Taken
     }
 
     /// Whether it was opened with the panel up: one that was not is left as the panel comes (by its shortcut, an
@@ -363,7 +587,10 @@ impl Menu {
     }
 
     /// Gone: the front given back where it was, unless something else has taken it.
-    pub fn close(self) {
+    pub fn close(mut self) {
+        if let Some((_, sub)) = self.sub.take() {
+            sub.close();
+        }
         let held = !self.left();
         super::window::let_go_of_capture(self.window.hwnd);
         self.window.destroy();
@@ -381,8 +608,9 @@ impl Menu {
         }
     }
 
-    /// The choice `row` lit (left, where it could not be drawn so).
+    /// The choice `row` lit (left, where it could not be drawn so). One dimmed is not lit.
     fn light(&mut self, row: Option<usize>) -> Handled {
+        let row = row.filter(|row| self.items[*row].open());
         if row != self.lit {
             self.lit = row;
             if !self.draw() {
@@ -409,14 +637,15 @@ impl Menu {
         if x < 0.0 || x > self.sheet.width {
             return None;
         }
-        self.sheet.tops.iter().position(|top| y >= *top && y < top + ROW)
+        self.sheet.tops.iter().zip(&self.items).position(|(top, item)| y >= *top && y < top + item.tall())
     }
 
     /// Where the choice `row` is on the screen (physical px).
     pub fn row_on_screen(&self, row: usize) -> Option<RECT> {
         let top = *self.sheet.tops.get(row)?;
+        let tall = self.items.get(row)?.tall();
         let px = |dips: f32| (dips * self.scale).round() as i32;
-        Some(RECT { left: self.rect.left + px(self.room), top: self.rect.top + px(self.room + top), right: self.rect.left + px(self.room + self.sheet.width), bottom: self.rect.top + px(self.room + top + ROW) })
+        Some(RECT { left: self.rect.left + px(self.room), top: self.rect.top + px(self.room + top), right: self.rect.left + px(self.room + self.sheet.width), bottom: self.rect.top + px(self.room + top + tall) })
     }
 
     fn inside(&self, x: i32, y: i32) -> bool {
@@ -435,19 +664,20 @@ pub struct Sheet {
 
 impl Sheet {
     pub fn new(gfx: &gfx::Gfx, items: &[Item], look: Look) -> Self {
-        // As wide as its longest choice.
-        let widest = items.iter().map(|item| gfx.measure(item.label, look.font())).fold(0.0, f32::max);
+        // As wide as its longest choice (or what is said under one).
+        let detail = look.detail_font();
+        let widest = items.iter().map(|item| gfx.measure(&item.label, look.font()).max(item.detail.as_deref().map_or(0.0, |words| gfx.measure(words, detail)))).fold(0.0, f32::max);
         let width = (TEXT_LEFT + widest + 48.0).max(MIN_WIDTH);
         let tops: Vec<f32> = items
             .iter()
             .scan(INSET, |y, item| {
                 *y += if item.rule_before { RULE } else { 0.0 };
                 let top = *y;
-                *y += ROW;
+                *y += item.tall();
                 Some(top)
             })
             .collect();
-        let height = tops.last().map_or(INSET, |top| top + ROW) + INSET;
+        let height = tops.last().zip(items.last()).map_or(INSET, |(top, item)| top + item.tall()) + INSET;
         Sheet { width, height, tops }
     }
 
@@ -479,7 +709,7 @@ impl Sheet {
                 frame.fill(colours.rule, 0.0, top - RULE / 2.0 - 0.5, width, 1.0);
             }
             if lit == Some(i) {
-                frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, ROW, highlight_radius);
+                frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, item.tall(), highlight_radius);
             }
         }
     }
@@ -489,16 +719,28 @@ impl Sheet {
         let width = self.width;
         let colours = Colours::new(look, frosted);
         for (item, top) in items.iter().zip(&self.tops) {
-            let middle = top + ROW / 2.0;
+            let middle = top + item.tall() / 2.0;
+            // (Dimmed: shown, not to be chosen.)
+            let seen = |color: Color| if item.dimmed { color.alpha(0.45) } else { color };
             match item.mark {
-                Some(Mark::Icon(icon)) => frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, colours.icon),
-                Some(Mark::Colour(colour)) => frame.fill_circle(colour, Point { x: INSET + 16.0, y: middle }, DOT / 2.0),
+                Some(Mark::Icon(icon)) => frame.icon(icon, Point { x: INSET + 16.0, y: middle }, ICON, seen(colours.icon)),
+                Some(Mark::Colour(colour)) => frame.fill_circle(seen(colour), Point { x: INSET + 16.0, y: middle }, DOT / 2.0),
                 None => {}
             }
-            let (ink_top, ink_bottom) = frame.ink(item.label, look.font());
-            frame.text(item.label, look.font(), colours.text, TEXT_LEFT, middle - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+            // (Its words above the middle where more is said under them.)
+            let words = if item.detail.is_some() { middle - 8.0 } else { middle };
+            let (ink_top, ink_bottom) = frame.ink(&item.label, look.font());
+            frame.text(&item.label, look.font(), seen(colours.text), TEXT_LEFT, words - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+            if let Some(detail) = item.detail.as_deref() {
+                let font = look.detail_font();
+                let (ink_top, ink_bottom) = frame.ink(detail, font);
+                frame.text(detail, font, seen(colours.icon), TEXT_LEFT, middle + 9.0 - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+            }
             if item.checked {
-                frame.icon(Icon::Check, Point { x: width - INSET - 18.0, y: middle }, ICON, colours.text);
+                frame.icon(Icon::Check, Point { x: width - INSET - 18.0, y: middle }, ICON, seen(colours.text));
+            }
+            if !item.more.is_empty() {
+                frame.icon(Icon::ChevronRight, Point { x: width - INSET - 18.0, y: middle }, ICON, seen(colours.icon));
             }
         }
     }
@@ -623,6 +865,23 @@ mod sized {
 mod tests {
     use super::*;
 
+    /// A choice made among those one opens is told after all the menu's own, after those of the choices before it that
+    /// open some; a row saying more under its words is taller.
+    #[test]
+    fn choices_beside_one_are_told_after_the_menu_s_own() {
+        let mut first = Item::new("甲", None, false, false);
+        first.more = vec![Item::new("一", None, false, false), Item::new("二", None, false, false)];
+        let mut third = Item::new("丙", None, false, false);
+        third.more = vec![Item::new("三", None, false, false)];
+        let items = vec![first, Item::new("乙", None, false, false), third];
+        assert_eq!(Menu::sub_choice(&items, 0, 1), 4);
+        assert_eq!(Menu::sub_choice(&items, 2, 0), 5);
+        let mut said = Item::new("丁", None, false, false);
+        assert_eq!(said.tall(), ROW);
+        said.detail = Some("已配对的手机".into());
+        assert_eq!(said.tall(), ROW_TWO);
+    }
+
     /// A choice marked by a colour (a note's) shows a dot of that colour where an icon stands, round, in every look.
     #[test]
     fn a_colour_s_choice_shows_a_dot_of_it() {
@@ -630,7 +889,7 @@ mod tests {
         use super::super::theme::Skin;
         let gfx = gfx::Gfx::new().expect("graphics");
         let pink = Color::hex(0xEE556D, 1.0);
-        let items = vec![Item { label: "粉色", mark: Some(Mark::Colour(pink)), checked: false, rule_before: false }];
+        let items = vec![Item::new("粉色", Some(Mark::Colour(pink)), false, false)];
         for look in [Look { skin: None, dark: false, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, false)] {
             let sheet = Sheet::new(&gfx, &items, look);
             let (w, h) = (sheet.width.ceil() as u32, sheet.height.ceil() as u32);
@@ -673,11 +932,20 @@ mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         let gfx = gfx::Gfx::new().expect("graphics");
+        let mut send = Item::new("发送到", Some(Mark::Icon(Icon::Send)), false, false);
+        send.more = vec![Item::new("Galaxy Z Fold6", Some(Mark::Icon(Icon::Smartphone)), false, false)];
+        let mut away = Item::new("书房电脑", Some(Mark::Icon(Icon::Monitor)), false, false);
+        (away.detail, away.dimmed) = (Some("未开启接收".into()), true);
+        let mut paired = Item::new("Galaxy Z Fold6", Some(Mark::Icon(Icon::Smartphone)), false, false);
+        paired.detail = Some("已配对的手机".into());
         let items = vec![
-            Item { label: "小卡片", mark: Some(Mark::Icon(Icon::LayoutGrid)), checked: false, rule_before: false },
-            Item { label: "大卡片", mark: Some(Mark::Icon(Icon::Image)), checked: false, rule_before: false },
-            Item { label: "列表", mark: Some(Mark::Icon(Icon::List)), checked: true, rule_before: false },
-            Item { label: "清空中转站", mark: None, checked: false, rule_before: true },
+            Item::new("小卡片", Some(Mark::Icon(Icon::LayoutGrid)), false, false),
+            Item::new("大卡片", Some(Mark::Icon(Icon::Image)), false, false),
+            Item::new("列表", Some(Mark::Icon(Icon::List)), true, false),
+            send,
+            paired,
+            away,
+            Item::new("清空中转站", None, false, true),
         ];
         let looks = [Look { skin: None, dark: false, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, false), Look::of(Skin::Paper, false), Look { skin: None, dark: true, frost: 1.0, zoom: 1.0 }, Look::of(Skin::Glass, true), Look::of(Skin::Paper, true)];
         let sheets: Vec<Sheet> = looks.iter().map(|look| Sheet::new(&gfx, &items, *look)).collect();

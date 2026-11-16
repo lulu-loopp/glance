@@ -25,12 +25,21 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission"
         xmlns:tools="http://schemas.android.com/tools" />
-    <!-- The short notice that photos were sent (it can be turned off). -->
+    <!-- The short notice that photos were sent (it can be turned off), and the notifications of receiving: a device
+         asking to send, what is coming, what came. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Receiving from devices nearby as LocalSend does: found in its multicast group (the system told to let the
+         group's packets through while it is heard), and kept up in front of the system while 后台接收 is on or
+         something comes (a service of type connectedDevice, which Android 14 lets run with the multicast leave). -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Before Android 10 only: what comes is written into the shared storage (later, MediaStore needs no leave). -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- The PC is asked over the local network, in plain HTTP: each request
          is signed with the key shared at pairing, which never travels. -->
     <application
+        android:name=".GlanceApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -86,6 +95,19 @@
 
         <!-- What is handed to a PC, sent as it goes on when the app is left. -->
         <service android:name=".HandService" android:exported="false" android:foregroundServiceType="dataSync" />
+
+        <!-- Receiving from devices nearby, kept up when the app is left (后台接收, or while something comes). -->
+        <service android:name=".ReceiveService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <!-- What the notifications of receiving are answered by: refused, cancelled, copied. -->
+        <receiver android:name=".NearbyAction" android:exported="false" />
+        <!-- Before Android 10, what came is opened from the shared storage through this. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/shared" />
+        </provider>
 
         <!-- The scanner, upright as the rest is. -->
         <activity

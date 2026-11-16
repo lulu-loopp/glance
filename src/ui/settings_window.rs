@@ -72,6 +72,8 @@ use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitiv
 pub(crate) mod guide;
 mod layout_page;
 mod reads;
+mod send;
+pub(crate) use send::dragged_in;
 use layout_page::{Carry, Zone};
 use crate::panel::SIZES;
 use crate::update;
@@ -400,6 +402,15 @@ pub fn open_at_updates(place: Option<RECT>) {
     open_at(Asked { to: Some(To::Updates), place });
 }
 
+/// What was given to send to devices nearby (from Explorer's Send to), till the window takes it (see `To::Send`).
+static TO_SEND: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Opens the window (as `open`) at nearby transfer's page, `paths` chosen there to send: from Explorer's Send to.
+pub fn open_to_send(paths: Vec<std::path::PathBuf>) {
+    TO_SEND.lock().unwrap().extend(paths);
+    open_at(Asked { to: Some(To::Send), place: None });
+}
+
 /// Begins the guide to Glance (see `guide`), from any thread: as Glance first starts with it, the window made for it
 /// and shown by the guide as it comes up.
 pub fn open_guide() {
@@ -415,6 +426,8 @@ enum To {
     /// The guide begun (see `guide`).
     Guide,
     Updates,
+    /// Nearby transfer's page, what was given to send chosen there (see `open_to_send`).
+    Send,
 }
 
 impl Asked {
@@ -434,6 +447,7 @@ impl To {
             Some(To::Reports) => 3,
             Some(To::Guide) => 4,
             Some(To::Updates) => 5,
+            Some(To::Send) => 6,
         }
     }
 
@@ -444,6 +458,7 @@ impl To {
             3 => Some(To::Reports),
             4 => Some(To::Guide),
             5 => Some(To::Updates),
+            6 => Some(To::Send),
             _ => None,
         }
     }
@@ -459,6 +474,7 @@ fn open_at(asked: Asked) {
             Some(To::Reports) => Some(TO_REPORTS),
             Some(To::Guide) => Some(TO_GUIDE),
             Some(To::Updates) => Some(TO_UPDATES),
+            Some(To::Send) => Some(send::TO_SEND_PAGE),
             None => None,
         };
         if let Some(message) = message {
@@ -634,10 +650,15 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
                 again = Some(Asked::of_told(&msg));
                 continue;
             }
+            // A menu up takes its own messages (see `menu::Menu`).
+            if with_ui(|ui| ui.menu_message(&msg)).unwrap_or(false) {
+                continue;
+            }
             unsafe {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            with_ui(Ui::menu_left);
         }
         // Gone (closed).
         let Some(due) = tick(Instant::now()) else { return Some(again) };
@@ -808,6 +829,9 @@ fn tick(now: Instant) -> Option<Duration> {
         ui.follow_when_free();
         // (The window left as it is under the guide's dialog, the guide alone drawn.)
         ui.take_in();
+        if ui.send_tick(now) {
+            ui.next_frame = now;
+        }
         let held = ui.guide_holds_window();
         if now >= ui.next_frame && !held {
             ui.draw(now);
@@ -817,6 +841,7 @@ fn tick(now: Instant) -> Option<Duration> {
         // (Drawn or not, the desktops wanted read: see `draw`.)
         ui.read_wanted();
         let next = if held { ui.guide_frame } else { ui.next_frame.min(ui.guide_frame) };
+        let next = if ui.send_watching() { next.min(now + send::WATCH_EVERY) } else { next };
         next.saturating_duration_since(now)
     })
 }
@@ -906,14 +931,11 @@ enum Read {
     Done(u64),
 }
 
-/// How the phone remote is, as its helper says (see `Ui::remote_asked`), a code asked of it with what for (none
-/// asked: none), and the phones paired as it then has them.
+/// How the phone remote is, as its helper says (see `Ui::remote_asked`), and the phones paired as it then has them.
 struct RemoteAnswer {
     lights: bool,
     raised: bool,
     screens: bool,
-    address: Option<String>,
-    code: Option<Option<(crate::phone::Code, CodeFor)>>,
     phones: Vec<crate::phone::Phone>,
 }
 
@@ -1056,6 +1078,10 @@ enum Page {
     Monitor,
     Workbench,
     Music,
+    /// The devices this PC knows: the phones paired with it and the devices it takes files from without asking, and
+    /// those found nearby; this PC's name to them.
+    Devices,
+    /// The phone remote: what phones paired may control of this PC.
     Phone,
     /// Nearby transfer (see `nearby`): files to and from devices on the local network with LocalSend.
     Nearby,
@@ -1091,13 +1117,14 @@ enum NavItem {
     Components,
 }
 
-const NAV_ITEMS: [NavItem; 9] = [
+const NAV_ITEMS: [NavItem; 10] = [
     NavItem::Page(Page::Layout),
     NavItem::Page(Page::Look),
     NavItem::Components,
     NavItem::Page(Page::Monitor),
     NavItem::Page(Page::Workbench),
     NavItem::Page(Page::Music),
+    NavItem::Page(Page::Devices),
     NavItem::Page(Page::Phone),
     NavItem::Page(Page::Nearby),
     NavItem::Page(Page::General),
@@ -1112,7 +1139,8 @@ impl NavItem {
             NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
             NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
-            NavItem::Page(Page::Phone) => pick(lang, "手机互联", "Phone"),
+            NavItem::Page(Page::Devices) => pick(lang, "设备", "Devices"),
+            NavItem::Page(Page::Phone) => pick(lang, "手机遥控", "Phone remote"),
             NavItem::Page(Page::Nearby) => pick(lang, "附近传输", "Nearby sharing"),
             NavItem::Page(Page::General | Page::Reports) => pick(lang, "通用", "General"),
         }
@@ -1128,6 +1156,7 @@ impl Page {
             Page::Monitor => Icon::Gauge,
             Page::Workbench => Icon::PencilRuler,
             Page::Music => Icon::Music,
+            Page::Devices => Icon::MonitorSmartphone,
             Page::Phone => Icon::Smartphone,
             Page::Nearby => Icon::Share,
             Page::General | Page::Reports => Icon::Settings,
@@ -1184,20 +1213,25 @@ enum Field {
     /// Whether nearby transfer asks about what a device not trusted sends, or turns it away (the helper keeps it: see
     /// `phone::Nearby::others_refused`).
     NearbyOthers,
+    /// What the devices' page's stage shows: the pairing code, or the code that leads to the phone app (see
+    /// `Ui::stage_shows`).
+    Adding,
 }
 
 /// How a button looks: outlined; filled in the accent (the one thing to
-/// press); waiting for keys; or busy, greyed and not to be pressed. Or
-/// words of their own where a button would be, nothing to press (dimmed
-/// where their row is).
+/// press); waiting for keys; busy, greyed and not to be pressed; or outlined
+/// with a chevron after its words, a menu of choices opening from it.
 #[derive(Clone, Copy, PartialEq)]
 enum Button {
     Plain,
     Accent,
     Taking,
     Quiet,
-    Said(bool),
+    Menu,
 }
+
+/// How much wider a button that opens a menu is than its words make it: its chevron and the room before it (DIPs).
+const MENU_CHEVRON: f32 = 22.0;
 
 /// Nearby transfer's helper asked on a thread of its own: what to tell it, in turn, and what it says to each.
 type NearbyLink = (std::sync::mpsc::Sender<Vec<String>>, std::sync::mpsc::Receiver<Option<crate::phone::Nearby>>);
@@ -1354,18 +1388,33 @@ fn remote_switches(lights: bool, laptop: bool) -> Vec<Switch> {
     switches
 }
 
-/// What a QR code shown is for.
+/// What a QR code shown is for: what the devices' page's stage shows (see `Ui::paint_adding`).
 #[derive(Clone, Copy, PartialEq)]
 enum CodeFor {
     /// Where the phone app is to be had.
     App,
-    /// A pairing, for the app to scan.
+    /// A pairing, for the app or a phone's camera to scan (the camera opens the remote's page with it).
     Pairing,
-    /// A pairing, for a phone's camera: it opens the remote's page.
-    WebPairing,
-    /// The remote's page, for a phone paired by it before.
-    WebPage,
 }
+
+/// A device this PC knows, as the devices' page lists it: a phone paired (by the remote's id for it), or a device
+/// trusted that is no paired phone's (by its certificate's fingerprint).
+#[derive(Clone, PartialEq, Debug)]
+enum Known {
+    Phone(String),
+    Trusted(String),
+}
+
+/// What a row that leads to the devices' page counts: the phones paired, or every device whose files are taken
+/// without asking.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Managed {
+    Phones,
+    Trusted,
+}
+
+/// How often the devices nearby are asked to say themselves while the devices' page shows.
+const ANNOUNCE_EVERY: Duration = Duration::from_secs(30);
 
 /// Which shortcut: the panel's, search's, or the preview's.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1381,6 +1430,8 @@ enum Keys {
 enum Named {
     Sensor(String, String),
     ThisPc,
+    /// Words to send to devices nearby (see `send`): on lines of their own, kept till added or left.
+    Words,
 }
 
 /// Something being named in its row (see `Named`): the words written, since when its caret blinks, whether the input
@@ -1402,9 +1453,6 @@ const PEN: f32 = 24.0;
 /// How wide the box this PC's name is written in is, in its row (DIPs), and the most its name may be (UTF-16 units).
 const NAME_FIELD: f32 = 200.0;
 const PC_NAME_MOST: usize = 40;
-/// The room a trusted device's round icon takes left of its words: the round, and the room after it.
-const DEVICE_ROUND: f32 = 34.0;
-const DEVICE_ROOM: f32 = DEVICE_ROUND + 12.0;
 
 /// How long the caret of a sensor being named shows, and is gone, as it blinks.
 const BLINK: Duration = Duration::from_millis(530);
@@ -1473,21 +1521,39 @@ enum Target {
     Update,
     Uninstall,
     Quit,
-    /// Shows the code that leads to the phone app.
-    GetApp,
-    /// Offers a pairing and shows its code: for the app, or (true) for a phone's browser.
-    Pair(bool),
-    /// Shows the code that opens the remote's web page again.
-    OpenPage,
-    /// Unpairs the phone of that id (not by its place among those shown: the list is read again every second, and a
-    /// phone paired or removed meanwhile would move another into it).
+    /// Offers a pairing again, where the last could not be offered (see `Ui::keep_offer`).
+    Pair,
+    /// Unpairs the phone of that id, once the user agrees (not by its place among those shown: the list is read again
+    /// every second, and a phone paired or removed meanwhile would move another into it).
     Unpair(String),
-    /// The box this PC's name is written in, for devices nearby: pressed, it is written there.
-    NearbyName,
+    /// Opens or closes the card of the phone of that id (as a module's: see `phone_card`): its switches and its
+    /// unpairing in it.
+    OpenPhone(String),
+    /// Turns what the phone of that id may do.
+    PhoneMay(String, crate::phone::May),
+    /// Trusts the device found nearby of that fingerprint (once it proves its certificate).
+    TrustFound(String),
+    /// Turns to the devices' page.
+    Manage,
+    /// The box this PC's name is written in: pressed, it is written there.
+    PcName,
     /// Trusts the device of that certificate's fingerprint no longer (its files asked about again).
     Untrust(String),
-    /// Opens the station's folder, where what comes from devices nearby is kept.
+    /// Opens where what comes from devices nearby goes: the folder chosen for it, else the station's.
     OpenStation,
+    /// Opens the menu of where what comes from devices nearby goes: the station, or a folder chosen.
+    KeptIn,
+    /// The sending pane's (see `send`): what to choose by (0 files, 1 a folder, 2 words written, 3 the clipboard), what
+    /// is chosen cleared or one of it taken away (by its number), a device sent to (by its fingerprint), a sending
+    /// cancelled, the devices looked for again, the words written added or left.
+    SendKind(u8),
+    SendClear,
+    SendRemove(u64),
+    SendTo(String),
+    SendCancel(u64),
+    SendRefresh,
+    SendWordsAdd,
+    SendWordsCancel,
     /// Sends the diagnostics to Glance's site, shown first in a window of
     /// their own to be read and agreed to.
     SendReport,
@@ -1560,23 +1626,37 @@ enum Row {
     Notice,
     Uninstall,
     Quit,
-    /// The phone remote's: pairing a phone (and where the app is to be had), the code last asked for, and each phone
-    /// paired (its place in the remote's list, and its name).
-    Pair,
-    Code,
-    /// Where the remote's page for a phone's browser is.
-    WebPage,
-    /// A phone paired with: its id and its name.
-    Phone(String, String),
-    /// Nearby transfer's: what this PC is called to devices nearby, where what they send is kept, and a device trusted
-    /// (by its certificate's fingerprint).
-    NearbyName,
+    /// What this PC is called, to phones and devices nearby alike.
+    PcName,
+    /// A device this PC knows; in a phone's card opened (see `phone_card`), its switches, each by what it lets the
+    /// phone do, and its unpairing.
+    Device(Known),
+    PhoneMay(String, crate::phone::May),
+    Unpair(String),
+    /// A device found nearby that this PC does not know yet (by its certificate's fingerprint).
+    Found(String),
+    /// How many of them there are, and the way to the devices' page (from the remote's and nearby transfer's).
+    Manage(Managed),
+    /// Nearby transfer's: where what devices send is kept.
     NearbyFolder,
-    Trusted(String),
     /// What the rows under it are, said small above them: a group of their own.
     Group(&'static str),
     /// NetEase Cloud Music's lyrics plugin (InfLink-rs): how it is, and installing or taking it back.
     NetEase,
+}
+
+impl Row {
+    /// The card that opens this row is of or heads, by what it is known by (see `Ui::opened`), and whether it heads
+    /// it: a module's, and the rows in it; a phone paired's, and its switches and its unpairing.
+    fn card(&self) -> Option<(String, bool)> {
+        match self {
+            Row::Module(id) => Some((id.clone(), true)),
+            Row::Device(Known::Phone(id)) => Some((phone_card(id), true)),
+            Row::Item(id, _) | Row::ModuleChoice(id, _) => Some((id.clone(), false)),
+            Row::PhoneMay(id, _) | Row::Unpair(id) => Some((phone_card(id), false)),
+            _ => None,
+        }
+    }
 }
 
 /// How tall a group's name is, above its rows.
@@ -1591,8 +1671,12 @@ const TABS_ROW: f32 = 48.0;
 const TAB_MARK: f32 = 16.0;
 const TAB_MARK_LEADS: (Duration, Easing) = (Duration::from_millis(200), Easing(0.55, 0.55, 0.0, 1.0));
 const TAB_MARK_TRAILS: (Duration, Easing) = (Duration::from_millis(360), Easing(0.55, 0.55, 0.0, 1.0));
-/// How tall the code's own square is, in its row.
-const CODE: f32 = 176.0;
+/// How large a QR code's white square is on the devices' page's stage (see `Ui::paint_adding`) where it has room,
+/// and how wide the steps under it are at most.
+const CODE: f32 = 248.0;
+const STEPS: f32 = 420.0;
+/// The smallest a QR code's square is drawn there, where the stage is short.
+const CODE_LEAST: f32 = 150.0;
 
 /// A module row being dragged: by how far below the row's top it was
 /// taken, and where the pointer is (document DIPs).
@@ -1893,6 +1977,11 @@ struct Ui {
     nearby_waiting: usize,
     nearby_written: Option<std::time::SystemTime>,
     nearby_at: Option<Instant>,
+    /// The devices' page's: the devices found nearby that this PC does not know (as found while the page shows), those
+    /// being trusted (see `nearby::Shown::trusting`), and when the devices nearby were last asked to say themselves.
+    found: Vec<crate::nearby::Device>,
+    trusting: HashMap<String, Option<String>>,
+    announced_at: Option<Instant>,
     /// Whether the remote has the program it sets lights by; that being
     /// fetched or taken away just now (on another thread: it takes a
     /// while), and whether the last fetching failed.
@@ -1923,7 +2012,16 @@ struct Ui {
     netease_restart: bool,
     netease_work: Option<(NetEaseWork, std::thread::JoinHandle<NetEaseDone>)>,
     netease_failed: Option<(NetEaseWork, crate::netease::Failed)>,
-    code: Option<(crate::phone::Code, CodeFor)>,
+    /// What the devices' page's stage shows (see `paint_adding`); the pairing offered there and when it was asked
+    /// for (it lasts `phone::OFFER_LASTS` from then), one being asked for (on another thread: see `keep_offer`), and
+    /// whether the last could not be; the code that leads to the phone app, once asked for (none: it could not be
+    /// made), and it being asked for.
+    stage_shows: CodeFor,
+    offer: Option<(crate::phone::Offer, Instant)>,
+    offering: Option<(Instant, std::thread::JoinHandle<Option<crate::phone::Offer>>)>,
+    offer_failed: bool,
+    app_code: Option<Option<crate::phone::Code>>,
+    app_asked: Option<std::thread::JoinHandle<Option<crate::phone::Code>>>,
     phones: Vec<crate::phone::Phone>,
     /// When the remote had last written the phones, as they were last read.
     phones_written: Option<std::time::SystemTime>,
@@ -1940,8 +2038,6 @@ struct Ui {
     uninstaller: Option<std::path::PathBuf>,
     /// When the diagnostics were last copied.
     copied_at: Option<Instant>,
-    /// Where the remote's page for a phone's browser is.
-    web_address: Option<String>,
     /// The diagnostics being sent (on a thread of its own), and how the
     /// last sending went: the name the site gave them, or none.
     sending: Option<std::thread::JoinHandle<Option<String>>>,
@@ -1969,6 +2065,12 @@ struct Ui {
     /// Windows' chooser of folders up (on a thread of its own, a single-threaded apartment as the shell wants: this
     /// one is not), with what is chosen in it once it is closed.
     choosing_folders: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
+    /// The same, for the folder what devices nearby send goes to.
+    choosing_kept: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
+    /// A menu up (where what devices nearby send goes), run by this window's thread (see `menu_message`).
+    menu: Option<super::menu::Menu>,
+    /// Nearby transfer's sending pane (see `send`).
+    send: send::Pane,
     /// Since when the fans in the phone remote's picture have been turning.
     phone_from: Instant,
     phone: PhonePage,
@@ -2228,6 +2330,9 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             nearby_waiting: 0,
             nearby_written: None,
             nearby_at: None,
+            found: Vec::new(),
+            trusting: HashMap::new(),
+            announced_at: None,
             reading_switches: Some(std::thread::spawn(|| (crate::source::autostart(), crate::phone::on(), crate::phone::nearby_on()))),
             // (As its helper says, asked as the window opens: see `remote_asked`.)
             remote_lights: false,
@@ -2244,7 +2349,12 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             netease_restart: false,
             netease_work: None,
             netease_failed: None,
-            code: None,
+            stage_shows: CodeFor::Pairing,
+            offer: None,
+            offering: None,
+            offer_failed: false,
+            app_code: None,
+            app_asked: None,
             phones_written: crate::phone::phones_written(),
             phones: crate::phone::phones(),
             remote_asked: None,
@@ -2253,11 +2363,13 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             reading_drives: None,
             drives_at: None,
             choosing_folders: None,
+            choosing_kept: None,
+            menu: None,
+            send: send::Pane::default(),
             laptop: crate::laptop::this_machine(),
             may_autostart: elevation::may_start_unasked(),
             // Run elevated, so only where no ordinary program can change it.
             copied_at: None,
-            web_address: None,
             sending: None,
             sent: None,
             followed: crate::reports::list(),
@@ -2323,7 +2435,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
         crate::perf::mark(|| "settings state".into());
         ui.raise_more();
         if ui.remote_there {
-            ui.ask_remote(|| None);
+            ui.ask_remote(|| ());
         }
         ui.read_stages();
         ui.restyle();
@@ -2428,6 +2540,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             with_ui(|ui| ui.turn_as_asked(To::Updates));
             LRESULT(0)
         }
+        send::TO_SEND_PAGE => {
+            with_ui(|ui| ui.turn_as_asked(To::Send));
+            LRESULT(0)
+        }
         GUIDE_TOLD => {
             with_ui(|ui| ui.next_frame = Instant::now());
             LRESULT(0)
@@ -2445,7 +2561,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
         PERF_TURN if crate::perf::on() => {
-            const PAGES: [Page; 8] = [Page::Layout, Page::Look, Page::Monitor, Page::Workbench, Page::Music, Page::Phone, Page::Nearby, Page::General];
+            const PAGES: [Page; 9] = [Page::Layout, Page::Look, Page::Monitor, Page::Workbench, Page::Music, Page::Devices, Page::Phone, Page::Nearby, Page::General];
             const TABS: [Tab; 3] = [Tab::Shown, Tab::Data, Tab::Overlay];
             with_ui(|ui| {
                 crate::perf::mark(|| format!("settings turn {} {}", wparam.0, lparam.0));
@@ -2530,6 +2646,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     }
                 });
             }
+            LRESULT(0)
+        }
+        send::SEND_DRAGGED => {
+            with_ui(|ui| ui.send_dragged(wparam.0));
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
@@ -2620,7 +2740,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| {
                 ui.record(None);
-                ui.end_rename(true);
+                if !ui.writing_words() {
+                    ui.end_rename(true);
+                }
             });
             if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
                 leave_the_front(hwnd);
@@ -2654,7 +2776,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             // Its surfaces and bitmaps go first; then the device gives back
             // what they held (unless desktop widgets still draw with it).
             // Closed mid-drag: what was dragged is kept.
-            with_ui(|ui| ui.let_go());
+            with_ui(|ui| {
+                if let Some(menu) = ui.menu.take() {
+                    menu.close();
+                }
+                ui.let_go();
+                ui.withdraw_offer();
+            });
             // (All it drew with goes: see `life`.)
             if let Some(mut ui) = UI.with(|cell| cell.borrow_mut().take()) {
                 ui.gone();
@@ -2836,6 +2964,7 @@ impl Ui {
                     "To find lyrics online, the track's title is sent to NetEase Cloud Music, QQ Music, Kugou or LRCLIB. A local track uses the lyrics in its file first. Synced lyrics need the player to report its position.",
                 )));
             }
+            (Page::Devices, _) => self.device_rows(&mut rows),
             (Page::Phone, _) => self.remote_rows(&mut rows),
             (Page::Nearby, _) => self.nearby_rows(&mut rows),
             (Page::Reports, _) => {
@@ -2973,45 +3102,101 @@ impl Ui {
     }
 
     /// The phone's rows: the remote on or off, and while it is, what it does and the phones paired with it.
+    /// The phone remote's rows: on or off; what it sets of this PC; and how many phones are paired, with the way to the
+    /// devices' page (where they are added and unpaired).
     fn remote_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Switch(Switch::Remote));
         if self.remote {
             rows.extend(remote_switches(self.remote_lights, self.laptop).into_iter().map(Row::Switch));
-            // A code shows under the row that asked for it.
-            let shown = self.code.as_ref().map(|(_, what)| *what);
-            rows.push(Row::Pair);
-            if matches!(shown, Some(CodeFor::App | CodeFor::Pairing | CodeFor::WebPairing)) {
-                rows.push(Row::Code);
-            }
-            if self.web_address.is_some() {
-                rows.push(Row::WebPage);
-                if shown == Some(CodeFor::WebPage) {
-                    rows.push(Row::Code);
-                }
-            }
-            // The phones paired, each a row.
-            rows.extend(self.phones.iter().map(|phone| Row::Phone(phone.id.clone(), phone.name.clone())));
+            rows.push(Row::Manage(Managed::Phones));
         }
     }
 
-    /// Nearby transfer's rows: on or off; what this PC is called, what of devices not trusted, the edge's notice and
-    /// where what comes is kept (dimmed while it is off); and the devices trusted, each a row.
+    /// Nearby transfer's rows: on or off; what of devices not trusted, the edge's notice and where what comes is kept
+    /// (dimmed while it is off); and how many devices are trusted, with the way to the devices' page.
     fn nearby_rows(&self, rows: &mut Vec<Row>) {
         rows.push(Row::Switch(Switch::Nearby));
         if !self.remote_there {
             return;
         }
-        rows.extend([Row::NearbyName, Row::Choice(Field::NearbyOthers), Row::Switch(Switch::NearbyNotice), Row::NearbyFolder]);
-        rows.push(Row::Group(pick(self.lang, "已信任的设备", "Devices trusted")));
-        let trusted = self.nearby.as_ref().map_or(&[][..], |nearby| &nearby.trusted[..]);
-        if trusted.is_empty() {
-            rows.push(Row::Note(pick(
-                self.lang,
-                "接收文件时勾选“以后直接接收这台设备的文件”，该设备即列于此处。已配对的 Glance 手机自动信任",
-                "A device is listed here once its files are taken with “Accept files from this device without asking” ticked. A Glance phone paired is trusted as it pairs",
-            )));
+        rows.extend([Row::Choice(Field::NearbyOthers), Row::Switch(Switch::NearbyNotice), Row::NearbyFolder, Row::Manage(Managed::Trusted)]);
+    }
+
+    /// The devices' page's rows: this PC's name; the phones paired (one opened, its switches and its unpairing in its
+    /// card); the devices trusted that are no paired phone's, where there are any; the devices found nearby that this
+    /// PC does not know. (A phone is added on the page's stage: see `paint_adding`.) With no helper beside this
+    /// Glance, only why.
+    fn device_rows(&self, rows: &mut Vec<Row>) {
+        let lang = self.lang;
+        if !self.remote_there {
+            rows.push(Row::Note(pick(lang, "此版本的 Glance 未包含手机遥控与附近传输程序", "This copy of Glance came without the phone remote and nearby sharing")));
+            return;
         }
-        rows.extend(trusted.iter().map(|trusted| Row::Trusted(trusted.fingerprint.clone())));
+        rows.push(Row::PcName);
+        rows.push(Row::Group(pick(lang, "已配对的手机", "Phones paired")));
+        if self.phones.is_empty() {
+            rows.push(Row::Note(pick(lang, "还没有配对的手机", "No phone is paired yet")));
+        }
+        for phone in &self.phones {
+            rows.push(Row::Device(Known::Phone(phone.id.clone())));
+            // (In its card while it opens, is open or closes, as a module's items are.)
+            if self.opened(&phone_card(&phone.id)) > 0.0 {
+                rows.push(Row::PhoneMay(phone.id.clone(), crate::phone::May::Control));
+                // (A phone's browser sends nothing.)
+                if !phone.web {
+                    rows.push(Row::PhoneMay(phone.id.clone(), crate::phone::May::Files));
+                }
+                rows.push(Row::Unpair(phone.id.clone()));
+            }
+        }
+        let trusted: Vec<Row> = self.known().into_iter().filter(|known| matches!(known, Known::Trusted(_))).map(Row::Device).collect();
+        if !trusted.is_empty() {
+            rows.push(Row::Group(pick(lang, "已信任的设备", "Devices trusted")));
+            rows.extend(trusted);
+        }
+        rows.push(Row::Group(pick(lang, "附近发现的设备", "Found nearby")));
+        if self.found.is_empty() {
+            rows.push(Row::Note(pick(lang, "附近没有发现其他设备", "No other devices are found nearby")));
+        }
+        rows.extend(self.found.iter().map(|device| Row::Found(device.fingerprint.clone())));
+    }
+
+    /// The devices this PC knows, in the order they are listed: the phones paired, then the devices trusted that are
+    /// no paired phone's.
+    fn known(&self) -> Vec<Known> {
+        let phones = self.phones.iter().map(|phone| Known::Phone(phone.id.clone()));
+        let trusted = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter()).filter(|trusted| trusted.phone.is_none()).map(|trusted| Known::Trusted(trusted.fingerprint.clone()));
+        phones.chain(trusted).collect()
+    }
+
+    /// The phone paired of that id, as the phones were last read.
+    fn phone_of(&self, id: &str) -> Option<&crate::phone::Phone> {
+        self.phones.iter().find(|phone| phone.id == id)
+    }
+
+    /// What a paired phone's switch for `may` is called, and what it says.
+    fn phone_may_words(&self, may: crate::phone::May) -> (&'static str, &'static str) {
+        let lang = self.lang;
+        match may {
+            crate::phone::May::Control => (
+                pick(lang, "控制这台电脑", "Control this PC"),
+                pick(lang, "屏幕、灯光、音量、亮度与电源模式。关闭后，手机仅能查看状态", "Screens, lights, volume, brightness and the power mode. Off, the phone only sees how the PC is"),
+            ),
+            crate::phone::May::Files => (pick(lang, "直接接收文件", "Take its files without asking"), pick(lang, "关闭后，该手机发来的文件每次询问", "Off, what the phone sends is asked about each time")),
+        }
+    }
+
+    /// The icon a device this PC knows is drawn by (where a module's grip is).
+    fn device_icon(&self, known: &Known) -> Icon {
+        match known {
+            Known::Phone(_) => Icon::Smartphone,
+            Known::Trusted(fingerprint) => Icon::of_device(self.trusted(fingerprint).and_then(|trusted| trusted.kind.as_deref())),
+        }
+    }
+
+    /// The device found nearby of that fingerprint, as it was last found.
+    fn found_device(&self, fingerprint: &str) -> Option<&crate::nearby::Device> {
+        self.found.iter().find(|device| device.fingerprint == fingerprint)
     }
 
     /// Shows the monitor's tab `tab`, from its top.
@@ -3051,11 +3236,17 @@ impl Ui {
                 flash.retarget(0.0, FLASH.0, FLASH.1, Instant::now());
                 self.motion.insert("flash:notice".into(), flash);
             }
+            To::Send => {
+                let paths = std::mem::take(&mut *TO_SEND.lock().unwrap());
+                self.send.add_paths(paths);
+                self.turn_to(Page::Nearby);
+            }
         }
     }
 
     fn turn_to(&mut self, page: Page) {
         if page != self.page {
+            self.put_words_by();
             self.page = page;
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -3087,10 +3278,7 @@ impl Ui {
         // what follows it moves up by the part of them still hidden.
         let mut card: Option<(String, f32, f32)> = None;
         for row in self.rows() {
-            let inside = match &row {
-                Row::Item(id, _) | Row::ModuleChoice(id, _) => Some(id.clone()),
-                _ => None,
-            };
+            let inside = row.card().filter(|(_, head)| !head).map(|(id, _)| id);
             if card.as_ref().is_some_and(|(id, ..)| Some(id) != inside.as_ref()) {
                 let (_, start, open) = card.take().unwrap();
                 y -= (1.0 - open) * (y - start);
@@ -3132,12 +3320,9 @@ impl Ui {
                     let lines = self.choice_lines(&self.choices(*field).1, self.choices_room()).len() as f32;
                     (if after_heading { 8.0 } else { ROW_GAP }, ROW + CHOICE_LINE * lines)
                 }
-                // As tall as the code, or as the words beside it where those are taller.
-                Row::Code => {
-                    let words = self.code.as_ref().map_or(0.0, |(_, what)| 22.0 + self.gfx.wrapped_height(&code_words(self.lang, *what, self.web_address.as_deref()).1, Font::new(Family::Segoe, HINT, 400.0), self.code_words_room()));
-                    (ROW_GAP, CODE.max(words) + 2.0 * ROW_SIDE)
-                }
                 Row::Group(_) => (20.0, GROUP),
+                // (Inside the card of the phone above them, right under its row, as a module's items are.)
+                Row::PhoneMay(..) | Row::Unpair(_) => (0.0, self.words_height(&row).max(ROW)),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
@@ -3180,15 +3365,15 @@ impl Ui {
         self.kept_stages.retain(|kept| kept.screen.as_deref().is_some_and(|id| known.contains(&id)));
     }
 
-    /// Asks the phone remote's helper `ask` (a code, or what to do), then how the remote is, on another thread (see
+    /// Tells the phone remote's helper `ask` (what to do), then asks how the remote is, on another thread (see
     /// `remote_asked`); one at a time, a press meanwhile not taken.
-    fn ask_remote(&mut self, ask: impl FnOnce() -> Option<Option<(crate::phone::Code, CodeFor)>> + Send + 'static) {
+    fn ask_remote(&mut self, ask: impl FnOnce() + Send + 'static) {
         if self.remote_asked.as_ref().is_some_and(|asked| !asked.is_finished()) {
             return;
         }
         self.remote_asked = Some(std::thread::spawn(move || {
-            let code = ask();
-            RemoteAnswer { lights: crate::phone::lights(), raised: crate::phone::lights_raised(), screens: crate::phone::screens_kept(), address: crate::phone::web_address(), code, phones: crate::phone::phones() }
+            ask();
+            RemoteAnswer { lights: crate::phone::lights(), raised: crate::phone::lights_raised(), screens: crate::phone::screens_kept(), phones: crate::phone::phones() }
         }));
         self.next_frame = Instant::now();
     }
@@ -3206,7 +3391,7 @@ impl Ui {
             std::thread::spawn(move || {
                 for words in asked {
                     let said = crate::phone::nearby(&words.iter().map(String::as_str).collect::<Vec<_>>());
-                    if words.first().is_some_and(|word| word == "alias") {
+                    if words.first().is_some_and(|word| word == "name") {
                         crate::nearby::announce();
                     }
                     if answer.send(said).is_err() {
@@ -3222,9 +3407,75 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
+    /// The menu of where what devices nearby send goes, under its button: the station, or a folder (chosen in Windows'
+    /// chooser), the one it goes to now ticked. (One at a time: up, or the chooser up, nothing more.)
+    fn open_kept_menu(&mut self) {
+        if self.menu.is_some() || self.choosing_kept.is_some() {
+            return;
+        }
+        let Some(rect) = self.targets.iter().find(|(_, target)| *target == Target::KeptIn).map(|(rect, _)| *rect) else { return };
+        let lang = self.lang;
+        let folder = self.settings.nearby_folder.is_some();
+        let items = vec![
+            super::menu::Item::new(pick(lang, "中转站", "Station"), Some(super::menu::Mark::Icon(Icon::Inbox)), !folder, false),
+            super::menu::Item::new(pick(lang, "选择文件夹…", "Choose a folder…"), Some(super::menu::Mark::Icon(Icon::Folder)), folder, false),
+        ];
+        let mut at = windows::Win32::Foundation::POINT { x: (rect.x * self.scale).round() as i32, y: ((rect.y + rect.h + 4.0) * self.scale).round() as i32 };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut at);
+        }
+        let look = super::menu::Look { skin: None, dark: self.dark, frost: 1.0, zoom: 1.0 };
+        self.menu = super::menu::Menu::open_at(items, look, at, false, false);
+    }
+
+    /// A message for the menu up, if it is its own: taken (a choice made in it, done).
+    fn menu_message(&mut self, msg: &MSG) -> bool {
+        let Some(menu) = &mut self.menu else { return false };
+        if !menu.owns(msg.hwnd) {
+            return false;
+        }
+        match menu.handle(msg) {
+            super::menu::Handled::Not => false,
+            super::menu::Handled::Taken => true,
+            super::menu::Handled::Done(choice) => {
+                self.end_menu(choice);
+                true
+            }
+        }
+    }
+
+    /// The menu left by something else coming to the front: gone.
+    fn menu_left(&mut self) {
+        if self.menu.as_ref().is_some_and(|menu| menu.left()) {
+            self.end_menu(None);
+        }
+    }
+
+    /// The menu gone, and what was chosen in it done: the station, or Windows' chooser of a folder (on a thread of its
+    /// own, a single-threaded apartment as the shell wants), what it chooses taken in `tick`.
+    fn end_menu(&mut self, choice: Option<usize>) {
+        let Some(menu) = self.menu.take() else { return };
+        menu.close();
+        match choice {
+            Some(0) if self.settings.nearby_folder.is_some() => {
+                self.settings.nearby_folder = None;
+                self.save();
+            }
+            Some(1) => {
+                let (hwnd, lang) = (self.hwnd.0 as isize, self.lang);
+                self.choosing_kept = Some(std::thread::spawn(move || unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+                    super::beside::choose(HWND(hwnd as *mut _), super::beside::Kinds::Folders, lang)
+                }));
+            }
+            _ => {}
+        }
+        self.next_frame = Instant::now();
+    }
+
     /// Whether `row` is one of nearby transfer's that does nothing while it is off: shown dimmed, not to be pressed.
     fn dimmed(&self, row: &Row) -> bool {
-        !self.nearby_on && matches!(row, Row::NearbyName | Row::NearbyFolder | Row::Trusted(_) | Row::Choice(Field::NearbyOthers) | Row::Switch(Switch::NearbyNotice))
+        !self.nearby_on && matches!(row, Row::NearbyFolder | Row::Choice(Field::NearbyOthers) | Row::Switch(Switch::NearbyNotice))
     }
 
     /// The device trusted of that fingerprint, as nearby transfer was last said.
@@ -3232,16 +3483,16 @@ impl Ui {
         self.nearby.as_ref()?.trusted.iter().find(|trusted| trusted.fingerprint == fingerprint)
     }
 
-    /// What devices nearby see this PC called: as it is being written, else as it was last said (its computer's name
-    /// where it is named nothing).
+    /// What phones and devices nearby see this PC called: as it is being written (its computer's name where that is
+    /// nothing), else as it was last said.
     fn pc_called(&self) -> String {
-        let computer = self.nearby.as_ref().map_or_else(|| std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into()), |nearby| nearby.name.clone());
+        let kept = self.nearby.as_ref().map_or_else(computer_name, |nearby| nearby.name.clone());
         match &self.renaming {
             Some(renaming) if renaming.of == Named::ThisPc => {
                 let written = renaming.typing.string();
-                if written.trim().is_empty() { computer } else { written.trim().to_string() }
+                if written.trim().is_empty() { computer_name() } else { written.trim().to_string() }
             }
-            _ => self.nearby.as_ref().map_or(computer, |nearby| nearby.called().to_string()),
+            _ => kept,
         }
     }
 
@@ -3356,7 +3607,6 @@ impl Ui {
     fn words_height(&self, row: &Row) -> f32 {
         let width = self.cards();
         let font = Font::new(Family::Segoe, 14.0, 400.0);
-        let button = |text: &str, kind: Button| if matches!(kind, Button::Said(_)) { self.gfx.measure(text, Font::new(Family::Segoe, HINT, 400.0)) } else { self.gfx.measure(text, font) + 32.0 };
         let (word, room): (Cow<'static, str>, f32) = match row {
             Row::Switch(switch) => match self.switch(*switch).1 {
                 Some(word) => (word, width - 2.0 * ROW_SIDE - 40.0 - 16.0),
@@ -3385,13 +3635,21 @@ impl Ui {
                 Some(word) => (Cow::Owned(word), width - ROW_SIDE - CHEVRON_ROOM - 40.0 - 12.0 - ITEM_INSET),
                 None => return 0.0,
             },
-            Row::NearbyName => (Cow::Borrowed(pick(self.lang, "附近设备中显示的名称", "What devices nearby call this PC")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
+            Row::PcName => (Cow::Borrowed(pick(self.lang, "在手机和附近设备上显示", "Shown on phones and devices nearby")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
+            // (Its words where a module's item's are, left of its switch: see `paint_list`.)
+            Row::PhoneMay(_, may) => (Cow::Borrowed(self.phone_may_words(*may).1), width - ROW_SIDE - 40.0 - 16.0 - ITEM_INSET),
+            // (Its words beside its icon, left of its chevron, as a module's: see `paint_list`.)
+            Row::Device(Known::Phone(_)) => match self.button_row(row, Instant::now()) {
+                Some((_, word, _)) => (Cow::Owned(word), width - ROW_SIDE - CHEVRON_ROOM - 12.0 - ITEM_INSET),
+                None => return 0.0,
+            },
             _ => match self.button_row(row, Instant::now()) {
                 Some((_, word, buttons)) => {
-                    let taken: f32 = buttons.iter().map(|(text, _, kind)| button(text, *kind) + 8.0).sum();
+                    let taken: f32 = buttons.iter().map(|(text, _, kind)| self.gfx.measure(text, font) + 32.0 + if *kind == Button::Menu { MENU_CHEVRON } else { 0.0 } + 8.0).sum();
+                    // (A device's words, and its unpairing's, where a module's are.)
                     let icon = match row {
                         Row::Notice => NOTICE_ICON_ROOM,
-                        Row::Trusted(_) => DEVICE_ROOM,
+                        Row::Found(_) | Row::Device(_) | Row::Unpair(_) => ITEM_INSET - ROW_SIDE,
                         _ => 0.0,
                     };
                     (Cow::Owned(word), width - 2.0 * ROW_SIDE - taken - 8.0 - icon)
@@ -3434,11 +3692,6 @@ impl Ui {
     /// The list's column: its side's padding, its cards, and the room past them to the preview.
     fn pane(&self) -> f32 {
         PAD_SIDE + self.cards() + LIST_GAP
-    }
-
-    /// The room for the words beside a code: what its row has left.
-    fn code_words_room(&self) -> f32 {
-        self.cards() - 2.0 * ROW_SIDE - CODE - 20.0
     }
 
     /// Whether a row of choices with a word goes on a line of its own under
@@ -3633,55 +3886,81 @@ impl Ui {
                 p("卸载程序并删除设置，执行前会再次确认", "Removes Glance and its settings, after asking"),
                 vec![(p("卸载", "Uninstall"), Target::Uninstall, Button::Plain)],
             ),
-            Row::Pair => (
-                p("配对手机", "Pair a phone"),
-                p("安卓手机请先安装 Glance APP，iPhone 请使用网页配对", "On Android, install the Glance app first. On iPhone, pair with the web page"),
-                vec![
-                    (p("用 APP", "With the app"), Target::Pair(false), Button::Accent),
-                    (p("用网页", "With the web"), Target::Pair(true), Button::Plain),
-                    (if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) { p("收起", "Hide") } else { p("下载 APP", "Get the app") }, Target::GetApp, Button::Plain),
-                ],
-            ),
-            Row::WebPage => (
-                p("网页遥控", "Web remote"),
-                p("已通过网页配对的手机，扫码即可再次打开", "A phone paired with the web page scans this to open it again"),
-                vec![(if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) { p("收起", "Hide") } else { p("显示二维码", "Show the code") }, Target::OpenPage, Button::Plain)],
-            ),
-            Row::Phone(at, name) => (
-                if name.is_empty() { p("未命名的手机", "Unnamed phone") } else { name.clone() },
-                p("已配对", "Paired"),
-                vec![(p("取消配对", "Unpair"), Target::Unpair(at.clone()), Button::Plain)],
-            ),
-            Row::NearbyFolder => (
-                p("保存位置", "Kept in"),
-                p("中转站文件夹", "The station's folder"),
-                vec![(p("打开文件夹", "Open folder"), Target::OpenStation, if self.dimmed(row) { Button::Quiet } else { Button::Plain })],
-            ),
-            // A paired phone's device stays while the phone is paired (unpaired, it goes); another, till it is removed.
-            Row::Trusted(fingerprint) => {
+            Row::Manage(managed) => {
+                let (count, title, detail) = match managed {
+                    Managed::Phones => (self.phones.len(), (("已配对 ", " 部手机"), ("", " phones paired")), p("添加手机和解除配对在“设备”页", "Phones are added and unpaired on the Devices page")),
+                    Managed::Trusted => {
+                        let count = self.phones.iter().filter(|phone| phone.files && !phone.web).count() + self.known().iter().filter(|known| matches!(known, Known::Trusted(_))).count();
+                        (count, (("已信任 ", " 台设备"), ("", " devices trusted")), p("已配对的手机自动信任", "Phones paired are trusted"))
+                    }
+                };
+                let ((zh_before, zh_after), (en_before, en_after)) = title;
+                let name = match lang {
+                    Lang::Zh => format!("{zh_before}{count}{zh_after}"),
+                    Lang::En => format!("{en_before}{count}{en_after}"),
+                };
+                (name, detail, vec![(p("管理设备", "Manage devices"), Target::Manage, Button::Plain)])
+            }
+            // A phone paired: what it is, and what it may do (it opens to that: its chevron drawn with it, see
+            // `paint_list`).
+            Row::Device(Known::Phone(id)) => {
+                let phone = self.phone_of(id)?;
+                let name = if phone.name.is_empty() { p("未命名的手机", "Unnamed phone") } else { phone.name.clone() };
+                let mut said = vec![if phone.web { pick(lang, "网页", "Web page") } else { pick(lang, "Glance 手机", "Glance phone") }];
+                said.push(if phone.control { pick(lang, "可控制这台电脑", "Controls this PC") } else { pick(lang, "仅查看状态", "Sees status only") });
+                if phone.files && !phone.web {
+                    said.push(pick(lang, "直接接收文件", "Files without asking"));
+                }
+                (name, said.join(" · "), Vec::new())
+            }
+            Row::Device(Known::Trusted(fingerprint)) => {
                 let trusted = self.trusted(fingerprint)?;
                 let name = if trusted.alias.is_empty() { p("未命名的设备", "Unnamed device") } else { trusted.alias.clone() };
-                if trusted.phone.is_some() {
-                    (name, p("已配对的 Glance 手机", "A Glance phone paired"), vec![(p("随配对保留", "Kept while paired"), Target::Untrust(fingerprint.clone()), Button::Said(self.dimmed(row)))])
-                } else {
-                    let kind = match trusted.kind.as_deref() {
-                        Some("mobile") => p("手机", "Phone"),
-                        Some("desktop" | "laptop") => p("电脑", "Computer"),
-                        Some("web") => p("浏览器", "Browser"),
-                        _ => p("设备", "Device"),
-                    };
-                    let detail = match trusted.since {
-                        0 => kind,
-                        since => {
-                            let day = crate::ui::text::Local::at(since * 1000);
-                            match lang {
-                                Lang::Zh => format!("{kind} · {}月{}日起信任", day.month, day.day),
-                                Lang::En => format!("{kind} · trusted since {}", day.date(lang).split_once(", ").map_or(String::new(), |(_, date)| date.to_string())),
-                            }
-                        }
-                    };
-                    (name, detail, vec![(p("移除", "Remove"), Target::Untrust(fingerprint.clone()), if self.dimmed(row) { Button::Quiet } else { Button::Plain })])
+                let said = format!("{} · {}", maker(lang, trusted.glance, trusted.kind.as_deref()), pick(lang, "直接接收文件", "Files without asking"));
+                let detail = match (trusted.since, lang) {
+                    (0, _) => said,
+                    (since, Lang::Zh) => format!("{said} · {}起", day_said(lang, since)),
+                    (since, Lang::En) => format!("{said} · since {}", day_said(lang, since)),
+                };
+                (name, detail, vec![(p("移除", "Remove"), Target::Untrust(fingerprint.clone()), Button::Plain)])
+            }
+            Row::Unpair(id) => (
+                p("解除配对", "Unpair"),
+                p("解除后，该手机需重新添加才能使用", "Unpaired, the phone is to be added again before it is used"),
+                vec![(p("解除配对", "Unpair"), Target::Unpair(id.clone()), Button::Plain)],
+            ),
+            // A device found: whose it is (Glance's, or LocalSend's), what, and what trusting it does; being trusted,
+            // checked first.
+            Row::Found(fingerprint) => {
+                let device = self.found_device(fingerprint)?;
+                let name = if device.alias.is_empty() { p("未命名的设备", "Unnamed device") } else { device.alias.clone() };
+                let what = device.model.clone().filter(|model| !model.trim().is_empty()).unwrap_or_else(|| kind_word(lang, device.kind.as_deref()).to_string());
+                let detail = match lang {
+                    Lang::Zh => format!("{} · {what}。信任后，它发来的文件直接接收", maker(lang, device.glance, device.kind.as_deref())),
+                    Lang::En => format!("{} · {what}. Trusted, what it sends is taken without asking", maker(lang, device.glance, device.kind.as_deref())),
+                };
+                let trust = |text: String, kind: Button| vec![(text, Target::TrustFound(fingerprint.clone()), kind)];
+                match self.trusting.get(fingerprint) {
+                    Some(None) => (name, detail, trust(p("正在验证", "Checking"), Button::Quiet)),
+                    Some(Some(_)) => (name, p("未能验证这台设备，请确认它仍在附近并已打开", "This device could not be checked. See that it is still nearby and open"), trust(p("重试", "Try again"), Button::Plain)),
+                    None => (name, detail, trust(p("信任", "Trust"), Button::Plain)),
                 }
+            }
+            // The station, or a folder chosen (by its name on the button, where it is said under).
+            Row::NearbyFolder => {
+                let quiet = |kind: Button| if self.dimmed(row) { Button::Quiet } else { kind };
+                let (detail, chosen) = match &self.settings.nearby_folder {
+                    None => (p("放入中转站，按其保留期限清理", "Put on the station, and cleared as the station keeps things"), p("中转站", "Station")),
+                    Some(folder) => {
+                        let name = folder.file_name().map_or_else(|| folder.display().to_string(), |name| name.to_string_lossy().into_owned());
+                        let said = match lang {
+                            Lang::Zh => format!("以原名存入 {}。中转站中同时列出，移除或到期只去掉那一项，文件保留", folder.display()),
+                            Lang::En => format!("Kept under their own names in {}. Listed on the station too: taken off it, or gone with time, only the entry goes and the files stay", folder.display()),
+                        };
+                        (said, name)
+                    }
+                };
+                (p("保存位置", "Kept in"), detail, vec![(p("打开", "Open"), Target::OpenStation, quiet(Button::Plain)), (chosen, Target::KeptIn, quiet(Button::Menu))])
             }
             // A folder by its name, where it is under it (a drive's top, by itself).
             Row::RecentFolder(folder) => (
@@ -3754,6 +4033,7 @@ impl Ui {
                 vec![s("卡片", "Card"), s("横条", "Strip")],
                 [Layout::Card, Layout::Strip].iter().position(|&l| l == settings.overlay.layout),
             ),
+            Field::Adding => (pick(lang, "添加方式", "How to add"), vec![s("配对码", "Pairing code"), s("下载 APP", "Get the app")], Some(usize::from(self.stage_shows == CodeFor::App))),
             Field::NearbyOthers => (
                 pick(lang, "来自未信任设备的文件", "Files from devices not trusted"),
                 vec![s("每次询问", "Ask each time"), s("一律拒绝", "Refuse")],
@@ -3882,6 +4162,12 @@ impl Ui {
             Field::StationCopy => settings.station.always_copy = index == 1,
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
             Field::RecentScope => settings.recent_only = index == 1,
+            // (Not kept: the stage shows the pairing code each time the page is opened.)
+            Field::Adding => {
+                self.stage_shows = [CodeFor::Pairing, CodeFor::App][index];
+                self.next_frame = Instant::now();
+                return;
+            }
             // (Kept by the helper: told so, as it then says; meanwhile as chosen.)
             Field::NearbyOthers => {
                 let refused = index == 1;
@@ -3960,12 +4246,16 @@ impl Ui {
         let name = match renaming.of {
             Named::ThisPc => {
                 let Some(nearby) = self.nearby.as_mut() else { return };
-                let alias = Some(written.trim().to_string()).filter(|alias| !alias.is_empty() && *alias != nearby.name);
-                if alias == nearby.alias {
+                let name = Some(written.trim().to_string()).filter(|name| !name.is_empty()).unwrap_or_else(computer_name);
+                if name == nearby.name {
                     return;
                 }
-                nearby.alias = alias.clone();
-                self.ask_nearby(std::iter::once("alias".to_string()).chain(alias).collect());
+                nearby.name = name.clone();
+                self.ask_nearby(vec!["name".into(), name]);
+                return;
+            }
+            Named::Words => {
+                self.send.add_words(written);
                 return;
             }
             Named::Sensor(_, name) => name,
@@ -4332,17 +4622,18 @@ impl Ui {
                 let hint = if self.remote_there {
                     p("通过手机关闭屏幕与灯光，调节音量与亮度。仅在本地网络中可用", "Screens, lights, volume and brightness from a phone, over the local network only")
                 } else {
-                    p("此版本的 Glance 未包含手机互联程序", "This copy of Glance came without the phone remote")
+                    p("此版本的 Glance 未包含手机遥控程序", "This copy of Glance came without the phone remote")
                 };
-                return (p("开启手机互联", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
+                return (p("开启手机遥控", "Phone remote"), Some(Cow::Borrowed(hint)), self.remote);
             }
+            // (With what the devices nearby see this PC as: its name is changed on the devices' page.)
             Switch::Nearby => {
-                let hint = if self.remote_there {
-                    p("手机或电脑安装 LocalSend 后，即可在同一网络中互相发送文件", "Phones and computers with LocalSend send files to and from this PC on the same network")
-                } else {
-                    p("此版本的 Glance 未包含附近传输程序", "This copy of Glance came without nearby sharing")
+                let hint = match (self.remote_there, lang) {
+                    (true, Lang::Zh) => Cow::Owned(format!("兼容 LocalSend 的设备可将文件发到这台电脑，在附近设备上显示为 {}", self.pc_called())),
+                    (true, Lang::En) => Cow::Owned(format!("Devices that work with LocalSend can send files to this PC, which they see as {}", self.pc_called())),
+                    (false, _) => Cow::Borrowed(p("此版本的 Glance 未包含附近传输程序", "This copy of Glance came without nearby sharing")),
                 };
-                return (p("接收附近设备的文件", "Receive files from devices nearby"), Some(Cow::Borrowed(hint)), self.nearby_on);
+                return (p("接收附近设备的文件", "Receive files from devices nearby"), Some(hint), self.nearby_on);
             }
             Switch::NearbyNotice => (
                 p("在屏幕边缘提示", "Show at the screen's edge"),
@@ -4430,7 +4721,6 @@ impl Ui {
                 let kept = !self.remote_screens;
                 self.ask_remote(move || {
                     crate::phone::keep_screens(kept);
-                    None
                 });
                 self.next_frame = Instant::now();
                 return;
@@ -5030,7 +5320,7 @@ impl Ui {
         // the name is kept.
         if self.renaming.is_some() {
             if self.over_rename() {
-                let at = self.rename_caret_at(x);
+                let at = if self.writing_words() { self.words_caret_at(x, y) } else { self.rename_caret_at(x) };
                 let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
                 if let Some(renaming) = self.renaming.as_mut() {
                     renaming.typing.go(at, shift);
@@ -5039,7 +5329,9 @@ impl Ui {
                 self.next_frame = Instant::now();
                 return;
             }
-            self.end_rename(true);
+            if !self.writing_words() {
+                self.end_rename(true);
+            }
         }
         if self.page == Page::Phone && self.press_phone(x, y) {
             return;
@@ -5281,21 +5573,69 @@ impl Ui {
                 self.turn_to(Page::Reports);
             }
             Target::Thread(id) => self.open_thread(&id),
-            // (Pressed again, its code is put away.)
-            Target::GetApp if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::App) => self.code = None,
-            // (Each asked of the remote's helper on another thread: see `tick`.)
-            Target::GetApp => self.ask_remote(|| Some(crate::phone::app_code().map(|code| (code, CodeFor::App)))),
-            Target::Pair(web) => self.ask_remote(move || Some(crate::phone::offer(web).map(|code| (code, if web { CodeFor::WebPairing } else { CodeFor::Pairing })))),
-            Target::OpenPage if self.code.as_ref().is_some_and(|(_, what)| *what == CodeFor::WebPage) => self.code = None,
-            // (Where it is now: this PC's address may have changed.)
-            Target::OpenPage => self.ask_remote(|| Some(crate::phone::web_address().as_deref().and_then(crate::phone::code_of).map(|code| (code, CodeFor::WebPage)))),
+            // (Asked for again as the window ticks: see `keep_offer`.)
+            Target::Pair => self.offer_failed = false,
+            // Asked first: unpaired, the phone neither controls this PC nor sends to it without asking.
             Target::Unpair(id) => {
-                self.ask_remote(move || {
-                    crate::phone::unpair(&id);
-                    None
-                });
+                let lang = self.lang;
+                let name = self.phone_of(&id).map(|phone| phone.name.clone()).filter(|name| !name.is_empty()).unwrap_or_else(|| pick(lang, "未命名的手机", "Unnamed phone").to_string());
+                let title = match lang {
+                    Lang::Zh => format!("解除与“{name}”的配对？"),
+                    Lang::En => format!("Unpair “{name}”?"),
+                };
+                let asked = super::ask::Asked {
+                    title: &title,
+                    intro: pick(
+                        lang,
+                        "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，请再次添加手机。",
+                        "Unpaired, the phone no longer controls this PC, and what it sends is asked about again. To use it again, add the phone once more.",
+                    ),
+                    own: None,
+                    option: None,
+                    sent: None,
+                    from_end: false,
+                    yes: pick(lang, "解除配对", "Unpair"),
+                    no: pick(lang, "取消", "Cancel"),
+                    dark: self.dark,
+                };
+                if super::ask::show(self.hwnd, &asked).is_some() {
+                    self.set_open(&phone_card(&id), false, true);
+                    self.phones.retain(|phone| phone.id != id);
+                    self.ask_remote(move || crate::phone::unpair(&id));
+                }
             }
-            Target::NearbyName => self.begin_name_pc(),
+            Target::OpenPhone(id) => {
+                let card = phone_card(&id);
+                let open = !self.expanded.contains(&card);
+                self.set_open(&card, open, false);
+            }
+            // Shown turned at once; the helper told on its thread (one asking at a time: a press while it is asked is
+            // not taken), and the phones read again as it answers.
+            Target::PhoneMay(id, may) => {
+                if self.remote_asked.as_ref().is_some_and(|asked| !asked.is_finished()) {
+                    return;
+                }
+                let Some(phone) = self.phones.iter_mut().find(|phone| phone.id == id) else { return };
+                let on = match may {
+                    crate::phone::May::Control => {
+                        phone.control ^= true;
+                        phone.control
+                    }
+                    crate::phone::May::Files => {
+                        phone.files ^= true;
+                        phone.files
+                    }
+                };
+                self.ask_remote(move || crate::phone::let_phone(&id, may, on));
+            }
+            Target::TrustFound(fingerprint) => {
+                if self.trusting.get(&fingerprint) != Some(&None) {
+                    self.trusting.insert(fingerprint.clone(), None);
+                    crate::nearby::trust(&fingerprint);
+                }
+            }
+            Target::Manage => self.turn_to(Page::Devices),
+            Target::PcName => self.begin_name_pc(),
             // (Gone from the list at once; the helper told, and as it then says.)
             Target::Untrust(fingerprint) => {
                 if let Some(nearby) = self.nearby.as_mut() {
@@ -5303,8 +5643,17 @@ impl Ui {
                 }
                 self.ask_nearby(vec!["forget".into(), fingerprint]);
             }
+            Target::SendKind(_)
+            | Target::SendClear
+            | Target::SendRemove(_)
+            | Target::SendTo(_)
+            | Target::SendCancel(_)
+            | Target::SendRefresh
+            | Target::SendWordsAdd
+            | Target::SendWordsCancel => self.send_press(target),
+            Target::KeptIn => self.open_kept_menu(),
             Target::OpenStation => {
-                let folder = crate::settings::local_dir().join(crate::station::folder::OWN);
+                let folder = self.settings.nearby_folder.clone().unwrap_or_else(|| crate::settings::local_dir().join(crate::station::folder::OWN));
                 let _ = std::fs::create_dir_all(&folder);
                 unsafe { ShellExecuteW(Some(self.hwnd), w!("open"), &HSTRING::from(folder.as_os_str()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
             }
@@ -5375,14 +5724,18 @@ impl Ui {
                 },
                 Row::Quit => vec![Target::Quit],
                 Row::Guide => vec![Target::Guide],
-                Row::Pair => vec![Target::Pair(false), Target::Pair(true), Target::GetApp],
-                Row::WebPage => vec![Target::OpenPage],
-                Row::Phone(id, _) => vec![Target::Unpair(id)],
-                Row::NearbyName => vec![Target::NearbyName],
-                Row::NearbyFolder => vec![Target::OpenStation],
-                Row::Trusted(fingerprint) if self.trusted(&fingerprint).is_some_and(|trusted| trusted.phone.is_none()) => vec![Target::Untrust(fingerprint)],
-                Row::Trusted(_) => vec![],
-                Row::Code | Row::Group(_) => vec![],
+                Row::PcName => vec![Target::PcName],
+                Row::Device(Known::Phone(id)) => vec![Target::OpenPhone(id)],
+                Row::Device(Known::Trusted(fingerprint)) => vec![Target::Untrust(fingerprint)],
+                // (Only while its card is open, as a module's items.)
+                Row::PhoneMay(id, may) if self.expanded.contains(&phone_card(&id)) => vec![Target::PhoneMay(id, may)],
+                Row::Unpair(id) if self.expanded.contains(&phone_card(&id)) => vec![Target::Unpair(id)],
+                Row::PhoneMay(..) | Row::Unpair(_) => vec![],
+                Row::Found(fingerprint) if self.trusting.get(&fingerprint) == Some(&None) => vec![],
+                Row::Found(fingerprint) => vec![Target::TrustFound(fingerprint)],
+                Row::Manage(_) => vec![Target::Manage],
+                Row::NearbyFolder => vec![Target::KeptIn, Target::OpenStation],
+                Row::Group(_) => vec![],
                 Row::More(_) => vec![Target::More],
                 Row::Tabs => TABS.iter().map(|tab| Target::Tab(*tab)).collect(),
                 Row::Element(name) => vec![Target::Element(name)],
@@ -5408,6 +5761,9 @@ impl Ui {
             return true;
         }
         // A sensor being named takes the keys (but Tab, which keeps its name and goes on: see `rename_key`).
+        if self.writing_words() && !alt {
+            return self.words_key(key, shift);
+        }
         if self.renaming.is_some() && !alt && self.rename_key(key, shift) {
             return true;
         }
@@ -5528,11 +5884,11 @@ impl Ui {
             (Row::Skins, Target::Skin(_)) | (Row::Update, Target::Update | Target::Download) | (Row::Notice, Target::NoticeRead | Target::NoticeLink) | (Row::Diagnostics, Target::Diagnostics | Target::SendReport) | (Row::Uninstall, Target::Uninstall) | (Row::Quit, Target::Quit) | (Row::Guide, Target::Guide) => true,
             (Row::Version, Target::CheckNow) => true,
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
-            (Row::Pair, Target::Pair(_) | Target::GetApp) | (Row::WebPage, Target::OpenPage) => true,
+            (Row::Manage(_), Target::Manage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
-            (Row::Phone(a, _), Target::Unpair(b)) => a == b,
-            (Row::NearbyName, Target::NearbyName) | (Row::NearbyFolder, Target::OpenStation) => true,
-            (Row::Trusted(a), Target::Untrust(b)) => a == b,
+            (Row::Unpair(a), Target::Unpair(b)) | (Row::Device(Known::Phone(a)), Target::OpenPhone(b)) | (Row::Device(Known::Trusted(a)), Target::Untrust(b)) | (Row::Found(a), Target::TrustFound(b)) => a == b,
+            (Row::PhoneMay(a, s), Target::PhoneMay(b, t)) => a == b && s == t,
+            (Row::PcName, Target::PcName) | (Row::NearbyFolder, Target::OpenStation | Target::KeptIn) => true,
             (Row::MyReports, Target::MyReports) => true,
             (Row::Report(a), Target::Thread(b)) => a == b,
             (Row::Drive(a), Target::Drive(b)) => a == b,
@@ -5565,6 +5921,9 @@ impl Ui {
         if let Some((_, k)) = self.phone.at.filter(|(at, _)| self.page == Page::Phone && x >= at.x && x < at.x + at.w && y >= at.y && y < at.y + at.h) {
             self.phone.scroll = (self.phone.scroll - delta as f32 / 120.0 * WHEEL / k).clamp(0.0, self.phone.most);
             self.next_frame = Instant::now();
+            return;
+        }
+        if self.send_wheel(delta) {
             return;
         }
         if !(NAV..NAV + self.pane()).contains(&x) {
@@ -5764,9 +6123,9 @@ impl Ui {
         let took = began.elapsed();
         if took > SLOW_FRAME {
             let ms = |d: Duration| d.as_secs_f32() * 1000.0;
-            let (given, handed) = (surface.took.given, surface.took.handed);
+            let (given, ended, handed, card) = (surface.took.given, surface.took.ended, surface.took.handed, gfx.drawing_on());
             crate::widget::note_sparingly("settings frame", || {
-                format!("settings: a frame took {:.1} ms (its surface given in {:.1}, painted {:.1}, handed to the compositor {:.1})", ms(took), ms(given), ms(took.saturating_sub(given + handed)), ms(handed))
+                format!("settings: a frame took {:.1} ms (its surface given in {:.1}, painted {:.1} (its drawing ended in {:.1}), handed to the compositor {:.1}, {card})", ms(took), ms(given), ms(took.saturating_sub(given + handed)), ms(ended), ms(handed))
             });
         }
         self.surface = Some(surface);
@@ -5821,10 +6180,12 @@ impl Ui {
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
+        self.send.area = None;
         let creep = {
             let _timed = crate::perf::Timed::start("settings preview", String::new);
             self.paint_preview(frame, &palette, width, height)
         };
+        self.tell_send_area();
         unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         {
             let _timed = crate::perf::Timed::start("settings list", String::new);
@@ -5858,7 +6219,7 @@ impl Ui {
                 }
                 NavItem::Page(page) => page,
             };
-            if page == Page::Phone {
+            if page == Page::Devices {
                 y += NAV_GAP / 2.0;
                 fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
                 y += NAV_GAP / 2.0;
@@ -5967,9 +6328,8 @@ impl Ui {
                 SwitchAsked::Startup => self.autostart = on,
                 SwitchAsked::Remote => {
                     self.remote = on;
-                    self.code = None;
                     self.phones = crate::phone::phones();
-                    self.ask_remote(|| None);
+                    self.ask_remote(|| ());
                 }
                 SwitchAsked::Nearby => {
                     self.nearby_on = on;
@@ -6001,10 +6361,6 @@ impl Ui {
                 self.remote_lights = answer.lights;
                 self.remote_raised = answer.raised;
                 self.remote_screens = answer.screens;
-                self.web_address = answer.address;
-                if let Some(code) = answer.code {
-                    self.code = code;
-                }
                 self.phones = answer.phones;
             }
             self.next_frame = now;
@@ -6027,7 +6383,7 @@ impl Ui {
         }
         // Read again while its page shows, once the helper has written what it keeps since (a device trusted from the
         // edge's notice appears): looked at, not read, every second.
-        if self.page == Page::Nearby && self.nearby_at.is_none_or(|at| now.duration_since(at) > Duration::from_secs(1)) {
+        if matches!(self.page, Page::Nearby | Page::Devices | Page::Phone) && self.nearby_at.is_none_or(|at| now.duration_since(at) > Duration::from_secs(1)) {
             let written = crate::phone::phones_written();
             if written != self.nearby_written || self.nearby.is_none() && self.nearby_at.is_none() {
                 self.nearby_written = written;
@@ -6036,7 +6392,7 @@ impl Ui {
             self.nearby_at = Some(now);
             self.next_frame = self.next_frame.min(now + Duration::from_secs(1));
         }
-        if self.switching.is_some() || self.reading_switches.is_some() || self.reporting.is_some() || self.remote_asked.is_some() || self.nearby_waiting > 0 {
+        if self.switching.is_some() || self.reading_switches.is_some() || self.reporting.is_some() || self.remote_asked.is_some() || self.nearby_waiting > 0 || self.offering.is_some() || self.app_asked.is_some() {
             self.next_frame = self.next_frame.min(now + Duration::from_millis(100));
         }
         // The lights' program fetched (or taken away): how that went, once it is over.
@@ -6046,12 +6402,12 @@ impl Ui {
         if free && self.fetching.as_ref().is_some_and(|fetching| fetching.is_finished()) {
             let done = self.fetching.take().unwrap().join().unwrap_or(false);
             self.fetch_failed = !done;
-            self.ask_remote(|| None);
+            self.ask_remote(|| ());
         }
         if free && self.remote_asked.is_none() && self.raising.as_ref().is_some_and(|raising| raising.is_finished()) {
             let done = self.raising.take().unwrap().join().unwrap_or(false);
             self.raise_failed = !done;
-            self.ask_remote(|| None);
+            self.ask_remote(|| ());
         }
         if self.fetching.is_some() || self.raising.is_some() {
             self.next_frame = now + Duration::from_millis(300);
@@ -6087,45 +6443,73 @@ impl Ui {
             self.reading_drives = Some(std::thread::spawn(crate::station::recent::volumes));
             self.drives_at = Some(now);
         }
+        // The folder chosen for what devices nearby send, once the chooser is closed (none chosen: as it was).
+        if self.choosing_kept.as_ref().is_some_and(|choosing| choosing.is_finished()) {
+            let chosen = self.choosing_kept.take().unwrap().join().unwrap_or_default();
+            if let Some(folder) = chosen.into_iter().next() {
+                self.settings.nearby_folder = Some(folder);
+                self.save();
+            }
+            self.next_frame = now;
+        }
         // The folders chosen in Windows' chooser, once it is closed.
         if self.choosing_folders.as_ref().is_some_and(|choosing| choosing.is_finished()) {
             let chosen = self.choosing_folders.take().unwrap().join().unwrap_or_default();
             self.add_recent_folders(chosen);
             self.next_frame = now;
         }
-        // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered appears, and its code goes.
+        // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered
+        // appears (and the pairing is offered anew: see `keep_offer`).
         // (Read only once the remote has written them since: looked at, not read, every second.)
-        if self.page == Page::Phone && self.remote && now.duration_since(self.phones_at) > Duration::from_secs(1) {
+        if matches!(self.page, Page::Phone | Page::Devices) && now.duration_since(self.phones_at) > Duration::from_secs(1) {
             let written = crate::phone::phones_written();
             if written != self.phones_written {
                 let phones = crate::phone::phones();
-                if phones.len() > self.phones.len() && self.code.as_ref().is_some_and(|(_, what)| matches!(what, CodeFor::Pairing | CodeFor::WebPairing)) {
-                    self.code = None;
-                }
                 self.phones = phones;
                 self.phones_written = written;
             }
             self.phones_at = now;
-            self.next_frame = now + Duration::from_secs(1);
+            self.next_frame = self.next_frame.min(now + Duration::from_secs(1));
+        }
+        self.keep_offer(now);
+        // The devices found nearby, as the helper last found them (those this PC knows already listed above them), and
+        // those being trusted, taken while the devices' page shows: the devices nearby asked to say themselves as it
+        // opens and now and then while it shows (one that came since says itself, one that went is forgotten).
+        if self.page == Page::Devices {
+            let shown = crate::nearby::shown();
+            let trusted: Vec<&str> = self.nearby.iter().flat_map(|nearby| nearby.trusted.iter()).map(|trusted| trusted.fingerprint.as_str()).collect();
+            let found: Vec<crate::nearby::Device> = shown.devices.into_iter().filter(|device| !trusted.iter().any(|known| known.eq_ignore_ascii_case(&device.fingerprint))).collect();
+            if found != self.found || shown.trusting != self.trusting {
+                self.found = found;
+                self.trusting = shown.trusting;
+                self.next_frame = now;
+            }
+            if self.announced_at.is_none_or(|at| now.duration_since(at) >= ANNOUNCE_EVERY) {
+                crate::nearby::announce();
+                self.announced_at = Some(now);
+            }
+            self.next_frame = self.next_frame.min(now + Duration::from_millis(500));
+        } else {
+            self.announced_at = None;
         }
         let placed = self.layout();
-        // How far each module's card reaches down: its row, and as it opens,
-        // that share of the rows inside it; and where the card's top is.
-        // A card's rows follow its module's.
+        // How far each card that opens reaches down (a module's, a phone's): its row, and as it opens, that share of
+        // the rows inside it; and where the card's top is. A card's rows follow its head's.
         let mut reach: HashMap<String, f32> = HashMap::new();
         let mut card_top: HashMap<String, f32> = HashMap::new();
         let mut own: HashMap<String, f32> = HashMap::new();
         for (row, top, row_height) in &placed {
-            match row {
-                Row::Module(id) => {
+            match row.card() {
+                Some((id, true)) => {
                     card_top.insert(id.clone(), *top);
                     reach.insert(id.clone(), *row_height);
-                    own.insert(id.clone(), *row_height);
+                    own.insert(id, *row_height);
                 }
-                Row::Item(id, _) | Row::ModuleChoice(id, _) => {
-                    reach.insert(id.clone(), top + row_height - card_top[id]);
+                Some((id, false)) => {
+                    let to = top + row_height - card_top[&id];
+                    reach.insert(id, to);
                 }
-                _ => {}
+                None => {}
             }
         }
         let open: HashMap<String, f32> = card_top.keys().map(|id| (id.clone(), self.opened(id))).collect();
@@ -6135,18 +6519,21 @@ impl Ui {
         }
         for (row, top, row_height) in placed {
             let y = top - scroll;
-            let extent = if let Row::Module(id) = &row { reach[id] } else { row_height };
+            let extent = match row.card() {
+                Some((id, true)) => reach[&id],
+                _ => row_height,
+            };
             if y > height || y + extent + 60.0 < 0.0 {
                 continue;
             }
             // A row inside a card shows only within the card as far as it
             // has opened, and takes clicks once it is open.
-            let inside = match &row {
-                Row::Item(id, _) | Row::ModuleChoice(id, _) => {
+            let inside = match row.card() {
+                Some((id, false)) => {
                     let glide = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
-                    let top = card_top[id] - scroll + glide;
-                    unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, reach[id]), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                    Some(open[id] >= 1.0)
+                    let top = card_top[&id] - scroll + glide;
+                    unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, reach[&id]), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+                    Some(open[&id] >= 1.0)
                 }
                 _ => None,
             };
@@ -6309,45 +6696,96 @@ impl Ui {
                     }
                 }
                 // What this PC is called, written in its box (pressed, it is written there).
-                Row::NearbyName => {
+                Row::PcName => {
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let enabled = !self.dimmed(&row);
                     let cy = y + row_height / 2.0;
                     let field = Rect { x: left + width - ROW_SIDE - NAME_FIELD, y: cy - 14.0, w: NAME_FIELD, h: 28.0 };
-                    let colors = if enabled { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
-                    let words = pick(lang, "附近设备中显示的名称", "What devices nearby call this PC");
-                    field_label_in(frame, colors, pick(lang, "这台电脑的名称", "This PC's name"), Some(words), label, hint, left + ROW_SIDE, cy, field.x - 16.0 - left - ROW_SIDE);
+                    let words = pick(lang, "在手机和附近设备上显示", "Shown on phones and devices nearby");
+                    field_label_in(frame, (palette.text, palette.text2), pick(lang, "这台电脑的名称", "This PC's name"), Some(words), label, hint, left + ROW_SIDE, cy, field.x - 16.0 - left - ROW_SIDE);
                     if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::ThisPc) {
                         self.paint_rename(frame, palette, label, field.x + 8.0, cy, field.w - 8.0, now);
                     } else {
-                        let lit = enabled && hovered.as_ref() == Some(&Target::NearbyName);
+                        let lit = hovered.as_ref() == Some(&Target::PcName);
                         fill(frame, if lit { palette.hover } else { palette.control }, field.x, field.y, field.w, field.h, 6.0);
                         stroke_inside(frame, field, 6.0, palette.rule);
                         frame.clip(field.x + 8.0, field.y, field.w - 16.0, field.h);
-                        text_centred(frame, &self.pc_called(), label, if enabled { palette.text } else { palette.text3 }, field.x + 8.0, cy, field.w - 16.0, Align::Start);
+                        text_centred(frame, &self.pc_called(), label, palette.text, field.x + 8.0, cy, field.w - 16.0, Align::Start);
                         frame.unclip();
-                        if enabled {
-                            self.targets.push((field, Target::NearbyName));
-                        }
+                        self.targets.push((field, Target::PcName));
                     }
                 }
-                // A device trusted: what it is, round, left of its words.
-                Row::Trusted(_) => {
+                // A device this PC knows: its icon where a module's grip is, its name, and what it is and may do under
+                // it. A phone's card opens as a module's does (the whole row opens it, its chevron turning over as it
+                // does); a device trusted's button takes it away.
+                Row::Device(known) => {
+                    let Some((name, detail, buttons)) = self.button_row(&Row::Device(known.clone()), now) else { continue };
+                    card(frame, palette, left, y, width, extent, palette.card);
+                    let cy = y + row_height / 2.0;
+                    let mut right = left + width - ROW_SIDE;
+                    if let Known::Phone(id) = &known {
+                        let key = phone_card(id);
+                        let turn = self.animate(format!("chevron:{key}"), if self.expanded.contains(&key) { 180.0 } else { 0.0 }, SLIDE, now, false);
+                        let cx = right - 6.0;
+                        frame.place(Matrix3x2::rotation_around(turn, Vector2 { X: cx, Y: cy }));
+                        frame.icon(Icon::ChevronDown, Point { x: cx, y: cy }, CHEVRON, palette.text2);
+                        frame.origin(0.0, 0.0);
+                        right -= CHEVRON_ROOM + 4.0;
+                    }
+                    for (text, target, kind) in buttons {
+                        right = self.button(frame, palette, &text, right, cy, target, kind, &hovered) - 8.0;
+                    }
+                    frame.icon(self.device_icon(&known), Point { x: left + 22.0, y: cy }, 16.0, palette.text2);
+                    field_label(frame, palette, &name, Some(&detail), label, hint, left + ITEM_INSET, cy, right - 8.0 - left - ITEM_INSET);
+                    if let Known::Phone(id) = known {
+                        self.targets.push((Rect { x: left, y, w: width, h: row_height }, Target::OpenPhone(id)));
+                    }
+                }
+                // In a phone's card, each under a hairline across it as a module's items are, their words where those
+                // are: a switch for what it may do, and its unpairing, the switch and the button in the column the
+                // buttons of the other rows are in.
+                Row::PhoneMay(id, may) => {
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let (name, word) = self.phone_may_words(may);
+                    let on = self.phone_of(&id).is_some_and(|phone| match may {
+                        crate::phone::May::Control => phone.control,
+                        crate::phone::May::Files => phone.files,
+                    });
+                    let switch_left = left + width - ROW_SIDE - 40.0;
+                    let cy = y + row_height / 2.0;
+                    field_label(frame, palette, name, Some(word), label, hint, left + ITEM_INSET, cy, switch_left - 16.0 - left - ITEM_INSET);
+                    let target = Target::PhoneMay(id.clone(), may);
+                    let pressed = self.pressed == Some(target.clone());
+                    self.toggle(frame, palette, format!("phone:{id}:{may:?}"), on, true, switch_left, cy, now, pressed);
+                    if usable {
+                        self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
+                    }
+                }
+                Row::Unpair(_) => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let cy = y + row_height / 2.0;
+                    let mut right = left + width - ROW_SIDE;
+                    let targets = self.targets.len();
+                    for (text, target, kind) in buttons {
+                        right = self.button(frame, palette, &text, right, cy, target, kind, &hovered) - 8.0;
+                    }
+                    if !usable {
+                        self.targets.truncate(targets);
+                    }
+                    field_label(frame, palette, &name, Some(&detail), label, hint, left + ITEM_INSET, cy, right - 8.0 - left - ITEM_INSET);
+                }
+                // A device found nearby: as a device trusted is, with the button that trusts it.
+                Row::Found(ref fingerprint) => {
+                    let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
+                    let kind = self.found_device(fingerprint).and_then(|device| device.kind.clone());
                     card(frame, palette, left, y, width, row_height, palette.card);
-                    let enabled = !self.dimmed(&row);
                     let cy = y + row_height / 2.0;
                     let mut right = left + width - ROW_SIDE;
                     for (text, target, kind) in buttons {
                         right = self.button(frame, palette, &text, right, cy, target, kind, &hovered) - 8.0;
                     }
-                    let mobile = matches!(&row, Row::Trusted(fingerprint) if self.trusted(fingerprint).is_some_and(|trusted| trusted.kind.as_deref() == Some("mobile")));
-                    let round_x = left + ROW_SIDE + DEVICE_ROUND / 2.0;
-                    fill(frame, palette.control, round_x - DEVICE_ROUND / 2.0, cy - DEVICE_ROUND / 2.0, DEVICE_ROUND, DEVICE_ROUND, DEVICE_ROUND / 2.0);
-                    frame.icon(if mobile { Icon::Smartphone } else { Icon::Monitor }, Point { x: round_x, y: cy }, 17.0, if enabled { palette.text } else { palette.text3 });
-                    let words_left = left + ROW_SIDE + DEVICE_ROOM;
-                    let colors = if enabled { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
-                    field_label_in(frame, colors, &name, Some(&detail), label, hint, words_left, cy, right - 8.0 - words_left);
+                    frame.icon(Icon::of_device(kind.as_deref()), Point { x: left + 22.0, y: cy }, 16.0, palette.text2);
+                    field_label(frame, palette, &name, Some(&detail), label, hint, left + ITEM_INSET, cy, right - 8.0 - left - ITEM_INSET);
                 }
                 Row::Module(id) => {
                     let offset = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
@@ -6422,31 +6860,6 @@ impl Ui {
                     let small = Font::new(Family::Segoe, 13.0, 600.0);
                     text_centred(frame, name, small, palette.text2, left + 4.0, y + row_height / 2.0, width, Align::Start);
                 }
-                Row::Code => {
-                    card(frame, palette, left, y, width, row_height, palette.card);
-                    if let Some((code, what)) = &self.code {
-                        // Dark on white whatever the theme (what a phone's camera reads), a margin of four cells round it.
-                        let (x0, y0) = (left + ROW_SIDE, y + (row_height - CODE) / 2.0);
-                        fill(frame, Color::hex(0xFFFFFF, 1.0), x0, y0, CODE, CODE, 8.0);
-                        let cell = CODE / (code.0.len() as f32 + 8.0);
-                        for (down, row) in code.0.iter().enumerate() {
-                            // (Each run of dark cells as one piece, and a hair over the row below: no seams between them.)
-                            let mut across = 0;
-                            while across < row.len() {
-                                let run = row[across..].iter().take_while(|dark| **dark).count();
-                                if run > 0 {
-                                    fill(frame, Color::hex(0x000000, 1.0), x0 + (across as f32 + 4.0) * cell, y0 + (down as f32 + 4.0) * cell, run as f32 * cell, cell + 0.3, 0.0);
-                                }
-                                across += run.max(1);
-                            }
-                        }
-                        let (title, word) = code_words(lang, *what, self.web_address.as_deref());
-                        let word = word.as_ref();
-                        let text_left = x0 + CODE + 20.0;
-                        field_label(frame, palette, title, Some(word), label, hint, text_left, y + row_height / 2.0, self.code_words_room());
-
-                    }
-                }
                 Row::Notice => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     // Tinted in the accent a moment, opened at from its notification.
@@ -6463,7 +6876,7 @@ impl Ui {
                     frame.icon(Icon::Megaphone, Point { x: left + ROW_SIDE + 8.0, y: top + 10.0 }, 16.0, palette.selection);
                     field_label(frame, palette, &name, Some(&detail), Font::new(Family::Segoe, 14.0, 600.0), hint, words_left, y + row_height / 2.0, room);
                 }
-                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Pair | Row::WebPage | Row::Phone(..) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Manage(_) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -6596,12 +7009,8 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     fn button(&mut self, frame: &Frame, palette: &Palette, text: &str, right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
         let font = Font::new(Family::Segoe, 14.0, 400.0);
-        if let Button::Said(dimmed) = kind {
-            let w = frame.gfx.measure(text, Font::new(Family::Segoe, HINT, 400.0));
-            text_centred(frame, text, Font::new(Family::Segoe, HINT, 400.0), if dimmed { palette.text3 } else { palette.text2 }, right - w, cy, w + 1.0, Align::Start);
-            return right - w;
-        }
-        let w = frame.gfx.measure(text, font) + 32.0;
+        let chevron = if kind == Button::Menu { MENU_CHEVRON } else { 0.0 };
+        let w = frame.gfx.measure(text, font) + 32.0 + chevron;
         let rect = Rect { x: right - w, y: cy - 16.0, w, h: 32.0 };
         let hover = kind != Button::Quiet && hovered.as_ref() == Some(&target);
         let ink = match kind {
@@ -6617,7 +7026,10 @@ impl Ui {
                 if kind == Button::Quiet { palette.text2 } else { palette.text }
             }
         };
-        text_centred(frame, text, font, ink, rect.x + 16.0, cy, w, Align::Start);
+        text_centred(frame, text, font, ink, rect.x + 16.0, cy, w - 32.0 - chevron + 1.0, Align::Start);
+        if kind == Button::Menu {
+            frame.icon(Icon::ChevronDown, Point { x: rect.x + rect.w - 16.0 - 6.0, y: cy }, 14.0, palette.text2);
+        }
         if kind != Button::Quiet {
             self.targets.push((rect, target));
         }
@@ -6742,62 +7154,6 @@ impl Ui {
         self.phone.parts = painted.parts;
         // (Drawn again soon whether or not its fans turn: how the PC is, is asked meanwhile.)
         true
-    }
-
-    /// Nearby transfer's preview: a phone with LocalSend open at its sending, in a phone's outline (as `paint_phone`
-    /// draws one), listing the devices nearby as it would: this PC under its name (as it is being written), while it
-    /// receives, and the others found.
-    fn paint_nearby(&self, frame: &Frame, area: Rect) {
-        let (bezel, margin) = (10.0, 24.0);
-        let (wide, tall) = super::phone_art::SCREEN;
-        let k = ((area.h - 2.0 * margin - 2.0 * bezel) / tall).min((area.w - 2.0 * margin - 2.0 * bezel) / wide).min(1.0);
-        if k <= 0.0 {
-            return;
-        }
-        let (w, h) = (wide * k, tall * k);
-        let (x, y) = (area.x + (area.w - w) / 2.0, area.y + (area.h - h) / 2.0);
-        fill(frame, Color::hex(0x15181D, 1.0), x - bezel, y - bezel, w + 2.0 * bezel, h + 2.0 * bezel, 26.0 * k + bezel);
-        // (LocalSend's light screen, as a phone in a light theme shows it.)
-        const SCREEN: Color = Color::hex(0xF4F6F9, 1.0);
-        const INK: Color = Color::hex(0x1C2230, 1.0);
-        const DIM: Color = Color::hex(0x6B7586, 1.0);
-        const TILE: Color = Color::hex(0xE7EDF8, 1.0);
-        const BLUE: Color = Color::hex(0x2F6FDB, 1.0);
-        fill(frame, SCREEN, x, y, w, h, 26.0 * k);
-        let lang = self.lang;
-        let at = |dp: f32| dp * k;
-        let side = x + at(22.0);
-        let room = w - at(44.0);
-        text_centred(frame, pick(lang, "发送", "Send"), Font::new(Family::Segoe, at(25.0), 600.0), INK, side, y + at(68.0), room, Align::Start);
-        text_centred(frame, pick(lang, "附近的设备", "Nearby devices"), Font::new(Family::Segoe, at(16.0), 400.0), DIM, side, y + at(96.0), room, Align::Start);
-        let mut top = y + at(120.0);
-        let device = |top: f32, icon: Icon, name: &str, under: &str| {
-            let tall = at(70.0);
-            fill(frame, Color::hex(0x000000, 0.05), side, top + at(1.5), room, tall, at(18.0));
-            fill(frame, Color::hex(0xFFFFFF, 1.0), side, top, room, tall, at(18.0));
-            let tile = at(50.0);
-            fill(frame, TILE, side + at(10.0), top + (tall - tile) / 2.0, tile, tile, at(14.0));
-            frame.icon(icon, Point { x: side + at(10.0) + tile / 2.0, y: top + tall / 2.0 }, at(24.0), BLUE);
-            let words = side + at(10.0) + tile + at(14.0);
-            let words_room = side + room - at(12.0) - words;
-            text_centred(frame, name, Font::new(Family::Segoe, at(18.0), 600.0), INK, words, top + tall / 2.0 - at(10.0), words_room, Align::Start);
-            text_centred(frame, under, Font::new(Family::Segoe, at(15.0), 400.0), DIM, words, top + tall / 2.0 + at(12.0), words_room, Align::Start);
-            top + tall + at(12.0)
-        };
-        if self.nearby_on {
-            top = device(top, Icon::Monitor, &self.pc_called(), "Windows · Glance");
-        }
-        for found in crate::nearby::shown().devices {
-            let mobile = found.kind.as_deref() == Some("mobile");
-            let under = found.model.clone().unwrap_or_else(|| if mobile { pick(lang, "手机", "Phone") } else { pick(lang, "电脑", "Computer") }.to_string());
-            top = device(top, if mobile { Icon::Smartphone } else { Icon::Monitor }, &found.alias, &under);
-        }
-        if !self.nearby_on {
-            let said = pick(lang, "这台电脑已关闭接收，不在列表中", "This PC does not receive, and is not listed");
-            let font = Font::new(Family::Segoe, at(16.0), 400.0);
-            let said_w = frame.gfx.measure(said, font).min(room);
-            text_centred(frame, said, font, DIM, side + (room - said_w) / 2.0, top + at(48.0), room, Align::Start);
-        }
     }
 
     /// Asks the remote, on a thread of its own (it answers when it has done it: the window goes on meanwhile).
@@ -7144,16 +7500,199 @@ impl Ui {
     }
 
     /// The preview: the panel as it will look over the desktop, running live.
+    /// The devices' page's stage in `area` (the window's DIPs, its frame drawn): what it shows chosen at its top (the
+    /// pairing code, or the code that leads to the phone app), the code in its white square under that, and how it is
+    /// used under that; the pairing code with when it is offered anew (see `keep_offer`).
+    fn paint_adding(&mut self, frame: &Frame, palette: &Palette, area: Rect, now: Instant) {
+        let lang = self.lang;
+        let hovered = self.hovered_now.clone();
+        let hint = Font::new(Family::Segoe, HINT, 400.0);
+        let cx = area.x + area.w / 2.0;
+        frame.clip(area.x, area.y, area.w, area.h);
+        let running = self.remote || self.nearby_on;
+        // How it is used: by an Android phone, and by an iPhone.
+        let steps = match self.stage_shows {
+            CodeFor::Pairing => [
+                (pick(lang, "安卓手机", "Android"), pick(lang, "在 Glance APP 中点“添加电脑”扫描", "In the Glance app, press Add a PC and scan it")),
+                (
+                    pick(lang, "iPhone 或未装 APP 的手机", "iPhone, or a phone without the app"),
+                    pick(lang, "用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕", "Scan it with the camera to open the remote's page in the browser, which can be added to the home screen"),
+                ),
+            ],
+            CodeFor::App => [
+                (pick(lang, "安卓手机", "Android"), pick(lang, "扫描下载 Glance APP，装好后在“配对码”中添加", "Scan it to get the Glance app, then add the phone by its pairing code")),
+                (pick(lang, "iPhone", "iPhone"), pick(lang, "无需安装，扫配对码即可在浏览器中使用", "Needs no app: scan the pairing code to use it in the browser")),
+            ],
+        };
+        let steps_w = STEPS.min(area.w - 48.0).max(120.0);
+        let steps_tall: f32 = steps.iter().map(|(_, words)| 20.0 + frame.gfx.wrapped_height(words, hint, steps_w - 28.0) + 12.0).sum();
+        let under = match self.stage_shows {
+            CodeFor::Pairing if running && self.offer_failed => 32.0,
+            CodeFor::Pairing if self.offer.is_some() => 42.0,
+            CodeFor::Pairing => 0.0,
+            CodeFor::App => 20.0,
+        };
+        // Where the stage is short, less room between what it shows, and the code smaller (as small as a phone's camera
+        // still reads it off a screen well): all of it shown.
+        let content = |gaps: f32, code: f32| gaps * (40.0 + 24.0 + 16.0 + 24.0 + 24.0) + 32.0 + code + under + steps_tall;
+        let gaps = if content(1.0, CODE) <= area.h { 1.0 } else { 0.5 };
+        let size = (area.h - content(gaps, 0.0)).clamp(CODE_LEAST, CODE);
+        let (_, options, chosen) = self.choices(Field::Adding);
+        let mut y = area.y + 40.0 * gaps;
+        let total = self.segmented_width(&options);
+        self.segmented(frame, palette, Field::Adding, &options, chosen, true, cx + total / 2.0, y + 16.0, f32::INFINITY, now, &hovered);
+        y += 32.0 + 24.0 * gaps;
+        // The code: dark on white whatever the theme (what a phone's camera reads); else, in its square, why there is
+        // none.
+        let square = Rect { x: cx - size / 2.0, y, w: size, h: size };
+        fill(frame, Color::hex(0xFFFFFF, 1.0), square.x, square.y, square.w, square.h, 8.0);
+        stroke_inside(frame, square, 8.0, palette.card_stroke);
+        let (code, missing) = match self.stage_shows {
+            CodeFor::Pairing if !running => (None, pick(lang, "请先开启“手机遥控”或“附近传输”，再添加手机", "Turn on the phone remote or nearby sharing first, then add a phone")),
+            CodeFor::Pairing if self.offer_failed => (None, pick(lang, "未能生成配对码", "The pairing code could not be made")),
+            CodeFor::Pairing => (self.offer.as_ref().map(|(offer, _)| &offer.code), pick(lang, "正在生成配对码", "Making the pairing code")),
+            CodeFor::App => match &self.app_code {
+                Some(Some(code)) => (Some(code), ""),
+                Some(None) => (None, pick(lang, "未能生成二维码", "The code could not be made")),
+                None => (None, pick(lang, "正在生成二维码", "Making the code")),
+            },
+        };
+        match code {
+            Some(code) => paint_code(frame, code, square),
+            None => {
+                let room = size - 40.0;
+                let ink = Color::hex(0x000000, 0.6);
+                let w = frame.gfx.measure(missing, hint);
+                if w <= room {
+                    text_centred(frame, missing, hint, ink, cx - w / 2.0, square.y + size / 2.0, w + 1.0, Align::Start);
+                } else {
+                    let tall = frame.gfx.wrapped_height(missing, hint, room);
+                    frame.text_wrapped(missing, hint, ink, square.x + 20.0, square.y + (size - tall) / 2.0, room);
+                }
+            }
+        }
+        y += size + 16.0 * gaps;
+        // Under it: when the pairing code is offered anew, and what else does that; where the app is to be had; or
+        // what asks for the pairing code again.
+        let centred = |frame: &Frame, words: &str, font: Font, color: Color, cy: f32| {
+            let w = frame.gfx.measure(words, font);
+            text_centred(frame, words, font, color, cx - w / 2.0, cy, w + 1.0, Align::Start);
+        };
+        match self.stage_shows {
+            CodeFor::Pairing if running && self.offer_failed => {
+                let w = frame.gfx.measure(pick(lang, "重试", "Try again"), Font::new(Family::Segoe, 14.0, 400.0)) + 32.0;
+                self.button(frame, palette, pick(lang, "重试", "Try again"), cx + w / 2.0, y + 16.0, Target::Pair, Button::Plain, &hovered);
+                y += 32.0;
+            }
+            CodeFor::Pairing => {
+                if let Some((_, at)) = &self.offer {
+                    let left = crate::phone::OFFER_LASTS.saturating_sub(now.duration_since(*at)).as_secs();
+                    let said = match lang {
+                        Lang::Zh => format!("{} 分 {:02} 秒后刷新", left / 60, left % 60),
+                        Lang::En => format!("Renewed in {}:{:02}", left / 60, left % 60),
+                    };
+                    let font = Font::new(Family::Segoe, 14.0, 400.0);
+                    let w = 14.0 + 6.0 + frame.gfx.measure(&said, font);
+                    frame.icon(Icon::Update, Point { x: cx - w / 2.0 + 7.0, y: y + 10.0 }, 14.0, palette.text2);
+                    text_centred(frame, &said, font, palette.text, cx - w / 2.0 + 20.0, y + 10.0, w, Align::Start);
+                    centred(frame, pick(lang, "一部手机配对后立即刷新，离开此页后失效", "Renewed once a phone pairs, and void once this page is left"), hint, palette.text2, y + 32.0);
+                    y += 42.0;
+                }
+            }
+            CodeFor::App => {
+                centred(frame, "glancepc.com/app", hint, palette.text2, y + 10.0);
+                y += 20.0;
+            }
+        }
+        y += 24.0 * gaps;
+        let width = steps_w;
+        let (left, words_left) = (cx - width / 2.0, cx - width / 2.0 + 28.0);
+        for (name, words) in steps {
+            frame.icon(Icon::Smartphone, Point { x: left + 8.0, y: y + 10.0 }, 16.0, palette.text2);
+            text_centred(frame, name, hint, palette.text, words_left, y + 10.0, width - 28.0, Align::Start);
+            frame.text_wrapped(words, hint, palette.text2, words_left, y + 20.0, width - 28.0);
+            y += 20.0 + frame.gfx.wrapped_height(words, hint, width - 28.0) + 12.0;
+        }
+        frame.unclip();
+    }
+
+    /// The pairing on the devices' page's stage kept as it is to be: offered as the page shows with a helper running
+    /// (the remote's, or nearby transfer's), offered anew once it has lasted its time or a phone has taken it (the one
+    /// before taken back first), and taken back as the page is left or the helper stops. And the window drawn again as
+    /// what is said of when it is offered anew changes.
+    fn keep_offer(&mut self, now: Instant) {
+        if self.page == Page::Devices && self.stage_shows == CodeFor::App && self.app_code.is_none() && self.app_asked.is_none() {
+            self.app_asked = Some(std::thread::spawn(crate::phone::app_code));
+        }
+        if self.app_asked.as_ref().is_some_and(|asked| asked.is_finished()) {
+            self.app_code = Some(self.app_asked.take().unwrap().join().ok().flatten());
+            self.next_frame = now;
+        }
+        if !(self.page == Page::Devices && self.remote_there && (self.remote || self.nearby_on)) {
+            self.withdraw_offer();
+            self.offer_failed = false;
+            return;
+        }
+        if self.offering.as_ref().is_some_and(|(_, offering)| offering.is_finished()) {
+            let (asked_at, offering) = self.offering.take().unwrap();
+            let offer = offering.join().ok().flatten();
+            self.offer_failed = offer.is_none();
+            // (It lasts from when it was asked for, a moment before the remote began to count.)
+            self.offer = offer.map(|offer| (offer, asked_at));
+            self.next_frame = now;
+        }
+        let lapsed = self.offer.as_ref().is_some_and(|(offer, at)| now.duration_since(*at) >= crate::phone::OFFER_LASTS || self.phones.iter().any(|phone| phone.id == offer.id));
+        if self.offering.is_none() && !self.offer_failed && (self.offer.is_none() || lapsed) {
+            let before = self.offer.take().map(|(offer, _)| offer.id);
+            self.offering = Some((
+                now,
+                std::thread::spawn(move || {
+                    if let Some(id) = before {
+                        crate::phone::withdraw(&id);
+                    }
+                    crate::phone::offer()
+                }),
+            ));
+            self.next_frame = now;
+        }
+        if let Some((_, at)) = &self.offer {
+            let left = crate::phone::OFFER_LASTS.saturating_sub(now.duration_since(*at));
+            self.next_frame = self.next_frame.min(now + Duration::from_nanos(u64::from(left.subsec_nanos())) + Duration::from_millis(1));
+        }
+    }
+
+    /// The pairing offered on the devices' page's stage taken back, and one being asked for once it comes (on a thread
+    /// of their own): the page is left, or the window closes.
+    fn withdraw_offer(&mut self) {
+        let offer = self.offer.take().map(|(offer, _)| offer.id);
+        let offering = self.offering.take().map(|(_, offering)| offering);
+        if offer.is_none() && offering.is_none() {
+            return;
+        }
+        std::thread::spawn(move || {
+            let came = offering.and_then(|offering| offering.join().ok().flatten()).map(|offer| offer.id);
+            for id in offer.into_iter().chain(came) {
+                crate::phone::withdraw(&id);
+            }
+        });
+    }
+
     fn paint_preview(&mut self, frame: &Frame, palette: &Palette, width: f32, height: f32) -> Option<f32> {
         let lang = self.lang;
         let x0 = NAV + self.pane();
         let head = Font::new(Family::SegoeDisplay, 20.0, 600.0);
-        let title = if self.page == Page::Layout { pick(lang, "屏幕", "Screens") } else { pick(lang, "预览", "Preview") };
+        let title = match self.page {
+            Page::Layout => pick(lang, "屏幕", "Screens"),
+            Page::Nearby => pick(lang, "发送", "Send"),
+            Page::Devices => pick(lang, "添加手机", "Add a phone"),
+            _ => pick(lang, "预览", "Preview"),
+        };
         text_centred(frame, title, head, palette.text, x0, PAD_TOP + 18.0, 200.0, Align::Start);
         let detail = match self.page {
             Page::Layout => pick(lang, "屏幕的排列与 Windows 设置一致，桌面为当前壁纸", "The screens as Windows arranges them, over your wallpaper"),
             Page::Phone => pick(lang, "手机上的 Glance", "Glance on the phone"),
-            Page::Nearby => pick(lang, "附近设备上看到的这台电脑", "This PC as devices nearby see it"),
+            Page::Devices => pick(lang, "配对后，手机可控制这台电脑，发来的文件也直接接收", "Paired, a phone controls this PC and its files are taken without asking"),
+            Page::Nearby => pick(lang, "选择内容，再选择要发送到的设备", "Choose what to send, then the device to send it to"),
             Page::Music => pick(lang, "正在播放的内容", "What plays now"),
             _ => pick(lang, "实时数据", "Live readings"),
         };
@@ -7167,9 +7706,13 @@ impl Ui {
         }
         // (The panel's and the music's previews frame what of the screen they show: see `shown_of`.)
         let overlay = self.page == Page::Monitor && self.tab == Tab::Overlay;
-        if matches!(self.page, Page::Layout | Page::Phone | Page::Nearby) {
+        if matches!(self.page, Page::Layout | Page::Phone | Page::Devices) {
             fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
             stroke_inside(frame, area, 8.0, palette.card_stroke);
+        }
+        if self.page == Page::Devices {
+            self.paint_adding(frame, palette, area, Instant::now());
+            return None;
         }
 
         if overlay {
@@ -7183,7 +7726,7 @@ impl Ui {
             return self.paint_layout(frame, palette, area, Instant::now());
         }
         if self.page == Page::Nearby {
-            self.paint_nearby(frame, area);
+            self.paint_send(frame, palette, area, Instant::now());
             return None;
         }
         // The phone's page: the phone app as a phone shows it, in a phone's outline.
@@ -7518,6 +8061,22 @@ fn card(frame: &Frame, palette: &Palette, x: f32, y: f32, w: f32, h: f32, color:
     stroke_inside(frame, Rect { x, y, w, h }, CARD_RADIUS, palette.card_stroke);
 }
 
+/// QR code `code`'s dark cells in `square` (its white drawn), a margin of four cells round them.
+fn paint_code(frame: &Frame, code: &crate::phone::Code, square: Rect) {
+    let cell = square.w / (code.0.len() as f32 + 8.0);
+    for (down, row) in code.0.iter().enumerate() {
+        // (Each run of dark cells as one piece, and a hair over the row below: no seams between them.)
+        let mut across = 0;
+        while across < row.len() {
+            let run = row[across..].iter().take_while(|dark| **dark).count();
+            if run > 0 {
+                fill(frame, Color::hex(0x000000, 1.0), square.x + (across as f32 + 4.0) * cell, square.y + (down as f32 + 4.0) * cell, run as f32 * cell, cell + 0.3, 0.0);
+            }
+            across += run.max(1);
+        }
+    }
+}
+
 /// One line of text centred on `cy`.
 #[allow(clippy::too_many_arguments)]
 fn text_centred(frame: &Frame, text: &str, font: Font, color: Color, x: f32, cy: f32, width: f32, align: Align) {
@@ -7565,21 +8124,44 @@ fn field_label_in(frame: &Frame, colors: (Color, Color), label: &str, hint: Opti
     }
 }
 
-/// What is said beside a code: what to do with it, and what comes of that.
-fn code_words(lang: Lang, what: CodeFor, page: Option<&str>) -> (&'static str, Cow<'static, str>) {
-    let (title, words) = match what {
-        // (The first of each on one line: short enough for the room beside the code.)
-        CodeFor::App => (pick(lang, "扫码下载 Glance", "Scan to get Glance"), crate::phone::APP_PAGE.trim_start_matches("https://")),
-        CodeFor::Pairing => (pick(lang, "用 Glance APP 扫描", "Scan with the Glance app"), pick(lang, "打开手机上的 Glance，扫描此配对码。10 分钟内有效，仅供一部手机使用", "Open Glance on the phone and scan this code. Good for ten minutes, for one phone")),
-        // (The address itself too, to be typed where the code cannot be scanned.)
-        CodeFor::WebPage => {
-            let words = pick(lang, "请在此前配对时使用的浏览器中打开。电脑的网络地址变更后，原配对随之失效，请通过“用网页”重新配对", "Open it in the browser the phone was paired with. Once this PC's address on the network changes, that pairing no longer holds. Pair again with “With the web”");
-            return (pick(lang, "用手机相机扫描", "Scan with the camera"), Cow::Owned(format!("{}
-{words}", page.unwrap_or_default())));
-        }
-        CodeFor::WebPairing => (pick(lang, "用手机相机扫描", "Scan with the camera"), pick(lang, "扫码后将在浏览器中打开，之后可添加到主屏幕。网页未加密，请仅在可信任的网络（如家庭网络）中使用。10 分钟内有效，仅供一部手机使用", "It opens in the browser, and can then be added to the home screen. The page is not encrypted. Use it only on a network you trust, such as your home's. Good for ten minutes, for one phone")),
-    };
-    (title, Cow::Borrowed(words))
+/// This computer's name, as Windows has it: what this PC is called where it is named nothing.
+fn computer_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into())
+}
+
+/// A day (seconds since 1970) as a device's row says since when it is trusted: "11月14日", "Nov 14".
+fn day_said(lang: Lang, at: u64) -> String {
+    let day = crate::ui::text::Local::at(at * 1000);
+    match lang {
+        Lang::Zh => format!("{}月{}日", day.month, day.day),
+        Lang::En => day.date(lang).split_once(", ").map_or(String::new(), |(_, date)| date.to_string()),
+    }
+}
+
+/// The icon of a device of LocalSend's `kind` ("mobile", "desktop", "laptop", "web", "headless", "server").
+/// What a device of LocalSend's `kind` is, in a word.
+fn kind_word(lang: Lang, kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("mobile") => pick(lang, "手机", "Phone"),
+        Some("desktop" | "laptop") => pick(lang, "电脑", "Computer"),
+        Some("web") => pick(lang, "浏览器", "Browser"),
+        _ => pick(lang, "设备", "Device"),
+    }
+}
+
+/// What the card of the phone paired of `id` is known by among the cards that open (as a module's by its id: see
+/// `Ui::opened`).
+fn phone_card(id: &str) -> String {
+    format!("phone:{id}")
+}
+
+/// Whose a device is, as its page says it: Glance's on a phone or a PC, or LocalSend's.
+fn maker(lang: Lang, glance: bool, kind: Option<&str>) -> &'static str {
+    match (glance, kind) {
+        (true, Some("mobile")) => pick(lang, "Glance 手机", "Glance phone"),
+        (true, _) => pick(lang, "Glance 电脑", "Glance PC"),
+        (false, _) => "LocalSend",
+    }
 }
 
 /// A row's label and hint, each on one line, cut short if they do not fit.
@@ -7664,15 +8246,49 @@ mod pictures {
         }
         ui.remote_there = true;
         ui.nearby_on = on;
-        let trusted = |fingerprint: &str, alias: &str, kind: &str, since: u64, phone: Option<&str>| crate::phone::Trusted { fingerprint: fingerprint.into(), alias: alias.into(), kind: Some(kind.into()), since, phone: phone.map(str::to_string) };
+        ui.remote = true;
+        let trusted = |fingerprint: &str, alias: &str, kind: &str, since: u64, phone: Option<&str>, glance: bool| crate::phone::Trusted { fingerprint: fingerprint.into(), alias: alias.into(), kind: Some(kind.into()), since, phone: phone.map(str::to_string), glance };
         ui.nearby = Some(crate::phone::Nearby {
-            alias: None,
             name: "DESKTOP-9950X".into(),
-            trusted: vec![trusted("AA", "Galaxy Z Fold6", "mobile", 1_762_300_000, Some("p1")), trusted("BB", "MacBook Air", "desktop", 1_762_732_800, None)],
+            trusted: vec![
+                trusted("AA", "Galaxy Z Fold6", "mobile", 1_762_300_000, Some("p1"), true),
+                trusted("BB", "MacBook Air", "desktop", 1_762_732_800, None, false),
+                trusted("CC", "书房电脑", "desktop", 1_763_078_400, None, true),
+            ],
             others_refused: false,
         });
-        let found = |alias: &str, model: &str, kind: &str| crate::nearby::Device { fingerprint: alias.into(), alias: alias.into(), model: Some(model.into()), kind: Some(kind.into()) };
-        crate::nearby::pretend_devices(vec![found("MacBook Air", "macOS", "desktop"), found("Galaxy Z Fold6", "Samsung", "mobile")]);
+        // The phones paired: one with the app, one by its browser that only sees how this PC is (the first opened).
+        let phone = |id: &str, name: &str, control: bool, web: bool| crate::phone::Phone { id: id.into(), name: name.into(), control, files: !web, web };
+        ui.phones = vec![phone("p1", "Galaxy Z Fold6", true, false), phone("p2", "iPhone", false, true)];
+        ui.phones_written = crate::phone::phones_written();
+        ui.phones_at = Instant::now();
+        ui.set_open(&phone_card("p1"), true, true);
+        // A pairing offered a minute and a half ago (its code made up: a QR code's finders, and cells at random).
+        let cells = (0..25)
+            .map(|down: usize| {
+                (0..25)
+                    .map(|across: usize| {
+                        let finder = [(0, 0), (0, 18), (18, 0)].into_iter().find(|(top, left)| (*top..top + 7).contains(&down) && (*left..left + 7).contains(&across));
+                        match finder {
+                            Some((top, left)) => {
+                                let (d, a) = (down - top, across - left);
+                                d == 0 || d == 6 || a == 0 || a == 6 || ((2..5).contains(&d) && (2..5).contains(&a))
+                            }
+                            None => (down * 31 + across * 17 + down * across * 7) % 5 < 2,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        ui.offer = Some((crate::phone::Offer { id: "made up".into(), code: crate::phone::Code(cells) }, Instant::now() - Duration::from_secs(98)));
+        // Found nearby: two trusted already (not listed among those found), and two not.
+        let found = |fingerprint: &str, alias: &str, model: &str, kind: &str, glance: bool| crate::nearby::Device { fingerprint: fingerprint.into(), alias: alias.into(), model: Some(model.into()), kind: Some(kind.into()), glance };
+        crate::nearby::pretend_devices(vec![
+            found("BB", "MacBook Air", "macOS", "desktop", false),
+            found("AA", "Galaxy Z Fold6", "Samsung", "mobile", true),
+            found("DD", "Xiaomi 14", "Xiaomi", "mobile", true),
+            found("EE", "iPad", "iPadOS", "mobile", false),
+        ]);
     }
 
     #[test]
@@ -7719,6 +8335,7 @@ mod pictures {
             (Page::Monitor, Tab::Overlay, "monitor-overlay"),
             (Page::Workbench, Tab::Shown, "workbench"),
             (Page::Music, Tab::Shown, "music"),
+            (Page::Devices, Tab::Shown, "devices"),
             (Page::Phone, Tab::Shown, "phone"),
             (Page::Nearby, Tab::Shown, "nearby"),
             (Page::General, Tab::Shown, "general"),
@@ -7733,7 +8350,7 @@ mod pictures {
                 with_ui(|ui| {
                     ui.tab = tab;
                     ui.turn_to(page);
-                    if page == Page::Nearby {
+                    if matches!(page, Page::Nearby | Page::Devices | Page::Phone) {
                         pretend_nearby(ui, true);
                     }
                 });
@@ -7806,6 +8423,47 @@ mod pictures {
                 }
                 crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &picture()).unwrap();
                 with_ui(|ui| ui.end_rename(false));
+            }
+            // The sending pane: files, a folder and words chosen, a sending to each device going its own way (one
+            // going, one waited on, one sent); the words being written; something dragged over it.
+            for name in ["nearby-send", "nearby-writing", "nearby-drop"] {
+                with_ui(|ui| {
+                    ui.turn_to(Page::Nearby);
+                    pretend_nearby(ui, true);
+                    let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR")));
+                    let sendings = vec![
+                        ("AA", crate::nearby::Sending::Going { done: 6_200_000, of: 14_000_000 }),
+                        ("DD", crate::nearby::Sending::Waiting),
+                        ("BB", crate::nearby::Sending::Sent),
+                    ];
+                    send::pretend(ui, vec![file("Cargo.toml"), file("README.md"), file("docs"), file("icons/128x128@2x.png")], "会议改到周四下午三点，地点在二楼小会议室", sendings);
+                    if name == "nearby-writing" {
+                        ui.activate(Target::SendKind(2));
+                        if let Some(renaming) = ui.renaming.as_mut() {
+                            renaming.typing.put(&"晚上七点在楼下见\n记得带上充电器和那本书".encode_utf16().collect::<Vec<u16>>());
+                        }
+                    }
+                    ui.send.over = name == "nearby-drop";
+                });
+                for _ in 0..12 {
+                    with_ui(|ui| ui.draw(Instant::now()));
+                    std::thread::sleep(Duration::from_millis(80));
+                }
+                let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+                let size = ((cw * scale).round() as u32, (ch * scale).round() as u32);
+                let pixels = gfx.draw_offscreen(size, scale, |frame| {
+                    with_ui(|ui| {
+                        fill(frame, ui.palette.window, 0.0, 0.0, cw, ch, 0.0);
+                        ui.paint(frame, Instant::now())
+                    });
+                })
+                .unwrap();
+                crate::studio::save_png(&out.join(format!("{name}-{}.png", w as u32)), size.0, size.1, &pixels).unwrap();
+                with_ui(|ui| {
+                    ui.end_rename(false);
+                    ui.send = send::Pane::default();
+                    crate::nearby::pretend_sendings(HashMap::new());
+                });
             }
             // A notice of Glance's site, at the top of the updates, with its link and without.
             for (name, link) in [("general-notice", Some("https://glancepc.com/#download")), ("general-notice-plain", None)] {
