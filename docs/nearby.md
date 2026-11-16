@@ -426,29 +426,49 @@ One code for the app and for a phone's camera: the remote's page with the key af
 `http://<address>:<port>/#k=<key>&n=<name>` (the name escaped). A browser opens the page and pairs by the key, as the
 web pairing did. The app takes such a link as it took `glance://pair?h&p&k&n` (still read, for older PCs): the
 address and port from the link, the key and name from after the `#`. The page has "下载 Glance APP" for Android phones
-(glancepc.com/app). The app's own download code is a row of its own in settings.
+(glancepc.com/app). The app's own download code is on the 设备 page's stage, under 下载 APP.
 
 ### Settings (PC)
 
 Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (was 手机互联), **附近传输**, 通用.
 
-- **设备** (no preview: one column).
-  - 这台电脑的名称: the box, as nearby's was, now for both.
-  - 添加手机, "显示配对码": the code under the row, "安卓手机：在 Glance APP 中点“添加电脑”扫描。" /
-    "iPhone 或未装 APP 的手机：用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕。" / "10 分钟内有效，仅供一部手机使用".
-  - Glance 手机 APP, "显示下载二维码": glancepc.com/app.
-  - 设备 (n 台): paired phones (and phones paired by the web page), then trusted devices. Each: its kind's round icon,
-    its name, "已配对 · Glance 手机" / "已配对 · 网页" / "已信任 · Glance 电脑 · M月D日起" / "已信任 · LocalSend · M月D日起",
-    and what it may do as tags: 可控制这台电脑 or 仅查看状态, 直接接收文件. A paired phone opens (a chevron) to its two
-    switches and 解除配对, which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，
-    请再次添加手机。"). A trusted device has 移除, without asking (it is asked about again when it sends). A web-paired
-    phone has no files switch (a page cannot send).
-  - 附近发现的设备 (n 台): what discovery found that is neither, each with 信任. None: "附近没有其他设备".
-  - Notes under the lists as the mockup has them.
+The 设备 and 附近传输 pages were redone on 2026-11-15 to the rest of settings' look (mockup:
+https://claude.ai/artifact/EcUBywr2EjRtQwSz8GCn35, artboards 设备 and 附近传输): cards as wide as the other pages'
+(no page of one wide column), the stage on the right, cards that open as the modules' do, no round icon plates or tag
+pills, groups named without counts, no paragraphs of notes under the lists.
+
+- **设备**, its list:
+  - 这台电脑的名称 ("在手机和附近设备上显示"): the box, as nearby's was, now for both.
+  - 已配对的手机: paired phones (and phones paired by the web page), "还没有配对的手机" where none are. Each a card as a
+    module's: its icon where a module's grip is, its name, and under it what it is and may do in one line ("Glance 手机 ·
+    可控制这台电脑 · 直接接收文件", "网页 · 仅查看状态"). The whole row opens it (the chevron turns over, the card slides
+    open in 240 ms), several may be open. Inside, under hairlines across the card, words where a module's items' are:
+    控制这台电脑 and 直接接收文件 with their switches, and 解除配对 ("解除后，该手机需重新添加才能使用") with its button,
+    which asks first ("解除与“X”的配对？" "解除后，该手机不能再控制这台电脑，发来的文件也需要重新确认。如需重新使用，
+    请再次添加手机。"). The switches and the button stand in the column every row's buttons do (the card's right less
+    its inset). A web-paired phone has no files switch (a page cannot send).
+  - 已信任的设备 (only where there are any): "LocalSend · 直接接收文件 · M月D日起" / "Glance 电脑 · …", with 移除, without
+    asking (it is asked about again when it sends).
+  - 附近发现的设备: what discovery found that is neither: "Glance 手机 · Xiaomi。信任后，它发来的文件直接接收", with 信任.
+    None: "附近没有发现其他设备".
+- **设备**, its stage: "添加手机", "配对后，手机可控制这台电脑，发来的文件也直接接收", a card with 配对码 | 下载 APP.
+  - 配对码: the code always shown while the page is (no button to show it), "X 分 XX 秒后刷新" and
+    "一部手机配对后立即刷新，离开此页后失效", then the two ways ("安卓手机 / 在 Glance APP 中点“添加电脑”扫描",
+    "iPhone 或未装 APP 的手机 / 用相机扫描，在浏览器中打开遥控页面，可添加到主屏幕"). Neither helper running: "请先开启
+    “手机遥控”或“附近传输”，再添加手机" in the code's square. Not made: "未能生成配对码" with 重试.
+  - The offer's life (`Ui::keep_offer`): offered as the page shows with a helper running; offered anew once it has
+    lasted ten minutes (`phone::OFFER_LASTS`, the helper's `OFFERED_FOR`) or as a phone takes it (the phone appears in
+    the list, the code is replaced at once); the one before is withdrawn first. Leaving the page, the helpers both
+    stopping, or the window closing withdraws it (`glance-remote pair withdraw <id>`; `pair cells` says the offer's id
+    on its first line). An offer a phone has taken is that phone's and stays.
+  - 下载 APP: the code of glancepc.com/app, "glancepc.com/app", "安卓手机 / 扫描下载 Glance APP，装好后在“配对码”中添加",
+    "iPhone / 无需安装，扫配对码即可在浏览器中使用".
+  - Where the window is short, the gaps halve and the code's square shrinks (to 150 at least), so all of it shows.
 - **手机遥控**: 开启手机遥控, RGB 灯光控制, 内存灯光控制, 关屏时保持显示器连接, then "已配对 n 部手机" with 管理设备
   (to 设备). The phone preview stays.
 - **附近传输**: 接收附近设备的文件, 来自未信任设备的文件, 在屏幕边缘提示, 保存位置, then "已信任 n 台设备" with 管理设备.
-  - 保存位置: 中转站 (as before, "放在中转站，随中转站的保留期限清理") or 选择文件夹… (the system's folder picker).
+  - 接收附近设备的文件: "兼容 LocalSend 的设备可将文件发到这台电脑，在附近设备上显示为 <name>" (the name changed on 设备).
+  - 保存位置: 中转站 ("放入中转站，按其保留期限清理") or 选择文件夹… (the system's folder picker).
     A folder chosen: "以原名存入此文件夹。中转站中同时列出，移除或到期只去掉那一项，文件保留", with 打开. The files are
     adopted into that folder under the names they came with (made plain names, a folder's inner places kept, "name (1)"
     where taken), and the station's item points at them as a `Files` item does (not kept: removing or expiry leaves
@@ -457,26 +477,31 @@ Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (
 
 ### Sending from the PC
 
-- **发送** (the right of 附近传输), top to bottom:
-  - "选择" with 文件, 文件夹, 文字, 剪贴板
-  - "已选择 n 项 · size" with 清除 and each item's ×
-  - "附近的设备"
-  - "附近设备上显示为 <name>" with 更改 (to 设备)
+- **发送** (the right of 附近传输, "选择内容，再选择要发送到的设备"), on the window's ground as the list's rows are, top
+  to bottom:
+  - four tiles (cards 92 tall, the icon 24 in the accent over the name): 文件, 文件夹, 文字, 剪贴板
+  - the box words are written in, while they are
+  - a card: "已选择 n 项 · size" (or "还没有选择内容") over "也可以把文件从资源管理器拖到这里" (or, for a while, what a
+    press said: "剪贴板中没有内容"…), 清除; each item under a hairline (its icon where a module's grip is, its name, its
+    size, a quiet ×), "另有 n 项"
+  - "附近的设备" as the list's groups are, with a refresh icon
+  - a card for each device (below)
   - 文件 and 文件夹: the system's pickers (several files at once). Files or folders dropped on the pane from Explorer
     join too ("松开以添加到发送" over the pane while they are over it).
   - 文字: a box opens in the pane (no window), "输入要发送的文字", "n 字", 取消 and 添加.
   - 剪贴板: read once as it is pressed: words go as words, a picture as a PNG, files as those files, nothing:
     "剪贴板中没有内容".
   - What is chosen stays after a sending, to send it to another device. 清除 or × take it away. Four are listed,
-    the rest counted ("另有 n 项"). The pane scrolls by the wheel where it is taller than the window, its foot (what
-    this PC is called) staying. Words being written stay as the window loses the front, and are put by as the page
+    the rest counted ("另有 n 项"). The pane scrolls by the wheel where it is taller than the window (its bar in the
+    room right of it). Words being written stay as the window loses the front, and are put by as the page
     is left (written on as 文字 is pressed again).
   - Drops reach the pane through the station's catchers (the settings' thread cannot take OLE drops): the window
     tells the station where the pane is as it draws it, and a catcher over it takes what is let go.
-  - The devices: paired phones first, then Glance PCs and other LocalSend devices found, each with its tags. Pressed
-    with something chosen, it is sent: a bar along the card's foot and the percent, "等待对方接受" (with ×) where the
-    device's user is asked, "已发送" with a tick. Nothing chosen: "选择内容后，点设备即可发送". A paired phone not
-    receiving is dimmed, "未开启接收", and pressing it says "在手机上打开 Glance，或在 App 中开启“后台接收”".
+  - The devices: paired phones first, then Glance PCs and other LocalSend devices found. Each card: its icon, its
+    name, "已配对的手机" / "Glance · Windows" / "LocalSend · iPadOS", and 发送 at its right (greyed with nothing chosen,
+    or where the device does not receive). Sending: "等待对方接受" or the percent with a quiet ×, a 3 DIP bar in the
+    accent along the card's foot (the card's own shape), "已发送" with a tick in the accent; after 4 s 发送 again. A
+    paired phone not receiving is dimmed, "已配对的手机 · 未开启接收".
 - **Explorer's 发送到**: a shortcut "Glance 附近传输" ("Glance Nearby" in English) in the installing user's SendTo
   folder (made by the installer, removed by the uninstaller), running `glance.exe --send <paths…>`: settings open at
   附近传输 with those in 已选择. A Glance running already is given the paths by `WM_COPYDATA` to its tray window.

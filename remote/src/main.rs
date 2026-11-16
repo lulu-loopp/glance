@@ -861,17 +861,26 @@ fn main() -> std::io::Result<()> {
     let _ = unsafe { windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     let config = Config::load();
     match std::env::args().nth(1).as_deref() {
+        // glance-remote pair withdraw ID: the pairing offered of that name (as `pair cells` said it) taken back, where
+        // no phone has taken it yet (one that has stays paired).
+        Some("pair") if std::env::args().nth(2).as_deref() == Some("withdraw") => {
+            Config::withdraw(&std::env::args().nth(3).unwrap_or_default())?;
+            return Ok(());
+        }
         // glance-remote pair [cells]: a pairing offered, as its link (for the app and a phone's browser alike). With
-        // "cells", the link's QR code follows as rows of 1 and 0 (for Glance to draw); without, it follows drawn in the
-        // console's characters, to be scanned off the screen (written to a file, the key in it was left on the disk).
+        // "cells", the offer's name comes first (what it is taken back by: see `pair withdraw`), and the link's QR code
+        // follows the link as rows of 1 and 0 (for Glance to draw); without, it follows drawn in the console's
+        // characters, to be scanned off the screen (written to a file, the key in it was left on the disk).
         Some("pair") => {
             let asked = |word: &str| std::env::args().skip(2).any(|given| given == word);
-            let key = Config::offer()?;
+            let (key, id) = Config::offer()?;
             let link = pairing(&config, &key);
-            say!("{link}");
             if asked("cells") {
+                say!("{id}");
+                say!("{link}");
                 say!("{}", cells(&link)?.trim_end());
             } else {
+                say!("{link}");
                 let code = qrcode::QrCode::new(link.as_bytes()).map_err(std::io::Error::other)?;
                 say!("{}", code.render::<qrcode::render::unicode::Dense1x2>().dark_color(qrcode::render::unicode::Dense1x2::Light).light_color(qrcode::render::unicode::Dense1x2::Dark).quiet_zone(true).build());
             }

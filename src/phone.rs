@@ -247,12 +247,33 @@ fn code(rows: &mut dyn Iterator<Item = &str>) -> Option<Code> {
     (!cells.is_empty() && cells.iter().all(|row| row.len() == cells.len())).then_some(Code(cells))
 }
 
-/// A pairing offered to one phone, as the QR code it scans: with the app, or with its camera, which opens the remote's
-/// page in its browser (the same code for both).
-pub fn offer() -> Option<Code> {
-    let said = ask(&["pair", "cells"])?;
-    // (The link itself, then the code's rows.)
-    code(&mut said.lines().skip(1))
+/// A pairing offered to one phone: what the remote names it by (to take it back by, see `withdraw`), and the QR code
+/// it is scanned as: with the app, or with a phone's camera, which opens the remote's page in its browser (the same
+/// code for both).
+pub struct Offer {
+    pub id: String,
+    pub code: Code,
+}
+
+/// How long the remote keeps a pairing offered (as its `OFFERED_FOR`).
+pub const OFFER_LASTS: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A pairing offered to one phone (see `Offer`), for as long as the remote keeps one (`OFFER_LASTS`).
+pub fn offer() -> Option<Offer> {
+    offered(&ask(&["pair", "cells"])?)
+}
+
+/// The pairing offered as the remote says it (`pair cells`): its name, the link itself, then the code's rows.
+fn offered(said: &str) -> Option<Offer> {
+    let mut lines = said.lines();
+    let id = lines.next()?.trim().to_string();
+    lines.next()?;
+    Some(Offer { id, code: code(&mut lines)? })
+}
+
+/// Takes back the pairing offered of name `id` (see `offer`), where no phone has taken it yet.
+pub fn withdraw(id: &str) {
+    let _ = ask(&["pair", "withdraw", id]);
 }
 
 /// The QR code that holds `text`.
@@ -632,6 +653,21 @@ mod tests {
         assert!(lowered_as_glance_starts(true, || true));
         assert!(!lowered_as_glance_starts(true, || false));
         assert!(!lowered_as_glance_starts(false, || panic!("asked on a desktop")));
+    }
+
+    #[test]
+    fn a_pairing_offered_is_read_with_its_name() {
+        let offer = offered("3f2a9c
+http://10.0.0.19:7311/#k=ab&n=PC
+110
+011
+101
+").unwrap();
+        assert_eq!(offer.id, "3f2a9c");
+        assert_eq!(offer.code.0, vec![vec![true, true, false], vec![false, true, true], vec![true, false, true]]);
+        assert!(offered("3f2a9c
+http://10.0.0.19:7311/
+").is_none(), "an offer with no code is none");
     }
 
     #[test]

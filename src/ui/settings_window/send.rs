@@ -20,14 +20,12 @@ const SHOWN_OVER: Duration = Duration::from_secs(4);
 const SAID_FOR: Duration = Duration::from_secs(5);
 /// The most written to send (UTF-16 units).
 pub(super) const WORDS_MOST: usize = 100_000;
-/// Measures (DIPs): the pane's inset, the choosers' tiles, an item chosen, a device, the box words are written in.
-const INSET: f32 = 16.0;
-const KIND: f32 = 62.0;
-const ITEM: f32 = 34.0;
-const DEVICE: f32 = 54.0;
+/// Measures (DIPs): the choosers' tiles, an item chosen, what is said of the items not listed, the box words are
+/// written in.
+const TILE: f32 = 92.0;
+const ITEM: f32 = 44.0;
+const MORE: f32 = 40.0;
 const WRITER: f32 = 96.0;
-/// How tall the pane's foot is (what this PC is called to devices nearby: it stays as the rest scrolls).
-const FOOT: f32 = 52.0;
 /// The words written to send are written in.
 const WORDS_FONT: Font = Font::new(Family::Segoe, 13.0, 400.0);
 /// How often the window looks at what nearby transfer shows while the pane shows or a sending of its goes on (it is
@@ -90,13 +88,14 @@ impl Default for Pane {
 /// Where the folders chosen are told measured (a folder's number, how large), and where that is heard.
 type Sizes = (std::sync::mpsc::Sender<(u64, u64)>, std::sync::mpsc::Receiver<(u64, u64)>);
 
-/// A device the pane can send to: its fingerprint, what it is called, its icon, what is said of it (its tags), whether
-/// it is a phone paired, and whether it is found nearby now (a phone paired not found is not receiving).
+/// A device the pane can send to: its fingerprint, what it is called, its icon, what is said of it (whose it is and
+/// what, and why it does not receive where it does not), and whether it is found nearby now (a phone paired not found
+/// is not receiving).
 pub(super) struct SendDevice {
     fingerprint: String,
     name: String,
     icon: Icon,
-    tags: Vec<String>,
+    detail: String,
     found: bool,
 }
 
@@ -240,14 +239,18 @@ impl Ui {
             .into_iter()
             .map(|target| {
                 let maker = if target.paired {
-                    pick(lang, "已配对", "Paired")
+                    pick(lang, "已配对的手机", "Phone paired")
                 } else if target.glance {
                     "Glance"
                 } else {
                     "LocalSend"
                 };
-                let name = if target.name.is_empty() { pick(lang, "未命名的设备", "Unnamed device").to_string() } else { target.name };
-                SendDevice { icon: Icon::of_device(target.kind.as_deref()), tags: std::iter::once(maker.to_string()).chain(target.model).collect(), fingerprint: target.fingerprint, name, found: target.found }
+                let mut said: Vec<&str> = std::iter::once(maker).chain(target.model.as_deref().filter(|_| !target.paired)).collect();
+                if !target.found {
+                    said.push(pick(lang, "未开启接收", "Not receiving"));
+                }
+                let name = if target.name.is_empty() { pick(lang, "未命名的设备", "Unnamed device").to_string() } else { target.name.clone() };
+                SendDevice { icon: Icon::of_device(target.kind.as_deref()), detail: said.join(" · "), fingerprint: target.fingerprint, name, found: target.found }
             })
             .collect()
     }
@@ -402,131 +405,126 @@ impl Ui {
         true
     }
 
-    /// The pane in `area` (the window's DIPs): what to choose by, what is chosen (or the words being written) and the
-    /// devices, scrolled as far as it is where they are taller than it; and at its foot, what this PC is called to them.
-    /// The drop's frame over it while something dragged is.
+    /// The pane in `area` (the window's DIPs), on the window's ground as the list's rows are: tiles to choose by, the
+    /// words being written, a card of what is chosen, and a card for each device, scrolled as far as it is where they
+    /// are taller than it. The drop's frame over it while something dragged is.
     pub(super) fn paint_send(&mut self, frame: &Frame, palette: &Palette, area: Rect, now: Instant) {
         let lang = self.lang;
         let hovered = self.hovered_now.clone();
         self.send.area = Some(area);
-        fill(frame, palette.card, area.x, area.y, area.w, area.h, 8.0);
-        stroke_inside(frame, area, 8.0, palette.card_stroke);
-        let view = Rect { x: area.x, y: area.y, w: area.w, h: (area.h - FOOT).max(0.0) };
-        frame.clip(view.x, view.y, view.w, view.h);
-        let (left, right) = (area.x + INSET, area.x + area.w - INSET);
-        let width = right - left;
-        let small = Font::new(Family::Segoe, 12.0, 600.0);
-        let label = Font::new(Family::Segoe, 13.0, 400.0);
+        frame.clip(area.x, area.y, area.w, area.h);
+        let (left, right, width) = (area.x, area.x + area.w, area.w);
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, HINT, 400.0);
         let targets_from = self.targets.len();
-        let mut y = area.y + INSET - self.send.scroll;
-        // What to choose by.
-        text_centred(frame, pick(lang, "选择", "Choose"), small, palette.text2, left, y + 8.0, width, Align::Start);
-        y += 22.0;
+        let mut y = area.y - self.send.scroll;
+        // What to choose by: a tile each, its icon in the accent over its name.
         let kinds = [
             (Icon::File, pick(lang, "文件", "Files"), 0u8),
             (Icon::Folder, pick(lang, "文件夹", "Folder"), 1),
             (Icon::Text, pick(lang, "文字", "Words"), 2),
             (Icon::Clipboard, pick(lang, "剪贴板", "Clipboard"), 3),
         ];
-        let tile = (width - 3.0 * 8.0) / 4.0;
+        let tile = (width - 3.0 * ROW_GAP) / 4.0;
         for (at, (icon, name, kind)) in kinds.into_iter().enumerate() {
-            let rect = Rect { x: left + at as f32 * (tile + 8.0), y, w: tile, h: KIND };
+            let rect = Rect { x: left + at as f32 * (tile + ROW_GAP), y, w: tile, h: TILE };
             let target = Target::SendKind(kind);
-            let lit = hovered.as_ref() == Some(&target);
-            fill(frame, if lit { palette.hover } else { palette.control }, rect.x, rect.y, rect.w, rect.h, 8.0);
-            stroke_inside(frame, rect, 8.0, palette.rule);
-            frame.icon(icon, Point { x: rect.x + rect.w / 2.0, y: rect.y + 22.0 }, 20.0, palette.selection);
-            across(frame, name, label, palette.text, rect.x, rect.y + 46.0, rect.w);
+            card(frame, palette, rect.x, rect.y, rect.w, rect.h, palette.card);
+            if hovered.as_ref() == Some(&target) {
+                fill(frame, palette.hover, rect.x, rect.y, rect.w, rect.h, CARD_RADIUS);
+            }
+            frame.icon(icon, Point { x: rect.x + rect.w / 2.0, y: rect.y + 31.0 }, 24.0, palette.selection);
+            across(frame, name, label, palette.text, rect.x, rect.y + 63.0, rect.w);
             self.targets.push((rect, target));
         }
-        y += KIND + 12.0;
+        y += TILE + ROW_GAP;
         // The words being written, in their box, with what to do with them under it.
-        if self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Words) {
-            y = self.paint_writer(frame, palette, left, y, width, now) + 12.0;
+        if self.writing_words() {
+            y = self.paint_writer(frame, palette, left, y, width, now) + ROW_GAP;
         }
-        // What is chosen: how many and how large, each (as many as are listed) with what takes it away.
+        // What is chosen: how many and how large (else that nothing is), what was said of a press or that files may be
+        // dropped here too, and what clears it; then each (as many as are listed) under a hairline, with what takes it
+        // away, and how many more there are.
+        let listed = self.send.chosen.len().min(LISTED);
+        let more = self.send.chosen.len() - listed;
+        let tall = ROW + listed as f32 * ITEM + if more > 0 { MORE } else { 0.0 };
+        card(frame, palette, left, y, width, tall, palette.card);
+        let cy = y + ROW / 2.0;
+        let mut words_right = right - ROW_SIDE;
         if !self.send.chosen.is_empty() {
-            let listed = self.send.chosen.len().min(LISTED);
-            let more = self.send.chosen.len() - listed;
-            let tall = 40.0 + listed as f32 * ITEM + if more > 0 { 22.0 } else { 0.0 } + 6.0;
-            let boxed = Rect { x: left, y, w: width, h: tall };
-            stroke_inside(frame, boxed, 8.0, palette.rule);
-            let bytes: u64 = self.send.chosen.iter().filter_map(|chosen| chosen.size).sum();
-            let count = self.send.chosen.len();
-            let summed = match lang {
-                Lang::Zh => format!("已选择 {count} 项 · {}", crate::ui::text::bytes(bytes as f64)),
-                Lang::En => format!("{count} chosen · {}", crate::ui::text::bytes(bytes as f64)),
-            };
-            text_centred(frame, &summed, Font::new(Family::Segoe, 13.0, 600.0), palette.text, left + 12.0, y + 20.0, width - 100.0, Align::Start);
-            self.button(frame, palette, pick(lang, "清除", "Clear"), right - 6.0, y + 20.0, Target::SendClear, Button::Plain, &hovered);
-            let mut row = y + 40.0;
-            for chosen in self.send.chosen.iter().take(LISTED).cloned().collect::<Vec<_>>() {
-                let cy = row + ITEM / 2.0;
-                fill(frame, palette.control, left + 12.0, cy - 14.0, 28.0, 28.0, 6.0);
-                let icon = match chosen.kind {
-                    Kind::File => Icon::File,
-                    Kind::Folder => Icon::Folder,
-                    Kind::Words => Icon::Text,
-                    Kind::Picture => Icon::Image,
-                };
-                frame.icon(icon, Point { x: left + 26.0, y: cy }, 16.0, palette.text2);
-                let size = chosen.size.map_or_else(|| pick(lang, "正在计算", "Measuring").to_string(), |size| crate::ui::text::bytes(size as f64));
-                let size_w = frame.gfx.measure(&size, hint);
-                let remove = Rect { x: right - 12.0 - 28.0, y: cy - 14.0, w: 28.0, h: 28.0 };
-                let target = Target::SendRemove(chosen.id);
-                if hovered.as_ref() == Some(&target) {
-                    fill(frame, palette.hover, remove.x, remove.y, remove.w, remove.h, 6.0);
-                }
-                frame.icon(Icon::Close, Point { x: remove.x + 14.0, y: cy }, 14.0, palette.text2);
-                self.targets.push((remove, target));
-                let size_x = remove.x - 8.0 - size_w;
-                text_centred(frame, &size, hint, palette.text2, size_x, cy, size_w + 1.0, Align::Start);
-                let name_x = left + 50.0;
-                text_centred(frame, &chosen.name, label, palette.text, name_x, cy, size_x - 12.0 - name_x, Align::Start);
-                row += ITEM;
-            }
-            if more > 0 {
-                let said = match lang {
-                    Lang::Zh => format!("另有 {more} 项"),
-                    Lang::En => format!("{more} more"),
-                };
-                text_centred(frame, &said, hint, palette.text2, left + 50.0, row + 10.0, width - 62.0, Align::Start);
-            }
-            y += tall + 12.0;
+            words_right = self.button(frame, palette, pick(lang, "清除", "Clear"), words_right, cy, Target::SendClear, Button::Plain, &hovered) - 8.0;
         }
-        // The devices.
-        text_centred(frame, pick(lang, "附近的设备", "Devices nearby"), small, palette.text2, left, y + 8.0, width - 40.0, Align::Start);
-        let refresh = Rect { x: right - 28.0, y: y - 6.0, w: 28.0, h: 28.0 };
+        let bytes: u64 = self.send.chosen.iter().filter_map(|chosen| chosen.size).sum();
+        let count = self.send.chosen.len();
+        let summed = match (count, lang) {
+            (0, _) => pick(lang, "还没有选择内容", "Nothing is chosen yet").to_string(),
+            (_, Lang::Zh) => format!("已选择 {count} 项 · {}", crate::ui::text::bytes(bytes as f64)),
+            (_, Lang::En) => format!("{count} chosen · {}", crate::ui::text::bytes(bytes as f64)),
+        };
+        let said = self.send.said.map_or_else(|| pick(lang, "也可以把文件从资源管理器拖到这里", "Files can be dragged here from File Explorer too"), |(said, _)| said);
+        field_label(frame, palette, &summed, Some(said), label, hint, left + ROW_SIDE, cy, words_right - 8.0 - left - ROW_SIDE);
+        let mut row = y + ROW;
+        for chosen in self.send.chosen.iter().take(LISTED).cloned().collect::<Vec<_>>() {
+            fill(frame, palette.rule, left + 1.0, row, width - 2.0, 1.0, 0.0);
+            let cy = row + ITEM / 2.0;
+            let icon = match chosen.kind {
+                Kind::File => Icon::File,
+                Kind::Folder => Icon::Folder,
+                Kind::Words => Icon::Text,
+                Kind::Picture => Icon::Image,
+            };
+            frame.icon(icon, Point { x: left + 22.0, y: cy }, 16.0, palette.text2);
+            let remove = Rect { x: right - 14.0 - 28.0, y: cy - 14.0, w: 28.0, h: 28.0 };
+            let target = Target::SendRemove(chosen.id);
+            if hovered.as_ref() == Some(&target) {
+                fill(frame, palette.hover, remove.x, remove.y, remove.w, remove.h, 6.0);
+            }
+            frame.icon(Icon::Close, Point { x: remove.x + 14.0, y: cy }, 14.0, palette.text2);
+            self.targets.push((remove, target));
+            let size = chosen.size.map_or_else(|| pick(lang, "正在计算", "Measuring").to_string(), |size| crate::ui::text::bytes(size as f64));
+            let size_w = frame.gfx.measure(&size, hint);
+            let size_x = remove.x - 12.0 - size_w;
+            text_centred(frame, &size, hint, palette.text2, size_x, cy, size_w + 1.0, Align::Start);
+            let name_x = left + ITEM_INSET;
+            text_centred(frame, &chosen.name, label, palette.text, name_x, cy, size_x - 16.0 - name_x, Align::Start);
+            row += ITEM;
+        }
+        if more > 0 {
+            fill(frame, palette.rule, left + 1.0, row, width - 2.0, 1.0, 0.0);
+            let said = match lang {
+                Lang::Zh => format!("另有 {more} 项"),
+                Lang::En => format!("{more} more"),
+            };
+            text_centred(frame, &said, hint, palette.text2, left + ITEM_INSET, row + MORE / 2.0, width - ITEM_INSET - ROW_SIDE, Align::Start);
+        }
+        y += tall;
+        // The devices, under their group's name (as the list's groups are), with what looks for them again.
+        y += 20.0;
+        let small = Font::new(Family::Segoe, 13.0, 600.0);
+        text_centred(frame, pick(lang, "附近的设备", "Devices nearby"), small, palette.text2, left + 4.0, y + GROUP / 2.0, width - 40.0, Align::Start);
+        let refresh = Rect { x: right - 28.0, y: y + GROUP / 2.0 - 14.0, w: 28.0, h: 28.0 };
         if hovered.as_ref() == Some(&Target::SendRefresh) {
             fill(frame, palette.hover, refresh.x, refresh.y, refresh.w, refresh.h, 6.0);
         }
-        frame.icon(Icon::Update, Point { x: refresh.x + 14.0, y: refresh.y + 14.0 }, 15.0, palette.text2);
+        frame.icon(Icon::Update, Point { x: refresh.x + 14.0, y: refresh.y + 14.0 }, 14.0, palette.text2);
         self.targets.push((refresh, Target::SendRefresh));
-        y += 24.0;
+        y += GROUP + 8.0;
         let shown = crate::nearby::shown();
         let devices = self.send_devices(&shown);
         if devices.is_empty() {
-            across(frame, pick(lang, "正在查找附近的设备", "Looking for devices nearby"), hint, palette.text2, left, y + 18.0, width);
-            y += 36.0;
+            text_centred(frame, pick(lang, "正在查找附近的设备", "Looking for devices nearby"), hint, palette.text2, left + 4.0, y + 10.0, width - 8.0, Align::Start);
+            y += 20.0;
         }
         for device in &devices {
-            y = self.paint_send_device(frame, palette, device, &shown, left, y, width, &hovered) + 6.0;
-        }
-        // What a press said, else what to do.
-        let said = self.send.said.map(|(said, _)| said).or_else(|| self.send.chosen.is_empty().then(|| pick(lang, "选择内容后，点设备即可发送", "Choose what to send, then press a device")));
-        if let Some(said) = said {
-            let tall = frame.gfx.wrapped_height(said, hint, width);
-            frame.text_wrapped(said, hint, palette.text2, left, y + 4.0, width);
-            y += tall + 8.0;
+            y = self.paint_send_device(frame, palette, device, &shown, left, y, width, &hovered) + ROW_GAP;
         }
         frame.unclip();
         // As far as it scrolls (its content taller than where it shows), and what of it is pressed only where it shows.
         let content = y + self.send.scroll - area.y;
-        self.send.most = (content - view.h).max(0.0);
+        self.send.most = (content - area.h).max(0.0);
         self.send.scroll = self.send.scroll.clamp(0.0, self.send.most);
         let shown_in = |rect: Rect| {
-            let (top, bottom) = (rect.y.max(view.y), (rect.y + rect.h).min(view.y + view.h));
+            let (top, bottom) = (rect.y.max(area.y), (rect.y + rect.h).min(area.y + area.h));
             (bottom > top).then_some(Rect { y: top, h: bottom - top, ..rect })
         };
         let scrolled: Vec<(Rect, Target)> = self.targets.drain(targets_from..).filter_map(|(rect, target)| Some((shown_in(rect)?, target))).collect();
@@ -534,53 +532,37 @@ impl Ui {
         if let Some(renaming) = self.renaming.as_mut().filter(|renaming| renaming.of == Named::Words) {
             renaming.field = renaming.field.and_then(shown_in);
         }
+        // (Its bar in the room right of it, where the list's is beside the list.)
         if self.send.most > 0.0 {
-            let thumb = (view.h * view.h / content).max(24.0);
-            let at = view.y + (view.h - thumb) * self.send.scroll / self.send.most;
-            fill(frame, palette.text3.alpha(0.45), area.x + area.w - 6.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
+            let thumb = (area.h * area.h / content).max(24.0);
+            let at = area.y + (area.h - thumb) * self.send.scroll / self.send.most;
+            fill(frame, palette.text3.alpha(0.45), right + 12.0, at + 2.0, 3.0, thumb - 4.0, 1.5);
         }
-        // What this PC is called to them, with the way to change it.
-        let foot = area.y + area.h - FOOT;
-        fill(frame, palette.rule, left, foot, width, 1.0, 0.0);
-        let named = match lang {
-            Lang::Zh => format!("附近设备上显示为 {}", self.pc_called()),
-            Lang::En => format!("Devices nearby see it as {}", self.pc_called()),
-        };
-        let change_left = self.button(frame, palette, pick(lang, "更改", "Change"), right, foot + FOOT / 2.0, Target::Manage, Button::Plain, &hovered);
-        text_centred(frame, &named, hint, palette.text2, left, foot + FOOT / 2.0, change_left - 12.0 - left, Align::Start);
         // Something dragged over it: where it is let go.
         if self.send.over {
-            let inner = Rect { x: area.x + 6.0, y: area.y + 6.0, w: area.w - 12.0, h: area.h - 12.0 };
-            fill(frame, palette.window.alpha(0.88), inner.x, inner.y, inner.w, inner.h, 8.0);
-            frame.stroke_rounded_dashed(palette.selection, inner.x, inner.y, inner.w, inner.h, 8.0, 2.0);
-            across(frame, pick(lang, "松开以添加到发送", "Let go to add it"), Font::new(Family::Segoe, 15.0, 600.0), palette.selection, inner.x, inner.y + inner.h / 2.0, inner.w);
+            fill(frame, palette.window.alpha(0.88), area.x, area.y, area.w, area.h, CARD_RADIUS);
+            frame.stroke_rounded_dashed(palette.selection, area.x + 1.0, area.y + 1.0, area.w - 2.0, area.h - 2.0, CARD_RADIUS, 2.0);
+            across(frame, pick(lang, "松开以添加到发送", "Let go to add it"), Font::new(Family::Segoe, 15.0, 600.0), palette.selection, area.x, area.y + area.h / 2.0, area.w);
         }
     }
 
-    /// A device in the pane at `y`: its icon, its name and its tags, how a sending to it goes (with a bar along its foot
-    /// while it goes, and what cancels it while it is waited on), dimmed where it is a phone paired not receiving.
-    /// Where the next goes.
+    /// A device's card in the pane at `y`: its icon where a module's grip is, its name and what it is, and at its right
+    /// what sends to it (pressed only with something chosen, and while it receives), or how a sending to it goes (what
+    /// cancels it while it is waited on or goes, and a bar along the card's foot while it goes); dimmed where it is a
+    /// phone paired not receiving. Where it ends.
     #[allow(clippy::too_many_arguments)]
     fn paint_send_device(&mut self, frame: &Frame, palette: &Palette, device: &SendDevice, shown: &crate::nearby::Shown, left: f32, y: f32, width: f32, hovered: &Option<Target>) -> f32 {
         let lang = self.lang;
-        let rect = Rect { x: left, y, w: width, h: DEVICE };
-        let target = Target::SendTo(device.fingerprint.clone());
-        let lit = hovered.as_ref() == Some(&target) && device.found;
-        fill(frame, if lit { palette.hover } else { palette.control }, rect.x, rect.y, rect.w, rect.h, 8.0);
-        stroke_inside(frame, rect, 8.0, palette.rule);
-        let (ink, ink2) = if device.found { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
-        let cy = y + DEVICE / 2.0;
-        fill(frame, palette.window, left + 10.0, cy - 17.0, 34.0, 34.0, 10.0);
-        frame.icon(device.icon, Point { x: left + 27.0, y: cy }, 19.0, if device.found { palette.selection } else { palette.text3 });
-        // How it goes, at its right.
-        let job = self.send.job_to(&device.fingerprint, shown);
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
         let hint = Font::new(Family::Segoe, HINT, 400.0);
-        let mut right = left + width - 12.0;
-        let (said, good, cancel, part): (Cow<'static, str>, bool, Option<u64>, Option<f32>) = match (&job, device.found) {
-            (None, false) => (Cow::Borrowed(pick(lang, "未开启接收", "Not receiving")), false, None, None),
-            (None, true) => (Cow::Borrowed(""), false, None, None),
-            (Some((_, None)), _) => (Cow::Borrowed(pick(lang, "正在准备", "Getting ready")), false, None, None),
-            (Some((job, Some(state))), _) => match state {
+        card(frame, palette, left, y, width, ROW, palette.card);
+        let cy = y + ROW / 2.0;
+        let job = self.send.job_to(&device.fingerprint, shown);
+        let mut right = left + width - ROW_SIDE;
+        let state = match &job {
+            None => None,
+            Some((_, None)) => Some((Cow::Borrowed(pick(lang, "正在准备", "Getting ready")), false, None, None)),
+            Some((job, Some(state))) => Some(match state {
                 Sending::Waiting => (Cow::Borrowed(pick(lang, "等待对方接受", "Waiting to be taken")), false, Some(*job), None),
                 Sending::Going { done, of } => {
                     let part = if *of == 0 { 0.0 } else { (*done as f32 / *of as f32).clamp(0.0, 1.0) };
@@ -592,51 +574,46 @@ impl Ui {
                 Sending::Pin { .. } => (Cow::Borrowed(pick(lang, "需要 PIN 码", "A PIN is needed")), false, Some(*job), None),
                 Sending::Cancelled => (Cow::Borrowed(pick(lang, "已取消", "Cancelled")), false, None, None),
                 Sending::Failed { .. } => (Cow::Borrowed(pick(lang, "发送失败", "Not sent")), false, None, None),
-            },
+            }),
         };
-        if let Some(job) = cancel {
-            let x = Rect { x: right - 28.0, y: cy - 14.0, w: 28.0, h: 28.0 };
-            let target = Target::SendCancel(job);
-            if hovered.as_ref() == Some(&target) {
-                fill(frame, palette.window, x.x, x.y, x.w, x.h, 6.0);
+        match state {
+            // Nothing sent to it lately: what sends to it.
+            None => {
+                let kind = if device.found && !self.send.chosen.is_empty() { Button::Plain } else { Button::Quiet };
+                right = self.button(frame, palette, pick(lang, "发送", "Send"), right, cy, Target::SendTo(device.fingerprint.clone()), kind, hovered) - 8.0;
             }
-            frame.icon(Icon::Close, Point { x: x.x + 14.0, y: cy }, 14.0, palette.text2);
-            self.targets.push((x, target));
-            right = x.x - 6.0;
-        }
-        if !said.is_empty() {
-            let said_w = frame.gfx.measure(&said, hint);
-            let good_color = if self.dark { Color::hex(0x58C98B, 1.0) } else { Color::hex(0x1E7B45, 1.0) };
-            text_centred(frame, &said, hint, if good { good_color } else { ink2 }, right - said_w, cy, said_w + 1.0, Align::Start);
-            right -= said_w;
-            if good {
-                frame.icon(Icon::Check, Point { x: right - 10.0, y: cy }, 15.0, good_color);
-                right -= 20.0;
+            Some((said, sent, cancel, part)) => {
+                if let Some(job) = cancel {
+                    let x = Rect { x: right + 6.0 - 28.0, y: cy - 14.0, w: 28.0, h: 28.0 };
+                    let target = Target::SendCancel(job);
+                    if hovered.as_ref() == Some(&target) {
+                        fill(frame, palette.hover, x.x, x.y, x.w, x.h, 6.0);
+                    }
+                    frame.icon(Icon::Close, Point { x: x.x + 14.0, y: cy }, 14.0, palette.text2);
+                    self.targets.push((x, target));
+                    right = x.x - 6.0;
+                }
+                let ink = if sent { palette.selection } else { palette.text2 };
+                let said_w = frame.gfx.measure(&said, hint);
+                text_centred(frame, &said, hint, ink, right - said_w, cy, said_w + 1.0, Align::Start);
+                right -= said_w;
+                if sent {
+                    frame.icon(Icon::Check, Point { x: right - 13.0, y: cy }, 14.0, ink);
+                    right -= 20.0;
+                }
+                right -= 16.0;
+                // (The card's own shape, its foot alone, as far as it has gone.)
+                if let Some(part) = part {
+                    frame.clip(left, y + ROW - 3.0, width * part, 3.0);
+                    fill(frame, palette.selection, left, y, width, ROW, CARD_RADIUS);
+                    frame.unclip();
+                }
             }
-            right -= 12.0;
         }
-        // Its name, and its tags under it.
-        let words_left = left + 56.0;
-        let room = (right - words_left).max(40.0);
-        frame.clip(words_left, y, room, DEVICE);
-        text_centred(frame, &device.name, Font::new(Family::Segoe, 13.5, 600.0), ink, words_left, cy - 9.0, room, Align::Start);
-        let tag_font = Font::new(Family::Segoe, 11.0, 400.0);
-        let mut x = words_left;
-        for tag in &device.tags {
-            let w = frame.gfx.measure(tag, tag_font) + 12.0;
-            fill(frame, palette.window, x, cy + 3.0, w, 17.0, 4.0);
-            text_centred(frame, tag, tag_font, ink2, x + 6.0, cy + 11.5, w, Align::Start);
-            x += w + 6.0;
-        }
-        frame.unclip();
-        if let Some(part) = part {
-            frame.clip(rect.x, rect.y, rect.w, rect.h);
-            fill(frame, palette.selection, rect.x + 8.0, rect.y + rect.h - 4.0, (rect.w - 16.0) * part, 3.0, 1.5);
-            frame.unclip();
-        }
-        // (After what cancels it: the first under the pointer is pressed, see `hovered`.)
-        self.targets.push((rect, target));
-        y + DEVICE
+        let (ink, ink2) = if device.found { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+        frame.icon(device.icon, Point { x: left + 22.0, y: cy }, 16.0, ink2);
+        field_label_in(frame, (ink, ink2), &device.name, Some(&device.detail), label, hint, left + ITEM_INSET, cy, right - left - ITEM_INSET);
+        y + ROW
     }
 
     /// The box words are written in to send, at `y`: wrapped, the caret and what is chosen in them shown, how many
@@ -646,7 +623,7 @@ impl Ui {
         let hovered = self.hovered_now.clone();
         let font = WORDS_FONT;
         let boxed = Rect { x: left, y, w: width, h: WRITER + 44.0 };
-        fill(frame, palette.control, boxed.x, boxed.y, boxed.w, boxed.h, 8.0);
+        fill(frame, palette.card, boxed.x, boxed.y, boxed.w, boxed.h, 8.0);
         Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x + 0.75, boxed.y + 0.75, boxed.w - 1.5, boxed.h - 1.5, 7.25, 1.5);
         let field = Rect { x: left + 10.0, y: y + 10.0, w: width - 20.0, h: WRITER - 14.0 };
         let Some(renaming) = self.renaming.as_mut() else { return y };
@@ -750,11 +727,7 @@ impl Ui {
     fn send_to(&mut self, fingerprint: String) {
         let shown = crate::nearby::shown();
         let Some(device) = self.send_devices(&shown).into_iter().find(|device| device.fingerprint == fingerprint) else { return };
-        if !device.found {
-            self.send.say(pick(self.lang, "在手机上打开 Glance，或在 App 中开启“后台接收”", "Open Glance on the phone, or turn on Receive in the background in the app"));
-            return;
-        }
-        if self.send.chosen.is_empty() || self.send.job_to(&fingerprint, &shown).is_some_and(|(_, state)| state.is_none_or(|state| !state.over())) {
+        if !device.found || self.send.chosen.is_empty() || self.send.job_to(&fingerprint, &shown).is_some_and(|(_, state)| state.is_none_or(|state| !state.over())) {
             return;
         }
         let job = crate::nearby::job();

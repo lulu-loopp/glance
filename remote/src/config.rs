@@ -298,14 +298,21 @@ impl Config {
         Ok(config)
     }
 
-    /// Offers a pairing: a key of its own for the phone that takes it,
-    /// which is returned.
-    pub fn offer() -> std::io::Result<String> {
+    /// Offers a pairing: a key of its own for the phone that takes it, which is returned with its name (see
+    /// `sign::key_id`: what the offer is taken back by, see `withdraw`).
+    pub fn offer() -> std::io::Result<(String, String)> {
         let mut key = [0u8; 32];
         getrandom::getrandom(&mut key).map_err(|error| std::io::Error::other(error.to_string()))?;
-        let key = crate::sign::hex(&key);
+        let (id, key) = (crate::sign::key_id(&key), crate::sign::hex(&key));
         Config::change(|config| config.phones.push(Phone { key: key.clone(), offered_till: Some(crate::sign::now() + OFFERED_FOR), ..Phone::default() }))?;
-        Ok(key)
+        Ok((key, id))
+    }
+
+    /// Takes back the pairing offered of name `id` (see `offer`), where no phone has taken it yet: one taken is that
+    /// phone's, and stays.
+    pub fn withdraw(id: &str) -> std::io::Result<()> {
+        Config::change(|config| config.phones.retain(|phone| !(phone.offered_till.is_some() && phone.device.is_none() && phone.id == id)))?;
+        Ok(())
     }
 
     /// The key this PC itself asks by: made the first time it is wanted.
@@ -363,8 +370,31 @@ mod tests {
     }
 
     /// What nearby transfer called this PC becomes its one name, and is not kept again.
+    /// Held by a test while it writes the configuration's file (the tests' own, one for them all).
+    static FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_pairing_offered_is_taken_back_unless_a_phone_took_it() {
+        let _file = FILE.lock().unwrap_or_else(|held| held.into_inner());
+        let _ = std::fs::remove_file(path());
+        std::fs::create_dir_all(folder()).unwrap();
+        let (_, first) = Config::offer().unwrap();
+        let (taken_key, taken) = Config::offer().unwrap();
+        Config::change(|config| {
+            let phone = config.phones.iter_mut().find(|phone| phone.key == taken_key).unwrap();
+            (phone.device, phone.offered_till) = (Some("fold".into()), None);
+        })
+        .unwrap();
+        Config::withdraw(&first).unwrap();
+        Config::withdraw(&taken).unwrap();
+        let ids: Vec<String> = Config::read().unwrap().phones.into_iter().map(|phone| phone.id).collect();
+        assert_eq!(ids, vec![taken]);
+        let _ = std::fs::remove_file(path());
+    }
+
     #[test]
     fn the_nearby_alias_becomes_the_name() {
+        let _file = FILE.lock().unwrap_or_else(|held| held.into_inner());
         let _ = std::fs::remove_file(path());
         std::fs::create_dir_all(folder()).unwrap();
         std::fs::write(path(), r#"{"name":"DESKTOP","nearby":{"on":true,"alias":"书房"}}"#).unwrap();
