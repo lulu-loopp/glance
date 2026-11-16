@@ -138,10 +138,8 @@ struct Carry {
 /// of what it is lifted off) till it is carried onto a screen another adapter drives: each of its tiles flying from its
 /// room into its place in the stack.
 pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
+    put_back(&lifted.carried);
     CARRIED.with_borrow_mut(|carried| {
-        if let Some(was) = carried.take() {
-            crate::ui::view::land_tiles(was.lifted.carried, Instant::now());
-        }
         // (Over the screen frosted where its look is, as a menu's sheet is: on a window the compositor draws what is
         // behind into, which a layered one is not.)
         let window = if crate::ui::menu::frosting(lifted.look).is_some() { Window::see_through() } else { Window::new() };
@@ -177,6 +175,16 @@ pub fn begin(gfx: &Rc<Gfx>, lifted: Lifted) {
             last: Instant::now(),
         });
     });
+}
+
+/// What is carried put back where it was lifted off at once (another drag begins: see `station::drag_off`): those of
+/// it lifted again (`again`) drawn full in their rooms at once, as they are lifted from there as they are drawn there
+/// (else drawn as the outline of a room left, flying back into it still), the rest landing in theirs.
+pub fn put_back(again: &[Hit]) {
+    let Some(was) = CARRIED.with_borrow_mut(|carried| carried.take()) else { return };
+    let (lifted, landing): (Vec<Hit>, Vec<Hit>) = was.lifted.carried.iter().partition(|hit| again.contains(hit));
+    crate::ui::view::settle_tiles(&lifted);
+    crate::ui::view::land_tiles(landing, Instant::now());
 }
 
 /// What is carried a step on to `now`, drawn: when next to (none, nothing carried).
@@ -992,6 +1000,33 @@ mod tests {
         assert!((reach.0 - 100.0).abs() < 1e-3 && (reach.1 - 50.0).abs() < 1e-3 && (reach.2 - 400.0).abs() < 1e-3 && (reach.3 - 330.0).abs() < 1e-3, "{reach:?}");
         let rect = window_rect((100.0, 50.0, 400.0, 330.0), 1.5);
         assert_eq!((rect.left, rect.top, rect.right, rect.bottom), (90, 15, 660, 555));
+    }
+
+    /// Things carried, put back as another drag begins before they landed: those lifted again are in their rooms at
+    /// once and drawn full there (no longer the outlines of rooms left, which a lift from there drew as what it
+    /// carried), the rest landing in theirs.
+    #[test]
+    fn what_is_lifted_again_before_it_landed_is_in_its_room_at_once() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let _holding = crate::ui::view::HOLDING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gfx = Rc::new(Gfx::new().expect("graphics"));
+        let (again, other) = (Hit::Shelf(918_001), Hit::Shelf(918_002));
+        let lift = |carried: Vec<Hit>| {
+            crate::ui::view::carry_tiles(carried.clone());
+            let tile = Tile { hit: carried[0], parts: Vec::new(), home: None, size: (40.0, 30.0), at: POINT { x: 0, y: 0 } };
+            let look = crate::ui::menu::Look::of(crate::ui::theme::Skin::Paper, false);
+            begin(&gfx, Lifted { carried, count: 1, drag: 0, tiles: vec![tile], from: POINT { x: 5, y: 5 }, px: 1.0, over: RECT::default(), window: HWND::default(), look });
+        };
+        lift(vec![again, other]);
+        assert_eq!(crate::ui::view::away_tiles(), [again, other]);
+        put_back(&[again]);
+        assert!(crate::ui::view::away_tiles().is_empty(), "back in their rooms");
+        assert!(crate::ui::view::tile_landing(), "the other one landing in its room");
+        crate::ui::view::settle_tiles(&[other]);
+        lift(vec![again]);
+        put_back(&[again]);
+        assert!(crate::ui::view::away_tiles().is_empty() && !crate::ui::view::tile_landing(), "lifted again: in its room at once, drawn full");
+        assert!(CARRIED.with_borrow(|carried| carried.is_none()));
     }
 
     /// The plates behind the one on top draw what each of them is, each its own: carried together, a red thing on top
