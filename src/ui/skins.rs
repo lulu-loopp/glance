@@ -808,6 +808,60 @@ mod tests {
         crate::studio::save_png(&std::path::PathBuf::from(std::env::var("GLANCE_OUT").expect("GLANCE_OUT")), w as u32, h as u32, &pixels).unwrap();
     }
 
+    /// How long the part of a widget drawn anew each frame it is moved takes (the desktop as its skin shows it: see
+    /// `Part`), on the graphics card, Windows 11's acrylic beside glass at its most and least frosted:
+    /// `cargo test --lib -- --ignored --nocapture what_moving_costs` prints it. (Each frame is read back, as the
+    /// first, drawing nothing, is: what that takes is said with them.)
+    #[test]
+    #[ignore = "measures, and prints what it found"]
+    fn what_moving_costs() {
+        use std::cell::RefCell;
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let scale = 1.5;
+        let (w, h) = (400.0f32, 300.0f32);
+        let pixels = ((w * scale) as u32, (h * scale) as u32);
+        let screen = (2560u32, 1440u32);
+        let noise: Vec<u8> = (0..screen.0 * screen.1 * 4).map(|i| if i % 4 == 3 { 255 } else { (i.wrapping_mul(2_654_435_761) >> 24) as u8 }).collect();
+        let desktop: RefCell<Option<ID2D1Bitmap1>> = RefCell::new(None);
+        gfx.draw_offscreen((1, 1), 1.0, |frame| {
+            let properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0 * scale,
+                dpiY: 96.0 * scale,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                ..Default::default()
+            };
+            *desktop.borrow_mut() = Some(unsafe { frame.dc.CreateBitmap(D2D_SIZE_U { width: screen.0, height: screen.1 }, Some(noise.as_ptr().cast()), screen.0 * 4, &properties) }.expect("bitmap"));
+        })
+        .expect("drawn");
+        let desktop = desktop.into_inner().expect("bitmap");
+        let frames = 60;
+        let timed = |draw: &dyn Fn(&Frame, usize)| {
+            let mut took: Vec<f64> = (0..frames)
+                .map(|n| {
+                    let began = std::time::Instant::now();
+                    gfx.draw_offscreen(pixels, scale, |frame| draw(frame, n)).expect("drawn");
+                    began.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            took.sort_by(f64::total_cmp);
+            (took[frames / 2], took[frames * 9 / 10])
+        };
+        let nothing = timed(&|_, _| {});
+        println!("read back alone: median {:.2} ms, 90% {:.2} ms", nothing.0, nothing.1);
+        let lanes = [Rect { x: 0.0, y: 0.0, w, h }];
+        for (name, skin, frost) in [("Windows 11", Skin::Fluent, 1.0), ("glass, most frosted", Skin::Glass, 1.0), ("glass, least frosted", Skin::Glass, 0.2)] {
+            let theme = Theme::new(skin, true);
+            let took = timed(&|frame, n| {
+                // (Moved a little each frame, as it is in hand.)
+                let ground = Ground { theme: &theme, edge: None, size: (w, h), lanes: &lanes, bar: Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, backdrop: Some((&desktop, Vector2 { X: 300.0 + n as f32 * 3.0, Y: 200.0 + n as f32 }, scale)), frost };
+                draw(frame, &ground, Part::Desktop).expect("drawn");
+            });
+            println!("{name}: median {:.2} ms, 90% {:.2} ms", took.0, took.1);
+        }
+    }
+
     /// Glass with no picture of the desktop to frost (none taken yet, or taken on a device since lost) is tinted as
     /// at its most frosted: the desktop shows through it sharp, and how busy it is is not known; tinted as the
     /// picture last had it, a busy desktop came through all but clear, and the readings over it were lost.
