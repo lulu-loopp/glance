@@ -2397,17 +2397,18 @@ impl Hash for Block {
                 (apps, rows, named, over).hash(state);
                 crate::station::thumbs::changes().hash(state);
             }
+            // (A station's pages: the devices nearby drawn at their foot as something is dragged too, see `paint_strip`.)
             Block::Recent { rows, filter, view, tall, nowhere } => {
                 (rows, filter, view, tall.to_bits(), nowhere).hash(state);
-                crate::station::thumbs::changes().hash(state);
+                (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
             Block::Shelf { tiles, shows, tall, said, over } => {
                 (tiles, shows, tall.to_bits(), said, over).hash(state);
-                crate::station::thumbs::changes().hash(state);
+                (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
             Block::Copies { rows, filter, view, tall } => {
                 (rows, filter, view, tall.to_bits()).hash(state);
-                crate::station::thumbs::changes().hash(state);
+                (crate::station::thumbs::changes(), crate::station::send::changes()).hash(state);
             }
         }
     }
@@ -6994,6 +6995,37 @@ otepad.exe", "Notepad"),
         let pixels = draw();
         crate::station::send::pretend(None);
         crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/send-strip.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+    }
+
+    /// A station's page, whose drawing is kept while what it shows is the same (see `render::PanelLayers::draw_on`), is
+    /// told to be drawn again as the devices nearby at its foot change: a device lit, then not, and the strip gone. Not
+    /// told, a device stayed lit on the screen up to a second after the pointer left it.
+    #[test]
+    fn a_station_is_drawn_again_as_its_strip_changes() {
+        use crate::station::send::{pretend, ChipShown, Shown};
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let _pretending = crate::pretending();
+        let pages = [
+            Block::Shelf { tiles: Vec::new(), shows: Shows::Row, tall: 100.0, said: None, over: false },
+            Block::Copies { rows: Vec::new(), filter: Default::default(), view: ShelfView::Cards, tall: 100.0 },
+            Block::Recent { rows: Vec::new(), filter: Default::default(), view: ShelfView::Cards, tall: 100.0, nowhere: false },
+        ];
+        let hashed = |block: &Block| {
+            let mut hasher = DefaultHasher::new();
+            block.hash(&mut hasher);
+            hasher.finish()
+        };
+        let strip = |lit: bool| Shown { up: 1.0, open: true, stays_here: false, chips: vec![ChipShown { key: 1, alias: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), grown: 1.0, lit, sending: None }] };
+        for page in &pages {
+            pretend(Some(strip(true)));
+            let lit = hashed(page);
+            assert_eq!(hashed(page), lit, "drawn again with nothing changed");
+            pretend(Some(strip(false)));
+            let left = hashed(page);
+            assert_ne!(left, lit, "a device let go of by the pointer still drawn lit");
+            pretend(None);
+            assert_ne!(hashed(page), left, "the strip gone still drawn");
+        }
     }
 
     /// Things chosen together on the station's lane in each skin, light and dark (a row each): on the station as cards

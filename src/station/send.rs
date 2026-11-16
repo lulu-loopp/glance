@@ -80,6 +80,20 @@ struct Dropped {
 
 static STRIP: Mutex<Option<Strip>> = Mutex::new(None);
 static DROPPED: Mutex<Option<Dropped>> = Mutex::new(None);
+/// How many times what the strip shows changed (see `changes`).
+static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times what the strip shows (see `shown`) changed so far: for a drawing kept while what it shows is the
+/// same (a station's lane, see `render::PanelLayers::draw_on`) to tell that it is not, as a device is lit, the strip
+/// rises or falls. Not told, it was drawn again only as something else in it changed (a sample, once a second), and
+/// a device stayed lit as long after the pointer had left it.
+pub fn changes() -> u64 {
+    CHANGES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn changed() {
+    CHANGES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// What the strip rises for besides a drag off a station (whose numbers count up from 1, see `drag::announce`): what
 /// was sent from a menu, and (with a number of their own after it) drags from other programs over a station.
@@ -287,6 +301,7 @@ pub fn tick(now: Instant) -> (bool, Option<Duration>) {
                 crate::nearby::forget(job);
             }
             *held = None;
+            changed();
             return (true, None);
         }
     }
@@ -299,13 +314,14 @@ pub fn tick(now: Instant) -> (bool, Option<Duration>) {
         sooner(ANNOUNCE[strip.announced].saturating_sub(now.saturating_duration_since(strip.asked)));
     }
     let shown = strip.shown(now, open, &nearby.sendings);
-    let changed = strip.drawn.as_ref() != Some(&shown);
+    let moved = strip.drawn.as_ref() != Some(&shown);
     strip.drawn = Some(shown);
     // (Moving: drawn again with the screen.)
-    if changed {
+    if moved {
+        changed();
         sooner(Duration::ZERO);
     }
-    (changed, due)
+    (moved, due)
 }
 
 /// What the strip shows now: none where it is down.
@@ -327,6 +343,7 @@ thread_local! {
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(shown: Option<Shown>) {
     PRETENDED.with_borrow_mut(|pretended| *pretended = shown);
+    changed();
 }
 
 /// The pointer over the device `key` on the strip as something is dragged (none: off it, where it was over `key`).
