@@ -38,12 +38,14 @@ pub enum Command {
     Trust { fingerprint: String },
 }
 
-/// A file to be sent: where it is, and the name the device is told (a folder's files named by their places in it,
-/// "folder/inner/file", as LocalSend names them).
+/// Something to be sent, and the name the device is told: a file where it is (a folder's files named by their places
+/// in it, "folder/inner/file", as LocalSend names them), or words (sent as LocalSend sends text: a text "file" whose
+/// words are its preview, a message where they go alone, the name told only where they are kept as a file).
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-pub struct Outgoing {
-    pub path: PathBuf,
-    pub name: String,
+#[serde(untagged)]
+pub enum Outgoing {
+    File { path: PathBuf, name: String },
+    Words { words: String, name: String },
 }
 
 pub struct Link {
@@ -233,14 +235,14 @@ mod tests {
     use super::*;
 
     /// What Glance tells it to send (as Glance's `nearby::send_line` writes it) is read: each file where it is, and
-    /// the name the device is told.
+    /// the name the device is told, and words as they are.
     #[test]
     fn a_sending_glance_asks_for_is_read() {
-        let line = r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"}],"job":3,"kind":"send","to":"AB12"}"#;
+        let line = r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"},{"name":"周四开会.txt","words":"周四开会"}],"job":3,"kind":"send","to":"AB12"}"#;
         match serde_json::from_str::<Command>(line).unwrap() {
             Command::Send { job, to, files } => {
                 assert_eq!((job, to.as_str()), (3, "AB12"));
-                assert_eq!(files, [Outgoing { path: PathBuf::from(r"C:\Users\me\trip\a.jpg"), name: "trip/a.jpg".into() }]);
+                assert_eq!(files, [Outgoing::File { path: PathBuf::from(r"C:\Users\me\trip\a.jpg"), name: "trip/a.jpg".into() }, Outgoing::Words { words: "周四开会".into(), name: "周四开会.txt".into() }]);
             }
             other => panic!("read as {other:?}"),
         }

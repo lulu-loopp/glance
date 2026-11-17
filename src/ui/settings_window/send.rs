@@ -721,9 +721,9 @@ impl Ui {
         self.next_frame = Instant::now();
     }
 
-    /// All that is chosen sent to the device of `fingerprint` (put together as files on a thread of its own first:
-    /// words and pictures written as files, folders walked): unless nothing is chosen, it is a phone paired that does
-    /// not receive now, or a sending to it goes on.
+    /// All that is chosen sent to the device of `fingerprint` (put together on a thread of its own first: pictures
+    /// written as files, folders walked, words as words: see `station::send::outgoing`): unless nothing is chosen, it is
+    /// a phone paired that does not receive now, or a sending to it goes on.
     fn send_to(&mut self, fingerprint: String) {
         let shown = crate::nearby::shown();
         let Some(device) = self.send_devices(&shown).into_iter().find(|device| device.fingerprint == fingerprint) else { return };
