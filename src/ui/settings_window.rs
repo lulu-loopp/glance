@@ -1228,6 +1228,25 @@ enum Button {
     Taking,
     Quiet,
     Menu,
+    /// A button that opens a menu, not to be pressed now: as quiet as `Quiet`, its chevron kept.
+    QuietMenu,
+}
+
+impl Button {
+    /// Whether it opens a menu (drawn with a chevron after its words).
+    fn menu(self) -> bool {
+        matches!(self, Button::Menu | Button::QuietMenu)
+    }
+
+    /// Whether it is not to be pressed now (its words in the quieter ink, nothing on hover).
+    fn quiet(self) -> bool {
+        matches!(self, Button::Quiet | Button::QuietMenu)
+    }
+
+    /// It as it is drawn not to be pressed now.
+    fn quieted(self) -> Button {
+        if self.menu() { Button::QuietMenu } else { Button::Quiet }
+    }
 }
 
 /// How much wider a button that opens a menu is than its words make it: its chevron and the room before it (DIPs).
@@ -3645,7 +3664,7 @@ impl Ui {
             },
             _ => match self.button_row(row, Instant::now()) {
                 Some((_, word, buttons)) => {
-                    let taken: f32 = buttons.iter().map(|(text, _, kind)| self.gfx.measure(text, font) + 32.0 + if *kind == Button::Menu { MENU_CHEVRON } else { 0.0 } + 8.0).sum();
+                    let taken: f32 = buttons.iter().map(|(text, _, kind)| self.gfx.measure(text, font) + 32.0 + if kind.menu() { MENU_CHEVRON } else { 0.0 } + 8.0).sum();
                     // (A device's words, and its unpairing's, where a module's are.)
                     let icon = match row {
                         Row::Notice => NOTICE_ICON_ROOM,
@@ -3948,7 +3967,7 @@ impl Ui {
             }
             // The station, or a folder chosen (by its name on the button, where it is said under).
             Row::NearbyFolder => {
-                let quiet = |kind: Button| if self.dimmed(row) { Button::Quiet } else { kind };
+                let quiet = |kind: Button| if self.dimmed(row) { kind.quieted() } else { kind };
                 let (detail, chosen) = match &self.settings.nearby_folder {
                     None => (p("放入中转站，按其保留期限清理", "Put on the station, and cleared as the station keeps things"), p("中转站", "Station")),
                     Some(folder) => {
@@ -7009,10 +7028,10 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     fn button(&mut self, frame: &Frame, palette: &Palette, text: &str, right: f32, cy: f32, target: Target, kind: Button, hovered: &Option<Target>) -> f32 {
         let font = Font::new(Family::Segoe, 14.0, 400.0);
-        let chevron = if kind == Button::Menu { MENU_CHEVRON } else { 0.0 };
+        let chevron = if kind.menu() { MENU_CHEVRON } else { 0.0 };
         let w = frame.gfx.measure(text, font) + 32.0 + chevron;
         let rect = Rect { x: right - w, y: cy - 16.0, w, h: 32.0 };
-        let hover = kind != Button::Quiet && hovered.as_ref() == Some(&target);
+        let hover = !kind.quiet() && hovered.as_ref() == Some(&target);
         let ink = match kind {
             Button::Accent => {
                 fill(frame, if hover { palette.switch_on.alpha(0.9) } else { palette.switch_on }, rect.x, rect.y, rect.w, rect.h, 6.0);
@@ -7023,14 +7042,14 @@ impl Ui {
                     fill(frame, palette.hover, rect.x, rect.y, rect.w, rect.h, 6.0);
                 }
                 stroke_inside(frame, rect, 6.0, if kind == Button::Taking { palette.selection } else { palette.rule });
-                if kind == Button::Quiet { palette.text2 } else { palette.text }
+                if kind.quiet() { palette.text2 } else { palette.text }
             }
         };
         text_centred(frame, text, font, ink, rect.x + 16.0, cy, w - 32.0 - chevron + 1.0, Align::Start);
-        if kind == Button::Menu {
-            frame.icon(Icon::ChevronDown, Point { x: rect.x + rect.w - 16.0 - 6.0, y: cy }, 14.0, palette.text2);
+        if kind.menu() {
+            frame.icon(Icon::ChevronDown, Point { x: rect.x + rect.w - 16.0 - 6.0, y: cy }, 14.0, if kind.quiet() { palette.text2.alpha(0.5) } else { palette.text2 });
         }
-        if kind != Button::Quiet {
+        if !kind.quiet() {
             self.targets.push((rect, target));
         }
         rect.x

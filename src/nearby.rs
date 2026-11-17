@@ -104,6 +104,31 @@ pub struct Outgoing {
     pub bytes: u64,
 }
 
+/// What a sending gives the device (see `send`), each with the name the device is told: a file where it is, or words
+/// (sent as LocalSend sends text: alone, a message the device shows as words; with files, a text file beside them).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Part {
+    File(PathBuf, String),
+    Words(String, String),
+}
+
+impl Part {
+    /// The name the device is told.
+    pub fn name(&self) -> &str {
+        match self {
+            Part::File(_, name) | Part::Words(_, name) => name,
+        }
+    }
+
+    /// How large it is (bytes): a file as it is now (none where it cannot be read), words as UTF-8.
+    fn size(&self) -> Option<u64> {
+        match self {
+            Part::File(path, _) => std::fs::metadata(path).ok().map(|meta| meta.len()),
+            Part::Words(words, _) => Some(words.len() as u64),
+        }
+    }
+}
+
 /// What the helper tells.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -262,16 +287,16 @@ pub fn job() -> u64 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `files` (each where it is, and the name the device is told) sent to the device `to` (its fingerprint), as sending
-/// `job` (see `job`). Nothing to send, or the helper not there to be asked, it failed at once. The station is told as
-/// it is over (see `station::run::Ask::Sent`).
-pub fn send(job: u64, to: &str, files: &[(PathBuf, String)]) {
+/// `files` (each a file where it is or words, and the name the device is told: see `Part`) sent to the device `to`
+/// (its fingerprint), as sending `job` (see `job`). Nothing to send, or the helper not there to be asked, it failed at
+/// once. The station is told as it is over (see `station::run::Ask::Sent`).
+pub fn send(job: u64, to: &str, files: &[Part]) {
     if files.is_empty() {
         sending(job, Sending::Failed { why: "nothing to send".into() });
         return;
     }
-    let bytes = files.iter().filter_map(|(path, _)| std::fs::metadata(path).ok()).map(|meta| meta.len()).sum();
-    let first = files[0].1.rsplit('/').next().unwrap_or_default().to_string();
+    let bytes = files.iter().filter_map(Part::size).sum();
+    let first = files[0].name().rsplit('/').next().unwrap_or_default().to_string();
     change(|shown| {
         let device = shown.devices.iter().find(|device| device.fingerprint.eq_ignore_ascii_case(to));
         let (alias, kind) = device.map_or_else(|| (String::new(), None), |device| (device.alias.clone(), device.kind.clone()));
@@ -284,8 +309,14 @@ pub fn send(job: u64, to: &str, files: &[(PathBuf, String)]) {
 }
 
 /// What the helper is told to send `files` to `to` as sending `job` (see `send`).
-fn send_line(job: u64, to: &str, files: &[(PathBuf, String)]) -> serde_json::Value {
-    let files: Vec<serde_json::Value> = files.iter().map(|(path, name)| json!({ "path": path, "name": name })).collect();
+fn send_line(job: u64, to: &str, files: &[Part]) -> serde_json::Value {
+    let files: Vec<serde_json::Value> = files
+        .iter()
+        .map(|part| match part {
+            Part::File(path, name) => json!({ "path": path, "name": name }),
+            Part::Words(words, name) => json!({ "words": words, "name": name }),
+        })
+        .collect();
     json!({ "kind": "send", "job": job, "to": to, "files": files })
 }
 
@@ -753,11 +784,11 @@ mod tests {
     use super::*;
 
     /// What the helper is told to send, as it reads it (see its `link::Command::Send`): each file where it is, and
-    /// the name the device is told.
+    /// the name the device is told, and words as they are.
     #[test]
     fn a_sending_is_told_as_the_helper_reads_it() {
-        let files = [(PathBuf::from(r"C:\Users\me\trip\a.jpg"), "trip/a.jpg".to_string())];
-        assert_eq!(send_line(3, "AB12", &files).to_string(), r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"}],"job":3,"kind":"send","to":"AB12"}"#);
+        let files = [Part::File(PathBuf::from(r"C:\Users\me\trip\a.jpg"), "trip/a.jpg".to_string()), Part::Words("周四开会".into(), "周四开会.txt".into())];
+        assert_eq!(send_line(3, "AB12", &files).to_string(), r#"{"files":[{"name":"trip/a.jpg","path":"C:\\Users\\me\\trip\\a.jpg"},{"name":"周四开会.txt","words":"周四开会"}],"job":3,"kind":"send","to":"AB12"}"#);
     }
 
     fn receipt(session: &str, files: &[&str]) -> Receipt {

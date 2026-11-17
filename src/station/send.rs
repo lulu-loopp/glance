@@ -22,7 +22,7 @@ use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::Shell::{DROPIMAGE_COPY, DROPIMAGE_INVALID, DROPIMAGE_NONE};
 
 use super::clipboard::Content;
-use crate::nearby::{Device, Sending, Target};
+use crate::nearby::{Device, Part, Sending, Target};
 use crate::ui::icons::Icon;
 use crate::ui::menu::{Item, Mark};
 use crate::ui::text::Lang;
@@ -557,26 +557,32 @@ pub fn folder_of(job: u64) -> PathBuf {
     folder().join(job.to_string())
 }
 
-/// What `given` sends: each file where it is, and the name the device is told; a folder as each file in it (named by
-/// its place there, "folder/inner/file", as LocalSend names them; what in it only points elsewhere left out: a link
-/// may point back up into it); what is not a file yet written as one in `folder` first (as it is dragged off, see
-/// `drag::as_paths`). None of it where something of it could not be written.
-pub fn outgoing(given: &[Content], folder: &Path) -> Vec<(PathBuf, String)> {
-    let Some(paths) = super::drag::as_paths(given, folder) else { return Vec::new() };
+/// What `given` sends (see `nearby::Part`): each file where it is, and the name the device is told; a folder as each
+/// file in it (named by its place there, "folder/inner/file", as LocalSend names them; what in it only points elsewhere
+/// left out: a link may point back up into it); words and links as words (named as they would be kept as a file, see
+/// `drag::text_name`), after the files; a picture or what came with no path yet written as a file in `folder` first
+/// (as it is dragged off, see `drag::as_paths`). None of it where something of it could not be written.
+pub fn outgoing(given: &[Content], folder: &Path) -> Vec<Part> {
+    let not_words: Vec<Content> = given.iter().filter(|content| !matches!(content, Content::Text(_))).cloned().collect();
+    let Some(paths) = super::drag::as_paths(&not_words, folder) else { return Vec::new() };
     let mut files = Vec::new();
     for path in paths {
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         match std::fs::metadata(&path) {
             Ok(meta) if meta.is_dir() => within(&path, &name, &mut files),
-            Ok(_) => files.push((path, name)),
+            Ok(_) => files.push(Part::File(path, name)),
             Err(_) => {}
         }
     }
+    files.extend(given.iter().filter_map(|content| match content {
+        Content::Text(words) => Some(Part::Words(words.clone(), super::drag::text_name(words))),
+        _ => None,
+    }));
     files
 }
 
 /// Each file within the folder `folder` (named `named`) added to `files`, named by its place there.
-fn within(folder: &Path, named: &str, files: &mut Vec<(PathBuf, String)>) {
+fn within(folder: &Path, named: &str, files: &mut Vec<Part>) {
     let Ok(entries) = std::fs::read_dir(folder) else { return };
     let mut entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
@@ -588,7 +594,7 @@ fn within(folder: &Path, named: &str, files: &mut Vec<(PathBuf, String)>) {
         } else if kind.is_dir() {
             within(&entry.path(), &name, files);
         } else if kind.is_file() {
-            files.push((entry.path(), name));
+            files.push(Part::File(entry.path(), name));
         }
     }
 }
@@ -689,7 +695,8 @@ mod tests {
     use super::*;
 
     /// A folder is sent as its files, each named by its place in it, what in it only points elsewhere left out; a file
-    /// as itself; words as a text file named by them.
+    /// as itself; words and a link as words (nothing written for them), named as their text file would be, after the
+    /// files.
     #[test]
     fn what_is_sent_is_each_file_named_by_its_place() {
         let root = crate::settings::local_dir().join("send-outgoing");
@@ -700,12 +707,14 @@ mod tests {
         std::fs::write(trip.join("day 2").join("b.jpg"), b"b").unwrap();
         let alone = root.join("alone.pdf");
         std::fs::write(&alone, b"c").unwrap();
-        let given = [Content::Files(vec![trip.clone(), alone.clone()]), Content::Text("见面地点\n东门".into())];
+        let given = [Content::Text("见面地点\n东门".into()), Content::Files(vec![trip.clone(), alone.clone()]), Content::Text("https://glancepc.com".into())];
         let files = outgoing(&given, &root.join("written"));
-        let names: Vec<&str> = files.iter().map(|(_, name)| name.as_str()).collect();
-        assert_eq!(names, ["trip/a.jpg", "trip/day 2/b.jpg", "alone.pdf", "见面地点.txt"]);
-        assert_eq!(files[1].0, trip.join("day 2").join("b.jpg"));
-        assert!(files[3].0.starts_with(root.join("written")));
+        let names: Vec<&str> = files.iter().map(Part::name).collect();
+        assert_eq!(names, ["trip/a.jpg", "trip/day 2/b.jpg", "alone.pdf", "见面地点.txt", "httpsglancepc.com.txt"]);
+        assert_eq!(files[1], Part::File(trip.join("day 2").join("b.jpg"), "trip/day 2/b.jpg".into()));
+        assert_eq!(files[3], Part::Words("见面地点\n东门".into(), "见面地点.txt".into()));
+        assert!(matches!(&files[4], Part::Words(words, _) if words == "https://glancepc.com"));
+        assert!(!root.join("written").exists(), "nothing written for words");
         let _ = std::fs::remove_dir_all(&root);
     }
 

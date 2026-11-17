@@ -80,7 +80,7 @@ fn files(name: &str, contents: &[(&str, &[u8])]) -> Vec<link::Outgoing> {
     contents.iter().enumerate().map(|(at, (file, bytes))| {
         let path = dir.join(format!("{at}"));
         std::fs::write(&path, bytes).unwrap();
-        link::Outgoing { path, name: file.to_string() }
+        link::Outgoing::File { path, name: file.to_string() }
     }).collect()
 }
 
@@ -475,4 +475,27 @@ fn words_sent_come_as_words() {
     assert_eq!(posted(&both, "/prepare-upload", offer("second").as_bytes(), true).0, 204);
     assert_eq!(both.heard.asked.lock().unwrap().len(), 1);
     assert_eq!(receipts().iter().filter(|receipt| receipt.words == ["second"]).count(), 1);
+}
+
+/// Words this PC sends go as LocalSend sends text: alone, a message (taken as words, nothing uploaded, nothing in the
+/// inbox); with a file, a text file of their own bytes (UTF-8, nothing before them) beside it, by the name told.
+#[test]
+fn words_this_pc_sends_go_as_words() {
+    let both = both("sending-words", Some(Answer { take: true, trust: true }), Kept { on: true, ..Kept::default() });
+    let words = "周四开会 https://example.com/a?b=1";
+    let alone = [link::Outgoing::Words { words: words.into(), name: "周四开会.txt".into() }];
+    assert_eq!(sent(&both, &alone).last(), Some(&send::State::Sent));
+    let receipts = || -> Vec<Receipt> { std::fs::read_dir(Receipt::folder(both.receiver.inbox())).unwrap().flatten().map(|entry| serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap()).collect() };
+    let written = receipts();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].words, [words]);
+    assert!(written[0].files.is_empty());
+    assert!(std::fs::read_dir(both.receiver.inbox()).map_or(true, |entries| entries.flatten().all(|entry| entry.path() == Receipt::folder(both.receiver.inbox()))), "nothing uploaded");
+    // With a file: both come as files.
+    let mut with = files("sending-words", &[("a.jpg", b"a photo's bytes")]);
+    with.push(link::Outgoing::Words { words: words.into(), name: "周四开会.txt".into() });
+    assert_eq!(sent(&both, &with).last(), Some(&send::State::Sent));
+    let came = receipts().into_iter().find(|receipt| !receipt.files.is_empty()).expect("the files came");
+    let text = came.files.iter().find(|file| file.name == "周四开会.txt").expect("the words came as a file");
+    assert_eq!(std::fs::read(both.receiver.inbox().join(&text.file)).unwrap(), words.as_bytes());
 }

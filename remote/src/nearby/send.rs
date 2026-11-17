@@ -246,13 +246,17 @@ pub fn send(own: &tls::Own, me: &Info, device: &Device, files: &[Outgoing], numb
 
 fn sending(own: &tls::Own, me: &Info, device: &Device, outgoing: &[Outgoing], job: &Job, tell: &(dyn Fn(State) + Sync)) -> std::io::Result<State> {
     let host = device.address.to_string();
-    // What each file is: its id (its place), its name, how large it is.
+    // What each is: its id (its place), its name, how large it is, what it is; words their own preview, as LocalSend
+    // tells text (alone, a message the device shows, answering 204: nothing to upload).
     let mut files = Vec::new();
-    for (at, file) in outgoing.iter().enumerate() {
-        let size = std::fs::metadata(&file.path)?.len();
-        files.push((format!("f{at}"), file.name.clone(), size, &file.path));
+    for (at, thing) in outgoing.iter().enumerate() {
+        let (name, size, kind, words) = match thing {
+            Outgoing::File { path, name } => (name, std::fs::metadata(path)?.len(), kind_of(name), None),
+            Outgoing::Words { words, name } => (name, words.len() as u64, "text/plain", Some(words.as_str())),
+        };
+        files.push((format!("f{at}"), name.clone(), size, kind, words, thing));
     }
-    let named: serde_json::Map<String, Value> = files.iter().map(|(id, name, size, _)| (id.clone(), json!({ "id": id, "fileName": name, "size": size, "fileType": kind_of(name), "sha256": null, "preview": null }))).collect();
+    let named: serde_json::Map<String, Value> = files.iter().map(|(id, name, size, kind, words, _)| (id.clone(), json!({ "id": id, "fileName": name, "size": size, "fileType": kind, "sha256": null, "preview": words }))).collect();
     tell(State::Waiting);
     let offer = json!({ "info": mine(me), "files": named }).to_string();
     // Offered, and again with each PIN given while the device asks for one (it turns a PIN not right down at once:
@@ -294,17 +298,21 @@ fn sending(own: &tls::Own, me: &Info, device: &Device, outgoing: &[Outgoing], jo
     let answer: Value = serde_json::from_slice(&body).map_err(std::io::Error::other)?;
     let session = answer.get("sessionId").and_then(Value::as_str).ok_or_else(|| std::io::Error::other("no session"))?.to_string();
     let tokens = answer.get("files").and_then(Value::as_object).cloned().unwrap_or_default();
-    let of: u64 = files.iter().filter(|(id, ..)| tokens.contains_key(id)).map(|(_, _, size, _)| size).sum();
+    let of: u64 = files.iter().filter(|(id, ..)| tokens.contains_key(id)).map(|(_, _, size, ..)| size).sum();
     let mut done = 0u64;
     let mut told = Instant::now();
     tell(State::Sending { done, of });
-    for (id, _, size, path) in &files {
+    for (id, _, size, _, _, thing) in &files {
         // (A file the device did not want has no token: left out.)
         let Some(token) = tokens.get(id).and_then(Value::as_str) else { continue };
         let mut stream = connect(own, device.address, device.port, device.https, &device.fingerprint, ANSWER)?;
         let path_query = format!("{API}/upload?sessionId={}&fileId={}&token={}", http::escaped(&session), http::escaped(id), http::escaped(token));
         http::ask(&mut stream, "POST", &path_query, &host, *size, false)?;
-        let mut from = std::fs::File::open(path)?;
+        // (Words the device keeps as a file: their own bytes, as UTF-8.)
+        let mut from: Box<dyn Read> = match thing {
+            Outgoing::File { path, .. } => Box::new(std::fs::File::open(path)?),
+            Outgoing::Words { words, .. } => Box::new(std::io::Cursor::new(words.as_bytes())),
+        };
         let mut chunk = vec![0u8; 256 << 10];
         loop {
             if job.cancelled() {
