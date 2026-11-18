@@ -173,9 +173,19 @@ fn rgba(rgb: u32, a: f32) -> Color {
 
 /// Each AI source's lane in its maker's colour, in every skin (as clear on a dark ground as on a light one), at the
 /// strengths `lane` gives the skin's own inks.
-fn brands(dark: bool, lane: impl Fn(u32) -> Ink) -> [(&'static str, Ink); 2] {
+fn brands(dark: bool, lane: impl Fn(u32) -> Ink) -> [(&'static str, Ink); 9] {
     let pick = |on_dark: u32, on_light: u32| lane(if dark { on_dark } else { on_light });
-    [("ai:claude", pick(0xE48B67, 0xD97757)), ("ai:codex", pick(0x4FC1B4, 0x1F8F84))]
+    [
+        ("ai:claude", pick(0xE48B67, 0xD97757)),
+        ("ai:codex", pick(0x4FC1B4, 0x1F8F84)),
+        ("ai:deepseek", pick(0x7B91FF, 0x4D6BFE)),
+        ("ai:kimi", pick(0x4DA3FF, 0x1783FF)),
+        ("ai:moonshot", pick(0x4DA3FF, 0x1783FF)),
+        ("ai:glm", pick(0x7086FF, 0x3859FF)),
+        ("ai:minimax", pick(0xFF6E8A, 0xE2167E)),
+        ("ai:volcengine", pick(0x4D9BFF, 0x006EFF)),
+        ("ai:openrouter", pick(0x8F90FF, 0x6566F1)),
+    ]
 }
 
 /// 记录纸: chart paper and ink. The panel is one ink until something runs

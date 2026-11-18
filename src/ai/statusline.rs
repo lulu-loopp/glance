@@ -60,7 +60,7 @@ fn limit_of(given: &[u8], now: u64) -> Option<Limit> {
         .into_iter()
         .filter_map(|(minutes, rate)| rate.map(|rate| Window { minutes, used: rate.used_percentage, resets: rate.resets_at.map(|seconds| (seconds * 1000.0) as u64) }))
         .collect();
-    (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan: None, windows, told: now })
+    (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan: None, windows, balance: None, told: now })
 }
 
 /// The limit last told, as kept in `folder` (none where none was, or it cannot be read).

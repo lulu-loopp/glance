@@ -4,10 +4,17 @@
 //! a third of Claude Code's responses on the owner's PC were in more than one file), in quarter hours of their own
 //! time. What was read is kept in Glance's local folder, with how far each file was read, so as not to read a
 //! transcript of gigabytes again as Glance starts. Codex's limits (its 5-hour and weekly windows) come with its
-//! records: as they were when Codex last ran.
+//! records: as they were when Codex last ran. Claude's come as Claude Code tells them to its status line, where the
+//! user put Glance there (see `statusline`); the AI providers' accounts (their plans' windows, their balances) are
+//! read by the user's keys (see `providers`).
 
 mod claude;
 mod codex;
+#[cfg(windows)]
+pub mod keys;
+#[cfg(windows)]
+pub mod providers;
+#[cfg(windows)]
 pub mod statusline;
 mod time;
 #[cfg(windows)]
@@ -20,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 pub use time::today_start;
 #[cfg(windows)]
-pub use watch::{look_now, start, usage};
+pub use watch::{keys_changed, look_now, start, usage};
 
 /// How long what was spent is kept: a month, and a day more for a month counted from any day of it.
 pub const KEPT_DAYS: u64 = 32;
@@ -31,13 +38,27 @@ pub const QUARTER_MS: u64 = 15 * 60 * 1000;
 /// The file Glance keeps what it read in, in its local folder.
 const FILE: &str = "ai-usage.bin";
 
-/// Whose records.
+/// Whose records, or whose account's limits (an AI provider's, read by the user's key: see `providers`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Tool {
     /// Claude Code.
     Claude,
     /// Codex (ChatGPT's).
     Codex,
+    /// DeepSeek's open platform: what is left of its balance.
+    DeepSeek,
+    /// Moonshot AI's open platform (Kimi's API): its balance.
+    Moonshot,
+    /// OpenRouter: its credits, and the key's own limit.
+    OpenRouter,
+    /// Kimi Code's plan.
+    Kimi,
+    /// Zhipu's GLM Coding Plan (bigmodel.cn, or Z.ai's abroad).
+    Glm,
+    /// MiniMax's Token Plan, or its open platform's balance.
+    MiniMax,
+    /// Volcengine Ark's Coding Plan.
+    Volcengine,
 }
 
 /// Tokens spent, by kind. `input` is what was read afresh (neither from nor into a cache), `output` what was written
@@ -104,8 +125,50 @@ pub struct Limit {
     /// The plan (Codex: "plus", "pro" …).
     pub plan: Option<String>,
     pub windows: Vec<Window>,
+    /// What is left of the money paid in, where its account has a balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<Balance>,
     /// When it was told (ms since 1970).
     pub told: u64,
+}
+
+/// How reading a provider's account failed: its key refused, asked too often, or not reached (or its answer not one
+/// that tells it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Failed {
+    Key,
+    Limited,
+    Unavailable,
+}
+
+/// An account's money: what is left of it, and what was spent today, in its currency ("CNY", "USD").
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Balance {
+    pub currency: String,
+    pub amount: Option<f64>,
+    /// What was spent today, as the provider tells it; else (none told) as `Ledger` counts it from what was left of
+    /// the balance, or `spent` mounted, from one reading to the next.
+    pub today: Option<f64>,
+    /// Since when today's is counted, where that was after today began (the first reading of the day was its start).
+    #[serde(default)]
+    pub since: Option<u64>,
+    /// All the account ever spent, where the provider tells it (today's is counted from it as it mounts).
+    #[serde(default)]
+    pub spent: Option<f64>,
+}
+
+/// What today's spending of a provider's account is counted from: what its balance was last read as (or all it spent),
+/// in which currency, which day it is of, what was spent that day so far, and since when it was counted.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+struct Paid {
+    tool: Tool,
+    currency: String,
+    /// All it spent (mounting), else what was left (falling).
+    mounting: bool,
+    last: f64,
+    day: u64,
+    today: f64,
+    since: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -164,6 +227,12 @@ pub struct Ledger {
     titled: HashMap<(Tool, String), TitleKind>,
     limits: Vec<Limit>,
     counted: BTreeMap<u32, HashSet<u64>>,
+    /// What each provider's account was last read as, today's spending counted from it.
+    paid: Vec<Paid>,
+    /// How the last reading of each provider's account failed, where it did, and those whose keys are not set (not
+    /// kept from one run to the next).
+    failed: BTreeMap<Tool, Failed>,
+    unkeyed: std::collections::BTreeSet<Tool>,
 }
 
 /// What was spent as it stood at `now`, as what shows it needs it: today's by tool and model, each of the last seven
@@ -181,6 +250,9 @@ pub struct Usage {
     /// The sessions that spent within the last day, the latest first.
     pub sessions: Vec<Session>,
     pub limits: Vec<Limit>,
+    /// The providers whose accounts could not be read when last asked, and why, and those whose keys are not set.
+    pub failed: Vec<(Tool, Failed)>,
+    pub unkeyed: Vec<Tool>,
 }
 
 /// The sessions told of (at most).
@@ -264,6 +336,8 @@ impl Ledger {
                     match tool {
                         Tool::Claude => claude::line(&line, &mut read, &mut told),
                         Tool::Codex => codex::line(&line, &mut read, &mut told),
+                        // (The providers keep no records here: see `providers`.)
+                        _ => {}
                     }
                 }
             }
@@ -314,6 +388,68 @@ impl Ledger {
             Told::Limit(limit) if limit.told < from => false,
             Told::Limit(limit) => self.told_limit(limit),
         }
+    }
+
+    /// How reading provider `tool`'s account at `now` went: what it told kept (today's spending counted, where it does
+    /// not tell it, from what it told before), or how it failed (what it told before kept, shown as it was). Whether
+    /// what is shown changed.
+    pub(crate) fn read_of(&mut self, tool: Tool, read: Result<Limit, Failed>, now: u64) -> bool {
+        let keyed = self.unkeyed.remove(&tool);
+        keyed | match read {
+            Ok(mut limit) => {
+                if let Some(balance) = limit.balance.as_mut() {
+                    self.count_spent(tool, balance, now);
+                }
+                let failed = self.failed.remove(&tool).is_some();
+                self.told_limit(limit) | failed
+            }
+            Err(failed) => self.failed.insert(tool, failed) != Some(failed),
+        }
+    }
+
+    /// Provider `tool`'s account no longer read (its key taken away): what it told let go of. Whether there was any.
+    pub(crate) fn unkeyed(&mut self, tool: Tool) -> bool {
+        let before = (self.limits.len(), self.paid.len());
+        let told = self.unkeyed.insert(tool);
+        self.limits.retain(|limit| limit.tool != tool);
+        self.paid.retain(|paid| paid.tool != tool);
+        told | self.failed.remove(&tool).is_some() | (before != (self.limits.len(), self.paid.len()))
+    }
+
+    /// Today's spending of `tool`'s account, where it does not tell it, counted into `balance` at `now`: from what it
+    /// spent in all (as that mounts), else from what is left (as that falls: a rise is money paid in, from which it is
+    /// counted on). The day's first reading counts from itself; one in another currency counts anew.
+    fn count_spent(&mut self, tool: Tool, balance: &mut Balance, now: u64) {
+        if balance.today.is_some() {
+            return;
+        }
+        let (value, mounting) = match (balance.spent, balance.amount) {
+            (Some(spent), _) => (spent, true),
+            (None, Some(amount)) => (amount, false),
+            (None, None) => return,
+        };
+        let day = time::today_start(now);
+        let at = self.paid.iter().position(|paid| paid.tool == tool);
+        let paid = match at {
+            Some(at) if self.paid[at].currency == balance.currency && self.paid[at].mounting == mounting => &mut self.paid[at],
+            _ => {
+                self.paid.retain(|paid| paid.tool != tool);
+                self.paid.push(Paid { tool, currency: balance.currency.clone(), mounting, last: value, day, today: 0.0, since: now });
+                self.paid.last_mut().unwrap()
+            }
+        };
+        if paid.day != day {
+            // (What was spent since the last reading, the day before, is today's: it is not known when it was. Today's
+            // is counted from its start.)
+            paid.since = day;
+            paid.day = day;
+            paid.today = 0.0;
+        }
+        let spent = if mounting { value - paid.last } else { paid.last - value };
+        paid.today += spent.max(0.0);
+        paid.last = value;
+        balance.today = Some((paid.today * 100.0).round() / 100.0);
+        balance.since = (paid.since > day).then_some(paid.since);
     }
 
     /// `tool`'s limit `id` no longer kept. Whether there was one.
@@ -427,7 +563,9 @@ impl Ledger {
             .collect();
         let quarters = tools.iter().map(|tool| (*tool, self.by_quarter(Some(*tool), today, now))).collect();
         let sessions = self.sessions_since(now.saturating_sub(DAY_MS)).into_iter().take(SESSIONS).cloned().collect();
-        Usage { now, today, spent_today: self.spent_between(today, now), days, quarters, sessions, limits: self.limits.clone() }
+        let failed = self.failed.iter().map(|(tool, failed)| (*tool, *failed)).collect();
+        let unkeyed = self.unkeyed.iter().copied().collect();
+        Usage { now, today, spent_today: self.spent_between(today, now), days, quarters, sessions, limits: self.limits.clone(), failed, unkeyed }
     }
 
     /// The records at `paths` of `tool` (each a file, or a folder of them) read as far as they have grown, at `now`
@@ -472,6 +610,7 @@ impl Ledger {
             sessions: self.sessions.values().cloned().collect(),
             titled: self.titled.iter().map(|((tool, id), kind)| (*tool, id.clone(), *kind as u8)).collect(),
             limits: self.limits.clone(),
+            paid: self.paid.clone(),
         };
         let mut bytes = serde_json::to_vec(&kept).expect("what was read is written");
         bytes.push(b'\n');
@@ -505,6 +644,9 @@ impl Ledger {
             titled: kept.titled.into_iter().filter_map(|(tool, id, kind_of)| Some(((tool, id), kind(kind_of)?))).collect(),
             limits: kept.limits,
             counted,
+            paid: kept.paid,
+            failed: BTreeMap::new(),
+            unkeyed: Default::default(),
         })
     }
 }
@@ -517,6 +659,8 @@ struct Kept {
     sessions: Vec<Session>,
     titled: Vec<(Tool, String, u8)>,
     limits: Vec<Limit>,
+    #[serde(default)]
+    paid: Vec<Paid>,
 }
 
 /// The day (since 1970, by UTC) the moment `ms` falls in: responses counted are let go of a day at a time.
@@ -558,7 +702,7 @@ fn key(parts: &[&str]) -> u64 {
 }
 
 /// The moment an ISO 8601 time in UTC ("2026-11-18T12:59:29.123Z") names, in ms since 1970 (another kind: none).
-fn moment(text: &str) -> Option<u64> {
+pub(super) fn moment(text: &str) -> Option<u64> {
     let b = text.as_bytes();
     let digits = |at: usize, n: usize| -> Option<u64> { b.get(at..at + n)?.iter().try_fold(0u64, |v, c| c.is_ascii_digit().then(|| v * 10 + (c - b'0') as u64)) };
     if b.get(4) != Some(&b'-') || b.get(10) != Some(&b'T') {

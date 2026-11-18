@@ -595,12 +595,14 @@ pub fn run() {
     if phone::helper().is_some() {
         touches::start();
     }
-    // What AI tools have spent, read while an edge or a widget shows the AI component, or the settings its page.
+    // What AI tools have spent, read while an edge or a widget shows the AI component, or the settings its page; the
+    // providers' accounts, each whose lane is on.
     ai::start(
         || {
             let settings = app().settings.lock().unwrap();
             settings.places().shows(settings::Part::Ai) || settings.widgets.iter().any(settings::WidgetAt::shows_ai) || ui::settings_window::shows_ai()
         },
+        |tool| ui::view::ai::module_of(tool).is_some_and(|id| ui::prefs::module_on_in(&app().settings.lock().unwrap().view, "ai", id)),
         || app().controller.ai_changed(),
     );
     thread::Builder::new().name("glance: samples".into()).spawn(move || {

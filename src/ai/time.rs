@@ -24,6 +24,23 @@ pub fn today_start(now: u64) -> u64 {
     midnight.unwrap_or(now - now % super::DAY_MS)
 }
 
+/// The date the moment `now` (ms since 1970) falls on by this PC's clock.
+#[cfg(windows)]
+pub fn local_date(now: u64) -> crate::todo::Day {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    const FROM_1601_MS: u64 = 11_644_473_600_000;
+    let ticks = (now + FROM_1601_MS) * 10_000;
+    let file = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    let read = unsafe { FileTimeToSystemTime(&file, &mut utc).ok().and_then(|_| SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).ok()) };
+    match read {
+        Some(()) => crate::todo::Day { year: local.wYear as i32, month: local.wMonth as u32, day: local.wDay as u32 },
+        // (The clock unreadable: the day as UTC counts it.)
+        None => crate::todo::Day::from_number((now / super::DAY_MS) as i64),
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn today_start(now: u64) -> u64 {
     let seconds = (now / 1000) as libc::time_t;

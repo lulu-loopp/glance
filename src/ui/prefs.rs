@@ -136,8 +136,8 @@ pub fn offered(module: &str) -> bool {
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the
 /// settings list them.
 pub fn items(module: &str) -> &'static [Item] {
-    // (What every AI source spent today is a figure alone.)
-    if module == "ai:today" {
+    // (What every AI source spent today is a figure alone, and a provider tells no models or sessions.)
+    if module.starts_with("ai:") && (module == "ai:today" || !AI_ON.contains(&module)) {
         return &[];
     }
     match module.split(':').next().unwrap_or(module) {
@@ -334,9 +334,11 @@ impl Default for ProcessPrefs {
 /// The workbench's modules, in default order (each on until chosen otherwise).
 pub const WORKBENCH: [&str; 6] = ["search", "time", "station", "notes", "todo", "apps"];
 
-/// The AI component's modules, in default order (each on until chosen otherwise): what all its sources spent today,
-/// then each source's lane (Claude Code's, Codex's: ChatGPT's).
-pub const AI: [&str; 3] = ["ai:today", "ai:claude", "ai:codex"];
+/// The AI component's modules, in default order: what all its sources spent today, then each source's lane (Claude
+/// Code's, Codex's: ChatGPT's), then each provider's whose account is read by the user's key.
+pub const AI: [&str; 10] = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek", "ai:kimi", "ai:moonshot", "ai:glm", "ai:minimax", "ai:volcengine", "ai:openrouter"];
+/// Those of them on until chosen otherwise (a provider's lane is turned on as its key is given).
+pub const AI_ON: [&str; 3] = ["ai:today", "ai:claude", "ai:codex"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
@@ -408,7 +410,7 @@ pub fn module_on_in(stored: &serde_json::Value, list: &str, id: &str) -> bool {
     let entry = stored[list].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id));
     match entry {
         Some(entry) => entry["on"] == true,
-        None => (list == "workbench" && WORKBENCH.contains(&id)) || (list == "ai" && AI.contains(&id)),
+        None => (list == "workbench" && WORKBENCH.contains(&id)) || (list == "ai" && AI_ON.contains(&id)),
     }
 }
 
@@ -459,7 +461,7 @@ impl Prefs {
         prefs.music.ground = music_ground(stored);
         fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));
         fit(&mut prefs.workbench, &WORKBENCH.map(String::from), |_| true);
-        fit(&mut prefs.ai, &AI.map(String::from), |_| true);
+        fit(&mut prefs.ai, &AI.map(String::from), |id| AI_ON.contains(&id));
         prefs.carry_over();
         prefs
     }

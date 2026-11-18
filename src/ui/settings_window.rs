@@ -1470,6 +1470,9 @@ enum Keys {
 enum Named {
     Sensor(String, String),
     ThisPc,
+    /// One of the keys of the AI provider whose lane is module `0` (its field `1`: see `ai::providers::Field`): written
+    /// unseen (see `Renaming::masked`), never shown as it was given.
+    Key(String, usize),
     /// Words to send to devices nearby (see `send`): on lines of their own, kept till added or left.
     Words,
 }
@@ -1485,6 +1488,30 @@ struct Renaming {
     field: Option<Rect>,
     along: f32,
     caret: Option<(f32, f32, f32)>,
+}
+
+/// A key's characters written unseen: each a dot, so far apart (DIPs).
+const KEY_DOT: f32 = 6.0;
+const KEY_STEP: f32 = 9.0;
+/// The most characters a key is written in.
+const KEY_MOST: usize = 512;
+/// A key's box, on its name's line, how far below the row's top it is, and how much taller its row is than its words
+/// make it (the box's line taller than the name's alone, the words 6 DIPs under the box).
+const KEY_FIELD: f32 = 170.0;
+const KEY_TOP: f32 = 16.0;
+const KEY_TALLER: f32 = 24.0;
+
+impl Renaming {
+    /// Whether what is written is not shown: a key's.
+    fn masked(&self) -> bool {
+        matches!(self.of, Named::Key(..))
+    }
+
+    /// How far across what is written its `at`th unit is, in `font`: its characters' width, or a key's dots'.
+    fn width_to(&self, gfx: &Gfx, font: Font, at: usize) -> f32 {
+        let at = at.min(self.typing.text.len());
+        if self.masked() { at as f32 * KEY_STEP } else { gfx.measure(&String::from_utf16_lossy(&self.typing.text[..at]), font) }
+    }
 }
 
 /// The room of the button beside a board's sensor that names it (DIPs, square).
@@ -1607,6 +1634,14 @@ enum Target {
     NetEaseRestart,
     /// Puts Glance in Claude Code's status line (asked first), or takes it out (see `ai::statusline`).
     ClaudeLimits(bool),
+    /// Writes one of an AI provider's keys (see `Row::AiKey`), or takes the one given away.
+    AiKey(String, usize),
+    AiKeyRemove(String, usize),
+}
+
+/// Where each AI provider's key is taken from, by its id (see `ai::keys::kept`).
+fn ai_keys_kept() -> Vec<(&'static str, crate::ai::keys::Kept)> {
+    crate::ai::providers::ALL.iter().flat_map(|provider| provider.fields).map(|field| (field.id, crate::ai::keys::kept(field.id, field.env))).collect()
 }
 
 /// How what was done to NetEase Cloud Music's lyrics plugin went: done, with whether the loader is Glance's now
@@ -1688,6 +1723,9 @@ enum Row {
     /// Claude's limits read through Claude Code's status line: whether they are, and putting Glance there or taking it
     /// out.
     ClaudeLimits,
+    /// In an AI provider's module's card (module `0`): one of the keys its account is read by (its field `1`), where it
+    /// is taken from, and writing it.
+    AiKey(String, usize),
 }
 
 impl Row {
@@ -1697,7 +1735,7 @@ impl Row {
         match self {
             Row::Module(id) => Some((id.clone(), true)),
             Row::Device(Known::Phone(id)) => Some((phone_card(id), true)),
-            Row::Item(id, _) | Row::ModuleChoice(id, _) => Some((id.clone(), false)),
+            Row::Item(id, _) | Row::ModuleChoice(id, _) | Row::AiKey(id, _) => Some((id.clone(), false)),
             Row::PhoneMay(id, _) | Row::Unpair(id) => Some((phone_card(id), false)),
             _ => None,
         }
@@ -2061,6 +2099,9 @@ struct Ui {
     /// turned to, and as it is put there or taken out), and whether that last failed.
     claude_limits: crate::ai::statusline::Standing,
     claude_failed: bool,
+    /// Where each AI provider's key is taken from (see `ai::keys::kept`), by its id: looked at as the window is made,
+    /// as the AI component's page is turned to, and as one is given or taken away.
+    ai_keys: Vec<(&'static str, crate::ai::keys::Kept)>,
     /// What the devices' page's stage shows (see `paint_adding`); the pairing offered there and when it was asked
     /// for (it lasts `phone::OFFER_LASTS` from then), one being asked for (on another thread: see `keep_offer`), and
     /// whether the last could not be; the code that leads to the phone app, once asked for (none: it could not be
@@ -2400,6 +2441,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             netease_failed: None,
             claude_limits: crate::ai::statusline::standing(),
             claude_failed: false,
+            ai_keys: ai_keys_kept(),
             stage_shows: CodeFor::Pairing,
             offer: None,
             offering: None,
@@ -3008,6 +3050,9 @@ impl Ui {
                     rows.push(Row::Module(entry.id.clone()));
                     if self.opened(&entry.id) > 0.0 {
                         rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
+                        // A provider's keys.
+                        let fields = super::view::ai::provider_of(&entry.id).map_or(0, |provider| provider.fields.len());
+                        rows.extend((0..fields).map(|field| Row::AiKey(entry.id.clone(), field)));
                     }
                 }
             }
@@ -3317,6 +3362,7 @@ impl Ui {
             crate::ai::look_now();
             if page == Page::Ai {
                 self.claude_limits = crate::ai::statusline::standing();
+                self.ai_keys = ai_keys_kept();
             }
             self.scroll = 0.0;
             self.scroll_target = 0.0;
@@ -3379,6 +3425,9 @@ impl Ui {
                     let words = self.words_height(&row);
                     (0.0, if words > 0.0 { words.max(ROW) } else { ITEM_ROW })
                 }
+                // (In its module's card, as its items are.)
+                // (Its box on its name's line, its words across the row under them: see `paint_list`.)
+                Row::AiKey(..) => (0.0, self.words_height(&row) + KEY_TALLER),
                 // Its choices under its name where they do not fit beside it.
                 Row::ModuleChoice(_, field) => {
                     let (name, options, _) = self.choices(*field);
@@ -3707,6 +3756,11 @@ impl Ui {
                 None => return 0.0,
             },
             Row::PcName => (Cow::Borrowed(pick(self.lang, "在手机和附近设备上显示", "Shown on phones and devices nearby")), width - 2.0 * ROW_SIDE - NAME_FIELD - 16.0),
+            // (Across the row under its name and its box: see `paint_list`.)
+            Row::AiKey(id, field) => match self.ai_key_words(id, *field) {
+                Some((_, words)) => (Cow::Owned(words), width - ROW_SIDE - CHEVRON_ROOM - ITEM_INSET),
+                None => return 0.0,
+            },
             // (Its words where a module's item's are, left of its switch: see `paint_list`.)
             Row::PhoneMay(_, may) => (Cow::Borrowed(self.phone_may_words(*may).1), width - ROW_SIDE - 40.0 - 16.0 - ITEM_INSET),
             // (Its words beside its icon, left of its chevron, as a module's: see `paint_list`.)
@@ -4299,11 +4353,15 @@ impl Ui {
         typing.put(&called.encode_utf16().collect::<Vec<u16>>());
         typing.go(0, false);
         typing.go(typing.text.len(), true);
+        // (A key is written as it is, no input method putting words together.)
+        let words = !matches!(of, Named::Key(..));
         self.renaming = Some(Renaming { of, typing, blink_from: Instant::now(), composing: false, field: None, along: 0.0, caret: None });
         unsafe {
             let mut typed = MSG::default();
             let _ = PeekMessageW(&mut typed, Some(self.hwnd), WM_CHAR, WM_CHAR, PM_REMOVE);
-            let _ = ImmAssociateContextEx(self.hwnd, HIMC::default(), IACE_DEFAULT);
+            if words {
+                let _ = ImmAssociateContextEx(self.hwnd, HIMC::default(), IACE_DEFAULT);
+            }
         }
         self.next_frame = Instant::now();
     }
@@ -4328,6 +4386,10 @@ impl Ui {
         let written = renaming.typing.string();
         // This PC named as its computer is, or nothing: named nothing, called as its computer is again.
         let name = match renaming.of {
+            Named::Key(id, field) => {
+                self.keep_key(&id, field, Some(&written));
+                return;
+            }
             Named::ThisPc => {
                 let Some(nearby) = self.nearby.as_mut() else { return };
                 let name = Some(written.trim().to_string()).filter(|name| !name.is_empty()).unwrap_or_else(computer_name);
@@ -4372,6 +4434,7 @@ impl Ui {
                 let hwnd = self.hwnd;
                 let pasted = (ctrl && key == VK_V).then(|| crate::clipboard::text(hwnd).unwrap_or_default());
                 let Some(renaming) = self.renaming.as_mut() else { return false };
+                let masked = renaming.masked();
                 let typing = &mut renaming.typing;
                 match key {
                     VK_LEFT | VK_RIGHT => {
@@ -4387,7 +4450,8 @@ impl Ui {
                         typing.go(0, false);
                         typing.go(typing.text.len(), true);
                     }
-                    VK_C | VK_X if ctrl => {
+                    // (A key written is not copied out.)
+                    VK_C | VK_X if ctrl && !masked => {
                         let selection = typing.selection();
                         if !selection.is_empty() {
                             let text = String::from_utf16_lossy(&typing.text[selection]);
@@ -4454,7 +4518,7 @@ impl Ui {
         let mut i = 0;
         while i < typing.text.len() {
             i = typing.step(i, true);
-            let off = (self.gfx.measure(&String::from_utf16_lossy(&typing.text[..i]), font) - at).abs();
+            let off = (renaming.width_to(&self.gfx, font, i) - at).abs();
             if off < best.1 {
                 best = (i, off);
             }
@@ -4474,7 +4538,7 @@ impl Ui {
         fill(frame, palette.control, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
         Canvas::stroke_rounded(frame, crate::ui::canvas::Fill::Solid(palette.selection), boxed.x + 0.75, boxed.y + 0.75, boxed.w - 1.5, boxed.h - 1.5, 5.25, 1.5);
         let typing = &renaming.typing;
-        let before = |at: usize| frame.gfx.measure(&String::from_utf16_lossy(&typing.text[..at.min(typing.text.len())]), font);
+        let before = |at: usize| renaming.width_to(frame.gfx, font, at);
         let caret_x = before(typing.caret);
         let along = (caret_x - words + 2.0).max(0.0);
         let (caret_top, caret_tall) = (cy - font.size * 0.65, font.size * 1.3);
@@ -4483,7 +4547,14 @@ impl Ui {
             let (from, to) = (before(typing.caret.min(typing.anchor)), before(typing.caret.max(typing.anchor)));
             frame.fill(palette.selection.alpha(0.3), x + from - along, caret_top, to - from, caret_tall);
         }
-        text_centred(frame, &typing.string(), font, palette.text, x - along, cy, 10_000.0, Align::Start);
+        if renaming.masked() {
+            for at in 0..typing.text.len() {
+                let dot_x = x - along + at as f32 * KEY_STEP + (KEY_STEP - KEY_DOT) / 2.0;
+                fill(frame, palette.text, dot_x, cy - KEY_DOT / 2.0, KEY_DOT, KEY_DOT, KEY_DOT / 2.0);
+            }
+        } else {
+            text_centred(frame, &typing.string(), font, palette.text, x - along, cy, 10_000.0, Align::Start);
+        }
         let blinks = now.duration_since(renaming.blink_from).as_millis() / BLINK.as_millis();
         if blinks.is_multiple_of(2) && !renaming.composing {
             frame.fill(palette.text, x + caret_x - along, caret_top, 1.2, caret_tall);
@@ -5116,6 +5187,13 @@ It can be disconnected here at any time, and the status line command put back.",
             "ai:today" => return (p("今日用量", "Today"), Some(p("各来源今日的令牌用量及其变化", "Tokens every source spent today, and how they mounted"))),
             "ai:claude" => return ("Claude".into(), Some(p("Claude Code 的额度、令牌用量、模型与会话", "Claude Code's limits, tokens, models and sessions"))),
             "ai:codex" => return ("ChatGPT".into(), Some(p("Codex 的额度、令牌用量、模型与会话", "Codex's limits, tokens, models and sessions"))),
+            "ai:deepseek" => return ("DeepSeek".into(), Some(p("DeepSeek 开放平台的余额与今日消费", "DeepSeek's platform: its balance, and what it spent today"))),
+            "ai:kimi" => return ("Kimi".into(), Some(p("Kimi Code 会员的用量额度", "Kimi Code's plan limits"))),
+            "ai:moonshot" => return ("Moonshot".into(), Some(p("Moonshot AI 开放平台的余额与今日消费", "Moonshot AI's platform: its balance, and what it spent today"))),
+            "ai:glm" => return ("GLM".into(), Some(p("智谱 GLM Coding Plan 的用量额度与账户余额", "Zhipu's GLM Coding Plan: its limits, and the account's balance"))),
+            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费", "MiniMax's Token Plan limits, or its platform's balance and what it spent today"))),
+            "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("火山方舟 Coding Plan 的用量额度", "Volcengine Ark's Coding Plan limits"))),
+            "ai:openrouter" => return ("OpenRouter".into(), Some(p("OpenRouter 的余额、今日消费与密钥额度", "OpenRouter's credits, what it spent today, and the key's limit"))),
             _ => {}
         }
         if let Some(group) = id.strip_prefix(OVERLAY) {
@@ -5328,7 +5406,63 @@ It can be disconnected here at any time, and the status line command put back.",
 
     /// Whether module `id` has a card to open: items, or choices of its own.
     fn opens(&self, id: &str) -> bool {
-        !module_fields(id.trim_start_matches(WORKBENCH)).is_empty() || !self.items_here(id).is_empty()
+        !module_fields(id.trim_start_matches(WORKBENCH)).is_empty() || !self.items_here(id).is_empty() || super::view::ai::provider_of(id).is_some()
+    }
+
+    /// The key of the AI provider whose lane is module `id`, its field `field`, and where it is taken from.
+    fn ai_key(&self, id: &str, field: usize) -> Option<(&'static crate::ai::providers::Field, crate::ai::keys::Kept)> {
+        let field = super::view::ai::provider_of(id)?.fields.get(field)?;
+        let kept = self.ai_keys.iter().find(|(of, _)| *of == field.id).map_or(crate::ai::keys::Kept::None, |(_, kept)| *kept);
+        Some((field, kept))
+    }
+
+    /// A provider's key's row: what it is called, and where it is taken from (only ever sent to its provider).
+    fn ai_key_words(&self, id: &str, field: usize) -> Option<(&'static str, String)> {
+        let (key, kept) = self.ai_key(id, field)?;
+        let lang = self.lang;
+        let name = match key.id {
+            "volcengine-access" => "Access Key ID",
+            "volcengine-secret" => "Secret Access Key",
+            _ => pick(lang, "API 密钥", "API key"),
+        };
+        let provider = super::view::ai::Source::of(id).map_or("", |source| source.name(lang));
+        // (A space between Chinese and a Latin name, none before a Chinese one.)
+        let to = if provider.starts_with(|c: char| c.is_ascii()) { format!(" {provider}") } else { provider.to_string() };
+        let words = match (kept, lang) {
+            (crate::ai::keys::Kept::Env(variable), Lang::Zh) => format!("取自环境变量 {variable}，仅发送给{to}"),
+            (crate::ai::keys::Kept::Env(variable), Lang::En) => format!("Taken from the variable {variable}, sent to {provider} alone"),
+            (_, Lang::Zh) => format!("加密保存在本机，仅发送给{to}"),
+            (_, Lang::En) => format!("Kept encrypted on this PC, sent to {provider} alone"),
+        };
+        Some((name, words))
+    }
+
+    /// One of a provider's keys written in its row (see `Named::Key`): begun empty, the one given never shown.
+    fn begin_key(&mut self, id: String, field: usize) {
+        self.end_rename(true);
+        self.begin_naming(Named::Key(id, field), "", KEY_MOST);
+    }
+
+    /// The key written for the provider whose lane is module `id` (its field `field`) kept, where something was
+    /// written (nothing: left as it was), its lane turned on; or (none) the one given taken away.
+    fn keep_key(&mut self, id: &str, field: usize, written: Option<&str>) {
+        let Some((key, _)) = self.ai_key(id, field) else { return };
+        let written = written.map(str::trim);
+        if written == Some("") {
+            return;
+        }
+        if let Err(error) = crate::ai::keys::give(key.id, written.unwrap_or_default()) {
+            crate::journal::note(format!("An AI provider's key could not be kept ({error})"));
+        }
+        if written.is_some() {
+            if let Some(entry) = self.prefs.ai.iter_mut().find(|entry| entry.id == id && !entry.on) {
+                entry.on = true;
+                self.save();
+            }
+        }
+        self.ai_keys = ai_keys_kept();
+        crate::ai::keys_changed();
+        self.next_frame = Instant::now();
     }
 
     /// What an item of module `id` is called, and a word on it.
@@ -5653,6 +5787,10 @@ It can be disconnected here at any time, and the status line command put back.",
                     entry.on ^= true;
                 }
                 self.save();
+                // (A provider's lane on: its account read at once.)
+                if id.starts_with(AI) {
+                    crate::ai::look_now();
+                }
             }
             Target::Expand(id) => {
                 let open = !self.expanded.contains(&id);
@@ -5707,6 +5845,8 @@ It can be disconnected here at any time, and the status line command put back.",
             }
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
             Target::ClaudeLimits(put_in) => self.claude_asked(put_in),
+            Target::AiKey(id, field) => self.begin_key(id, field),
+            Target::AiKeyRemove(id, field) => self.keep_key(&id, field, None),
             Target::NetEase(_) => {}
             Target::NetEaseRestart => {
                 if let Some(netease) = self.netease.clone() {
@@ -5860,6 +6000,12 @@ It can be disconnected here at any time, and the status line command put back.",
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
+                Row::AiKey(id, field) if self.expanded.contains(&id) => match self.ai_key(&id, field).map(|(_, kept)| kept) {
+                    Some(crate::ai::keys::Kept::Given) => vec![Target::AiKeyRemove(id.clone(), field), Target::AiKey(id, field)],
+                    Some(crate::ai::keys::Kept::None) => vec![Target::AiKey(id, field)],
+                    _ => vec![],
+                },
+                Row::AiKey(..) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => update::available().map_or(Vec::new(), |(_, state)| update_offer(state, self.lang).1.into_iter().map(|(_, target, _)| target).collect()),
                 Row::Notice => self.button_row(&Row::Notice, Instant::now()).map_or(Vec::new(), |(_, _, buttons)| buttons.into_iter().map(|(_, target, _)| target).collect()),
@@ -6041,6 +6187,7 @@ It can be disconnected here at any time, and the status line command put back.",
             (Row::Manage(_), Target::Manage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
             (Row::ClaudeLimits, Target::ClaudeLimits(_)) => true,
+            (Row::AiKey(a, i), Target::AiKey(b, j) | Target::AiKeyRemove(b, j)) => a == b && i == j,
             (Row::Unpair(a), Target::Unpair(b)) | (Row::Device(Known::Phone(a)), Target::OpenPhone(b)) | (Row::Device(Known::Trusted(a)), Target::Untrust(b)) | (Row::Found(a), Target::TrustFound(b)) => a == b,
             (Row::PhoneMay(a, s), Target::PhoneMay(b, t)) => a == b && s == t,
             (Row::PcName, Target::PcName) | (Row::NearbyFolder, Target::OpenStation | Target::KeptIn) => true,
@@ -6988,6 +7135,44 @@ It can be disconnected here at any time, and the status line command put back.",
                     self.toggle(frame, palette, format!("item:{id}:{name}"), on, active, switch_left, y + row_height / 2.0, now, pressed);
                     if active && usable {
                         self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
+                    }
+                }
+                // One of an AI provider's keys: what it is and where it is taken from, its box (pressed, it is written
+                // there, unseen), and the removal of one given.
+                Row::AiKey(id, field) => {
+                    let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let (Some((_, kept)), Some((name, words))) = (self.ai_key(&id, field), self.ai_key_words(&id, field)) else { continue };
+                    let cy = y + KEY_TOP + 14.0;
+                    let boxed = Rect { x: left + width - ROW_SIDE - CHEVRON_ROOM - KEY_FIELD, y: cy - 14.0, w: KEY_FIELD, h: 28.0 };
+                    let writing = self.renaming.as_ref().is_some_and(|renaming| renaming.of == Named::Key(id.clone(), field));
+                    let mut name_right = boxed.x - 12.0;
+                    if kept == crate::ai::keys::Kept::Given && !writing {
+                        name_right = self.button(frame, palette, pick(lang, "移除", "Remove"), boxed.x - 8.0, cy, Target::AiKeyRemove(id.clone(), field), Button::Plain, &hovered) - 12.0;
+                    }
+                    let words_left = left + ITEM_INSET;
+                    text_centred(frame, name, label, palette.text, words_left, cy, name_right - words_left, Align::Start);
+                    frame.text_wrapped(&words, hint, palette.text2, words_left, boxed.y + boxed.h + 6.0, boxed.x + boxed.w - words_left);
+                    if writing {
+                        self.paint_rename(frame, palette, label, boxed.x + 8.0, cy, boxed.w - 8.0, now);
+                    } else {
+                        // (Taken from a variable: written there, not here.)
+                        let from_env = matches!(kept, crate::ai::keys::Kept::Env(_));
+                        let target = Target::AiKey(id.clone(), field);
+                        let lit = !from_env && hovered.as_ref() == Some(&target);
+                        fill(frame, if lit { palette.hover } else { palette.control }, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
+                        stroke_inside(frame, boxed, 6.0, palette.rule);
+                        let (shown, color) = match kept {
+                            crate::ai::keys::Kept::Env(_) => (pick(lang, "环境变量", "Variable"), palette.text3),
+                            crate::ai::keys::Kept::Given => (pick(lang, "已设置", "Set"), palette.text),
+                            crate::ai::keys::Kept::None => (pick(lang, "粘贴密钥", "Paste the key"), palette.text3),
+                        };
+                        frame.clip(boxed.x + 8.0, boxed.y, boxed.w - 16.0, boxed.h);
+                        text_centred(frame, shown, label, color, boxed.x + 8.0, cy, boxed.w - 16.0, Align::Start);
+                        frame.unclip();
+                        if !from_env {
+                            self.targets.push((boxed, target));
+                        }
                     }
                 }
                 Row::ModuleChoice(id, field) => {
@@ -8485,6 +8670,7 @@ mod pictures {
         let shown = [
             (Page::Layout, Tab::Shown, "layout"),
             (Page::Ai, Tab::Shown, "ai"),
+            (Page::Ai, Tab::Shown, "ai-keys"),
             (Page::Look, Tab::Shown, "look"),
             (Page::Monitor, Tab::Shown, "monitor-shown"),
             (Page::Monitor, Tab::Data, "monitor-data"),
@@ -8512,6 +8698,19 @@ mod pictures {
                     // (As where Claude Code is on the PC: its settings in a test are none.)
                     if page == Page::Ai {
                         ui.claude_limits = crate::ai::statusline::Standing::Out;
+                    }
+                    // Two providers' cards opened, their keys as made up: one given, one from a variable, one not set;
+                    // scrolled to the foot.
+                    if name == "ai-keys" {
+                        use crate::ai::keys::Kept;
+                        ui.ai_keys = vec![("deepseek", Kept::Given), ("volcengine-access", Kept::Env("VOLCENGINE_ACCESS_KEY_ID")), ("volcengine-secret", Kept::None)];
+                        for id in ["ai:deepseek", "ai:volcengine"] {
+                            ui.set_open(id, true, true);
+                            if let Some(entry) = ui.prefs.ai.iter_mut().find(|entry| entry.id == id) {
+                                entry.on = true;
+                            }
+                        }
+                        ui.scroll_by(100_000.0);
                     }
                 });
                 // Drawn a while (the desktops read meanwhile, what moves come to rest), then pictured.

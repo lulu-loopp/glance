@@ -22,8 +22,8 @@ use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::Networking::WinHttp::{
     WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
-    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2, WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3, WINHTTP_OPTION_REDIRECT_POLICY, WINHTTP_OPTION_REDIRECT_POLICY_NEVER,
+    WINHTTP_OPTION_SECURE_PROTOCOLS, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
 };
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Security::Cryptography::{
@@ -760,19 +760,52 @@ pub fn post(url: &str, json: &[u8]) -> Option<Vec<u8>> {
 /// What `url` answered to an HTTPS GET asked for as JSON (any other site's API), whatever its status: its status and body (none, where it
 /// was not reached, or its answer was cut short).
 pub fn answer_json(url: &str) -> Option<(u32, Vec<u8>)> {
-    answered(url, None, "application/json, */*", None)
+    asked_as(url, None, "application/json, */*", None)
 }
 
 /// The same, asked as from the page `referer` (a site whose API answers only its own pages).
 pub fn answer_json_from(url: &str, referer: &str) -> Option<(u32, Vec<u8>)> {
-    answered(url, None, "application/json, */*", Some(referer))
+    asked_as(url, None, "application/json, */*", Some(referer))
+}
+
+/// What `url` answered to a request with a key of the user's in `headers` (each a name and its value), `sent` POSTed
+/// (as JSON) or else a GET, whatever its status: its status and body (none, where it was not reached, or its answer
+/// was cut short). It is never sent on elsewhere: a redirect is answered as it is, not followed.
+pub fn answer_keyed(url: &str, headers: &[(&str, &str)], sent: Option<&[u8]>) -> Option<(u32, Vec<u8>)> {
+    let mut lines = String::from("Accept: application/json\r\n");
+    // (Sent as JSON, unless what is sent says what it is.)
+    if sent.is_some() && !headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("Content-Type")) {
+        lines += "Content-Type: application/json\r\n";
+    }
+    for (name, value) in headers {
+        // (A line break in what is sent would begin a header of its own.)
+        if [name, value].iter().any(|part| part.contains(['\r', '\n'])) {
+            return None;
+        }
+        lines += &format!("{name}: {value}\r\n");
+    }
+    answered(url, sent, &lines, false)
 }
 
 fn ask(url: &str, sent: Option<&[u8]>, accept: &str) -> Option<Vec<u8>> {
-    answered(url, sent, accept, None).filter(|(status, _)| *status == 200).map(|(_, body)| body)
+    asked_as(url, sent, accept, None).filter(|(status, _)| *status == 200).map(|(_, body)| body)
 }
 
-fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>) -> Option<(u32, Vec<u8>)> {
+/// What `url` answered, asked for as `accept` (as from the page `referer`), `sent` POSTed as JSON.
+fn asked_as(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>) -> Option<(u32, Vec<u8>)> {
+    let mut lines = format!("Accept: {accept}\r\n");
+    if sent.is_some() {
+        lines = format!("Content-Type: application/json\r\n{lines}");
+    }
+    if let Some(page) = referer.filter(|_| sent.is_none()) {
+        lines += &format!("Referer: {page}\r\n");
+    }
+    answered(url, sent, &lines, true)
+}
+
+/// What `url` answered to a request with the header lines `headers` (each ending in CRLF), `sent` POSTed or else a GET,
+/// redirects followed (never from HTTPS to HTTP) where `follow`.
+fn answered(url: &str, sent: Option<&[u8]>, headers: &str, follow: bool) -> Option<(u32, Vec<u8>)> {
     // Over HTTPS, or (a debug build only) over plain HTTP to a site run on this PC (see `own_site`).
     let (secure, rest) = match url.strip_prefix("https://") {
         Some(rest) => (true, rest),
@@ -806,16 +839,13 @@ fn answered(url: &str, sent: Option<&[u8]>, accept: &str, referer: Option<&str>)
         if request.0.is_null() {
             return None;
         }
+        if !follow {
+            WinHttpSetOption(Some(request.0), WINHTTP_OPTION_REDIRECT_POLICY, Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes())).ok()?;
+        }
+        let headers: Vec<u16> = headers.encode_utf16().collect();
         match sent {
-            None => {
-                let from = referer.map(|page| format!("Referer: {page}\r\n")).unwrap_or_default();
-                let headers: Vec<u16> = format!("Accept: {accept}\r\n{from}").encode_utf16().collect();
-                WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?;
-            }
-            Some(body) => {
-                let headers: Vec<u16> = format!("Content-Type: application/json\r\nAccept: {accept}\r\n").encode_utf16().collect();
-                WinHttpSendRequest(request.0, Some(&headers), Some(body.as_ptr().cast()), body.len() as u32, body.len() as u32, 0).ok()?;
-            }
+            None => WinHttpSendRequest(request.0, Some(&headers), None, 0, 0, 0).ok()?,
+            Some(body) => WinHttpSendRequest(request.0, Some(&headers), Some(body.as_ptr().cast()), body.len() as u32, body.len() as u32, 0).ok()?,
         }
         WinHttpReceiveResponse(request.0, std::ptr::null_mut()).ok()?;
         let mut status = 0u32;

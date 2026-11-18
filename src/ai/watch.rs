@@ -4,9 +4,11 @@
 //! besides (Windows tells of a file kept open as it is written to only now and then), and all of them again every hour
 //! (what was missed, and what is no longer kept, let go of). What was read is kept in Glance's local folder now and
 //! then. Claude's limits, as Claude Code tells them to its status line where Glance is that (see `statusline`), are read
-//! as they are written.
+//! as they are written. The providers' accounts (see `providers`) are read on a thread of their own, each one whose
+//! lane is on and whose key is set, every few minutes while what was spent is wanted, and at once as its keys change.
 
 use super::{Ledger, Tool, Usage};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,10 @@ const TICK: Duration = Duration::from_secs(60);
 const AT_WORK_MS: u64 = 30 * 60 * 1000;
 /// How often all the records are read again.
 const WHOLE: Duration = Duration::from_secs(60 * 60);
+/// How often a provider's account is read again, while it is wanted.
+const ASKED_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How often the providers' thread looks whether one is due.
+const ASK_TICK: Duration = Duration::from_secs(60);
 /// How long after Windows tells a file was written to it is read (what else is written meanwhile read with it).
 const GATHER: Duration = Duration::from_secs(2);
 /// How often what was read is kept, while more is.
@@ -41,12 +47,18 @@ enum Heard {
     /// A folder is watched no more (gone, or it could not be watched): watched again, where it can be, as all are read
     /// again.
     Ended(PathBuf),
+    /// How reading a provider's account went.
+    Read(Tool, Result<super::Limit, super::Failed>),
+    /// A provider's key was taken away.
+    Unkeyed(Tool),
 }
 
 /// What was spent as last read (none: not yet read, or not wanted).
 static NOW: Mutex<Option<Arc<Usage>>> = Mutex::new(None);
 /// The thread's ear, once it has started.
 static EAR: Mutex<Option<Sender<Heard>>> = Mutex::new(None);
+/// The providers' thread's ear: told to look whether one is due, or (true) that keys changed.
+static ASK: Mutex<Option<Sender<bool>>> = Mutex::new(None);
 
 /// What was spent as last read.
 pub fn usage() -> Option<Arc<Usage>> {
@@ -58,19 +70,77 @@ pub fn look_now() {
     if let Some(ear) = &*EAR.lock().unwrap() {
         let _ = ear.send(Heard::Look);
     }
+    if let Some(ask) = &*ASK.lock().unwrap() {
+        let _ = ask.send(false);
+    }
+}
+
+/// A provider's keys were given or taken away: each provider read again at once (where it is wanted).
+pub fn keys_changed() {
+    if let Some(ask) = &*ASK.lock().unwrap() {
+        let _ = ask.send(true);
+    }
 }
 
 /// Keeps what was spent current while `wanted` says something shows it (looked at again as `look_now` asks), telling
-/// `told` as it changes.
-pub fn start(wanted: impl Fn() -> bool + Send + 'static, told: impl Fn() + Send + 'static) {
-    start_in(super::roots, wanted, told);
+/// `told` as it changes; the providers' accounts too, each whose lane `on` says is on.
+pub fn start(wanted: impl Fn() -> bool + Clone + Send + 'static, on: impl Fn(Tool) -> bool + Send + 'static, told: impl Fn() + Send + 'static) {
+    start_in(super::roots, wanted, on, told);
 }
 
 /// As `start`, with the records where `roots` says (asked again as all are read again).
-fn start_in(roots: impl Fn() -> Vec<(Tool, PathBuf)> + Send + 'static, wanted: impl Fn() -> bool + Send + 'static, told: impl Fn() + Send + 'static) {
+fn start_in(roots: impl Fn() -> Vec<(Tool, PathBuf)> + Send + 'static, wanted: impl Fn() -> bool + Clone + Send + 'static, on: impl Fn(Tool) -> bool + Send + 'static, told: impl Fn() + Send + 'static) {
     let (ear, heard) = channel();
     *EAR.lock().unwrap() = Some(ear.clone());
+    let (ask, asked) = channel();
+    *ASK.lock().unwrap() = Some(ask);
+    let (providers_wanted, providers_ear) = (wanted.clone(), ear.clone());
     std::thread::Builder::new().name("glance: AI usage".into()).spawn(move || keep(roots, wanted, told, ear, heard)).expect("a thread started");
+    std::thread::Builder::new().name("glance: AI providers".into()).spawn(move || ask_providers(providers_wanted, on, providers_ear, asked)).expect("a thread started");
+}
+
+/// Reads each provider's account whose lane `on` says is on and whose keys are set, while `wanted`, as it is due
+/// (`ASKED_EVERY` after it was last read, or at once where its keys changed since), telling `ear` how it went; one
+/// whose keys are not set, that they are not (once, till they are). Looks again as `asked` tells it to, or every `ASK_TICK`.
+fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Sender<Heard>, asked: Receiver<bool>) {
+    use std::hash::{Hash, Hasher};
+    // When each was last read, and a hash of the keys it was read with (only in memory).
+    let mut read: HashMap<Tool, (Instant, u64)> = HashMap::new();
+    // Those told to have no keys (once each, till they have some again).
+    let mut unkeyed: std::collections::HashSet<Tool> = std::collections::HashSet::new();
+    loop {
+        if wanted() {
+            for provider in &super::providers::ALL {
+                let tool = provider.tool;
+                let Some(keys) = provider.keys() else {
+                    read.remove(&tool);
+                    if unkeyed.insert(tool) && ear.send(Heard::Unkeyed(tool)).is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                unkeyed.remove(&tool);
+                if !on(tool) {
+                    continue;
+                }
+                let mut hash = std::hash::DefaultHasher::new();
+                keys.hash(&mut hash);
+                let hash = hash.finish();
+                if read.get(&tool).is_some_and(|(at, with)| at.elapsed() < ASKED_EVERY && *with == hash) {
+                    continue;
+                }
+                let told = provider.read(&keys, crate::station::now_ms());
+                read.insert(tool, (Instant::now(), hash));
+                if ear.send(Heard::Read(tool, told)).is_err() {
+                    return;
+                }
+            }
+        }
+        match asked.recv_timeout(ASK_TICK) {
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
 }
 
 fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, told: impl Fn(), ear: Sender<Heard>, heard: Receiver<Heard>) {
@@ -115,9 +185,11 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
         while wanted() && whole.elapsed() < WHOLE {
             let mut written: Vec<(Tool, Vec<PathBuf>)> = Vec::new();
             let (mut lost, mut limits) = (false, false);
+            let mut accounts: Vec<Heard> = Vec::new();
             match heard.recv_timeout(TICK.saturating_sub(ticked.elapsed())) {
                 Ok(Heard::Look) => continue,
                 Ok(Heard::Told) => limits = true,
+                Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_))) => accounts.push(account),
                 Ok(Heard::Written(tool, paths)) => written.push((tool, paths)),
                 Ok(Heard::Lost) => lost = true,
                 Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
@@ -134,6 +206,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
                         Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
                         Ok(Heard::Look) => {}
                         Ok(Heard::Told) => limits = true,
+                        Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_))) => accounts.push(account),
                         Err(_) => break,
                     }
                 }
@@ -143,6 +216,13 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
             }
             let now = crate::station::now_ms();
             let mut changed = limits && limits_told(ledger, &told_in);
+            for account in accounts {
+                changed |= match account {
+                    Heard::Read(tool, told) => ledger.read_of(tool, told, now),
+                    Heard::Unkeyed(tool) => ledger.unkeyed(tool),
+                    _ => false,
+                };
+            }
             for (tool, mut paths) in written {
                 paths.sort();
                 paths.dedup();
@@ -269,7 +349,7 @@ mod tests {
     fn takes_claudes_limits_as_the_status_line_keeps_them() {
         let folder = std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join("limits-told");
         std::fs::create_dir_all(&folder).unwrap();
-        let limit = |told| super::super::Limit { tool: Tool::Claude, id: super::super::statusline::ID.into(), name: None, plan: None, windows: vec![super::super::Window { minutes: 300, used: 40.0, resets: None }], told };
+        let limit = |told| super::super::Limit { tool: Tool::Claude, id: super::super::statusline::ID.into(), name: None, plan: None, windows: vec![super::super::Window { minutes: 300, used: 40.0, resets: None }], balance: None, told };
         let keep = |told| std::fs::write(folder.join(super::super::statusline::LIMITS), serde_json::to_vec(&limit(told)).unwrap()).unwrap();
         let mut ledger = Ledger::default();
         assert!(!limits_told(&mut ledger, &folder));
@@ -316,7 +396,8 @@ mod tests {
         append(line("m1", 5));
         crate::settle::want(crate::settle::Work::AiUsage);
         let watched = root.clone();
-        start_in(move || vec![(Tool::Claude, watched.clone())], || WANTED.load(Ordering::SeqCst), || { TOLD.fetch_add(1, Ordering::SeqCst); });
+        // (No provider's account read: a test sends no key of the user's anywhere.)
+        start_in(move || vec![(Tool::Claude, watched.clone())], || WANTED.load(Ordering::SeqCst), |_| false, || { TOLD.fetch_add(1, Ordering::SeqCst); });
         assert!(soon(|| usage().is_some_and(|usage| today(&usage) == 5)), "read whole as it is wanted");
         let told = TOLD.load(Ordering::SeqCst);
         append(line("m2", 7));

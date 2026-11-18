@@ -6760,8 +6760,9 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// The AI component's lanes over a made-up day (see `ai::tests::lanes::day`): what was spent today, Claude's, and
-    /// ChatGPT's closed and opened, in each skin, light and dark: `cargo test --features studio --lib -- --ignored
+    /// The AI component's lanes over a made-up day (see `ai::tests::lanes::accounts`): what was spent today, Claude's,
+    /// ChatGPT's closed and opened, and four providers' (a balance, a plan's windows, a key refused, a key not set), in
+    /// each skin, light and dark: `cargo test --features studio --lib -- --ignored
     /// ai_lanes` writes `target/ai/<skin>-<light or dark>.png`, and its dock down a side and across (the pointer on
     /// ChatGPT's ring) by the card beside it, `target/ai/<skin>-<light or dark>-dock.png`.
     #[test]
@@ -6775,8 +6776,10 @@ otepad.exe", "Notepad"),
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let out = std::path::PathBuf::from(format!("{}/target/ai", env!("CARGO_MANIFEST_DIR")));
         std::fs::create_dir_all(&out).unwrap();
-        let usage = ai::tests::lanes::day();
+        let usage = ai::tests::lanes::accounts();
         let now = ai::tests::lanes::NOON;
+        let providers = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek", "ai:glm", "ai:kimi", "ai:minimax"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let stored = serde_json::json!({ "ai": providers });
         for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
             for dark in [false, true] {
                 let theme = Theme::new(skin, dark);
@@ -6784,7 +6787,7 @@ otepad.exe", "Notepad"),
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-                let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true)]
+                let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true), ("ai:deepseek", false), ("ai:glm", false), ("ai:kimi", false), ("ai:minimax", false)]
                     .into_iter()
                     .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, Some(open)).unwrap(), ink: theme.ink(id) })
                     .collect();
@@ -6806,7 +6809,7 @@ otepad.exe", "Notepad"),
                 let name = format!("{skin:?}-{}.png", if dark { "dark" } else { "light" });
                 crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
                 // The dock, down a side and across, and the card beside it.
-                let held = Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai);
+                let held = Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai);
                 let scene = Scene { prefs: &held, hover: Some(Hit::AiSlot(ai::Source::Codex)), ..scene };
                 let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
                 let (down, across) = (ai::dock_size(false, dock.slots.len()), ai::dock_size(true, dock.slots.len()));

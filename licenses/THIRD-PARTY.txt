@@ -52,6 +52,17 @@ Glass Card (the coloured glass of the notes' cards: its swatches' tints and
   Licence: MIT (glass-card-MIT.txt). Its colours and the way it is drawn are
   reworked in glance.exe's own code.
 
+LobeHub Icons (the AI providers' marks: Claude, OpenAI, DeepSeek, Kimi,
+  Moonshot, Z.ai, MiniMax, Volcengine, OpenRouter, Qwen), from
+  @lobehub/icons-static-svg 1.95.0
+  Copyright (c) 2023 LobeHub. Licence: MIT (LobeHub-Icons-MIT.txt). Their path
+  data is built into glance.exe. Each mark is its owner's trademark.
+
+token-monitor (which address of each AI provider is asked for its account's
+  balance and limits, and what of its answer is read)
+  Copyright (c) 2026 Javis (https://github.com/Javis603/token-monitor).
+  Licence: MIT (token-monitor-MIT.txt). Reworked in glance.exe's own code.
+
 Unicode Character Database (Unihan, Chinese characters' Mandarin readings, for
   searching programs and files by pinyin)
   Copyright (c) 1991-2026 Unicode, Inc.

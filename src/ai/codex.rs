@@ -148,5 +148,5 @@ fn limit(limits: Limits, at: u64, told: &mut Vec<Told>) {
         return;
     }
     let id = limits.limit_id.unwrap_or_else(|| "codex".to_string());
-    told.push(Told::Limit(Limit { tool: Tool::Codex, id, name: limits.limit_name, plan: limits.plan_type, windows, told: at }));
+    told.push(Told::Limit(Limit { tool: Tool::Codex, id, name: limits.limit_name, plan: limits.plan_type, windows, balance: None, told: at }));
 }

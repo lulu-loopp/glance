@@ -158,6 +158,7 @@ fn counts_codex_responses_by_their_last_usage_once_with_the_latest_limits() {
             name: None,
             plan: Some("plus".to_string()),
             windows: vec![Window { minutes: 300, used: 25.0, resets: Some(1_795_530_000_000) }, Window { minutes: 10080, used: 40.0, resets: Some(1_796_000_000_000) }],
+            balance: None,
             told: moment("2026-11-18T11:00:00Z").unwrap(),
         }]
     );
@@ -174,7 +175,7 @@ fn keeps_what_was_read_from_one_run_to_the_next() {
     let roots = [(Tool::Claude, records.clone())];
     let mut ledger = Ledger::default();
     ledger.refresh(&roots, NOON);
-    ledger.limits.push(Limit { tool: Tool::Codex, id: "codex".to_string(), name: None, plan: None, windows: vec![Window { minutes: 300, used: 1.5, resets: None }], told: NOON });
+    ledger.limits.push(Limit { tool: Tool::Codex, id: "codex".to_string(), name: None, plan: None, windows: vec![Window { minutes: 300, used: 1.5, resets: None }], balance: None, told: NOON });
     ledger.save(&dir).unwrap();
     let mut again = Ledger::load(&dir);
     assert_eq!(spent(&again), spent(&ledger));
@@ -212,7 +213,7 @@ fn lets_go_of_what_was_spent_before_the_days_kept() {
     assert!(spent(&ledger).is_empty());
     assert!(ledger.sessions_since(0).is_empty());
     assert!(ledger.files.is_empty() && ledger.counted.is_empty());
-    ledger.limits.push(Limit { tool: Tool::Codex, id: "codex".to_string(), name: None, plan: None, windows: vec![Window { minutes: 300, used: 1.5, resets: None }], told: NOON });
+    ledger.limits.push(Limit { tool: Tool::Codex, id: "codex".to_string(), name: None, plan: None, windows: vec![Window { minutes: 300, used: 1.5, resets: None }], balance: None, told: NOON });
     assert!(ledger.refresh(&roots, NOON + 40 * DAY_MS));
     assert!(ledger.limits().is_empty(), "a limit told before the days kept is let go of");
     let codex = dir.join("codex").join("rollout.jsonl");
@@ -306,4 +307,44 @@ fn reads_this_pcs_records() {
         println!("limit {} plan {:?} windows {:?} told {} min ago", limit.id, limit.plan, limit.windows.iter().map(|window| (window.minutes, window.used)).collect::<Vec<_>>(), (now - limit.told) / 60_000);
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What a provider's account spent today, counted from one reading to the next where it does not tell it: what its
+/// balance fell by (a rise is money paid in, counted on from), from the day's first reading, then from the day's
+/// start; what it tells of today kept as it is; a reading failed keeping what was read, told as failed; its key taken
+/// away, all of it let go of.
+#[test]
+fn counts_what_an_account_spent_today_from_its_balance() {
+    const HOUR: u64 = 3_600_000;
+    let read = |amount: f64, today: Option<f64>, at: u64| -> Result<Limit, Failed> {
+        let balance = Balance { currency: "CNY".into(), amount: Some(amount), today, since: None, spent: None };
+        Ok(Limit { tool: Tool::DeepSeek, id: "deepseek".into(), name: None, plan: None, windows: Vec::new(), balance: Some(balance), told: at })
+    };
+    let shown = |ledger: &Ledger| ledger.limits[0].balance.as_ref().map(|balance| (balance.today, balance.since)).unwrap();
+    let mut ledger = Ledger::default();
+    assert!(ledger.read_of(Tool::DeepSeek, read(100.0, None, NOON), NOON));
+    assert_eq!(shown(&ledger), (Some(0.0), Some(NOON)));
+    ledger.read_of(Tool::DeepSeek, read(97.5, None, NOON + HOUR), NOON + HOUR);
+    ledger.read_of(Tool::DeepSeek, read(147.5, None, NOON + 2 * HOUR), NOON + 2 * HOUR);
+    ledger.read_of(Tool::DeepSeek, read(146.0, None, NOON + 3 * HOUR), NOON + 3 * HOUR);
+    assert_eq!(shown(&ledger), (Some(4.0), Some(NOON)));
+    // Failed: what was read kept, and told as failed till it is read again.
+    assert!(ledger.read_of(Tool::DeepSeek, Err(Failed::Key), NOON + 4 * HOUR));
+    assert!(!ledger.read_of(Tool::DeepSeek, Err(Failed::Key), NOON + 4 * HOUR));
+    assert_eq!((shown(&ledger), ledger.usage(NOON + 4 * HOUR).failed), ((Some(4.0), Some(NOON)), vec![(Tool::DeepSeek, Failed::Key)]));
+    // The next day, counted from its start.
+    ledger.read_of(Tool::DeepSeek, read(145.0, None, NOON + DAY_MS), NOON + DAY_MS);
+    assert_eq!((shown(&ledger), ledger.usage(NOON + DAY_MS).failed), ((Some(1.0), None), vec![]));
+    // Kept from one run to the next.
+    let again = Ledger::from_bytes(&ledger.to_bytes()).unwrap();
+    assert_eq!(again.paid, ledger.paid);
+    // Told by the provider: as it is told.
+    ledger.read_of(Tool::DeepSeek, read(140.0, Some(7.25), NOON + DAY_MS + HOUR), NOON + DAY_MS + HOUR);
+    assert_eq!(shown(&ledger), (Some(7.25), None));
+    // Its key taken away: what was read forgotten, and told as unkeyed (once) till it is read again.
+    assert!(ledger.unkeyed(Tool::DeepSeek) && ledger.limits.is_empty() && ledger.paid.is_empty());
+    assert!(!ledger.unkeyed(Tool::DeepSeek));
+    assert_eq!(ledger.usage(NOON + DAY_MS).unkeyed, vec![Tool::DeepSeek]);
+    assert!(ledger.read_of(Tool::DeepSeek, Err(Failed::Unavailable), NOON + DAY_MS + 2 * HOUR));
+    assert!(ledger.usage(NOON + DAY_MS).unkeyed.is_empty());
 }
