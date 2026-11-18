@@ -1,7 +1,6 @@
 # Nearby transfer (compatible with LocalSend)
 
-Agreed with the owner on 2026-11-12, from the approved motion mockup
-(https://claude.ai/artifact/MD5MXDL4z24DJxrFEMFTPP). A photo taken on a phone shows up on the PC by itself: in the
+Agreed with the owner on 2026-11-12, from the approved motion mockup. A photo taken on a phone shows up on the PC by itself: in the
 station and in recent files. Glance speaks LocalSend's open protocol, so any phone or computer that has LocalSend can
 send to it and receive from it without Glance's own app. Glance's Android app adds one thing LocalSend cannot do:
 it sends each new photo by itself.
@@ -154,8 +153,8 @@ LocalSend app does that for now).
 - **Edge notice.** A small layered window at the panel's edge, drawn in the skin like the plates. Its states:
   request, receiving, received. Pressed, it opens the panel, and the picture is carried to the station's head (the
   carry window used by drags). It is not shown while a game is in front.
-  - Received, its picture is dragged off it into any program as a station's thing is (approved mockup
-    https://claude.ai/artifact/SNAdNfgttk327DHukW3cet): pressed, the plate is drawn at 0.97, and moved past the
+  - Received, its picture is dragged off it into any program as a station's thing is (as the approved mockup
+    shows): pressed, the plate is drawn at 0.97, and moved past the
     system's drag distance, the station gives the item (`station::drag_off`) and `carry` carries the picture as the
     notice drew it, its room left outlined (`view::paint_kept_room`). Taken, the files are copied and stay on the
     station, and the notice goes 1.2 s later. Not taken, the picture flies back and the notice stays its 4 s again.
@@ -346,7 +345,7 @@ when the photo goes at once. Hence the question above.
 7. Android: auto-send, certificate, settings.
 8. A live test with the owner's phone (LocalSend and Glance's app), and an iPhone if one is at hand.
 
-## After the design review (Codex, 2026-11-12)
+## After the design review (2026-11-12)
 
 Taken:
 - **Trust is only ever verified.**
@@ -400,8 +399,7 @@ lack port and protocol, so the announcement's are kept).
 ## Both ways (approved 2026-11-14)
 
 The owner approved two mockups the same evening: sending from the PC to any device
-(https://claude.ai/artifact/D5fiJk4RMCAhFdaGLYPEaT, v3) and the settings split by "who" and "what"
-(https://claude.ai/artifact/M5oSvc9feEx5mKwSqeRaeg, v3). Every Glance PC and every Glance phone is a whole LocalSend
+(v3) and the settings split by "who" and "what" (v3). Every Glance PC and every Glance phone is a whole LocalSend
 device: PC to phone, PC to PC and phone to phone all go. Decided with the owner: the phone receives in the background
 only where its user turns that on (off by default), and turning it on asks the system not to optimise the app for
 the battery.
@@ -433,8 +431,8 @@ address and port from the link, the key and name from after the `#`. The page ha
 
 Pages: 布局, 外观, 监控, 工作台, 音乐, **设备**, **手机遥控** (was 手机互联), **附近传输**, 通用.
 
-The 设备 and 附近传输 pages were redone on 2026-11-15 to the rest of settings' look (mockup:
-https://claude.ai/artifact/EcUBywr2EjRtQwSz8GCn35, artboards 设备 and 附近传输): cards as wide as the other pages'
+The 设备 and 附近传输 pages were redone on 2026-11-15 to the rest of settings' look (the approved
+mockup's artboards 设备 and 附近传输): cards as wide as the other pages'
 (no page of one wide column), the stage on the right, cards that open as the modules' do, no round icon plates or tag
 pills, groups named without counts, no paragraphs of notes under the lists.
 
