@@ -4043,6 +4043,14 @@ impl Widget {
                                 },
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
+                                // Its process list sorted by the header clicked, as a panel's is (the sort is one for
+                                // all: kept, every one shows it as it restyles).
+                                Some(view::Hit::Sort(sort)) => {
+                                    if let Some(readings) = self.content.readings_mut() {
+                                        readings.scrolls.reset();
+                                    }
+                                    crate::sort_processes(sort);
+                                }
                                 Some(hit) if crate::station::pressed(hit) => {}
                                 Some(view::Hit::Tab(tab)) => {
                                     if let Some(readings) = self.content.readings_mut() {

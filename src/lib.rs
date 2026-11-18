@@ -6,6 +6,7 @@
 mod ai;
 #[cfg(windows)]
 mod asus;
+mod latest;
 #[cfg(windows)]
 mod laptop;
 #[cfg(windows)]
@@ -248,10 +249,13 @@ impl App {
         tray::follow_settings();
     }
 
-    /// The process list was sorted from the panel: kept, as if chosen in the
-    /// settings.
+    /// The process list was sorted from a panel or a widget: kept, as if chosen in the settings (sorted as it was:
+    /// nothing to keep).
     pub fn set_process_sort(&self, sort: ui::prefs::ProcessSort) {
         let known = self.controller.known_modules();
+        if ui::prefs::Prefs::resolve(&self.settings.lock().unwrap().view, &known).processes.sort == sort {
+            return;
+        }
         self.change(|settings| {
             let mut prefs = ui::prefs::Prefs::resolve(&settings.view, &known);
             prefs.processes.sort = sort;
@@ -741,6 +745,16 @@ pub fn run() {
 
 /// Glance does not run on this system yet: the Linux port comes after the
 /// macOS one.
+/// The process list sorted by `sort` from a panel or a widget (its header clicked): kept, as if chosen in the
+/// settings, on a thread of its own (keeping it tells every window to restyle: not from theirs). Sorted again before
+/// that was kept, the last sort is what is kept (see `latest`).
+#[cfg(windows)]
+pub fn sort_processes(sort: ui::prefs::ProcessSort) {
+    static ASKED: latest::Latest<ui::prefs::ProcessSort> = latest::Latest::new();
+    ASKED.ask(sort);
+    thread::spawn(|| ASKED.keep(|sort| app().set_process_sort(sort)));
+}
+
 /// For tests: what is pretended shown (the notes, the station's things, the programs found, files lately) is one for
 /// all of them, so a test pretending it holds this while it looks at it (tests run side by side: one pretending other
 /// notes in the middle of another's made it fail now and then).
