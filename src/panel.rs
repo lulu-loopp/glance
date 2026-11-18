@@ -4884,8 +4884,7 @@ impl<'a> Panel<'a> {
                 self.drawn.processes.sort = sort;
                 self.scrolls.reset();
                 // Kept for next time, as if chosen in the settings.
-                // Saving tells this thread to restyle; not from here.
-                std::thread::spawn(move || crate::app().set_process_sort(sort));
+                crate::sort_processes(sort);
             }
             _ => {}
         }
