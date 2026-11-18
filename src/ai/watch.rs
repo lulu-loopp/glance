@@ -60,8 +60,9 @@ static EAR: Mutex<Option<Sender<Heard>>> = Mutex::new(None);
 /// The providers' thread's ear: told to look whether one is due, or (true) that keys changed.
 static ASK: Mutex<Option<Sender<bool>>> = Mutex::new(None);
 
-/// What was spent as last read.
+/// What was spent as last read. Asked for, it is shown: its first reading begins now, the machine settled or not.
 pub fn usage() -> Option<Arc<Usage>> {
+    crate::settle::want(crate::settle::Work::AiUsage);
     NOW.lock().unwrap().clone()
 }
 
@@ -342,6 +343,15 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// What was spent asked for (to be shown: the AI component's lanes, its dock, its card) has its first reading begin
+    /// at once, the machine settled or not (one kept busy would otherwise show it being read for as long as it is).
+    /// (Run alone, this process's machine never settled: a test run is never ten seconds idle.)
+    #[test]
+    fn what_was_spent_asked_for_is_read_at_once() {
+        let _ = usage();
+        assert!(crate::settle::ready(crate::settle::Work::AiUsage));
+    }
 
     /// Claude's limits taken from what the status line kept, where newer than those taken before; what it kept gone
     /// (Glance taken out of Claude Code's status line), no longer kept.
