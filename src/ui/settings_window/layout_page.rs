@@ -66,6 +66,7 @@ pub(super) fn part_name(part: Part, lang: Lang) -> &'static str {
         Part::Monitor => pick(lang, "监控", "Monitor"),
         Part::Workbench => pick(lang, "工作台", "Workbench"),
         Part::Music => pick(lang, "音乐", "Music"),
+        Part::Ai => pick(lang, "AI 用量", "AI usage"),
     }
 }
 
@@ -75,6 +76,7 @@ fn part_word(part: Part, lang: Lang) -> &'static str {
         Part::Monitor => pick(lang, "实时硬件数据", "Live readings"),
         Part::Workbench => pick(lang, "时间与工具", "Time and tools"),
         Part::Music => pick(lang, "歌曲与歌词", "Songs and lyrics"),
+        Part::Ai => pick(lang, "额度与令牌用量", "Limits and tokens"),
     }
 }
 
@@ -83,6 +85,7 @@ pub(super) fn part_icon(part: Part) -> Icon {
         Part::Monitor => Icon::Gauge,
         Part::Workbench => Icon::PencilRuler,
         Part::Music => Icon::Music,
+        Part::Ai => Icon::Ai,
     }
 }
 
@@ -138,6 +141,7 @@ impl Ui {
             match part {
                 Part::Monitor => self.component_picture(frame, Part::Monitor, inside, 0),
                 Part::Workbench => self.component_picture(frame, Part::Workbench, inside, 1),
+                Part::Ai => self.component_picture(frame, Part::Ai, inside, 2),
                 Part::Music => {
                     let mut shows = super::super::music::Shows::from(&self.settings.view);
                     // As a strip: one line, the cover and what plays beside it, made smaller into the picture (on a

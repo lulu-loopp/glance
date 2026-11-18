@@ -12,6 +12,8 @@ pub struct Prefs {
     pub modules: Vec<ModuleEntry>,
     /// The workbench's, as the readings' are (the time and what plays in it are its own, apart from the readings').
     pub workbench: Vec<ModuleEntry>,
+    /// The AI component's: what was spent today, then each source (see `AI`).
+    pub ai: Vec<ModuleEntry>,
     /// The switches each module's items had before they were the modules'
     /// own (up to 0.1.7): read once, to carry the choices over, and not
     /// written again.
@@ -103,6 +105,8 @@ const TIME: [Item; 3] = [item("sound", true), item("media", true), item("lyrics"
 /// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing. (What
 /// they are drawn on is a choice of its own: see `MusicGround`.)
 const LYRICS: [Item; 5] = [item("translation", true), item("cover", true), item("title", true), item("spectrum", true), item("controls", false)];
+/// An AI source's: its share of each model, its sessions.
+const AI_ITEMS: [Item; 2] = [item("models", true), item("sessions", true)];
 /// The station: what was copied lately under what is on it.
 const STATION: [Item; 0] = [];
 const SYSTEM: [Item; 4] = [item("uptime", true), item("processes", true), item("threads", true), item("handles", true)];
@@ -132,6 +136,10 @@ pub fn offered(module: &str) -> bool {
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the
 /// settings list them.
 pub fn items(module: &str) -> &'static [Item] {
+    // (What every AI source spent today is a figure alone.)
+    if module == "ai:today" {
+        return &[];
+    }
     match module.split(':').next().unwrap_or(module) {
         "cpu" => &CPU,
         "gpu" => &GPU,
@@ -147,6 +155,7 @@ pub fn items(module: &str) -> &'static [Item] {
         "lyrics" => &LYRICS,
         "wsl" => &WSL,
         "game" => &GAME,
+        "ai" => &AI_ITEMS,
         _ => &[],
     }
 }
@@ -287,6 +296,7 @@ impl Default for Prefs {
         Prefs {
             modules: Vec::new(),
             workbench: Vec::new(),
+            ai: Vec::new(),
             cpu: None,
             gpu: None,
             memory: None,
@@ -323,6 +333,10 @@ impl Default for ProcessPrefs {
 
 /// The workbench's modules, in default order (each on until chosen otherwise).
 pub const WORKBENCH: [&str; 6] = ["search", "time", "station", "notes", "todo", "apps"];
+
+/// The AI component's modules, in default order (each on until chosen otherwise): what all its sources spent today,
+/// then each source's lane (Claude Code's, Codex's: ChatGPT's).
+pub const AI: [&str; 3] = ["ai:today", "ai:claude", "ai:codex"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
@@ -363,15 +377,15 @@ pub fn module_on(stored: &serde_json::Value, id: &str) -> bool {
     module_on_in(stored, "modules", id)
 }
 
-/// As `module_on`, in the stored list `list` ("modules", the readings'; "workbench", the workbench's, each of its
-/// modules on unless listed off).
+/// As `module_on`, in the stored list `list` ("modules", the readings'; "workbench", the workbench's, and "ai", the
+/// AI component's, each of their modules on unless listed off).
 /// `prefs` as they are kept, over the preferences `held` they were resolved from: the modules of what is not on this
 /// machine now (a GPU taken out, an external one unplugged) kept as they were, each after the one it followed. (Left
 /// out, as `resolve` leaves them out of what is shown, a change of any preference lost their switches and their
 /// place, and they came back as new.) What earlier versions kept, carried over into `prefs`, is not written again.
 pub fn kept(prefs: &Prefs, held: &serde_json::Value) -> serde_json::Value {
     let mut kept = serde_json::to_value(prefs).unwrap();
-    for list in ["modules", "workbench"] {
+    for list in ["modules", "workbench", "ai"] {
         let (Some(held), Some(now)) = (held[list].as_array(), kept[list].as_array_mut()) else { continue };
         let id = |entry: &serde_json::Value| entry["id"].as_str().map(str::to_string);
         // Where the next one away goes: after the one held before it, as it is now.
@@ -394,7 +408,7 @@ pub fn module_on_in(stored: &serde_json::Value, list: &str, id: &str) -> bool {
     let entry = stored[list].as_array().and_then(|modules| modules.iter().find(|entry| entry["id"] == id));
     match entry {
         Some(entry) => entry["on"] == true,
-        None => list == "workbench" && WORKBENCH.contains(&id),
+        None => (list == "workbench" && WORKBENCH.contains(&id)) || (list == "ai" && AI.contains(&id)),
     }
 }
 
@@ -445,16 +459,18 @@ impl Prefs {
         prefs.music.ground = music_ground(stored);
         fit(&mut prefs.modules, known, |id| !DEFAULT_OFF.contains(&id));
         fit(&mut prefs.workbench, &WORKBENCH.map(String::from), |_| true);
+        fit(&mut prefs.ai, &AI.map(String::from), |_| true);
         prefs.carry_over();
         prefs
     }
 
     /// As a panel showing `part` draws its lanes: the readings' modules (what plays not among them: it is a
-    /// component of its own), or the workbench's.
+    /// component of its own), the workbench's, or the AI component's.
     pub fn holding(mut self, part: crate::settings::Part) -> Prefs {
         use crate::settings::Part;
         match part {
             Part::Workbench => self.modules = std::mem::take(&mut self.workbench),
+            Part::Ai => self.modules = std::mem::take(&mut self.ai),
             Part::Monitor | Part::Music => self.modules.retain(|module| module.id != "lyrics"),
         }
         self

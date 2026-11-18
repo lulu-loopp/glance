@@ -13,6 +13,7 @@ use super::theme::{Ink, Skin, Theme};
 use crate::settings::ShelfView;
 use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
 
+pub mod ai;
 pub mod todo;
 pub use todo::TodoHit;
 
@@ -270,6 +271,8 @@ pub enum Hit {
     Search,
     /// The to-dos' lane (see `todo`).
     Todo(TodoHit),
+    /// An AI source's head: its lane opened or closed (see `ai`).
+    Ai(ai::Source),
 }
 
 impl Hit {
@@ -774,6 +777,8 @@ enum Block {
     Search { keys: String },
     /// The to-dos (see `todo`), their list in room `tall` high.
     Todo { lane: todo::TodoLane, tall: f32 },
+    /// What the AI component shows (see `ai`).
+    Ai(ai::AiBlock),
 }
 
 /// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
@@ -2359,6 +2364,7 @@ impl Block {
             Block::Bench(_) => BENCH,
             Block::Search { .. } => SEARCH_BOX,
             Block::Todo { lane, tall } => todo::height(lane, *tall),
+            Block::Ai(block) => block.height(),
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
@@ -2392,6 +2398,7 @@ impl Hash for Block {
             Block::Search { keys } => keys.hash(state),
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Todo { lane, tall } => (lane, tall.to_bits()).hash(state),
+            Block::Ai(block) => block.hash(state),
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
@@ -3364,6 +3371,8 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                 },
             ]
         }
+        #[cfg(windows)]
+        id if id.starts_with("ai:") => return ai::ai_lane(id, prefs, lang),
         _ => return None,
     })
 }
@@ -3829,6 +3838,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Bench(_) => "bench",
             Block::Search { .. } => "search",
             Block::Todo { .. } => "todo",
+            Block::Ai(_) => "ai",
         };
         let nth = kinds.iter().filter(|k| **k == kind).count();
         kinds.push(kind);
@@ -3852,6 +3862,11 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (_, Pass::Plots) => {}
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "todo" => todo::paint_head(frame, scene, (left, y, width), title, device, hits),
             (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), pad_x, lane, *tall + spare, hits),
+            (Block::Head { title, device, aside, .. }, Pass::Content) if ai::Source::of(&lane.id).is_some() => {
+                let source = ai::Source::of(&lane.id).unwrap();
+                ai::paint_head(frame, scene, (left, y, width), source, title, device, aside, hits, &name);
+            }
+            (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -6738,6 +6753,54 @@ otepad.exe", "Notepad"),
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
+    /// The AI component's lanes over a made-up day (see `ai::tests::lanes::day`): what was spent today, Claude's, and
+    /// ChatGPT's closed and opened, in each skin, light and dark: `cargo test --features studio --lib -- --ignored
+    /// ai_lanes` writes `target/ai/<skin>-<light or dark>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn ai_lanes() {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/ai", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let usage = ai::tests::lanes::day();
+        let now = ai::tests::lanes::NOON;
+        for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
+            for dark in [false, true] {
+                let theme = Theme::new(skin, dark);
+                let (info, prefs) = (info(), Prefs::default());
+                let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+                let seen = Seen::of(history);
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true)]
+                    .into_iter()
+                    .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, open).unwrap(), ink: theme.ink(id) })
+                    .collect();
+                let w = COLUMN_WIDTH;
+                let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+                let h: f32 = heights.iter().sum::<f32>() + 8.0 * lanes.len() as f32;
+                let ground = if dark { Color::hex(0x202124, 1.0) } else { Color::hex(0xF3F3F3, 1.0) };
+                let pixels = gfx
+                    .draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                        frame.fill(ground, 0.0, 0.0, w, h);
+                        let mut y = 0.0;
+                        for (lane, height) in lanes.iter().zip(&heights) {
+                            paint_lane(frame, &scene, lane, Rect { x: 0.0, y, w, h: *height }, 0.0, Pass::Content, &mut Vec::new());
+                            y += height + 8.0;
+                            frame.fill(theme.rule, 0.0, y - 4.0, w, 1.0);
+                        }
+                    })
+                    .expect("drawn");
+                let name = format!("{skin:?}-{}.png", if dark { "dark" } else { "light" });
+                crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+            }
         }
     }
 

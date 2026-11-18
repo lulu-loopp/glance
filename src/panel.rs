@@ -215,9 +215,10 @@ struct Config {
     live: bool,
     tear_off: bool,
     anchor: Anchor,
-    /// The readings' panel's columns and the workbench's.
+    /// The readings' panel's columns, the workbench's and the AI component's.
     columns: Option<usize>,
     workbench_columns: Option<usize>,
+    ai_columns: Option<usize>,
     /// How large a panel is drawn where it was not sized, and each component's on each screen it was (see
     /// `Settings::part_sizes`).
     size: f32,
@@ -253,6 +254,7 @@ fn config_from(settings: &Settings) -> Config {
         anchor: settings.anchor,
         columns: settings.columns_of(Part::Monitor),
         workbench_columns: settings.columns_of(Part::Workbench),
+        ai_columns: settings.columns_of(Part::Ai),
         size: settings.panel_size,
         sizes: settings.part_sizes.clone(),
         overlay: settings.overlay.clone(),
@@ -376,6 +378,12 @@ impl Controller {
 
     /// The line of the lyrics sung has changed (from any thread).
     pub fn lyric_changed(&self) {
+        self.post(LYRIC);
+    }
+
+    /// What AI tools have spent has changed (from any thread): drawn again soon where it shows, as a line of the
+    /// lyrics is.
+    pub fn ai_changed(&self) {
         self.post(LYRIC);
     }
 
@@ -2779,7 +2787,11 @@ impl<'a> Panel<'a> {
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
         self.drawn = self.prefs.clone().holding(self.part);
-        self.columns = if self.part == Part::Workbench { config.workbench_columns } else { config.columns };
+        self.columns = match self.part {
+            Part::Workbench => config.workbench_columns,
+            Part::Ai => config.ai_columns,
+            Part::Monitor | Part::Music => config.columns,
+        };
         // Mid-drag, the size is the drag's; going back to its own size, the way there's.
         if self.drag.is_none() && self.restoring.is_none() {
             self.size = config.size_on(self.part, self.screen.as_deref());
@@ -4112,7 +4124,7 @@ impl<'a> Panel<'a> {
             Part::Music => {
                 self.music_size();
             }
-            Part::Monitor | Part::Workbench => {
+            Part::Monitor | Part::Workbench | Part::Ai => {
                 self.arrange_lanes();
             }
         }
@@ -4830,6 +4842,7 @@ impl<'a> Panel<'a> {
                     }
                 }
             },
+            Some(Hit::Ai(source)) => view::ai::toggle(source),
             Some(Hit::Settings) => {
                 self.settings_from = self.on_screen(Hit::Settings);
                 crate::show_settings(self.settings_from);

@@ -247,6 +247,8 @@ impl App {
         }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
+        // (What AI tools spent read while an edge or a widget shows it: looked at again as either may have changed.)
+        ai::look_now();
     }
 
     /// The process list was sorted from a panel or a widget: kept, as if chosen in the settings (sorted as it was:
@@ -591,6 +593,14 @@ pub fn run() {
     if phone::helper().is_some() {
         touches::start();
     }
+    // What AI tools have spent, read while an edge or a widget shows the AI component, or the settings its page.
+    ai::start(
+        || {
+            let settings = app().settings.lock().unwrap();
+            settings.places().shows(settings::Part::Ai) || settings.widgets.iter().any(settings::WidgetAt::shows_ai) || ui::settings_window::shows_ai()
+        },
+        || app().controller.ai_changed(),
+    );
     thread::Builder::new().name("glance: samples".into()).spawn(move || {
         // What plays and how loud, while the module that shows them is on and something that can show it is on the
         // screen (the panel, a widget, the settings). The lyrics too, while either shows them.

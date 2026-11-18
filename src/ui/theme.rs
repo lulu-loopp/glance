@@ -149,10 +149,11 @@ impl Theme {
         theme
     }
 
-    /// The ink of the lane for module `id`.
+    /// The ink of the lane for module `id`: its own (an AI source's, its maker's colour), else its kind's.
     pub fn ink(&self, id: &str) -> Ink {
         let kind = id.split(':').next().unwrap();
-        self.inks.iter().find(|(module, _)| *module == kind).map_or(self.ink, |(_, ink)| *ink)
+        let of = |name: &str| self.inks.iter().find(|(module, _)| *module == name).map(|(_, ink)| *ink);
+        of(id).or_else(|| of(kind)).unwrap_or(self.ink)
     }
 
     /// Whether modules `a` and `b` are drawn in the same ink.
@@ -168,6 +169,13 @@ fn ink(trace: Color, second: f32, wash: f32, wash_end: f32) -> Ink {
 
 fn rgba(rgb: u32, a: f32) -> Color {
     Color::hex(rgb, a)
+}
+
+/// Each AI source's lane in its maker's colour, in every skin (as clear on a dark ground as on a light one), at the
+/// strengths `lane` gives the skin's own inks.
+fn brands(dark: bool, lane: impl Fn(u32) -> Ink) -> [(&'static str, Ink); 2] {
+    let pick = |on_dark: u32, on_light: u32| lane(if dark { on_dark } else { on_light });
+    [("ai:claude", pick(0xE48B67, 0xD97757)), ("ai:codex", pick(0x4FC1B4, 0x1F8F84))]
 }
 
 /// 记录纸: chart paper and ink. The panel is one ink until something runs
@@ -192,7 +200,7 @@ fn paper(dark: bool) -> Theme {
         track: rgba(text, wash),
         signal: rgba(signal, 1.0),
         hover: rgba(text, if dark { 0.07 } else { 0.06 }),
-        inks: vec![("game", game)],
+        inks: [("game", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.14, 0.14))).collect(),
         ink,
         body: archivo(13.0, 500.0),
         small: archivo(12.0, 500.0),
@@ -263,7 +271,7 @@ fn fluent(dark: bool) -> Theme {
         track: rgba(on, a[4]),
         signal: if dark { rgba(0xFF99A4, 1.0) } else { rgba(0xC42B1C, 1.0) },
         hover: if dark { rgba(0xFFFFFF, 0.06) } else { rgba(0x000000, 0.04) },
-        inks: vec![("game", game)],
+        inks: [("game", game)].into_iter().chain(brands(dark, |rgb| self::ink(rgba(rgb, 1.0), 0.5, 0.22, 0.0))).collect(),
         ink,
         body: segoe(13.0, 500.0),
         small: segoe(12.0, 500.0),
@@ -347,7 +355,10 @@ fn glass(dark: bool) -> Theme {
             ("network", lane(purple)),
             ("disk", lane(teal)),
             ("storage", lane(teal)),
-        ],
+        ]
+        .into_iter()
+        .chain(brands(dark, lane))
+        .collect(),
         ink: lane(blue),
         body: inter(13.0, 500.0),
         small: inter(12.0, 500.0),

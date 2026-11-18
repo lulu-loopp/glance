@@ -124,6 +124,8 @@ const TITLE: f32 = 52.0;
 const OVERLAY: &str = "overlay:";
 /// What the workbench's modules' rows are told from the readings' by: the start of their ids.
 const WORKBENCH: &str = "workbench:";
+/// The AI component's modules' ids begin so (they are kept so in its list: see `prefs::AI`).
+const AI: &str = "ai:";
 
 /// A row inside a module's open card (its name alone: as tall as Windows' own settings make such a row), and how far
 /// in from the card's edge its label starts: under the module's name, past the grip.
@@ -343,6 +345,14 @@ thread_local! {
 }
 
 /// Whether it is open and not minimized: what it shows can be seen.
+/// Whether the page shown shows the AI component (its own, or the layout's, where its tile pictures it).
+static AI_PAGE: AtomicBool = AtomicBool::new(true);
+
+/// Whether the settings window is seen with what AI tools spent on its page.
+pub fn shows_ai() -> bool {
+    is_seen() && AI_PAGE.load(Ordering::Relaxed)
+}
+
 pub fn is_seen() -> bool {
     let hwnd = WINDOW.load(Ordering::Relaxed);
     // (Hidden while made for the guide, till it shows it: see `guide`.)
@@ -624,8 +634,12 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     }
     if let Some(hwnd) = made {
         WINDOW.store(hwnd.0 as isize, Ordering::Release);
-        // (What plays, looked at only while something on the screen can show it: at once, for the previews.)
+        // (What plays, looked at only while something on the screen can show it: at once, for the previews; what AI
+        // tools spent, too.)
         crate::playing::look_now();
+        // (Each window made opens on the layout's page.)
+        AI_PAGE.store(true, Ordering::Relaxed);
+        crate::ai::look_now();
     }
     OPENING.store(false, Ordering::Release);
     // (Not made: the thread ends, and what it made of it with it.)
@@ -1078,6 +1092,8 @@ enum Page {
     Monitor,
     Workbench,
     Music,
+    /// The AI component: what AI tools spent and what is left of their limits.
+    Ai,
     /// The devices this PC knows: the phones paired with it and the devices it takes files from without asking, and
     /// those found nearby; this PC's name to them.
     Devices,
@@ -1117,13 +1133,14 @@ enum NavItem {
     Components,
 }
 
-const NAV_ITEMS: [NavItem; 10] = [
+const NAV_ITEMS: [NavItem; 11] = [
     NavItem::Page(Page::Layout),
     NavItem::Page(Page::Look),
     NavItem::Components,
     NavItem::Page(Page::Monitor),
     NavItem::Page(Page::Workbench),
     NavItem::Page(Page::Music),
+    NavItem::Page(Page::Ai),
     NavItem::Page(Page::Devices),
     NavItem::Page(Page::Phone),
     NavItem::Page(Page::Nearby),
@@ -1139,6 +1156,7 @@ impl NavItem {
             NavItem::Page(Page::Monitor) => pick(lang, "监控", "Monitor"),
             NavItem::Page(Page::Workbench) => pick(lang, "工作台", "Workbench"),
             NavItem::Page(Page::Music) => pick(lang, "音乐", "Music"),
+            NavItem::Page(Page::Ai) => pick(lang, "AI 用量", "AI usage"),
             NavItem::Page(Page::Devices) => pick(lang, "设备", "Devices"),
             NavItem::Page(Page::Phone) => pick(lang, "手机遥控", "Phone remote"),
             NavItem::Page(Page::Nearby) => pick(lang, "附近传输", "Nearby sharing"),
@@ -1156,6 +1174,7 @@ impl Page {
             Page::Monitor => Icon::Gauge,
             Page::Workbench => Icon::PencilRuler,
             Page::Music => Icon::Music,
+            Page::Ai => Icon::Ai,
             Page::Devices => Icon::MonitorSmartphone,
             Page::Phone => Icon::Smartphone,
             Page::Nearby => Icon::Share,
@@ -2129,7 +2148,7 @@ struct Ui {
     /// in layers of its own: see `render::PanelLayers`).
     library_music: super::music::Music,
     library_music_ground: render::GroundLayers,
-    library_layers: [PanelLayers; 2],
+    library_layers: [PanelLayers; 3],
     /// The panel the guide's plays show on the stage, and the widgets its play tears off it, the lane's and the whole
     /// panel's (see `Shown`).
     guide_layers: StageLayers,
@@ -2421,7 +2440,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             zones: Vec::new(),
             library_music: super::music::Music::default(),
             library_music_ground: render::GroundLayers::default(),
-            library_layers: [PanelLayers::default(), PanelLayers::default()],
+            library_layers: [PanelLayers::default(), PanelLayers::default(), PanelLayers::default()],
             guide_layers: StageLayers::default(),
             torn_layers: [StageLayers::default(), StageLayers::default()],
             map_art: Vec::new(),
@@ -2580,7 +2599,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // (Measuring: a page, and a tab of the monitor's, turned to as a press on it turns to it; see `perf`.)
         PERF_TURN if crate::perf::on() => {
-            const PAGES: [Page; 9] = [Page::Layout, Page::Look, Page::Monitor, Page::Workbench, Page::Music, Page::Devices, Page::Phone, Page::Nearby, Page::General];
+            const PAGES: [Page; 10] = [Page::Layout, Page::Look, Page::Monitor, Page::Workbench, Page::Music, Page::Ai, Page::Devices, Page::Phone, Page::Nearby, Page::General];
             const TABS: [Tab; 3] = [Tab::Shown, Tab::Data, Tab::Overlay];
             with_ui(|ui| {
                 crate::perf::mark(|| format!("settings turn {} {}", wparam.0, lparam.0));
@@ -2965,6 +2984,15 @@ impl Ui {
                     self.recent_rows(&mut rows);
                 }
             }
+            (Page::Ai, _) => {
+                rows.push(Row::Choice(Field::Columns));
+                for entry in &self.prefs.ai {
+                    rows.push(Row::Module(entry.id.clone()));
+                    if self.opened(&entry.id) > 0.0 {
+                        rows.extend(self.items_here(&entry.id).into_iter().map(|name| Row::Item(entry.id.clone(), name)));
+                    }
+                }
+            }
             (Page::Music, _) => {
                 rows.push(Row::Choice(Field::MusicSource));
                 // (Only where NetEase is installed.)
@@ -3267,6 +3295,8 @@ impl Ui {
         if page != self.page {
             self.put_words_by();
             self.page = page;
+            AI_PAGE.store(matches!(page, Page::Ai | Page::Layout), Ordering::Relaxed);
+            crate::ai::look_now();
             self.scroll = 0.0;
             self.scroll_target = 0.0;
             self.drag = None;
@@ -3595,6 +3625,7 @@ impl Ui {
         match self.page {
             Page::Workbench => Part::Workbench,
             Page::Music => Part::Music,
+            Page::Ai => Part::Ai,
             _ => Part::Monitor,
         }
     }
@@ -5001,6 +5032,12 @@ impl Ui {
         }
         let (lang, info) = (self.lang, &crate::app().info());
         let p = |zh, en| pick(lang, zh, en).to_string();
+        match id {
+            "ai:today" => return (p("今日用量", "Today"), Some(p("各来源今日的令牌用量及其变化", "Tokens every source spent today, and how they mounted"))),
+            "ai:claude" => return ("Claude".into(), Some(p("Claude Code 的令牌用量、模型与会话", "Claude Code's tokens, models and sessions"))),
+            "ai:codex" => return ("ChatGPT".into(), Some(p("Codex 的额度、令牌用量、模型与会话", "Codex's limits, tokens, models and sessions"))),
+            _ => {}
+        }
         if let Some(group) = id.strip_prefix(OVERLAY) {
             return match group {
                 "frames" => (p("帧率", "Frame rate"), Some(p("没有游戏运行时显示“—”", "“—” while no game runs"))),
@@ -5063,16 +5100,23 @@ impl Ui {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return self.prefs.workbench.iter().any(|entry| entry.id == bare && entry.on);
         }
+        if id.starts_with(AI) {
+            return self.prefs.ai.iter().any(|entry| entry.id == id && entry.on);
+        }
         match id.strip_prefix(OVERLAY) {
             Some(group) => self.settings.overlay.groups.iter().any(|entry| entry.id == group && entry.on),
             None => self.prefs.modules.iter().any(|entry| entry.id == id && entry.on),
         }
     }
 
-    /// The list a row's module (`id`) is in, the readings', the workbench's or the overlay's, and its id there.
+    /// The list a row's module (`id`) is in, the readings', the workbench's, the AI component's or the overlay's, and
+    /// its id there.
     fn list<'a>(&mut self, id: &'a str) -> (&mut Vec<super::prefs::ModuleEntry>, &'a str) {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return (&mut self.prefs.workbench, bare);
+        }
+        if id.starts_with(AI) {
+            return (&mut self.prefs.ai, id);
         }
         match id.strip_prefix(OVERLAY) {
             Some(group) => (&mut self.settings.overlay.groups, group),
@@ -5087,6 +5131,9 @@ impl Ui {
         }
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return prefs::shows_in(&self.prefs.workbench, bare, name);
+        }
+        if id.starts_with(AI) {
+            return prefs::shows_in(&self.prefs.ai, id, name);
         }
         match id.strip_prefix(OVERLAY) {
             Some(group) => super::overlay::shows(&self.settings.overlay.groups, group, name),
@@ -5115,6 +5162,9 @@ impl Ui {
     fn items_here(&self, id: &str) -> Vec<String> {
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return self.items_here(bare);
+        }
+        if id.starts_with(AI) {
+            return prefs::items(id).iter().map(|item| item.name.to_string()).collect();
         }
         if id == "station" {
             return ["history", "recent"].map(String::from).to_vec();
@@ -5233,6 +5283,8 @@ impl Ui {
             ("time", "sound") => (p("音量", "Volume"), None),
             ("time", "media") => (p("正在播放", "Now playing"), None),
             ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在演唱的一句与下一句", "The line sung now and the next"))),
+            ("ai", "models") => (p("模型", "Models"), Some(p("各模型今日的用量占比", "Each model's share of today's tokens"))),
+            ("ai", "sessions") => (p("会话", "Sessions"), Some(p("今日用过的会话，最近的在前", "Sessions that spent today, the latest first"))),
             ("lyrics", "translation") => (p("翻译", "Translation"), Some(p("有翻译时显示在当前歌词下方，否则显示下一句", "Under the line sung now where there is one, else the next line"))),
             ("lyrics", "cover") => (p("封面", "Cover"), None),
             ("lyrics", "title") => (p("歌名与歌手", "Title and artist"), None),
@@ -5540,6 +5592,7 @@ impl Ui {
                     },
                     (Some(group), _) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),
                     (None, Some(bare)) => prefs::set_item_in(&mut self.prefs.workbench, bare, &name, !on),
+                    (None, None) if id.starts_with(AI) => prefs::set_item_in(&mut self.prefs.ai, &id, &name, !on),
                     (None, None) => self.prefs.set_item(&id, &name, !on),
                 }
                 self.save();
@@ -5867,7 +5920,7 @@ impl Ui {
         let before = self.row_tops();
         // Past the next module listed with it: one in the fold, or listed
         // there, is passed over.
-        let folded = |other: &str| !id.starts_with(OVERLAY) && !id.starts_with(WORKBENCH) && self.folded(other);
+        let folded = |other: &str| !id.starts_with(OVERLAY) && !id.starts_with(WORKBENCH) && !id.starts_with(AI) && self.folded(other);
         if folded(id) {
             return;
         }

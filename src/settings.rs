@@ -197,10 +197,23 @@ pub enum Part {
     Workbench,
     /// What plays, its lyrics and its controls.
     Music,
+    /// What AI tools have spent and what is left of their limits.
+    Ai,
 }
 
 /// Every component there is, in the order the settings offer them.
-pub const PARTS: [Part; 3] = [Part::Monitor, Part::Workbench, Part::Music];
+pub const PARTS: [Part; 4] = [Part::Monitor, Part::Workbench, Part::Music, Part::Ai];
+
+/// What an edge holding the AI component opens: its card (a panel of its lanes, as the readings'), or its dock (a
+/// narrow strip down the edge, a ring for each source, across a top edge; each source's card beside it as the pointer
+/// rests on its ring).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AiForm {
+    Card,
+    #[default]
+    Dock,
+}
 
 /// One edge of a screen and the component it opens.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -378,13 +391,43 @@ impl Lit {
 /// form by name ("full-2", "compact-1", "tiles-3x2", "rail", …), its
 /// scale, and how much wider and taller than designed it is drawn (DIPs).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "KeptLayout", into = "KeptLayout")]
 pub struct PanelLayout {
     pub form: String,
     pub scale: f32,
     pub extra: (f32, f32),
-    /// Its lanes the workbench's, not the readings'.
+    /// Whose lanes it shows: the readings', the workbench's or the AI component's (what plays is told by its form).
+    pub lanes: Part,
+}
+
+/// A `PanelLayout` as it is written: whose lanes it shows said only where they are not the readings', the workbench's
+/// as an older Glance reads it.
+#[derive(Clone, Serialize, Deserialize)]
+struct KeptLayout {
+    form: String,
+    scale: f32,
+    extra: (f32, f32),
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub workbench: bool,
+    workbench: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ai: bool,
+}
+
+impl From<KeptLayout> for PanelLayout {
+    fn from(kept: KeptLayout) -> Self {
+        let lanes = match (kept.workbench, kept.ai) {
+            (_, true) => Part::Ai,
+            (true, false) => Part::Workbench,
+            (false, false) => Part::Monitor,
+        };
+        PanelLayout { form: kept.form, scale: kept.scale, extra: kept.extra, lanes }
+    }
+}
+
+impl From<PanelLayout> for KeptLayout {
+    fn from(layout: PanelLayout) -> Self {
+        KeptLayout { form: layout.form, scale: layout.scale, extra: layout.extra, workbench: layout.lanes == Part::Workbench, ai: layout.lanes == Part::Ai }
+    }
 }
 
 /// A player music is followed from: as Windows identifies it, and by the name it is shown by (said in the settings
@@ -400,6 +443,11 @@ pub struct MusicSource {
 pub const MUSIC_FORM: &str = "music";
 
 impl WidgetAt {
+    /// Whether it shows the AI component's lanes (merged into it or not).
+    pub fn shows_ai(&self) -> bool {
+        self.layout.lanes == Part::Ai || self.parts.iter().flatten().any(|part| part.lanes == Part::Ai)
+    }
+
     /// Whether it shows what plays (merged into it or not).
     pub fn shows_music(&self) -> bool {
         self.layout.form == MUSIC_FORM || self.parts.iter().flatten().any(|part| part.form == MUSIC_FORM)
@@ -695,6 +743,7 @@ impl MusicRooms {
 pub struct PanelSizes {
     monitor: BTreeMap<String, f32>,
     workbench: BTreeMap<String, f32>,
+    ai: BTreeMap<String, f32>,
 }
 
 impl PanelSizes {
@@ -704,6 +753,7 @@ impl PanelSizes {
         let sized = match part {
             Part::Monitor => &self.monitor,
             Part::Workbench => &self.workbench,
+            Part::Ai => &self.ai,
             Part::Music => return 1.0,
         };
         sized.get(screen.unwrap_or_default()).copied().unwrap_or(otherwise)
@@ -736,6 +786,10 @@ pub struct Settings {
     /// And the workbench's. Up to 0.4.3 it had the readings' (chosen on their page, it was dealt into as many unasked):
     /// settings from then, whose `columns_apart` is not set, keep what it showed (see `carry_over`).
     pub workbench_columns: Option<usize>,
+    /// And the AI component's card's.
+    pub ai_columns: Option<usize>,
+    /// What an edge holding the AI component opens.
+    pub ai_form: AiForm,
     #[serde(default)]
     columns_apart: bool,
     /// How large a panel is drawn, 1 as designed (0.75 to 2), where it was not sized (see `part_sizes`). Up to 0.4.3,
@@ -973,6 +1027,8 @@ impl Default for Settings {
             anchor: Anchor::default(),
             columns: None,
             workbench_columns: None,
+            ai_columns: None,
+            ai_form: AiForm::default(),
             columns_apart: true,
             panel_size: 1.0,
             part_sizes: PanelSizes::default(),
@@ -1047,6 +1103,7 @@ impl Settings {
         let sized = match part {
             Part::Monitor => &mut self.part_sizes.monitor,
             Part::Workbench => &mut self.part_sizes.workbench,
+            Part::Ai => &mut self.part_sizes.ai,
             Part::Music => return,
         };
         sized.insert(screen.unwrap_or_default().to_string(), size);
@@ -1056,6 +1113,7 @@ impl Settings {
     pub fn columns_of(&self, part: Part) -> Option<usize> {
         match part {
             Part::Workbench => self.workbench_columns,
+            Part::Ai => self.ai_columns,
             Part::Monitor | Part::Music => self.columns,
         }
     }
@@ -1064,6 +1122,7 @@ impl Settings {
     pub fn set_columns(&mut self, part: Part, columns: Option<usize>) {
         match part {
             Part::Workbench => self.workbench_columns = columns,
+            Part::Ai => self.ai_columns = columns,
             Part::Monitor | Part::Music => self.columns = columns,
         }
     }
@@ -1671,6 +1730,24 @@ mod tests {
         let widget = &settings.widgets[0];
         assert_eq!((widget.layout.form.as_str(), widget.layout.scale, widget.stuck), ("full-2", 1.2, Some(WidgetSide::Right)));
         assert!(!serde_json::to_string(&settings).unwrap().contains("\"before\""));
+    }
+
+    /// A widget keeps whose lanes it shows: the readings' as before (nothing said), the workbench's as an older
+    /// Glance reads them, the AI component's apart from both; and reads them back so.
+    #[test]
+    fn a_widget_keeps_whose_lanes_it_shows() {
+        let kept = |lanes| serde_json::to_value(PanelLayout { form: "full-2".into(), scale: 1.0, extra: (0.0, 0.0), lanes }).unwrap();
+        assert_eq!(kept(Part::Monitor), serde_json::json!({"form": "full-2", "scale": 1.0, "extra": [0.0, 0.0]}));
+        assert_eq!(kept(Part::Workbench)["workbench"], true);
+        assert_eq!((kept(Part::Ai)["ai"].clone(), kept(Part::Ai).get("workbench").is_none()), (serde_json::json!(true), true));
+        for lanes in [Part::Monitor, Part::Workbench, Part::Ai] {
+            assert_eq!(serde_json::from_value::<PanelLayout>(kept(lanes)).unwrap().lanes, lanes);
+        }
+        let read: WidgetAt = serde_json::from_str(r#"{"at":[10,20],"layout":{"form":"full-2","scale":1.0,"extra":[0.0,0.0],"workbench":true}}"#).unwrap();
+        assert_eq!(read.layout.lanes, Part::Workbench);
+        assert!(!read.shows_ai());
+        let read: WidgetAt = serde_json::from_str(r#"{"at":[10,20],"layout":{"form":"music","scale":1.0,"extra":[0.0,0.0]},"parts":[{"form":"music","scale":1.0,"extra":[0.0,0.0]},{"form":"full-1","scale":1.0,"extra":[0.0,0.0],"ai":true}]}"#).unwrap();
+        assert!(read.shows_ai());
     }
 
     #[test]

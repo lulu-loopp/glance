@@ -56,7 +56,7 @@ impl Tokens {
         self.input + self.output + self.cache_read + self.cache_write
     }
 
-    fn add(&mut self, other: Tokens) {
+    pub fn add(&mut self, other: Tokens) {
         self.input += other.input;
         self.output += other.output;
         self.cache_read += other.cache_read;
@@ -384,7 +384,8 @@ impl Ledger {
         sessions
     }
 
-    /// Each limit as it was last told.
+    /// Each limit as it was last told (what is shown has them with the rest: see `usage`).
+    #[cfg(test)]
     pub fn limits(&self) -> &[Limit] {
         &self.limits
     }

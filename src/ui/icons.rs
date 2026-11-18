@@ -126,6 +126,8 @@ pub enum Icon {
     /// The devices' page: a monitor with a phone before it (Lucide's monitor-smartphone).
     MonitorSmartphone,
     Laptop,
+    /// The AI component's: a limit's ring, three quarters spent, round a spark (drawn for Glance, in Lucide's manner).
+    Ai,
 }
 
 impl Icon {
@@ -238,6 +240,7 @@ impl Icon {
             Icon::MoveDiagonal => &["M11 19H5v-6", "M13 5h6v6", "M19 5 5 19"],
             Icon::MoveDiagonal2 => &["M19 13v6h-6", "M5 11V5h6", "m5 5 14 14"],
             Icon::MonitorSmartphone => &["M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8", "M10 19v-3.96 3.15", "M7 19h5", "M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"],
+            Icon::Ai => &["M12 3a9 9 0 1 1-9 9", "M12 8.5l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"],
             Icon::Laptop => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
             Icon::Calendar => &["M8 2v4", "M16 2v4", "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M3 10h18"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
@@ -557,7 +560,7 @@ mod tests {
 
     #[test]
     fn every_icon_reads_whole() {
-        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop] {
+        for icon in [Icon::Cpu, Icon::Gpu, Icon::Memory, Icon::Disk, Icon::Network, Icon::Game, Icon::Pin, Icon::Close, Icon::Lock, Icon::Share, Icon::Settings, Icon::Check, Icon::Pointer, Icon::Panel, Icon::Restore, Icon::Update, Icon::Quit, Icon::Layers, Icon::Clock, Icon::ImagePlus, Icon::SkipBack, Icon::Play, Icon::Pause, Icon::SkipForward, Icon::Music, Icon::Volume, Icon::Muted, Icon::File, Icon::Link, Icon::Inbox, Icon::Clipboard, Icon::Ellipsis, Icon::List, Icon::Image, Icon::Add, Icon::Folder, Icon::ArrowDown, Icon::Search, Icon::Palette, Icon::Smartphone, Icon::Monitor, Icon::Megaphone, Icon::PencilRuler, Icon::PinOff, Icon::Trash, Icon::EyeOff, Icon::Bold, Icon::Italic, Icon::Strikethrough, Icon::Code, Icon::Scissors, Icon::Copy, Icon::ClipboardPaste, Icon::SquareCheck, Icon::Table, Icon::Minus, Icon::SquareCode, Icon::Heading1, Icon::Heading2, Icon::Heading3, Icon::Pilcrow, Icon::Text, Icon::ArrowUpToLine, Icon::ArrowDownToLine, Icon::ArrowLeftToLine, Icon::ArrowRightToLine, Icon::SquarePen, Icon::Unlink, Icon::Send, Icon::Paperclip, Icon::CircleDot, Icon::MessageCircle, Icon::CircleCheck, Icon::CircleX, Icon::AppWindow, Icon::Wrench, Icon::StickyNote, Icon::ExternalLink, Icon::ChevronLeft, Icon::Calendar, Icon::ChevronUp, Icon::ChevronRight, Icon::MoveDiagonal, Icon::MoveDiagonal2, Icon::MonitorSmartphone, Icon::Laptop, Icon::Ai] {
             let figures = icon.figures();
             assert!(!figures.is_empty(), "{icon:?}");
             // Every point on the grid.

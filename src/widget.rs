@@ -1403,8 +1403,8 @@ struct Readings {
     scrolls: view::Scrolls,
     /// Its station's page shown (see `view::Tab`).
     tab: view::Tab,
-    /// Its lanes the workbench's (torn off a workbench's panel), not the readings'.
-    workbench: bool,
+    /// Whose lanes it shows: the readings', the workbench's or the AI component's (torn off that one's panel).
+    lanes: crate::settings::Part,
     /// The one lane it shows (its module's id: torn off by that lane's head), whatever else the panel shows, and shown
     /// though it is switched off there.
     only: Option<String>,
@@ -1417,7 +1417,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), workbench: false, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -1433,7 +1433,7 @@ impl Readings {
     /// What it shows, as the settings keep it.
     fn kept(&self) -> crate::settings::PanelLayout {
         let kept = self.choice.kept();
-        crate::settings::PanelLayout { workbench: self.workbench, form: form_of(self.only.as_deref(), kept.form), ..kept }
+        crate::settings::PanelLayout { lanes: self.lanes, form: form_of(self.only.as_deref(), kept.form), ..kept }
     }
 }
 
@@ -1537,23 +1537,24 @@ impl Content {
         }
     }
 
-    /// Whether it shows the workbench's lanes (torn off its panel), not the readings'.
-    fn workbench(&self) -> bool {
+    /// Whose lanes it shows (one merged has one part with lanes at most: see `takes`): the readings', or another
+    /// component's (torn off its panel).
+    fn lanes(&self) -> crate::settings::Part {
         match self {
-            Content::Readings(readings) => readings.workbench,
-            Content::Merged(merged) => merged.parts.iter().any(|part| matches!(part, Content::Readings(readings) if readings.workbench)),
-            Content::Music(_) => false,
+            Content::Readings(readings) => readings.lanes,
+            Content::Merged(merged) => merged.parts.iter().find_map(|part| if let Content::Readings(readings) = part { Some(readings.lanes) } else { None }).unwrap_or(crate::settings::Part::Monitor),
+            Content::Music(_) => crate::settings::Part::Monitor,
         }
     }
 
-    /// `theme` as it is drawn in: the workbench's, or one lane's alone, with no bar under its lanes (see
-    /// `workbench_dressed`). (All the panel's lanes torn off together keep the panel's bar.)
+    /// `theme` as it is drawn in: the workbench's or the AI component's, or one lane's alone, with no bar under its
+    /// lanes (see `workbench_dressed`). (All the readings' lanes torn off together keep the panel's bar.)
     ///
     /// A note stuck on the desktop alone: its card the whole of it, with no room round it, the skin's ground (the
     /// desktop frosted, on glass) as round as the card, under it alone (in the skin's sheet, the card read as a note in
     /// a frame; on no ground, glass's card was clear over the desktop, not frosted as on the panel).
     fn dressed(&self, mut theme: Theme) -> Theme {
-        if self.workbench() || matches!(self, Content::Readings(readings) if readings.only.is_some()) {
+        if self.lanes() != crate::settings::Part::Monitor || matches!(self, Content::Readings(readings) if readings.only.is_some()) {
             theme = workbench_dressed(theme);
         }
         if self.bare() {
@@ -1581,9 +1582,11 @@ impl Content {
     /// The preferences its readings are drawn by, where they are not the panel's (`prefs`): without the music lane
     /// (what plays is a widget of its own); merged with what plays as one of their lanes, with it, on.
     fn prefs(&self, prefs: &crate::ui::prefs::Prefs) -> Option<crate::ui::prefs::Prefs> {
-        // The workbench's lanes, for readings torn off its panel.
-        let workbench = self.workbench();
-        let mut prefs = if workbench { prefs.clone().holding(crate::settings::Part::Workbench) } else { prefs.clone() };
+        // The workbench's or the AI component's lanes, for those torn off its panel.
+        let mut prefs = match self.lanes() {
+            crate::settings::Part::Monitor => prefs.clone(),
+            lanes => prefs.clone().holding(lanes),
+        };
         // One lane alone: that one, on, whatever else the panel shows (taken out of the edge since, or switched off
         // there, it is still what this widget shows).
         let only = match self {
@@ -1648,15 +1651,15 @@ impl Content {
     /// Its buttons, as they stand in their row: the game's only with the readings (the game lane is theirs).
     fn buttons(&self) -> &'static [Button] {
         match self {
-            // (A game shown or not changes only the readings': the workbench's has nothing of it.)
-            Content::Readings(readings) if readings.workbench => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
+            // (A game shown or not changes only the readings': the workbench's and the AI component's have nothing of it.)
+            Content::Readings(readings) if readings.lanes != crate::settings::Part::Monitor => &[Button::Settings, Button::Pin, Button::Through, Button::Close],
             Content::Readings(_) => &buttons::ALL,
             Content::Music(_) => &[Button::Full, Button::Settings, Button::Pin, Button::Through, Button::Close],
-            // (With the readings' in it, as theirs; else with the workbench's, as its.)
+            // (With the readings' in it, as theirs; else with another component's lanes, as its.)
             Content::Merged(merged) => merged
                 .parts
                 .iter()
-                .find(|part| matches!(part, Content::Readings(readings) if !readings.workbench))
+                .find(|part| matches!(part, Content::Readings(readings) if readings.lanes == crate::settings::Part::Monitor))
                 .or_else(|| merged.parts.iter().find(|part| matches!(part, Content::Readings(_))))
                 .map_or(&[Button::Settings, Button::Pin, Button::Through, Button::Close], Content::buttons),
         }
@@ -1741,8 +1744,7 @@ impl Widgets {
         let made = Instant::now();
         // What the panel showed, as large as it was.
         let content = match part {
-            crate::settings::Part::Monitor => Content::Readings(Readings { only, ..Readings::new(choice) }),
-            crate::settings::Part::Workbench => Content::Readings(Readings { workbench: true, only, ..Readings::new(choice) }),
+            crate::settings::Part::Monitor | crate::settings::Part::Workbench | crate::settings::Part::Ai => Content::Readings(Readings { lanes: part, only, ..Readings::new(choice) }),
             crate::settings::Part::Music => Content::Music(MusicShown::new(size)),
         };
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
@@ -1782,7 +1784,7 @@ impl Widgets {
         };
         let (wide, tall) = size.unwrap_or(view::STUCK_NOTE);
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (wide - view::STUCK_NOTE.0, tall - view::STUCK_NOTE.1) };
-        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let content = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         match Widget::new(contact, at, content) {
             Some(widget) => {
                 widget.window.yield_to(self.settings);
@@ -1838,7 +1840,7 @@ impl Widgets {
         let grab = POINT { x: from.x - card.left, y: from.y - card.top };
         let Some(contact) = monitor_at(at) else { return false };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let content = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         let Some(mut widget) = Widget::new(contact, at, content) else { return false };
         // (Not torn off: the panel it came from stays, as it does as a note is stuck from its menu.)
         widget.drag = Some(Drag::Move { grab, trail: Vec::new(), torn: false, moved: true });
@@ -3304,7 +3306,7 @@ impl Widget {
                 form => {
                     let (only, form) = only_of(form);
                     let choice = Choice::from_kept(&crate::settings::PanelLayout { form, ..layout.clone() })?;
-                    Content::Readings(Readings { workbench: layout.workbench, only, ..Readings::new(choice) })
+                    Content::Readings(Readings { lanes: layout.lanes, only, ..Readings::new(choice) })
                 }
             })
         };
@@ -3330,7 +3332,7 @@ impl Widget {
     fn kept(&self) -> WidgetAt {
         let layout_of = |content: &Content| match content {
             Content::Readings(readings) => readings.kept(),
-            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), workbench: false },
+            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), lanes: crate::settings::Part::Music },
         };
         let (layout, size, parts, beside) = match &self.content {
             Content::Readings(readings) => (readings.kept(), None, None, false),
@@ -4041,6 +4043,7 @@ impl Widget {
                                         }
                                     }
                                 },
+                                Some(view::Hit::Ai(source)) => view::ai::toggle(source),
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
                                 // Its process list sorted by the header clicked, as a panel's is (the sort is one for
@@ -4484,9 +4487,9 @@ impl Widget {
             Content::Readings(readings) => {
                 let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
                     Some(last) => last,
-                    // The workbench's lanes: laid out again for the size it is made (its columns as wide, its lists as
-                    // tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::gives`).
-                    None if readings.workbench => {
+                    // The workbench's lanes, or the AI component's: laid out again for the size it is made (its columns as
+                    // wide, its lists as tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::gives`).
+                    None if readings.lanes != crate::settings::Part::Monitor => {
                         let heights = view::heights(&scene);
                         let columns = match readings.choice.form {
                             Form::Lanes { columns, .. } => columns.min(heights.len()).max(1),
@@ -4540,13 +4543,13 @@ impl Widget {
                 self.zoom = shown.zoom;
                 self.shown = shown.size;
                 // The workbench's sized by hand while still turning: the turn ends at once (see `turns_into`).
-                if readings.workbench && sized_to.is_some() && readings.morph.take().is_some() {
+                if readings.lanes != crate::settings::Part::Monitor && sized_to.is_some() && readings.morph.take().is_some() {
                     readings.drawn.clear();
                     readings.morph_layer.release();
                 }
                 // Another layout: what showed turns into it, from where it is now if
                 // it was still turning (see `turns_into`).
-                if let Some(last) = readings.last.take().filter(|last| turns_into(last, &shown, readings.workbench, sized_to.is_some(), &theme)) {
+                if let Some(last) = readings.last.take().filter(|last| turns_into(last, &shown, readings.lanes != crate::settings::Part::Monitor, sized_to.is_some(), &theme)) {
                     note(format!("widget: {} -> {}", last.form.key(), shown.form.key()));
                     let before = if readings.morph.is_some() { Before::Drawn(std::mem::take(&mut readings.drawn)) } else { Before::Shown(last) };
                     readings.morph = Some((now, before));
@@ -5282,16 +5285,17 @@ pub(crate) fn paint_hint(canvas: &dyn Canvas, theme: &Theme, (w, h): (f32, f32),
 
 /// What a widget's menu offers, row by row (`full`: it shows what plays, and offers it over the whole screen).
 /// Whether a widget of readings that showed `last` turns into `shown` (see `morph`), rather than showing it at once: as
-/// it shows another form, or other lanes. The workbench's lanes, laid out for the size it is made, also as their
+/// it shows another form, or other lanes. Lanes laid out for the size it is made (`laid_out`: the workbench's, the AI
+/// component's), also as their
 /// things flow anew across its columns (cards and quick launch's things a row more or less) or its lanes take other
 /// shapes (see `view::Shape`), but not while it is sized by hand (`by_hand`): laid out again for each size the hand
 /// makes, it shows that at once, as the hand makes it (turning behind the hand, each turn from one still turning, what
 /// it drew showed through faded twice over, and its cards' grounds were drawn lighter and darker as they faded).
-fn turns_into(last: &Shown, shown: &Shown, workbench: bool, by_hand: bool, theme: &Theme) -> bool {
-    if workbench && by_hand {
+fn turns_into(last: &Shown, shown: &Shown, laid_out: bool, by_hand: bool, theme: &Theme) -> bool {
+    if laid_out && by_hand {
         return false;
     }
-    let flowed = workbench && (last.layout.flow(theme) != shown.layout.flow(theme) || last.layout.shapes(theme) != shown.layout.shapes(theme));
+    let flowed = laid_out && (last.layout.flow(theme) != shown.layout.flow(theme) || last.layout.shapes(theme) != shown.layout.shapes(theme));
     last.form != shown.form || last.layout.heights.len() != shown.layout.heights.len() || flowed
 }
 
@@ -5505,7 +5509,7 @@ mod tests {
         use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
         let contact = Contact { monitor: RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, work: RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, scale: 1.5 };
-        let content = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let content = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         let mut widget = Widget::new(contact, POINT { x: 400, y: 300 }, content).unwrap();
         // (The panel over everywhere the pointer may be: let go, it is over the panel.)
         let everywhere = RECT { left: -100_000, top: -100_000, right: 100_000, bottom: 100_000 };
@@ -5544,7 +5548,7 @@ mod tests {
     #[test]
     fn finds_a_stuck_note_merged_or_alone() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
+        let note = |name: &str| Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
         assert_eq!(note("a.md").holding("note:a.md"), Some(None));
         let merged = Content::Merged(Box::new(Merged::new(vec![Content::Music(MusicShown::new(music::LEAST)), note("a.md")], true, music::LEAST)));
         assert_eq!(merged.holding("note:a.md"), Some(Some(1)));
@@ -5561,7 +5565,7 @@ mod tests {
         let _one = crate::pretending();
         crate::notes::pretend(vec![Note { name: "a.md".into(), text: "a".into(), colour: Colour::Pink, stamp: Default::default() }]);
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let note = |name: &str| Content::Readings(Readings { workbench: true, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
+        let note = |name: &str| Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}{name}", view::STUCK_NOTE_LANE)), ..Readings::new(choice.clone()) });
         let cover = MusicGround::Cover;
         assert_eq!(note("a.md").ground(None, cover), Some(Ground::Tint(view::note_colour(Colour::Pink))));
         assert_eq!(note("a.md").ground(Some(Colour::Green), cover), Some(Ground::Tint(view::note_colour(Colour::Green))));
@@ -5647,7 +5651,7 @@ mod tests {
         let seen = Seen::of(history);
         let scene = Scene { music_apart: true, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: view::Scrolls::default(), tab: view::Tab::Shelf, hover: None, thumbs: &view::RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let readings = Content::Readings(Readings { workbench: true, ..Readings::new(choice) });
+        let readings = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, ..Readings::new(choice) });
         let mut merged = Merged::new(vec![readings, Content::Music(MusicShown::new(music::LEAST))], false, (600.0, 700.0));
         let now = Instant::now();
         assert!(merged.lay_out(&scene, &theme, (1920.0, 1080.0), &seen, now));
@@ -5698,7 +5702,7 @@ mod tests {
     #[test]
     fn a_stuck_note_has_no_rule_under_it() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let note = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let note = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
             assert!(!note.dressed(Theme::new(skin, false)).ruled, "{skin:?}");
         }
@@ -5710,7 +5714,7 @@ mod tests {
     #[test]
     fn a_note_pulled_off_the_panel_is_laid_out_as_large_as_it_is() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let note = Content::Readings(Readings { workbench: true, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
+        let note = Content::Readings(Readings { lanes: crate::settings::Part::Workbench, only: Some(format!("{}a.md", view::STUCK_NOTE_LANE)), ..Readings::new(choice) });
         for skin in [Skin::Paper, Skin::Glass, Skin::Fluent] {
             let theme = note.dressed(Theme::new(skin, false));
             let layout = view::Layout::with_columns(vec![view::STUCK_NOTE.1], 1, &theme).fitted(view::STUCK_NOTE);
@@ -5749,7 +5753,7 @@ mod tests {
     #[test]
     fn only_the_readings_have_a_game_button() {
         let choice = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
-        let lanes = |workbench: bool| Content::Readings(Readings { workbench, ..Readings::new(choice.clone()) });
+        let lanes = |workbench: bool| Content::Readings(Readings { lanes: if workbench { crate::settings::Part::Workbench } else { crate::settings::Part::Monitor }, ..Readings::new(choice.clone()) });
         let game = |content: &Content| content.buttons().contains(&Button::Game);
         assert!(!game(&lanes(true)));
         assert!(game(&lanes(false)));

@@ -277,7 +277,7 @@ mod tests {
         append(line("m1", 5));
         crate::settle::want(crate::settle::Work::AiUsage);
         let watched = root.clone();
-        start_in(move || vec![(Tool::Claude, watched.clone())], || WANTED.load(Ordering::SeqCst), || drop(TOLD.fetch_add(1, Ordering::SeqCst)));
+        start_in(move || vec![(Tool::Claude, watched.clone())], || WANTED.load(Ordering::SeqCst), || { TOLD.fetch_add(1, Ordering::SeqCst); });
         assert!(soon(|| usage().is_some_and(|usage| today(&usage) == 5)), "read whole as it is wanted");
         let told = TOLD.load(Ordering::SeqCst);
         append(line("m2", 7));
