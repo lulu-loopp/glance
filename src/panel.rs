@@ -2545,6 +2545,8 @@ struct Panel<'a> {
     /// Whether the game was asked for, and turned off, by hand, as `opening` was laid out: its lane comes or goes
     /// with them (see `arrange`).
     game_at: (bool, bool),
+    /// The AI component's lanes' heights as `opening` was laid out for them (see `arrange_lanes`).
+    ai_heights: Vec<(String, [f32; 2])>,
     /// What a panel laid out afresh while up (the settings changed) still
     /// holds from before: a volume unplugged stays until it closes.
     held: Option<Seen>,
@@ -2715,6 +2717,7 @@ impl<'a> Panel<'a> {
             game: None,
             opening: None,
             game_at: (false, false),
+            ai_heights: Vec::new(),
             held: None,
             style: String::new(),
             hits: Vec::new(),
@@ -4196,6 +4199,17 @@ impl<'a> Panel<'a> {
             }
             self.game_at = game;
         }
+        // The AI component's lanes grown or shrunk since it was laid out (its first reading come, a lane opened or
+        // closed by its head, a model or a session more): laid out anew, holding what it held. (What they show is not
+        // readings that join a lane as they fit: each is shown whole, or drawn over the lane under it.)
+        if self.part == Part::Ai && self.opening.is_some() {
+            let probe = scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned, samples, &now);
+            if view::heights(&probe) != self.ai_heights {
+                if let Some(opening) = self.opening.take() {
+                    self.held = Some(opening.seen);
+                }
+            }
+        }
         let (prefs, theme, lang, scroll, tab, hover, pinned) = (&self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover, self.pinned);
         let opening = match &mut self.opening {
             Some(opening) => {
@@ -4212,6 +4226,9 @@ impl<'a> Panel<'a> {
                 };
                 let scene = scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &now);
                 let heights = view::heights(&scene);
+                if self.part == Part::Ai {
+                    self.ai_heights = heights.clone();
+                }
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 let rail = heights.iter().position(|(id, _)| id == "apps");
                 self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1, rail);
