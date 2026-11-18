@@ -52,15 +52,61 @@ struct Rate {
     resets_at: Option<f64>,
 }
 
-/// The limit `given` tells at `now`: none where it tells none (an account with no subscription's limits, or a session
-/// before its first answer). Each window may be left out (Claude Code drops one as it starts again).
-fn limit_of(given: &[u8], now: u64) -> Option<Limit> {
+/// The limit `given` tells at `now`, of an account on `plan`: none where it tells none (an account with no
+/// subscription's limits, or a session before its first answer). Each window may be left out (Claude Code drops one as
+/// it starts again, and tells none a plan does not have).
+fn limit_of(given: &[u8], plan: Option<String>, now: u64) -> Option<Limit> {
     let rates = serde_json::from_slice::<Given>(given).ok()?.rate_limits?;
     let windows: Vec<Window> = [(300, rates.five_hour), (10080, rates.seven_day)]
         .into_iter()
         .filter_map(|(minutes, rate)| rate.map(|rate| Window { minutes, used: rate.used_percentage, resets: rate.resets_at.map(|seconds| (seconds * 1000.0) as u64) }))
         .collect();
-    (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan: None, windows, balance: None, told: now })
+    (!windows.is_empty()).then(|| Limit { tool: Tool::Claude, id: ID.into(), name: None, plan, windows, balance: None, told: now })
+}
+
+/// What is kept of the limit `told` and the one `kept` before it: each window as it is told, but where the one kept is
+/// the same window (it starts again at the same time) with more of it used. Each session tells the limits of its own
+/// last answer, and one idle since tells them again as its status line is drawn: a window's use within it only grows,
+/// so less of it is an older answer's.
+fn newest(told: Limit, kept: Option<Limit>) -> Limit {
+    let Some(kept) = kept else { return told };
+    let windows = told
+        .windows
+        .into_iter()
+        .map(|window| match kept.windows.iter().find(|was| was.minutes == window.minutes && was.resets.is_some() && was.resets == window.resets) {
+            Some(was) if was.used > window.used => Window { used: was.used, ..window },
+            _ => window,
+        })
+        .collect();
+    Limit { windows, ..told }
+}
+
+/// Claude Code's account file, as the session that runs its status line has it: in `CLAUDE_CONFIG_DIR` where that is
+/// set, else in the user's folder.
+fn account_file() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join(".claude.json")),
+        None => std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(|home| PathBuf::from(home).join(".claude.json")),
+    }
+}
+
+/// Of Claude Code's account file, the plan alone (nothing else of it is read).
+#[derive(Deserialize)]
+struct Account {
+    #[serde(rename = "oauthAccount")]
+    account: Option<Signed>,
+}
+
+#[derive(Deserialize)]
+struct Signed {
+    #[serde(rename = "planDisplayName")]
+    plan: Option<String>,
+}
+
+/// The plan the account is on as Claude Code names it ("Pro", "Max"), from `text` (its account file): none where it
+/// names none.
+fn plan_in(text: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Account>(text).ok()?.account?.plan.filter(|plan| !plan.trim().is_empty())
 }
 
 /// The limit last told, as kept in `folder` (none where none was, or it cannot be read).
@@ -76,16 +122,19 @@ pub fn run() -> i32 {
         return 1;
     }
     let folder = folder();
-    keep_told(&given, &folder, crate::station::now_ms());
+    let plan = account_file().and_then(|file| std::fs::read(file).ok()).and_then(|text| plan_in(&text));
+    keep_told(&given, plan, &folder, crate::station::now_ms());
     match (replaced_command(&folder), parent_program()) {
         (Some(command), Some(shell)) => pass_on(&shell, &command, &given),
         _ => 0,
     }
 }
 
-/// The limit `given` tells at `now` kept in `folder`, where it tells one.
-fn keep_told(given: &[u8], folder: &Path, now: u64) {
-    if let Some(limit) = limit_of(given, now) {
+/// The limit `given` tells at `now` (of an account on `plan`) kept in `folder` with what was kept there (see `newest`),
+/// where it tells one.
+fn keep_told(given: &[u8], plan: Option<String>, folder: &Path, now: u64) {
+    if let Some(limit) = limit_of(given, plan, now) {
+        let limit = newest(limit, told_in(folder));
         if std::fs::create_dir_all(folder).is_ok() {
             let _ = super::write_whole(folder, LIMITS, &serde_json::to_vec(&limit).unwrap_or_default());
         }
@@ -435,12 +484,12 @@ mod tests {
     #[test]
     fn reads_the_limits_claude_code_tells() {
         let given = br#"{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#;
-        let limit = limit_of(given, 7).unwrap();
+        let limit = limit_of(given, None, 7).unwrap();
         assert_eq!((limit.tool, limit.id.as_str(), limit.told), (Tool::Claude, "claude", 7));
         assert_eq!(limit.windows, [Window { minutes: 300, used: 23.5, resets: Some(1_738_425_600_000) }, Window { minutes: 10080, used: 41.2, resets: Some(1_738_857_600_000) }]);
         let given = br#"{"rate_limits":{"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#;
-        assert_eq!(limit_of(given, 7).unwrap().windows.len(), 1);
-        assert!(limit_of(br#"{"model":{}}"#, 7).is_none() && limit_of(br#"{"rate_limits":{}}"#, 7).is_none() && limit_of(b"not json", 7).is_none());
+        assert_eq!(limit_of(given, None, 7).unwrap().windows.len(), 1);
+        assert!(limit_of(br#"{"model":{}}"#, None, 7).is_none() && limit_of(br#"{"rate_limits":{}}"#, None, 7).is_none() && limit_of(b"not json", None, 7).is_none());
     }
 
     /// The limit told kept in Glance's folder for it, and read from there as it was told; none told, the one kept before
@@ -448,12 +497,41 @@ mod tests {
     #[test]
     fn keeps_the_limits_it_is_told() {
         let folder = folder().join("keeps");
-        keep_told(br#"{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1738425600}}}"#, &folder, 9);
+        keep_told(br#"{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1738425600}}}"#, None, &folder, 9);
         let kept = told_in(&folder).unwrap();
         assert_eq!((kept.told, kept.windows.as_slice()), (9, [Window { minutes: 300, used: 12.0, resets: Some(1_738_425_600_000) }].as_slice()));
-        keep_told(br#"{"model":{}}"#, &folder, 10);
+        keep_told(br#"{"model":{}}"#, None, &folder, 10);
         assert_eq!(told_in(&folder).unwrap().told, 9);
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// Told by sessions one after another: a window as the newest answer has it, the same window told with less of it
+    /// used again (a session idle since) kept as it was, and told again once it has started again; the plan as told.
+    #[test]
+    fn keeps_the_newest_answers_limits_whichever_session_tells_them() {
+        let folder = folder().join("newest");
+        let _ = std::fs::remove_dir_all(&folder);
+        let week = |used: u32, resets: u64| format!(r#"{{"rate_limits":{{"seven_day":{{"used_percentage":{used},"resets_at":{resets}}}}}}}"#);
+        let used = || told_in(&folder).unwrap().windows.iter().map(|window| (window.used, window.resets)).collect::<Vec<_>>();
+        keep_told(week(49, 1795449600).as_bytes(), Some("Ultra".into()), &folder, 1);
+        keep_told(week(45, 1795449600).as_bytes(), Some("Ultra".into()), &folder, 2);
+        assert_eq!(used(), [(49.0, Some(1_795_449_600_000))]);
+        assert_eq!((told_in(&folder).unwrap().told, told_in(&folder).unwrap().plan.as_deref()), (2, Some("Ultra")));
+        keep_told(week(52, 1795449600).as_bytes(), None, &folder, 3);
+        assert_eq!(used(), [(52.0, Some(1_795_449_600_000))]);
+        keep_told(week(3, 1796054400).as_bytes(), None, &folder, 4);
+        assert_eq!(used(), [(3.0, Some(1_796_054_400_000))]);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// The plan from Claude Code's account file, nothing else of it read; none where it names none.
+    #[test]
+    fn reads_the_plan_from_claude_codes_account_file() {
+        let text = br#"{"numStartups":3,"projects":{"E:/x":{"history":[]}},"oauthAccount":{"accountUuid":"made-up","planDisplayName":"Max","organizationType":"claude_max"}}"#;
+        assert_eq!(plan_in(text).as_deref(), Some("Max"));
+        assert_eq!(plan_in(br#"{"oauthAccount":{"planDisplayName":" "}}"#), None);
+        assert_eq!(plan_in(br#"{"numStartups":3}"#), None);
+        assert_eq!(plan_in(b"not json"), None);
     }
 
     /// What it is told passed on whole to the status line it took the place of, by each shell Claude Code may run it
