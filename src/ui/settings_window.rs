@@ -8181,17 +8181,39 @@ It can be disconnected here at any time, and the status line command put back.",
         // (Quick launch as its rail, as the panel lays it out.)
         let rail = lanes.iter().position(|lane| lane.id() == "apps");
         let columns = self.settings.columns_of(part);
+        // The AI component as its edges open it: its dock (down its edge, across a top one) where it opens so and has
+        // sources to dock, as the panel lays it out (see `Panel::arrange_lanes`); else its lanes.
+        let shows = crate::ui::forms::shows(&probe);
+        let dock = match shows {
+            crate::ui::forms::Shows::Ai(count) if part == Part::Ai && self.settings.ai_form == crate::settings::AiForm::Dock && count > 0 => Some(crate::ui::forms::Small::Dock { across: edge == Edge::Top }),
+            _ => None,
+        };
         // What it is (another drawn in its place is not turned into: see `render::Turn::follow`).
         let what = {
             let mut key = DefaultHasher::new();
-            (part, edge, whole, size.is_some(), at.is_some(), only).hash(&mut key);
+            (part, edge, whole, size.is_some(), at.is_some(), only, dock).hash(&mut key);
             key.finish()
         };
         // No larger than the screen holds it, as the panel is made (see `Panel::dragged`).
         let size = size.unwrap_or_else(|| self.settings.panel_size_on(part, self.stage.screen.as_deref())).clamp(SIZES.0, SIZES.1);
         let size = size.min(arrange::largest(&measure, edge, &heights, (sw, sh), columns, size, rail).max(SIZES.0));
-        let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
-        let (pw, ph) = (layout.width() * zoom, layout.height() * zoom);
+        let (layout, zoom, small) = match dock {
+            Some(dock) => {
+                let heights = view::heights(&probe);
+                let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
+                let want = arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) });
+                let opening = arrange::Opening::new(&measure, edge, &lanes, shows, (sw, sh), columns, size, want, seen.clone());
+                let small = opening.small().map(|small| (small, opening.size));
+                (opening.layout, opening.zoom, small)
+            }
+            None => {
+                let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
+                (layout, zoom, None)
+            }
+        };
+        // How large it is drawn, its own DIPs: its dock's size, else its lanes'.
+        let extent = |layout: &view::Layout| small.map_or((layout.width(), layout.height()), |(_, size)| size);
+        let (pw, ph) = (extent(&layout).0 * zoom, extent(&layout).1 * zoom);
         let along = |at: f32, length: f32, extent: f32| (at - length / 2.0).min(extent - GAP - length).max(GAP);
         // (Slid in, as far past the edge as its shadow reaches.)
         let away = 1.0 - out;
@@ -8199,7 +8221,7 @@ It can be disconnected here at any time, and the status line command put back.",
         // Its corner on the screen, laid out as `layout` at `zoom`: against its edge, or where it is put down (where
         // one lane of it is, that lane's).
         let corner = |layout: &view::Layout, zoom: f32| {
-            let (pw, ph, inset) = (layout.width() * zoom, layout.height() * zoom, measure.inset * zoom);
+            let (pw, ph, inset) = (extent(layout).0 * zoom, extent(layout).1 * zoom, measure.inset * zoom);
             match (at, only.and_then(|lane| layout.lanes().get(lane).copied())) {
                 (Some(at), Some(lane)) => (at.0 - lane.x * zoom, at.1 - lane.y * zoom),
                 (Some(at), None) => at,
@@ -8219,8 +8241,9 @@ It can be disconnected here at any time, and the status line command put back.",
             plot,
             screen,
             panel: Some(shown(pos.0, pos.1, pw, ph)),
-            lanes: boxes.iter().map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom)).collect(),
-            bar: Some(layout.bar()).map(|bar| shown(pos.0 + bar.x * zoom, pos.1 + bar.y * zoom, bar.w * zoom, bar.h * zoom)),
+            // (A dock has neither lanes nor a bar.)
+            lanes: if small.is_some() { Vec::new() } else { boxes.iter().map(|lane| shown(pos.0 + lane.x * zoom, pos.1 + lane.y * zoom, lane.w * zoom, lane.h * zoom)).collect() },
+            bar: small.is_none().then(|| layout.bar()).map(|bar| shown(pos.0 + bar.x * zoom, pos.1 + bar.y * zoom, bar.w * zoom, bar.h * zoom)),
             head: (measure.pad_top + view::HEAD_BAND) * zoom * k,
         };
         if !draw {
@@ -8271,7 +8294,7 @@ It can be disconnected here at any time, and the status line command put back.",
         let local = Matrix3x2::scale(zoom, zoom) * Matrix3x2::translation(pos.0, pos.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(ox, oy);
         // The stage's desktop is a pixel a DIP: a panel DIP covers `zoom` of them.
         let backdrop = self.stage.bitmap.as_ref().map(|(_, bitmap)| (bitmap, Vector2 { X: pos.0 / zoom, Y: pos.1 / zoom }, self.stage.desktop.as_ref().map_or(0, |desktop| desktop.digest), zoom));
-        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: at.is_none().then_some(edge), backdrop, frost, rough: false };
+        let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small, size: extent(&layout), at: (0.0, 0.0), edge: at.is_none().then_some(edge), backdrop, frost, rough: false };
         let scale = self.scale * zoom * k;
         let cache = match staged_as {
             Shown::Preview => &mut self.layers,
@@ -8300,7 +8323,7 @@ It can be disconnected here at any time, and the status line command put back.",
             // (Not shown, the frame: see `Frame::fail`.)
             Err(error) => frame.fail(error),
         }
-        staged(layout.plot_width(&theme, &lanes).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32))
+        staged(layout.plot_width(&theme, &lanes).filter(|_| small.is_none()).map(|width| width * self.scale * zoom * k / prefs.chart_seconds as f32))
     }
 
     /// The stage's desktop made a bitmap for a panel's `zoom` (a zoomed panel's units shrink it), where it is not yet.
@@ -8630,6 +8653,50 @@ mod pictures {
             found("DD", "Xiaomi 14", "Xiaomi", "mobile", true),
             found("EE", "iPad", "iPadOS", "mobile", false),
         ]);
+    }
+
+    #[test]
+    #[ignore = "makes a settings window on this PC's graphics card"]
+    fn previews_the_ai_component_as_its_edges_open_it() {
+        let _pretending = crate::pretending();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let info = crate::metrics::Sampler::new().info.clone();
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() * 1000.0;
+        let history = (0..10).map(|i| crate::studio::made_up(&info, now_ms - (10 - i) as f64 * 1000.0, i as u64, 0.4, None)).collect();
+        crate::pictured(info, history);
+        let gfx = gfx::held().unwrap();
+        let hwnd = make(gfx.clone(), None, None).unwrap();
+        let area = Rect { x: 0.0, y: 0.0, w: 700.0, h: 900.0 };
+        // The panel the preview shows, as large as the AI page shows it with the form `form` chosen, and the dock's
+        // size as designed for the sources it docks there.
+        let staged = |form: crate::settings::AiForm| {
+            let mut drawn = None;
+            gfx.draw_offscreen((700, 900), 1.0, |frame| {
+                drawn = with_ui(|ui| {
+                    ui.turn_to(Page::Ai);
+                    ui.settings.ai_form = form;
+                    let prefs = ui.prefs.clone().holding(Part::Ai);
+                    let edge = ui.preview_edge();
+                    let dock = view::ai::dock_size(edge == Edge::Top, view::ai::docked(&prefs).len());
+                    let panel = ui.stage_panel(frame, area, Some((edge, &prefs, Part::Ai)), Staging { draw: false, ..Staging::default() }).panel.unwrap();
+                    (panel, dock)
+                });
+            })
+            .unwrap();
+            drawn.unwrap()
+        };
+        let (card, _) = staged(crate::settings::AiForm::Card);
+        let (dock, designed) = staged(crate::settings::AiForm::Dock);
+        // (Its window gone first: a test ended with it still up does not end.)
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+        assert!(designed.0 > 0.0 && designed.1 > 0.0);
+        // Its dock, shaped as the dock is (however large the preview draws it), not its card.
+        assert!((dock.w / dock.h - designed.0 / designed.1).abs() < 0.01, "dock {:?} designed {designed:?}", (dock.w, dock.h));
+        assert!((card.w / card.h - designed.0 / designed.1).abs() > 0.1, "card {:?}", (card.w, card.h));
     }
 
     #[test]
