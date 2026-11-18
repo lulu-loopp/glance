@@ -50,6 +50,7 @@ impl Drop for Window {
         super::todo::went(self.hwnd);
         let _ = unsafe { DestroyWindow(self.hwnd) };
         super::tip::went(self.hwnd);
+        super::ai_card::went(self.hwnd);
     }
 }
 
@@ -490,6 +491,7 @@ impl Window {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         super::tip::went(self.hwnd);
+        super::ai_card::went(self.hwnd);
     }
 
     /// Lets clicks through to whatever is underneath, or takes them. Only

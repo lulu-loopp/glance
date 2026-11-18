@@ -1218,6 +1218,8 @@ enum Field {
     OverlayShow,
     /// The player music is followed from (see `Ui::sources`).
     MusicSource,
+    /// What an edge holding the AI component opens: its card, or its dock.
+    AiForm,
     /// The station's (see `settings::StationSettings`): the folders the files come lately are not listed from (all
     /// listed again: under Recent files' group, see `Ui::recent_rows`), how long what is not pinned stays, files kept
     /// as a copy too, and what is dragged off it taken off. (What is copied kept, and the files come lately listed, are
@@ -2985,6 +2987,7 @@ impl Ui {
                 }
             }
             (Page::Ai, _) => {
+                rows.push(Row::Choice(Field::AiForm));
                 rows.push(Row::Choice(Field::Columns));
                 for entry in &self.prefs.ai {
                     rows.push(Row::Module(entry.id.clone()));
@@ -4089,6 +4092,7 @@ impl Ui {
                 vec![s("每次询问", "Ask each time"), s("一律拒绝", "Refuse")],
                 self.nearby.as_ref().map(|nearby| usize::from(nearby.others_refused)),
             ),
+            Field::AiForm => (pick(lang, "划出时显示", "Shown from the edge"), vec![s("卡片", "Card"), s("边条", "Dock")], Some(usize::from(settings.ai_form == crate::settings::AiForm::Dock))),
             Field::MusicSource => {
                 let mut options = vec![s("自动", "Automatic")];
                 options.extend(self.sources.iter().map(|(_, name)| name.clone()));
@@ -4191,6 +4195,7 @@ impl Ui {
             Field::OverlayLayout => settings.overlay.layout = [Layout::Card, Layout::Strip][index],
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
             Field::OverlayShow => settings.overlay.show(OVERLAY_SHOWN[index]),
+            Field::AiForm => settings.ai_form = [crate::settings::AiForm::Card, crate::settings::AiForm::Dock][index],
             Field::MusicSource => {
                 settings.music_source = index.checked_sub(1).and_then(|at| self.sources.get(at)).map(|(id, name)| crate::settings::MusicSource { id: id.clone(), name: name.clone() });
             }
@@ -4578,6 +4583,11 @@ impl Ui {
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
             Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "What devices trusted send is taken without asking")),
+            Field::AiForm => Some(pick(
+                self.lang,
+                "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情；位于顶部边缘时横向排列",
+                "The dock lies along the screen's edge, a source's detail shown beside it as the pointer rests on it; across a top edge",
+            )),
             Field::MusicSource => Some(pick(
                 self.lang,
                 "自动时仅跟随音乐播放器。在网页中听歌时，请选择所用的浏览器。时间与媒体不受此项影响",

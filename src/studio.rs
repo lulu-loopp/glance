@@ -540,7 +540,7 @@ impl Filming {
     fn lay_out(&mut self, t: f32, scene: &Scene, theme: &Theme, seen: &Seen, work: (f32, f32), room: Option<(f32, f32)>) -> Shown {
         let heights = view::heights(scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-        let readings = forms::count(scene);
+        let readings = forms::shows(scene);
         let want = match room {
             Some(room) => Want::Room(room, Some(self.taken.filter(|taken| taken.form == self.choice.form).unwrap_or(arrange::Shown { form: self.choice.form, taken: room }))),
             None => Want::Kept(self.choice),
@@ -824,7 +824,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             None => {
                 let heights = view::heights(scene);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, heights)| (id.as_str(), *heights)).collect();
-                held.insert(arrange::Opening::new(theme, edge, &lanes, 0, (sw, sh), None, shot.size, arrange::Want::Itself, scene.seen.clone()))
+                held.insert(arrange::Opening::new(theme, edge, &lanes, forms::Shows::Readings(0), (sw, sh), None, shot.size, arrange::Want::Itself, scene.seen.clone()))
             }
         };
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);

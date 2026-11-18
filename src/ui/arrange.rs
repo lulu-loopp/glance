@@ -3,7 +3,7 @@
 
 use super::seen::Seen;
 use super::theme::Theme;
-use super::forms::Small;
+use super::forms::{Shows, Small};
 use super::view::{rail_length, RailSide, RAIL_ROW, RAIL_W};
 use super::view::{Detail, Layout, Shape, COLUMN_WIDTH};
 use crate::reading::StaticInfo;
@@ -144,7 +144,7 @@ impl Form {
             Form::Lanes { detail: Detail::Compact | Detail::Shape(_), .. } => 1,
             Form::Small(Small::Tiles { .. }) => 2,
             Form::Small(Small::Corner | Small::Tall) => 3,
-            Form::Small(Small::Strip { rich: true } | Small::Rail) => 4,
+            Form::Small(Small::Strip { rich: true } | Small::Rail | Small::Dock { .. }) => 4,
             Form::Small(Small::Strip { rich: false }) => 5,
             Form::Small(Small::Micro) => 6,
         }
@@ -236,7 +236,7 @@ pub struct Ladder {
 }
 
 impl Ladder {
-    pub fn new(theme: &Theme, lanes: &[Heights], readings: usize) -> Self {
+    pub fn new(theme: &Theme, lanes: &[Heights], shows: Shows) -> Self {
         let mut rungs = Vec::new();
         for detail in [Detail::Full, Detail::Compact] {
             for columns in (1..=MAX_COLUMNS.min(lanes.len())).rev() {
@@ -251,10 +251,9 @@ impl Ladder {
         }
         // (The small layouts show readings: with none to show (the workbench's station, notes, quick launch), none
         // offered. Sized down, such a widget went to one, and showed nothing.)
-        if readings > 0 {
-            for small in Small::ladder(readings) {
-                rungs.push(Rung { form: Form::Small(small), size: small.size_within(readings, theme.radius), stretch: small.stretch(), floor: small.floor() });
-            }
+        // (The AI component's sources, as its dock.)
+        for small in Small::ladder(shows) {
+            rungs.push(Rung { form: Form::Small(small), size: small.size_within(shows.count(), theme.radius), stretch: small.stretch(), floor: small.floor() });
         }
         Ladder { rungs }
     }
@@ -403,7 +402,7 @@ impl Opening {
     }
 
     /// Lays out `lanes` (each by module, with its heights when holding what
-    /// `seen` holds) and the small layouts' `readings` for a work area
+    /// `seen` holds) and what the small layouts show (`shows`) for a work area
     /// `work` DIPs large, at the size chosen, as `want` says: by itself,
     /// in `columns` if chosen (see `arrange`); else as far as the screen
     /// holds what is wanted, and otherwise what best fills the screen.
@@ -412,7 +411,7 @@ impl Opening {
         theme: &Theme,
         edge: Edge,
         lanes: &[(&str, Heights)],
-        readings: usize,
+        shows: Shows,
         work: (f32, f32),
         columns: Option<usize>,
         size: f32,
@@ -421,7 +420,7 @@ impl Opening {
     ) -> Self {
         let heights: Vec<Heights> = lanes.iter().map(|(_, heights)| *heights).collect();
         let ids: Vec<String> = lanes.iter().map(|(id, _)| id.to_string()).collect();
-        let ladder = Ladder::new(theme, &heights, readings);
+        let ladder = Ladder::new(theme, &heights, shows);
         // As it is laid out itself: quick launch, at the panel's edge, as its rail.
         let itself = |ids: Vec<String>, seen: Seen| {
             let rail = ids.iter().position(|id| id == "apps");
@@ -606,13 +605,13 @@ mod tests {
     #[test]
     fn a_large_room_shows_all_of_each_lane_and_a_small_one_rings() {
         let theme = Theme::new(Skin::Paper, false);
-        let ladder = Ladder::new(&theme, &lanes(), 6);
-        let three = Ladder::new(&theme, &lanes(), 6).drawn(Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.0, extra: (0.0, 0.0) });
+        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
+        let three = Ladder::new(&theme, &lanes(), Shows::Readings(6)).drawn(Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.0, extra: (0.0, 0.0) });
         assert_eq!(ladder.choose(three, None).form, Form::Lanes { detail: Detail::Full, columns: 3 });
         assert_eq!(ladder.choose((130.0, 40.0), None).form, Form::Small(Small::Micro));
         assert_eq!(ladder.choose((90.0, 320.0), None).form, Form::Small(Small::Rail));
         // With no readings to show small (the workbench's lanes), sized down, still its lanes, at their least.
-        let none = Ladder::new(&theme, &lanes(), 0);
+        let none = Ladder::new(&theme, &lanes(), Shows::Readings(0));
         assert!(matches!(none.choose((130.0, 40.0), None).form, Form::Lanes { .. }));
         assert!(matches!(ladder.choose((700.0, 36.0), None).form, Form::Small(Small::Strip { .. })));
     }
@@ -620,7 +619,7 @@ mod tests {
     #[test]
     fn between_its_forms_a_panel_grows_with_its_room() {
         let theme = Theme::new(Skin::Paper, false);
-        let ladder = Ladder::new(&theme, &lanes(), 6);
+        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
         // Within one form, a little more room is a little larger, stretched
         // and scaled: never a jump.
         let a = ladder.choose((480.0, 230.0), None);
@@ -642,7 +641,7 @@ mod tests {
     fn a_level_left_comes_back_only_with_room_to_spare() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, 6);
+        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
         // Narrowed a pixel at a time until the level drops, then widened:
         // a few pixels back keep the level it dropped to; `UP` times the
         // room it dropped at, both ways, brings the other back.
@@ -671,7 +670,7 @@ mod tests {
     #[test]
     fn tiles_across_and_down_do_not_swap_as_a_corner_wavers_over_their_line() {
         let theme = Theme::new(Skin::Glass, false);
-        let ladder = Ladder::new(&theme, &lanes(), 6);
+        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
         // Where, going from wide to tall, three across gives way to two across: the room before and after.
         let room = |i: usize| (560.0 - 2.0 * i as f32, 300.0 + 1.5 * i as f32);
         let mut shown = Shown::after(None, ladder.choose(room(0), None).form, room(0));
@@ -701,7 +700,7 @@ mod tests {
     #[test]
     fn a_rail_widened_a_long_way_gives_way_though_it_is_a_little_shorter() {
         let theme = Theme::new(Skin::Glass, false);
-        let ladder = Ladder::new(&theme, &lanes(), 6);
+        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
         let tall = (130.0, 330.0);
         let shown = Shown::after(None, ladder.choose(tall, None).form, tall);
         assert_eq!(shown.form, Form::Small(Small::Rail), "{shown:?}");
@@ -715,7 +714,7 @@ mod tests {
     fn a_room_grown_one_way_as_it_shrinks_the_other_turns_its_level_once_at_most() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, 6);
+        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
         // Dragged by a corner, wider and shorter at each step: the level only ever goes down, never back up and
         // down again.
         let (mut width, mut height) = (500.0f32, 700.0f32);
@@ -737,7 +736,7 @@ mod tests {
     fn a_narrow_tall_room_gets_the_corner_on_end() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, 6);
+        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
         assert_eq!(ladder.choose((260.0, 420.0), None).form, Form::Small(Small::Tall));
         assert_eq!(ladder.choose((320.0, 190.0), None).form, Form::Small(Small::Corner));
     }
@@ -746,7 +745,7 @@ mod tests {
     fn the_less_room_the_less_shows_never_back() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, 6);
+        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
         // Narrower and narrower, then shorter and shorter, each from the
         // form shown: the level only goes down, and passes the tiles on the
         // way where they fit at all.
@@ -778,7 +777,7 @@ mod tests {
         let theme = Theme::new(Skin::Paper, false);
         let corner = Choice { form: Form::Small(Small::Corner), scale: 1.0, extra: (0.0, 0.0) };
         for want in [Want::Kept(corner), Want::Room((300.0, 200.0), None)] {
-            let opening = Opening::new(&theme, Edge::Right, &[], 0, (1600.0, 900.0), None, 1.0, want, Seen::default());
+            let opening = Opening::new(&theme, Edge::Right, &[], Shows::Readings(0), (1600.0, 900.0), None, 1.0, want, Seen::default());
             assert_eq!(opening.choice, None);
             assert!(opening.lanes.is_empty());
         }
@@ -790,10 +789,10 @@ mod tests {
         let lanes = [("cpu", [300.0, 150.0]), ("gpu:0", [300.0, 150.0]), ("memory", [300.0, 150.0])];
         let three = Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.3, extra: (0.0, 0.0) };
         // Room for it: as kept.
-        let opening = Opening::new(&theme, Edge::Right, &lanes, 6, (3000.0, 2000.0), None, 1.0, Want::Kept(three), Seen::default());
+        let opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(three), Seen::default());
         assert_eq!(opening.choice, Some(three));
         // A screen too small for it: what best fills the screen.
-        let opening = Opening::new(&theme, Edge::Right, &lanes, 6, (800.0, 600.0), None, 1.0, Want::Kept(three), Seen::default());
+        let opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(6), (800.0, 600.0), None, 1.0, Want::Kept(three), Seen::default());
         assert_ne!(opening.choice.unwrap().form, three.form);
         assert!(opening.size.0 * opening.zoom <= 800.0 && opening.size.1 * opening.zoom <= 600.0);
     }
@@ -828,7 +827,7 @@ mod tests {
         let mut opened = Seen::default();
         opened.gpus.push(crate::ui::seen::GpuSeen { present: true, ..Default::default() });
         let lanes = [("cpu", [700.0; 2]), ("gpu:0", [100.0; 2]), ("memory", [100.0; 2])];
-        let mut opening = Opening::new(&theme, Edge::Right, &lanes, 3, (1400.0, 900.0), None, 1.0, Want::Itself, opened.clone());
+        let mut opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(3), (1400.0, 900.0), None, 1.0, Want::Itself, opened.clone());
         assert_eq!(opening.layout.columns, 2);
         let (layout, zoom) = (opening.layout.height(), opening.zoom);
         // The GPU's clock and power read for the first time together: the

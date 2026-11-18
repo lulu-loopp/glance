@@ -178,9 +178,9 @@ impl Ui {
         }
     }
 
-    /// The readings (as their corner shows them: the processor's last minutes, the chips' rings, the network) or the
-    /// workbench (as its panel does), drawn as the skin draws them, as large as `area` holds, in its middle; in the
-    /// layers `layers` (one each: see `library_layers`).
+    /// The readings (as their corner shows them: the processor's last minutes, the chips' rings, the network), the
+    /// workbench (as its panel does) or the AI component (as its edges open it), drawn as the skin draws them, as large
+    /// as `area` holds, in its middle; in the layers `layers` (one each: see `library_layers`).
     fn component_picture(&mut self, frame: &Frame, part: Part, area: Rect, layers: usize) {
         let lang = self.lang;
         let app = crate::app();
@@ -202,9 +202,13 @@ impl Ui {
         let scene = Scene { music_apart: false, hint: None, thumbs: &crate::ui::view::RESTING, info: &app.info(), prefs: &prefs, theme: &theme, lang, history: samples, seen: &seen, pen_ms: pen, scrolls: crate::ui::view::Scrolls::default(), tab: crate::ui::view::Tab::Shelf, hover: None, pinned: false, overlay, buttons: false, newer, settings_lit: None };
         let heights = view::heights(&scene);
         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
-        let readings = super::super::forms::count(&scene);
+        let readings = super::super::forms::shows(&scene);
         let want = match part {
             Part::Monitor => arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Corner), scale: 1.0, extra: (0.0, 0.0) }),
+            // (The AI component as its edges open it: its dock, laid across to fill the tile as a top edge's is.)
+            Part::Ai if self.settings.ai_form == crate::settings::AiForm::Dock => {
+                arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Dock { across: true }), scale: 1.0, extra: (0.0, 0.0) })
+            }
             _ => arrange::Want::Itself,
         };
         let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings, (sw, sh), None, 1.0, want, seen.clone());

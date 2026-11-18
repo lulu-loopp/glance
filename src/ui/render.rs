@@ -201,10 +201,7 @@ impl PanelLayers {
         let drawn = picture.small.map_or((layout.width(), layout.height()), |(_, drawn)| drawn);
         self.content.draw(frame, content_key, content, (0.0, 0.0, drawn.0, drawn.1), scale, halo, |frame| {
             match picture.small {
-                Some((small, drawn)) => {
-                    forms::paint(frame, scene, small, drawn);
-                    hits = Some(Vec::new());
-                }
+                Some((small, drawn)) => hits = Some(forms::paint(frame, scene, small, drawn)),
                 None => hits = Some(view::paint(frame, scene, picture.lanes, layout, Pass::Content)),
             }
             Ok(())
@@ -234,7 +231,9 @@ impl PanelLayers {
 pub fn record(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout, small: Option<(Small, (f32, f32))>, scale: f32, at: (f32, f32)) -> Vec<Part> {
     let recorder = Recorder::new(frame, scale, at);
     match small {
-        Some((small, size)) => forms::paint(&recorder, scene, small, size),
+        Some((small, size)) => {
+            forms::paint(&recorder, scene, small, size);
+        }
         None => {
             view::paint(&recorder, scene, lanes, layout, Pass::Content);
             view::paint(&recorder, scene, lanes, layout, Pass::Plots);

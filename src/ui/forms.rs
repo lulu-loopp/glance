@@ -1,7 +1,8 @@
 //! The panel's small layouts, for when it is sized smaller than its lanes
 //! can be: each reading a ring round its icon (how full, for what has a
 //! share), with its figure; laid out as tiles, a corner, a strip, a rail
-//! along the screen's edge, or rings alone.
+//! along the screen's edge, or rings alone. The AI component's: its dock, down a side or across the top (see
+//! `view::ai::paint_dock`).
 
 use super::canvas::{Align, Canvas, Color, Fill, Font, Point};
 use super::icons::Icon;
@@ -27,6 +28,24 @@ pub enum Small {
     Rail,
     /// The chips' rings and nothing else.
     Micro,
+    /// The AI component's sources each as a ring round its maker's mark, down a side or `across` (see
+    /// `view::ai::paint_dock`).
+    Dock { across: bool },
+}
+
+/// What the small layouts show, and how many of it: the readings (see `readings`), or the AI component's sources.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shows {
+    Readings(usize),
+    Ai(usize),
+}
+
+impl Shows {
+    pub fn count(self) -> usize {
+        match self {
+            Shows::Readings(count) | Shows::Ai(count) => count,
+        }
+    }
 }
 
 /// A tile's size, and the room round the tiles (DIPs).
@@ -59,6 +78,7 @@ impl Small {
             Small::Strip { rich: false } => (24.0 + count * 70.0, STRIP),
             Small::Rail => (RAIL, 120.0 + count * RAIL_ROW),
             Small::Micro => (16.0 + 34.0 * count.min(3.0), 38.0),
+            Small::Dock { across } => super::view::ai::dock_size(across, count as usize),
         }
     }
 
@@ -95,6 +115,8 @@ impl Small {
             Small::Strip { rich: false } => (120.0, 10.0),
             Small::Rail => (96.0, 160.0),
             Small::Micro => (30.0, 6.0),
+            Small::Dock { across: false } => (60.0, 240.0),
+            Small::Dock { across: true } => (240.0, 16.0),
         }
     }
 
@@ -103,7 +125,7 @@ impl Small {
         match self {
             Small::Tiles { .. } => 0.9,
             Small::Corner | Small::Tall => 0.85,
-            Small::Strip { .. } | Small::Rail => 0.76,
+            Small::Strip { .. } | Small::Rail | Small::Dock { .. } => 0.76,
             Small::Micro => 0.9,
         }
     }
@@ -118,6 +140,8 @@ impl Small {
             Small::Strip { rich: false } => "strip-short".into(),
             Small::Rail => "rail".into(),
             Small::Micro => "micro".into(),
+            Small::Dock { across: false } => "dock".into(),
+            Small::Dock { across: true } => "dock-across".into(),
         }
     }
 
@@ -129,6 +153,8 @@ impl Small {
             "strip-short" => Small::Strip { rich: false },
             "rail" => Small::Rail,
             "micro" => Small::Micro,
+            "dock" => Small::Dock { across: false },
+            "dock-across" => Small::Dock { across: true },
             _ => {
                 let (across, down) = key.strip_prefix("tiles-")?.split_once('x')?;
                 Small::Tiles { across: across.parse().ok()?, down: down.parse().ok()? }
@@ -136,9 +162,14 @@ impl Small {
         })
     }
 
-    /// The small layouts there are for `count` readings, the most shown
-    /// first.
-    pub fn ladder(count: usize) -> Vec<Small> {
+    /// The small layouts there are for what `shows`, the most shown first: the readings' (none of them for none), or
+    /// the AI component's dock down a side and across.
+    pub fn ladder(shows: Shows) -> Vec<Small> {
+        let count = match shows {
+            Shows::Readings(0) | Shows::Ai(0) => return Vec::new(),
+            Shows::Ai(_) => return vec![Small::Dock { across: false }, Small::Dock { across: true }],
+            Shows::Readings(count) => count,
+        };
         let mut ladder = Vec::new();
         for across in [3, 2] {
             if count > 0 {
@@ -403,13 +434,23 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     readings
 }
 
-/// How many readings the small layouts have for this scene.
-pub fn count(scene: &Scene) -> usize {
-    readings(scene).len()
+/// What the small layouts show for this scene: the AI component's sources where it shows that component (its
+/// modules held: see `Prefs::holding`), else its readings.
+pub fn shows(scene: &Scene) -> Shows {
+    if scene.prefs.modules.iter().any(|entry| entry.id.starts_with("ai:")) {
+        return Shows::Ai(super::view::ai::docked(scene.prefs).len());
+    }
+    Shows::Readings(readings(scene).len())
 }
 
-/// Draws `small` filling `size` (DIPs), its corner at the frame's origin.
-pub fn paint(frame: &dyn Canvas, scene: &Scene, small: Small, size: (f32, f32)) {
+/// Draws `small` filling `size` (DIPs), its corner at the frame's origin; where a press or the pointer does something
+/// in it.
+pub fn paint(frame: &dyn Canvas, scene: &Scene, small: Small, size: (f32, f32)) -> Vec<super::view::HitBox> {
+    if let Small::Dock { across } = small {
+        let hits = super::view::ai::paint_dock(frame, scene, across, size);
+        frame.key("");
+        return hits;
+    }
     let readings = readings(scene);
     let painter = Painter { frame, scene, readings: &readings };
     match small {
@@ -419,8 +460,10 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, small: Small, size: (f32, f32)) 
         Small::Strip { rich } => painter.strip(rich, size),
         Small::Rail => painter.rail(size),
         Small::Micro => painter.micro(size),
+        Small::Dock { .. } => unreachable!("drawn above"),
     }
     frame.key("");
+    Vec::new()
 }
 
 /// What goes on a chart: a reading, and (dashed) its pair's second rate or
@@ -940,7 +983,7 @@ mod tests {
 
     #[test]
     fn keeps_each_layout_under_a_name() {
-        for small in Small::ladder(6).into_iter().chain(Small::ladder(2)) {
+        for small in Small::ladder(Shows::Readings(6)).into_iter().chain(Small::ladder(Shows::Readings(2))).chain(Small::ladder(Shows::Ai(2))) {
             assert_eq!(Small::from_key(&small.key()), Some(small));
         }
         assert_eq!(Small::from_key("tiles-x"), None);
@@ -948,9 +991,11 @@ mod tests {
 
     #[test]
     fn tiles_take_as_many_rows_as_the_readings_need() {
-        assert_eq!(Small::ladder(6)[..2], [Small::Tiles { across: 3, down: 2 }, Small::Tiles { across: 2, down: 3 }]);
-        assert_eq!(Small::ladder(4)[..2], [Small::Tiles { across: 3, down: 2 }, Small::Tiles { across: 2, down: 2 }]);
-        assert!(!Small::ladder(0).iter().any(|s| matches!(s, Small::Tiles { .. })));
+        assert_eq!(Small::ladder(Shows::Readings(6))[..2], [Small::Tiles { across: 3, down: 2 }, Small::Tiles { across: 2, down: 3 }]);
+        assert_eq!(Small::ladder(Shows::Readings(4))[..2], [Small::Tiles { across: 3, down: 2 }, Small::Tiles { across: 2, down: 2 }]);
+        assert!(Small::ladder(Shows::Readings(0)).is_empty() && Small::ladder(Shows::Ai(0)).is_empty());
+        // (The AI component's sources only as its dock.)
+        assert_eq!(Small::ladder(Shows::Ai(3)), [Small::Dock { across: false }, Small::Dock { across: true }]);
     }
 
     #[test]

@@ -219,6 +219,8 @@ struct Config {
     columns: Option<usize>,
     workbench_columns: Option<usize>,
     ai_columns: Option<usize>,
+    /// What an edge holding the AI component opens.
+    ai_form: crate::settings::AiForm,
     /// How large a panel is drawn where it was not sized, and each component's on each screen it was (see
     /// `Settings::part_sizes`).
     size: f32,
@@ -255,6 +257,7 @@ fn config_from(settings: &Settings) -> Config {
         columns: settings.columns_of(Part::Monitor),
         workbench_columns: settings.columns_of(Part::Workbench),
         ai_columns: settings.columns_of(Part::Ai),
+        ai_form: settings.ai_form,
         size: settings.panel_size,
         sizes: settings.part_sizes.clone(),
         overlay: settings.overlay.clone(),
@@ -1190,6 +1193,7 @@ impl Controller {
                                 overlay = None;
                             }
                             crate::ui::tip::screens_changed();
+                            crate::ui::ai_card::screens_changed();
                             crate::ui::beside::screens_changed();
                         }
                         widgets.screens_changed();
@@ -2502,6 +2506,8 @@ struct Panel<'a> {
     part: Part,
     /// The columns chosen in the settings; none, as few as fit.
     columns: Option<usize>,
+    /// It opens as the AI component's dock (see `AiForm`), where there are sources to dock.
+    docked: bool,
     /// The size chosen for its screen, 1 as designed.
     size: f32,
     /// The screen it is on, by the name that stays its own (see `screens`): its size is that screen's.
@@ -2522,6 +2528,8 @@ struct Panel<'a> {
     /// What is under the pointer said under it (see `hover_at`): taken away as the pointer leaves it, the panel goes,
     /// or what is under the pointer changes without it moving (see `hover_again`).
     saying: bool,
+    /// The card beside the AI component's dock shown, of the source the pointer is on (see `follow_card`).
+    carding: bool,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
@@ -2689,6 +2697,7 @@ impl<'a> Panel<'a> {
             edge: Edge::Right,
             part: Part::Monitor,
             columns: None,
+            docked: false,
             size: 1.0,
             screen: None,
             live: false,
@@ -2700,6 +2709,7 @@ impl<'a> Panel<'a> {
             hover: None,
             hint: view::Hint::default(),
             saying: false,
+            carding: false,
             pinned: false,
             full_asked: None,
             game: None,
@@ -2792,6 +2802,7 @@ impl<'a> Panel<'a> {
             Part::Ai => config.ai_columns,
             Part::Monitor | Part::Music => config.columns,
         };
+        self.docked = self.part == Part::Ai && config.ai_form == crate::settings::AiForm::Dock;
         // Mid-drag, the size is the drag's; going back to its own size, the way there's.
         if self.drag.is_none() && self.restoring.is_none() {
             self.size = config.size_on(self.part, self.screen.as_deref());
@@ -2826,7 +2837,7 @@ impl<'a> Panel<'a> {
         // lane's size, and leaves it be.
         let mut sized = self.drawn.clone();
         sized.processes.sort = Default::default();
-        let style = format!("{} {:?} {} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.size, self.skin, serde_json::to_string(&sized).unwrap_or_default());
+        let style = format!("{} {:?} {} {} {:?} {}", serde_json::to_string(&self.edge).unwrap_or_default(), self.columns, self.docked, self.size, self.skin, serde_json::to_string(&sized).unwrap_or_default());
         if style != self.style {
             self.style = style;
             // A second change before a frame laid it out keeps what the
@@ -3465,7 +3476,7 @@ impl<'a> Panel<'a> {
     fn edges_at(&self, x: f32, y: f32) -> Edges {
         let (width, height) = match (self.part, &self.opening, &self.placement) {
             (Part::Music, _, Some(placement)) => ((placement.panel.right - placement.panel.left) as f32 / placement.px, (placement.panel.bottom - placement.panel.top) as f32 / placement.px),
-            (_, Some(opening), _) => (opening.layout.width(), opening.layout.height()),
+            (_, Some(opening), _) => opening.size,
             _ => return Edges::default(),
         };
         let zoom = self.placement.as_ref().map_or(1.0, |placement| placement.px / placement.contact.scale);
@@ -3506,7 +3517,8 @@ impl<'a> Panel<'a> {
         let (placement, opening) = (self.placement.as_ref()?, self.opening.as_ref()?);
         let (x, y) = (client.x as f32 / placement.px - self.corner.0, client.y as f32 / placement.px - self.corner.1);
         let lanes = opening.layout.lanes();
-        if lanes.len() < 2 {
+        // (The dock is one piece, its lanes not shown.)
+        if lanes.len() < 2 || opening.small().is_some() {
             return None;
         }
         // (The readings' lanes by their heads, as ever: pulled by its readings, the panel comes off whole.)
@@ -3820,7 +3832,8 @@ impl<'a> Panel<'a> {
                     let at = POINT { x: corner(lane.x, self.corner.0, placement.window.left) + dx, y: corner(lane.y, self.corner.1, placement.window.top) + dy };
                     (Form::Lanes { detail: Detail::Full, columns: 1 }, at, Some(id))
                 }
-                None => (Form::Lanes { detail: Detail::Full, columns: opening.layout.columns }, POINT { x: placement.panel.left + dx, y: placement.panel.top + dy }, None),
+                // (The dock as it is.)
+                None => (opening.choice.map_or(Form::Lanes { detail: Detail::Full, columns: opening.layout.columns }, |choice| choice.form), POINT { x: placement.panel.left + dx, y: placement.panel.top + dy }, None),
             };
             let size = ((placement.panel.right - placement.panel.left) as f32 / placement.contact.scale, (placement.panel.bottom - placement.panel.top) as f32 / placement.contact.scale);
             self.tear = Some((form, opening.zoom, at, POINT { x: cursor.x - at.x, y: cursor.y - at.y }, size, only));
@@ -4203,14 +4216,24 @@ impl<'a> Panel<'a> {
                 let rail = heights.iter().position(|(id, _)| id == "apps");
                 self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1, rail);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
-                self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, 0, work, self.columns, self.size, arrange::Want::Itself, now.clone()))
+                // The AI component's dock (down its edge, across a top one), where it opens so and has sources to dock;
+                // else laid out itself.
+                let shows = crate::ui::forms::shows(&scene);
+                let want = match shows {
+                    crate::ui::forms::Shows::Ai(count) if self.docked && count > 0 => {
+                        let dock = crate::ui::forms::Small::Dock { across: self.edge == Edge::Top };
+                        arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) })
+                    }
+                    _ => arrange::Want::Itself,
+                };
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, shows, work, self.columns, self.size, want, now.clone()))
             }
         };
         let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
-        let (layout, zoom) = (opening.layout.clone(), opening.zoom);
+        let (layout, zoom, size) = (opening.layout.clone(), opening.zoom, opening.size);
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, (layout.width(), layout.height()), zoom, None);
+        place(placement, self.edge, &self.theme, size, zoom, None);
         self.follow_beside();
         (lanes, layout)
     }
@@ -4292,7 +4315,7 @@ impl<'a> Panel<'a> {
         self.step_restore(now, false);
         let (lanes, layout) = self.arrange_lanes();
         let laid_out = began.elapsed();
-        let zoom = self.opening.as_ref().map_or(1.0, |opening| opening.zoom);
+        let (zoom, small) = self.opening.as_ref().map_or((1.0, None), |opening| (opening.zoom, opening.small().map(|small| (small, opening.size))));
         // Laid out in other columns (sized, or the readings grown): it turns into the new layout (see `render::Turn`).
         let turn = self.turn.follow(0, &lanes, &layout, zoom, now, !reduced_motion());
         let placement = self.placement.as_ref().unwrap();
@@ -4301,7 +4324,7 @@ impl<'a> Panel<'a> {
         let window = placement.painted;
         let size = ((window.right - window.left) as u32, (window.bottom - window.top) as u32);
         let offset = (window.left - placement.window.left, window.top - placement.window.top);
-        let (width, height) = (layout.width(), layout.height());
+        let (width, height) = small.map_or((layout.width(), layout.height()), |(_, size)| size);
         // Where the panel rests in the window, and where it is now, slid
         // out by `shift` of the way it comes in.
         let rest = ((placement.panel.left - window.left) as f32 / px, (placement.panel.top - window.top) as f32 / px);
@@ -4391,7 +4414,7 @@ impl<'a> Panel<'a> {
                 unsafe { frame.dc.PushLayer(&layer, None) };
             }
             let backdrop = behind.as_mut().and_then(|behind| behind.backdrop(&frame.dc, px, window, rest));
-            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
+            let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small, size: (width, height), at: (0.0, 0.0), edge, backdrop, frost, rough: false };
             let local = Matrix3x2::translation(x, y);
             // A thing carried off its station put down and taken off it: turning from how it was drawn as it was
             // carried (its room outlined) into how it is drawn now.
@@ -4750,6 +4773,30 @@ impl<'a> Panel<'a> {
             self.hover = hover;
             self.next_frame = Instant::now();
         }
+        self.follow_card();
+    }
+
+    /// The card beside the AI component's dock: the lane of the source whose ring the pointer is on, beside the panel
+    /// away from its edge (kept as what it tells changes); else none.
+    fn follow_card(&mut self) {
+        let source = match self.hover {
+            Some(Hit::AiSlot(source)) => source,
+            _ => {
+                if std::mem::take(&mut self.carding) {
+                    crate::ui::ai_card::hide();
+                }
+                return;
+            }
+        };
+        let (Some(placement), Some(about)) = (self.placement.as_ref(), self.hit_on_screen(Hit::AiSlot(source))) else { return };
+        use crate::ui::ai_card::Side;
+        let side = match self.edge {
+            Edge::Left => Side::Right,
+            Edge::Right => Side::Left,
+            Edge::Top => Side::Below,
+        };
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang }, placement.panel, about, side);
+        self.carding = true;
     }
 
     /// What it said under the pointer taken away.
@@ -4812,6 +4859,7 @@ impl<'a> Panel<'a> {
             }
             self.hover = hover;
             self.next_frame = Instant::now();
+            self.follow_card();
         }
     }
 

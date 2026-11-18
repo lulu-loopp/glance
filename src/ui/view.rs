@@ -273,13 +273,21 @@ pub enum Hit {
     Todo(TodoHit),
     /// An AI source's head: its lane opened or closed (see `ai`).
     Ai(ai::Source),
+    /// An AI source in the dock: its lane shown beside it as the pointer rests there (see `ai::paint_dock`).
+    AiSlot(ai::Source),
 }
 
 impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_))
+    }
+
+    /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
+    /// beside the dock as the pointer rests there).
+    pub fn lights(self) -> bool {
+        self.takes_press() || matches!(self, Hit::AiSlot(_))
     }
 
     /// The track it is, where it is one dragged along.
@@ -3862,11 +3870,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (_, Pass::Plots) => {}
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "todo" => todo::paint_head(frame, scene, (left, y, width), title, device, hits),
             (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), pad_x, lane, *tall + spare, hits),
-            (Block::Head { title, device, aside, .. }, Pass::Content) if ai::Source::of(&lane.id).is_some() => {
-                let source = ai::Source::of(&lane.id).unwrap();
-                ai::paint_head(frame, scene, (left, y, width), source, title, device, aside, hits, &name);
-            }
-            (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part),
+            (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part, hits),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -6758,7 +6762,8 @@ otepad.exe", "Notepad"),
 
     /// The AI component's lanes over a made-up day (see `ai::tests::lanes::day`): what was spent today, Claude's, and
     /// ChatGPT's closed and opened, in each skin, light and dark: `cargo test --features studio --lib -- --ignored
-    /// ai_lanes` writes `target/ai/<skin>-<light or dark>.png`.
+    /// ai_lanes` writes `target/ai/<skin>-<light or dark>.png`, and its dock down a side and across (the pointer on
+    /// ChatGPT's ring) by the card beside it, `target/ai/<skin>-<light or dark>-dock.png`.
     #[test]
     #[ignore = "writes pictures to look at"]
     #[cfg(feature = "studio")]
@@ -6781,7 +6786,7 @@ otepad.exe", "Notepad"),
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true)]
                     .into_iter()
-                    .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, open).unwrap(), ink: theme.ink(id) })
+                    .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, Some(open)).unwrap(), ink: theme.ink(id) })
                     .collect();
                 let w = COLUMN_WIDTH;
                 let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
@@ -6799,6 +6804,29 @@ otepad.exe", "Notepad"),
                     })
                     .expect("drawn");
                 let name = format!("{skin:?}-{}.png", if dark { "dark" } else { "light" });
+                crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+                // The dock, down a side and across, and the card beside it.
+                let held = Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai);
+                let scene = Scene { prefs: &held, hover: Some(Hit::AiSlot(ai::Source::Codex)), ..scene };
+                let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
+                let (down, across) = (ai::dock_size(false, dock.slots.len()), ai::dock_size(true, dock.slots.len()));
+                let card = Lane { id: "ai:codex".into(), blocks: ai::lane_of("ai:codex", &held, Lang::Zh, Some(&usage), now, None).unwrap(), ink: theme.ink("ai:codex") };
+                let card_h = card.height(&theme);
+                let (w, h) = ((across.0 + 16.0).max(down.0 + 16.0 + w), down.1.max(card_h) + across.1 + 24.0);
+                let pixels = gfx
+                    .draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                        frame.fill(ground, 0.0, 0.0, w, h);
+                        frame.fill_rounded(theme.track, 0.0, 0.0, down.0, down.1, 12.0);
+                        ai::draw_dock(frame, &scene, &dock, false, down);
+                        paint_lane(frame, &scene, &card, Rect { x: down.0 + 16.0, y: 0.0, w: COLUMN_WIDTH, h: card_h }, 0.0, Pass::Content, &mut Vec::new());
+                        let top = down.1.max(card_h) + 16.0;
+                        frame.place(windows_numerics::Matrix3x2::translation(0.0, top));
+                        frame.fill_rounded(theme.track, 0.0, 0.0, across.0, across.1, 12.0);
+                        ai::draw_dock(frame, &scene, &dock, true, across);
+                        frame.origin(0.0, 0.0);
+                    })
+                    .expect("drawn");
+                let name = format!("{skin:?}-{}-dock.png", if dark { "dark" } else { "light" });
                 crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
             }
         }

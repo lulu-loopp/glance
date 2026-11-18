@@ -801,6 +801,8 @@ struct Widget {
     /// What is under the pointer said under it (see `hover`): taken away as the pointer leaves it, the widget goes, or
     /// what is under the pointer changes without it (pages turned).
     saying: bool,
+    /// The card beside the AI component's dock shown, of the source the pointer is on (see `follow_card`).
+    carding: bool,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
@@ -1004,7 +1006,7 @@ fn readings_for(scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen, roo
 fn readings_as(scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen, want: Want, with_music: bool) -> Option<arrange::Opening> {
     let heights = view::heights(scene);
     let lanes: Vec<(&str, arrange::Heights)> = heights.iter().filter(|(id, _)| with_music || id != "lyrics").map(|(id, h)| (id.as_str(), *h)).collect();
-    let opening = arrange::Opening::new(theme, Edge::Right, &lanes, forms::count(scene), work, None, 1.0, want, seen.clone());
+    let opening = arrange::Opening::new(theme, Edge::Right, &lanes, forms::shows(scene), work, None, 1.0, want, seen.clone());
     opening.choice.is_some().then_some(opening)
 }
 
@@ -2101,9 +2103,10 @@ impl Widgets {
                 _ => crate::ui::tip::hide(),
             }
         }
-        // What a press there would open or do, lit (a drive's row, a player's button).
+        // What a press there would open or do, lit (a drive's row, a player's button); an AI source in the dock, its
+        // card shown beside it as it is drawn (see `follow_card`).
         let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
-        let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.takes_press());
+        let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.lights());
         if hit != widget.hit_hover {
             // What a press does, said under what says so (a drive's row, the line that switches players, its buttons'
             // own said over it). Nothing while a thing is dragged off a station's lane: the pointer is the drag's, and
@@ -2954,7 +2957,7 @@ fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: b
         Takes::Edges((left, right, top, bottom)) => crate::panel::sizing(*left, *right, *top, *bottom),
         _ if over => IDC_HAND,
         _ if matches!(hit, Some(view::Hit::Words(_))) => IDC_IBEAM,
-        _ if hit.is_some() => IDC_HAND,
+        _ if hit.is_some_and(view::Hit::takes_press) => IDC_HAND,
         _ => IDC_ARROW,
     }
 }
@@ -3274,6 +3277,7 @@ impl Widget {
             hit_hover: None,
             preview_hint: view::Hint::default(),
             saying: false,
+            carding: false,
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
             shadowed: false,
@@ -3756,6 +3760,33 @@ impl Widget {
             Some(Drag::Scroll(thumb)) => format!("widget: a list's bar pressed ({:?})", thumb.list()),
             None => "widget: pressed, nothing taken".to_string(),
         });
+    }
+
+    /// The card beside the AI component's dock, as it was just drawn in `theme` from `prefs`: the lane of the source
+    /// whose ring the pointer is on, beside it on the side of the screen with more room (under or over it, laid
+    /// across); else none.
+    fn follow_card(&mut self, theme: &Theme, prefs: &crate::ui::prefs::Prefs, lang: crate::ui::text::Lang) {
+        let source = match self.hit_hover {
+            Some(view::Hit::AiSlot(source)) => source,
+            _ => {
+                if std::mem::take(&mut self.carding) {
+                    crate::ui::ai_card::hide();
+                }
+                return;
+            }
+        };
+        let Some(about) = self.hits_on_screen().into_iter().find_map(|(rect, hit)| (hit == view::Hit::AiSlot(source)).then_some(rect)) else { return };
+        use crate::ui::ai_card::Side;
+        let (by, screen) = (self.rect(), self.contact.monitor);
+        let side = if by.right - by.left > by.bottom - by.top {
+            if (by.top + by.bottom) / 2 < (screen.top + screen.bottom) / 2 { Side::Below } else { Side::Above }
+        } else if (by.left + by.right) / 2 < (screen.left + screen.right) / 2 {
+            Side::Right
+        } else {
+            Side::Left
+        };
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang }, by, about, side);
+        self.carding = true;
     }
 
     /// What is under the pointer changed without it (pages turned): what was said of what was there taken away, and
@@ -4526,7 +4557,7 @@ impl Widget {
                     None => {
                         let heights = view::heights(&scene);
                         let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, h)| (id.as_str(), *h)).collect();
-                        let readings_count = forms::count(&scene);
+                        let readings_count = forms::shows(&scene);
                         let want = match sized_to {
                             Some(room) => Want::Room(room, Some(readings.taken.filter(|taken| taken.form == readings.choice.form).unwrap_or(arrange::Shown { form: readings.choice.form, taken: room }))),
                             None => Want::Kept(readings.choice),
@@ -4848,6 +4879,7 @@ impl Widget {
         let scene = view::Scene { hover: self.hover_shown(), hint, thumbs: &thumbs, scrolls, tab, music_apart, ..crate::panel::scene_for(controller, &info, prefs, &theme, look.lang, history, seen) };
         let taken = started.elapsed();
         self.draw(&theme, &scene, look.prefs.music.ground, now);
+        self.follow_card(&theme, prefs, look.lang);
         // Sized by hand, and now drawn at rest: what was made for it as it was sized is let go (see `Gfx::settle`).
         if sizing {
             self.was_sized = true;
@@ -5183,6 +5215,9 @@ impl Widget {
         self.window.show_in_place();
         if self.tip.is_some() {
             crate::ui::tip::above();
+        }
+        if self.carding {
+            crate::ui::ai_card::above();
         }
         // (A note stuck from its page shown: the page goes, now that it is here.)
         if !self.shown_once && whole {
