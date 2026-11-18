@@ -731,12 +731,14 @@ pub struct Slot {
     pub label: String,
 }
 
-/// What the dock shows: what every source spent today, each source docked, and those with a session at work.
+/// What the dock shows: what every source spent today, each source docked, those with a session at work, and how many
+/// sessions are at work.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Dock {
     pub today: String,
     pub slots: Vec<Slot>,
     pub at_work: Vec<Source>,
+    pub working: usize,
 }
 
 /// The dock down a side: how wide it is, the room at its top and foot, today's figure, a source's slot (its ring, its
@@ -772,7 +774,7 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
     let sources = docked(prefs);
     let Some(usage) = usage else {
         let slots = sources.into_iter().map(|source| Slot { source, used: None, figure: "—".into(), label: lang.pick("正在读取", "Reading").into() }).collect();
-        return Dock { today: "—".into(), slots, at_work: Vec::new() };
+        return Dock { today: "—".into(), slots, at_work: Vec::new(), working: 0 };
     };
     let today = short(usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum(), lang);
     let slots = sources
@@ -808,8 +810,9 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
             }
         })
         .collect();
-    let at_work = sources.into_iter().filter(|&source| usage.sessions.iter().any(|session| session.tool == tool_of(source) && now.saturating_sub(session.last) < AT_WORK_MS)).collect();
-    Dock { today, slots, at_work }
+    let working: Vec<&crate::ai::Session> = usage.sessions.iter().filter(|session| now.saturating_sub(session.last) < AT_WORK_MS && sources.iter().any(|&source| tool_of(source) == session.tool)).collect();
+    let at_work = sources.into_iter().filter(|&source| working.iter().any(|session| session.tool == tool_of(source))).collect();
+    Dock { today, slots, at_work, working: working.len() }
 }
 
 /// Draws the dock filling `size` (down a side, or `across` a top edge), its corner at the frame's origin: what every
@@ -858,7 +861,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     let spread = if across { (w - natural.0) / (count as f32 + 2.0) } else { (h - natural.1) / (count as f32 + 2.0) }.max(0.0);
     let figure_of = |slot: &Slot| if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text };
     let lit = |source: Source| scene.hover == Some(Hit::AiSlot(source));
-    let sessions = (lang.pick("会话", "Sessions"), dock.at_work.len().to_string());
+    let sessions = (lang.pick("会话", "Sessions"), dock.working.to_string());
     // The sessions at work: their sources' marks in a row, its middle at `centre`.
     let marks = |centre: f32, y: f32| {
         const MARK: f32 = 12.0;
@@ -1107,7 +1110,7 @@ pub(super) mod tests {
 
         /// The dock: every source's tokens together; each source by its tightest window (how much of it is used, and
         /// which, where it has several: a window started again since counts as unused), or with no limit told by what
-        /// it spent today; the sources with a session at work.
+        /// it spent today; the sources with a session at work, and how many sessions are.
         #[test]
         fn the_dock_shows_each_source_by_its_tightest_window() {
             let usage = day();
@@ -1115,7 +1118,14 @@ pub(super) mod tests {
             assert_eq!(dock.today, "20 万");
             let slots: Vec<(Source, Option<f32>, &str, &str)> = dock.slots.iter().map(|slot| (slot.source, slot.used, slot.figure.as_str(), slot.label.as_str())).collect();
             assert_eq!(slots, [(Source::Claude, None, "10 万", "今日"), (Source::Codex, Some(0.95), "95%", "每周")]);
-            assert_eq!(dock.at_work, [Source::Codex]);
+            assert_eq!((dock.at_work.as_slice(), dock.working), ([Source::Codex].as_slice(), 1));
+            // Two sessions of one source at work: two sessions, one source's mark.
+            let mut usage = usage;
+            let mut second = usage.sessions.iter().find(|session| NOON.saturating_sub(session.last) < AT_WORK_MS).unwrap().clone();
+            second.id = "second".into();
+            usage.sessions.push(second);
+            let dock = dock_of(&Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai), Lang::Zh, Some(&usage), NOON);
+            assert_eq!((dock.at_work.as_slice(), dock.working), ([Source::Codex].as_slice(), 2));
             // (Not read yet: each source says so.)
             let dock = dock_of(&Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai), Lang::Zh, None, NOON);
             assert!(dock.slots.len() == 2 && dock.slots.iter().all(|slot| slot.used.is_none() && slot.label == "正在读取"));
