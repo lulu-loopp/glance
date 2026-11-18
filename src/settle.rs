@@ -25,15 +25,17 @@ pub enum Work {
     Search,
     /// The recent files' journals read.
     Recent,
+    /// What AI tools spent read from their records (the first time, all a month of them).
+    AiUsage,
 }
 
 /// Whether the machine has settled, and whether the user asked for what each kind of work makes.
 struct Gate {
     settled: bool,
-    wanted: [bool; 2],
+    wanted: [bool; 3],
 }
 
-static GATE: (Mutex<Gate>, Condvar) = (Mutex::new(Gate { settled: false, wanted: [false; 2] }), Condvar::new());
+static GATE: (Mutex<Gate>, Condvar) = (Mutex::new(Gate { settled: false, wanted: [false; 3] }), Condvar::new());
 
 impl Gate {
     fn open(&self, work: Work) -> bool {
