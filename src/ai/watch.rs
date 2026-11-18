@@ -158,6 +158,9 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
             }
         }
         crate::settle::wait(crate::settle::Work::AiUsage);
+        // (Nothing of it shown yet: what the user is waiting for, read as their programs read, and in the background
+        // again once it is told. The first time, it is a month of records.)
+        let waited = NOW.lock().unwrap().is_none().then(|| crate::settle::Waited::begin("AI usage"));
         let ledger = ledger.get_or_insert_with(|| Ledger::load(&dir));
         let roots = roots();
         for (tool, root) in &roots {
@@ -178,6 +181,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
             keep_in(ledger, &dir);
         }
         tell(ledger, now, &told);
+        drop(waited);
         let mut kept = Instant::now();
         let whole = Instant::now();
         let mut ticked = Instant::now();

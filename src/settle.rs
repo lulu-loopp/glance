@@ -151,7 +151,7 @@ impl Drop for Sampled {
 /// This thread's work put in the background: its processor time, its disk reads and writes, and the memory it touches
 /// all below what the user's programs ask (`THREAD_MODE_BACKGROUND_BEGIN`). Where Windows refuses it (for a reason
 /// other than its being so already), that is noted, and its processor time at least is put lowest.
-pub fn background(what: &str) {
+pub fn background(what: &'static str) {
     use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_LOWEST};
     /// ERROR_THREAD_MODE_ALREADY_BACKGROUND.
     const ALREADY: u32 = 400;
@@ -161,6 +161,29 @@ pub fn background(what: &str) {
     }
     let lowest = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
     crate::journal::note(format!("{what}: not put in the background ({error}), its processor time {}", if lowest.is_ok() { "put lowest" } else { "as it was" }));
+}
+
+/// This thread's work, put in the background (see `background`), done as the user's programs do theirs while it is held:
+/// what the user is waiting for, nothing of it shown yet (what AI tools spent, read the first time). Let go of, the
+/// thread is in the background again.
+pub struct Waited(&'static str);
+
+impl Waited {
+    pub fn begin(what: &'static str) -> Waited {
+        use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END, THREAD_PRIORITY_NORMAL};
+        // (Where it was not in the background, its processor time put lowest instead: put back as well.)
+        unsafe {
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+        Waited(what)
+    }
+}
+
+impl Drop for Waited {
+    fn drop(&mut self) {
+        background(self.0);
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +220,24 @@ mod tests {
             background("test");
             use windows::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_LOWEST};
             assert!(unsafe { GetThreadPriority(GetCurrentThread()) } < THREAD_PRIORITY_LOWEST.0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// Waited for, a thread in the background does its work as the user's programs do, and is in the background again
+    /// once it is done.
+    #[test]
+    fn work_waited_for_is_done_in_the_foreground() {
+        std::thread::spawn(|| {
+            use windows::Win32::System::Threading::{GetCurrentThread, GetThreadPriority, THREAD_PRIORITY_LOWEST, THREAD_PRIORITY_NORMAL};
+            let priority = || unsafe { GetThreadPriority(GetCurrentThread()) };
+            background("test");
+            {
+                let _waited = Waited::begin("test");
+                assert_eq!(priority(), THREAD_PRIORITY_NORMAL.0);
+            }
+            assert!(priority() < THREAD_PRIORITY_LOWEST.0);
         })
         .join()
         .unwrap();
