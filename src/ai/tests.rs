@@ -348,3 +348,136 @@ fn counts_what_an_account_spent_today_from_its_balance() {
     assert!(ledger.read_of(Tool::DeepSeek, Err(Failed::Unavailable), NOON + DAY_MS + 2 * HOUR));
     assert!(ledger.usage(NOON + DAY_MS).unkeyed.is_empty());
 }
+
+/// A line of Kimi Code's: what agent `agent` of a session spent at `at` (ms), as its record writes it.
+fn kimi(agent: &str, at: u64, scope: &str, input: u64, output: u64, read: u64, write: u64) -> String {
+    format!(r#"{{"type":"usage.record","agentId":"{agent}","model":"kimi-for-coding","usage":{{"inputOther":{input},"output":{output},"inputCacheRead":{read},"inputCacheCreation":{write}}},"usageScope":"{scope}","time":{at}}}"#) + "\n"
+}
+
+/// Kimi Code's sessions: each request's spending counted once (its main agent's and its subagents', each in a record of
+/// its own), the session known by its folder, its folder by its agent's binding, its title by what the user asked
+/// last (not by a subagent's task).
+#[test]
+fn reads_kimi_codes_sessions_by_their_agents_records() {
+    let dir = folder("kimi");
+    let session = dir.join("sessions").join("wd_glance_1a2b").join("session_k1");
+    let main = session.join("agents").join("main").join("wire.jsonl");
+    append(&main, "{\"type\":\"metadata\",\"protocol_version\":\"2\",\"created_at\":1}\n");
+    append(&main, "{\"type\":\"profile.bind\",\"agentId\":\"main\",\"environmentDisclosure\":{\"cwd\":\"E:\\\\work\"},\"time\":1}\n");
+    append(&main, "{\"type\":\"turn.prompt\",\"agentId\":\"main\",\"input\":[{\"type\":\"text\",\"text\":\"tidy the sensors\"}],\"origin\":{\"kind\":\"user\"},\"time\":2}\n");
+    append(&main, &kimi("main", NOON - 3_600_000, "turn", 100, 20, 3_000, 400));
+    append(&main, &kimi("main", NOON - 3_000_000, "session", 5, 1, 0, 0));
+    let sub = session.join("agents").join("agent-0").join("wire.jsonl");
+    append(&sub, "{\"type\":\"turn.prompt\",\"agentId\":\"agent-0\",\"input\":[{\"type\":\"text\",\"text\":\"read the fan module\"}],\"origin\":{\"kind\":\"system_trigger\"},\"time\":3}\n");
+    append(&sub, &kimi("agent-0", NOON - 3_500_000, "turn", 10, 2, 300, 0));
+    let roots = [(Tool::Kimi, dir.join("sessions"))];
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger), vec![(Tool::Kimi, "kimi-for-coding".to_string(), Tokens { input: 115, output: 23, cache_read: 3_300, cache_write: 400, reasoning: 0 })]);
+    let sessions = ledger.sessions_since(0);
+    assert_eq!(
+        sessions.iter().map(|session| (session.tool, session.id.as_str(), session.folder.as_deref(), session.title.as_deref())).collect::<Vec<_>>(),
+        [(Tool::Kimi, "k1", Some("E:\\work"), Some("tidy the sensors"))]
+    );
+    // (The same request read again, from a copy of the record: not counted again.)
+    append(&session.join("agents").join("main").join("copy.jsonl"), &kimi("main", NOON - 3_600_000, "turn", 100, 20, 3_000, 400));
+    ledger.refresh(&roots, NOON);
+    assert_eq!(spent(&ledger)[0].2.total(), 115 + 23 + 3_300 + 400);
+    assert_eq!(kimi::session_of(&main).as_deref(), Some("k1"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A line of Qwen Code's: its answer `uuid` in `session` at `time`, as it spent (its thoughts' count, and the total it
+/// tells, where it tells one).
+fn qwen(uuid: &str, time: &str, prompt: u64, answer: u64, thoughts: u64, cached: u64, total: Option<u64>) -> String {
+    let total = total.map_or(String::new(), |total| format!(r#","totalTokenCount":{total}"#));
+    format!(
+        r#"{{"uuid":"{uuid}","parentUuid":null,"sessionId":"q1","timestamp":"{time}","type":"assistant","cwd":"D:\\app","model":"qwen3-coder-plus","usageMetadata":{{"promptTokenCount":{prompt},"candidatesTokenCount":{answer},"thoughtsTokenCount":{thoughts},"cachedContentTokenCount":{cached}{total}}}}}"#
+    ) + "\n"
+}
+
+/// Qwen Code's sessions: each answer counted once by its id, its prompt less what came from the cache, its thoughts
+/// among its answer where the total it tells is the prompt's and the answer's alone (else beside it); the session's
+/// folder, and its title from what the user asked.
+#[test]
+fn reads_qwen_codes_answers_with_their_thoughts() {
+    let dir = folder("qwen");
+    let file = dir.join("projects").join("D--app").join("chats").join("q1.jsonl");
+    append(&file, "{\"uuid\":\"u0\",\"sessionId\":\"q1\",\"timestamp\":\"2026-11-18T10:00:00.000Z\",\"type\":\"user\",\"cwd\":\"D:\\\\app\",\"message\":{\"role\":\"user\",\"parts\":[{\"text\":\"add the lunar date\"}]}}\n");
+    // (Thoughts among the answer: the total is the prompt's and the answer's.)
+    append(&file, &qwen("a1", "2026-11-18T10:01:00.000Z", 1_000, 300, 100, 400, Some(1_300)));
+    // (Thoughts beside it.)
+    append(&file, &qwen("a2", "2026-11-18T10:02:00.000Z", 500, 50, 20, 0, Some(570)));
+    append(&file, &qwen("a2", "2026-11-18T10:02:00.000Z", 500, 50, 20, 0, Some(570)));
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&[(Tool::Qwen, dir.join("projects"))], NOON));
+    assert_eq!(spent(&ledger), vec![(Tool::Qwen, "qwen3-coder-plus".to_string(), Tokens { input: 600 + 500, output: 300 + 70, cache_read: 400, cache_write: 0, reasoning: 120 })]);
+    let sessions = ledger.sessions_since(0);
+    assert_eq!(
+        sessions.iter().map(|session| (session.id.as_str(), session.folder.as_deref(), session.title.as_deref())).collect::<Vec<_>>(),
+        [("q1", Some("D:\\app"), Some("add the lunar date"))]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ZCode's database: each row counted once, however often it is asked again as the database is written to; where a
+/// row tells its total, its input and output read as that total counts them (the cache's and the reasoning among
+/// them, or beside them); a row of the later kind telling none as it is; a database of the first kind (no total
+/// column) with them always among; the session's folder from its table.
+#[test]
+fn reads_zcodes_database_as_its_totals_count() {
+    let dir = folder("zcode");
+    let db = dir.join("cli").join("db");
+    std::fs::create_dir_all(&db).unwrap();
+    let later = sqlite::Database::made(&db.join("db.sqlite")).expect("Windows' SQLite");
+    let hour = 3_600_000;
+    for sql in [
+        "CREATE TABLE session (id TEXT, directory TEXT, path TEXT)".to_string(),
+        "CREATE TABLE model_usage (id TEXT, session_id TEXT, turn_id TEXT, model_id TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, computed_total_tokens INTEGER, agent TEXT, mode TEXT)".into(),
+        "INSERT INTO session VALUES ('z1', 'E:\\work', '')".into(),
+        // (Among: its total is its input's and output's.)
+        format!("INSERT INTO model_usage VALUES ('r1', 'z1', 't1', 'GLM-5.2', {}, NULL, NULL, 1000, 300, 100, 600, 200, 1300, 'main', NULL)", NOON - 2 * hour),
+        // (Beside: its total is every count's.)
+        format!("INSERT INTO model_usage VALUES ('r2', 'z1', 't1', 'glm-5.2', NULL, {}, 60000, 100, 30, 10, 50, 0, 190, 'main', NULL)", NOON - hour),
+        // (No total: as it is.)
+        format!("INSERT INTO model_usage VALUES ('r3', 'z1', 't2', 'glm-5.2', {}, NULL, NULL, 10, 5, 2, 3, 0, NULL, 'main', NULL)", NOON - hour),
+    ] {
+        later.rows(&sql).expect(&sql);
+    }
+    drop(later);
+    let roots = [(Tool::Glm, db.clone())];
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&roots, NOON));
+    let among = Tokens { input: 200, output: 300, cache_read: 600, cache_write: 200, reasoning: 100 };
+    let beside = Tokens { input: 100, output: 40, cache_read: 50, cache_write: 0, reasoning: 10 };
+    let plain = Tokens { input: 10, output: 7, cache_read: 3, cache_write: 0, reasoning: 2 };
+    let mut all = among;
+    all.add(beside);
+    all.add(plain);
+    assert_eq!(spent(&ledger), vec![(Tool::Glm, "glm-5.2".to_string(), all)]);
+    let sessions = ledger.sessions_since(0);
+    assert_eq!(sessions.iter().map(|session| (session.id.as_str(), session.folder.as_deref(), session.last)).collect::<Vec<_>>(), [("z1", Some("E:\\work"), NOON - hour)]);
+    // (Written to again: asked again, what was counted not counted again.)
+    let later = sqlite::Database::made(&db.join("db.sqlite")).unwrap();
+    later.rows(&format!("INSERT INTO model_usage VALUES ('r4', 'z1', 't3', 'glm-5.2', {}, NULL, NULL, 1, 1, 0, 0, 0, 2, 'main', NULL)", NOON - 60_000)).unwrap();
+    drop(later);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    // (Told by the name of what is written ahead of it, gone by now.)
+    ledger.read_paths(Tool::Glm, &[db.join("db.sqlite-wal")], NOON);
+    assert_eq!(spent(&ledger)[0].2.total(), all.total() + 2);
+    // A database of the first kind: no total told, the cache's and the reasoning always among.
+    let first = dir.join("first").join("db.sqlite");
+    std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+    let made = sqlite::Database::made(&first).unwrap();
+    for sql in [
+        "CREATE TABLE model_usage (id TEXT, session_id TEXT, turn_id TEXT, model_id TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, agent TEXT, mode TEXT)".to_string(),
+        format!("INSERT INTO model_usage VALUES ('f1', 'z2', 't1', 'glm-4.6', {}, NULL, NULL, 1000, 300, 100, 600, 200, 'main', NULL)", NOON - hour),
+    ] {
+        made.rows(&sql).expect(&sql);
+    }
+    drop(made);
+    let mut ledger = Ledger::default();
+    ledger.refresh(&[(Tool::Glm, first.parent().unwrap().to_path_buf())], NOON);
+    assert_eq!(spent(&ledger), vec![(Tool::Glm, "glm-4.6".to_string(), among)]);
+    let _ = std::fs::remove_dir_all(dir);
+}

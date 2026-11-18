@@ -173,11 +173,12 @@ fn rgba(rgb: u32, a: f32) -> Color {
 
 /// Each AI source's lane in its maker's colour, in every skin (as clear on a dark ground as on a light one), at the
 /// strengths `lane` gives the skin's own inks.
-fn brands(dark: bool, lane: impl Fn(u32) -> Ink) -> [(&'static str, Ink); 9] {
+fn brands(dark: bool, lane: impl Fn(u32) -> Ink) -> [(&'static str, Ink); 10] {
     let pick = |on_dark: u32, on_light: u32| lane(if dark { on_dark } else { on_light });
     [
         ("ai:claude", pick(0xE48B67, 0xD97757)),
         ("ai:codex", pick(0x4FC1B4, 0x1F8F84)),
+        ("ai:qwen", pick(0x8F8BF5, 0x615CED)),
         ("ai:deepseek", pick(0x7B91FF, 0x4D6BFE)),
         ("ai:kimi", pick(0x4DA3FF, 0x1783FF)),
         ("ai:moonshot", pick(0x4DA3FF, 0x1783FF)),

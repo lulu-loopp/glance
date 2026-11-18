@@ -88,7 +88,7 @@ pub(super) fn line(bytes: &[u8], read: &mut Read, told: &mut Vec<Told>) {
 }
 
 /// Session `session` called `title` (its first line, cut to `TITLE` characters), where it says anything.
-fn title(told: &mut Vec<Told>, session: String, title: Option<String>, kind: TitleKind) {
+pub(super) fn title(told: &mut Vec<Told>, session: String, title: Option<String>, kind: TitleKind) {
     let Some(title) = title else { return };
     let first = title.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or_default();
     if first.is_empty() {

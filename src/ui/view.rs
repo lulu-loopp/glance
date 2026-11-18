@@ -6778,7 +6778,7 @@ otepad.exe", "Notepad"),
         std::fs::create_dir_all(&out).unwrap();
         let usage = ai::tests::lanes::accounts();
         let now = ai::tests::lanes::NOON;
-        let providers = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek", "ai:glm", "ai:kimi", "ai:minimax"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let providers = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:deepseek", "ai:glm", "ai:kimi", "ai:minimax"].map(|id| serde_json::json!({ "id": id, "on": true }));
         let stored = serde_json::json!({ "ai": providers });
         for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
             for dark in [false, true] {
@@ -6787,7 +6787,7 @@ otepad.exe", "Notepad"),
                 let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                 let seen = Seen::of(history);
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-                let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true), ("ai:deepseek", false), ("ai:glm", false), ("ai:kimi", false), ("ai:minimax", false)]
+                let lanes: Vec<Lane> = [("ai:today", false), ("ai:claude", false), ("ai:codex", false), ("ai:codex", true), ("ai:qwen", true), ("ai:deepseek", false), ("ai:glm", false), ("ai:kimi", false), ("ai:minimax", false)]
                     .into_iter()
                     .map(|(id, open)| Lane { id: id.into(), blocks: ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, Some(open)).unwrap(), ink: theme.ink(id) })
                     .collect();

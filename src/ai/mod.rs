@@ -1,5 +1,5 @@
-//! What AI coding tools have spent, as their own records on this PC tell it: Claude Code's transcripts and Codex's
-//! session logs, each read as it grows (only what was added since it was last read), every response counted once
+//! What AI coding tools have spent, as their own records on this PC tell it: Claude Code's transcripts, Codex's
+//! session logs, Kimi Code's and Qwen Code's sessions' records and ZCode's database, each read as it grows (only what was added since it was last read), every response counted once
 //! however many of the files hold it (a resumed or forked session copies what came before into a file of its own:
 //! a third of Claude Code's responses on the owner's PC were in more than one file), in quarter hours of their own
 //! time. What was read is kept in Glance's local folder, with how far each file was read, so as not to read a
@@ -10,6 +10,12 @@
 
 mod claude;
 mod codex;
+mod kimi;
+mod qwen;
+#[cfg(windows)]
+mod sqlite;
+#[cfg(windows)]
+mod zcode;
 #[cfg(windows)]
 pub mod keys;
 #[cfg(windows)]
@@ -51,14 +57,16 @@ pub enum Tool {
     Moonshot,
     /// OpenRouter: its credits, and the key's own limit.
     OpenRouter,
-    /// Kimi Code's plan.
+    /// Kimi Code: its plan, and what it spent on this PC.
     Kimi,
-    /// Zhipu's GLM Coding Plan (bigmodel.cn, or Z.ai's abroad).
+    /// Zhipu's GLM Coding Plan (bigmodel.cn, or Z.ai's abroad), and what ZCode spent on this PC.
     Glm,
     /// MiniMax's Token Plan, or its open platform's balance.
     MiniMax,
     /// Volcengine Ark's Coding Plan.
     Volcengine,
+    /// Qwen Code.
+    Qwen,
 }
 
 /// Tokens spent, by kind. `input` is what was read afresh (neither from nor into a cache), `output` what was written
@@ -273,8 +281,23 @@ pub fn roots() -> Vec<(Tool, PathBuf)> {
         Some(dirs) => roots.extend(std::env::split_paths(&dirs).map(|dir| (Tool::Claude, dir.join("projects")))),
         None => roots.extend(home.iter().flat_map(|home| [home.join(".claude"), home.join(".config").join("claude")]).map(|dir| (Tool::Claude, dir.join("projects")))),
     }
-    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| home.map(|home| home.join(".codex")));
+    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from).or_else(|| home.clone().map(|home| home.join(".codex")));
     roots.extend(codex.iter().flat_map(|codex| [codex.join("sessions"), codex.join("archived_sessions"), codex.join("session_index.jsonl")]).map(|dir| (Tool::Codex, dir)));
+    // Kimi Code's, and those of the Kimi app's agent, which runs Kimi Code where the app keeps its files (its own
+    // folder, or the one chosen for them).
+    let kimi = std::env::var_os("KIMI_CODE_HOME").filter(|dir| !dir.to_string_lossy().trim().is_empty()).map(PathBuf::from).or_else(|| home.clone().map(|home| home.join(".kimi-code")));
+    roots.extend(kimi.map(|kimi| (Tool::Kimi, kimi.join("sessions"))));
+    // Qwen Code's, and ZCode's database (what its model spent: GLM's).
+    roots.extend(home.iter().map(|home| (Tool::Qwen, home.join(".qwen").join("projects"))));
+    roots.extend(home.iter().map(|home| (Tool::Glm, home.join(".zcode").join("cli").join("db"))));
+    if let Some(app) = std::env::var_os("APPDATA").filter(|dir| !dir.is_empty()).map(PathBuf::from) {
+        let runtime = Path::new("daimon").join("runtime").join("kimi-code").join("home").join("sessions");
+        let shared = std::fs::read(app.join("kimi-desktop").join("daimon-storage.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|storage| storage.get("shareDir")?.as_str().map(str::trim).filter(|dir| !dir.is_empty()).map(PathBuf::from));
+        roots.push((Tool::Kimi, shared.unwrap_or_else(|| app.join("kimi-desktop").join("daimon-share")).join(runtime)));
+    }
     roots
 }
 
@@ -316,8 +339,25 @@ impl Ledger {
         if read.len == len && read.modified == modified {
             return false;
         }
+        // A database (ZCode's) asked again whole as it is written to: what was counted is not counted again.
+        if is_database(path) {
+            #[cfg(windows)]
+            let told = if tool == Tool::Glm { zcode::told_in(path, from, modified) } else { Vec::new() };
+            #[cfg(not(windows))]
+            let told: Vec<Told> = Vec::new();
+            self.files.insert(path.to_path_buf(), Read { len, modified, at: len, ..Read::default() });
+            let mut changed = false;
+            for told in told {
+                changed |= self.take(tool, told, from, modified);
+            }
+            return changed;
+        }
         if len < read.at {
             read = Read::default();
+        }
+        // (Kimi Code names a record's session by its folder alone.)
+        if tool == Tool::Kimi && read.session.is_none() {
+            read.session = kimi::session_of(path);
         }
         let Ok(mut file) = std::fs::File::open(path) else { return false };
         if file.seek(std::io::SeekFrom::Start(read.at)).is_err() {
@@ -336,6 +376,8 @@ impl Ledger {
                     match tool {
                         Tool::Claude => claude::line(&line, &mut read, &mut told),
                         Tool::Codex => codex::line(&line, &mut read, &mut told),
+                        Tool::Kimi => kimi::line(&line, &mut read, &mut told),
+                        Tool::Qwen => qwen::line(&line, &mut read, &mut told),
                         // (The providers keep no records here: see `providers`.)
                         _ => {}
                     }
@@ -671,11 +713,21 @@ fn day(ms: u64) -> u32 {
 /// Every record (`.jsonl`) at `path` (one, or those in the folder it is and in the folders in it), with its length and
 /// when it was last written to (ms since 1970).
 fn records_in(path: &Path, found: &mut Vec<(PathBuf, u64, u64)>) {
+    let modified_of = |meta: &std::fs::Metadata| meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |since| since.as_millis() as u64);
+    // A database, as it and what is written ahead of it (its `-wal`, gone as it is taken in) stand together: written
+    // ahead, it is.
+    let database = path.to_str().and_then(|name| name.strip_suffix("-wal")).map(PathBuf::from).filter(|database| is_database(database)).or_else(|| is_database(path).then(|| path.to_path_buf()));
+    if let Some(database) = database {
+        let parts: Vec<std::fs::Metadata> = [database.clone(), PathBuf::from(format!("{}-wal", database.display()))].iter().filter_map(|part| std::fs::metadata(part).ok()).filter(std::fs::Metadata::is_file).collect();
+        if !parts.is_empty() {
+            found.push((database, parts.iter().map(|part| part.len()).sum(), parts.iter().map(modified_of).max().unwrap_or(0)));
+        }
+        return;
+    }
     let Ok(meta) = std::fs::metadata(path) else { return };
     if meta.is_file() {
         if path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("jsonl")) {
-            let modified = meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |since| since.as_millis() as u64);
-            found.push((path.to_path_buf(), meta.len(), modified));
+            found.push((path.to_path_buf(), meta.len(), modified_of(&meta)));
         }
         return;
     }
@@ -686,6 +738,11 @@ fn records_in(path: &Path, found: &mut Vec<(PathBuf, u64, u64)>) {
             records_in(&entry.path(), found);
         }
     }
+}
+
+/// Whether the file at `path` is a database of a tool's records (by its name: `.sqlite`).
+fn is_database(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("sqlite"))
 }
 
 /// A key that stays the same for the same words in every build of Glance (FNV-1a, of each part and a byte between

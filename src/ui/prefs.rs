@@ -136,8 +136,9 @@ pub fn offered(module: &str) -> bool {
 /// The items of module `module` ("cpu", "gpu:1", …), in the order the
 /// settings list them.
 pub fn items(module: &str) -> &'static [Item] {
-    // (What every AI source spent today is a figure alone, and a provider tells no models or sessions.)
-    if module.starts_with("ai:") && (module == "ai:today" || !AI_ON.contains(&module)) {
+    // (What every AI source spent today is a figure alone, and a provider read by its key alone tells no models or
+    // sessions.)
+    if module.starts_with("ai:") && !AI_RECORDED.contains(&module) {
         return &[];
     }
     match module.split(':').next().unwrap_or(module) {
@@ -335,10 +336,12 @@ impl Default for ProcessPrefs {
 pub const WORKBENCH: [&str; 6] = ["search", "time", "station", "notes", "todo", "apps"];
 
 /// The AI component's modules, in default order: what all its sources spent today, then each source's lane (Claude
-/// Code's, Codex's: ChatGPT's), then each provider's whose account is read by the user's key.
-pub const AI: [&str; 10] = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek", "ai:kimi", "ai:moonshot", "ai:glm", "ai:minimax", "ai:volcengine", "ai:openrouter"];
+/// Code's, Codex's: ChatGPT's, Qwen Code's), then each provider's whose account is read by the user's key.
+pub const AI: [&str; 11] = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:deepseek", "ai:kimi", "ai:moonshot", "ai:glm", "ai:minimax", "ai:volcengine", "ai:openrouter"];
 /// Those of them on until chosen otherwise (a provider's lane is turned on as its key is given).
 pub const AI_ON: [&str; 3] = ["ai:today", "ai:claude", "ai:codex"];
+/// The sources whose own records on this PC tell what they spent, by model and by session.
+const AI_RECORDED: [&str; 5] = ["ai:claude", "ai:codex", "ai:qwen", "ai:kimi", "ai:glm"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {

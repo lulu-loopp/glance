@@ -17,6 +17,8 @@ pub enum Source {
     Claude,
     /// Codex, whose limits are ChatGPT's.
     Codex,
+    /// Qwen Code.
+    Qwen,
     DeepSeek,
     /// Kimi Code's plan.
     Kimi,
@@ -31,9 +33,10 @@ pub enum Source {
 }
 
 /// Every source, as the AI component lists them.
-const SOURCES: [Source; 9] = [
+const SOURCES: [Source; 10] = [
     Source::Claude,
     Source::Codex,
+    Source::Qwen,
     Source::DeepSeek,
     Source::Kimi,
     Source::Moonshot,
@@ -53,6 +56,7 @@ impl Source {
         match self {
             Source::Claude => Mark::Claude,
             Source::Codex => Mark::OpenAi,
+            Source::Qwen => Mark::Qwen,
             Source::DeepSeek => Mark::DeepSeek,
             Source::Kimi => Mark::Kimi,
             Source::Moonshot => Mark::Moonshot,
@@ -68,6 +72,7 @@ impl Source {
         match self {
             Source::Claude => "ai:claude",
             Source::Codex => "ai:codex",
+            Source::Qwen => "ai:qwen",
             Source::DeepSeek => "ai:deepseek",
             Source::Kimi => "ai:kimi",
             Source::Moonshot => "ai:moonshot",
@@ -83,6 +88,7 @@ impl Source {
         match self {
             Source::Claude => "Claude",
             Source::Codex => "ChatGPT",
+            Source::Qwen => "Qwen",
             Source::DeepSeek => "DeepSeek",
             Source::Kimi => "Kimi",
             Source::Moonshot => "Moonshot",
@@ -98,6 +104,7 @@ impl Source {
         match self {
             Source::Claude => "Claude Code",
             Source::Codex => "Codex",
+            Source::Qwen => "Qwen Code",
             Source::Kimi => "Kimi Code",
             Source::Glm | Source::Volcengine => "Coding Plan",
             Source::DeepSeek | Source::Moonshot | Source::MiniMax | Source::OpenRouter => "API",
@@ -106,7 +113,7 @@ impl Source {
 
     /// Whether it is a provider whose account is read by the user's key.
     pub fn keyed(self) -> bool {
-        !matches!(self, Source::Claude | Source::Codex)
+        !matches!(self, Source::Claude | Source::Codex | Source::Qwen)
     }
 
     fn bit(self) -> u16 {
@@ -318,6 +325,7 @@ fn tool_of(source: Source) -> crate::ai::Tool {
     match source {
         Source::Claude => Tool::Claude,
         Source::Codex => Tool::Codex,
+        Source::Qwen => Tool::Qwen,
         Source::DeepSeek => Tool::DeepSeek,
         Source::Kimi => Tool::Kimi,
         Source::Moonshot => Tool::Moonshot,
@@ -370,56 +378,44 @@ fn failed_words(failed: crate::ai::Failed, lang: Lang) -> &'static str {
     }
 }
 
-/// A provider's lane, of `usage` at `now`: its plan (else what it reads) and when it was read, why it could not be
-/// read (its key not set, refused, the provider not reached), its windows, its balance and what it spent today.
+/// Why provider `tool`'s account (its last reading `limit`) is not shown as it stands: its key not set (said only
+/// where its records on this PC tell nothing it spent today: `spent`), refused, the provider not reached, or not read
+/// yet.
 #[cfg(windows)]
-fn provider_lane(source: Source, usage: Option<&crate::ai::Usage>, now: u64, lang: Lang) -> Vec<Block> {
-    let tool = tool_of(source);
-    let head = |device: String, aside: String| Block::Ai(AiBlock::Head { source, title: source.name(lang).into(), device, aside, opened: None });
-    let fact = |what: &str, value: String, hot: bool| Block::Facts { rows: vec![(what.into(), value, hot)], gap: GAP };
-    let Some(usage) = usage else { return vec![head(source.tool_name().into(), String::new()), fact(lang.pick("状态", "State"), lang.pick("正在读取", "Reading").into(), false)] };
-    let limit = limit_of(usage, tool);
-    let device = limit.and_then(|limit| limit.plan.as_deref()).map_or(source.tool_name().to_string(), plan_name);
-    let aside = limit.map_or(String::new(), |limit| text::since(limit.told, now, lang));
-    let mut blocks = vec![head(device, aside)];
+fn account_state(tool: crate::ai::Tool, usage: &crate::ai::Usage, limit: Option<&crate::ai::Limit>, spent: bool, lang: Lang) -> Option<Block> {
+    let fact = |what: &str, value: &str, hot: bool| Block::Facts { rows: vec![(what.into(), value.into(), hot)], gap: GAP };
     if usage.unkeyed.contains(&tool) {
-        blocks.push(fact(lang.pick("API 密钥", "API key"), lang.pick("未设置", "Not set").into(), false));
-        return blocks;
+        return (!spent).then(|| fact(lang.pick("API 密钥", "API key"), lang.pick("未设置", "Not set"), false));
     }
     match usage.failed.iter().find(|(of, _)| *of == tool) {
-        Some((_, failed)) => blocks.push(fact(lang.pick("状态", "State"), failed_words(*failed, lang).into(), *failed == crate::ai::Failed::Key)),
-        None if limit.is_none() => blocks.push(fact(lang.pick("状态", "State"), lang.pick("正在读取", "Reading").into(), false)),
-        None => {}
+        Some((_, failed)) => Some(fact(lang.pick("状态", "State"), failed_words(*failed, lang), *failed == crate::ai::Failed::Key)),
+        None if limit.is_none() => Some(fact(lang.pick("状态", "State"), lang.pick("正在读取", "Reading"), false)),
+        None => None,
     }
-    let Some(limit) = limit else { return blocks };
-    let windows = windows_of(Some(limit), now, lang);
-    if !windows.is_empty() {
-        blocks.push(Block::Ai(AiBlock::Windows(windows)));
+}
+
+/// An account's `balance`, and what it spent today (from when that was first read, where that was after the day,
+/// `today`, began).
+#[cfg(windows)]
+fn balance_pairs(balance: &crate::ai::Balance, today: u64, lang: Lang) -> Option<Block> {
+    let mut pairs = Vec::new();
+    if let Some(amount) = balance.amount {
+        pairs.push((lang.pick("余额", "Balance").to_string(), money(amount, &balance.currency)));
     }
-    if let Some(balance) = &limit.balance {
-        let mut pairs = Vec::new();
-        if let Some(amount) = balance.amount {
-            pairs.push((lang.pick("余额", "Balance").to_string(), money(amount, &balance.currency)));
-        }
-        if let Some(today) = balance.today {
-            // (Counted from the day's first reading: from when that was.)
-            let what = match balance.since {
-                Some(since) => {
-                    let minutes = since.saturating_sub(usage.today) / 60_000;
-                    match lang {
-                        Lang::Zh => format!("{:02}:{:02} 起消费", minutes / 60, minutes % 60),
-                        Lang::En => format!("Spent since {:02}:{:02}", minutes / 60, minutes % 60),
-                    }
+    if let Some(spent) = balance.today {
+        let what = match balance.since {
+            Some(since) => {
+                let minutes = since.saturating_sub(today) / 60_000;
+                match lang {
+                    Lang::Zh => format!("{:02}:{:02} 起消费", minutes / 60, minutes % 60),
+                    Lang::En => format!("Spent since {:02}:{:02}", minutes / 60, minutes % 60),
                 }
-                None => lang.pick("今日消费", "Spent today").into(),
-            };
-            pairs.push((what, money(today, &balance.currency)));
-        }
-        if !pairs.is_empty() {
-            blocks.push(Block::Ai(AiBlock::Pairs(pairs)));
-        }
+            }
+            None => lang.pick("今日消费", "Spent today").into(),
+        };
+        pairs.push((what, money(spent, &balance.currency)));
     }
-    blocks
+    (!pairs.is_empty()).then_some(Block::Ai(AiBlock::Pairs(pairs)))
 }
 
 /// The lane of AI module `id` as `prefs` show it: what every source spent today (`ai:today`), or one source's; none
@@ -508,15 +504,12 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
         // Each tool's share, where there are more than one.
         let tools: Vec<(crate::ai::Tool, u64)> = usage.days.iter().map(|(tool, days)| (*tool, days[6])).filter(|(_, spent)| *spent > 0).collect();
         if tools.len() > 1 {
-            let named = |tool| if tool == crate::ai::Tool::Claude { Source::Claude.tool_name() } else { Source::Codex.tool_name() };
+            let named = |tool| SOURCES.into_iter().find(|source| tool_of(*source) == tool).map_or("", Source::tool_name);
             blocks.push(Block::Facts { rows: tools.into_iter().map(|(tool, spent)| (named(tool).into(), short(spent, lang), false)).collect(), gap: GAP });
         }
         return Some(blocks);
     }
     let source = Source::of(id)?;
-    if source.keyed() {
-        return Some(provider_lane(source, usage, now, lang));
-    }
     let tool = tool_of(source);
     let head = |device: String, aside: String, opened: Option<bool>| Block::Ai(AiBlock::Head { source, title: source.name(lang).into(), device, aside, opened });
     let Some(usage) = usage else { return Some(vec![head(source.tool_name().into(), String::new(), None), reading()]) };
@@ -530,13 +523,22 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     let (spent, total) = spent_by(usage, tool);
     // (It opens where it spent today: there is more to tell.)
     let mut blocks = vec![head(device, aside, open.filter(|_| total.total() > 0))];
-    if !windows.is_empty() {
+    // A provider's account: why it is not shown as it stands, where it is not.
+    if source.keyed() {
+        blocks.extend(account_state(tool, usage, limit, total.total() > 0, lang));
+    }
+    let shown_limit = !windows.is_empty();
+    if shown_limit {
         blocks.push(Block::Ai(AiBlock::Windows(windows)));
     }
+    if let Some(balance) = limit.and_then(|limit| limit.balance.as_ref()).and_then(|balance| balance_pairs(balance, usage.today, lang)) {
+        blocks.push(balance);
+    }
     // Opened, or showing all (where it spent today): what it spent, by model and by kind, and its sessions; else, with
-    // no limit to show, what it spent today.
+    // no limit to show, what it spent today (a provider's, where its records on this PC tell it spent anything).
     if !open.unwrap_or(true) || total.total() == 0 {
-        if limit.is_none() {
+        let today = if source.keyed() { total.total() > 0 && !shown_limit } else { limit.is_none() };
+        if today {
             blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), short(total.total(), lang), false)], gap: GAP });
         }
         return Some(blocks);
@@ -782,7 +784,9 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
             let failed = usage.failed.iter().find(|(of, _)| *of == tool).map(|(_, failed)| *failed);
             let balance = limit.and_then(|limit| limit.balance.as_ref()).and_then(|balance| Some((balance.amount?, balance.currency.as_str())));
             let none = |label: &str| Slot { source, used: None, figure: "—".into(), label: label.into() };
-            if source.keyed() && usage.unkeyed.contains(&tool) {
+            let spent = spent_by(usage, tool).1.total();
+            // (A provider whose records on this PC tell it spent today shows that where its key is not set.)
+            if source.keyed() && usage.unkeyed.contains(&tool) && spent == 0 {
                 return none(lang.pick("未设置密钥", "No key"));
             }
             // (What was read before is not shown as it stands now.)
@@ -796,11 +800,11 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
                     figure: format!("{:.0}%", tightest.used * 100.0),
                     label: if windows.len() > 1 { tightest.name.clone() } else { String::new() },
                 },
-                None if source.keyed() => match balance {
+                None => match balance {
                     Some((amount, currency)) => Slot { source, used: None, figure: money_short(amount, currency), label: lang.pick("余额", "Balance").into() },
-                    None => none(lang.pick("正在读取", "Reading")),
+                    None if source.keyed() && spent == 0 && !usage.unkeyed.contains(&tool) => none(lang.pick("正在读取", "Reading")),
+                    None => Slot { source, used: None, figure: short(spent, lang), label: lang.pick("今日", "Today").into() },
                 },
-                None => Slot { source, used: None, figure: short(spent_by(usage, tool).1.total(), lang), label: lang.pick("今日", "Today").into() },
             }
         })
         .collect();
@@ -1138,6 +1142,9 @@ pub(super) mod tests {
             usage.limits.push(limit(Tool::Kimi, Some("Andante"), vec![Window { minutes: 10080, used: 40.0, resets: None }], None));
             usage.failed.push((Tool::Kimi, Failed::Key));
             usage.unkeyed.push(Tool::MiniMax);
+            // (Qwen Code spent too, in a session of its own.)
+            usage.spent_today.push((Tool::Qwen, "qwen3-coder-plus".into(), spent(20_000, 3_000, 40_000, 0, 1_000)));
+            usage.sessions.push(session(Tool::Qwen, "q", Some("Add the lunar date"), NOON - 30 * 60_000, 63_000));
             usage
         }
 
@@ -1166,6 +1173,18 @@ pub(super) mod tests {
             assert!(matches!(blocks.as_slice(), [Block::Ai(AiBlock::Head { device, .. }), Block::Facts { rows, .. }] if device == "API" && rows[0].1 == "正在读取"));
             assert_eq!(money(12.0, "USD"), "$12.00");
             assert_eq!(money_short(1_234.5, "CNY"), "¥1,235");
+            // Kimi Code spent today on this PC, its key not set: what it spent, opening as a recorded source's does, its
+            // key not asked for, and so in the dock.
+            let mut usage = accounts();
+            usage.limits.retain(|limit| limit.tool != crate::ai::Tool::Kimi);
+            usage.failed.clear();
+            usage.unkeyed.push(crate::ai::Tool::Kimi);
+            usage.spent_today.push((crate::ai::Tool::Kimi, "kimi-for-coding".into(), spent(1_000, 200, 30_000, 0, 0)));
+            let blocks = lane("ai:kimi", Some(&usage));
+            assert!(matches!(blocks.as_slice(), [Block::Ai(AiBlock::Head { opened: Some(false), device, .. }), Block::Facts { rows, .. }] if device == "Kimi Code" && rows[0].1 == "3.1 万"));
+            let stored = serde_json::json!({ "ai": [{ "id": "ai:kimi", "on": true }] });
+            let dock = dock_of(&Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai), Lang::Zh, Some(&usage), NOON);
+            assert!(dock.slots.iter().any(|slot| slot.source == Source::Kimi && slot.figure == "3.1 万" && slot.label == "今日"));
         }
 
         /// The dock: a provider by its tightest window, else by its balance; one whose key was refused or is not set,
