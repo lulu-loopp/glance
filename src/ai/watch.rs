@@ -3,7 +3,8 @@
 //! files Windows tells were written to (each of the tools' folders watched), the files at work looked at every minute
 //! besides (Windows tells of a file kept open as it is written to only now and then), and all of them again every hour
 //! (what was missed, and what is no longer kept, let go of). What was read is kept in Glance's local folder now and
-//! then.
+//! then. Claude's limits, as Claude Code tells them to its status line where Glance is that (see `statusline`), are read
+//! as they are written.
 
 use super::{Ledger, Tool, Usage};
 use std::path::PathBuf;
@@ -31,6 +32,8 @@ const KEEP: Duration = Duration::from_secs(10 * 60);
 enum Heard {
     /// Asked to look whether it is wanted.
     Look,
+    /// Claude Code told its status line Claude's limits.
+    Told,
     /// These records of `Tool` were written to.
     Written(Tool, Vec<PathBuf>),
     /// More was written under a folder than Windows kept: all read again.
@@ -89,11 +92,18 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
         for (tool, root) in &roots {
             if !watched.contains(root) && root.is_dir() {
                 watched.push(root.clone());
-                watch(*tool, root.clone(), ear.clone());
+                let tool = *tool;
+                watch(root.clone(), ear.clone(), move |paths| Heard::Written(tool, paths));
             }
         }
+        // (Its folder made, to be watched before the status line first writes in it.)
+        let told_in = super::statusline::folder();
+        if !watched.contains(&told_in) && std::fs::create_dir_all(&told_in).is_ok() {
+            watched.push(told_in.clone());
+            watch(told_in.clone(), ear.clone(), |_| Heard::Told);
+        }
         let now = crate::station::now_ms();
-        if ledger.refresh(&roots, now) {
+        if ledger.refresh(&roots, now) | limits_told(ledger, &told_in) {
             keep_in(ledger, &dir);
         }
         tell(ledger, now, &told);
@@ -104,9 +114,10 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
         // Till it is not wanted, or an hour on.
         while wanted() && whole.elapsed() < WHOLE {
             let mut written: Vec<(Tool, Vec<PathBuf>)> = Vec::new();
-            let mut lost = false;
+            let (mut lost, mut limits) = (false, false);
             match heard.recv_timeout(TICK.saturating_sub(ticked.elapsed())) {
                 Ok(Heard::Look) => continue,
+                Ok(Heard::Told) => limits = true,
                 Ok(Heard::Written(tool, paths)) => written.push((tool, paths)),
                 Ok(Heard::Lost) => lost = true,
                 Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
@@ -122,6 +133,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
                         Ok(Heard::Lost) => lost = true,
                         Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
                         Ok(Heard::Look) => {}
+                        Ok(Heard::Told) => limits = true,
                         Err(_) => break,
                     }
                 }
@@ -130,7 +142,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
                 break;
             }
             let now = crate::station::now_ms();
-            let mut changed = false;
+            let mut changed = limits && limits_told(ledger, &told_in);
             for (tool, mut paths) in written {
                 paths.sort();
                 paths.dedup();
@@ -158,6 +170,15 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
     }
 }
 
+/// Claude's limits as the status line last kept them in `folder`, taken where they are newer; none kept there (Glance
+/// taken out of Claude Code's status line), those it told before no longer kept. Whether they changed.
+fn limits_told(ledger: &mut Ledger, folder: &std::path::Path) -> bool {
+    match super::statusline::told_in(folder) {
+        Some(limit) => ledger.told_limit(limit),
+        None => ledger.forget_limit(Tool::Claude, super::statusline::ID),
+    }
+}
+
 /// What was spent as it stands at `now` told, where it changed.
 fn tell(ledger: &Ledger, now: u64, told: &impl Fn()) {
     let usage = ledger.usage(now);
@@ -178,9 +199,9 @@ fn keep_in(ledger: &Ledger, dir: &std::path::Path) {
     }
 }
 
-/// Watches the folder `root` of `tool`'s records and those in it on a thread of its own, telling `ear` which records
-/// were written to, till it is gone (told as ended).
-fn watch(tool: Tool, root: PathBuf, ear: Sender<Heard>) {
+/// Watches the folder `root` and those in it on a thread of its own, telling `ear` what `heard` makes of the files
+/// written to there, till it is gone (told as ended).
+fn watch(root: PathBuf, ear: Sender<Heard>, heard: impl Fn(Vec<PathBuf>) -> Heard + Send + 'static) {
     /// FILE_LIST_DIRECTORY.
     const LIST: u32 = 0x1;
     let _ = std::thread::Builder::new().name("glance: AI records watched".into()).spawn(move || {
@@ -197,7 +218,7 @@ fn watch(tool: Tool, root: PathBuf, ear: Sender<Heard>) {
             let heard = match read {
                 Err(_) => None,
                 Ok(()) if got == 0 => Some(Heard::Lost),
-                Ok(()) => Some(Heard::Written(tool, names(unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, got as usize) }).into_iter().map(|name| root.join(name)).collect())),
+                Ok(()) => Some(heard(names(unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const u8, got as usize) }).into_iter().map(|name| root.join(name)).collect())),
             };
             let Some(heard) = heard else { break };
             if ear.send(heard).is_err() {
@@ -241,6 +262,24 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Claude's limits taken from what the status line kept, where newer than those taken before; what it kept gone
+    /// (Glance taken out of Claude Code's status line), no longer kept.
+    #[test]
+    fn takes_claudes_limits_as_the_status_line_keeps_them() {
+        let folder = std::env::temp_dir().join(format!("glance-test-{}", std::process::id())).join("limits-told");
+        std::fs::create_dir_all(&folder).unwrap();
+        let limit = |told| super::super::Limit { tool: Tool::Claude, id: super::super::statusline::ID.into(), name: None, plan: None, windows: vec![super::super::Window { minutes: 300, used: 40.0, resets: None }], told };
+        let keep = |told| std::fs::write(folder.join(super::super::statusline::LIMITS), serde_json::to_vec(&limit(told)).unwrap()).unwrap();
+        let mut ledger = Ledger::default();
+        assert!(!limits_told(&mut ledger, &folder));
+        keep(5);
+        assert!(limits_told(&mut ledger, &folder) && ledger.limits.len() == 1 && ledger.limits[0].told == 5);
+        assert!(!limits_told(&mut ledger, &folder));
+        std::fs::remove_file(folder.join(super::super::statusline::LIMITS)).unwrap();
+        assert!(limits_told(&mut ledger, &folder) && ledger.limits.is_empty());
+        let _ = std::fs::remove_dir_all(&folder);
+    }
 
     /// Waits up to five seconds for `done`.
     fn soon(done: impl Fn() -> bool) -> bool {

@@ -428,6 +428,8 @@ pub fn run() {
             elevation::forget_download();
             std::process::exit(if ended { 0 } else { 4 })
         }
+        // Claude Code's status line, where the user put Glance there (see `ai::statusline`).
+        [_, flag] if flag == ai::statusline::ASKED => std::process::exit(ai::statusline::run()),
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
         // An update taken elevated for a Glance without its sensors (see `update`).
         [_, flag, ..] if flag == "--update" => std::process::exit(if elevation::is_elevated() { update::run_asked(&args[1..]).unwrap_or(1) } else { 1 }),

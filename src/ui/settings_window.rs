@@ -1605,6 +1605,8 @@ enum Target {
     /// again to load it.
     NetEase(NetEaseWork),
     NetEaseRestart,
+    /// Puts Glance in Claude Code's status line (asked first), or takes it out (see `ai::statusline`).
+    ClaudeLimits(bool),
 }
 
 /// How what was done to NetEase Cloud Music's lyrics plugin went: done, with whether the loader is Glance's now
@@ -1683,6 +1685,9 @@ enum Row {
     Group(&'static str),
     /// NetEase Cloud Music's lyrics plugin (InfLink-rs): how it is, and installing or taking it back.
     NetEase,
+    /// Claude's limits read through Claude Code's status line: whether they are, and putting Glance there or taking it
+    /// out.
+    ClaudeLimits,
 }
 
 impl Row {
@@ -2052,6 +2057,10 @@ struct Ui {
     netease_restart: bool,
     netease_work: Option<(NetEaseWork, std::thread::JoinHandle<NetEaseDone>)>,
     netease_failed: Option<(NetEaseWork, crate::netease::Failed)>,
+    /// How Glance stands in Claude Code's status line (looked at as the window is made, as the AI component's page is
+    /// turned to, and as it is put there or taken out), and whether that last failed.
+    claude_limits: crate::ai::statusline::Standing,
+    claude_failed: bool,
     /// What the devices' page's stage shows (see `paint_adding`); the pairing offered there and when it was asked
     /// for (it lasts `phone::OFFER_LASTS` from then), one being asked for (on another thread: see `keep_offer`), and
     /// whether the last could not be; the code that leads to the phone app, once asked for (none: it could not be
@@ -2389,6 +2398,8 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             netease_restart: false,
             netease_work: None,
             netease_failed: None,
+            claude_limits: crate::ai::statusline::standing(),
+            claude_failed: false,
             stage_shows: CodeFor::Pairing,
             offer: None,
             offering: None,
@@ -2989,6 +3000,10 @@ impl Ui {
             (Page::Ai, _) => {
                 rows.push(Row::Choice(Field::AiForm));
                 rows.push(Row::Choice(Field::Columns));
+                // (Only where Claude Code is on this PC.)
+                if self.claude_limits != crate::ai::statusline::Standing::NoClaude {
+                    rows.push(Row::ClaudeLimits);
+                }
                 for entry in &self.prefs.ai {
                     rows.push(Row::Module(entry.id.clone()));
                     if self.opened(&entry.id) > 0.0 {
@@ -3300,6 +3315,9 @@ impl Ui {
             self.page = page;
             AI_PAGE.store(matches!(page, Page::Ai | Page::Layout), Ordering::Relaxed);
             crate::ai::look_now();
+            if page == Page::Ai {
+                self.claude_limits = crate::ai::statusline::standing();
+            }
             self.scroll = 0.0;
             self.scroll_target = 0.0;
             self.drag = None;
@@ -3933,6 +3951,17 @@ impl Ui {
                     }
                 };
                 (p("网易云音乐歌词插件", "NetEase Cloud Music lyrics plugin"), detail, buttons)
+            }
+            Row::ClaudeLimits => {
+                let put_in = (p("接入", "Connect"), Target::ClaudeLimits(true), Button::Accent);
+                let take_out = (p("取消接入", "Disconnect"), Target::ClaudeLimits(false), Button::Plain);
+                let (detail, buttons) = match (self.claude_failed, self.claude_limits) {
+                    (true, crate::ai::statusline::Standing::In) => (p("未能写入 Claude Code 的设置文件，接入未取消", "Claude Code's settings could not be written. It is still connected"), vec![take_out]),
+                    (true, _) => (p("未能写入 Claude Code 的设置文件，接入未完成", "Claude Code's settings could not be written. It was not connected"), vec![(p("重试", "Retry"), Target::ClaudeLimits(true), Button::Accent)]),
+                    (false, crate::ai::statusline::Standing::In) => (p("已接入 Claude Code 状态栏，额度在 Claude Code 运行时更新", "Connected to Claude Code's status line. The limits are told as Claude Code runs"), vec![take_out]),
+                    (false, _) => (p("通过 Claude Code 状态栏读取 5 小时与每周额度，原有的状态栏照常显示", "The five-hour and weekly limits read through Claude Code's status line. Its own status line shows as before"), vec![put_in]),
+                };
+                (p("Claude 订阅额度", "Claude plan limits"), detail, buttons)
             }
             Row::Uninstall => (
                 p("卸载 Glance", "Uninstall Glance"),
@@ -4585,8 +4614,8 @@ impl Ui {
             Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "What devices trusted send is taken without asking")),
             Field::AiForm => Some(pick(
                 self.lang,
-                "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情；位于顶部边缘时横向排列",
-                "The dock lies along the screen's edge, a source's detail shown beside it as the pointer rests on it; across a top edge",
+                "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情。位于顶部边缘时横向排列",
+                "The dock lies along the screen's edge, a source's detail shown beside it as the pointer rests on it. Along a top edge, it lies across",
             )),
             Field::MusicSource => Some(pick(
                 self.lang,
@@ -4959,6 +4988,47 @@ impl Ui {
         }
     }
 
+    /// Puts Glance in Claude Code's status line (`put_in`, once the user agrees to what it does), or takes it out,
+    /// the status line it took the place of put back.
+    fn claude_asked(&mut self, put_in: bool) {
+        use crate::ai::statusline;
+        let lang = self.lang;
+        if put_in {
+            let (title, intro, yes) = match lang {
+                Lang::Zh => (
+                    "接入 Claude Code 状态栏？",
+                    "Glance 将把自身设为 Claude Code 的状态栏命令（写入其设置文件 settings.json 中的 statusLine 一项），以读取 Claude 订阅的 5 小时与每周额度。这是 Claude Code 文档提供的方式，额度只保存在本机。
+
+原有的状态栏命令会保留：Glance 读取额度后照常运行它，状态栏的显示不变。未设置状态栏时，状态栏不显示内容。设置文件中的其他内容不作改动。
+
+可随时在此处取消接入，原有的状态栏命令将恢复。",
+                    "接入",
+                ),
+                Lang::En => (
+                    "Connect to Claude Code's status line?",
+                    "Glance sets itself as Claude Code's status line command (the statusLine entry of its settings.json) to read the five-hour and weekly limits of a Claude plan. This is the way Claude Code's documentation gives, and the limits stay on this PC.
+
+A status line command already set is kept: Glance runs it as before once it has read the limits, and the status line shows what it did. With none set, the status line shows nothing. Nothing else in the settings is changed.
+
+It can be disconnected here at any time, and the status line command put back.",
+                    "Connect",
+                ),
+            };
+            let asked = super::ask::Asked { title, intro, own: None, option: None, sent: None, from_end: false, yes, no: pick(lang, "取消", "Cancel"), dark: self.dark };
+            if super::ask::show(self.hwnd, &asked).is_none() {
+                return;
+            }
+        }
+        let done = if put_in { statusline::put_in() } else { statusline::take_out() };
+        if let Err(error) = &done {
+            crate::journal::note(format!("Claude Code's status line: {} failed ({error})", if put_in { "putting Glance in" } else { "taking Glance out" }));
+        }
+        self.claude_failed = done.is_err();
+        self.claude_limits = statusline::standing();
+        crate::ai::look_now();
+        self.next_frame = Instant::now();
+    }
+
     /// Installs NetEase Cloud Music's lyrics plugin, or takes it back (`work`), once the user agrees to what it does,
     /// on another thread (see `paint_list`).
     fn netease_asked(&mut self, work: NetEaseWork) {
@@ -5044,7 +5114,7 @@ impl Ui {
         let p = |zh, en| pick(lang, zh, en).to_string();
         match id {
             "ai:today" => return (p("今日用量", "Today"), Some(p("各来源今日的令牌用量及其变化", "Tokens every source spent today, and how they mounted"))),
-            "ai:claude" => return ("Claude".into(), Some(p("Claude Code 的令牌用量、模型与会话", "Claude Code's tokens, models and sessions"))),
+            "ai:claude" => return ("Claude".into(), Some(p("Claude Code 的额度、令牌用量、模型与会话", "Claude Code's limits, tokens, models and sessions"))),
             "ai:codex" => return ("ChatGPT".into(), Some(p("Codex 的额度、令牌用量、模型与会话", "Codex's limits, tokens, models and sessions"))),
             _ => {}
         }
@@ -5636,6 +5706,7 @@ impl Ui {
                 }
             }
             Target::NetEase(work) if self.netease_work.is_none() => self.netease_asked(work),
+            Target::ClaudeLimits(put_in) => self.claude_asked(put_in),
             Target::NetEase(_) => {}
             Target::NetEaseRestart => {
                 if let Some(netease) = self.netease.clone() {
@@ -5796,6 +5867,7 @@ impl Ui {
                 Row::MyReports => vec![Target::MyReports],
                 Row::Report(id) => vec![Target::Thread(id)],
                 Row::Uninstall => vec![Target::Uninstall],
+                Row::ClaudeLimits => self.button_row(&Row::ClaudeLimits, Instant::now()).map_or(Vec::new(), |(_, _, buttons)| buttons.into_iter().map(|(_, target, _)| target).collect()),
                 Row::NetEase if self.netease_work.is_some() => vec![],
                 Row::NetEase if self.netease_has == crate::netease::Installed::Yes && self.netease_restart && self.netease_failed.is_none() => vec![Target::NetEaseRestart, Target::NetEase(NetEaseWork::Remove)],
                 Row::NetEase => match (self.netease_failed.map(|(work, _)| work), self.netease_has) {
@@ -5968,6 +6040,7 @@ impl Ui {
             (Row::Shortcut(a), Target::Shortcut(b) | Target::ClearShortcut(b)) => a == b,
             (Row::Manage(_), Target::Manage) => true,
             (Row::NetEase, Target::NetEase(_) | Target::NetEaseRestart) => true,
+            (Row::ClaudeLimits, Target::ClaudeLimits(_)) => true,
             (Row::Unpair(a), Target::Unpair(b)) | (Row::Device(Known::Phone(a)), Target::OpenPhone(b)) | (Row::Device(Known::Trusted(a)), Target::Untrust(b)) | (Row::Found(a), Target::TrustFound(b)) => a == b,
             (Row::PhoneMay(a, s), Target::PhoneMay(b, t)) => a == b && s == t,
             (Row::PcName, Target::PcName) | (Row::NearbyFolder, Target::OpenStation | Target::KeptIn) => true,
@@ -6958,7 +7031,7 @@ impl Ui {
                     frame.icon(Icon::Megaphone, Point { x: left + ROW_SIDE + 8.0, y: top + 10.0 }, 16.0, palette.selection);
                     field_label(frame, palette, &name, Some(&detail), Font::new(Family::Segoe, 14.0, 600.0), hint, words_left, y + row_height / 2.0, room);
                 }
-                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Manage(_) | Row::NetEase | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
+                Row::Update | Row::Version | Row::Shortcut(_) | Row::Diagnostics | Row::Guide | Row::MyReports | Row::Report(_) | Row::Uninstall | Row::Quit | Row::Manage(_) | Row::NetEase | Row::ClaudeLimits | Row::RecentFolder(_) | Row::AddRecentFolder | Row::NearbyFolder => {
                     let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
                     card(frame, palette, left, y, width, row_height, palette.card);
                     let mut right = left + width - ROW_SIDE;
@@ -8411,6 +8484,7 @@ mod pictures {
         std::fs::create_dir_all(&out).unwrap();
         let shown = [
             (Page::Layout, Tab::Shown, "layout"),
+            (Page::Ai, Tab::Shown, "ai"),
             (Page::Look, Tab::Shown, "look"),
             (Page::Monitor, Tab::Shown, "monitor-shown"),
             (Page::Monitor, Tab::Data, "monitor-data"),
@@ -8434,6 +8508,10 @@ mod pictures {
                     ui.turn_to(page);
                     if matches!(page, Page::Nearby | Page::Devices | Page::Phone) {
                         pretend_nearby(ui, true);
+                    }
+                    // (As where Claude Code is on the PC: its settings in a test are none.)
+                    if page == Page::Ai {
+                        ui.claude_limits = crate::ai::statusline::Standing::Out;
                     }
                 });
                 // Drawn a while (the desktops read meanwhile, what moves come to rest), then pictured.

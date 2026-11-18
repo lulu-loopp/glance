@@ -8,6 +8,7 @@
 
 mod claude;
 mod codex;
+pub mod statusline;
 mod time;
 #[cfg(windows)]
 mod watch;
@@ -311,17 +312,29 @@ impl Ledger {
                 changed
             }
             Told::Limit(limit) if limit.told < from => false,
-            Told::Limit(limit) => match self.limits.iter_mut().find(|had| had.tool == limit.tool && had.id == limit.id) {
-                Some(had) if had.told >= limit.told => false,
-                Some(had) => {
-                    *had = limit;
-                    true
-                }
-                None => {
-                    self.limits.push(limit);
-                    true
-                }
-            },
+            Told::Limit(limit) => self.told_limit(limit),
+        }
+    }
+
+    /// `tool`'s limit `id` no longer kept. Whether there was one.
+    pub(crate) fn forget_limit(&mut self, tool: Tool, id: &str) -> bool {
+        let before = self.limits.len();
+        self.limits.retain(|limit| limit.tool != tool || limit.id != id);
+        self.limits.len() != before
+    }
+
+    /// A limit as it was told, kept where it is newer than what was told of it before. Whether it was.
+    pub(crate) fn told_limit(&mut self, limit: Limit) -> bool {
+        match self.limits.iter_mut().find(|had| had.tool == limit.tool && had.id == limit.id) {
+            Some(had) if had.told >= limit.told => false,
+            Some(had) => {
+                *had = limit;
+                true
+            }
+            None => {
+                self.limits.push(limit);
+                true
+            }
         }
     }
 
