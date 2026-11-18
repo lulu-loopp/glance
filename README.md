@@ -23,7 +23,7 @@ give it, or torn off onto the desktop.
 ## What it shows
 
 - **CPU**: usage, every thread (point at one for its clock), clock (each kind's on processors with big and little cores), temperature, package power, each chiplet's temperature
-- **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards; Intel Arc graphics' temperature, clock, fan and power, from Intel's own driver library; and a hot spot line on the cards whose driver says it apart (NVIDIA's before the RTX 50 series, AMD's)
+- **Graphics**: usage, video memory, clock, temperature, fan, and the card's power on NVIDIA and AMD cards; Intel Arc graphics' temperature, clock, fan and power, from Intel's own driver library; and a hot spot line on NVIDIA's cards (the RTX 50 series' read from the chip's own register, which their driver no longer reports) and AMD's
 - **Memory**: use, its speed (and what the modules are rated for, if it runs below that), and each module's temperature
 - **Network and disk**: traffic, the name of the Wi-Fi network if you like, and each drive's temperature, every drive on a line of its own
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU

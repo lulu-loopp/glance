@@ -342,16 +342,44 @@ impl Drop for Nvml {
 // documents of NVAPI: it is asked for as other monitors ask for it, by the
 // call that reads all of the card's thermal sensors, of which the second is
 // that point on the cards before the RTX 50 series. From that series on the
-// driver no longer tells it (the second sensor there is the chip's
-// temperature again: seen on an RTX 5070 Ti, driver 617.14), so those cards
-// are not asked.
+// driver no longer tells it there (the second sensor is the chip's
+// temperature again: seen on an RTX 5070 Ti, driver 617.14): on those cards
+// (Blackwell's) it is read from the register the chip keeps it in, through
+// NVAPI's register reads, as LACT reads it (MIT, lact-daemon's nvapi.rs),
+// which only an administrator may do (glance-sensors is one). Read so on an
+// RTX 5080 (driver 617.14), it was HWiNFO's hot spot to the tenth of a degree
+// (30.0 °C, its chip at 27). Later architectures, whose register is not
+// known, are not asked.
 
 const NVAPI_OK: i32 = 0;
-/// The first architecture whose cards do not tell their hot spot (the RTX 50 series').
-const NV_ARCHITECTURE_UNTOLD_FROM: u32 = 0x1B0;
-/// Which of the thermal sensors the hot spot is, and what a sensor with nothing to say reads.
+/// The architecture whose cards keep their hot spot in a register of their own (the RTX 50 series', Blackwell).
+const NV_ARCHITECTURE_BLACKWELL: u32 = 0x1B0;
+/// Which of the thermal sensors the hot spot is (before Blackwell), and what a sensor with nothing to say reads.
 const NV_HOT_SPOT: usize = 1;
 const NV_NOTHING: i32 = 255 * 256;
+/// Where a Blackwell chip keeps its hot spot (the warmest of its sensors), in its low 16 bits, in 1/256 °C.
+const NV_BLACKWELL_HOT_SPOT_REGISTER: u32 = 0x00AD_0AA0;
+/// A register read: of 32 bits, of the chip's global space.
+const NV_REGISTER_READ_32_GLOBAL: u16 = 1 | 4 | 16;
+
+/// One register read or written by NVAPI's register call.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct NvRegisterOp {
+    flags: u16,
+    status: u16,
+    offset: u32,
+    write_mask: u64,
+    value: u64,
+}
+
+/// What NVAPI's register call is given: up to 256 reads or writes (only reads are ever asked here).
+#[repr(C)]
+struct NvRegisterOps {
+    version: u32,
+    count: u32,
+    ops: [NvRegisterOp; 256],
+}
 
 #[repr(C)]
 struct NvThermalSensors {
@@ -375,13 +403,39 @@ type NvCardQuery<T> = unsafe extern "C" fn(*mut c_void, *mut T) -> i32;
 
 struct Nvapi {
     sensors: NvCardQuery<NvThermalSensors>,
+    /// The register call, where the driver has it.
+    registers: Option<NvCardQuery<NvRegisterOps>>,
     bus: NvCardQuery<u32>,
     slot: NvCardQuery<u32>,
     architecture: NvCardQuery<NvArchitecture>,
     /// Every card NVAPI has.
     cards: Vec<*mut c_void>,
-    /// The cards found that tell their hot spot, by where each sits.
-    devices: Vec<(PciAddress, *mut c_void)>,
+    /// The cards found that tell their hot spot, by where each sits, and how each tells it.
+    devices: Vec<(PciAddress, *mut c_void, HotSpotFrom)>,
+}
+
+/// Where a card tells its hot spot.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum HotSpotFrom {
+    /// Its second thermal sensor (the cards before Blackwell).
+    Sensor,
+    /// Its register of it (Blackwell's).
+    Register,
+}
+
+/// Where a card of `architecture` tells its hot spot, if it is known to (and, for a register, the driver can read one).
+fn hot_spot_from(architecture: u32, registers: bool) -> Option<HotSpotFrom> {
+    match architecture {
+        a if a < NV_ARCHITECTURE_BLACKWELL => Some(HotSpotFrom::Sensor),
+        NV_ARCHITECTURE_BLACKWELL if registers => Some(HotSpotFrom::Register),
+        _ => None,
+    }
+}
+
+/// A Blackwell hot spot register's word in °C, where it says one (none read, or not a temperature: nothing).
+fn blackwell_hot_spot(raw: u64) -> Option<f32> {
+    let celsius = (raw & 0xFFFF) as f32 / 256.0;
+    (celsius > 0.0 && celsius < 255.0).then_some(celsius)
 }
 
 impl Nvapi {
@@ -407,13 +461,14 @@ impl Nvapi {
         let slot = unsafe { had(query, 0x2A0A_350F) }?;
         let architecture = unsafe { had(query, 0xD826_5D24) }?;
         let sensors = unsafe { had(query, 0x65FE_3AAD) }?;
+        let registers = unsafe { had(query, 0x2EB3_C140) };
         if unsafe { initialize() } != NVAPI_OK {
             return None;
         }
         let (mut cards, mut count) = ([std::ptr::null_mut(); 64], 0u32);
         let listed = unsafe { enumerate(&mut cards, &mut count) } == NVAPI_OK;
         let cards = if listed { cards.into_iter().take(count as usize).collect() } else { Vec::new() };
-        Some(Nvapi { sensors, bus, slot, architecture, cards, devices: Vec::new() })
+        Some(Nvapi { sensors, registers, bus, slot, architecture, cards, devices: Vec::new() })
     }
 
     /// Finds the card at `at`, kept if it is one that tells its hot spot: the cards asked where each sits till it is
@@ -426,8 +481,10 @@ impl Nvapi {
                 continue;
             }
             let mut about = NvArchitecture { version: size_of::<NvArchitecture>() as u32 | 2 << 16, architecture: 0, implementation: 0, revision: 0 };
-            if unsafe { (self.architecture)(card, &mut about) } == NVAPI_OK && about.architecture < NV_ARCHITECTURE_UNTOLD_FROM {
-                self.devices.push((at, card));
+            if unsafe { (self.architecture)(card, &mut about) } == NVAPI_OK {
+                if let Some(from) = hot_spot_from(about.architecture, self.registers.is_some()) {
+                    self.devices.push((at, card, from));
+                }
             }
             return;
         }
@@ -436,14 +493,26 @@ impl Nvapi {
     /// The warmest point of the chip of the card at `at` (°C), if it is one that tells it, asked only as `awake` says
     /// it is just before.
     fn hot_spot(&self, at: PciAddress, awake: &mut dyn FnMut() -> bool) -> Option<f32> {
-        let card = self.devices.iter().find(|(theirs, _)| *theirs == at)?.1;
+        let &(_, card, from) = self.devices.iter().find(|(theirs, ..)| *theirs == at)?;
         if !awake() {
             return None;
         }
-        let mut read = NvThermalSensors { version: size_of::<NvThermalSensors>() as u32 | 2 << 16, mask: 1 << NV_HOT_SPOT, reserved: [0; 8], temperatures: [0; 32] };
-        let told = unsafe { (self.sensors)(card, &mut read) } == NVAPI_OK;
-        let raw = read.temperatures[NV_HOT_SPOT];
-        (told && raw > 0 && raw < NV_NOTHING).then(|| raw as f32 / 256.0)
+        match from {
+            HotSpotFrom::Sensor => {
+                let mut read = NvThermalSensors { version: size_of::<NvThermalSensors>() as u32 | 2 << 16, mask: 1 << NV_HOT_SPOT, reserved: [0; 8], temperatures: [0; 32] };
+                let told = unsafe { (self.sensors)(card, &mut read) } == NVAPI_OK;
+                let raw = read.temperatures[NV_HOT_SPOT];
+                (told && raw > 0 && raw < NV_NOTHING).then(|| raw as f32 / 256.0)
+            }
+            HotSpotFrom::Register => {
+                let registers = self.registers?;
+                // (On the heap: the call's answer is 6 KB.)
+                let mut ops = Box::new(NvRegisterOps { version: size_of::<NvRegisterOps>() as u32 | 1 << 16, count: 1, ops: [NvRegisterOp::default(); 256] });
+                ops.ops[0] = NvRegisterOp { flags: NV_REGISTER_READ_32_GLOBAL, offset: NV_BLACKWELL_HOT_SPOT_REGISTER, ..NvRegisterOp::default() };
+                let told = unsafe { registers(card, &mut *ops) } == NVAPI_OK && ops.ops[0].status == 0;
+                told.then(|| blackwell_hot_spot(ops.ops[0].value)).flatten()
+            }
+        }
     }
 }
 
@@ -937,6 +1006,42 @@ mod tests {
         NVAPI_OK
     }
 
+    // NVAPI as it stands for an RTX 50 card: Blackwell, its hot spot register read as an RTX 5080's was (30 °C), any
+    // other register refused.
+    unsafe extern "C" fn nvapi_blackwell(_: *mut c_void, about: *mut NvArchitecture) -> i32 {
+        unsafe { (*about).architecture = 0x1B0 };
+        NVAPI_OK
+    }
+    unsafe extern "C" fn nvapi_registers(_: *mut c_void, ops: *mut NvRegisterOps) -> i32 {
+        let ops = unsafe { &mut *ops };
+        asked("NVAPI: register");
+        let only = &mut ops.ops[0];
+        if ops.count != 1 || only.flags != NV_REGISTER_READ_32_GLOBAL || only.offset != NV_BLACKWELL_HOT_SPOT_REGISTER {
+            return -1;
+        }
+        only.value = 0x4000_1E00;
+        NVAPI_OK
+    }
+
+    /// An RTX 50 card is found as one that tells its hot spot where the driver reads registers, and its hot spot is
+    /// read from its register alone (its sensors not asked): where the driver has no register call, it is not found so.
+    #[test]
+    fn reads_a_blackwell_cards_hot_spot_from_its_register() {
+        let at = (2, 0, 0);
+        let with = |registers| Nvapi { sensors: nvapi_sensors_asked, registers, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_blackwell, cards: vec![std::ptr::dangling_mut::<c_void>()], devices: Vec::new() };
+        let mut nvapi = with(Some(nvapi_registers));
+        nvapi.find(at);
+        assert_eq!(nvapi.devices.iter().map(|&(at, _, from)| (at, from)).collect::<Vec<_>>(), [(at, HotSpotFrom::Register)]);
+        taken();
+        assert_eq!(nvapi.hot_spot(at, &mut || true), Some(30.0));
+        assert_eq!(taken(), ["NVAPI: register"]);
+        assert_eq!(nvapi.hot_spot(at, &mut || false), None);
+        assert!(taken().is_empty());
+        let mut without = with(None);
+        without.find(at);
+        assert!(without.devices.is_empty());
+    }
+
     // NVML and NVAPI as they stand for NVIDIA's card being read below: each call takes long enough for the card to go
     // to sleep, and it has a fan.
     unsafe extern "C" fn nvml_power_meanwhile(_: NvmlDevice, _: *mut u32) -> i32 {
@@ -979,7 +1084,7 @@ mod tests {
             shutdown: nvml_shutdown,
             devices: vec![(at, 1 as NvmlDevice)],
         };
-        let nvapi = Nvapi { sensors: nvapi_sensors_asked, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: Vec::new(), devices: vec![(at, 1 as *mut c_void)] };
+        let nvapi = Nvapi { sensors: nvapi_sensors_asked, registers: None, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: Vec::new(), devices: vec![(at, std::ptr::dangling_mut::<c_void>(), HotSpotFrom::Sensor)] };
         let power = GpuPower { nvml: Some(Some(nvml)), nvapi: Some(Some(nvapi)), adl: None, igcl: None };
         let card = Reader::Nvidia(0);
         let mut awake = || !NVIDIA_ASLEEP.get();
@@ -1006,7 +1111,7 @@ mod tests {
     #[test]
     fn asks_each_library_only_as_its_makers_cards_are_awake() {
         let nvml = Nvml { library: HMODULE::default(), by_bus_id: nvml_by_bus_id, power_usage: nvml_power, clock_reasons: None, fans: None, shutdown: nvml_shutdown, devices: Vec::new() };
-        let nvapi = Nvapi { sensors: nvapi_sensors, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: vec![1 as *mut c_void], devices: Vec::new() };
+        let nvapi = Nvapi { sensors: nvapi_sensors, registers: None, bus: nvapi_bus, slot: nvapi_slot, architecture: nvapi_architecture, cards: vec![std::ptr::dangling_mut::<c_void>()], devices: Vec::new() };
         let mut power = GpuPower { nvml: Some(Some(nvml)), nvapi: Some(Some(nvapi)), adl: None, igcl: None };
         let at = (2, 0, 0);
         let mut awake = [true, false].into_iter();
@@ -1098,5 +1203,48 @@ mod tests {
         assert_eq!(limit_of(HW_SLOWDOWN | HW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
         assert_eq!(limit_of(SW_POWER_CAP | SW_THERMAL_SLOWDOWN), GpuLimit::Thermal);
         assert_eq!(limit_of(HW_SLOWDOWN), GpuLimit::Hardware);
+    }
+
+    /// The cards before Blackwell tell their hot spot by their second sensor, Blackwell's by its register where the
+    /// driver reads registers, and later architectures are not asked. A register's word is its low 16 bits in 1/256 °C
+    /// (as an RTX 5080's read: 0x40001E00 is 30 °C), none where it says nothing.
+    #[test]
+    fn asks_each_architecture_for_its_hot_spot_where_it_keeps_it() {
+        assert_eq!(hot_spot_from(0x190, true), Some(HotSpotFrom::Sensor));
+        assert_eq!(hot_spot_from(0x190, false), Some(HotSpotFrom::Sensor));
+        assert_eq!(hot_spot_from(0x1B0, true), Some(HotSpotFrom::Register));
+        assert_eq!(hot_spot_from(0x1B0, false), None);
+        assert_eq!(hot_spot_from(0x1C0, true), None);
+        assert_eq!(blackwell_hot_spot(0x4000_1E00), Some(30.0));
+        assert_eq!(blackwell_hot_spot(0x4000_1F70), Some(31.4375));
+        assert_eq!(blackwell_hot_spot(0), None);
+        assert_eq!(blackwell_hot_spot(0xFFFF), None);
+        // The register call's structures as NVAPI lays them out (its version 1 is of this size).
+        assert_eq!((size_of::<NvRegisterOp>(), size_of::<NvRegisterOps>()), (24, 8 + 256 * 24));
+    }
+
+    /// This PC's NVIDIA cards' hot spots as Glance reads them, once a second for HOT_SPOT_SECS (10) seconds. Run by
+    /// hand: a Blackwell card's needs administrator rights.
+    #[test]
+    #[ignore = "reads this PC's NVIDIA cards; a Blackwell card's hot spot needs administrator rights"]
+    fn reads_this_pcs_hot_spots() {
+        let mut nvapi = Nvapi::open().expect("NVAPI");
+        let mut found = Vec::new();
+        for &card in &nvapi.cards.clone() {
+            let (mut on_bus, mut in_slot) = (0u32, 0u32);
+            if unsafe { (nvapi.bus)(card, &mut on_bus) == NVAPI_OK && (nvapi.slot)(card, &mut in_slot) == NVAPI_OK } {
+                found.push((on_bus, in_slot, 0));
+            }
+        }
+        for &at in &found {
+            nvapi.find(at);
+        }
+        let secs: u32 = std::env::var("HOT_SPOT_SECS").ok().and_then(|secs| secs.parse().ok()).unwrap_or(10);
+        for _ in 0..secs {
+            for &(at, _, from) in &nvapi.devices {
+                println!("{at:?} by {from:?}: {:?}", nvapi.hot_spot(at, &mut || true));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 }
