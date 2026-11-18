@@ -300,7 +300,8 @@ pairing (the tile's sending tells it again each time, so a PC sent to by hand ne
 
 - **Which PC.** On a PC's page, that one. Shared from another app (`ShareActivity`, over that app, its own task): the
   one paired, or, with several, a sheet "发送到" listing them, each reached first (`/v1/nearby`): the one sent to last
-  first, those not reached or not receiving last and not to be chosen. None paired: said so.
+  first, the others as they were paired, those not reached or not receiving dimmed where they are and not to be chosen
+  (no row moves while the sheet is open: it would move from under the finger). None paired: said so.
 - **One at a time.** A handing goes on in a foreground service (`HandService`, type dataSync), so it goes on when the
   app is left: its notification says how far ("正在发送到 <PC>", n / m, bytes). Another shared meanwhile is told to
   wait ("正在发送其他内容"), and the tile shows the one going on.
@@ -553,8 +554,9 @@ pills, groups named without counts, no paragraphs of notes under the lists.
 - **Settings.** "已配对的电脑" becomes **设备** (+ 添加电脑): paired PCs ("已配对 · 可控制这台电脑、直接接收文件", 解除配对)
   and trusted devices ("已信任 · 直接接收文件", 移除). A section **附近传输**: 后台接收, 来自未信任设备的文件, 本机名称 (the
   device's name by default), 最近收到 (the last 20, pressed to open, words to copy).
-- **Sending.** The send sheet lists paired PCs ("已配对的电脑") and then "附近的设备" found (looking while it is open). A
-  device not paired is sent to as LocalSend sends: "等待对方接受", its PIN asked for on a 401, refused said so.
+- **Sending.** The send sheet lists paired PCs ("已配对的电脑") and then "附近的设备" found (looking while it is open),
+  Glance's first, by name, as the PC lists them: each keeps its place as it says itself again every few seconds (they
+  were listed the one heard last first, and moved under the finger). A device not paired is sent to as LocalSend sends: "等待对方接受", its PIN asked for on a 401, refused said so.
 - **The pairing scanner** takes the new code (above).
 
 ### Order of work
