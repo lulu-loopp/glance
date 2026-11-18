@@ -96,14 +96,26 @@ fn ec_source_is_temperature(source: u8) -> bool {
 /// What each of the chip's inputs is wired to on a given board, as the
 /// board's maker labels them. Names are keys the page translates.
 struct Layout {
-    temps: &'static [&'static str],
-    fans: &'static [&'static str],
+    temps: &'static [Wired],
+    fans: &'static [Wired],
 }
+
+/// What one of a chip's inputs is wired to on a board.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Wired {
+    /// To what the key names (a key the page translates).
+    To(&'static str),
+    /// To something not known: it keeps its number (a Nuvoton chip's temperature input its name for it).
+    Unknown,
+    /// To nothing: what it reads measures nothing, and it is not shown.
+    Nothing,
+}
+use Wired::{Nothing, To, Unknown};
 
 /// Gigabyte's AM5 boards with an IT8689E all wire it the same way.
 const GIGABYTE_IT8689E: Layout = Layout {
-    temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm", "vsoc"],
-    fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "system_fan_4_pump", "cpu_opt_fan"],
+    temps: &[To("system"), To("chipset"), To("cpu_socket"), To("pcie_x16"), To("vrm"), To("vsoc")],
+    fans: &[To("cpu_fan"), To("system_fan_1"), To("system_fan_2"), To("system_fan_3"), To("system_fan_4_pump"), To("cpu_opt_fan")],
 };
 
 /// Gigabyte's 800-series AM5 boards with an IT8696E wire its first five
@@ -112,8 +124,8 @@ const GIGABYTE_IT8689E: Layout = Layout {
 /// and they keep their numbers (as LibreHardwareMonitor's tables of those
 /// boards have them).
 const GIGABYTE_IT8696E: Layout = Layout {
-    temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm"],
-    fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3", "cpu_opt_fan"],
+    temps: &[To("system"), To("chipset"), To("cpu_socket"), To("pcie_x16"), To("vrm")],
+    fans: &[To("cpu_fan"), To("system_fan_1"), To("system_fan_2"), To("system_fan_3"), To("cpu_opt_fan")],
 };
 
 /// Gigabyte's B760M GAMING WIFI6 PLUS GEN5, an Intel board with an IT8689E, wires its first five temperature inputs
@@ -121,8 +133,8 @@ const GIGABYTE_IT8696E: Layout = Layout {
 /// of them, read beside Glance on that board, its second header turning as its first case fan; the third and fourth the
 /// case fans after it, as its owner told). Its other fan headers keep their numbers, what they are wired to not seen.
 const GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5: Layout = Layout {
-    temps: &["system", "chipset", "cpu_socket", "pcie_x16", "vrm", "aux"],
-    fans: &["cpu_fan", "system_fan_1", "system_fan_2", "system_fan_3"],
+    temps: &[To("system"), To("chipset"), To("cpu_socket"), To("pcie_x16"), To("vrm"), To("aux")],
+    fans: &[To("cpu_fan"), To("system_fan_1"), To("system_fan_2"), To("system_fan_3")],
 };
 
 /// MSI's boards with an NCT6687D wire its first seven monitoring channels
@@ -130,8 +142,19 @@ const GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5: Layout = Layout {
 /// those boards and LibreHardwareMonitor name them): by the channel's and
 /// the input's own number, not by which of them are in use.
 const MSI_NCT6687D: Layout = Layout {
-    temps: &["cpu", "system", "vrm", "chipset", "cpu_socket", "pcie_x1", "m2_1"],
-    fans: &["cpu_fan", "pump_fan", "system_fan_1", "system_fan_2", "system_fan_3", "system_fan_4", "system_fan_5", "system_fan_6"],
+    temps: &[To("cpu"), To("system"), To("vrm"), To("chipset"), To("cpu_socket"), To("pcie_x1"), To("m2_1")],
+    fans: &[To("cpu_fan"), To("pump_fan"), To("system_fan_1"), To("system_fan_2"), To("system_fan_3"), To("system_fan_4"), To("system_fan_5"), To("system_fan_6")],
+};
+
+/// ASUS's ROG STRIX B850-F GAMING WIFI7 NEO wires its NCT6799D's SYSTIN to the reading Armoury Crate calls its
+/// motherboard's, its CPUTIN to the processor's socket and its AUXTIN4 to its VRM thermistor (read beside Armoury Crate
+/// on that board through a few minutes of load: SYSTIN 20 to 21 °C as its motherboard, AUXTIN4 38 to 40 and back as its
+/// VRM, CPUTIN 38 to 43 and back), and nothing to AUXTIN0 to AUXTIN3, which read about 90, 6, 17 and 25 °C through idle
+/// and load alike and are shown by neither (its chipset's temperature comes from elsewhere). Its second fan header is
+/// its CPU fan and its fourth its third chassis fan, as Armoury Crate counts them: the rest keep their numbers.
+const ASUS_ROG_STRIX_B850_F_GAMING_WIFI7_NEO: Layout = Layout {
+    temps: &[To("system"), To("cpu_socket"), Nothing, Nothing, Nothing, Nothing, To("vrm")],
+    fans: &[Unknown, To("cpu_fan"), Unknown, To("system_fan_3")],
 };
 
 /// What the inputs of the chip `chip` are wired to on the board `board` made by `vendor`, where that is known.
@@ -149,6 +172,10 @@ fn layout(vendor: &str, board: &str, chip: u16) -> Option<&'static Layout> {
     // (The NCT6687D, whatever its revision.)
     if vendor.starts_with("Micro-Star") && chip & 0xFFF0 == 0xD590 {
         return Some(&MSI_NCT6687D);
+    }
+    // (The NCT6799D, whatever its revision.)
+    if vendor.starts_with("ASUSTeK") && chip & 0xFFF8 == 0xD800 && board.eq_ignore_ascii_case("ROG STRIX B850-F GAMING WIFI7 NEO") {
+        return Some(&ASUS_ROG_STRIX_B850_F_GAMING_WIFI7_NEO);
     }
     None
 }
@@ -321,8 +348,12 @@ impl SuperIo {
             }
             // As the board wires it, where that is known; else by what it is of (a second channel of a named
             // source by a number, as the rest).
-            let wired = self.layout.and_then(|layout| layout.temps.get(channel as usize)).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == *name));
-            let name = wired.copied().or_else(|| ec_source_name(source).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name)));
+            let wired = match self.layout.and_then(|layout| layout.temps.get(channel as usize)) {
+                Some(Nothing) => continue,
+                Some(To(name)) => Some(*name).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name)),
+                Some(Unknown) | None => None,
+            };
+            let name = wired.or_else(|| ec_source_name(source).filter(|name| !self.ec_temps.iter().any(|(_, taken)| taken == name)));
             let name = name.map(str::to_string).unwrap_or_else(|| {
                 numbered += 1;
                 numbered.to_string()
@@ -332,8 +363,9 @@ impl SuperIo {
         for fan in 0..EC_FANS {
             if self.register(EC_FAN_INPUT + fan).is_some_and(|input| input & 0x80 != 0) {
                 // (By the input's own number, as the board's maker counts its headers: not by how many are in use.)
-                let name = self.layout.and_then(|layout| layout.fans.get(fan as usize)).map_or_else(|| (fan + 1).to_string(), |name| name.to_string());
-                self.ec_fans.push((EC_FAN_RPM + fan * 2, name));
+                if let Some(name) = self.name(fan as usize, |layout| layout.fans, || (fan + 1).to_string()) {
+                    self.ec_fans.push((EC_FAN_RPM + fan * 2, name));
+                }
             }
         }
         Ok(())
@@ -388,11 +420,13 @@ impl SuperIo {
         match self.kind {
             Kind::Ite { temps, fans } => {
                 for input in 0..temps as usize {
+                    let Some(name) = self.name(input, |l| l.temps, || (input + 1).to_string()) else { continue };
                     if let Some(value) = self.register(ITE_TEMPERATURE_BASE + input as u16).and_then(celsius) {
-                        sensors.temps.push((self.name(input, |l| l.temps), value));
+                        sensors.temps.push((name, value));
                     }
                 }
                 for fan in 0..fans {
+                    let Some(name) = self.name(fan, |l| l.fans, || (fan + 1).to_string()) else { continue };
                     let (Some(low), Some(high)) = (self.register(ITE_FAN_LOW[fan]), self.register(ITE_FAN_HIGH[fan])) else {
                         continue;
                     };
@@ -400,9 +434,9 @@ impl SuperIo {
                     // A stopped or absent fan reads all ones (stopped, once seen turning: see `spun`).
                     if count > 0 && count < 0xFFFF {
                         self.spun |= 1 << fan;
-                        sensors.fans.push((self.name(fan, |l| l.fans), 1.35e6 / (count as f32 * 2.0)));
+                        sensors.fans.push((name, 1.35e6 / (count as f32 * 2.0)));
                     } else if count == 0xFFFF && self.spun & 1 << fan != 0 {
-                        sensors.fans.push((self.name(fan, |l| l.fans), 0.0));
+                        sensors.fans.push((name, 0.0));
                     }
                 }
             }
@@ -430,12 +464,14 @@ impl SuperIo {
                     self.last = (sensors.clone(), Instant::now());
                     return sensors;
                 }
-                for (register, name) in NUVOTON_TEMPERATURES[..temps].iter().copied() {
+                for (input, (register, input_name)) in NUVOTON_TEMPERATURES[..temps].iter().copied().enumerate() {
+                    let Some(name) = self.name(input, |l| l.temps, || input_name.to_string()) else { continue };
                     if let Some(value) = self.register(register).and_then(celsius) {
-                        sensors.temps.push((name.to_string(), value));
+                        sensors.temps.push((name, value));
                     }
                 }
                 for (fan, register) in NUVOTON_FANS[..fans].iter().enumerate() {
+                    let Some(name) = self.name(fan, |l| l.fans, || (fan + 1).to_string()) else { continue };
                     let (Some(high), Some(low)) = (self.register(*register), self.register(register + 1)) else {
                         continue;
                     };
@@ -443,9 +479,9 @@ impl SuperIo {
                     // A stopped or absent fan reads zero (stopped, once seen turning: see `spun`).
                     if rpm > 0 && rpm < 0xFFFF {
                         self.spun |= 1 << fan;
-                        sensors.fans.push(((fan + 1).to_string(), rpm as f32));
+                        sensors.fans.push((name, rpm as f32));
                     } else if rpm == 0 && self.spun & 1 << fan != 0 {
-                        sensors.fans.push(((fan + 1).to_string(), 0.0));
+                        sensors.fans.push((name, 0.0));
                     }
                 }
             }
@@ -478,11 +514,19 @@ impl SuperIo {
         answers
     }
 
-    /// The input's name on this board, or its number from 1.
-    fn name(&self, index: usize, names: fn(&Layout) -> &'static [&'static str]) -> String {
-        self.layout
-            .and_then(|layout| names(layout).get(index))
-            .map_or_else(|| (index + 1).to_string(), |name| name.to_string())
+    /// The input's name on this board, or `unknown` where what it is wired to is not known: none where it is wired to
+    /// nothing (not shown).
+    fn name(&self, index: usize, names: fn(&Layout) -> &'static [Wired], unknown: impl FnOnce() -> String) -> Option<String> {
+        wired_name(self.layout, index, names, unknown)
+    }
+}
+
+/// The name of a chip's input `index` by `layout` (see `SuperIo::name`).
+fn wired_name(layout: Option<&Layout>, index: usize, names: fn(&Layout) -> &'static [Wired], unknown: impl FnOnce() -> String) -> Option<String> {
+    match layout.and_then(|layout| names(layout).get(index)) {
+        Some(Nothing) => None,
+        Some(To(name)) => Some(name.to_string()),
+        Some(Unknown) | None => Some(unknown()),
     }
 }
 
@@ -723,8 +767,8 @@ mod tests {
         let gigabyte = "Gigabyte Technology Co., Ltd.";
         let board = super::layout(gigabyte, "B760M GAMING WIFI6 PLUS GEN5", 0x8689).expect("the B760M GAMING WIFI6 PLUS GEN5's wiring");
         let shown = |lang| {
-            let temps: Vec<String> = board.temps.iter().map(|name| board_sensor(name, "temps", lang)).collect();
-            let fans: Vec<String> = board.fans.iter().map(|name| board_sensor(name, "fans", lang)).collect();
+            let temps: Vec<String> = board.temps.iter().map(|wired| board_sensor(key(wired), "temps", lang)).collect();
+            let fans: Vec<String> = board.fans.iter().map(|wired| board_sensor(key(wired), "fans", lang)).collect();
             (temps, fans)
         };
         let (temps, fans) = shown(Lang::Zh);
@@ -739,13 +783,48 @@ mod tests {
         assert!(super::layout(gigabyte, "B760M GAMING WIFI6 PLUS GEN5", 0x8696).is_none());
     }
 
+    /// The key a layout names an input by (every input of the layouts this is asked of is named).
+    fn key(wired: &super::Wired) -> &'static str {
+        match wired {
+            super::To(key) => key,
+            other => panic!("{other:?} named"),
+        }
+    }
+
+    /// The ROG STRIX B850-F GAMING WIFI7 NEO's NCT6799D (D806, a revision of D800) shows its motherboard's, its socket's
+    /// and its VRM's temperatures by those names and not the four inputs with nothing on them, its CPU fan and third
+    /// chassis fan by theirs, and its other fan headers by their numbers. ASUS's other boards keep the chip's names.
+    #[test]
+    fn names_the_b850_f_gaming_wifi7_neos_inputs() {
+        let asus = "ASUSTeK COMPUTER INC.";
+        let board = super::layout(asus, "ROG STRIX B850-F GAMING WIFI7 NEO", 0xD806).expect("the B850-F GAMING WIFI7 NEO's wiring");
+        let temps: Vec<Option<String>> = super::NUVOTON_TEMPERATURES
+            .iter()
+            .enumerate()
+            .map(|(input, (_, chip_name))| super::wired_name(Some(board), input, |l| l.temps, || chip_name.to_string()))
+            .collect();
+        let shown = |names: &[&str]| names.iter().map(|name| (!name.is_empty()).then(|| name.to_string())).collect::<Vec<_>>();
+        assert_eq!(temps, shown(&["system", "cpu_socket", "", "", "", "", "vrm"]));
+        let fans: Vec<Option<String>> = (0..7).map(|fan| super::wired_name(Some(board), fan, |l| l.fans, || (fan + 1).to_string())).collect();
+        assert_eq!(fans, shown(&["1", "cpu_fan", "3", "system_fan_3", "5", "6", "7"]));
+        assert!(super::layout(asus, "ROG STRIX X870E-E GAMING WIFI", 0xD806).is_none());
+        assert!(super::layout(asus, "ROG STRIX B850-F GAMING WIFI7 NEO", 0xD428).is_none());
+        // Without a known wiring, the chip's names and the headers' numbers, every input shown.
+        let generic: Vec<Option<String>> = (0..2).map(|input| super::wired_name(None, input, |l| l.temps, || format!("AUXTIN{input}"))).collect();
+        assert_eq!(generic, shown(&["AUXTIN0", "AUXTIN1"]));
+    }
+
     /// Every input a known board's wiring names has a name in both languages (a key with none would be shown as it
     /// is spelled).
     #[test]
     fn every_wired_input_has_a_name() {
         use crate::ui::text::Lang;
-        let layouts = [&super::GIGABYTE_IT8689E, &super::GIGABYTE_IT8696E, &super::GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5, &super::MSI_NCT6687D];
-        for key in layouts.iter().flat_map(|layout| layout.temps.iter().chain(layout.fans.iter())) {
+        let layouts = [&super::GIGABYTE_IT8689E, &super::GIGABYTE_IT8696E, &super::GIGABYTE_B760M_GAMING_WIFI6_PLUS_GEN5, &super::MSI_NCT6687D, &super::ASUS_ROG_STRIX_B850_F_GAMING_WIFI7_NEO];
+        let keys = layouts.iter().flat_map(|layout| layout.temps.iter().chain(layout.fans.iter())).filter_map(|wired| match wired {
+            super::To(key) => Some(*key),
+            _ => None,
+        });
+        for key in keys {
             for lang in [Lang::Zh, Lang::En] {
                 assert_ne!(lang.name(key), *key, "{key}");
             }
@@ -782,7 +861,7 @@ mod tests {
     fn knows_the_boards_whose_wiring_it_has() {
         // MSI's NCT6687D, whatever its revision, by the channel's and the input's own number.
         let msi = super::layout("Micro-Star International Co., Ltd.", "MAG X670E TOMAHAWK WIFI (MS-7E12)", 0xD592).expect("MSI's NCT6687D");
-        assert_eq!((msi.temps[1], msi.temps[4], msi.fans[0], msi.fans[2]), ("system", "cpu_socket", "cpu_fan", "system_fan_1"));
+        assert_eq!((msi.temps[1], msi.temps[4], msi.fans[0], msi.fans[2]), (super::To("system"), super::To("cpu_socket"), super::To("cpu_fan"), super::To("system_fan_1")));
         assert!(super::layout("Micro-Star International Co., Ltd.", "MAG X670E TOMAHAWK WIFI (MS-7E12)", 0xD42B).is_none());
         assert!(super::layout("Gigabyte Technology Co., Ltd.", "X670E AORUS MASTER", 0x8689).is_some());
         assert!(super::layout("ASUSTeK COMPUTER INC.", "ROG STRIX X670E-E GAMING WIFI", 0xD592).is_none());
@@ -807,11 +886,39 @@ mod tests {
         assert!(!super::waits_for_the_bus(super::ON_A_LAPTOP));
     }
 
+    /// This PC's board's chip, as Glance finds it: its readings as shown, and each temperature input's register as it
+    /// is, every two seconds for READ_SECS seconds (once without it), each line also added to READ_OUT where it is
+    /// given (to read beside another program's figures, under a load, to learn how a board wires its inputs).
     /// Needs administrator rights and the PawnIO driver.
     #[test]
     #[ignore = "needs administrator rights and the PawnIO driver; run with --ignored"]
     fn reads_this_board() {
-        let mut chip = super::SuperIo::open("Gigabyte Technology Co., Ltd.", "X870E AORUS MASTER").expect("a supported Super I/O chip, elevated");
-        println!("{:?}", chip.read(crate::sensors::LOCK_WAIT));
+        use windows::core::w;
+        let bios = w!(r"HARDWARE\DESCRIPTION\System\BIOS");
+        let (vendor, board) = (crate::metrics::reg_string(bios, w!("BaseBoardManufacturer")), crate::metrics::reg_string(bios, w!("BaseBoardProduct")));
+        let mut chip = super::SuperIo::open(&vendor, &board).expect("a supported Super I/O chip, elevated");
+        println!("{vendor} {board}: {}", chip.describe());
+        let secs: u64 = std::env::var("READ_SECS").ok().and_then(|secs| secs.parse().ok()).unwrap_or(0);
+        let out = std::env::var("READ_OUT").ok();
+        let began = std::time::Instant::now();
+        loop {
+            let shown = chip.read(crate::sensors::LOCK_WAIT);
+            // (A Nuvoton monitor's: the other chips keep theirs elsewhere.)
+            let raw: Vec<String> = match chip.kind {
+                super::Kind::Nuvoton { temps, .. } => super::NUVOTON_TEMPERATURES[..temps].iter().map(|(register, name)| format!("{name}={:?}", chip.register(*register))).collect(),
+                _ => Vec::new(),
+            };
+            let line = format!("{:>4}s {:?} {:?}  raw {}", began.elapsed().as_secs(), shown.temps, shown.fans, raw.join(" "));
+            println!("{line}");
+            if let Some(path) = &out {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).expect("the file READ_OUT names");
+                writeln!(file, "{line}").expect("a line written");
+            }
+            if began.elapsed().as_secs() >= secs {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
     }
 }
