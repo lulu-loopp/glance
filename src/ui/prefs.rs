@@ -341,7 +341,7 @@ pub const AI: [&str; 11] = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:
 /// Those of them on until chosen otherwise (a provider's lane is turned on as its key is given).
 pub const AI_ON: [&str; 3] = ["ai:today", "ai:claude", "ai:codex"];
 /// The sources whose own records on this PC tell what they spent, by model and by session.
-const AI_RECORDED: [&str; 5] = ["ai:claude", "ai:codex", "ai:qwen", "ai:kimi", "ai:glm"];
+const AI_RECORDED: [&str; 6] = ["ai:claude", "ai:codex", "ai:qwen", "ai:kimi", "ai:glm", "ai:minimax"];
 
 /// Whether module `id` among `entries` shows its item `name` (whether or not the module itself is on).
 pub fn shows_in(entries: &[ModuleEntry], id: &str, name: &str) -> bool {

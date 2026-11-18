@@ -5192,7 +5192,7 @@ It can be disconnected here at any time, and the status line command put back.",
             "ai:kimi" => return ("Kimi".into(), Some(p("Kimi Code 的额度、令牌用量、模型与会话", "Kimi Code's limits, tokens, models and sessions"))),
             "ai:moonshot" => return ("Moonshot".into(), Some(p("Moonshot AI 开放平台的余额与今日消费", "Moonshot AI's platform: its balance, and what it spent today"))),
             "ai:glm" => return ("GLM".into(), Some(p("智谱 GLM Coding Plan 的用量额度与账户余额，以及 ZCode 的令牌用量与会话", "Zhipu's GLM Coding Plan: its limits and the account's balance, and ZCode's tokens and sessions"))),
-            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费", "MiniMax's Token Plan limits, or its platform's balance and what it spent today"))),
+            "ai:minimax" => return ("MiniMax".into(), Some(p("MiniMax Token Plan 的用量额度，或开放平台的余额与今日消费，以及 MiniMax Code 的令牌用量与会话", "MiniMax's Token Plan limits, or its platform's balance and what it spent today, and MiniMax Code's tokens and sessions"))),
             "ai:volcengine" => return (p("火山方舟", "Volcengine Ark"), Some(p("火山方舟 Coding Plan 的用量额度", "Volcengine Ark's Coding Plan limits"))),
             "ai:openrouter" => return ("OpenRouter".into(), Some(p("OpenRouter 的余额、今日消费与密钥额度", "OpenRouter's credits, what it spent today, and the key's limit"))),
             _ => {}

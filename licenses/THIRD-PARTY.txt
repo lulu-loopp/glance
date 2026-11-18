@@ -64,8 +64,10 @@ token-monitor (which address of each AI provider is asked for its account's
   Licence: MIT (token-monitor-MIT.txt). Reworked in glance.exe's own code.
 
 tokscale (where Qwen Code's records and ZCode's database are, and how their
-  token counts are read)
-  Copyright (c) 2025 Junho Yeo (https://github.com/junhoyeo/tokscale).
+  token counts are read), and Token Monitor's branch of it (MiniMax Code's
+  sessions)
+  Copyright (c) 2025 Junho Yeo (https://github.com/junhoyeo/tokscale,
+  https://github.com/Javis603/tokscale).
   Licence: MIT (tokscale-MIT.txt). Reworked in glance.exe's own code.
 
 Unicode Character Database (Unihan, Chinese characters' Mandarin readings, for

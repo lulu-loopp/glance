@@ -1,5 +1,5 @@
 //! What AI coding tools have spent, as their own records on this PC tell it: Claude Code's transcripts, Codex's
-//! session logs, Kimi Code's and Qwen Code's sessions' records and ZCode's database, each read as it grows (only what was added since it was last read), every response counted once
+//! session logs, Kimi Code's, Qwen Code's and MiniMax Code's sessions' records and ZCode's database, each read as it grows (only what was added since it was last read), every response counted once
 //! however many of the files hold it (a resumed or forked session copies what came before into a file of its own:
 //! a third of Claude Code's responses on the owner's PC were in more than one file), in quarter hours of their own
 //! time. What was read is kept in Glance's local folder, with how far each file was read, so as not to read a
@@ -11,6 +11,7 @@
 mod claude;
 mod codex;
 mod kimi;
+mod minimax;
 mod qwen;
 #[cfg(windows)]
 mod sqlite;
@@ -61,7 +62,7 @@ pub enum Tool {
     Kimi,
     /// Zhipu's GLM Coding Plan (bigmodel.cn, or Z.ai's abroad), and what ZCode spent on this PC.
     Glm,
-    /// MiniMax's Token Plan, or its open platform's balance.
+    /// MiniMax's Token Plan, or its open platform's balance, and what MiniMax Code spent on this PC.
     MiniMax,
     /// Volcengine Ark's Coding Plan.
     Volcengine,
@@ -202,6 +203,20 @@ struct Read {
     total: Option<u64>,
     /// A summary read before the file named its session.
     summary: Option<String>,
+    /// How the file began as it was read (see `head_of`): one that begins otherwise was written anew.
+    head: Option<u64>,
+}
+
+/// How many of a file's first bytes tell it apart from one written anew in its place.
+const HEAD: u64 = 1024;
+
+/// A hash of the first bytes of `file` (as many as `HEAD`, or `upto` where that is fewer: those of it read, which
+/// lines added after them leave as they were).
+fn head_of(file: &mut std::fs::File, upto: u64) -> Option<u64> {
+    file.seek(std::io::SeekFrom::Start(0)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(upto.min(HEAD)).read_to_end(&mut bytes).ok()?;
+    Some(bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01B3)))
 }
 
 /// What a line of a record says, as the reader of its tool makes of it.
@@ -273,7 +288,8 @@ pub fn quarter(ms: u64) -> u32 {
 
 /// Where each tool keeps its records on this PC: Claude Code's transcripts (in each of `CLAUDE_CONFIG_DIR`'s folders
 /// where it is set, else in `.claude` and `.config\claude` in the user's folder), and Codex's sessions (in
-/// `CODEX_HOME`, else `.codex`), its archived ones too, and the index of their names beside them.
+/// `CODEX_HOME`, else `.codex`), its archived ones too, and the index of their names beside them, and those of Kimi
+/// Code, Qwen Code, ZCode and MiniMax Code, each where it keeps them.
 pub fn roots() -> Vec<(Tool, PathBuf)> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
     let mut roots = Vec::new();
@@ -298,6 +314,14 @@ pub fn roots() -> Vec<(Tool, PathBuf)> {
             .and_then(|storage| storage.get("shareDir")?.as_str().map(str::trim).filter(|dir| !dir.is_empty()).map(PathBuf::from));
         roots.push((Tool::Kimi, shared.unwrap_or_else(|| app.join("kimi-desktop").join("daimon-share")).join(runtime)));
     }
+    // MiniMax Code's sessions, and its runtime's database (what they are called).
+    for data in minimax::data_dirs(home.as_deref()) {
+        let data = data.join("v2");
+        roots.extend([data.join("sessions"), data.join("sqlite")].map(|dir| (Tool::MiniMax, dir)));
+    }
+    // (A folder linked to another, `.mavis` to `.minimax` as it often is, read once: by the first name it has.)
+    let mut seen = HashSet::new();
+    roots.retain(|(_, root)| std::fs::canonicalize(root).map_or(true, |real| seen.insert(real)));
     roots
 }
 
@@ -339,10 +363,15 @@ impl Ledger {
         if read.len == len && read.modified == modified {
             return false;
         }
-        // A database (ZCode's) asked again whole as it is written to: what was counted is not counted again.
+        // A database (ZCode's, or MiniMax Code's of its sessions' names) asked again whole as it is written to: what
+        // was counted is not counted again.
         if is_database(path) {
             #[cfg(windows)]
-            let told = if tool == Tool::Glm { zcode::told_in(path, from, modified) } else { Vec::new() };
+            let told = match tool {
+                Tool::Glm => zcode::told_in(path, from, modified),
+                Tool::MiniMax => minimax::told_in(path),
+                _ => Vec::new(),
+            };
             #[cfg(not(windows))]
             let told: Vec<Told> = Vec::new();
             self.files.insert(path.to_path_buf(), Read { len, modified, at: len, ..Read::default() });
@@ -352,14 +381,19 @@ impl Ledger {
             }
             return changed;
         }
-        if len < read.at {
+        let Ok(mut file) = std::fs::File::open(path) else { return false };
+        // (Written anew: shorter than it was read, or beginning otherwise than it did.)
+        if len < read.at || read.head.is_some_and(|head| head_of(&mut file, read.at) != Some(head)) {
             read = Read::default();
         }
-        // (Kimi Code names a record's session by its folder alone.)
-        if tool == Tool::Kimi && read.session.is_none() {
-            read.session = kimi::session_of(path);
+        // (Kimi Code names a record's session by its folder alone, MiniMax Code by its folder's manifest.)
+        if read.session.is_none() {
+            read.session = match tool {
+                Tool::Kimi => kimi::session_of(path),
+                Tool::MiniMax => minimax::session_of(path),
+                _ => None,
+            };
         }
-        let Ok(mut file) = std::fs::File::open(path) else { return false };
         if file.seek(std::io::SeekFrom::Start(read.at)).is_err() {
             return false;
         }
@@ -378,12 +412,14 @@ impl Ledger {
                         Tool::Codex => codex::line(&line, &mut read, &mut told),
                         Tool::Kimi => kimi::line(&line, &mut read, &mut told),
                         Tool::Qwen => qwen::line(&line, &mut read, &mut told),
+                        Tool::MiniMax => minimax::line(&line, &mut read, &mut told),
                         // (The providers keep no records here: see `providers`.)
                         _ => {}
                     }
                 }
             }
         }
+        read.head = head_of(&mut lines.into_inner().into_inner(), read.at);
         read.len = len;
         read.modified = modified;
         self.files.insert(path.to_path_buf(), read);

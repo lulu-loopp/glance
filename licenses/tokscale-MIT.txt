@@ -1,6 +1,7 @@
 How Glance reads Qwen Code's records and ZCode's database (src/ai/qwen.rs, src/ai/zcode.rs:
 where they are, and how their token counts are read) follows tokscale
-(https://github.com/junhoyeo/tokscale).
+(https://github.com/junhoyeo/tokscale), and MiniMax Code's sessions (src/ai/minimax.rs)
+Token Monitor's branch of it (https://github.com/Javis603/tokscale), under the same licence.
 
 MIT License
 

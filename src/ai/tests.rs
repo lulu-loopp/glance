@@ -90,6 +90,33 @@ fn reads_only_whole_lines_and_what_was_added_since() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A record written anew longer than it was read (a session compacted, then gone on with while Glance was not
+/// there to see it shrink) is read from its start, not from where the record it was was left: what is new in it,
+/// before that place and after it, counted, what was counted not counted again.
+#[test]
+fn reads_a_record_written_anew_longer_from_its_start() {
+    let dir = folder("written-anew");
+    let file = dir.join("p").join("s.jsonl");
+    let at = |minute: u32| format!("2026-11-18T11:{minute:02}:00Z");
+    append(&file, &claude("s1", "msg_1", "req_1", &at(0), "claude-opus-5-5", 1, 1, 1, 1));
+    append(&file, &claude("s1", "msg_2", "req_2", &at(1), "claude-opus-5-5", 1, 1, 1, 1));
+    let roots = [(Tool::Claude, dir.clone())];
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 8);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let anew = [
+        claude("s1", "msg_3", "req_3", &at(2), "claude-opus-5-5", 10, 10, 10, 10),
+        claude("s1", "msg_2", "req_2", &at(1), "claude-opus-5-5", 1, 1, 1, 1),
+        claude("s1", "msg_4", "req_4", &at(3), "claude-opus-5-5", 100, 100, 100, 100),
+        claude("s1", "msg_5", "req_5", &at(4), "claude-opus-5-5", 1000, 1000, 1000, 1000),
+    ];
+    std::fs::write(&file, anew.concat()).unwrap();
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 8 + 40 + 400 + 4000);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn names_a_claude_session_by_hand_before_by_summary_before_by_what_was_asked() {
     let dir = folder("claude-titles");
@@ -479,5 +506,75 @@ fn reads_zcodes_database_as_its_totals_count() {
     let mut ledger = Ledger::default();
     ledger.refresh(&[(Tool::Glm, first.parent().unwrap().to_path_buf())], NOON);
     assert_eq!(spent(&ledger), vec![(Tool::Glm, "glm-4.6".to_string(), among)]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An answer of MiniMax Code's, `id`, at `at` (as the runtime writes it: ms, or seconds), as it spent (`usage`).
+fn mcode(id: &str, at: &str, usage: &str) -> String {
+    format!(r#"{{"message_id":"{id}","turn_id":"t1","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"provider":"minimax","model":"MiniMax-M2.5","usage":{usage},"timestamp":{at}}}}}"#) + "\n"
+}
+
+/// MiniMax Code's sessions: each answer counted once across the session's messages and its snapshots from before it
+/// was compacted, its input with nothing from the cache among it, its reasoning among its output unless it is
+/// counted beside it, counts told as words read as the numbers they are, a time in seconds read as one; the session
+/// known by its manifest, named and placed in its folder by the runtime's database. Its data where MiniMax Code
+/// keeps it: `.minimax`, `.mavis`, and each profile's beside them.
+#[test]
+fn reads_minimax_codes_sessions_once_across_their_compactions() {
+    let dir = folder("mcode");
+    let data = dir.join(".minimax").join("v2");
+    let session = data.join("sessions").join("2026").join("11").join("18").join("10-00-00-000-session_bXZz");
+    std::fs::create_dir_all(session.join("snapshots")).unwrap();
+    std::fs::write(session.join("manifest.json"), r#"{"schemaVersion":1,"sessionId":"mvs_1","createdAtMs":1795000000000}"#).unwrap();
+    let hour = 3_600_000;
+    let ms = |at: u64| at.to_string();
+    let plain = |input: u64| format!(r#"{{"input":{input},"output":20,"cacheRead":300,"cacheWrite":5,"totalTokens":0}}"#);
+    append(&session.join("snapshots").join("g000000000000--c1.jsonl"), &[
+        r#"{"message_id":"u1","turn_id":"t1","message":{"role":"user","content":"hi assistant","timestamp":1795000000000}}"#.to_string() + "\n",
+        mcode("a", &ms(NOON - 3 * hour), &plain(700)),
+        mcode("b", &ms(NOON - 2 * hour), &plain(800)),
+    ].concat());
+    append(&session.join("messages.jsonl"), &[
+        r#"{"message_id":"s","turn_id":"t2:compaction","message":{"role":"compactionSummary","summary":"assistant"}}"#.to_string() + "\n",
+        mcode("b", &ms(NOON - 2 * hour), &plain(800)),
+        // (Its reasoning beside its output: the total counts it on top of the rest. Its time in seconds.)
+        mcode("c", &((NOON - hour) / 1000).to_string(), r#"{"input":100,"output":24,"cacheRead":10,"reasoning":9,"totalTokens":143}"#),
+        // (Neither input nor output told: its total, as input. Its counts as words, its cache told nested.)
+        mcode("d", &ms(NOON - hour), r#"{"input":"0","output":0,"total_tokens":"42","cache":{"read":7,"write":3}}"#),
+        // (Its reasoning among its output.)
+        mcode("e", &ms(NOON - hour), r#"{"input":5,"output":24,"reasoning":9,"totalTokens":29}"#),
+    ].concat());
+    // (A session working in the runtime's own folder.)
+    let other = data.join("sessions").join("2026").join("11").join("18").join("11-00-00-000-session_bXZy");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("manifest.json"), r#"{"sessionId":"mvs_2"}"#).unwrap();
+    append(&other.join("messages.jsonl"), &mcode("f", &ms(NOON - hour), &plain(1)));
+    let sqlite = data.join("sqlite");
+    std::fs::create_dir_all(&sqlite).unwrap();
+    let runtime = sqlite::Database::made(&sqlite.join("runtime-state.sqlite")).expect("Windows' SQLite");
+    for sql in [
+        "CREATE TABLE local_runtime_sessions (session_id TEXT PRIMARY KEY, title TEXT, workspace_dir TEXT, project_workspace_dir TEXT, is_default_workspace INTEGER NOT NULL DEFAULT 0)",
+        r"INSERT INTO local_runtime_sessions VALUES ('mvs_1', 'Fix the build', 'E:\scratch', 'E:\app', 0)",
+        r"INSERT INTO local_runtime_sessions VALUES ('mvs_2', 'In its own folder', 'C:\runtime', '', 1)",
+    ] {
+        runtime.rows(sql).expect(sql);
+    }
+    drop(runtime);
+    let roots = [(Tool::MiniMax, data.join("sessions")), (Tool::MiniMax, sqlite.clone())];
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&roots, NOON));
+    let spent_by = Tokens { input: 700 + 800 + 100 + 42 + 5 + 1, output: 20 + 20 + 33 + 24 + 20, cache_read: 300 + 300 + 10 + 7 + 300, cache_write: 5 + 5 + 3 + 5, reasoning: 9 + 9 };
+    assert_eq!(spent(&ledger), vec![(Tool::MiniMax, "MiniMax-M2.5".to_string(), spent_by)]);
+    let sessions = ledger.sessions_since(0);
+    let mut sessions: Vec<_> = sessions.iter().map(|session| (session.id.as_str(), session.folder.as_deref(), session.title.as_deref())).collect();
+    sessions.sort();
+    assert_eq!(sessions, [("mvs_1", Some(r"E:\app"), Some("Fix the build")), ("mvs_2", None, Some("In its own folder"))]);
+    // Where its data is kept: each of its folders, and none of another name.
+    for name in [".mavis", ".minimax-work", ".mavis-code", ".minimaxx", ".minimax-"] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+    }
+    if ["MINIMAX_DATA_DIR", "MAVIS_DATA_DIR"].iter().all(|name| std::env::var_os(name).is_none()) {
+        assert_eq!(minimax::data_dirs(Some(&dir)), [".minimax", ".mavis", ".mavis-code", ".minimax-work"].map(|name| dir.join(name)));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
