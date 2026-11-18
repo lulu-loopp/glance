@@ -126,7 +126,7 @@ pub enum Icon {
     /// The devices' page: a monitor with a phone before it (Lucide's monitor-smartphone).
     MonitorSmartphone,
     Laptop,
-    /// The AI component's: a limit's ring, three quarters spent, round a spark (drawn for Glance, in Lucide's manner).
+    /// The AI component's: a four-pointed spark (Lucide's sparkle).
     Ai,
 }
 
@@ -240,7 +240,7 @@ impl Icon {
             Icon::MoveDiagonal => &["M11 19H5v-6", "M13 5h6v6", "M19 5 5 19"],
             Icon::MoveDiagonal2 => &["M19 13v6h-6", "M5 11V5h6", "m5 5 14 14"],
             Icon::MonitorSmartphone => &["M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8", "M10 19v-3.96 3.15", "M7 19h5", "M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"],
-            Icon::Ai => &["M12 3a9 9 0 1 1-9 9", "M12 8.5l.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9z"],
+            Icon::Ai => &["M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"],
             Icon::Laptop => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
             Icon::Calendar => &["M8 2v4", "M16 2v4", "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M3 10h18"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
