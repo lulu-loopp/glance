@@ -52,7 +52,11 @@ object Receiver {
 
     private val known = HashMap<String, Found.Device>()
     private val heardNow = MutableStateFlow<List<Found.Device>>(emptyList())
-    /** The devices heard lately (not this phone, not long ago), the latest first. */
+    /**
+     * The devices heard lately (not this phone, not long ago), Glance's first, by name (as the PC lists them): each
+     * keeps its place as it is heard again (it says itself every few seconds), so that the row about to be tapped is
+     * not moved from under the finger.
+     */
     val devices: StateFlow<List<Found.Device>> = heardNow
 
     private val receiving = MutableStateFlow(false)
@@ -159,7 +163,7 @@ object Receiver {
             known[fingerprint] = if (info.port == null && was != null) device.copy(port = was.port, https = was.https, glance = device.glance || was.glance) else device
             val now = SystemClock.elapsedRealtime()
             known.values.removeAll { now - it.heard > Found.FRESH }
-            heardNow.value = known.values.sortedByDescending { it.heard }
+            heardNow.value = known.values.sortedWith(compareBy<Found.Device>({ !it.glance }, { it.alias.lowercase() }, { it.fingerprint }))
         }
     }
 

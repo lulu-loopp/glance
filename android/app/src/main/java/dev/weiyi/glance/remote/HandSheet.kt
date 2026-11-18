@@ -137,8 +137,9 @@ private enum class Standing { Looking, Ready, Off, Away }
 private const val LOOKING_FOR = 4000L
 
 /**
- * Where what is shared is sent ("发送到"): the paired PCs [pcs] first, each reached first (the one handed to last first,
- * those not reached last), then the devices found nearby (looked for while this is open: this phone announced, and
+ * Where what is shared is sent ("发送到"): the paired PCs [pcs] first (the one handed to last first, the others as they
+ * were paired, each kept in its place as it is reached or not: one not reached is dimmed where it is, so that no row is
+ * moved from under the finger), then the devices found nearby (looked for while this is open: this phone announced, and
  * those that answer listed as they do). A device chosen is sent to here, how it goes said beside it ("等待对方接受", how
  * far, "已发送"), its PIN asked for where it wants one. All there, the sheet goes 2 s later.
  */
@@ -178,7 +179,7 @@ fun SendSheet(pcs: List<Pc>, dismiss: () -> Unit, choosePc: (Pc) -> Unit, choose
             dismiss()
         }
     }
-    val ordered = pcs.sortedWith(compareBy<Pc>({ standing[it.key] == Standing.Away || standing[it.key] == Standing.Off }, { it.key != last }))
+    val ordered = remember(pcs) { pcs.sortedBy { it.key != last } }
     Sheet(dismiss) {
         SheetTitle(stringResource(R.string.hand_choose))
         if (ordered.isNotEmpty()) SheetPart(stringResource(R.string.send_paired))
