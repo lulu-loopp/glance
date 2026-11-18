@@ -52,7 +52,7 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1PathGeometry1, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
 };
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_BEZIER_SEGMENT, D2D1_FIGURE_END_CLOSED, D2D_SIZE_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_BEZIER_SEGMENT, D2D1_FIGURE_END_CLOSED, D2D1_FILL_MODE, D2D1_FILL_MODE_ALTERNATE, D2D1_FILL_MODE_WINDING, D2D_SIZE_F};
 use windows::Win32::Graphics::Direct2D::{
     ID2D1StrokeStyle, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_DASH_STYLE_CUSTOM, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND,
     D2D1_STROKE_STYLE_PROPERTIES1, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
@@ -111,6 +111,8 @@ pub struct Gfx {
     dashed: ID2D1StrokeStyle,
     /// Each icon's figures as a geometry, made when first drawn.
     icon_paths: RefCell<HashMap<Icon, ID2D1PathGeometry1>>,
+    /// Each layer of each provider's mark as a filled geometry, made when first drawn.
+    mark_paths: RefCell<HashMap<(super::marks::Mark, usize), ID2D1PathGeometry1>>,
     /// The pictures drawn (see `Canvas::picture`), as bitmaps on the card, by key, and when each was last drawn.
     pictures: RefCell<HashMap<u64, (ID2D1Bitmap1, Instant)>>,
     /// Bitmaps made from nothing but their key (the glass's displacement maps, by size, radius and scale; the pieces
@@ -714,6 +716,7 @@ impl Gfx {
             round: round.into(),
             dashed: dashed.into(),
             icon_paths: RefCell::new(HashMap::new()),
+            mark_paths: RefCell::new(HashMap::new()),
             pictures: RefCell::new(HashMap::new()),
         })
     }
@@ -1260,35 +1263,54 @@ impl Gfx {
         if let Some(path) = self.icon_paths.borrow().get(&icon) {
             return Some(path.clone());
         }
-        let point = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
-        let path = (|| -> Result<ID2D1PathGeometry1> {
-            unsafe {
-                let path = self.factory.CreatePathGeometry()?;
-                let sink = path.Open()?;
-                for figure in icon.figures() {
-                    sink.BeginFigure(point(figure.start), D2D1_FIGURE_BEGIN_HOLLOW);
-                    for segment in &figure.segments {
-                        match *segment {
-                            Segment::Line(to) => sink.AddLine(point(to)),
-                            Segment::Arc { to, radii, rotation, large, clockwise } => sink.AddArc(&D2D1_ARC_SEGMENT {
-                                point: point(to),
-                                size: D2D_SIZE_F { width: radii.0, height: radii.1 },
-                                rotationAngle: rotation,
-                                sweepDirection: if clockwise { D2D1_SWEEP_DIRECTION_CLOCKWISE } else { D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE },
-                                arcSize: if large { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
-                            }),
-                            Segment::Cubic(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: point(c1), point2: point(c2), point3: point(to) }),
-                        }
-                    }
-                    sink.EndFigure(if figure.closed { D2D1_FIGURE_END_CLOSED } else { D2D1_FIGURE_END_OPEN });
-                }
-                sink.Close()?;
-                Ok(path)
-            }
-        })()
-        .ok()?;
+        let path = self.geometry(&icon.figures(), None).ok()?;
         self.icon_paths.borrow_mut().insert(icon, path.clone());
         Some(path)
+    }
+
+    /// Layer `layer` of `mark` as a filled geometry, on its 24-unit grid; made once.
+    fn mark_path(&self, mark: super::marks::Mark, layer: usize) -> Option<ID2D1PathGeometry1> {
+        if let Some(path) = self.mark_paths.borrow().get(&(mark, layer)) {
+            return Some(path.clone());
+        }
+        let of = mark.layers().get(layer)?;
+        let mode = if of.even_odd { D2D1_FILL_MODE_ALTERNATE } else { D2D1_FILL_MODE_WINDING };
+        let path = self.geometry(&icons::parse(of.data), Some(mode)).ok()?;
+        self.mark_paths.borrow_mut().insert((mark, layer), path.clone());
+        Some(path)
+    }
+
+    /// `figures` as one geometry: filled by the rule `filled` (an icon's are stroked, none).
+    fn geometry(&self, figures: &[icons::Figure], filled: Option<D2D1_FILL_MODE>) -> Result<ID2D1PathGeometry1> {
+        let point = |(x, y): (f32, f32)| Vector2 { X: x, Y: y };
+        unsafe {
+            let path = self.factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            if let Some(mode) = filled {
+                sink.SetFillMode(mode);
+            }
+            let begin = if filled.is_some() { D2D1_FIGURE_BEGIN_FILLED } else { D2D1_FIGURE_BEGIN_HOLLOW };
+            for figure in figures {
+                sink.BeginFigure(point(figure.start), begin);
+                for segment in &figure.segments {
+                    match *segment {
+                        Segment::Line(to) => sink.AddLine(point(to)),
+                        Segment::Arc { to, radii, rotation, large, clockwise } => sink.AddArc(&D2D1_ARC_SEGMENT {
+                            point: point(to),
+                            size: D2D_SIZE_F { width: radii.0, height: radii.1 },
+                            rotationAngle: rotation,
+                            sweepDirection: if clockwise { D2D1_SWEEP_DIRECTION_CLOCKWISE } else { D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE },
+                            arcSize: if large { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL },
+                        }),
+                        Segment::Cubic(c1, c2, to) => sink.AddBezier(&D2D1_BEZIER_SEGMENT { point1: point(c1), point2: point(c2), point3: point(to) }),
+                    }
+                }
+                // (A filled figure is closed however it ends.)
+                sink.EndFigure(if figure.closed || filled.is_some() { D2D1_FIGURE_END_CLOSED } else { D2D1_FIGURE_END_OPEN });
+            }
+            sink.Close()?;
+            Ok(path)
+        }
     }
 }
 
@@ -1584,6 +1606,33 @@ impl Canvas for Frame<'_> {
 
     fn icon(&self, icon: Icon, centre: Point, size: f32, color: Color) {
         self.placed_icon(icon, centre, size, color, false);
+    }
+
+    fn mark(&self, mark: super::marks::Mark, centre: Point, size: f32, text: Color, opacity: f32) {
+        use super::marks::Paint;
+        let scale = size / 24.0;
+        let mut parent = Matrix3x2::default();
+        unsafe {
+            self.dc.GetTransform(&mut parent);
+            let placed = Matrix3x2::scale(scale, scale) * Matrix3x2::translation(centre.x - size / 2.0, centre.y - size / 2.0) * parent;
+            self.dc.SetTransform(&placed);
+            for (at, layer) in mark.layers().iter().enumerate() {
+                let Some(path) = self.gfx.mark_path(mark, at) else { continue };
+                let brush = match layer.paint {
+                    Paint::Own(rgb) => self.brush(Color::hex(rgb, opacity)).cast().ok(),
+                    Paint::Text => self.brush(text.alpha(opacity)).cast().ok(),
+                    // (Across its own box, as SVG's gradients are by default.)
+                    Paint::Across { from, to, colours: ((c0, a0), (c1, a1)) } => path.GetBounds(None).ok().and_then(|bounds| {
+                        let along = |(x, y): (f32, f32)| Vector2 { X: bounds.left + x * (bounds.right - bounds.left), Y: bounds.top + y * (bounds.bottom - bounds.top) };
+                        self.gradient(along(from), Color::hex(c0, a0 * opacity), along(to), Color::hex(c1, a1 * opacity))
+                    }),
+                };
+                if let Some(brush) = brush {
+                    self.dc.FillGeometry(&path, &brush, None);
+                }
+            }
+            self.dc.SetTransform(&parent);
+        }
     }
 
     fn pixels_per_dip(&self) -> f32 {
@@ -3906,5 +3955,42 @@ mod tests {
         assert!(kept(&held_too), "a device a window holds let go of");
         drop(held);
     }
-}
 
+    /// Each provider's mark drawn filled in its own colours (its one-colour layers in the text's, its gradients across
+    /// it), each colour covering a good part of its box: drawn hollow, or by the wrong rule, or a layer unread, its
+    /// colour covered next to nothing of it.
+    #[test]
+    fn draws_each_mark_in_its_own_colours() {
+        use crate::ui::canvas::{Canvas, Color, Point};
+        use crate::ui::marks::{Mark, Paint};
+        let _device = super::held().unwrap();
+        let gfx = super::Gfx::new().expect("graphics");
+        const SIDE: usize = 96;
+        let text = Color::hex(0xFF0000, 1.0);
+        for mark in [Mark::Claude, Mark::OpenAi, Mark::Kimi, Mark::Zai, Mark::MiniMax, Mark::DeepSeek, Mark::OpenRouter, Mark::Qwen, Mark::Moonshot] {
+            let pixels = gfx
+                .draw_offscreen((SIDE as u32, SIDE as u32), 1.0, |frame| {
+                    frame.fill(Color::hex(0xFFFFFF, 1.0), 0.0, 0.0, SIDE as f32, SIDE as f32);
+                    frame.mark(mark, Point { x: SIDE as f32 / 2.0, y: SIDE as f32 / 2.0 }, SIDE as f32, text, 1.0);
+                })
+                .unwrap();
+            // (How many pixels are near `rgb`: within a little of it each way.)
+            let near = |rgb: u32| {
+                let want = [(rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF].map(|c| c as i32);
+                pixels.chunks_exact(4).filter(|p| [p[2], p[1], p[0]].iter().zip(want).all(|(got, want)| (*got as i32 - want).abs() <= 24)).count()
+            };
+            for layer in mark.layers() {
+                let covered = match layer.paint {
+                    Paint::Own(rgb) => near(rgb),
+                    Paint::Text => near(0xFF0000),
+                    // (Its ends as they show over white, as clear as they are.)
+                    Paint::Across { colours: ((c0, a0), (c1, a1)), .. } => {
+                        let over_white = |rgb: u32, a: f32| [16, 8, 0].iter().fold(0, |sum, shift| sum << 8 | (((rgb >> shift) & 0xFF) as f32 * a + 255.0 * (1.0 - a)).round() as u32);
+                        near(over_white(c0, a0)) + near(over_white(c1, a1))
+                    }
+                };
+                assert!(covered > SIDE * SIDE / 200, "{mark:?}: {covered} pixels of {:?}", layer.paint);
+            }
+        }
+    }
+}

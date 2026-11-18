@@ -22,6 +22,7 @@ pub mod find;
 #[cfg(windows)]
 pub mod glass;
 pub mod icons;
+pub mod marks;
 #[cfg(windows)]
 pub mod keys;
 #[cfg(windows)]

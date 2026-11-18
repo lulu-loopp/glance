@@ -350,19 +350,25 @@ pub enum Segment {
     Cubic((f32, f32), (f32, f32), (f32, f32)),
 }
 
-/// SVG path data read into figures: the commands M, L, H, V, A, C and Z,
-/// each absolute or relative (lower case), a command's arguments repeated
-/// for as many segments as they make.
+/// SVG path data read into figures: the commands M, L, H, V, A, C, S, Q, T and Z, each absolute or relative (lower
+/// case), a command's arguments repeated for as many segments as they make. (Quadratic curves are made the cubic ones
+/// they are.)
 pub fn parse(data: &str) -> Vec<Figure> {
     let mut tokens = Tokens { rest: data };
     let mut figures: Vec<Figure> = Vec::new();
     let mut at = (0.0f32, 0.0f32);
     let mut start = at;
     let mut command = None;
+    // The last segment's control point nearest its end, a cubic's or a quadratic's (what S and T reflect: after
+    // anything else, they take none, the point they start at).
+    let mut cubic_control: Option<(f32, f32)> = None;
+    let mut quad_control: Option<(f32, f32)> = None;
     while let Some(next) = tokens.command().or(command) {
         let relative = next.is_ascii_lowercase();
         let base = if relative { at } else { (0.0, 0.0) };
         let point = |tokens: &mut Tokens| Some((base.0 + tokens.number()?, base.1 + tokens.number()?));
+        let reflected = |control: Option<(f32, f32)>| control.map_or(at, |(x, y)| (2.0 * at.0 - x, 2.0 * at.1 - y));
+        let (was_cubic, was_quad) = (cubic_control.take(), quad_control.take());
         match next.to_ascii_uppercase() {
             'M' => {
                 let Some(to) = point(&mut tokens) else { break };
@@ -397,7 +403,24 @@ pub fn parse(data: &str) -> Vec<Figure> {
             'C' => {
                 let (Some(c1), Some(c2), Some(to)) = (point(&mut tokens), point(&mut tokens), point(&mut tokens)) else { break };
                 at = to;
+                cubic_control = Some(c2);
                 push(&mut figures, start, Segment::Cubic(c1, c2, to));
+            }
+            'S' => {
+                let (Some(c2), Some(to)) = (point(&mut tokens), point(&mut tokens)) else { break };
+                let c1 = reflected(was_cubic);
+                at = to;
+                cubic_control = Some(c2);
+                push(&mut figures, start, Segment::Cubic(c1, c2, to));
+            }
+            'Q' | 'T' => {
+                let control = if next.eq_ignore_ascii_case(&'Q') { point(&mut tokens) } else { Some(reflected(was_quad)) };
+                let (Some(control), Some(to)) = (control, point(&mut tokens)) else { break };
+                let from = at;
+                let towards = |end: (f32, f32)| (end.0 + 2.0 / 3.0 * (control.0 - end.0), end.1 + 2.0 / 3.0 * (control.1 - end.1));
+                at = to;
+                quad_control = Some(control);
+                push(&mut figures, start, Segment::Cubic(towards(from), towards(to), to));
             }
             'Z' => {
                 if let Some(figure) = figures.last_mut() {
@@ -517,6 +540,19 @@ mod tests {
         // Flags packed against what follows.
         let packed = parse("M14 4a4 4 0 1 1-4 0");
         assert!(matches!(packed[0].segments[0], Segment::Arc { large: true, clockwise: true, .. }));
+    }
+
+    #[test]
+    fn reads_smooth_and_quadratic_curves() {
+        // A smooth curve's first control point the last one's reflected about where it starts.
+        let smooth = parse("M0 0C1 2 3 2 4 0s3-2 4 0");
+        assert_eq!(smooth[0].segments[1], Segment::Cubic((5.0, -2.0), (7.0, -2.0), (8.0, 0.0)));
+        // After anything but a cubic, the point it starts at.
+        assert_eq!(parse("M0 0L4 0S6 2 8 0")[0].segments[1], Segment::Cubic((4.0, 0.0), (6.0, 2.0), (8.0, 0.0)));
+        // A quadratic curve made the cubic it is, and a smooth one after it reflecting its control point.
+        let quad = parse("M0 0Q3 6 6 0t6 0");
+        assert_eq!(quad[0].segments[0], Segment::Cubic((2.0, 4.0), (4.0, 4.0), (6.0, 0.0)));
+        assert_eq!(quad[0].segments[1], Segment::Cubic((8.0, -4.0), (10.0, -4.0), (12.0, 0.0)));
     }
 
     #[test]

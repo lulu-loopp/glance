@@ -7517,6 +7517,7 @@ seven".into()));
             fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+            fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
             fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
             fn pixels_per_dip(&self) -> f32 {
                 self.0
@@ -7576,6 +7577,7 @@ seven".into()));
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
         fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
+        fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
         fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
     }
 
@@ -7748,6 +7750,9 @@ seven".into()));
         fn icon(&self, _: super::super::icons::Icon, centre: Point, size: f32, _: Color) {
             self.drew_box(centre.x - size / 2.0, centre.y - size / 2.0, size, size);
         }
+        fn mark(&self, _: super::super::marks::Mark, centre: Point, size: f32, _: Color, _: f32) {
+            self.drew_box(centre.x - size / 2.0, centre.y - size / 2.0, size, size);
+        }
         fn picture_within(&self, _: &super::super::canvas::Picture, at: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {
             self.drew_box(at.0, at.1, at.2, at.3);
         }
@@ -7790,6 +7795,7 @@ seven".into()));
             fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, color: Color) {
                 self.0.borrow_mut().push(color);
             }
+            fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
             fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
         }
         let theme = Theme::new(Skin::Fluent, true);

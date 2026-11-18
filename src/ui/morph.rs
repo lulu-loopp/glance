@@ -31,6 +31,7 @@ pub enum Op {
     Frosted { x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, below: Vec<Op> },
     Arc { centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32 },
     Icon { icon: Icon, centre: Point, size: f32, color: Color },
+    Mark { mark: super::marks::Mark, centre: Point, size: f32, text: Color, opacity: f32 },
     Picture { picture: Picture, at: Bounds, within: Bounds, radius: f32, opacity: f32 },
 }
 
@@ -131,7 +132,7 @@ impl Op {
                 Bounds { x: *x, y: *y, w: *w, h: *h }
             }
             Op::Circle { centre, radius, .. } | Op::Arc { centre, radius, .. } => Bounds { x: centre.x - radius, y: centre.y - radius, w: 2.0 * radius, h: 2.0 * radius },
-            Op::Icon { centre, size, .. } => Bounds { x: centre.x - size / 2.0, y: centre.y - size / 2.0, w: *size, h: *size },
+            Op::Icon { centre, size, .. } | Op::Mark { centre, size, .. } => Bounds { x: centre.x - size / 2.0, y: centre.y - size / 2.0, w: *size, h: *size },
             Op::Picture { at, .. } => *at,
             Op::Stroke { points, .. } | Op::Shape { points, .. } => of_points(points)?,
             Op::Unclip => return None,
@@ -152,7 +153,7 @@ impl Op {
             Op::Text { color, .. } | Op::Fill { color, .. } | Op::Rounded { color, .. } | Op::Circle { color, .. } | Op::Stroke { color, .. } => fade(color),
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => fade(color),
             Op::Shape { fill, .. } | Op::Outline { fill, .. } => fade_fill(fill),
-            Op::Picture { opacity, .. } => *opacity *= alpha,
+            Op::Picture { opacity, .. } | Op::Mark { opacity, .. } => *opacity *= alpha,
             Op::Markdown { inks, .. } => *inks = Inks { words: inks.words.alpha(alpha), faint: inks.faint.alpha(alpha), accent: inks.accent.alpha(alpha) },
             Op::Frosted { below, .. } => *below = std::mem::take(below).into_iter().map(|op| op.faded(alpha)).collect(),
             Op::Clip { .. } | Op::Unclip => {}
@@ -172,7 +173,7 @@ impl Op {
             Op::Text { color, .. } | Op::Fill { color, .. } | Op::Rounded { color, .. } | Op::Circle { color, .. } | Op::Stroke { color, .. } => color.a >= LEAST,
             Op::Shadow { color, .. } | Op::Arc { color, .. } | Op::Icon { color, .. } => color.a >= LEAST,
             Op::Shape { fill: f, .. } | Op::Outline { fill: f, .. } => fill(f),
-            Op::Picture { opacity, .. } => *opacity >= LEAST,
+            Op::Picture { opacity, .. } | Op::Mark { opacity, .. } => *opacity >= LEAST,
             Op::Markdown { inks, .. } => inks.words.a >= LEAST,
             Op::Frosted { below, .. } => below.iter().any(|op| op.bounds().is_some() && op.shows()),
             Op::Clip { .. } | Op::Unclip => true,
@@ -226,6 +227,7 @@ impl Op {
             Op::Circle { color, centre, radius } => Op::Circle { color, centre: map.point(centre), radius: map.length(radius) },
             Op::Arc { centre, radius, from, sweep, color, width } => Op::Arc { centre: map.point(centre), radius: map.length(radius), from, sweep, color, width: map.length(width) },
             Op::Icon { icon, centre, size, color } => Op::Icon { icon, centre: map.point(centre), size: map.length(size), color },
+            Op::Mark { mark, centre, size, text, opacity } => Op::Mark { mark, centre: map.point(centre), size: map.length(size), text, opacity },
             Op::Picture { picture, at, within, radius, opacity } => {
                 let bounds = |b: Bounds| {
                     let corner = map.point(Point { x: b.x, y: b.y });
@@ -309,6 +311,9 @@ impl Op {
             (Op::Icon { icon: ai, centre: ac, size: asz, color: acol }, Op::Icon { icon: bi, centre: bc, size: bsz, color: bcol }) if ai == bi => {
                 vec![Op::Icon { icon: *bi, centre: lerp_point(*ac, *bc, t), size: lerp(*asz, *bsz, t), color: lerp_color(*acol, *bcol, t) }]
             }
+            (Op::Mark { mark: am, centre: ac, size: asz, text: at, opacity: ao }, Op::Mark { mark: bm, centre: bc, size: bsz, text: bt, opacity: bo }) if am == bm => {
+                vec![Op::Mark { mark: *bm, centre: lerp_point(*ac, *bc, t), size: lerp(*asz, *bsz, t), text: lerp_color(*at, *bt, t), opacity: lerp(*ao, *bo, t) }]
+            }
             (Op::Picture { picture: ap, at: aa, within: aw, radius: ar, opacity: ao }, Op::Picture { picture: bp, at: ba, within: bw, radius: br, opacity: bo }) if ap == bp => {
                 let bounds = |a: &Bounds, b: &Bounds| Bounds { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), w: lerp(a.w, b.w, t), h: lerp(a.h, b.h, t) };
                 vec![Op::Picture { picture: bp.clone(), at: bounds(aa, ba), within: bounds(aw, bw), radius: lerp(*ar, *br, t), opacity: lerp(*ao, *bo, t) }]
@@ -375,6 +380,7 @@ impl Op {
             Op::Frosted { x, y, w, h, radius, blur, below } => canvas.frosted(*x, *y, *w, *h, *radius, *blur, &|canvas| below.iter().for_each(|op| op.draw(canvas))),
             Op::Arc { centre, radius, from, sweep, color, width } => canvas.arc(*centre, *radius, *from, *sweep, *color, *width),
             Op::Icon { icon, centre, size, color } => canvas.icon(*icon, *centre, *size, *color),
+            Op::Mark { mark, centre, size, text, opacity } => canvas.mark(*mark, *centre, *size, *text, *opacity),
             Op::Picture { picture, at, within, radius, opacity } => canvas.picture_within(picture, (at.x, at.y, at.w, at.h), (within.x, within.y, within.w, within.h, *radius), *opacity),
         }
     }
@@ -603,6 +609,10 @@ impl Canvas for Recorder<'_> {
         self.push(Op::Icon { icon, centre, size, color });
     }
 
+    fn mark(&self, mark: super::marks::Mark, centre: Point, size: f32, text: Color, opacity: f32) {
+        self.push(Op::Mark { mark, centre, size, text, opacity });
+    }
+
     fn pixels_per_dip(&self) -> f32 {
         self.measure.pixels_per_dip() * self.scale
     }
@@ -744,6 +754,7 @@ mod tests {
             fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
             fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
             fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+            fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
             fn picture_within(&self, _: &Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
         }
         let recorder = Recorder::new(&Measure, 2.0, (5.0, 5.0));

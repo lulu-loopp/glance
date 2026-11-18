@@ -352,6 +352,9 @@ pub trait Canvas {
     fn arc(&self, centre: Point, radius: f32, from: f32, sweep: f32, color: Color, width: f32);
     /// `icon` stroked in `color`, `size` DIPs square, centred on `centre`.
     fn icon(&self, icon: super::icons::Icon, centre: Point, size: f32, color: Color);
+    /// A provider's `mark` filled as it is drawn (its one-colour layers in `text`), `size` DIPs square, centred on
+    /// `centre`, `opacity` of it.
+    fn mark(&self, mark: super::marks::Mark, centre: Point, size: f32, text: Color, opacity: f32);
 
     /// `picture` drawn over the box `w` × `h` from (`x`, `y`), filling it (a box not of its shape shows the picture's
     /// middle, the rest cut off: see `Picture::fitted_in` for one drawn whole), its corners rounded by `radius`,
