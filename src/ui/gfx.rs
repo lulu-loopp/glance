@@ -111,6 +111,8 @@ pub struct Gfx {
     dashed: ID2D1StrokeStyle,
     /// Each icon's figures as a geometry, made when first drawn.
     icon_paths: RefCell<HashMap<Icon, ID2D1PathGeometry1>>,
+    /// What of an icon is filled (see `Icon::spots`), as one geometry; none for one with none.
+    icon_spots: RefCell<HashMap<Icon, Option<ID2D1PathGeometry1>>>,
     /// Each layer of each provider's mark as a filled geometry, made when first drawn.
     mark_paths: RefCell<HashMap<(super::marks::Mark, usize), ID2D1PathGeometry1>>,
     /// The pictures drawn (see `Canvas::picture`), as bitmaps on the card, by key, and when each was last drawn.
@@ -716,6 +718,7 @@ impl Gfx {
             round: round.into(),
             dashed: dashed.into(),
             icon_paths: RefCell::new(HashMap::new()),
+            icon_spots: RefCell::new(HashMap::new()),
             mark_paths: RefCell::new(HashMap::new()),
             pictures: RefCell::new(HashMap::new()),
         })
@@ -1268,6 +1271,17 @@ impl Gfx {
         Some(path)
     }
 
+    /// What of `icon` is filled as one geometry, on its 24-unit grid (none where none is); made once.
+    fn icon_spots(&self, icon: Icon) -> Option<ID2D1PathGeometry1> {
+        if let Some(spots) = self.icon_spots.borrow().get(&icon) {
+            return spots.clone();
+        }
+        let figures = icon.spots();
+        let spots = (!figures.is_empty()).then(|| self.geometry(&figures, Some(D2D1_FILL_MODE_WINDING)).ok()).flatten();
+        self.icon_spots.borrow_mut().insert(icon, spots.clone());
+        spots
+    }
+
     /// Layer `layer` of `mark` as a filled geometry, on its 24-unit grid; made once.
     fn mark_path(&self, mark: super::marks::Mark, layer: usize) -> Option<ID2D1PathGeometry1> {
         if let Some(path) = self.mark_paths.borrow().get(&(mark, layer)) {
@@ -1756,6 +1770,11 @@ impl Frame<'_> {
                 self.dc.FillGeometry(&path, self.brush(color), None);
             }
             self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
+            // What of it is filled, its edge round too.
+            if let Some(spots) = self.gfx.icon_spots(icon) {
+                self.dc.FillGeometry(&spots, self.brush(color), None);
+                self.dc.DrawGeometry(&spots, self.brush(color), icons::SPOT_EDGE, &self.gfx.round);
+            }
             self.dc.SetTransform(&parent);
         }
     }
