@@ -3781,7 +3781,11 @@ impl Widget {
                 return;
             }
         };
-        let Some(about) = self.hits_on_screen().into_iter().find_map(|(rect, hit)| (hit == view::Hit::AiSlot(source)).then_some(rect)) else { return };
+        // (Every ring on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
+        let rings: Vec<_> = self.hits_on_screen().into_iter().filter_map(|(rect, hit)| match hit {
+            view::Hit::AiSlot(source) => Some((source, rect)),
+            _ => None,
+        }).collect();
         use crate::ui::ai_card::Side;
         let (by, screen) = (self.rect(), self.contact.monitor);
         let side = if by.right - by.left > by.bottom - by.top {
@@ -3792,7 +3796,7 @@ impl Widget {
             Side::Left
         };
         let look = self.menu_look();
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang, look }, by, about, side);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang, look }, by, &rings, side);
         self.carding = true;
     }
 

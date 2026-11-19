@@ -21,6 +21,7 @@ use super::prefs::Prefs;
 use super::text::Lang;
 use super::theme::Theme;
 use super::view::{self, ai::Source, Layout, Pass, Scene};
+use super::backdrop::Capture;
 use super::window::Window;
 
 /// Which side of the dock the card is on: away from the screen's edge the dock is at.
@@ -41,11 +42,14 @@ struct Card {
     words: gfx::Layer,
     /// Where the pointer keeps it (see `holds`), on the screen, while it shows.
     holds: Option<RECT>,
-    /// Glass's: the windows behind it put together (see `scene`), when it last asked for them, and how light what is
-    /// behind its sheet is and how busy (its luminance's mean and spread), where it is now; none till that is read.
+    /// Glass's, while it shows: where the card of each ring on the dock shows (see `reach`), and what is behind there
+    /// as last seen with no card over it; the windows behind it put together (see `scene`) to see that again, and when
+    /// it last asked for them; how frosted it was last drawn.
+    reach: Option<RECT>,
+    seen: Option<Capture>,
     behind: Option<super::scene::Scene>,
     asked: Option<Instant>,
-    tone: Option<(RECT, (f32, f32))>,
+    frost: f32,
     /// Counted as shown on its device while it is (see `life`).
     showing: Option<Showing>,
     /// What it shows where, as last drawn (none: away), not drawn again for the same.
@@ -71,6 +75,7 @@ impl Lives for Card {
 
     fn let_go_of_kept(&mut self) {
         self.surface = None;
+        self.seen = None;
         self.behind = None;
     }
 }
@@ -89,37 +94,78 @@ const GAP: f32 = 8.0;
 const LOOK_AGAIN: Duration = Duration::from_secs(2);
 
 impl Card {
-    /// How frosted glass is drawn over what is behind `sheet` (physical px, `px` to a DIP), `dark` or light: as the
-    /// panel's glass is over what is behind it (see `skins::frost`), not as the dock's is (what is behind the dock may
-    /// be calm, and what is behind the card busy), in twentieths (not drawn again for less). As frosted as it may be
-    /// till that is read. What is behind it is taken again as it moves, and while it stays every `LOOK_AGAIN`.
-    fn frost(&mut self, sheet: RECT, px: f32, dark: bool) -> f32 {
-        if self.behind.is_none() {
-            // (Read on another thread: what draws the dock draws again, and the card with it.)
-            let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| crate::app().controller.wake());
-            self.behind = super::scene::Scene::new(sheet, wake, &self.gfx);
-        }
-        if let Some(scene) = &mut self.behind {
-            let arranged = scene.arrange(sheet, self.window.hwnd);
-            if arranged || self.asked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN) {
-                scene.want();
-                self.asked = Some(Instant::now());
+    /// How frosted glass is drawn over what is behind `sheet` (physical px, `px` to a DIP), `dark` or light, a card
+    /// beside the dock showing within `reach` wherever it shows: as the panel's glass is over what is behind it (see
+    /// `frost_over`), not as the dock's is (what is behind the dock may be calm, and what is behind the card busy).
+    /// Known as it first shows, and as it moves from ring to ring: what is behind all of `reach` is taken at once while
+    /// no card is over it (a few milliseconds: it is no larger than the cards). While one is, the windows behind it are
+    /// put together and taken instead (the screen has the card in it), every `LOOK_AGAIN` and as `reach` moves. Where
+    /// none of that holds the sheet, as frosted as it was.
+    fn frost(&mut self, sheet: RECT, reach: RECT, px: f32, dark: bool) -> f32 {
+        let holds = |seen: &Option<Capture>| seen.as_ref().is_some_and(|seen| within_area(sheet, seen.rect));
+        if self.shown.is_none() {
+            if !holds(&self.seen) {
+                self.seen = Capture::take(reach);
             }
-            if let Some(capture) = scene.ready() {
-                self.tone = Some((sheet, capture.luminance(sheet, px)));
+        } else {
+            if self.behind.is_none() {
+                // (Read on another thread: what draws the dock draws again, and the card with it.)
+                let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(|| crate::app().controller.wake());
+                self.behind = super::scene::Scene::new(reach, wake, &self.gfx);
+            }
+            if let Some(scene) = &mut self.behind {
+                let arranged = scene.arrange(reach, self.window.hwnd);
+                if arranged || self.asked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN) {
+                    scene.want();
+                    self.asked = Some(Instant::now());
+                }
+                if let Some(capture) = scene.ready() {
+                    self.seen = Some(capture);
+                }
             }
         }
-        frost_over(self.tone, sheet, dark)
+        let tone = self.seen.as_ref().filter(|_| holds(&self.seen)).map(|seen| seen.luminance(sheet, px));
+        self.frost = frost_over(tone, dark, self.frost);
+        self.frost
     }
 }
 
-/// How frosted glass is drawn over `sheet`, `dark` or light, what is behind it read as `tone` (where it was read, its
-/// luminance's mean and spread): as that asks, in twentieths; as frosted as it may be where it was not read there.
-fn frost_over(tone: Option<(RECT, (f32, f32))>, sheet: RECT, dark: bool) -> f32 {
+/// How frosted glass is drawn, `dark` or light, over what is behind it read as `tone` (its luminance's mean and
+/// spread): as the panel's glass is (see `skins::frost`), in twentieths (not drawn again for less). Not read, as it
+/// `was`.
+fn frost_over(tone: Option<(f32, f32)>, dark: bool, was: f32) -> f32 {
     match tone {
-        Some((at, (mean, spread))) if at == sheet => (super::skins::frost(mean, spread, dark) * 20.0).round() / 20.0,
-        _ => 1.0,
+        Some((mean, spread)) => (super::skins::frost(mean, spread, dark) * 20.0).round() / 20.0,
+        None => was,
     }
+}
+
+/// Where the cards at `sheets` (on the screen) show between them: the least that holds all of them.
+fn reach(sheets: impl IntoIterator<Item = RECT>) -> Option<RECT> {
+    sheets.into_iter().reduce(|all, sheet| RECT { left: all.left.min(sheet.left), top: all.top.min(sheet.top), right: all.right.max(sheet.right), bottom: all.bottom.max(sheet.bottom) })
+}
+
+/// The middle of `rect`.
+fn middle(rect: RECT) -> POINT {
+    POINT { x: (rect.left + rect.right) / 2, y: (rect.top + rect.bottom) / 2 }
+}
+
+/// Where a card `plate` large (physical px) shows beside `by` on `side`, `gap` from it: along it, its middle by `at`'s
+/// (its ring's middle), all of it in `work` (`gap` in from its edges).
+fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: i32, work: RECT) -> RECT {
+    let along = |middle: i32, length: i32, low: i32, high: i32| (middle - length / 2).min(high - gap - length).max(low + gap);
+    let (left, top) = match side {
+        Side::Left => (by.left - gap - plate_w, along(at.y, plate_h, work.top, work.bottom)),
+        Side::Right => (by.right + gap, along(at.y, plate_h, work.top, work.bottom)),
+        Side::Below => (along(at.x, plate_w, work.left, work.right), by.bottom + gap),
+        Side::Above => (along(at.x, plate_w, work.left, work.right), by.top - gap - plate_h),
+    };
+    RECT { left, top, right: left + plate_w, bottom: top + plate_h }
+}
+
+/// Whether all of `inner` is in `outer`.
+fn within_area(inner: RECT, outer: RECT) -> bool {
+    inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
 }
 
 /// What the card shows of: `source`, in `theme`, as `prefs` show the AI component (its modules held: see
@@ -132,10 +178,11 @@ pub struct Of<'a> {
     pub look: Look,
 }
 
-/// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by `about`'s (the source's ring), all
-/// of it on that screen, till `hide` or till `owner` (the window the dock is drawn in) is hidden or destroyed. Shown
-/// again as it is, nothing is drawn.
-pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
+/// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by its source's ring's (among
+/// `rings`, every ring on the dock and its source), all of it on that screen, till `hide` or till `owner` (the window
+/// the dock is drawn in) is hidden or destroyed. Shown again as it is, nothing is drawn.
+pub fn show(owner: HWND, of: Of, by: RECT, rings: &[(Source, RECT)], side: Side) {
+    let Some(&(_, about)) = rings.iter().find(|(source, _)| *source == of.source) else { return };
     let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.source));
     let controller = &crate::app().controller;
     let (info, history) = (controller.info(), controller.history.samples());
@@ -165,9 +212,10 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
         music_apart: false,
     };
     let Some(lane) = view::ai::card(&scene, of.source) else { return hide() };
-    let layout = Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
+    let laid = |lane: &view::Lane| Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
+    let layout = laid(&lane);
     let (plate, (shift_x, shift_y)) = sheet_of(of.theme, layout.lanes()[0]);
-    let at = POINT { x: (about.left + about.right) / 2, y: (about.top + about.bottom) / 2 };
+    let at = middle(about);
     // Its screen, and how many pixels a DIP is there.
     let monitor = unsafe { MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST) };
     let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -181,14 +229,8 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
     let px = |dips: f32| (dips * scale).round() as i32;
     let (plate_w, plate_h, gap) = (px(plate.0), px(plate.1), px(GAP));
     // Beside the dock; along it, its middle by the ring's, all of it in the work area.
-    let along = |middle: i32, length: i32, low: i32, high: i32| (middle - length / 2).min(high - gap - length).max(low + gap);
-    let (left, top) = match side {
-        Side::Left => (by.left - gap - plate_w, along(at.y, plate_h, work.top, work.bottom)),
-        Side::Right => (by.right + gap, along(at.y, plate_h, work.top, work.bottom)),
-        Side::Below => (along(at.x, plate_w, work.left, work.right), by.bottom + gap),
-        Side::Above => (along(at.x, plate_w, work.left, work.right), by.top - gap - plate_h),
-    };
-    let sheet = RECT { left, top, right: left + plate_w, bottom: top + plate_h };
+    let sheet = placed(by, at, side, (plate_w, plate_h), gap, work);
+    let (left, top) = (sheet.left, sheet.top);
     let holds = held_by(about, sheet);
     // (On the device for the screen it shows on: see `gfx::on_screen`.)
     let Ok(gfx) = gfx::for_area(sheet) else { return };
@@ -196,7 +238,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
         let mut kept = kept.borrow_mut();
         if kept.is_none() {
             let Ok(window) = Window::new() else { return };
-            *kept = Some(Card { window, gfx: gfx.clone(), surface: None, words: gfx::Layer::default(), holds: None, behind: None, asked: None, tone: None, showing: None, shown: None });
+            *kept = Some(Card { window, gfx: gfx.clone(), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: None });
         }
         let card = kept.as_mut().unwrap();
         OWNER.set(owner);
@@ -208,9 +250,19 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
         card.holds = Some(holds);
         // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's.)
         card.window.take_pointer_within(Some(sheet));
-        // Glass frosted as what is behind the card asks (see `Card::frost`).
+        // Glass frosted as what is behind the card asks (see `Card::frost`), what is behind every ring's card taken
+        // (where they show found again as the dock or what a card tells moves this one out of it).
         let look = match of.theme.skin {
-            super::theme::Skin::Glass => of.look.frosted(card.frost(sheet, scale, of.theme.dark), true),
+            super::theme::Skin::Glass => {
+                if card.reach.is_none_or(|reach| !within_area(sheet, reach)) {
+                    let sheets = rings.iter().filter_map(|&(source, ring)| {
+                        let (plate, _) = sheet_of(of.theme, laid(&view::ai::card(&scene, source)?).lanes()[0]);
+                        Some(placed(by, middle(ring), side, (px(plate.0), px(plate.1)), gap, work))
+                    });
+                    card.reach = reach(sheets.chain([sheet]));
+                }
+                of.look.frosted(card.frost(sheet, card.reach.unwrap_or(sheet), scale, of.theme.dark), true)
+            }
             _ => of.look,
         };
         let mut key = std::hash::DefaultHasher::new();
@@ -319,6 +371,12 @@ pub fn hide() {
             card.window.hide();
             card.shown = None;
             card.holds = None;
+            // (Where it shows found, and what is behind there seen, again as it next shows, as they are then.)
+            card.reach = None;
+            card.seen = None;
+            if let Some(scene) = &mut card.behind {
+                scene.rest();
+            }
             card.hidden();
         }
     });
@@ -346,16 +404,51 @@ mod tests {
     }
 
     /// The card's glass is frosted as what is behind it asks, not as what is behind the dock does: clear over a calm
-    /// dark ground under dark glass, frosted over text, and as frosted as it may be where what is behind it was read
-    /// elsewhere (it has moved) or not yet.
+    /// dark ground under dark glass, frosted over text, and as it was while what is behind it is not read.
     #[test]
     fn the_cards_glass_is_frosted_as_what_is_behind_it_asks() {
-        let (here, there) = (RECT { left: 100, top: 100, right: 500, bottom: 600 }, RECT { left: 300, top: 100, right: 700, bottom: 600 });
         let (calm, text) = ((0.05, 0.01), (0.12, 0.3));
-        assert_eq!(frost_over(Some((here, calm)), here, true), 0.0);
-        assert_eq!(frost_over(Some((here, text)), here, true), 1.0);
-        assert_eq!(frost_over(Some((there, calm)), here, true), 1.0);
-        assert_eq!(frost_over(None, here, true), 1.0);
+        assert_eq!(frost_over(Some(calm), true, 1.0), 0.0);
+        assert_eq!(frost_over(Some(text), true, 0.0), 1.0);
+        assert_eq!(frost_over(None, true, 0.4), 0.4);
+    }
+
+    /// What is taken of what is behind before any card shows holds the card of every ring on the dock, however tall
+    /// each is, on every side, by the screen's edges too (the first card and each next one frosted as what is behind
+    /// them asks from their first frame), and no more than they cover between them (taken at once, it is no larger).
+    #[test]
+    fn what_is_seen_before_a_card_shows_holds_every_card_beside_the_dock_and_no_more() {
+        let (work, gap, plate_w) = (RECT { left: 0, top: 0, right: 3440, bottom: 1400 }, 12, 640);
+        let docks = [
+            (RECT { left: 1400, top: 0, right: 2060, bottom: 140 }, Side::Below),
+            (RECT { left: 10, top: 0, right: 700, bottom: 140 }, Side::Below),
+            (RECT { left: 2900, top: 0, right: 3430, bottom: 140 }, Side::Below),
+            (RECT { left: 2900, top: 1260, right: 3430, bottom: 1400 }, Side::Above),
+            (RECT { left: 0, top: 400, right: 160, bottom: 1000 }, Side::Right),
+            (RECT { left: 3280, top: 20, right: 3440, bottom: 700 }, Side::Left),
+        ];
+        for (by, side) in docks {
+            // (Four rings along the dock, their cards of four heights.)
+            let (w, h) = (by.right - by.left, by.bottom - by.top);
+            let sheets: Vec<RECT> = (0..4)
+                .map(|i| {
+                    let ring = match side {
+                        Side::Below | Side::Above => RECT { left: by.left + w * i / 4, top: by.top, right: by.left + w * (i + 1) / 4, bottom: by.bottom },
+                        _ => RECT { left: by.left, top: by.top + h * i / 4, right: by.right, bottom: by.top + h * (i + 1) / 4 },
+                    };
+                    placed(by, middle(ring), side, (plate_w, [300, 1100, 200, 700][i as usize]), gap, work)
+                })
+                .collect();
+            let area = reach(sheets.iter().copied()).unwrap();
+            for sheet in &sheets {
+                assert!(within_area(*sheet, area), "{side:?} by {by:?}: {sheet:?} not in {area:?}");
+            }
+            // (Each of its edges is one of the cards'.)
+            let edges = [|r: &RECT| r.left, |r: &RECT| r.top, |r: &RECT| r.right, |r: &RECT| r.bottom];
+            for edge in edges {
+                assert!(sheets.iter().any(|sheet| edge(sheet) == edge(&area)), "{side:?} by {by:?}: {area:?}");
+            }
+        }
     }
 
     /// Its sheet is as round as the dock's pieces in every skin (glass's 24, not a menu's 14), and no rounder than half

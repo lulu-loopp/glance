@@ -4818,7 +4818,12 @@ impl<'a> Panel<'a> {
                 return;
             }
         };
-        let (Some(placement), Some(about)) = (self.placement.as_ref(), self.hit_on_screen(Hit::AiSlot(source))) else { return };
+        let Some(placement) = self.placement.as_ref() else { return };
+        // (Every ring on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
+        let rings: Vec<_> = self.hits.iter().filter_map(|&(x, y, w, h, hit)| match hit {
+            Hit::AiSlot(source) => Some((source, self.box_on_screen((x, y, w, h))?)),
+            _ => None,
+        }).collect();
         use crate::ui::ai_card::Side;
         let side = match self.edge {
             Edge::Left => Side::Right,
@@ -4826,7 +4831,7 @@ impl<'a> Panel<'a> {
             Edge::Top => Side::Below,
         };
         let look = self.menu_look();
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, about, side);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &rings, side);
         self.carding = true;
     }
 
