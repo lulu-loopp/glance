@@ -136,6 +136,73 @@ fn names_a_claude_session_by_hand_before_by_summary_before_by_what_was_asked() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A Claude Code session whose last-prompt lines hold no prompt (as many do) is named by what its user last typed,
+/// read from the prompts themselves: never by what Claude Code put in as the user's (its meta lines, a summary it
+/// carried on from, what the system queued, a command's tags) or by a subagent's task. The title Claude Code gave it
+/// itself outranks what was asked and a summary, and one given by hand outranks that.
+#[test]
+fn names_a_claude_session_by_its_own_title_and_by_what_its_user_typed() {
+    let dir = folder("claude-asked");
+    let file = dir.join("p").join("s.jsonl");
+    let user = |content: &str, rest: &str| format!("{{\"type\":\"user\",\"sessionId\":\"s1\",\"message\":{{\"role\":\"user\",\"content\":\"{content}\"}}{rest}}}\n");
+    append(&file, &claude("s1", "msg_1", "req_1", "2026-11-18T11:00:00Z", "claude-opus-5-5", 1, 1, 1, 1));
+    append(&file, "{\"type\":\"last-prompt\",\"sessionId\":\"s1\",\"leafUuid\":\"u1\"}\n");
+    append(&file, &user("  tune the fans\\nquietly", ",\"promptSource\":\"typed\""));
+    append(&file, &user("the earlier part, summed up", ",\"isCompactSummary\":true,\"isVisibleInTranscriptOnly\":true"));
+    append(&file, &user("Caveat: the messages below", ",\"isMeta\":true"));
+    append(&file, &user("a task queued by the system", ",\"promptSource\":\"system\""));
+    append(&file, &user("<command-name>/clear</command-name>", ",\"promptSource\":\"typed\""));
+    append(&file, &user("a subagent's task", ",\"isSidechain\":true"));
+    append(&file, "{\"type\":\"user\",\"sessionId\":\"s1\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n");
+    append(&file, "{\"type\":\"last-prompt\",\"sessionId\":\"s1\",\"leafUuid\":null}\n");
+    let roots = [(Tool::Claude, dir.clone())];
+    let mut ledger = Ledger::default();
+    ledger.refresh(&roots, NOON);
+    assert_eq!(ledger.sessions_since(0)[0].title.as_deref(), Some("tune the fans"));
+    // (A prompt from before Claude Code told where prompts came from is the user's.)
+    append(&file, &user("and the pump", ""));
+    ledger.refresh(&roots, NOON);
+    assert_eq!(ledger.sessions_since(0)[0].title.as_deref(), Some("and the pump"));
+    append(&file, "{\"type\":\"ai-title\",\"sessionId\":\"s1\",\"aiTitle\":\"Quieter cooling\"}\n");
+    append(&file, &user("and the case fans", ",\"promptSource\":\"queued\""));
+    append(&file, "{\"type\":\"summary\",\"sessionId\":\"s1\",\"summary\":\"Sensor fixes\"}\n");
+    ledger.refresh(&roots, NOON);
+    assert_eq!(ledger.sessions_since(0)[0].title.as_deref(), Some("Quieter cooling"));
+    append(&file, "{\"type\":\"custom-title\",\"sessionId\":\"s1\",\"customTitle\":\"Fans\"}\n");
+    append(&file, "{\"type\":\"ai-title\",\"sessionId\":\"s1\",\"aiTitle\":\"Fan curves\"}\n");
+    ledger.refresh(&roots, NOON);
+    assert_eq!(ledger.sessions_since(0)[0].title.as_deref(), Some("Fans"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What was kept from a reading that read less of each record than this one does is let go of, to be read afresh:
+/// the files it read are not read on from where it left off, which would never see what it did not read.
+#[test]
+fn what_was_kept_from_an_older_reading_is_read_afresh() {
+    let dir = folder("kept-older");
+    let records = dir.join("records");
+    let file = records.join("p").join("s.jsonl");
+    append(&file, &claude("s1", "msg_1", "req_1", "2026-11-18T11:00:00Z", "claude-opus-5-5", 1, 2, 3, 4));
+    append(&file, "{\"type\":\"ai-title\",\"sessionId\":\"s1\",\"aiTitle\":\"Quieter cooling\"}\n");
+    let roots = [(Tool::Claude, records.clone())];
+    let mut ledger = Ledger::default();
+    ledger.refresh(&roots, NOON);
+    ledger.save(&dir).unwrap();
+    let kept = std::fs::read(dir.join(FILE)).unwrap();
+    let line = kept.iter().position(|&byte| byte == b'\n').unwrap();
+    let mut first: serde_json::Value = serde_json::from_slice(&kept[..line]).unwrap();
+    assert!(!Ledger::load(&dir).refresh(&roots, NOON), "kept by this reading: read on from where it was");
+    first.as_object_mut().unwrap().remove("read_as");
+    let mut older = serde_json::to_vec(&first).unwrap();
+    older.extend_from_slice(&kept[line..]);
+    std::fs::write(dir.join(FILE), older).unwrap();
+    let mut again = Ledger::load(&dir);
+    assert!(again.sessions_since(0).is_empty(), "an older reading's let go of");
+    again.refresh(&roots, NOON);
+    assert_eq!(again.sessions_since(0)[0].title.as_deref(), Some("Quieter cooling"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Codex's lines: a session's start, a turn's model, and what a response spent with the limits as they stood.
 fn codex_meta(session: &str) -> String {
     format!(r#"{{"timestamp":"2026-11-18T10:00:00.000Z","type":"session_meta","payload":{{"id":"{session}","cwd":"D:\\code","cli_version":"0.99.0"}}}}"#) + "\n"

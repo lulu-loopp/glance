@@ -44,6 +44,10 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 pub const QUARTER_MS: u64 = 15 * 60 * 1000;
 /// The file Glance keeps what it read in, in its local folder.
 const FILE: &str = "ai-usage.bin";
+/// How the records are read, told with what was kept: one more each time more is read of a record than before, so what
+/// was kept from a reading that read less is let go of and read afresh (each file is read on from where it was left
+/// off, which would never see what the older reading did not read). 1: Claude Code's own titles and its users' prompts.
+const READ_AS: u32 = 1;
 
 /// Whose records, or whose account's limits (an AI provider's, read by the user's key: see `providers`).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
@@ -232,11 +236,13 @@ enum Told {
     Limit(Limit),
 }
 
-/// Where a session's title came from: one given by hand outranks a summary, and a summary the last thing asked.
+/// Where a session's title came from: one given by hand outranks the one its tool gave it, that a summary, and a summary
+/// the last thing asked.
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 enum TitleKind {
     Asked,
     Summed,
+    Titled,
     Named,
 }
 
@@ -683,6 +689,7 @@ impl Ledger {
     /// number and its count of keys, then the keys, each little-endian).
     fn to_bytes(&self) -> Vec<u8> {
         let kept = Kept {
+            read_as: READ_AS,
             files: self.files.iter().map(|(path, read)| (path.to_string_lossy().into_owned(), read.clone())).collect(),
             spent: self.spent.iter().map(|((tool, model, at), tokens)| (*tool, model.clone(), *at, *tokens)).collect(),
             sessions: self.sessions.values().cloned().collect(),
@@ -714,7 +721,10 @@ impl Ledger {
             counted.insert(at, keys.chunks_exact(8).map(|key| u64::from_le_bytes(key.try_into().unwrap())).collect::<HashSet<u64>>());
             rest = &rest[8 + n * 8..];
         }
-        let kind = |kind: u8| [TitleKind::Asked, TitleKind::Summed, TitleKind::Named].get(kind as usize).copied();
+        if kept.read_as != READ_AS {
+            return None;
+        }
+        let kind = |kind: u8| [TitleKind::Asked, TitleKind::Summed, TitleKind::Titled, TitleKind::Named].get(kind as usize).copied();
         Some(Ledger {
             files: kept.files.into_iter().map(|(path, read)| (PathBuf::from(path), read)).collect(),
             spent: kept.spent.into_iter().map(|(tool, model, at, tokens)| ((tool, model, at), tokens)).collect(),
@@ -732,6 +742,9 @@ impl Ledger {
 /// What a `Ledger` is kept as, but for the responses counted.
 #[derive(Serialize, Deserialize)]
 struct Kept {
+    /// How the records were read (see `READ_AS`): none, before it was told.
+    #[serde(default)]
+    read_as: u32,
     files: Vec<(String, Read)>,
     spent: Vec<(Tool, String, u32, Tokens)>,
     sessions: Vec<Session>,

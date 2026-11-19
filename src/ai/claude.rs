@@ -1,13 +1,18 @@
 //! Claude Code's transcripts: a line for each thing said, the model's carrying what its response spent
 //! (`message.usage`), repeated whole on each line of a response written in several (counted once, by the response's
-//! id and its request's); a session's name given by hand (`custom-title`), its summary (`summary`, which names no
-//! session: the file's), and the last thing asked in it (`last-prompt`).
+//! id and its request's); a session's name given by hand (`custom-title`), the one Claude Code gave it (`ai-title`), its
+//! summary (`summary`, which names no session: the file's), and what was last asked in it (`last-prompt`, which often
+//! holds no prompt, and the prompts its user typed themselves).
+
+/// A user's line whose message is text, not what tools gave back: what was asked, or what Claude Code put in as the
+/// user's (see `asked`).
+const PROMPT: &[u8] = b"\"role\":\"user\",\"content\":\"";
 
 use super::{key, moment, Read, TitleKind, Told, Tokens};
 use serde::Deserialize;
 
 /// Lines that say anything read here hold one of these words: the rest (most of a transcript's bytes) are not parsed.
-const WORTH: [&[u8]; 4] = [b"\"usage\"", b"\"custom-title\"", b"\"summary\"", b"\"last-prompt\""];
+const WORTH: [&[u8]; 6] = [b"\"usage\"", b"\"custom-title\"", b"\"ai-title\"", b"\"summary\"", b"\"last-prompt\"", PROMPT];
 /// The longest title kept (in characters).
 const TITLE: usize = 80;
 
@@ -24,9 +29,34 @@ struct Line {
     message: Option<Message>,
     #[serde(rename = "customTitle")]
     custom_title: Option<String>,
+    #[serde(rename = "aiTitle")]
+    ai_title: Option<String>,
     summary: Option<String>,
     #[serde(rename = "lastPrompt")]
     last_prompt: Option<String>,
+    /// A user's line Claude Code put in itself (what a command said, a caveat), not asked.
+    #[serde(rename = "isMeta", default)]
+    meta: bool,
+    /// A user's line holding a summary of what came before, the session carried on from it.
+    #[serde(rename = "isCompactSummary", default)]
+    summed: bool,
+    /// A subagent's line (its task, as the user's, in a file of its own under the session's).
+    #[serde(rename = "isSidechain", default)]
+    sidechain: bool,
+    /// Where a user's line came from: typed, queued, a suggestion taken, or the system (none before Claude Code told).
+    #[serde(rename = "promptSource")]
+    source: Option<String>,
+}
+
+/// A user's line whose message is text: the text.
+#[derive(Deserialize)]
+struct Asked {
+    message: Said,
+}
+
+#[derive(Deserialize)]
+struct Said {
+    content: String,
 }
 
 #[derive(Deserialize)]
@@ -81,10 +111,26 @@ pub(super) fn line(bytes: &[u8], read: &mut Read, told: &mut Vec<Told>) {
             told.push(Told::Spent { key: key(&["claude", &id, line.request.as_deref().unwrap_or_default()]), at, session, model, tokens });
         }
         (Some("custom-title"), Some(session)) => title(told, session, line.custom_title, TitleKind::Named),
+        (Some("ai-title"), Some(session)) => title(told, session, line.ai_title, TitleKind::Titled),
         (Some("summary"), Some(session)) => title(told, session, line.summary, TitleKind::Summed),
         (Some("last-prompt"), Some(session)) => title(told, session, line.last_prompt, TitleKind::Asked),
+        (Some("user"), Some(session)) if asked(&line) => title(told, session, prompt(bytes), TitleKind::Asked),
         _ => {}
     }
+}
+
+/// Whether user's line `line` is what its user asked: not one Claude Code put in itself, a summary carried on from,
+/// what the system queued, or a subagent's.
+fn asked(line: &Line) -> bool {
+    !line.meta && !line.summed && !line.sidechain && line.source.as_deref() != Some("system")
+}
+
+/// What user's line `bytes` asked, where its message is text and not a command's tags (`<command-name>` and the like,
+/// how Claude Code writes a command typed and what it said back).
+fn prompt(bytes: &[u8]) -> Option<String> {
+    memchr::memmem::find(bytes, PROMPT)?;
+    let text = serde_json::from_slice::<Asked>(bytes).ok()?.message.content;
+    (!text.trim_start().starts_with('<')).then_some(text)
 }
 
 /// Session `session` called `title` (its first line, cut to `TITLE` characters), where it says anything.
