@@ -177,17 +177,24 @@ impl Hash for AiBlock {
     }
 }
 
-/// The room above each block (DIPs).
-const GAP: f32 = 10.0;
+/// The room above each block (DIPs): what one tells set apart from what the one before it does.
+const GAP: f32 = 14.0;
+/// Between two rows of a block (its models, its facts two to a row): each row read as one, apart from the next.
+const ROW_GAP: f32 = 6.0;
+/// A window's bar, the room it is drawn in between its name and when it starts again (its middle there): clear of both.
+const BAR_BAND: f32 = 14.0;
 /// A window's: its name and how much is used, its bar, when it starts again.
-const WINDOW: f32 = LINE + 8.0 + LINE;
+const WINDOW: f32 = LINE + BAR_BAND + LINE;
 /// Between two windows side by side, and two rows of them.
 const WINDOW_GAP: f32 = 16.0;
 /// The models' bar, and the room under it.
 const MODELS_BAR: f32 = 6.0;
-const MODELS_BAR_GAP: f32 = 8.0;
-/// A session's row: its title over what it is.
-const SESSION: f32 = 36.0;
+const MODELS_BAR_GAP: f32 = 10.0;
+/// A session's: its title over what it is (`SESSION_LINES` apart), and the room between it and the next, more than
+/// that: each session's two lines read as one.
+const SESSION_LINES: f32 = 2.0;
+const SESSION_GAP: f32 = 10.0;
+const SESSION: f32 = LINE + SESSION_LINES + LINE + SESSION_GAP;
 /// The most sessions told of.
 const SESSIONS: usize = 4;
 /// The most models told apart (the rest as one).
@@ -206,9 +213,9 @@ impl AiBlock {
                 let rows = windows.len().div_ceil(2) as f32;
                 GAP + rows * WINDOW + (rows - 1.0).max(0.0) * WINDOW_GAP
             }
-            AiBlock::Models(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + FACT_GAP) - FACT_GAP,
-            AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + FACT_GAP) - FACT_GAP,
-            AiBlock::Sessions(rows) => GAP + rows.len() as f32 * SESSION,
+            AiBlock::Models(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
+            AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + ROW_GAP) - ROW_GAP,
+            AiBlock::Sessions(rows) => GAP + rows.len() as f32 * SESSION - SESSION_GAP,
         }
     }
 }
@@ -658,7 +665,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 frame.text(&window.name, theme.small, theme.text2, x, top, wide, Align::Start);
                 part(&format!("{at}.value"));
                 frame.text(&format!("{:.0}%", window.used * 100.0), theme.small, if hot { theme.signal } else { theme.text }, x, top, wide, Align::End);
-                let bar_y = top + LINE + (8.0 - theme.meter_height) / 2.0;
+                let bar_y = top + LINE + (BAR_BAND - theme.meter_height) / 2.0;
                 part(&format!("{at}.bar"));
                 meter(frame, theme, (x, bar_y, wide), window.used, if hot { theme.signal } else { ink.trace });
                 // How much of the window has gone by, a mark across the bar: used ahead of it, the limit is spent
@@ -668,7 +675,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                     frame.fill(theme.text2, (mark_x - 0.75).clamp(x, x + wide - 1.5), bar_y - 2.0, 1.5, theme.meter_height + 4.0);
                 }
                 part(&format!("{at}.resets"));
-                frame.text(&window.resets, theme.small, theme.text3, x, top + LINE + 8.0, wide, Align::Start);
+                frame.text(&window.resets, theme.small, theme.text3, x, top + LINE + BAR_BAND, wide, Align::Start);
             }
         }
         AiBlock::Models(rows) => {
@@ -683,7 +690,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 x += w;
             }
             for (at, (model, _, value)) in rows.iter().enumerate() {
-                let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + FACT_GAP);
+                let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + ROW_GAP);
                 part(&at.to_string());
                 frame.fill_rounded(ink.trace.alpha(strength(at)), left, row_y + (LINE - 8.0) / 2.0, 8.0, 8.0, 2.0);
                 frame.text(model, theme.small, theme.text2, left + 14.0, row_y, width - 14.0, Align::Start);
@@ -693,7 +700,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
         AiBlock::Pairs(pairs) => {
             let column = (width - WINDOW_GAP) / 2.0;
             for (at, (label, value)) in pairs.iter().enumerate() {
-                let (x, row_y) = (left + (at % 2) as f32 * (column + WINDOW_GAP), y + GAP + (at / 2) as f32 * (LINE + FACT_GAP));
+                let (x, row_y) = (left + (at % 2) as f32 * (column + WINDOW_GAP), y + GAP + (at / 2) as f32 * (LINE + ROW_GAP));
                 part(&at.to_string());
                 frame.text(label, theme.small, theme.text2, x, row_y, column, Align::Start);
                 frame.text(value, theme.small, theme.text, x, row_y, column, Align::End);
@@ -714,7 +721,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 let words = left + 2.0 * DOT + 8.0;
                 let value_width = frame.measure(value, theme.small);
                 frame.text(title, theme.body, theme.text, words, row_y, left + width - value_width - 12.0 - words, Align::Start);
-                frame.text(about, theme.small, theme.text3, words, row_y + LINE + 1.0, left + width - words, Align::Start);
+                frame.text(about, theme.small, theme.text3, words, row_y + LINE + SESSION_LINES, left + width - words, Align::Start);
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
             }
         }
