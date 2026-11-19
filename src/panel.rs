@@ -3205,6 +3205,7 @@ impl<'a> Panel<'a> {
         let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
         // (Its buttons' row outside it is on it: see `Placement::rack`.)
         let on_panel = contains(&placement.panel, cursor) || placement.rack.is_some_and(|(rack, _)| contains(&rack, cursor));
+        let racked = placement.rack.is_some();
         // (Where it is in the window, physical px.)
         let client = POINT { x: cursor.x - placement.window.left, y: cursor.y - placement.window.top };
         // (The card beside the AI component's dock, and the way to it from its ring, are the panel's while it is up.)
@@ -3219,8 +3220,11 @@ impl<'a> Panel<'a> {
         let (pressed, elsewhere) = self.presses_since(down);
         let held = down || pressed;
         if !on_panel && !carded {
-            // (Gone from it: nothing found under where it was as what is drawn moves, see `hover_again`.)
-            self.pointer = None;
+            // (Gone from it: nothing found under where it was as what is drawn moves, see `hover_again`. Its buttons'
+            // row outside it no longer shown.)
+            if self.pointer.take().is_some() && racked {
+                self.next_frame = now;
+            }
             // (What it said under it goes with it: a drive's row, the line that switches players, a name cut short. So
             // does the card beside the AI component's dock.)
             self.unsay();
@@ -4271,8 +4275,11 @@ impl<'a> Panel<'a> {
         let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
         view::todo::write_in(&mut lanes, &crate::ui::todo::field(self.window.hwnd, Instant::now()).0);
         let (layout, zoom, size) = (opening.layout.clone(), opening.zoom, opening.size);
+        // The AI component's dock has no bar: its pin and its settings in a row outside it, as the strip of what plays
+        // has them (see `DOCK_RACK`).
+        let rack = matches!(opening.small(), Some(crate::ui::forms::Small::Dock { .. })).then_some(DOCK_RACK);
         let placement = self.placement.as_mut().unwrap();
-        place(placement, self.edge, &self.theme, size, zoom, None);
+        place(placement, self.edge, &self.theme, size, zoom, rack);
         self.follow_beside();
         (lanes, layout)
     }
@@ -4420,9 +4427,18 @@ impl<'a> Panel<'a> {
             None => (placement.floating.is_none() && self.edge == Edge::Right, false),
         };
         let centred = placement.held.is_none() && placement.floating.is_none() && self.edge == Edge::Top;
+        // Its buttons' row outside it (the dock's, see `DOCK_RACK`), from its corner, while the pointer is on it or on
+        // them, or the settings asked from them are open.
+        let rack = placement.rack.map(|(_, under)| {
+            let (w, h) = DOCK_RACK;
+            (width - w, if under { height } else { -h }, w, h)
+        });
+        let (settings_lit, hover) = (self.settings_lit(), self.hover);
+        let racked = rack.filter(|_| self.pointer.is_some_and(|pointer| self.on_panel(pointer)) || settings_lit.is_some());
         let turning = &mut self.turn;
         let (layers, behind, frost) = (&mut self.layers, &mut self.behind, self.frost);
         let (sizing, lang, theme) = (self.sizing, self.lang, &self.theme);
+        let mut rack_hits: Vec<view::HitBox> = Vec::new();
         let mut drawn = None;
         // A thing on its station dragged off it: lifted off its room, as it was drawn there (see `carry`).
         // (With what is carried with it, those of them whose rooms show, each from its own room: see `carry::Tile`.)
@@ -4482,6 +4498,20 @@ impl<'a> Panel<'a> {
             if let Some(Err(error)) = &drawn {
                 frame.fail(error.clone());
             }
+            if let Some((rx, ry, rw, _)) = racked {
+                frame.origin(x, y);
+                let side = crate::ui::buttons::SIZE;
+                for (index, hit) in [Hit::Pin, Hit::Settings].into_iter().enumerate() {
+                    let (bx, by) = (rx + rw - side - index as f32 * (side + crate::ui::buttons::GAP), ry + RACK_INSET);
+                    let (button, settings) = if hit == Hit::Pin { (crate::ui::buttons::Button::Pin, false) } else { (crate::ui::buttons::Button::Settings, true) };
+                    let lit = (hit == Hit::Pin && scene.pinned) || (settings && settings_lit.is_some()) || hover == Some(hit);
+                    let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
+                    let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
+                    crate::ui::buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown);
+                    rack_hits.push((bx, by, side, side, hit));
+                }
+                frame.origin(0.0, 0.0);
+            }
             if let Some((size, limit)) = sizing {
                 frame.place(Matrix3x2::translation(x, y));
                 size_badge(frame, theme, size, limit, lang, (width, height));
@@ -4534,7 +4564,8 @@ impl<'a> Panel<'a> {
         // (Its own faces: what another window of this thread drew meanwhile was let go of as it began.)
         let faces = view::faces();
         if let Some(hits) = hits {
-            self.hits = hits;
+            // (Its buttons over what is under them.)
+            self.hits = rack_hits.into_iter().chain(hits).collect();
             self.faces = faces;
             self.follow_settings();
             self.hover_again();
@@ -4840,7 +4871,9 @@ impl<'a> Panel<'a> {
             Edge::Top => Side::Below,
         };
         let look = self.menu_look();
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side);
+        // (Beside its buttons' row too, where it has one outside it: the card lay over them.)
+        let by = placement.rack.map_or(placement.panel, |(rack, _)| union(placement.panel, rack));
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, by, &spots, side);
         self.carding = true;
     }
 
@@ -4871,13 +4904,19 @@ impl<'a> Panel<'a> {
     fn lit_at(&self, client: POINT) -> Option<Hit> {
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         match (hover, self.hover) {
-            (hover, Some(Hit::AiSlot(spot))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(spot)),
+            // (Not on its buttons, which may lie on that way: see `DOCK_RACK`.)
+            (hover, Some(Hit::AiSlot(spot))) if !matches!(hover, Some(Hit::AiSlot(_) | Hit::Pin | Hit::Settings)) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(spot)),
             (hover, _) => hover,
         }
     }
 
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
+        // (Come onto it or gone off it: its buttons' row outside it shown or not, see `DOCK_RACK`.)
+        let rack = self.placement.as_ref().is_some_and(|placement| placement.rack.is_some());
+        if rack && self.pointer.is_some_and(|was| self.on_panel(was)) != self.on_panel(client) {
+            self.next_frame = Instant::now();
+        }
         self.pointer = Some(client);
         // Off the panel (its window holds its screen): clicks there are let through at once, not as the pointer is
         // next followed (see `track`), which a quick click comes before.
@@ -5112,6 +5151,14 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
 const RACK: (f32, f32) = (3.0 * crate::ui::buttons::SIZE + 2.0 * crate::ui::buttons::GAP, crate::ui::buttons::SIZE + 2.0 * RACK_INSET);
 /// The room between such a row and the panel, and round it.
 const RACK_INSET: f32 = 6.0;
+/// The least rectangle holding both `a` and `b`.
+fn union(a: RECT, b: RECT) -> RECT {
+    RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) }
+}
+
+/// The row outside the AI component's dock: its pin and its settings (the dock has no bar to hold them, as the
+/// readings' panel has).
+const DOCK_RACK: (f32, f32) = (2.0 * crate::ui::buttons::SIZE + crate::ui::buttons::GAP, crate::ui::buttons::SIZE + 2.0 * RACK_INSET);
 
 /// Positions the panel for a layout `size` DIPs large, in its window (see `Placement::window`); with a row of buttons
 /// `rack` large outside it at its right end (above it, or under it where its screen has no room above), where it has
@@ -5145,7 +5192,7 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
     // the edge, past it too); and its buttons' row's.
     let mut painted = RECT { left: left - margin, top: top - margin, right: panel.right + margin, bottom: panel.bottom + margin };
     if let Some((r, _)) = rack {
-        painted = RECT { left: painted.left.min(r.left), top: painted.top.min(r.top), right: painted.right.max(r.right), bottom: painted.bottom.max(r.bottom) };
+        painted = union(painted, r);
     }
     if placement.held.is_none() {
         painted = RECT {
@@ -5183,7 +5230,7 @@ fn place(placement: &mut Placement, edge: Edge, theme: &Theme, size: (f32, f32),
     }
     // (The pointer going to its buttons' row is still at it.)
     if let Some((r, _)) = rack {
-        reach = RECT { left: reach.left.min(r.left), top: reach.top.min(r.top), right: reach.right.max(r.right), bottom: reach.bottom.max(r.bottom) };
+        reach = union(reach, r);
     }
     placement.rack = rack;
     if placement.painted != painted {

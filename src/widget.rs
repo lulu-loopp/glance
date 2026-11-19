@@ -2108,9 +2108,9 @@ impl Widgets {
         let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
         let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.lights());
         // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
-        // ring stays lit, its card up.)
+        // ring stays lit, its card up. Not on one of its buttons, which may lie on that way: the card goes.)
         let hit = match (hit, widget.hit_hover) {
-            (hit, Some(view::Hit::AiSlot(spot))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(spot)),
+            (hit, Some(view::Hit::AiSlot(spot))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && over.is_none() && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(spot)),
             (hit, _) => hit,
         };
         if hit != widget.hit_hover {
@@ -3796,6 +3796,13 @@ impl Widget {
             Side::Left
         };
         let look = self.menu_look();
+        // (Beside its buttons too, wherever they are outside it: the card lay over them.)
+        let by = self.content.buttons().iter().filter_map(|button| self.button_rect(*button)).fold(by, |all, button| RECT {
+            left: all.left.min(button.left),
+            top: all.top.min(button.top),
+            right: all.right.max(button.right),
+            bottom: all.bottom.max(button.bottom),
+        });
         crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme, prefs, lang, look }, by, &spots, side);
         self.carding = true;
     }
