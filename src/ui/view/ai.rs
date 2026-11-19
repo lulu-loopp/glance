@@ -489,16 +489,16 @@ fn balance_pairs(balance: &crate::ai::Balance, today: u64, lang: Lang) -> Option
 
 /// The AI component's lane as `prefs` show it, at `detail` (see `together`); none where it shows nothing.
 #[cfg(windows)]
-pub(super) fn ai_lane(prefs: &Prefs, lang: Lang, detail: Detail) -> Option<Vec<Block>> {
-    together(prefs, lang, crate::ai::usage().as_deref(), crate::station::now_ms(), detail, opened)
+pub(super) fn ai_lane(prefs: &Prefs, lang: Lang, detail: Detail, theme: &Theme) -> Option<Vec<Block>> {
+    together(prefs, lang, crate::ai::usage().as_deref(), crate::station::now_ms(), detail, opened, theme)
 }
 
 /// The AI component's lane of `usage` (none: not read yet) at `now`, one plate for it all: what every source spent
 /// today (where `ai:today` is on), then each source switched on, in their order, `opened` as it is toggled, and the
-/// sessions of those at work; in a widget too small for it all, its shape (see `paint_shaped`). None where it shows
-/// none of them.
+/// sessions of those at work; laid out across where `prefs` say so (see `across`); in a widget too small for it all,
+/// its shape (see `paint_shaped`). None where it shows none of them.
 #[cfg(windows)]
-pub(super) fn together(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64, detail: Detail, opened: impl Fn(Source) -> bool) -> Option<Vec<Block>> {
+pub(super) fn together(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64, detail: Detail, opened: impl Fn(Source) -> bool, theme: &Theme) -> Option<Vec<Block>> {
     let ids: Vec<&str> = prefs.modules.iter().filter(|entry| shows_module(entry) && entry.id.starts_with("ai:")).map(|entry| entry.id.as_str()).collect();
     if ids.is_empty() {
         return None;
@@ -507,29 +507,102 @@ pub(super) fn together(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usag
         let mounted = usage.map_or(Vec::new(), mounted);
         return Some(vec![Block::Ai(AiBlock::Shaped { shape, dock: dock_of(prefs, lang, usage, now), mounted })]);
     }
+    if prefs.across {
+        return Some(vec![Block::Across(across(prefs, &ids, lang, usage, now, &opened, theme))]);
+    }
     let mut blocks = Vec::new();
     for id in ids {
         if !blocks.is_empty() {
             blocks.push(Block::Room(SOURCE_GAP));
         }
         if id == "ai:today" {
-            blocks.push(head(lang.pick("AI 用量", "AI usage"), "", lang.pick("今日", "Today"), false));
-            blocks.push(usage.map_or_else(|| reading(lang), |usage| today_block(usage, lang)));
+            blocks.extend(spent_today(lang, usage));
             continue;
         }
         let Some(source) = Source::of(id) else { continue };
         blocks.extend(lane_of(id, prefs, lang, usage, now, Some(opened(source))).into_iter().flatten());
     }
-    // The sessions of the sources shown: those at work, and those of today.
-    let tools: Vec<crate::ai::Tool> = docked(prefs).into_iter().map(tool_of).collect();
-    if let Some(usage) = usage.filter(|_| !tools.is_empty()) {
-        let today: Vec<&crate::ai::Session> = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && session.spent_between(usage.today, usage.now) > 0).collect();
-        let at_work = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && now.saturating_sub(session.last) < AT_WORK_MS).count();
-        if !today.is_empty() || at_work > 0 {
-            blocks.push(Block::Ai(AiBlock::Working { at_work, today: today.len().max(at_work) }));
+    blocks.extend(working(prefs, usage, now));
+    Some(blocks)
+}
+
+/// The most parts the component laid out across sets side by side (see `across`): what every source spent today and
+/// three sources, the rest in the rows under them.
+const ACROSS_MOST: usize = 4;
+
+/// The component laid out across, as a panel opened from a top edge shows it, low and wide (see `Block::Across`): what
+/// every source spent today, with the sessions at work under it, beside each source's head and limits, at most
+/// `ACROSS_MOST` side by side, the rest in rows under them; and under them, for each source opened, what it spent by
+/// kind, by model and its sessions, side by side in a row of its own, each under the source's mark and what it tells.
+/// The parts of `ids` (the modules shown, in their order) as `together` tells them.
+#[cfg(windows)]
+fn across(prefs: &Prefs, ids: &[&str], lang: Lang, usage: Option<&crate::ai::Usage>, now: u64, opened: &impl Fn(Source) -> bool, theme: &Theme) -> Vec<Vec<Lane>> {
+    let part = |id: String, blocks: Vec<Block>| Lane { ink: theme.ink(&id), id, blocks };
+    let mut parts: Vec<Lane> = Vec::new();
+    let mut told: Vec<Vec<Lane>> = Vec::new();
+    for id in ids {
+        if *id == "ai:today" {
+            parts.push(part(id.to_string(), spent_today(lang, usage)));
+            continue;
+        }
+        let Some(source) = Source::of(id) else { continue };
+        let Some(blocks) = lane_of(id, prefs, lang, usage, now, Some(opened(source))) else { continue };
+        // What opening it tells goes in a row of its own under the heads, the rest stays under its head.
+        let (opens, stays): (Vec<Block>, Vec<Block>) = blocks.into_iter().partition(|block| matches!(block, Block::Ai(AiBlock::Models(_) | AiBlock::Pairs(_) | AiBlock::Sessions(_))));
+        parts.push(part(id.to_string(), stays));
+        let mut opens: Vec<(usize, Block)> = opens.into_iter().map(|block| (opened_order(&block), block)).collect();
+        opens.sort_by_key(|(order, _)| *order);
+        let row: Vec<Lane> = opens
+            .into_iter()
+            .map(|(order, block)| {
+                let (kind, title) = [("pairs", lang.pick("今日构成", "Today by kind")), ("models", lang.pick("模型", "Models")), ("sessions", lang.pick("会话", "Sessions"))][order];
+                let caption = Block::Ai(AiBlock::Head { source, title: title.into(), device: String::new(), aside: String::new(), opened: None });
+                part(format!("{id}.{kind}"), vec![caption, block])
+            })
+            .collect();
+        if !row.is_empty() {
+            told.push(row);
         }
     }
-    Some(blocks)
+    // The sessions at work under the first part (what every source spent, where it shows), else as one of their own.
+    if let Some(working) = working(prefs, usage, now) {
+        match parts.first_mut() {
+            Some(first) => first.blocks.push(working),
+            None => parts.push(part("ai:sessions".into(), vec![working])),
+        }
+    }
+    let mut rows = Vec::new();
+    for row in std::iter::once(parts).chain(told) {
+        let mut row = row.into_iter().peekable();
+        while row.peek().is_some() {
+            rows.push(row.by_ref().take(ACROSS_MOST).collect());
+        }
+    }
+    rows
+}
+
+/// Where what opening a source tells goes in its row laid out across (see `across`): what it spent by kind, by model,
+/// then its sessions.
+fn opened_order(block: &Block) -> usize {
+    match block {
+        Block::Ai(AiBlock::Pairs(_)) => 0,
+        Block::Ai(AiBlock::Models(_)) => 1,
+        _ => 2,
+    }
+}
+
+/// What every source spent today, under its head: the figure and how it mounted (or that it is being read).
+fn spent_today(lang: Lang, usage: Option<&crate::ai::Usage>) -> Vec<Block> {
+    vec![head(lang.pick("AI 用量", "AI usage"), "", lang.pick("今日", "Today"), false), usage.map_or_else(|| reading(lang), |usage| today_block(usage, lang))]
+}
+
+/// The sessions of the sources shown (see `docked`): how many are at work, and of today; none where there are none.
+fn working(prefs: &Prefs, usage: Option<&crate::ai::Usage>, now: u64) -> Option<Block> {
+    let tools: Vec<crate::ai::Tool> = docked(prefs).into_iter().map(tool_of).collect();
+    let usage = usage.filter(|_| !tools.is_empty())?;
+    let today = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && session.spent_between(usage.today, usage.now) > 0).count();
+    let at_work = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && now.saturating_sub(session.last) < AT_WORK_MS).count();
+    (today > 0 || at_work > 0).then_some(Block::Ai(AiBlock::Working { at_work, today: today.max(at_work) }))
 }
 
 /// The card beside the dock for `spot`: a source's lane, all it tells, its head opening nothing; what every source spent

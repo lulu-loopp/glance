@@ -31,10 +31,13 @@ const TOP_SHARE: f32 = 0.6;
 ///
 /// `rail`: the lane drawn as a rail along the screen's edge instead of in a column (quick launch's), where there is
 /// one (see `Layout::with_rail`).
+///
+/// `wide`: how wide the widest lane is to be drawn (see `view::wide`), its columns as wide where that is wider than
+/// they are.
 #[allow(clippy::too_many_arguments)]
-pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
-    let (layout, zoom) = fitted(theme, edge, heights.clone(), work, columns, size, rail);
-    let (_, at_one) = fitted(theme, edge, heights, work, columns, 1.0, rail);
+pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, wide: f32, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
+    let (layout, zoom) = fitted(theme, edge, heights.clone(), wide, work, columns, size, rail);
+    let (_, at_one) = fitted(theme, edge, heights, wide, work, columns, 1.0, rail);
     (layout, zoom.min(size * at_one))
 }
 
@@ -42,8 +45,8 @@ pub fn arrange(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), c
 /// laid out for the screen as the panel's own DIPs at that size measure
 /// it, the gaps from the screen's ends staying as they are on the screen.
 #[allow(clippy::too_many_arguments)]
-fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
-    let (layout, zoom) = arrange_designed(theme, edge, heights, (work.0 / size, work.1 / size), columns, GAP / size, rail);
+fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, wide: f32, work: (f32, f32), columns: Option<usize>, size: f32, rail: Option<usize>) -> (Layout, f32) {
+    let (layout, zoom) = arrange_designed(theme, edge, heights, wide, (work.0 / size, work.1 / size), columns, GAP / size, rail);
     (layout, zoom * size)
 }
 
@@ -54,9 +57,9 @@ fn fitted(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), column
 /// the screen holds no more of it (see `arrange`). In hundredths, as sizes
 /// are chosen.
 #[allow(clippy::too_many_arguments)]
-pub fn largest(theme: &Theme, edge: Edge, heights: &[f32], work: (f32, f32), columns: Option<usize>, most: f32, rail: Option<usize>) -> f32 {
-    let (_, at_one) = fitted(theme, edge, heights.to_vec(), work, columns, 1.0, rail);
-    let grows = |size: f32| size * at_one <= fitted(theme, edge, heights.to_vec(), work, columns, size, rail).1 + 1e-4;
+pub fn largest(theme: &Theme, edge: Edge, heights: &[f32], wide: f32, work: (f32, f32), columns: Option<usize>, most: f32, rail: Option<usize>) -> f32 {
+    let (_, at_one) = fitted(theme, edge, heights.to_vec(), wide, work, columns, 1.0, rail);
+    let grows = |size: f32| size * at_one <= fitted(theme, edge, heights.to_vec(), wide, work, columns, size, rail).1 + 1e-4;
     let mut size = (most * 100.0).round() as i32;
     while size > 100 && !grows(size as f32 / 100.0) {
         size -= 1;
@@ -73,7 +76,8 @@ fn room(theme: &Theme, edge: Edge, work: (f32, f32), gap: f32) -> (f32, f32) {
     }
 }
 
-fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f32), columns: Option<usize>, gap: f32, rail: Option<usize>) -> (Layout, f32) {
+#[allow(clippy::too_many_arguments)]
+fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, wide: f32, work: (f32, f32), columns: Option<usize>, gap: f32, rail: Option<usize>) -> (Layout, f32) {
     let (room_width, room) = room(theme, edge, work, gap);
     // A rail down a side as long as all quick launch holds takes, as far as the screen allows (scrolled along past
     // that): with few lanes beside it, or none, a thing or two showed and the rest were out of sight.
@@ -95,12 +99,13 @@ fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, work: (f32, f3
         None => (room_width, room),
     };
     // As many columns as fit across, and along a side no more than a few.
-    let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH + theme.column_gap)) as usize).max(1);
+    let fit = (((room_width + theme.column_gap) / (COLUMN_WIDTH.max(wide) + theme.column_gap)) as usize).max(1);
     let max_columns = if edge == Edge::Top { fit } else { fit.min(MAX_COLUMNS) };
     let layout = match columns {
         Some(columns) => Layout::with_columns(heights, columns.min(fit), theme),
         None => Layout::new(heights, room, max_columns, theme),
-    };
+    }
+    .widened(wide);
     let layout = match rail {
         Some((at, side)) => layout.with_rail(at, side, rail_long),
         None => layout,
@@ -236,11 +241,12 @@ pub struct Ladder {
 }
 
 impl Ladder {
-    pub fn new(theme: &Theme, lanes: &[Heights], shows: Shows) -> Self {
+    /// The forms for `lanes`, the widest of them `wide` wide (see `arrange`), and the readings `shows`.
+    pub fn new(theme: &Theme, lanes: &[Heights], wide: f32, shows: Shows) -> Self {
         let mut rungs = Vec::new();
         for detail in [Detail::Full, Detail::Compact] {
             for columns in (1..=MAX_COLUMNS.min(lanes.len())).rev() {
-                let layout = Layout::with_columns(lanes.iter().map(|heights| at(heights, detail)).collect(), columns, theme);
+                let layout = Layout::with_columns(lanes.iter().map(|heights| at(heights, detail)).collect(), columns, theme).widened(wide);
                 rungs.push(Rung {
                     form: Form::Lanes { detail, columns },
                     size: (layout.width(), layout.height()),
@@ -402,15 +408,17 @@ impl Opening {
     }
 
     /// Lays out `lanes` (each by module, with its heights when holding what
-    /// `seen` holds) and what the small layouts show (`shows`) for a work area
-    /// `work` DIPs large, at the size chosen, as `want` says: by itself,
-    /// in `columns` if chosen (see `arrange`); else as far as the screen
-    /// holds what is wanted, and otherwise what best fills the screen.
+    /// `seen` holds, the widest `wide` wide: see `arrange`) and what the small
+    /// layouts show (`shows`) for a work area `work` DIPs large, at the size
+    /// chosen, as `want` says: by itself, in `columns` if chosen (see
+    /// `arrange`); else as far as the screen holds what is wanted, and
+    /// otherwise what best fills the screen.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         theme: &Theme,
         edge: Edge,
         lanes: &[(&str, Heights)],
+        wide: f32,
         shows: Shows,
         work: (f32, f32),
         columns: Option<usize>,
@@ -420,11 +428,11 @@ impl Opening {
     ) -> Self {
         let heights: Vec<Heights> = lanes.iter().map(|(_, heights)| *heights).collect();
         let ids: Vec<String> = lanes.iter().map(|(id, _)| id.to_string()).collect();
-        let ladder = Ladder::new(theme, &heights, shows);
+        let ladder = Ladder::new(theme, &heights, wide, shows);
         // As it is laid out itself: quick launch, at the panel's edge, as its rail.
         let itself = |ids: Vec<String>, seen: Seen| {
             let rail = ids.iter().position(|id| id == "apps");
-            let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), work, columns, size, rail);
+            let (layout, zoom) = arrange(theme, edge, heights.iter().map(|heights| heights[0]).collect(), wide, work, columns, size, rail);
             Opening { size: (layout.width(), layout.height()), layout, zoom, choice: None, lanes: ids, seen }
         };
         let kept = match want {
@@ -443,7 +451,7 @@ impl Opening {
         let zoom = size * choice.scale * (room_width / (stretched.0 * choice.scale)).min(room_height / (stretched.1 * choice.scale)).min(1.0);
         let layout = match choice.form {
             Form::Lanes { detail, columns } => {
-                let designed = Layout::with_columns(heights.iter().map(|heights| at(heights, detail)).collect(), columns, theme);
+                let designed = Layout::with_columns(heights.iter().map(|heights| at(heights, detail)).collect(), columns, theme).widened(wide);
                 designed.stretched(choice.extra)
             }
             Form::Small(_) => Layout::with_columns(heights.iter().map(|heights| heights[0]).collect(), 1, theme),
@@ -499,11 +507,11 @@ mod tests {
     fn fits_narrow_and_short_screens() {
         let theme = Theme::new(Skin::Paper, false);
         // A portrait screen 600 DIPs wide holds one column, not three.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (600.0, 1000.0), None, 1.0, None);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], 0.0, (600.0, 1000.0), None, 1.0, None);
         assert_eq!(layout.columns, 1);
         assert!(zoom < 1.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
         // Narrower than a column: the column is zoomed to fit across.
-        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], (300.0, 1000.0), None, 1.0, None);
+        let (layout, zoom) = arrange(&theme, Edge::Top, vec![100.0], 0.0, (300.0, 1000.0), None, 1.0, None);
         assert!(layout.width() * zoom <= 300.0 - 2.0 * GAP + 0.01);
         assert!(zoom.is_finite() && zoom > 0.0);
     }
@@ -515,7 +523,7 @@ mod tests {
         let theme = Theme::new(Skin::Fluent, false);
         for (heights, rail) in [(vec![120.0], 0), (vec![40.0, 120.0], 1)] {
             for edge in [Edge::Left, Edge::Right] {
-                let (layout, _) = arrange(&theme, edge, heights.clone(), (1920.0, 1080.0), None, 1.0, Some(rail));
+                let (layout, _) = arrange(&theme, edge, heights.clone(), 0.0, (1920.0, 1080.0), None, 1.0, Some(rail));
                 let lanes = layout.lanes();
                 let area = lanes[rail];
                 assert!(area.h >= crate::ui::view::RAIL_LEAST, "{edge:?} {heights:?}: {area:?}");
@@ -532,12 +540,12 @@ mod tests {
         let app = |at: usize| crate::station::apps::App { target: format!("C:\\{at}.exe"), name: at.to_string() };
         crate::station::apps::pretend((0..6).map(app).collect());
         for edge in [Edge::Left, Edge::Right] {
-            let (layout, zoom) = arrange(&theme, edge, vec![120.0], (1920.0, 1080.0), None, 1.0, Some(0));
+            let (layout, zoom) = arrange(&theme, edge, vec![120.0], 0.0, (1920.0, 1080.0), None, 1.0, Some(0));
             assert!(layout.lanes()[0].h >= rail_length(6) - 0.01, "{edge:?}: {:?}", layout.lanes()[0]);
             assert_eq!(zoom, 1.0);
         }
         crate::station::apps::pretend((0..60).map(app).collect());
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![120.0], (1920.0, 1080.0), None, 1.0, Some(0));
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![120.0], 0.0, (1920.0, 1080.0), None, 1.0, Some(0));
         assert!(layout.height() <= 1080.0 && layout.lanes()[0].h > rail_length(6), "{:?} in {}", layout.lanes()[0], layout.height());
         assert_eq!(zoom, 1.0);
         crate::station::apps::pretend(Vec::new());
@@ -548,14 +556,14 @@ mod tests {
         let theme = Theme::new(Skin::Paper, false);
         // Lanes that fit one column on a tall screen: four chosen, four taken,
         // more than a side takes by itself.
-        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (3000.0, 2000.0), Some(4), 1.0, None);
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], 0.0, (3000.0, 2000.0), Some(4), 1.0, None);
         assert_eq!(layout.columns, 4);
         // On a screen that holds two across, two.
         let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset + 1.0;
-        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two, 2000.0), Some(4), 1.0, None);
+        let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], 0.0, (two, 2000.0), Some(4), 1.0, None);
         assert_eq!(layout.columns, 2);
         // One chosen and too tall for the screen: one, zoomed out.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], (3000.0, 1000.0), Some(1), 1.0, None);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![400.0; 6], 0.0, (3000.0, 1000.0), Some(1), 1.0, None);
         assert_eq!(layout.columns, 1);
         assert!(zoom < 1.0);
     }
@@ -567,9 +575,9 @@ mod tests {
         for skin in [Skin::Paper, Skin::Fluent, Skin::Glass] {
             let theme = Theme::new(skin, false);
             let two = 2.0 * COLUMN_WIDTH + theme.column_gap + GAP + theme.inset;
-            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two + 0.5, 2000.0), Some(4), 1.0, None);
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], 0.0, (two + 0.5, 2000.0), Some(4), 1.0, None);
             assert_eq!(layout.columns, 2, "{skin:?}");
-            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], (two - 2.0, 2000.0), Some(4), 1.0, None);
+            let (layout, _) = arrange(&theme, Edge::Right, vec![100.0; 6], 0.0, (two - 2.0, 2000.0), Some(4), 1.0, None);
             assert_eq!(layout.columns, 1, "{skin:?}");
         }
     }
@@ -578,10 +586,10 @@ mod tests {
     fn grows_to_the_size_chosen_as_far_as_the_screen_allows() {
         let theme = Theme::new(Skin::Paper, false);
         // Half again as large, with room for it.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![300.0], (3000.0, 2000.0), None, 1.5, None);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![300.0], 0.0, (3000.0, 2000.0), None, 1.5, None);
         assert_eq!((layout.columns, zoom), (1, 1.5));
         // Twice as large on a screen with room for less: as large as fits.
-        let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], (400.0, 1000.0), Some(1), 2.0, None);
+        let (layout, zoom) = arrange(&theme, Edge::Right, vec![600.0], 0.0, (400.0, 1000.0), Some(1), 2.0, None);
         assert!(zoom < 2.0 && layout.height() * zoom <= 1000.0 - 2.0 * GAP + 0.01);
     }
 
@@ -591,8 +599,8 @@ mod tests {
         // One column too tall for the screen: zoomed to fit at 1, and three
         // quarters of that at three quarters, not zoomed back to fit.
         let lanes = || vec![400.0; 6];
-        let (_, one) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 1.0, None);
-        let (_, less) = arrange(&theme, Edge::Right, lanes(), (3000.0, 1000.0), Some(1), 0.75, None);
+        let (_, one) = arrange(&theme, Edge::Right, lanes(), 0.0, (3000.0, 1000.0), Some(1), 1.0, None);
+        let (_, less) = arrange(&theme, Edge::Right, lanes(), 0.0, (3000.0, 1000.0), Some(1), 0.75, None);
         assert!(one < 1.0);
         assert!((less - 0.75 * one).abs() < 1e-4);
     }
@@ -605,13 +613,13 @@ mod tests {
     #[test]
     fn a_large_room_shows_all_of_each_lane_and_a_small_one_rings() {
         let theme = Theme::new(Skin::Paper, false);
-        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
-        let three = Ladder::new(&theme, &lanes(), Shows::Readings(6)).drawn(Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.0, extra: (0.0, 0.0) });
+        let ladder = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(6));
+        let three = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(6)).drawn(Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.0, extra: (0.0, 0.0) });
         assert_eq!(ladder.choose(three, None).form, Form::Lanes { detail: Detail::Full, columns: 3 });
         assert_eq!(ladder.choose((130.0, 40.0), None).form, Form::Small(Small::Micro));
         assert_eq!(ladder.choose((90.0, 320.0), None).form, Form::Small(Small::Rail));
         // With no readings to show small (the workbench's lanes), sized down, still its lanes, at their least.
-        let none = Ladder::new(&theme, &lanes(), Shows::Readings(0));
+        let none = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(0));
         assert!(matches!(none.choose((130.0, 40.0), None).form, Form::Lanes { .. }));
         assert!(matches!(ladder.choose((700.0, 36.0), None).form, Form::Small(Small::Strip { .. })));
     }
@@ -619,7 +627,7 @@ mod tests {
     #[test]
     fn between_its_forms_a_panel_grows_with_its_room() {
         let theme = Theme::new(Skin::Paper, false);
-        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(6));
         // Within one form, a little more room is a little larger, stretched
         // and scaled: never a jump.
         let a = ladder.choose((480.0, 230.0), None);
@@ -641,7 +649,7 @@ mod tests {
     fn a_level_left_comes_back_only_with_room_to_spare() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Narrowed a pixel at a time until the level drops, then widened:
         // a few pixels back keep the level it dropped to; `UP` times the
         // room it dropped at, both ways, brings the other back.
@@ -670,7 +678,7 @@ mod tests {
     #[test]
     fn tiles_across_and_down_do_not_swap_as_a_corner_wavers_over_their_line() {
         let theme = Theme::new(Skin::Glass, false);
-        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(6));
         // Where, going from wide to tall, three across gives way to two across: the room before and after.
         let room = |i: usize| (560.0 - 2.0 * i as f32, 300.0 + 1.5 * i as f32);
         let mut shown = Shown::after(None, ladder.choose(room(0), None).form, room(0));
@@ -700,7 +708,7 @@ mod tests {
     #[test]
     fn a_rail_widened_a_long_way_gives_way_though_it_is_a_little_shorter() {
         let theme = Theme::new(Skin::Glass, false);
-        let ladder = Ladder::new(&theme, &lanes(), Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes(), 0.0, Shows::Readings(6));
         let tall = (130.0, 330.0);
         let shown = Shown::after(None, ladder.choose(tall, None).form, tall);
         assert_eq!(shown.form, Form::Small(Small::Rail), "{shown:?}");
@@ -714,7 +722,7 @@ mod tests {
     fn a_room_grown_one_way_as_it_shrinks_the_other_turns_its_level_once_at_most() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Dragged by a corner, wider and shorter at each step: the level only ever goes down, never back up and
         // down again.
         let (mut width, mut height) = (500.0f32, 700.0f32);
@@ -736,7 +744,7 @@ mod tests {
     fn a_narrow_tall_room_gets_the_corner_on_end() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         assert_eq!(ladder.choose((260.0, 420.0), None).form, Form::Small(Small::Tall));
         assert_eq!(ladder.choose((320.0, 190.0), None).form, Form::Small(Small::Corner));
     }
@@ -745,7 +753,7 @@ mod tests {
     fn the_less_room_the_less_shows_never_back() {
         let theme = Theme::new(Skin::Paper, false);
         let lanes = [[196.0, 89.0], [177.0, 113.0], [134.0, 89.0], [111.0, 85.0], [85.0, 85.0], [159.0, 115.0], [89.0, 89.0]];
-        let ladder = Ladder::new(&theme, &lanes, Shows::Readings(6));
+        let ladder = Ladder::new(&theme, &lanes, 0.0, Shows::Readings(6));
         // Narrower and narrower, then shorter and shorter, each from the
         // form shown: the level only goes down, and passes the tiles on the
         // way where they fit at all.
@@ -777,7 +785,7 @@ mod tests {
         let theme = Theme::new(Skin::Paper, false);
         let corner = Choice { form: Form::Small(Small::Corner), scale: 1.0, extra: (0.0, 0.0) };
         for want in [Want::Kept(corner), Want::Room((300.0, 200.0), None)] {
-            let opening = Opening::new(&theme, Edge::Right, &[], Shows::Readings(0), (1600.0, 900.0), None, 1.0, want, Seen::default());
+            let opening = Opening::new(&theme, Edge::Right, &[], 0.0, Shows::Readings(0), (1600.0, 900.0), None, 1.0, want, Seen::default());
             assert_eq!(opening.choice, None);
             assert!(opening.lanes.is_empty());
         }
@@ -789,10 +797,10 @@ mod tests {
         let lanes = [("cpu", [300.0, 150.0]), ("gpu:0", [300.0, 150.0]), ("memory", [300.0, 150.0])];
         let three = Choice { form: Form::Lanes { detail: Detail::Full, columns: 3 }, scale: 1.3, extra: (0.0, 0.0) };
         // Room for it: as kept.
-        let opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(three), Seen::default());
+        let opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(6), (3000.0, 2000.0), None, 1.0, Want::Kept(three), Seen::default());
         assert_eq!(opening.choice, Some(three));
         // A screen too small for it: what best fills the screen.
-        let opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(6), (800.0, 600.0), None, 1.0, Want::Kept(three), Seen::default());
+        let opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(6), (800.0, 600.0), None, 1.0, Want::Kept(three), Seen::default());
         assert_ne!(opening.choice.unwrap().form, three.form);
         assert!(opening.size.0 * opening.zoom <= 800.0 && opening.size.1 * opening.zoom <= 600.0);
     }
@@ -827,7 +835,7 @@ mod tests {
         let mut opened = Seen::default();
         opened.gpus.push(crate::ui::seen::GpuSeen { present: true, ..Default::default() });
         let lanes = [("cpu", [700.0; 2]), ("gpu:0", [100.0; 2]), ("memory", [100.0; 2])];
-        let mut opening = Opening::new(&theme, Edge::Right, &lanes, Shows::Readings(3), (1400.0, 900.0), None, 1.0, Want::Itself, opened.clone());
+        let mut opening = Opening::new(&theme, Edge::Right, &lanes, 0.0, Shows::Readings(3), (1400.0, 900.0), None, 1.0, Want::Itself, opened.clone());
         assert_eq!(opening.layout.columns, 2);
         let (layout, zoom) = (opening.layout.height(), opening.zoom);
         // The GPU's clock and power read for the first time together: the

@@ -788,6 +788,10 @@ enum Block {
     Todo { lane: todo::TodoLane, tall: f32 },
     /// What the AI component shows (see `ai`).
     Ai(ai::AiBlock),
+    /// Parts of a lane side by side, in rows, each drawn as a lane is (its padding outside the room it is given), as
+    /// wide as the lane's width shares out among the most a row holds, its row as tall as its tallest part (see
+    /// `paint_across`): the AI component laid out across a top edge.
+    Across(Vec<Vec<Lane>>),
 }
 
 /// What a workbench lane holds, drawn in a shape (see `Block::Bench`).
@@ -2374,6 +2378,7 @@ impl Block {
             Block::Search { .. } => SEARCH_BOX,
             Block::Todo { lane, tall } => todo::height(lane, *tall),
             Block::Ai(block) => block.height(),
+            Block::Across(rows) => rows.iter().map(|row| across_tall(row)).sum::<f32>() + rows.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
         }
@@ -2408,6 +2413,7 @@ impl Hash for Block {
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Todo { lane, tall } => (lane, tall.to_bits()).hash(state),
             Block::Ai(block) => block.hash(state),
+            Block::Across(rows) => rows.iter().for_each(|row| row.iter().for_each(|lane| (&lane.id, lane).hash(state))),
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
                 (apps, rows, named, over).hash(state);
@@ -2501,8 +2507,58 @@ impl Lane {
 
     /// Whether it draws a chart, which creeps along as time goes.
     fn charts(&self) -> bool {
-        self.blocks.iter().any(|block| matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. } | Block::Trace { .. }))
+        self.blocks.iter().any(|block| match block {
+            Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. } | Block::Trace { .. } => true,
+            Block::Across(rows) => rows.iter().flatten().any(Lane::charts),
+            _ => false,
+        })
     }
+
+    /// How wide it is to be drawn, its padding in: a lane of parts side by side (see `Block::Across`) as wide as the
+    /// most a row holds take; none for another, drawn as wide as its column is.
+    fn wide(&self, theme: &Theme) -> f32 {
+        match self.blocks.as_slice() {
+            [Block::Across(rows)] => {
+                let most = rows.iter().map(Vec::len).max().unwrap_or(0) as f32;
+                2.0 * theme.pad_x + most * ACROSS_COLUMN + (most - 1.0).max(0.0) * ACROSS_GAP
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+/// A row of parts side by side (see `Block::Across`): as tall as the tallest.
+fn across_tall(row: &[Lane]) -> f32 {
+    row.iter().map(|lane| lane.blocks.iter().map(Block::height).sum::<f32>()).fold(0.0, f32::max)
+}
+
+/// The room a part of a lane laid out across is given (see `Block::Across`): its width, without its padding; between two
+/// side by side; and between two rows.
+const ACROSS_COLUMN: f32 = 300.0;
+const ACROSS_GAP: f32 = 32.0;
+const ACROSS_ROW_GAP: f32 = 22.0;
+
+/// Draws the parts of a lane laid out across (see `Block::Across`) from `y` across `width`, each as a lane is.
+fn paint_across(frame: &dyn Canvas, scene: &Scene, rows: &[Vec<Lane>], (left, y, width): (f32, f32, f32), pass: Pass, hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
+    let most = rows.iter().map(Vec::len).max().unwrap_or(1).max(1) as f32;
+    let column = (width - (most - 1.0) * ACROSS_GAP) / most;
+    let mut top = y;
+    for row in rows {
+        let tall = across_tall(row);
+        for (at, lane) in row.iter().enumerate() {
+            let x = left + at as f32 * (column + ACROSS_GAP);
+            let area = Rect { x: x - theme.pad_x, y: top - theme.pad_top, w: column + 2.0 * theme.pad_x, h: tall + theme.pad_top + theme.pad_bottom };
+            paint_lane(frame, scene, lane, area, 0.0, pass, hits);
+        }
+        top += tall + ACROSS_ROW_GAP;
+    }
+}
+
+/// How wide the widest of the lanes `scene` shows is to be drawn (see `Lane::wide`): none where each is drawn as wide as
+/// its column.
+pub fn wide(scene: &Scene) -> f32 {
+    lanes(scene).iter().map(|lane| lane.wide(scene.theme)).fold(0.0, f32::max)
 }
 
 impl Hash for Lane {
@@ -3382,7 +3438,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             ]
         }
         #[cfg(windows)]
-        AI_LANE => return ai::ai_lane(prefs, lang, detail),
+        AI_LANE => return ai::ai_lane(prefs, lang, detail, scene.theme),
         _ => return None,
     })
 }
@@ -3621,6 +3677,13 @@ impl Layout {
         }
     }
 
+    /// The same, each lane at least `wide` wide (as wide as its widest lane is to be drawn: see `wide`), its columns as
+    /// much wider as that takes (their share of the room at the panel's sides too: see `lanes`).
+    pub fn widened(mut self, wide: f32) -> Self {
+        self.column_width = self.column_width.max(wide + 2.0 * self.outer.1 / self.columns as f32);
+        self
+    }
+
     /// The same, `by` DIPs wider and taller: the width shared out among
     /// the columns, the height given to every column, for its charts (see
     /// `grows`).
@@ -3856,6 +3919,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Search { .. } => "search",
             Block::Todo { .. } => "todo",
             Block::Ai(_) => "ai",
+            Block::Across(_) => "across",
         };
         if let Block::Ai(ai::AiBlock::Head { source: of, .. }) = block {
             (ink, source) = (theme.ink(of.id()), Some(*of));
@@ -3871,6 +3935,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
         let height = block.height() + if charted { taller } else { 0.0 };
         match (block, pass) {
             (Block::Room(_), _) => {}
+            (Block::Across(rows), _) => paint_across(frame, scene, rows, (left, y, width), pass, hits),
             (Block::Readout { plot: Some(plot), .. }, Pass::Plots) => {
                 name("chart");
                 paint_plot(frame, scene, ink, plot, plot_left, y, plot_width, height);
@@ -6863,7 +6928,7 @@ otepad.exe", "Notepad"),
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
-        let (width, height, px) = (1400u32, 760u32, 1.5f32);
+        let (width, height, px) = (1400u32, 1420u32, 1.5f32);
         let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
         let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
         let out = std::path::PathBuf::from(format!("{}/target/ai-widget", env!("CARGO_MANIFEST_DIR")));
@@ -6883,8 +6948,12 @@ otepad.exe", "Notepad"),
                     let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
                     let seen = Seen::of(history);
                     let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-                    let lane_at = |detail: Detail| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| source == ai::Source::Codex).unwrap(), ink: theme.ink(AI_LANE) };
+                    let lane_at = |detail: Detail| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| source == ai::Source::Codex, &theme).unwrap(), ink: theme.ink(AI_LANE) };
                     let full = lane_at(Detail::Full);
+                    // (And as a top edge's panel lays it out across, Codex opened.)
+                    let laid_across = held.clone().laid_across(true);
+                    let across_lane = || Lane { id: AI_LANE.into(), blocks: ai::together(&laid_across, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex, &theme).unwrap(), ink: theme.ink(AI_LANE) };
+                    let across_closed = || Lane { id: AI_LANE.into(), blocks: ai::together(&laid_across, Lang::Zh, Some(&usage), now, Detail::Full, |_| false, &theme).unwrap(), ink: theme.ink(AI_LANE) };
                     let across = ai::dock_size(true, 2);
                     let down = ai::dock_size(false, 2);
                     // Each: its shape, its size, where it is.
@@ -6903,6 +6972,15 @@ otepad.exe", "Notepad"),
                             unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
                         }
                         let behind = desktop.bitmap(&frame.dc, px).ok();
+                        let laid: Vec<(Lane, (f32, f32))> = vec![(across_closed(), (30.0, 820.0)), (across_lane(), (30.0, 1040.0))];
+                        for (lane, at) in laid {
+                            let lanes = vec![lane];
+                            let layout = Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).widened(lanes[0].wide(&theme));
+                            let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
+                            let picture = crate::ui::render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
+                            let mut layers = crate::ui::render::PanelLayers::default();
+                            let _ = layers.draw(frame, &picture, windows_numerics::Matrix3x2::translation(at.0, at.1), px);
+                        }
                         for (shape, size, at) in &widgets {
                             let lanes = vec![shape.map_or_else(|| lane_at(Detail::Full), |shape| lane_at(Detail::Shape(shape)))];
                             let layout = Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).fitted(*size);
@@ -6964,29 +7042,80 @@ otepad.exe", "Notepad"),
     /// of those shown at its foot. In a widget too small for all of it, its shape alone.
     #[test]
     fn the_ai_component_is_one_lane_on_one_plate() {
+        let theme = Theme::new(Skin::Glass, false);
         let mut prefs = Prefs::default();
         prefs.modules = ["cpu", "ai:today", "gpu", "ai:claude", "memory"].map(|id| super::super::prefs::ModuleEntry { id: id.into(), on: id != "memory", items: Default::default() }).to_vec();
         assert_eq!(lane_ids(&prefs), ["cpu", AI_LANE, "gpu"]);
         let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
         let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
         let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
-        let blocks = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex).unwrap();
-        let told: Vec<String> = blocks
-            .iter()
-            .map(|block| match block {
-                Block::Head { title, .. } => format!("head {title}"),
-                Block::Room(_) => "apart".into(),
-                Block::Ai(ai::AiBlock::Head { title, aside, opened, .. }) => format!("{title} {aside} {opened:?}"),
-                Block::Ai(ai::AiBlock::Working { at_work, today }) => format!("at work {at_work} of {today}"),
-                Block::Ai(block) => block.kind().into(),
-                _ => "other".into(),
-            })
-            .collect();
+        let blocks = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex, &theme).unwrap();
+        let told: Vec<String> = blocks.iter().map(told_ai).collect();
         assert_eq!(told, ["head AI 用量", "today", "apart", "Claude 10 万 Some(false)", "apart", "ChatGPT 10 万 Some(true)", "windows", "models", "pairs", "sessions", "at work 1 of 3"]);
-        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false).unwrap();
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
         assert!(matches!(shaped.as_slice(), [Block::Ai(ai::AiBlock::Shaped { shape: Shape::Least, dock, .. })] if dock.slots.len() == 2 && dock.working == 1));
         // (None of its modules on: no lane.)
-        assert!(ai::together(&Prefs::default(), Lang::Zh, Some(&usage), now, Detail::Full, |_| false).is_none());
+        assert!(ai::together(&Prefs::default(), Lang::Zh, Some(&usage), now, Detail::Full, |_| false, &theme).is_none());
+    }
+
+    /// What a block of the AI component's lane tells, in a word or a few (see `the_ai_component_is_one_lane_on_one_plate`).
+    fn told_ai(block: &Block) -> String {
+        match block {
+            Block::Head { title, .. } => format!("head {title}"),
+            Block::Room(_) => "apart".into(),
+            Block::Ai(ai::AiBlock::Head { title, aside, opened, .. }) => format!("{title} {aside} {opened:?}"),
+            Block::Ai(ai::AiBlock::Working { at_work, today }) => format!("at work {at_work} of {today}"),
+            Block::Ai(block) => block.kind().into(),
+            _ => "other".into(),
+        }
+    }
+
+    /// The AI component opened from a top edge lies across it, low and wide: what every source spent today with the
+    /// sessions at work under it, beside each source's head and limits; a source opened tells what it spent by kind, by
+    /// model and its sessions side by side under them, each under its mark; more sources than fit side by side go on in
+    /// a row under them. Its panel is laid out as wide as that, and lower than the component is down a side, each head
+    /// opening and closing where it is drawn.
+    #[test]
+    fn the_ai_component_lies_across_a_top_edge() {
+        let theme = Theme::new(Skin::Glass, false);
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let lane_of = |prefs: &Prefs| Lane { id: AI_LANE.into(), blocks: ai::together(prefs, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex, &theme).unwrap(), ink: theme.ink(AI_LANE) };
+        let (down, across) = (lane_of(&held), lane_of(&held.clone().laid_across(true)));
+        let [Block::Across(rows)] = across.blocks.as_slice() else { panic!("not laid out across") };
+        let told: Vec<Vec<(String, Vec<String>)>> = rows.iter().map(|row| row.iter().map(|part| (part.id.clone(), part.blocks.iter().map(told_ai).collect())).collect()).collect();
+        let part = |id: &str, blocks: &[&str]| (id.to_string(), blocks.iter().map(|block| block.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            told,
+            [
+                vec![part("ai:today", &["head AI 用量", "today", "at work 1 of 3"]), part("ai:claude", &["Claude 10 万 Some(false)"]), part("ai:codex", &["ChatGPT 10 万 Some(true)", "windows"])],
+                vec![part("ai:codex.pairs", &["今日构成  None", "pairs"]), part("ai:codex.models", &["模型  None", "models"]), part("ai:codex.sessions", &["会话  None", "sessions"])],
+            ]
+        );
+        // As wide as three parts side by side, laid out so from a top edge, and lower than down a side.
+        let wide = across.wide(&theme);
+        assert_eq!((down.wide(&theme), wide), (0.0, 2.0 * theme.pad_x + 3.0 * ACROSS_COLUMN + 2.0 * ACROSS_GAP));
+        let (layout, zoom) = crate::ui::arrange::arrange(&theme, crate::settings::Edge::Top, vec![across.height(&theme)], wide, (2560.0, 1400.0), None, 1.0, None);
+        assert_eq!((layout.lanes()[0].w, zoom), (wide, 1.0));
+        assert!(across.height(&theme) < down.height(&theme) * 0.75, "{} across, {} down", across.height(&theme), down.height(&theme));
+        // Each source's head opens and closes it where it is drawn: side by side, one part's width apart.
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let hits = paint(&Nothing, &scene, &[across], &layout, Pass::Content);
+        let heads: Vec<(f32, f32, f32)> = [ai::Source::Claude, ai::Source::Codex].map(|source| hits.iter().find(|hit| hit.4 == Hit::Ai(source)).map(|hit| (hit.0, hit.1, hit.2)).unwrap()).to_vec();
+        let lane = layout.lanes()[0];
+        let left = lane.x + theme.pad_x;
+        assert_eq!(heads, [(left + ACROSS_COLUMN + ACROSS_GAP, lane.y + theme.pad_top, ACROSS_COLUMN), (left + 2.0 * (ACROSS_COLUMN + ACROSS_GAP), lane.y + theme.pad_top, ACROSS_COLUMN)]);
+        // More sources than fit side by side: the rest in a row under them.
+        let many = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:kimi", "ai:glm"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": many }), &[]).holding(crate::settings::Part::Ai).laid_across(true);
+        let blocks = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Full, |_| false, &theme).unwrap();
+        let [Block::Across(rows)] = blocks.as_slice() else { panic!("not laid out across") };
+        let ids: Vec<Vec<&str>> = rows.iter().map(|row| row.iter().map(|part| part.id.as_str()).collect()).collect();
+        assert_eq!(ids, [vec!["ai:today", "ai:claude", "ai:codex", "ai:qwen"], vec!["ai:kimi", "ai:glm"]]);
     }
 
     /// The AI component's widget too small for all of it: the dock's strip across or down where the dock fits it, else

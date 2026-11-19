@@ -211,7 +211,7 @@ impl Ui {
             }
             _ => arrange::Want::Itself,
         };
-        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings, (sw, sh), None, 1.0, want, seen.clone());
+        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, view::wide(&scene), readings, (sw, sh), None, 1.0, want, seen.clone());
         let drawn = (opening.size.0 * opening.zoom, opening.size.1 * opening.zoom);
         let k = (area.w / drawn.0).min(area.h / drawn.1).min(1.0);
         let at = (area.x + (area.w - drawn.0 * k) / 2.0, area.y + (area.h - drawn.1 * k) / 2.0);

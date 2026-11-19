@@ -425,7 +425,7 @@ mod tests {
     fn a_panel_laid_out_in_other_columns_turns_into_them() {
         use super::super::theme::{Skin, Theme};
         let theme = Theme::new(Skin::Paper, false);
-        let laid = |columns: usize| super::super::arrange::arrange(&theme, crate::settings::Edge::Right, vec![300.0; 6], (2560.0, 1440.0), Some(columns), 1.0, None).0;
+        let laid = |columns: usize| super::super::arrange::arrange(&theme, crate::settings::Edge::Right, vec![300.0; 6], 0.0, (2560.0, 1440.0), Some(columns), 1.0, None).0;
         let (two, three) = (laid(2), laid(3));
         assert_eq!((two.columns, three.columns), (2, 3));
         let start = Instant::now();

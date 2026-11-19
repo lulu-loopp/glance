@@ -8177,6 +8177,9 @@ It can be disconnected here at any time, and the status line command put back.",
             }
             return Staged { plot: None, screen, panel: None, lanes: Vec::new(), bar: None, head: 0.0 };
         };
+        // (The AI component laid out across from a top edge, as the panel lays it out: see `Panel::lays_across`.)
+        let laid = prefs.clone().laid_across(part == Part::Ai && edge == Edge::Top);
+        let prefs = &laid;
         let app = crate::app();
         let skin = Skin::named(&self.settings.skin);
         let interval = self.settings.interval_ms as f64;
@@ -8215,18 +8218,19 @@ It can be disconnected here at any time, and the status line command put back.",
         };
         // No larger than the screen holds it, as the panel is made (see `Panel::dragged`).
         let size = size.unwrap_or_else(|| self.settings.panel_size_on(part, self.stage.screen.as_deref())).clamp(SIZES.0, SIZES.1);
-        let size = size.min(arrange::largest(&measure, edge, &heights, (sw, sh), columns, size, rail).max(SIZES.0));
+        let wide = view::wide(&probe);
+        let size = size.min(arrange::largest(&measure, edge, &heights, wide, (sw, sh), columns, size, rail).max(SIZES.0));
         let (layout, zoom, small) = match dock {
             Some(dock) => {
                 let heights = view::heights(&probe);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
                 let want = arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) });
-                let opening = arrange::Opening::new(&measure, edge, &lanes, shows, (sw, sh), columns, size, want, seen.clone());
+                let opening = arrange::Opening::new(&measure, edge, &lanes, wide, shows, (sw, sh), columns, size, want, seen.clone());
                 let small = opening.small().map(|small| (small, opening.size));
                 (opening.layout, opening.zoom, small)
             }
             None => {
-                let (layout, zoom) = arrange::arrange(&measure, edge, heights, (sw, sh), columns, size, rail);
+                let (layout, zoom) = arrange::arrange(&measure, edge, heights, wide, (sw, sh), columns, size, rail);
                 (layout, zoom, None)
             }
         };

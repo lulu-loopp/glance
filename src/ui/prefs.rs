@@ -38,6 +38,10 @@ pub struct Prefs {
     /// board's wiring is not known to name, or names otherwise than the user sees it.
     #[serde(rename = "sensorNames", skip_serializing_if = "BTreeMap::is_empty")]
     pub sensor_names: BTreeMap<String, String>,
+    /// The AI component laid out across, its sources side by side, as a panel opened from a top edge shows it (see
+    /// `ai::together`): the panel's own, never kept.
+    #[serde(skip)]
+    pub across: bool,
 }
 
 /// The most a sensor's name given by the user holds (characters).
@@ -310,6 +314,7 @@ impl Default for Prefs {
             theme: ThemePref::System,
             language: LanguagePref::System,
             sensor_names: BTreeMap::new(),
+            across: false,
         }
     }
 }
@@ -448,8 +453,14 @@ impl Prefs {
     /// where they turn hot), hashed into `key`.
     pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
-        self.modules.hash(key);
+        (&self.modules, self.across).hash(key);
         (self.hot_temp.to_bits(), self.chart_seconds.to_bits()).hash(key);
+    }
+
+    /// The same, the AI component laid out across or not (see `across`).
+    pub fn laid_across(mut self, across: bool) -> Prefs {
+        self.across = across;
+        self
     }
 
     /// The stored preferences, completed with defaults, with the module list

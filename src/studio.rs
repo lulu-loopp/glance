@@ -545,7 +545,7 @@ impl Filming {
             Some(room) => Want::Room(room, Some(self.taken.filter(|taken| taken.form == self.choice.form).unwrap_or(arrange::Shown { form: self.choice.form, taken: room }))),
             None => Want::Kept(self.choice),
         };
-        let opening = arrange::Opening::new(theme, Edge::Right, &lanes, readings, work, None, 1.0, want, seen.clone());
+        let opening = arrange::Opening::new(theme, Edge::Right, &lanes, view::wide(scene), readings, work, None, 1.0, want, seen.clone());
         let choice = opening.choice.unwrap_or(self.choice);
         if let Some(room) = room {
             self.taken = Some(arrange::Shown::after(self.taken, choice.form, room));
@@ -824,7 +824,7 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
             None => {
                 let heights = view::heights(scene);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, heights)| (id.as_str(), *heights)).collect();
-                held.insert(arrange::Opening::new(theme, edge, &lanes, forms::Shows::Readings(0), (sw, sh), None, shot.size, arrange::Want::Itself, scene.seen.clone()))
+                held.insert(arrange::Opening::new(theme, edge, &lanes, view::wide(scene), forms::Shows::Readings(0), (sw, sh), None, shot.size, arrange::Want::Itself, scene.seen.clone()))
             }
         };
         let (layout, zoom) = (opening.layout.clone(), opening.zoom);

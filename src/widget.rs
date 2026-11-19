@@ -1006,7 +1006,7 @@ fn readings_for(scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen, roo
 fn readings_as(scene: &Scene, theme: &Theme, work: (f32, f32), seen: &Seen, want: Want, with_music: bool) -> Option<arrange::Opening> {
     let heights = view::heights(scene);
     let lanes: Vec<(&str, arrange::Heights)> = heights.iter().filter(|(id, _)| with_music || id != "lyrics").map(|(id, h)| (id.as_str(), *h)).collect();
-    let opening = arrange::Opening::new(theme, Edge::Right, &lanes, forms::shows(scene), work, None, 1.0, want, seen.clone());
+    let opening = arrange::Opening::new(theme, Edge::Right, &lanes, view::wide(scene), forms::shows(scene), work, None, 1.0, want, seen.clone());
     opening.choice.is_some().then_some(opening)
 }
 
@@ -4573,7 +4573,7 @@ impl Widget {
                             Some(room) => Want::Room(room, Some(readings.taken.filter(|taken| taken.form == readings.choice.form).unwrap_or(arrange::Shown { form: readings.choice.form, taken: room }))),
                             None => Want::Kept(readings.choice),
                         };
-                        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, readings_count, work, None, 1.0, want, seen.clone());
+                        let opening = arrange::Opening::new(&theme, Edge::Right, &lanes, view::wide(&scene), readings_count, work, None, 1.0, want, seen.clone());
                         let Some(choice) = opening.choice else { return Frame::Rest };
                         if let Some(room) = sized_to {
                             readings.taken = Some(arrange::Shown::after(readings.taken, choice.form, room));

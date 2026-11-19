@@ -2799,7 +2799,7 @@ impl<'a> Panel<'a> {
         self.next_frame = Instant::now();
         let config = self.controller.config.lock().unwrap();
         self.prefs = Prefs::resolve(&config.view, &self.controller.known_modules());
-        self.drawn = self.prefs.clone().holding(self.part);
+        self.drawn = self.prefs.clone().holding(self.part).laid_across(self.lays_across());
         self.columns = match self.part {
             Part::Workbench => config.workbench_columns,
             Part::Ai => config.ai_columns,
@@ -4190,9 +4190,17 @@ impl<'a> Panel<'a> {
         }
     }
 
+    /// Whether its lanes are laid out across (see `Prefs::across`): the AI component's, opened from a top edge, low and
+    /// wide, its sources side by side, as its dock lies across there.
+    fn lays_across(&self) -> bool {
+        self.part == Part::Ai && self.edge == Edge::Top
+    }
+
     /// The panel's lanes, laid out (once each opening, and held), and the
     /// window placed for them.
     fn arrange_lanes(&mut self) -> (Vec<view::Lane>, Layout) {
+        // (At the edge it is laid out for now: it may have been let go at another since the settings last changed.)
+        self.drawn.across = self.lays_across();
         let controller = self.controller;
         let info = controller.info();
         let now = controller.seen.lock().unwrap().clone();
@@ -4244,7 +4252,8 @@ impl<'a> Panel<'a> {
                 }
                 let tall: Vec<f32> = heights.iter().map(|(_, height)| height[0]).collect();
                 let rail = heights.iter().position(|(id, _)| id == "apps");
-                self.largest = arrange::largest(theme, self.edge, &tall, work, self.columns, SIZES.1, rail);
+                let wide = view::wide(&scene);
+                self.largest = arrange::largest(theme, self.edge, &tall, wide, work, self.columns, SIZES.1, rail);
                 let lanes: Vec<(&str, arrange::Heights)> = heights.iter().map(|(id, height)| (id.as_str(), *height)).collect();
                 // The AI component's dock (down its edge, across a top one), where it opens so and has sources to dock;
                 // else laid out itself.
@@ -4256,7 +4265,7 @@ impl<'a> Panel<'a> {
                     }
                     _ => arrange::Want::Itself,
                 };
-                self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, shows, work, self.columns, self.size, want, now.clone()))
+                self.opening.insert(arrange::Opening::new(theme, self.edge, &lanes, wide, shows, work, self.columns, self.size, want, now.clone()))
             }
         };
         let mut lanes = view::lanes(&scene(controller, &info, prefs, theme, lang, scroll, tab, hover, pinned, samples, &opening.seen));
