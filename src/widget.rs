@@ -2107,6 +2107,12 @@ impl Widgets {
         // card shown beside it as it is drawn (see `follow_card`).
         let (lx, ly) = (x - widget.hits_from.0, y - widget.hits_from.1);
         let hit = widget.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4).filter(|hit| hit.lights());
+        // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
+        // ring stays lit, its card up.)
+        let hit = match (hit, widget.hit_hover) {
+            (hit, Some(view::Hit::AiSlot(source))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(source)),
+            (hit, _) => hit,
+        };
         if hit != widget.hit_hover {
             // What a press does, said under what says so (a drive's row, the line that switches players, its buttons'
             // own said over it). Nothing while a thing is dragged off a station's lane: the pointer is the drag's, and
@@ -3785,7 +3791,8 @@ impl Widget {
         } else {
             Side::Left
         };
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang }, by, about, side);
+        let look = self.menu_look();
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang, look }, by, about, side);
         self.carding = true;
     }
 
@@ -4729,7 +4736,9 @@ impl Widget {
         if !hovered && (self.tip.take().is_some() | std::mem::take(&mut self.saying)) {
             crate::ui::tip::hide();
         }
-        if !hovered && self.hit_hover.take().is_some() {
+        // (Not while it is on the card beside the AI component's dock, or on its way there: see `ai_card::holds`.)
+        let carded = self.carding && cursor.is_some_and(crate::ui::ai_card::holds);
+        if !hovered && !carded && self.hit_hover.take().is_some() {
             self.next_frame = now;
         }
         // Moved near an edge, not stuck: where it would stick, as it would

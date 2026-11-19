@@ -3205,7 +3205,9 @@ impl<'a> Panel<'a> {
         let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
         // (Its buttons' row outside it is on it: see `Placement::rack`.)
         let on_panel = contains(&placement.panel, cursor) || placement.rack.is_some_and(|(rack, _)| contains(&rack, cursor));
-        let in_reach = contains(&placement.reach, cursor);
+        // (The card beside the AI component's dock, and the way to it from its ring, are the panel's while it is up.)
+        let carded = self.carding && crate::ui::ai_card::holds(cursor);
+        let in_reach = contains(&placement.reach, cursor) || carded;
         let close_delay = self.controller.config.lock().unwrap().close_delay;
         // Down now, or pressed (and perhaps let go) since it last looked; and of those presses, any not on it nor its
         // menu: a press elsewhere. (Told by the sensors' process, a press may come after the panel's menu took it and
@@ -3214,12 +3216,14 @@ impl<'a> Panel<'a> {
         let down = buttons_down();
         let (pressed, elsewhere) = self.presses_since(down);
         let held = down || pressed;
-        if !on_panel {
-            // (What it said under it goes with it: a drive's row, the line that switches players, a name cut short.)
+        if !on_panel && !carded {
+            // (What it said under it goes with it: a drive's row, the line that switches players, a name cut short. So
+            // does the card beside the AI component's dock.)
             self.unsay();
             if self.hover.take().is_some() {
                 self.next_frame = now;
             }
+            self.follow_card();
         }
         // Around the panel the window is only shadow; clicks there belong
         // to whatever is underneath.
@@ -4812,7 +4816,8 @@ impl<'a> Panel<'a> {
             Edge::Right => Side::Left,
             Edge::Top => Side::Below,
         };
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang }, placement.panel, about, side);
+        let look = self.menu_look();
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, about, side);
         self.carding = true;
     }
 
@@ -4855,6 +4860,12 @@ impl<'a> Panel<'a> {
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
+        // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
+        // ring stays lit, its card up.)
+        let hover = match (hover, self.hover) {
+            (hover, Some(Hit::AiSlot(source))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(source)),
+            (hover, _) => hover,
+        };
         if hover != self.hover {
             // What a press does, said under what says so (a drive's row, the line that switches players). Nothing while
             // a thing is dragged off a station's lane: the pointer is the drag's, and nothing here would hear it go
