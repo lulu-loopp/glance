@@ -1,8 +1,10 @@
-//! The AI component's lanes (see `crate::ai`): what every source spent today, as a figure and how it mounted through
-//! the day; then each source's lane, its maker's mark and its plan, each window of its limit as a bar (how much of it
-//! is used, how much of the window has gone by, when it starts again), and, opened by its head, what it spent today
-//! by model and by kind, and its sessions. Small, the dock (see `paint_dock`): each source as a ring round its mark,
-//! down the screen's side or across its top, its lane beside it as the pointer rests on it (see `ui::ai_card`).
+//! The AI component (see `crate::ai`), one lane on one plate: what every source spent today, as a figure and how it
+//! mounted through the day; then each source, its maker's mark, its plan and what it spent today, each window of its
+//! limit as a bar (how much of it is used, how much of the window has gone by, when it starts again), and, opened by
+//! its head, what it spent today by model and by kind, and its sessions; and the sessions at work. Small, the dock
+//! (see `paint_dock`): each source as a ring round its mark, down the screen's side or across its top, its lane beside
+//! it as the pointer rests on it (see `ui::ai_card`). A widget too small for all of it shows the dock's strip across or
+//! down, else as near a square as it is, today's figure over each source's ring (see `paint_shaped`).
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
@@ -175,6 +177,11 @@ pub enum AiBlock {
     /// The sessions that spent today, the latest first: each one's title, its model and when it last spent, how
     /// much it spent today, whether it is at work now, and the source it is of where sessions of several are told.
     Sessions(Vec<(String, String, String, bool, Option<Source>)>),
+    /// The sessions of the sources shown: how many are at work, and how many spent today.
+    Working { at_work: usize, today: usize },
+    /// The whole component in a widget too small for all of it, in `shape`: what the dock shows, and how today's
+    /// spending mounted (see `paint_shaped`).
+    Shaped { shape: Shape, dock: Dock, mounted: Vec<f32> },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -196,12 +203,21 @@ impl Hash for AiBlock {
             AiBlock::Sources(rows) => rows.iter().for_each(|(source, name, share, value)| (source, name, share.to_bits(), value).hash(state)),
             AiBlock::Pairs(rows) => rows.hash(state),
             AiBlock::Sessions(rows) => rows.hash(state),
+            AiBlock::Working { at_work, today } => (at_work, today).hash(state),
+            AiBlock::Shaped { shape, dock, mounted } => {
+                (shape, &dock.today, &dock.at_work, dock.working).hash(state);
+                dock.slots.iter().for_each(|slot| (slot.source, slot.used.map(f32::to_bits), &slot.figure, &slot.label).hash(state));
+                mounted.iter().for_each(|share| share.to_bits().hash(state));
+            }
         }
     }
 }
 
 /// The room above each block (DIPs): what one tells set apart from what the one before it does.
 const GAP: f32 = 14.0;
+/// Between what every source spent and each source, one source and the next, and the last and the sessions at work:
+/// each source read as one, apart from the next.
+const SOURCE_GAP: f32 = 22.0;
 /// Between two rows of a block (its models, its facts two to a row): each row read as one, apart from the next.
 const ROW_GAP: f32 = 6.0;
 /// A window's bar, the room it is drawn in between its name and when it starts again (its middle there): clear of both.
@@ -244,6 +260,24 @@ impl AiBlock {
             AiBlock::Sources(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Sessions(rows) => GAP + rows.len() as f32 * SESSION - SESSION_GAP,
+            AiBlock::Working { .. } => SOURCE_GAP + LINE,
+            // (As large as the widget it fills: see `paint_shaped`.)
+            AiBlock::Shaped { .. } => BENCH,
+        }
+    }
+
+    /// What it is, as its parts are named (see `paint_lane`).
+    pub(super) fn kind(&self) -> &'static str {
+        match self {
+            AiBlock::Head { .. } => "head",
+            AiBlock::Today { .. } => "today",
+            AiBlock::Windows(_) => "windows",
+            AiBlock::Models(_) => "models",
+            AiBlock::Sources(_) => "sources",
+            AiBlock::Pairs(_) => "pairs",
+            AiBlock::Sessions(_) => "sessions",
+            AiBlock::Working { .. } => "working",
+            AiBlock::Shaped { .. } => "shaped",
         }
     }
 }
@@ -453,11 +487,49 @@ fn balance_pairs(balance: &crate::ai::Balance, today: u64, lang: Lang) -> Option
     (!pairs.is_empty()).then_some(Block::Ai(AiBlock::Pairs(pairs)))
 }
 
-/// The lane of AI module `id` as `prefs` show it: what every source spent today (`ai:today`), or one source's; none
-/// for an id of none.
+/// The AI component's lane as `prefs` show it, at `detail` (see `together`); none where it shows nothing.
 #[cfg(windows)]
-pub(super) fn ai_lane(id: &str, prefs: &Prefs, lang: Lang) -> Option<Vec<Block>> {
-    lane_of(id, prefs, lang, crate::ai::usage().as_deref(), crate::station::now_ms(), Some(Source::of(id).is_some_and(opened)))
+pub(super) fn ai_lane(prefs: &Prefs, lang: Lang, detail: Detail) -> Option<Vec<Block>> {
+    together(prefs, lang, crate::ai::usage().as_deref(), crate::station::now_ms(), detail, opened)
+}
+
+/// The AI component's lane of `usage` (none: not read yet) at `now`, one plate for it all: what every source spent
+/// today (where `ai:today` is on), then each source switched on, in their order, `opened` as it is toggled, and the
+/// sessions of those at work; in a widget too small for it all, its shape (see `paint_shaped`). None where it shows
+/// none of them.
+#[cfg(windows)]
+pub(super) fn together(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64, detail: Detail, opened: impl Fn(Source) -> bool) -> Option<Vec<Block>> {
+    let ids: Vec<&str> = prefs.modules.iter().filter(|entry| shows_module(entry) && entry.id.starts_with("ai:")).map(|entry| entry.id.as_str()).collect();
+    if ids.is_empty() {
+        return None;
+    }
+    if let Detail::Shape(shape) = detail {
+        let mounted = usage.map_or(Vec::new(), mounted);
+        return Some(vec![Block::Ai(AiBlock::Shaped { shape, dock: dock_of(prefs, lang, usage, now), mounted })]);
+    }
+    let mut blocks = Vec::new();
+    for id in ids {
+        if !blocks.is_empty() {
+            blocks.push(Block::Room(SOURCE_GAP));
+        }
+        if id == "ai:today" {
+            blocks.push(head(lang.pick("AI 用量", "AI usage"), "", lang.pick("今日", "Today"), false));
+            blocks.push(usage.map_or_else(|| reading(lang), |usage| today_block(usage, lang)));
+            continue;
+        }
+        let Some(source) = Source::of(id) else { continue };
+        blocks.extend(lane_of(id, prefs, lang, usage, now, Some(opened(source))).into_iter().flatten());
+    }
+    // The sessions of the sources shown: those at work, and those of today.
+    let tools: Vec<crate::ai::Tool> = docked(prefs).into_iter().map(tool_of).collect();
+    if let Some(usage) = usage.filter(|_| !tools.is_empty()) {
+        let today: Vec<&crate::ai::Session> = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && session.spent_between(usage.today, usage.now) > 0).collect();
+        let at_work = usage.sessions.iter().filter(|session| tools.contains(&session.tool) && now.saturating_sub(session.last) < AT_WORK_MS).count();
+        if !today.is_empty() || at_work > 0 {
+            blocks.push(Block::Ai(AiBlock::Working { at_work, today: today.len().max(at_work) }));
+        }
+    }
+    Some(blocks)
 }
 
 /// The card beside the dock for `spot`: a source's lane, all it tells, its head opening nothing; what every source spent
@@ -533,6 +605,12 @@ pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai:
 fn today_block(usage: &crate::ai::Usage, lang: Lang) -> Block {
     let total: u64 = usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum();
     let (figure, unit) = tokens(total, lang);
+    Block::Ai(AiBlock::Today { figure, unit, mounted: mounted(usage) })
+}
+
+/// How today's spending mounted: what every tool spent by the end of each quarter hour so far, from 0 to 1 of the whole.
+fn mounted(usage: &crate::ai::Usage) -> Vec<f32> {
+    let total: u64 = usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum();
     // (Every tool's quarters added up, then how far the day had come by each.)
     let quarters = usage.quarters.iter().map(|(_, spent)| spent.len()).max().unwrap_or(0);
     let mut mounted = Vec::with_capacity(quarters);
@@ -541,7 +619,7 @@ fn today_block(usage: &crate::ai::Usage, lang: Lang) -> Block {
         sum += usage.quarters.iter().map(|(_, spent)| spent.get(at).copied().unwrap_or(0)).sum::<u64>();
         mounted.push(if total == 0 { 0.0 } else { sum as f32 / total as f32 });
     }
-    Block::Ai(AiBlock::Today { figure, unit, mounted })
+    mounted
 }
 
 /// What `total` was spent on by kind, and how many `sessions` spent it.
@@ -655,10 +733,15 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     let sessions: Vec<&crate::ai::Session> = usage.sessions.iter().filter(|session| session.tool == tool && session.spent_between(usage.today, usage.now) > 0).collect();
     // When it was last heard of: its limit told, else its last session's spending.
     let heard = limit.map(|limit| limit.told).into_iter().chain(sessions.first().map(|session| session.last)).max();
-    let aside = heard.map_or(String::new(), |heard| text::since(heard, now, lang));
     let device = limit.and_then(|limit| limit.plan.as_deref()).map_or(source.tool_name().to_string(), plan_name);
     let windows = windows_of(limit, now, lang);
     let (spent, total) = spent_by(usage, tool);
+    // Its head tells what it spent today, in the component's lane, where it spent anything (beside the dock, what it
+    // spent is told below); else when it was last heard of.
+    let aside = match open {
+        Some(_) if total.total() > 0 => short(total.total(), lang),
+        _ => heard.map_or(String::new(), |heard| text::since(heard, now, lang)),
+    };
     // (It opens where it spent today: there is more to tell.)
     let mut blocks = vec![head(device, aside, open.filter(|_| total.total() > 0))];
     // A provider's account: why it is not shown as it stands, where it is not.
@@ -675,7 +758,8 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     // Opened, or showing all (where it spent today): what it spent, by model and by kind, and its sessions; else, with
     // no limit to show, what it spent today (a provider's, where its records on this PC tell it spent anything).
     if !open.unwrap_or(true) || total.total() == 0 {
-        let today = if source.keyed() { total.total() > 0 && !shown_limit } else { limit.is_none() };
+        // (What it spent is told by its head in the component's lane.)
+        let today = open.is_none() && if source.keyed() { total.total() > 0 && !shown_limit } else { limit.is_none() };
         if today {
             blocks.push(Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), short(total.total(), lang), false)], gap: GAP });
         }
@@ -849,8 +933,188 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 frame.text(value, theme.small, theme.text2, left, row_y, width, Align::End);
             }
         }
+        AiBlock::Working { at_work, today } => {
+            const DOT: f32 = 3.5;
+            let row_y = y + SOURCE_GAP;
+            let lang = scene.lang;
+            part("dot");
+            let centre = Point { x: left + DOT, y: row_y + LINE / 2.0 };
+            if *at_work > 0 {
+                frame.fill_circle(ink.trace, centre, DOT);
+            } else {
+                frame.arc(centre, DOT - 0.5, 0.0, 360.0, theme.text3, 1.0);
+            }
+            let said = match lang {
+                Lang::Zh => format!("{at_work} 个会话进行中"),
+                Lang::En => format!("{at_work} {} at work", if *at_work == 1 { "session" } else { "sessions" }),
+            };
+            part("at_work");
+            frame.text(&said, theme.small, theme.text2, left + 2.0 * DOT + 8.0, row_y, width - 2.0 * DOT - 8.0, Align::Start);
+            let all = match lang {
+                Lang::Zh => format!("今日共 {today} 个"),
+                Lang::En => format!("{today} today"),
+            };
+            part("today");
+            frame.text(&all, theme.small, theme.text3, left, row_y, width, Align::End);
+        }
+        // (Drawn by `paint_shaped`, in all the room the widget gives it.)
+        AiBlock::Shaped { .. } => {}
     }
 }
+
+/// The whole component in a widget too small for all of it, filling `room` (DIPs) on the widget's plate: in `shape`,
+/// the dock's strip across or down where the dock fits (each source as a ring round its mark), else as near a square as
+/// the widget is (see `paint_least`). Where the pointer rests to show a spot's card beside it, as on the dock.
+pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, (shape, dock, mounted): (Shape, &Dock, &[f32]), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    let (x, y, w, h) = room;
+    let count = dock.slots.len();
+    let fits = |across: bool| {
+        let (dw, dh) = dock_size(across, count);
+        if across { w >= dw && h >= BAR_HEIGHT } else { w >= DOCK_WIDTH * 0.8 && h >= dh }
+    };
+    match shape {
+        Shape::Across if fits(true) => hits.extend(draw_dock(frame, scene, dock, true, room)),
+        Shape::Down if fits(false) => hits.extend(draw_dock(frame, scene, dock, false, room)),
+        _ => paint_least(frame, scene, ink, dock, mounted, (x, y, w, h), hits),
+    }
+}
+
+/// The component as near a square as its widget is, in `room`: today's figure; each source's ring round its mark and
+/// its figure under it, side by side, where they fit; and, roomier, the head, how today's spending mounted, what each
+/// figure is of, and the sessions at work.
+fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted: &[f32], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    let (theme, lang) = (scene.theme, scene.lang);
+    let label = Font { size: 11.0, weight: 500.0, ..theme.body };
+    let count = dock.slots.len();
+    let roomy = w >= LEAST_ROOMY.0 && h >= LEAST_ROOMY.1;
+    let inset = if roomy { theme.pad_x.min(24.0) } else { 14.0_f32.min(w / 6.0) };
+    let (left, top, width, height) = (x + inset, y + inset, (w - 2.0 * inset).max(0.0), (h - 2.0 * inset).max(0.0));
+    // Each spot the pointer rests on to show its card, as on the dock.
+    let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
+    let mut spot = |spot: Spot, (sx, sy, sw, sh): (f32, f32, f32, f32)| {
+        if lit(spot) {
+            frame.fill_rounded(theme.hover, sx - 4.0, sy - 4.0, sw + 8.0, sh + 8.0, 12.0);
+        }
+        hits.push((sx, sy, sw, sh, Hit::AiSlot(spot)));
+    };
+    // The rings: in as many columns as leave them the largest in the room under the figure, each with its figure under it.
+    // Today's figure as large as its room across lets it be, and what it is of in as many words as fit.
+    let figure_font = Font { size: if roomy { 30.0 } else { (height * 0.2).clamp(15.0, 24.0) }, weight: 650.0, ..theme.figure };
+    let natural = frame.measure(&dock.today, figure_font);
+    let figure_font = if natural > width && natural > 0.0 { Font { size: (figure_font.size * width / natural).max(11.0), ..figure_font } } else { figure_font };
+    let of = [lang.pick("今日 tokens", "Tokens today"), lang.pick("今日", "Today")].into_iter().find(|of| frame.measure(of, label) <= width).unwrap_or(lang.pick("今日", "Today"));
+    let head_tall = if roomy { HEAD + 4.0 } else { 0.0 };
+    let today_tall = label.size + 4.0 + figure_font.size;
+    let rings_top = top + head_tall + today_tall + 12.0;
+    let under = if roomy { 36.0 } else { 18.0 };
+    let foot = if roomy && dock.working > 0 { LINE + 10.0 } else { 0.0 };
+    let most = if roomy { 56.0 } else { 44.0 };
+    let below = top + height - foot - rings_top;
+    let (columns, cell, ring_room) = (1..=count.max(1))
+        .map(|columns| {
+            let rows = count.div_ceil(columns) as f32;
+            let cell = (width - (columns as f32 - 1.0) * 8.0) / columns as f32;
+            (columns, cell, ((below - (rows - 1.0) * 8.0) / rows - under).min(cell).min(most))
+        })
+        .fold((1, 0.0, f32::MIN), |best, this| if this.2 > best.2 { this } else { best });
+    let rings = count > 0 && ring_room >= 26.0;
+    // (In the middle of the room under the figure, where they leave some.)
+    let rows = count.div_ceil(columns) as f32;
+    let ring_from = rings_top + ((below - rows * (ring_room + under) - (rows - 1.0) * 8.0) / 2.0).max(0.0);
+    // Too small for the rings: today's figure alone, in the middle.
+    if !rings {
+        let tall = today_tall.min(height);
+        let middle = y + h / 2.0;
+        spot(Spot::Today, (left, middle - tall / 2.0, width, tall));
+        if h >= 60.0 {
+            frame.key("ai:today.label");
+            centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + w / 2.0, middle - tall / 2.0);
+        }
+        frame.key("ai:today.value");
+        let font = Font { size: (w * 0.26).clamp(11.0, 22.0), ..figure_font };
+        centred(frame, &dock.today, font, theme.text, x + w / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
+        return;
+    }
+    let mut row = top;
+    if roomy {
+        let row_y = row + (HEAD - theme.title.size) / 2.0 - 1.0;
+        frame.key("ai:today.head");
+        frame.text(lang.pick("AI 用量", "AI usage"), theme.title, theme.text, left, row_y, width, Align::Start);
+        frame.key("ai:today.aside");
+        frame.text(lang.pick("今日", "Today"), theme.small, theme.text3, left, row_y + 1.0, width, Align::End);
+        row += head_tall;
+    } else {
+        frame.key("ai:today.label");
+        // (Over one column of rings, in the middle as they are.)
+        if columns == 1 {
+            centred(frame, of, label, theme.text3, left + width / 2.0, row);
+        } else {
+            frame.text(of, label, theme.text3, left, row, width, Align::Start);
+        }
+        row += label.size + 4.0;
+    }
+    spot(Spot::Today, (left, top, width, rings_top - 12.0 - top));
+    frame.key("ai:today.value");
+    let figure_width = frame.measure(&dock.today, figure_font);
+    let figure_top = if roomy { row + label.size + 4.0 - figure_font.size * 0.25 } else { row };
+    if columns == 1 && !roomy {
+        centred(frame, &dock.today, figure_font, theme.text, left + width / 2.0, figure_top);
+    } else {
+        frame.text(&dock.today, figure_font, theme.text, left, figure_top, width, Align::Start);
+    }
+    // How it mounted, after the figure.
+    let spark_left = left + figure_width + 16.0;
+    if roomy && mounted.len() >= 2 && left + width - spark_left >= 40.0 {
+        let (spark_top, spark_foot) = (row + 6.0, rings_top - 16.0);
+        let spark_width = left + width - spark_left;
+        let points: Vec<Point> = mounted
+            .iter()
+            .enumerate()
+            .map(|(at, share)| Point { x: spark_left + at as f32 / (mounted.len() - 1) as f32 * spark_width, y: spark_foot - share.clamp(0.0, 1.0) * (spark_foot - spark_top) })
+            .collect();
+        let mut area = points.clone();
+        area.push(Point { x: spark_left + spark_width, y: spark_foot });
+        area.push(Point { x: spark_left, y: spark_foot });
+        frame.key("ai:today.chart");
+        frame.fill_shape(&area, if ink.wash == ink.wash_end { Fill::Solid(ink.wash) } else { Fill::Down { top: spark_top, from: ink.wash, bottom: spark_foot, to: ink.wash_end } });
+        frame.stroke(&points, ink.trace, 1.6);
+        if let Some(last) = points.last() {
+            frame.fill_circle(ink.trace, *last, 2.4);
+        }
+    }
+    // Each source's ring in its cell, its figure (and, roomier, what it is of) under it.
+    let figure = Font { size: if roomy { 15.0 } else { 12.0 }, weight: 650.0, ..theme.figure };
+    let under_font = Font { size: 10.5, weight: 500.0, ..theme.body };
+    let radius = ring_room / 2.0 - 2.0;
+    for (at, slot) in dock.slots.iter().enumerate() {
+        let (cell_left, rings_top) = (left + (at % columns) as f32 * (cell + 8.0), ring_from + (at / columns) as f32 * (ring_room + under + 8.0));
+        let centre = Point { x: cell_left + cell / 2.0, y: rings_top + ring_room / 2.0 };
+        spot(Spot::Ring(slot.source), (cell_left, rings_top, cell, ring_room + under));
+        ring(frame, theme, slot, centre, radius, if roomy { 4.0 } else { 3.0 }, radius * 0.9);
+        let hot = slot.used.is_some_and(|used| used >= HOT);
+        frame.key(&format!("{}.value", slot.source.id()));
+        centred(frame, &slot.figure, figure, if hot { theme.signal } else { theme.text }, centre.x, rings_top + ring_room + 4.0);
+        if roomy {
+            frame.key(&format!("{}.label", slot.source.id()));
+            centred(frame, &slot.label, under_font, theme.text3, centre.x, rings_top + ring_room + 4.0 + figure.size + 3.0);
+        }
+    }
+    // The sessions at work, at its foot.
+    if foot > 0.0 {
+        let row_y = top + height - LINE;
+        spot(Spot::Sessions, (left, row_y, width, LINE));
+        frame.key("ai:dock.at_work");
+        frame.fill_circle(ink.trace, Point { x: left + 3.5, y: row_y + LINE / 2.0 }, 3.5);
+        let said = match lang {
+            Lang::Zh => format!("{} 个会话进行中", dock.working),
+            Lang::En => format!("{} at work", dock.working),
+        };
+        frame.text(&said, theme.small, theme.text2, left + 15.0, row_y, width - 15.0, Align::Start);
+    }
+}
+
+/// The least a widget is to show the head, how today's spending mounted and what each ring's figure is of (DIPs).
+const LEAST_ROOMY: (f32, f32) = (240.0, 200.0);
 
 /// A source as the dock shows it: how much of its tightest window is used (none, with no limit told: its ring whole and
 /// faint), and its figure under its ring (that share, else what it spent today) and what the figure is of (that window,
@@ -950,12 +1214,12 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
 /// Draws the dock filling `size` (down a side, or `across` a top edge), its corner at the frame's origin: what every
 /// source spent today at its start, each source's slot, the sessions at work at its end; where each source is, to
 /// show its lane beside it as the pointer rests there.
-pub fn paint_dock(frame: &dyn Canvas, scene: &Scene, across: bool, size: (f32, f32)) -> Vec<HitBox> {
+pub fn paint_dock(frame: &dyn Canvas, scene: &Scene, across: bool, (w, h): (f32, f32)) -> Vec<HitBox> {
     #[cfg(windows)]
     let dock = dock_of(scene.prefs, scene.lang, crate::ai::usage().as_deref(), crate::station::now_ms());
     #[cfg(not(windows))]
     let dock = Dock { slots: docked(scene.prefs).into_iter().map(|source| Slot { source, used: None, figure: String::new(), label: String::new() }).collect(), ..Dock::default() };
-    draw_dock(frame, scene, &dock, across, size)
+    draw_dock(frame, scene, &dock, across, (0.0, 0.0, w, h))
 }
 
 /// `text` in `font`, its middle at `centre` across, from `top`.
@@ -980,7 +1244,8 @@ fn ring(frame: &dyn Canvas, theme: &Theme, slot: &Slot, centre: Point, radius: f
     frame.mark(slot.source.mark(), centre, mark, theme.text, 1.0);
 }
 
-pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: bool, (w, h): (f32, f32)) -> Vec<HitBox> {
+/// Draws `dock` filling the box `(x0, y0, w, h)`, down a side or `across` a top edge (see `paint_dock`).
+pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: bool, (x0, y0, w, h): (f32, f32, f32, f32)) -> Vec<HitBox> {
     let (theme, lang) = (scene.theme, scene.lang);
     let hits = std::cell::RefCell::new(Vec::new());
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
@@ -1011,16 +1276,16 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         }
     };
     if across {
-        let middle = h / 2.0;
-        let mut x = DOCK_PAD + spread / 2.0;
-        spot(frame, Spot::Today, (x, 0.0, BAR_END, h), (x, 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
+        let middle = y0 + h / 2.0;
+        let mut x = x0 + DOCK_PAD + spread / 2.0;
+        spot(frame, Spot::Today, (x, y0, BAR_END, h), (x, y0 + 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
         frame.key("ai:today.label");
         centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         frame.key("ai:today.value");
         centred(frame, &dock.today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
         x += BAR_END + spread;
         for slot in &dock.slots {
-            spot(frame, Spot::Ring(slot.source), (x, 0.0, BAR_SLOT, h), (x, 5.0, BAR_SLOT, h - 10.0, (h - 10.0) / 2.0));
+            spot(frame, Spot::Ring(slot.source), (x, y0, BAR_SLOT, h), (x, y0 + 5.0, BAR_SLOT, h - 10.0, (h - 10.0) / 2.0));
             ring(frame, theme, slot, Point { x: x + 8.0 + 17.0, y: middle }, 16.0, 2.6, 15.0);
             let words = x + 8.0 + 34.0 + 9.0;
             let (top, room) = (if slot.label.is_empty() { middle - 9.0 } else { middle - 17.0 }, x + BAR_SLOT - 8.0 - words);
@@ -1030,7 +1295,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
             frame.text(&slot.label, under, theme.text3, words, middle + 1.0, room, Align::Start);
             x += BAR_SLOT + spread;
         }
-        spot(frame, Spot::Sessions, (x, 0.0, BAR_END, h), (x, 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
+        spot(frame, Spot::Sessions, (x, y0, BAR_END, h), (x, y0 + 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
         frame.key("ai:dock.sessions");
         centred(frame, sessions.0, label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         let count_width = frame.measure(&sessions.1, big);
@@ -1041,17 +1306,17 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         marks(start + count_width + 4.0 + (row - 4.0) / 2.0, middle + 7.0);
         return hits.into_inner();
     }
-    let centre = w / 2.0;
-    let mut y = DOCK_PAD + spread / 2.0;
+    let centre = x0 + w / 2.0;
+    let mut y = y0 + DOCK_PAD + spread / 2.0;
     let round = 16.0_f32.min((w - 10.0) / 2.0);
-    spot(frame, Spot::Today, (0.0, y, w, DOCK_TODAY), (5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
+    spot(frame, Spot::Today, (x0, y, w, DOCK_TODAY), (x0 + 5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
     frame.key("ai:today.label");
     centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
     frame.key("ai:today.value");
     centred(frame, &dock.today, big, theme.text, centre, y + 18.0);
     y += DOCK_TODAY + spread;
     for slot in &dock.slots {
-        spot(frame, Spot::Ring(slot.source), (0.0, y, w, DOCK_SLOT), (5.0, y, w - 10.0, DOCK_SLOT - 4.0, round));
+        spot(frame, Spot::Ring(slot.source), (x0, y, w, DOCK_SLOT), (x0 + 5.0, y, w - 10.0, DOCK_SLOT - 4.0, round));
         ring(frame, theme, slot, Point { x: centre, y: y + 8.0 + 22.0 }, 21.5, 3.0, 20.0);
         frame.key(&format!("{}.value", slot.source.id()));
         centred(frame, &slot.figure, figure, figure_of(slot), centre, y + 56.0);
@@ -1059,7 +1324,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         centred(frame, &slot.label, under, theme.text3, centre, y + 74.0);
         y += DOCK_SLOT + spread;
     }
-    spot(frame, Spot::Sessions, (0.0, y, w, DOCK_FOOT), (5.0, y, w - 10.0, DOCK_FOOT + 4.0, round));
+    spot(frame, Spot::Sessions, (x0, y, w, DOCK_FOOT), (x0 + 5.0, y, w - 10.0, DOCK_FOOT + 4.0, round));
     frame.key("ai:dock.sessions");
     centred(frame, sessions.0, label, theme.text3, centre, y + 4.0);
     frame.key("ai:dock.at_work");
@@ -1300,25 +1565,27 @@ pub(super) mod tests {
             assert!((next - minute - 1.0 / 300.0).abs() < 1e-5, "{minute} then {next}");
         }
 
-        /// A source's lane, closed: its head (its name, its plan, when it was last heard of) and each window of its
-        /// limit, how much is used, how much of the window has gone by and when it starts again (one started again since
-        /// it was told, none of it used); a source with no limit told, what it spent today.
+        /// A source in the component's lane, closed: its head (its name, its plan, what it spent today) and each window
+        /// of its limit, how much is used, how much of the window has gone by and when it starts again (one started
+        /// again since it was told, none of it used); a source with no limit told, its head alone.
         #[test]
         fn a_source_shows_its_limits_windows() {
             let usage = day();
             let blocks = lane("ai:codex", Some(&usage));
             let [Block::Ai(AiBlock::Head { title, device, aside, opened, .. }), Block::Ai(AiBlock::Windows(windows))] = blocks.as_slice() else { panic!("{} blocks", blocks.len()) };
             assert_eq!((title.as_str(), device.as_str(), *opened), ("ChatGPT", "Pro", Some(false)));
-            // (Heard of last as its session spent, a minute ago.)
-            assert_eq!(aside, &text::since(NOON - 60_000, NOON, Lang::Zh));
+            assert_eq!(aside, "10 万");
             let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
             assert!(windows[0].name == "5 小时" && near(windows[0].used, 0.62) && windows[0].gone.is_some_and(|gone| near(gone, 0.6)), "{:?}", windows[0]);
             assert_eq!((windows[0].resets.as_str(), windows[1].resets.as_str()), ("2 小时后重置", "4 天后重置"));
             assert!(windows[1].used >= HOT && windows[1].name == "每周");
             assert_eq!(windows[2], Window { name: "每天".into(), used: 0.0, gone: None, resets: "已重置".into() });
             let blocks = lane("ai:claude", Some(&usage));
-            let [Block::Ai(AiBlock::Head { device, .. }), Block::Facts { rows, .. }] = blocks.as_slice() else { panic!("{} blocks", blocks.len()) };
-            assert_eq!((device.as_str(), rows[0].1.as_str()), ("Claude Code", "10 万"));
+            let [Block::Ai(AiBlock::Head { device, aside, .. })] = blocks.as_slice() else { panic!("{} blocks", blocks.len()) };
+            assert_eq!((device.as_str(), aside.as_str()), ("Claude Code", "10 万"));
+            // (Beside the dock, when it was last heard of, as its session spent a minute ago: what it spent is told below.)
+            let card = lane_of("ai:codex", &Prefs::default(), Lang::Zh, Some(&usage), NOON, None).unwrap();
+            assert!(matches!(&card[0], Block::Ai(AiBlock::Head { aside, .. }) if *aside == text::since(NOON - 60_000, NOON, Lang::Zh)));
             // (Not read yet: it says so, and opens nothing.)
             let blocks = lane("ai:claude", None);
             assert!(matches!(&blocks[0], Block::Ai(AiBlock::Head { opened: None, .. })));
@@ -1517,7 +1784,7 @@ pub(super) mod tests {
             usage.unkeyed.push(crate::ai::Tool::Kimi);
             usage.spent_today.push((crate::ai::Tool::Kimi, "kimi-for-coding".into(), spent(1_000, 200, 30_000, 0, 0)));
             let blocks = lane("ai:kimi", Some(&usage));
-            assert!(matches!(blocks.as_slice(), [Block::Ai(AiBlock::Head { opened: Some(false), device, .. }), Block::Facts { rows, .. }] if device == "Kimi Code" && rows[0].1 == "3.1 万"));
+            assert!(matches!(blocks.as_slice(), [Block::Ai(AiBlock::Head { opened: Some(false), device, aside, .. })] if device == "Kimi Code" && aside == "3.1 万"));
             let stored = serde_json::json!({ "ai": [{ "id": "ai:kimi", "on": true }] });
             let dock = dock_of(&Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai), Lang::Zh, Some(&usage), NOON);
             assert!(dock.slots.iter().any(|slot| slot.source == Source::Kimi && slot.figure == "3.1 万" && slot.label == "今日"));

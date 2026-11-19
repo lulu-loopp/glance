@@ -2555,6 +2555,22 @@ pub fn shows_module(entry: &super::prefs::ModuleEntry) -> bool {
     entry.on || (entry.id == "game" && front_is_game())
 }
 
+/// The AI component's lane: its sources' modules (`ai:` and the source) on one plate (see `ai::together`).
+pub const AI_LANE: &str = "ai";
+
+/// The lanes `prefs` show, in their order: each module that is on its own, the AI component's in one, where the first
+/// of them is.
+pub fn lane_ids(prefs: &Prefs) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for entry in prefs.modules.iter().filter(|entry| shows_module(entry)) {
+        let id = if entry.id.starts_with("ai:") { AI_LANE } else { entry.id.as_str() };
+        if !ids.iter().any(|shown| shown == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
 /// What a GPU asleep says in place of its temperature (see `GpuSample::asleep`): it has none to read, and it is not
 /// woken to read one.
 pub fn sleeping(lang: Lang) -> &'static str {
@@ -2587,13 +2603,7 @@ impl Lane {
 /// The lanes of the modules that are on and have something to show, each
 /// showing as much as `detail` says for it.
 pub fn lanes_at(scene: &Scene, detail: impl Fn(&str) -> Detail) -> Vec<Lane> {
-    scene
-        .prefs
-        .modules
-        .iter()
-        .filter(|entry| shows_module(entry))
-        .filter_map(|entry| Some(Lane { id: entry.id.clone(), blocks: lane(scene, &entry.id, detail(&entry.id))?, ink: scene.theme.ink(&entry.id) }))
-        .collect()
+    lane_ids(scene.prefs).into_iter().filter_map(|id| Some(Lane { blocks: lane(scene, &id, detail(&id))?, ink: scene.theme.ink(&id), id })).collect()
 }
 
 fn head(title: impl Into<String>, device: impl Into<String>, aside: impl Into<String>, aside_hot: bool) -> Block {
@@ -2617,25 +2627,16 @@ fn shown<T>(value: Option<T>, show: impl Fn(T) -> String) -> String {
 /// show.
 pub fn heights(scene: &Scene) -> Vec<(String, [f32; 2])> {
     let height = |id: &str, detail: Detail| lane(scene, id, detail).map(|blocks| scene.theme.pad_top + scene.theme.pad_bottom + blocks.iter().map(Block::height).sum::<f32>());
-    scene
-        .prefs
-        .modules
-        .iter()
-        .filter(|entry| shows_module(entry))
-        .filter_map(|entry| Some((entry.id.clone(), [height(&entry.id, Detail::Full)?, height(&entry.id, Detail::Compact)?])))
-        .collect()
+    lane_ids(scene.prefs).into_iter().filter_map(|id| Some(([height(&id, Detail::Full)?, height(&id, Detail::Compact)?], id))).map(|(heights, id)| (id, heights)).collect()
 }
 
 /// How much shorter than designed each lane of `heights` may be drawn (its list at its foot given way to
 /// `LIST_LEAST`; none for a lane with no list at its foot), in the same order (see `Layout::giving`).
 pub fn gives(scene: &Scene) -> Vec<f32> {
-    scene
-        .prefs
-        .modules
-        .iter()
-        .filter(|entry| shows_module(entry))
-        .filter_map(|entry| {
-            let blocks = lane(scene, &entry.id, Detail::Full)?;
+    lane_ids(scene.prefs)
+        .into_iter()
+        .filter_map(|id| {
+            let blocks = lane(scene, &id, Detail::Full)?;
             Some(blocks.last().and_then(Block::list_tall).map_or(0.0, |tall| (tall - LIST_LEAST).max(0.0)))
         })
         .collect()
@@ -3381,7 +3382,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             ]
         }
         #[cfg(windows)]
-        id if id.starts_with("ai:") => return ai::ai_lane(id, prefs, lang),
+        AI_LANE => return ai::ai_lane(prefs, lang, detail),
         _ => return None,
     })
 }
@@ -3800,8 +3801,13 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     let theme = scene.theme;
     let first = hits.len();
     let ink = lane.ink;
-    // (A workbench lane in a shape, padded less: see `BENCH_PAD`.)
-    let (pad_x, pad_top, pad_bottom) = if matches!(lane.blocks.as_slice(), [Block::Bench(_)]) { bench_pads(theme) } else { (theme.pad_x, theme.pad_top, theme.pad_bottom) };
+    // (A workbench lane in a shape, padded less: see `BENCH_PAD`. The AI component's shape fills it all: see
+    // `ai::paint_shaped`.)
+    let (pad_x, pad_top, pad_bottom) = match lane.blocks.as_slice() {
+        [Block::Bench(_)] => bench_pads(theme),
+        [Block::Ai(ai::AiBlock::Shaped { .. })] => (0.0, 0.0, 0.0),
+        _ => (theme.pad_x, theme.pad_top, theme.pad_bottom),
+    };
     let left = area.x + pad_x;
     let width = area.w - 2.0 * pad_x;
     let plot_left = left + LABEL + LABEL_GAP;
@@ -3821,7 +3827,9 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     // theirs alike (see `morph`): the CPU's figure is "cpu.value" in both.
     let id = &lane.id;
     let name = |part: &str| frame.key(&format!("{id}.{part}"));
-    let mut kinds: Vec<&str> = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
+    // (The AI component's: each source's blocks in its ink from its head on, named by it.)
+    let (mut ink, mut source) = (ink, None);
     for block in &lane.blocks {
         let kind = match block {
             Block::Head { .. } => "head",
@@ -3849,8 +3857,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Todo { .. } => "todo",
             Block::Ai(_) => "ai",
         };
+        if let Block::Ai(ai::AiBlock::Head { source: of, .. }) = block {
+            (ink, source) = (theme.ink(of.id()), Some(*of));
+        }
+        let kind = match block {
+            Block::Ai(block) => format!("{}.{}", source.map_or("all", |source| source.id()), block.kind()),
+            _ => kind.to_string(),
+        };
         let nth = kinds.iter().filter(|k| **k == kind).count();
-        kinds.push(kind);
+        kinds.push(kind.clone());
         let part = |what: &str| name(&format!("{kind}{nth}.{what}"));
         let charted = matches!(block, Block::Readout { plot: Some(_), .. } | Block::Rates { plot: Some(_), .. });
         let height = block.height() + if charted { taller } else { 0.0 };
@@ -3871,6 +3886,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (_, Pass::Plots) => {}
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "todo" => todo::paint_head(frame, scene, (left, y, width), title, device, hits),
             (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), pad_x, lane, *tall + spare, hits),
+            (Block::Ai(ai::AiBlock::Shaped { shape, dock, mounted }), Pass::Content) => ai::paint_shaped(frame, scene, ink, (*shape, dock, mounted), (area.x, area.y, area.w, area.h), hits),
             (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part, hits),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
@@ -6821,18 +6837,88 @@ otepad.exe", "Notepad"),
                     .draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
                         frame.fill(ground, 0.0, 0.0, w, h);
                         frame.fill_rounded(theme.track, 0.0, 0.0, down.0, down.1, 12.0);
-                        ai::draw_dock(frame, &scene, &dock, false, down);
+                        ai::draw_dock(frame, &scene, &dock, false, (0.0, 0.0, down.0, down.1));
                         paint_lane(frame, &scene, &card, Rect { x: down.0 + 16.0, y: 0.0, w: COLUMN_WIDTH, h: card_h }, 0.0, Pass::Content, &mut Vec::new());
                         let top = down.1.max(card_h) + 16.0;
                         frame.place(windows_numerics::Matrix3x2::translation(0.0, top));
                         frame.fill_rounded(theme.track, 0.0, 0.0, across.0, across.1, 12.0);
-                        ai::draw_dock(frame, &scene, &dock, true, across);
+                        ai::draw_dock(frame, &scene, &dock, true, (0.0, 0.0, across.0, across.1));
                         frame.origin(0.0, 0.0);
                     })
                     .expect("drawn");
                 let name = format!("{skin:?}-{}-dock.png", if dark { "dark" } else { "light" });
                 crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
             }
+        }
+    }
+
+    /// The AI component on its plate over a wallpaper, in each skin, light and dark: its lane in the panel (ChatGPT
+    /// opened), and its widget across, down, as near a square as small and as roomy, and tiny:
+    /// `cargo test --features studio --lib -- --ignored ai_widget` writes `target/ai-widget/<skin>-<light or dark>.png`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn ai_widget() {
+        let _device = crate::ui::gfx::held().unwrap();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let (width, height, px) = (1400u32, 760u32, 1.5f32);
+        let desktop = crate::ui::wallpaper::picture(r"C:\Windows\Web\Wallpaper\Windows\img19.jpg", (width as f32 * px) as u32, (height as f32 * px) as u32).expect("wallpaper");
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{}/target/ai-widget", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut usage = ai::tests::lanes::day();
+        let now = ai::tests::lanes::NOON;
+        usage.limits.push(crate::ai::Limit { tool: crate::ai::Tool::Claude, id: "claude".into(), name: None, plan: Some("max".into()), windows: vec![crate::ai::Window { minutes: 300, used: 62.0, resets: Some(now + 7_200_000) }, crate::ai::Window { minutes: 10080, used: 38.0, resets: Some(now + 3 * 86_400_000) }], balance: None, told: now - 60_000 });
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let stored = serde_json::json!({ "ai": shown });
+        let held = Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai);
+        for pass in 0..2 {
+            for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+                for dark in [false, true] {
+                    let mut theme = Theme::new(skin, dark);
+                    (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
+                    let info = info();
+                    let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+                    let seen = Seen::of(history);
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let lane_at = |detail: Detail| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| source == ai::Source::Codex).unwrap(), ink: theme.ink(AI_LANE) };
+                    let full = lane_at(Detail::Full);
+                    let across = ai::dock_size(true, 2);
+                    let down = ai::dock_size(false, 2);
+                    // Each: its shape, its size, where it is.
+                    let widgets: Vec<(Option<Shape>, (f32, f32), (f32, f32))> = vec![
+                        (None, (COLUMN_WIDTH, full.height(&theme)), (30.0, 30.0)),
+                        (Some(Shape::Across), (across.0 + 40.0, across.1 + 12.0), (420.0, 30.0)),
+                        (Some(Shape::Down), (down.0 + 8.0, down.1), (420.0, 140.0)),
+                        (Some(Shape::Least), (156.0, 156.0), (560.0, 140.0)),
+                        (Some(Shape::Least), (300.0, 240.0), (740.0, 140.0)),
+                        (Some(Shape::Least), (72.0, 72.0), (560.0, 320.0)),
+                        (Some(Shape::Least), (110.0, 110.0), (560.0, 420.0)),
+                        (Some(Shape::Down), (84.0, 250.0), (1080.0, 420.0)),
+                    ];
+                    let pixels = gfx.draw_offscreen(((width as f32 * px) as u32, (height as f32 * px) as u32), px, |frame| {
+                        if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                            unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                        }
+                        let behind = desktop.bitmap(&frame.dc, px).ok();
+                        for (shape, size, at) in &widgets {
+                            let lanes = vec![shape.map_or_else(|| lane_at(Detail::Full), |shape| lane_at(Detail::Shape(shape)))];
+                            let layout = Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).fitted(*size);
+                            let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
+                            let picture = crate::ui::render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
+                            let mut layers = crate::ui::render::PanelLayers::default();
+                            let _ = layers.draw(frame, &picture, windows_numerics::Matrix3x2::translation(at.0, at.1), px);
+                        }
+                    }).expect("drawn");
+                    if pass == 1 {
+                        let name = format!("{}-{}.png", match skin { Skin::Glass => "glass", Skin::Fluent => "fluent", Skin::Paper => "paper" }, if dark { "dark" } else { "light" });
+                        crate::studio::save_png(&out.join(name), (width as f32 * px) as u32, (height as f32 * px) as u32, &pixels).unwrap();
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
         }
     }
 
@@ -6862,6 +6948,80 @@ otepad.exe", "Notepad"),
                 ai::paint(&Nothing, &scene, theme.ink("ai:codex"), block, (12.0, 0.0, width), &|_| {}, &mut Vec::new());
             }
         }
+        // (And in a widget too small for all of it, at every size in each shape.)
+        let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
+        for shape in [Shape::Across, Shape::Down, Shape::Least] {
+            for w in (0..=400).step_by(3) {
+                for h in (0..=400).step_by(7) {
+                    ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (shape, &dock, &[0.0, 0.5, 1.0]), (0.0, 0.0, w as f32, h as f32), &mut Vec::new());
+                }
+            }
+        }
+    }
+
+    /// The AI component is one lane, on one plate, where its first module is: what every source spent today, then each
+    /// source in its order, its head telling what it spent today, each set apart from the one before, and the sessions
+    /// of those shown at its foot. In a widget too small for all of it, its shape alone.
+    #[test]
+    fn the_ai_component_is_one_lane_on_one_plate() {
+        let mut prefs = Prefs::default();
+        prefs.modules = ["cpu", "ai:today", "gpu", "ai:claude", "memory"].map(|id| super::super::prefs::ModuleEntry { id: id.into(), on: id != "memory", items: Default::default() }).to_vec();
+        assert_eq!(lane_ids(&prefs), ["cpu", AI_LANE, "gpu"]);
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let blocks = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex).unwrap();
+        let told: Vec<String> = blocks
+            .iter()
+            .map(|block| match block {
+                Block::Head { title, .. } => format!("head {title}"),
+                Block::Room(_) => "apart".into(),
+                Block::Ai(ai::AiBlock::Head { title, aside, opened, .. }) => format!("{title} {aside} {opened:?}"),
+                Block::Ai(ai::AiBlock::Working { at_work, today }) => format!("at work {at_work} of {today}"),
+                Block::Ai(block) => block.kind().into(),
+                _ => "other".into(),
+            })
+            .collect();
+        assert_eq!(told, ["head AI 用量", "today", "apart", "Claude 10 万 Some(false)", "apart", "ChatGPT 10 万 Some(true)", "windows", "models", "pairs", "sessions", "at work 1 of 3"]);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false).unwrap();
+        assert!(matches!(shaped.as_slice(), [Block::Ai(ai::AiBlock::Shaped { shape: Shape::Least, dock, .. })] if dock.slots.len() == 2 && dock.working == 1));
+        // (None of its modules on: no lane.)
+        assert!(ai::together(&Prefs::default(), Lang::Zh, Some(&usage), now, Detail::Full, |_| false).is_none());
+    }
+
+    /// The AI component's widget too small for all of it: the dock's strip across or down where the dock fits it, else
+    /// today's figure over each source's ring, roomier with the sessions at work, and today's figure alone where the
+    /// rings do not fit; each spot where the pointer shows its card beside it, within the widget.
+    #[test]
+    fn the_ai_widget_too_small_shows_the_docks_strip_or_as_near_a_square() {
+        let theme = Theme::new(Skin::Glass, false);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let prefs = Prefs::default();
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new() };
+        let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
+        use ai::{Source, Spot};
+        let every = [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot).to_vec();
+        let rings = [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex)].map(Hit::AiSlot).to_vec();
+        let spots = |shape: Shape, size: (f32, f32)| {
+            let mut hits = Vec::new();
+            ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (shape, &dock, &[0.2, 0.6, 1.0]), (30.0, 40.0, size.0, size.1), &mut hits);
+            for &(x, y, w, h, _) in &hits {
+                assert!(x >= 30.0 - 1e-3 && y >= 40.0 - 1e-3 && x + w <= 30.0 + size.0 + 1e-3 && y + h <= 40.0 + size.1 + 1e-3, "{shape:?} {size:?}: {:?}", (x, y, w, h));
+            }
+            hits.into_iter().map(|(.., hit)| hit).collect::<Vec<_>>()
+        };
+        let (across, down) = (ai::dock_size(true, 2), ai::dock_size(false, 2));
+        assert_eq!(spots(Shape::Across, across), every);
+        assert_eq!(spots(Shape::Down, (down.0 + 20.0, down.1)), every);
+        // (The dock not fitting it: as near a square as it is, too short for the rings there.)
+        assert_eq!(spots(Shape::Across, (across.0 - 60.0, across.1)), [Hit::AiSlot(Spot::Today)]);
+        assert_eq!(spots(Shape::Down, (down.0, down.1 - 40.0)), rings);
+        assert_eq!(spots(Shape::Least, (156.0, 156.0)), rings);
+        assert_eq!(spots(Shape::Least, (300.0, 240.0)), every);
+        assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today)]);
     }
 
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
@@ -6878,11 +7038,11 @@ otepad.exe", "Notepad"),
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
         use ai::{Source, Spot};
         let (w, h) = ai::dock_size(true, 2);
-        let across = spots(ai::draw_dock(&Nothing, &scene, &dock, true, (w, h)));
+        let across = spots(ai::draw_dock(&Nothing, &scene, &dock, true, (0.0, 0.0, w, h)));
         assert_eq!(across.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
         assert_eq!((across[0].1, across[3].1), ((12.0, 0.0, 76.0, h), (12.0 + 76.0 + 2.0 * 120.0, 0.0, 76.0, h)));
         let (w, h) = ai::dock_size(false, 2);
-        let down = spots(ai::draw_dock(&Nothing, &scene, &dock, false, (w, h)));
+        let down = spots(ai::draw_dock(&Nothing, &scene, &dock, false, (0.0, 0.0, w, h)));
         assert_eq!(down.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
         assert_eq!((down[0].1, down[3].1), ((0.0, 12.0, w, 42.0), (0.0, 12.0 + 42.0 + 2.0 * 92.0, w, 50.0)));
         // (Every spot within the dock, none over another.)

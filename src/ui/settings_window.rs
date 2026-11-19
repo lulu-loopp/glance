@@ -3043,8 +3043,8 @@ impl Ui {
                 }
             }
             (Page::Ai, _) => {
+                // (No columns to choose: the component is one lane, see `view::AI_LANE`.)
                 rows.push(Row::Choice(Field::AiForm));
-                rows.push(Row::Choice(Field::Columns));
                 // (Only where Claude Code is on this PC.)
                 if self.claude_limits != crate::ai::statusline::Standing::NoClaude {
                     rows.push(Row::ClaudeLimits);
