@@ -181,7 +181,7 @@ const CLOSE_STILL: (f32, f32) = (0.7, 0.85);
 /// corners concentric with its own, see `inset`.)
 const NAME: f32 = 36.0;
 const UNDER_NAME: f32 = 12.0;
-const INSET_LEAST: f32 = 16.0;
+pub(super) const INSET_LEAST: f32 = 16.0;
 const BUTTON: f32 = 30.0;
 const PICTURE_LEAST: f32 = 320.0;
 const WORDS: (f32, f32) = (560.0, 340.0);

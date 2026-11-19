@@ -550,7 +550,7 @@ impl Picker {
         let Some(mut surface) = self.surface.take() else { return false };
         let mut words = std::mem::take(&mut self.words);
         self.drawn += 1;
-        let drawn = surface.draw(&self.gfx.clone(), size, self.scale, self.look, self.room, (WIDTH, layout.height), &mut words, self.drawn, |_, _| {}, |frame, frosted| self.paint(frame, &layout, frosted, &mut hits));
+        let drawn = surface.draw(&self.gfx.clone(), size, self.scale, self.look, self.room, (WIDTH, layout.height), super::super::menu::sheet_radius(self.look, true, layout.height), &mut words, self.drawn, |_, _| {}, |frame, frosted| self.paint(frame, &layout, frosted, &mut hits));
         (self.surface, self.words) = (Some(surface), words);
         self.hits = hits;
         if let Err(error) = &drawn {
