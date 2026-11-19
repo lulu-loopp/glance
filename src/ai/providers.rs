@@ -42,7 +42,7 @@ pub const ALL: [Provider; 7] = [
     Provider { tool: Tool::DeepSeek, fields: &[Field { id: "deepseek", env: &["DEEPSEEK_API_KEY", "DEEPSEEK_KEY"] }], read: deepseek },
     Provider { tool: Tool::Kimi, fields: &[Field { id: "kimi", env: &["KIMI_CODE_API_KEY"] }], read: kimi },
     Provider { tool: Tool::Moonshot, fields: &[Field { id: "moonshot", env: &["MOONSHOT_API_KEY"] }], read: moonshot },
-    Provider { tool: Tool::Glm, fields: &[Field { id: "glm", env: &["ZAI_API_KEY", "Z_AI_API_KEY", "GLM_API_KEY", "ZHIPU_API_KEY"] }], read: glm },
+    Provider { tool: Tool::Glm, fields: &[Field { id: "glm", env: &["ZAI_API_KEY", "Z_AI_API_KEY", "GLM_API_KEY", "ZHIPU_API_KEY", "GLM_CODING_KEY"] }], read: glm },
     Provider { tool: Tool::MiniMax, fields: &[Field { id: "minimax", env: &["MINIMAX_CODING_API_KEY", "MINIMAX_API_KEY"] }], read: minimax },
     Provider {
         tool: Tool::Volcengine,

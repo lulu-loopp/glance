@@ -6836,6 +6836,34 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// Every part of the AI component draws in any room it is given, down to none (a widget sized small lays its lanes
+    /// out as narrow as that leaves them): a window's mark of the time gone by kept within its bar however short.
+    #[test]
+    fn every_part_of_the_ai_component_draws_however_narrow() {
+        let theme = Theme::new(Skin::Glass, false);
+        let (info, prefs) = (info(), Prefs::default());
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let (usage, now) = (ai::tests::lanes::accounts(), ai::tests::lanes::NOON);
+        let held = Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai);
+        let mut blocks: Vec<Block> = ["ai:today", "ai:claude", "ai:codex", "ai:qwen", "ai:deepseek", "ai:glm", "ai:kimi", "ai:minimax"]
+            .into_iter()
+            .flat_map(|id| [false, true].map(|open| ai::lane_of(id, &prefs, Lang::Zh, Some(&usage), now, Some(open)).unwrap()))
+            .flatten()
+            .collect();
+        blocks.extend(ai::today_card(Lang::Zh, Some(&usage)));
+        blocks.extend(ai::sessions_card(&held, Lang::Zh, Some(&usage), now));
+        let ai_blocks: Vec<&ai::AiBlock> = blocks.iter().filter_map(|block| if let Block::Ai(block) = block { Some(block) } else { None }).collect();
+        assert!(ai_blocks.iter().any(|block| matches!(block, ai::AiBlock::Windows(windows) if windows.iter().any(|window| window.gone.is_some()))));
+        for block in ai_blocks {
+            for quarter in 0..=1200 {
+                let width = quarter as f32 * 0.25;
+                ai::paint(&Nothing, &scene, theme.ink("ai:codex"), block, (12.0, 0.0, width), &|_| {}, &mut Vec::new());
+            }
+        }
+    }
+
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
     /// work at its end, as for each source's ring between them: each spot is where it is drawn, down a side and across.
     #[test]

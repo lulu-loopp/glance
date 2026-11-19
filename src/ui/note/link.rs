@@ -283,7 +283,7 @@ impl Linking {
                 self.pressing.set(true);
                 // (Pressed anywhere in its room, as on its words, as far as they go.)
                 let inner = self.field(which).bounds();
-                let at = POINT { x: point.x.clamp(inner.left, inner.right - 1), y: point.y.clamp(inner.top, inner.bottom - 1) };
+                let at = POINT { x: point.x.min(inner.right - 1).max(inner.left), y: point.y.min(inner.bottom - 1).max(inner.top) };
                 let at = LPARAM(((at.y as isize) << 16) | (at.x as isize & 0xFFFF));
                 (Some(Some(self.field(which).send(message, wparam, at).unwrap_or(LRESULT(0)))), None)
             }

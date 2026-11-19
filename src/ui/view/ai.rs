@@ -524,7 +524,7 @@ pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai:
         blocks.push(Block::Facts { rows: vec![(lang.pick("今日会话", "Today").into(), lang.pick("暂无", "None").into(), false)], gap: GAP });
         return blocks;
     }
-    let shown = working.min(SESSIONS_AT_WORK).max(SESSIONS_TOLD);
+    let shown = working.clamp(SESSIONS_TOLD, SESSIONS_AT_WORK);
     blocks.push(Block::Ai(AiBlock::Sessions(sessions.into_iter().take(shown).map(|(source, session)| session_row(session, usage, now, lang, Some(source))).collect())));
     blocks
 }
@@ -776,7 +776,8 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 // faster than the window goes.
                 if let Some(gone) = window.gone {
                     let mark_x = x + gone * wide;
-                    frame.fill(theme.text2, (mark_x - 0.75).clamp(x, x + wide - 1.5), bar_y - 2.0, 1.5, theme.meter_height + 4.0);
+                    // (Kept within the bar, at its start where the bar is shorter than the mark is wide.)
+                    frame.fill(theme.text2, (mark_x - 0.75).min(x + wide - 1.5).max(x), bar_y - 2.0, 1.5, theme.meter_height + 4.0);
                 }
                 part(&format!("{at}.resets"));
                 frame.text(&window.resets, theme.small, theme.text3, x, top + LINE + BAR_BAND, wide, Align::Start);

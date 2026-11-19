@@ -1426,7 +1426,7 @@ impl Ui {
         } else {
             (((right - w - px(16.0)).clamp(work.left, (work.right - w).max(work.left)), (foot - h - px(16.0)).clamp(work.top, (work.bottom - h).max(work.top))), None)
         };
-        let beak = side.map(|side| (side, ((middle - top) as f32 / scale).clamp(20.0, plate_h - 20.0)));
+        let beak = side.map(|side| (side, ((middle - top) as f32 / scale).min(plate_h - 20.0).max(20.0)));
         let pad = px(SHADOW);
         (beak, RECT { left: left - pad, top: top - pad, right: left + w + pad, bottom: top + h + pad })
     }

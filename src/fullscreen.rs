@@ -748,7 +748,8 @@ fn draw_controls(frame: &Frame, (w, h): (f32, f32), shown: f32, pointer: Option<
             let at = ((px - from) / wide).clamp(0.0, 1.0);
             let said = clock(at as f64 * length);
             let pill = frame.measure(&said, time);
-            let x = (from + wide * at - pill / 2.0).clamp(from, from + wide - pill);
+            // (Within the track, from its start where the track is shorter than the pill.)
+            let x = (from + wide * at - pill / 2.0).min(from + wide - pill).max(from);
             said_bare(frame, &said, time, x, y - 30.0, shown);
         }
         if seekable {
