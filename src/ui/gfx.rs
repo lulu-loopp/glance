@@ -2816,12 +2816,12 @@ thread_local! {
 }
 
 /// What this thread draws while the returned guard is held is being sized by hand (a panel, a widget or the
-/// settings held by their edges), or is not; once it is dropped, what is drawn is not (another window drawn on the
-/// thread after it is drawn as it is).
+/// settings held by their edges), or is not; once it is dropped, what is drawn is as it was before (another window
+/// drawn on the thread after it is drawn as it is). Another window drawn on the thread while one is sized (the card
+/// beside the AI component's dock, drawn in the dock's frame) takes a guard of its own, not being sized.
 #[must_use]
 pub fn sizing(on: bool) -> Sizing {
-    SIZING.with(|sizing| sizing.set(on));
-    Sizing
+    Sizing(SIZING.with(|sizing| sizing.replace(on)))
 }
 
 /// Whether what this thread draws now is being sized by hand (see `sizing`).
@@ -2829,12 +2829,12 @@ pub fn sized_by_hand() -> bool {
     SIZING.with(Cell::get)
 }
 
-/// See `sizing`.
-pub struct Sizing;
+/// See `sizing`: whether what was drawn was sized by hand before it was taken.
+pub struct Sizing(bool);
 
 impl Drop for Sizing {
     fn drop(&mut self) {
-        SIZING.with(|sizing| sizing.set(false));
+        SIZING.with(|sizing| sizing.set(self.0));
     }
 }
 
@@ -3344,7 +3344,22 @@ pub(crate) fn threads_now() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::room;
+    use super::{room, sized_by_hand, sizing};
+
+    /// Another window drawn on the thread while one is sized by hand, not sized itself, is drawn at rest, and once it
+    /// is drawn what is drawn is sized again: the window sized goes on as it was (as the card beside the AI
+    /// component's dock is drawn in a widget's frame as it settles). Once that is done, nothing is.
+    #[test]
+    fn a_window_drawn_at_rest_while_another_is_sized_gives_it_back() {
+        let sized = sizing(true);
+        {
+            let _at_rest = sizing(false);
+            assert!(!sized_by_hand());
+        }
+        assert!(sized_by_hand());
+        drop(sized);
+        assert!(!sized_by_hand());
+    }
 
     /// Words kept to so many lines: all of them where they fit, as tall as they are; else the most of their start that
     /// fits with an ellipsis after it, in no more lines, one more character of them not fitting.

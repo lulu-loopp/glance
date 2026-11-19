@@ -211,6 +211,10 @@ pub struct Of<'a> {
 pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, clear: Option<RECT>) {
     let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.spot) else { return };
     let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.spot));
+    // (Not sized by hand, whatever the dock it is shown from is: shown from a widget settling to the size it was sized
+    // to, it was drawn as that is, its words not kept but drawn where they show, and came out moved up and left on its
+    // sheet, its head cut off.)
+    let _at_rest = gfx::sizing(false);
     let controller = &crate::app().controller;
     let (info, history) = (controller.info(), controller.history.samples());
     // (Nothing read of the machine yet: the lanes are drawn from its last sample.)
