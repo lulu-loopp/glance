@@ -581,7 +581,7 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
             .iter()
             .take(SESSIONS)
             .map(|session| {
-                let title = session.title.clone().unwrap_or_else(|| lang.pick("未命名会话", "Untitled session").into());
+                let title = session.title.clone().or_else(|| session.folder.as_deref().and_then(folder_name)).unwrap_or_else(|| lang.pick("未命名会话", "Untitled session").into());
                 let model = session.model.as_deref().map(model_name).unwrap_or_default();
                 let when = text::since(session.last, now, lang);
                 let about = if model.is_empty() { when } else { format!("{model} · {when}") };
@@ -934,6 +934,12 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     hits
 }
 
+/// The name of folder `folder` (its last part, as written on Windows or elsewhere): none for a drive's root.
+fn folder_name(folder: &str) -> Option<String> {
+    let name = folder.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next()?;
+    (!name.is_empty() && !name.ends_with(':')).then(|| name.to_string())
+}
+
 /// How strong the `at`th model's colour is (the most spending, the strongest).
 fn strength(at: usize) -> f32 {
     1.0 - at.min(3) as f32 * 0.25
@@ -976,11 +982,15 @@ fn shares(frame: &dyn Canvas, theme: &Theme, (x, y, width): (f32, f32, f32), par
 pub(super) mod tests {
     use super::*;
 
+    type Box4 = (f32, f32, f32, f32);
+    /// A fill: its colour, its box, how round (none, a plain rectangle), and the clip it was drawn in.
+    type Drawn = (Color, Box4, Option<f32>, Option<Box4>);
+
     /// What a bar's drawing came to: each fill, the box it was asked for, how round, and the clip it was drawn in.
     #[derive(Default)]
     struct Bars {
-        clips: std::cell::RefCell<Vec<(f32, f32, f32, f32)>>,
-        fills: std::cell::RefCell<Vec<(Color, (f32, f32, f32, f32), Option<f32>, Option<(f32, f32, f32, f32)>)>>,
+        clips: std::cell::RefCell<Vec<Box4>>,
+        fills: std::cell::RefCell<Vec<Drawn>>,
     }
 
     impl Canvas for Bars {
@@ -1179,6 +1189,24 @@ pub(super) mod tests {
             let blocks = lane("ai:claude", None);
             assert!(matches!(&blocks[0], Block::Ai(AiBlock::Head { opened: None, .. })));
             assert!(matches!(&blocks[1], Block::Facts { rows, .. } if rows[0].1 == "正在读取"));
+        }
+
+        /// A session nothing names (one whose every prompt another program sent it) is told by the folder it was worked
+        /// in, the folder's own name: as untitled only with neither, or a folder that is a drive's root.
+        #[test]
+        fn a_session_nothing_names_is_told_by_its_folder() {
+            let told = |folder: Option<&str>| {
+                let mut usage = day();
+                usage.sessions.iter_mut().find(|session| session.id == "b").unwrap().folder = folder.map(String::from);
+                let blocks = lane_of("ai:codex", &Prefs::default(), Lang::Zh, Some(&usage), NOON, Some(true)).unwrap();
+                let sessions = blocks.iter().find_map(|block| if let Block::Ai(AiBlock::Sessions(rows)) = block { Some(rows.clone()) } else { None }).unwrap();
+                sessions.iter().map(|(title, ..)| title.clone()).collect::<Vec<_>>()
+            };
+            assert_eq!(told(Some(r"E:\Developer\Glance")), ["Review the release", "Glance"]);
+            assert_eq!(told(Some(r"E:\Developer\Glance\")), ["Review the release", "Glance"]);
+            assert_eq!(told(Some("/Users/someone/projects/glance-port")), ["Review the release", "glance-port"]);
+            assert_eq!(told(Some(r"D:\")), ["Review the release", "未命名会话"]);
+            assert_eq!(told(None), ["Review the release", "未命名会话"]);
         }
 
         /// Opened, a source's lane tells what it spent today by model (the most first, each one's share), by kind
