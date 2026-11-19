@@ -1,15 +1,15 @@
 //! The panel's own window: a borderless, topmost tool window that never takes
 //! the focus, drawn entirely by DirectComposition.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use windows::core::{w, Result, BOOL, PCWSTR};
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, IsWindowVisible, LoadCursorW, HWND_TOP, RegisterClassW, SetCursor, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWLP_USERDATA, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LWA_ALPHA,
     MA_NOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_FRAMECHANGED, SW_HIDE, SW_SHOWNOACTIVATE,
     PostMessageW, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
@@ -49,6 +49,8 @@ impl Drop for Window {
         super::keys::give_back(self.hwnd);
         super::todo::went(self.hwnd);
         let _ = unsafe { DestroyWindow(self.hwnd) };
+        // (At its thread's end, what this thread kept may be gone before it.)
+        let _ = TAKES.try_with(|takes| takes.borrow_mut().retain(|(of, _)| *of != self.hwnd.0 as isize));
         super::tip::went(self.hwnd);
         super::ai_card::went(self.hwnd);
     }
@@ -83,6 +85,12 @@ static ON_TOP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
 /// that comes to the top meanwhile (see `came_to_top`).
 static LIFTED: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
 
+thread_local! {
+    /// Where each of this thread's windows that takes the pointer only somewhere takes it, on the screen (see
+    /// `Window::take_pointer_within`).
+    static TAKES: RefCell<Vec<(isize, RECT)>> = const { RefCell::new(Vec::new()) };
+}
+
 /// How many times a window kept under the panel has come to the top (see `ON_TOP`).
 pub fn on_top() -> u64 {
     ON_TOP.load(std::sync::atomic::Ordering::Relaxed)
@@ -100,7 +108,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let never = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_NOACTIVATE.0 != 0;
             LRESULT(if never { MA_NOACTIVATE } else { windows::Win32::UI::WindowsAndMessaging::MA_ACTIVATE } as isize)
         }
-        WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        // (Where it takes no pointer, this thread's windows under it take it: see `Window::take_pointer_within`.)
+        WM_NCHITTEST => {
+            let at = POINT { x: (lparam.0 & 0xFFFF) as u16 as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32 };
+            let within = |area: RECT| at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom;
+            let passes = TAKES.with(|takes| takes.borrow().iter().any(|&(of, area)| of == hwnd.0 as isize && !within(area)));
+            LRESULT(if passes { HTTRANSPARENT as isize } else { HTCLIENT as isize })
+        }
         // The pointer's shape, as the window's owner last set it (see
         // `Window::point`): asked for at every move, before the move itself.
         WM_SETCURSOR => {
@@ -204,6 +218,17 @@ impl Window {
 
     pub fn place(&self, rect: RECT) {
         self.place_under(rect, None);
+    }
+
+    /// Takes the pointer only within `area` (on the screen; none: all over it). Elsewhere it is as if it were not
+    /// there for this thread's windows under it, which take the pointer there: the room round a sheet for its shadows,
+    /// over the window it is shown beside (the card beside the AI component's dock, over the dock).
+    pub fn take_pointer_within(&self, area: Option<RECT>) {
+        TAKES.with(|takes| {
+            let mut takes = takes.borrow_mut();
+            takes.retain(|(of, _)| *of != self.hwnd.0 as isize);
+            takes.extend(area.map(|area| (self.hwnd.0 as isize, area)));
+        });
     }
 
     /// Kept under the panel while it is open (a widget: one stuck to the edge the panel opens at was over it,
@@ -494,6 +519,11 @@ impl Window {
         super::ai_card::went(self.hwnd);
     }
 
+    /// Whether it lets clicks through now (see `set_click_through`).
+    pub fn lets_clicks_through(&self) -> bool {
+        self.click_through
+    }
+
     /// Lets clicks through to whatever is underneath, or takes them. Only
     /// a layered window lets them through to another program's: one made
     /// without the style has it for as long as it does (given no layer
@@ -536,6 +566,30 @@ pub fn desktop_window() -> Option<HWND> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window taking the pointer only within an area of it lets this thread's window under it take it elsewhere: the
+    /// pointer there is that window's, as if the one over it were not there, and within the area its own. Let take it
+    /// all over again, it does.
+    #[test]
+    fn a_window_takes_the_pointer_only_where_it_is_told() {
+        use windows::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+        let (under, over) = (Window::new().unwrap(), Window::new().unwrap());
+        under.place(RECT { left: 300, top: 300, right: 500, bottom: 400 });
+        over.place(RECT { left: 300, top: 300, right: 500, bottom: 500 });
+        under.show();
+        over.show();
+        over.take_pointer_within(Some(RECT { left: 300, top: 380, right: 500, bottom: 500 }));
+        let at = |x: i32, y: i32| unsafe { WindowFromPoint(POINT { x, y }) };
+        let (room, sheet) = (at(400, 340), at(400, 450));
+        over.take_pointer_within(None);
+        let all = at(400, 340);
+        let windows = (under.hwnd, over.hwnd);
+        over.destroy();
+        under.destroy();
+        assert_eq!(room, windows.0, "the pointer over its room not the window under it's");
+        assert_eq!(sheet, windows.1, "the pointer within its area not its own");
+        assert_eq!(all, windows.1, "let take it all over, it does not");
+    }
 
     /// Asked to close as a window is (Alt+F4), it is not destroyed: its thread is told instead.
     #[test]

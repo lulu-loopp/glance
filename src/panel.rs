@@ -3205,6 +3205,8 @@ impl<'a> Panel<'a> {
         let (Some(placement), Some(cursor)) = (&self.placement, cursor_position()) else { return };
         // (Its buttons' row outside it is on it: see `Placement::rack`.)
         let on_panel = contains(&placement.panel, cursor) || placement.rack.is_some_and(|(rack, _)| contains(&rack, cursor));
+        // (Where it is in the window, physical px.)
+        let client = POINT { x: cursor.x - placement.window.left, y: cursor.y - placement.window.top };
         // (The card beside the AI component's dock, and the way to it from its ring, are the panel's while it is up.)
         let carded = self.carding && crate::ui::ai_card::holds(cursor);
         let in_reach = contains(&placement.reach, cursor) || carded;
@@ -3217,6 +3219,8 @@ impl<'a> Panel<'a> {
         let (pressed, elsewhere) = self.presses_since(down);
         let held = down || pressed;
         if !on_panel && !carded {
+            // (Gone from it: nothing found under where it was as what is drawn moves, see `hover_again`.)
+            self.pointer = None;
             // (What it said under it goes with it: a drive's row, the line that switches players, a name cut short. So
             // does the card beside the AI component's dock.)
             self.unsay();
@@ -3224,6 +3228,11 @@ impl<'a> Panel<'a> {
                 self.next_frame = now;
             }
             self.follow_card();
+        }
+        // Come onto it while its window let clicks through, the pointer's moves went to what is under it: what it is on
+        // is found now, not as it next moves (it may rest where it came).
+        if on_panel && self.window.lets_clicks_through() {
+            self.hover_at(client);
         }
         // Around the panel the window is only shadow; clicks there belong
         // to whatever is underneath.
@@ -4787,7 +4796,7 @@ impl<'a> Panel<'a> {
     /// moving to new places): lit as it is.
     fn hover_again(&mut self) {
         let Some(at) = self.pointer else { return };
-        let hover = self.hit_at(at).filter(|hit| hit.list().is_none());
+        let hover = self.lit_at(at);
         if hover != self.hover {
             // (What was said of what was there is not of what is there now.)
             self.unsay();
@@ -4842,6 +4851,17 @@ impl<'a> Panel<'a> {
         self.next_frame = Instant::now();
     }
 
+    /// What the pointer at `client` (physical px in the window) lights: what it is on (a list itself is not lit, its
+    /// rows are), or, on its way from a ring of the AI component's dock to the card beside it (over the rest of the
+    /// dock, across to the card), that ring still, its card up.
+    fn lit_at(&self, client: POINT) -> Option<Hit> {
+        let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
+        match (hover, self.hover) {
+            (hover, Some(Hit::AiSlot(source))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(source)),
+            (hover, _) => hover,
+        }
+    }
+
     /// The pointer moved over the panel: lights what it is over.
     fn hover_at(&mut self, client: POINT) {
         self.pointer = Some(client);
@@ -4859,13 +4879,7 @@ impl<'a> Panel<'a> {
             None if self.hit_at(client).is_some_and(|hit| hit.takes_press()) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_HAND),
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
-        let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
-        // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
-        // ring stays lit, its card up.)
-        let hover = match (hover, self.hover) {
-            (hover, Some(Hit::AiSlot(source))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(source)),
-            (hover, _) => hover,
-        };
+        let hover = self.lit_at(client);
         if hover != self.hover {
             // What a press does, said under what says so (a drive's row, the line that switches players). Nothing while
             // a thing is dragged off a station's lane: the pointer is the drag's, and nothing here would hear it go

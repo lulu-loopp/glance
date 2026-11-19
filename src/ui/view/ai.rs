@@ -447,12 +447,13 @@ fn windows_of(limit: Option<&crate::ai::Limit>, now: u64, lang: Lang) -> Vec<Win
             .windows
             .iter()
             .map(|window| {
-                let length = window.minutes as u64 * 60_000;
                 let over = window.resets.is_some_and(|resets| resets <= now);
-                let resets = match window.resets {
-                    Some(_) if over => lang.pick("已重置", "Reset").into(),
-                    Some(resets) => {
-                        let left = left_in((resets - now).div_ceil(60_000), lang);
+                // (How long till it starts again, and so how much of it has gone, as of the minute: as it is told.)
+                let left = window.resets.filter(|_| !over).map(|resets| (resets - now).div_ceil(60_000));
+                let resets = match left {
+                    _ if over => lang.pick("已重置", "Reset").into(),
+                    Some(left) => {
+                        let left = left_in(left, lang);
                         match lang {
                             Lang::Zh => format!("{left}后重置"),
                             Lang::En => format!("Resets in {left}"),
@@ -463,7 +464,7 @@ fn windows_of(limit: Option<&crate::ai::Limit>, now: u64, lang: Lang) -> Vec<Win
                 Window {
                     name: window_name(window.minutes, lang),
                     used: if over { 0.0 } else { (window.used / 100.0).clamp(0.0, 1.0) },
-                    gone: window.resets.filter(|_| !over && length > 0).map(|resets| (1.0 - (resets - now) as f32 / length as f32).clamp(0.0, 1.0)),
+                    gone: left.filter(|_| window.minutes > 0).map(|left| (1.0 - left as f32 / window.minutes as f32).clamp(0.0, 1.0)),
                     resets,
                 }
             })
@@ -1040,6 +1041,21 @@ pub(super) mod tests {
 
         fn lane(id: &str, usage: Option<&crate::ai::Usage>) -> Vec<Block> {
             lane_of(id, &Prefs::default(), Lang::Zh, usage, NOON, Some(false)).unwrap()
+        }
+
+        /// How much of a window has gone by is told as of the minute, as when it starts again is: the same through the
+        /// minute (the card beside the dock, which shows it, is not drawn again for each of its frames), the next minute
+        /// a minute more.
+        #[test]
+        fn a_windows_time_gone_is_told_as_of_the_minute() {
+            let usage = day();
+            let windows = |now: u64| match lane_of("ai:codex", &Prefs::default(), Lang::Zh, Some(&usage), now, Some(false)).unwrap().as_slice() {
+                [_, Block::Ai(AiBlock::Windows(windows))] => windows.clone(),
+                blocks => panic!("{} blocks", blocks.len()),
+            };
+            assert_eq!(windows(NOON + 1_000), windows(NOON + 59_000));
+            let (minute, next) = (windows(NOON + 1_000)[0].gone.unwrap(), windows(NOON + 61_000)[0].gone.unwrap());
+            assert!((next - minute - 1.0 / 300.0).abs() < 1e-5, "{minute} then {next}");
         }
 
         /// A source's lane, closed: its head (its name, its plan, when it was last heard of) and each window of its

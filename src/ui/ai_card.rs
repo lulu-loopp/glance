@@ -1,8 +1,9 @@
 //! The card beside the AI component's dock: the lane of the source whose ring the pointer rests on, all it tells (its
 //! limit's windows, what it spent today by model and by kind, its sessions), on a sheet of the dock's skin as a menu
 //! opened on the dock is (glass's a piece of the glass, frosted as the dock is), beside the dock, its middle by that
-//! ring's, on its screen. A window of its own, one for this thread: it stays while the pointer is on the ring, on the
-//! card or on its way between them (see `holds`), and goes as the window the dock is drawn in is hidden or destroyed.
+//! ring's, on its screen. A window of its own, one for this thread, that takes the pointer on its sheet alone: it stays
+//! while the pointer is on the ring, on the card or on its way between them (see `holds`), and goes as the window the
+//! dock is drawn in is hidden or destroyed.
 
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -91,6 +92,7 @@ pub struct Of<'a> {
 /// of it on that screen, till `hide` or till `owner` (the window the dock is drawn in) is hidden or destroyed. Shown
 /// again as it is, nothing is drawn.
 pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
+    let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.source));
     let controller = &crate::app().controller;
     let (info, history) = (controller.info(), controller.history.samples());
     // (Nothing read of the machine yet: the lanes are drawn from its last sample.)
@@ -142,12 +144,13 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
         Side::Below => (along(at.x, plate_w, work.left, work.right), by.bottom + gap),
         Side::Above => (along(at.x, plate_w, work.left, work.right), by.top - gap - plate_h),
     };
-    let holds = held_by(about, RECT { left, top, right: left + plate_w, bottom: top + plate_h });
+    let sheet = RECT { left, top, right: left + plate_w, bottom: top + plate_h };
+    let holds = held_by(about, sheet);
     let mut key = std::hash::DefaultHasher::new();
     (&lane, of.theme.skin, of.theme.dark, of.look.frost.to_bits(), of.look.zoom.to_bits(), left, top, plate_w, plate_h).hash(&mut key);
     let key = key.finish();
     // (On the device for the screen it shows on: see `gfx::on_screen`.)
-    let Ok(gfx) = gfx::for_area(RECT { left, top, right: left + plate_w, bottom: top + plate_h }) else { return };
+    let Ok(gfx) = gfx::for_area(sheet) else { return };
     CARD.with(|kept| {
         let mut kept = kept.borrow_mut();
         if kept.is_none() {
@@ -162,6 +165,8 @@ pub fn show(owner: HWND, of: Of, by: RECT, about: RECT, side: Side) {
             card.gfx = gfx.clone();
         }
         card.holds = Some(holds);
+        // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's.)
+        card.window.take_pointer_within(Some(sheet));
         if card.shown == Some(key) {
             return;
         }
