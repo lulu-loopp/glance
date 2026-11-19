@@ -681,14 +681,8 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
         AiBlock::Models(rows) => {
             let bar_y = y + GAP;
             part("bar");
-            let (bx, by, bw, bh) = frame.on_pixels(left, bar_y, width, MODELS_BAR);
-            frame.fill_rounded(theme.track, bx, by, bw, bh, theme.meter_radius.min(MODELS_BAR / 2.0));
-            let mut x = bx;
-            for (at, (_, share, _)) in rows.iter().enumerate() {
-                let w = share * bw;
-                frame.fill(ink.trace.alpha(strength(at)), x, by, w, bh);
-                x += w;
-            }
+            let parts: Vec<_> = rows.iter().enumerate().map(|(at, (_, share, _))| (*share, ink.trace.alpha(strength(at)))).collect();
+            shares(frame, theme, (left, bar_y + (MODELS_BAR - theme.meter_height) / 2.0, width), &parts);
             for (at, (model, _, value)) in rows.iter().enumerate() {
                 let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + ROW_GAP);
                 part(&at.to_string());
@@ -957,9 +951,106 @@ fn meter(frame: &dyn Canvas, theme: &Theme, (x, y, width): (f32, f32, f32), frac
     }
 }
 
+/// Shares of one whole along a bar, each in its colour, from the left: the bar as a meter is (as tall, its ends as
+/// round), each share cut out of that one rounded bar, so the bar's round ends are the first's and the last's and where
+/// two meet is straight. (Where each ends on whole pixels as a meter's filling does: one after another, no seam.)
+fn shares(frame: &dyn Canvas, theme: &Theme, (x, y, width): (f32, f32, f32), parts: &[(f32, Color)]) {
+    let whole = frame.on_pixels(x, y, width, theme.meter_height);
+    let (bx, by, bw, bh) = whole;
+    frame.fill_rounded(theme.track, bx, by, bw, bh, theme.meter_radius);
+    let (mut gone, mut from) = (0.0, bx);
+    for &(share, colour) in parts {
+        gone += share;
+        let (_, _, filled, _) = filled_part(frame, whole, gone, false);
+        let to = bx + filled;
+        if to > from {
+            frame.clip(from, by, to - from, bh);
+            frame.fill_rounded(colour, bx, by, bw, bh, theme.meter_radius);
+            frame.unclip();
+            from = to;
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// What a bar's drawing came to: each fill, the box it was asked for, how round, and the clip it was drawn in.
+    #[derive(Default)]
+    struct Bars {
+        clips: std::cell::RefCell<Vec<(f32, f32, f32, f32)>>,
+        fills: std::cell::RefCell<Vec<(Color, (f32, f32, f32, f32), Option<f32>, Option<(f32, f32, f32, f32)>)>>,
+    }
+
+    impl Canvas for Bars {
+        fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}
+        fn markdown(&self, _: &str, _: Font, _: crate::ui::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
+        fn measure(&self, _: &str, _: Font) -> f32 {
+            0.0
+        }
+        fn baseline(&self, font: Font) -> (f32, f32) {
+            (font.size, 0.0)
+        }
+        fn ink(&self, _: &str, _: Font) -> (f32, f32) {
+            (0.0, 0.0)
+        }
+        fn clip(&self, x: f32, y: f32, w: f32, h: f32) {
+            self.clips.borrow_mut().push((x, y, w, h));
+        }
+        fn unclip(&self) {
+            self.clips.borrow_mut().pop();
+        }
+        fn fill(&self, color: Color, x: f32, y: f32, w: f32, h: f32) {
+            self.fills.borrow_mut().push((color, (x, y, w, h), None, self.clips.borrow().last().copied()));
+        }
+        fn fill_rounded(&self, color: Color, x: f32, y: f32, w: f32, h: f32, radius: f32) {
+            self.fills.borrow_mut().push((color, (x, y, w, h), Some(radius), self.clips.borrow().last().copied()));
+        }
+        fn fill_circle(&self, _: Color, _: Point, _: f32) {}
+        fn stroke(&self, _: &[Point], _: Color, _: f32) {}
+        fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
+        fn fill_shape(&self, _: &[Point], _: Fill) {}
+        fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
+        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn icon(&self, _: Icon, _: Point, _: f32, _: Color) {}
+        fn mark(&self, _: Mark, _: Point, _: f32, _: Color, _: f32) {}
+        fn picture_within(&self, _: &crate::ui::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+        fn pixels_per_dip(&self) -> f32 {
+            1.0
+        }
+    }
+
+    /// The models' shares along their bar are drawn as a meter is, in every skin: the bar as tall and its ends as round
+    /// as a limit's meter, each share cut out of that one rounded bar, so the first's left end and the last's right end
+    /// are the bar's round ends, where two shares meet is straight, and the shares cover the bar edge to edge.
+    #[test]
+    fn the_models_shares_are_cut_from_one_bar_as_round_as_a_meter() {
+        for skin in [Skin::Glass, Skin::Fluent, Skin::Paper] {
+            let theme = Theme::new(skin, false);
+            let (meter, bar) = (Bars::default(), Bars::default());
+            super::meter(&meter, &theme, (10.0, 20.0, 300.0), 0.5, Color::hex(0x123456, 1.0));
+            let parts = [(0.6, Color::hex(0xff0000, 1.0)), (0.3, Color::hex(0x00ff00, 1.0)), (0.1, Color::hex(0x0000ff, 1.0))];
+            shares(&bar, &theme, (10.0, 20.0, 300.0), &parts);
+            let track = meter.fills.borrow()[0];
+            let fills = bar.fills.borrow();
+            assert_eq!(fills[0], track, "{skin:?}: the track as a meter's");
+            let mut from = track.1 .0;
+            for (&(_, colour), &(drawn, at, round, clip)) in parts.iter().zip(&fills[1..]) {
+                assert_eq!((drawn, at, round), (colour, track.1, track.2), "{skin:?}: a share drawn as the whole bar, as round");
+                let clip = clip.expect("each share clipped to its part");
+                assert_eq!((clip.0, clip.1, clip.3), (from, track.1 .1, track.1 .3), "{skin:?}: shares meet");
+                from = clip.0 + clip.2;
+            }
+            assert_eq!(fills.len(), 1 + parts.len());
+            assert_eq!(from, track.1 .0 + track.1 .2, "{skin:?}: the last share ends where the bar does");
+        }
+    }
 
     /// Tokens are told in the units of the language they are read in.
     #[test]
