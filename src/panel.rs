@@ -4871,9 +4871,9 @@ impl<'a> Panel<'a> {
             Edge::Top => Side::Below,
         };
         let look = self.menu_look();
-        // (Beside its buttons' row too, where it has one outside it: the card lay over them.)
-        let by = placement.rack.map_or(placement.panel, |(rack, _)| union(placement.panel, rack));
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, by, &spots, side);
+        // (Clear of its buttons' row, where it has one outside it: the card lay over them.)
+        let clear = placement.rack.map(|(rack, _)| rack);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side, clear);
         self.carding = true;
     }
 

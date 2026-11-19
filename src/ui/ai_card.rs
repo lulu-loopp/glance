@@ -152,8 +152,11 @@ fn middle(rect: RECT) -> POINT {
 }
 
 /// Where a card `plate` large (physical px) shows beside `by` on `side`, `gap` from it: along it, its middle by `at`'s
-/// (its ring's middle), all of it in `work` (`gap` in from its edges).
-fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: i32, work: RECT) -> RECT {
+/// (its ring's middle), all of it in `work` (`gap` in from its edges), and clear of `clear` (the dock's buttons outside
+/// it, on the screen): where it would lie over them, slid along the dock past them (the nearer way that keeps it in
+/// `work`), `gap` from them, as near the dock as every other card. (Placed beside the buttons too, every card stood off
+/// the dock by their row, far from the ring it tells of.)
+fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: i32, work: RECT, clear: Option<RECT>) -> RECT {
     let along = |middle: i32, length: i32, low: i32, high: i32| (middle - length / 2).min(high - gap - length).max(low + gap);
     let (left, top) = match side {
         Side::Left => (by.left - gap - plate_w, along(at.y, plate_h, work.top, work.bottom)),
@@ -161,7 +164,30 @@ fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: 
         Side::Below => (along(at.x, plate_w, work.left, work.right), by.bottom + gap),
         Side::Above => (along(at.x, plate_w, work.left, work.right), by.top - gap - plate_h),
     };
-    RECT { left, top, right: left + plate_w, bottom: top + plate_h }
+    let sheet = RECT { left, top, right: left + plate_w, bottom: top + plate_h };
+    let Some(clear) = clear.filter(|clear| overlap(sheet, *clear, gap)) else { return sheet };
+    // (Along the dock: across it for a card under or over it, down it for one beside it.)
+    let (at, length, before, after, low, high) = match side {
+        Side::Below | Side::Above => (left, plate_w, clear.left - gap - plate_w, clear.right + gap, work.left + gap, work.right - gap),
+        Side::Left | Side::Right => (top, plate_h, clear.top - gap - plate_h, clear.bottom + gap, work.top + gap, work.bottom - gap),
+    };
+    let fits = |start: i32| start >= low && start + length <= high;
+    let to = match (fits(before), fits(after)) {
+        (true, true) => if at - before <= after - at { before } else { after },
+        (true, false) => before,
+        (false, true) => after,
+        // (No room past them either way: over them, as near its ring as it may be.)
+        (false, false) => at,
+    };
+    match side {
+        Side::Below | Side::Above => RECT { left: to, right: to + plate_w, ..sheet },
+        Side::Left | Side::Right => RECT { top: to, bottom: to + plate_h, ..sheet },
+    }
+}
+
+/// Whether `a` and `b` lie nearer than `gap` to each other, or over each other.
+fn overlap(a: RECT, b: RECT, gap: i32) -> bool {
+    a.left < b.right + gap && b.left < a.right + gap && a.top < b.bottom + gap && b.top < a.bottom + gap
 }
 
 /// Whether all of `inner` is in `outer`.
@@ -180,9 +206,9 @@ pub struct Of<'a> {
 }
 
 /// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by its spot's (among `spots`, every
-/// spot on the dock and where it is), all of it on that screen, till `hide` or till `owner` (the window the dock is
+/// spot on the dock and where it is), all of it on that screen, clear of `clear` (the dock's buttons outside it), till `hide` or till `owner` (the window the dock is
 /// drawn in) is hidden or destroyed. Shown again as it is, nothing is drawn.
-pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side) {
+pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, clear: Option<RECT>) {
     let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.spot) else { return };
     let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.spot));
     let controller = &crate::app().controller;
@@ -230,7 +256,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side) {
     let px = |dips: f32| (dips * scale).round() as i32;
     let (plate_w, plate_h, gap) = (px(plate.0), px(plate.1), px(GAP));
     // Beside the dock; along it, its middle by the ring's, all of it in the work area.
-    let sheet = placed(by, at, side, (plate_w, plate_h), gap, work);
+    let sheet = placed(by, at, side, (plate_w, plate_h), gap, work, clear);
     let (left, top) = (sheet.left, sheet.top);
     let holds = held_by(about, sheet);
     // (On the device for the screen it shows on: see `gfx::on_screen`.)
@@ -258,7 +284,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side) {
                 if card.reach.is_none_or(|reach| !within_area(sheet, reach)) {
                     let sheets = spots.iter().filter_map(|&(spot, at)| {
                         let (plate, _) = sheet_of(of.theme, laid(&view::ai::card(&scene, spot)?).lanes()[0]);
-                        Some(placed(by, middle(at), side, (px(plate.0), px(plate.1)), gap, work))
+                        Some(placed(by, middle(at), side, (px(plate.0), px(plate.1)), gap, work, clear))
                     });
                     card.reach = reach(sheets.chain([sheet]));
                 }
@@ -437,7 +463,7 @@ mod tests {
                         Side::Below | Side::Above => RECT { left: by.left + w * i / 4, top: by.top, right: by.left + w * (i + 1) / 4, bottom: by.bottom },
                         _ => RECT { left: by.left, top: by.top + h * i / 4, right: by.right, bottom: by.top + h * (i + 1) / 4 },
                     };
-                    placed(by, middle(ring), side, (plate_w, [300, 1100, 200, 700][i as usize]), gap, work)
+                    placed(by, middle(ring), side, (plate_w, [300, 1100, 200, 700][i as usize]), gap, work, None)
                 })
                 .collect();
             let area = reach(sheets.iter().copied()).unwrap();
@@ -462,6 +488,31 @@ mod tests {
             assert_eq!(round(&theme, (420.0, 460.0)), theme.radius, "{skin:?}");
         }
         assert_eq!(round(&Theme::new(Skin::Glass, true), (420.0, 30.0)), 15.0);
+    }
+
+    /// A card that would lie over the dock's buttons outside it slides along the dock past them, as near the dock as
+    /// every other card: under a dock across the top, its buttons under its right end, the last ring's card slides left
+    /// of them (to their right, where the screen ends there), the first ring's stays over its ring; beside a dock down
+    /// the right edge, its buttons in a column on its left from its top, the first ring's card slides under them.
+    #[test]
+    fn a_card_slides_past_the_docks_buttons() {
+        let (work, gap, plate) = (RECT { left: 0, top: 0, right: 3440, bottom: 1400 }, 16, (1100, 900));
+        let (dock, buttons) = (RECT { left: 1400, top: 10, right: 2200, bottom: 140 }, RECT { left: 2080, top: 140, right: 2200, bottom: 200 });
+        let plain = placed(dock, POINT { x: 2140, y: 75 }, Side::Below, plate, gap, work, None);
+        assert!(overlap(plain, buttons, gap));
+        let slid = placed(dock, POINT { x: 2140, y: 75 }, Side::Below, plate, gap, work, Some(buttons));
+        assert_eq!((slid.top, slid.right), (plain.top, buttons.left - gap));
+        let first = placed(dock, POINT { x: 1450, y: 75 }, Side::Below, plate, gap, work, Some(buttons));
+        assert_eq!(first, placed(dock, POINT { x: 1450, y: 75 }, Side::Below, plate, gap, work, None));
+        // (No room left of them: to their right.)
+        let narrow = RECT { left: 1400, right: 3440, ..work };
+        let right = placed(dock, POINT { x: 2140, y: 75 }, Side::Below, (800, 900), gap, narrow, Some(buttons));
+        assert_eq!(right.left, buttons.right + gap);
+        assert!(!overlap(right, buttons, gap) && right.top == plain.top);
+        // (Beside a dock down the right edge, its buttons on its left from its top.)
+        let (dock, buttons) = (RECT { left: 3300, top: 300, right: 3430, bottom: 1000 }, RECT { left: 3240, top: 300, right: 3300, bottom: 420 });
+        let slid = placed(dock, POINT { x: 3360, y: 340 }, Side::Left, (500, 300), gap, work, Some(buttons));
+        assert!(!overlap(slid, buttons, gap) && slid.right == dock.left - gap && slid.top == buttons.bottom + gap);
     }
 
     /// The pointer keeps the card up on the ring, on the card, and on its way from one to the other (over the rest of

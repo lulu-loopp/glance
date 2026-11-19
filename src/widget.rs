@@ -3796,14 +3796,14 @@ impl Widget {
             Side::Left
         };
         let look = self.menu_look();
-        // (Beside its buttons too, wherever they are outside it: the card lay over them.)
-        let by = self.content.buttons().iter().filter_map(|button| self.button_rect(*button)).fold(by, |all, button| RECT {
+        // (Clear of its buttons, wherever they are outside it: the card lay over them.)
+        let clear = self.content.buttons().iter().filter_map(|button| self.button_rect(*button)).reduce(|all, button| RECT {
             left: all.left.min(button.left),
             top: all.top.min(button.top),
             right: all.right.max(button.right),
             bottom: all.bottom.max(button.bottom),
         });
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme, prefs, lang, look }, by, &spots, side);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme, prefs, lang, look }, by, &spots, side, clear);
         self.carding = true;
     }
 
