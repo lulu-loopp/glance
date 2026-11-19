@@ -1744,9 +1744,22 @@ impl Frame<'_> {
         self.placed_icon(icon, centre, size, color, true);
     }
 
+    /// The AI icon `ms` into its greeting (see `icons::ai_waving`), drawn as `Canvas::icon` draws it.
+    pub fn ai_waving(&self, ms: f32, centre: Point, size: f32, color: Color) {
+        let (lines, spots) = icons::ai_waving(ms);
+        let (Ok(path), Ok(spots)) = (self.gfx.geometry(&lines, None), self.gfx.geometry(&spots, Some(D2D1_FILL_MODE_WINDING))) else { return };
+        self.placed_paths(&path, Some(&spots), centre, size, color, false);
+    }
+
     /// `icon` drawn about `centre`, `size` across, in `color`: its lines, or (`solid`) filled too.
     fn placed_icon(&self, icon: Icon, centre: Point, size: f32, color: Color, solid: bool) {
         let Some(path) = self.gfx.icon_path(icon) else { return };
+        self.placed_paths(&path, self.gfx.icon_spots(icon).as_ref(), centre, size, color, solid);
+    }
+
+    /// An icon's lines `path` and what of it is filled (`spots`), on its 24-unit grid, drawn about `centre`, `size`
+    /// across, in `color`, its lines filled too where `solid`.
+    fn placed_paths(&self, path: &ID2D1PathGeometry1, spots: Option<&ID2D1PathGeometry1>, centre: Point, size: f32, color: Color, solid: bool) {
         // Its middle where a circle's is put (on a whole pixel: a button's plate, its ring and its glyph one about
         // another), and as many pixels across as that leaves its box's corner on a whole pixel too (an even number:
         // drawn between two, every stroke of it was spread over both, and blurred).
@@ -1767,13 +1780,13 @@ impl Frame<'_> {
             self.dc.SetTransform(&placed);
             // (Solid: filled, and its edge drawn round as ever, its corners rounded as a stroked one's.)
             if solid {
-                self.dc.FillGeometry(&path, self.brush(color), None);
+                self.dc.FillGeometry(path, self.brush(color), None);
             }
-            self.dc.DrawGeometry(&path, self.brush(color), icons::STROKE, &self.gfx.round);
+            self.dc.DrawGeometry(path, self.brush(color), icons::STROKE, &self.gfx.round);
             // What of it is filled, its edge round too.
-            if let Some(spots) = self.gfx.icon_spots(icon) {
-                self.dc.FillGeometry(&spots, self.brush(color), None);
-                self.dc.DrawGeometry(&spots, self.brush(color), icons::SPOT_EDGE, &self.gfx.round);
+            if let Some(spots) = spots {
+                self.dc.FillGeometry(spots, self.brush(color), None);
+                self.dc.DrawGeometry(spots, self.brush(color), icons::SPOT_EDGE, &self.gfx.round);
             }
             self.dc.SetTransform(&parent);
         }

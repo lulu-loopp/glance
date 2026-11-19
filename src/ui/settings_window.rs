@@ -2184,6 +2184,8 @@ struct Ui {
     /// What the pointer is over as the frame being drawn is drawn: found among the last frame's targets before they
     /// are made anew (found among those being made, it was none, and nothing lit under the pointer).
     hovered_now: Option<Target>,
+    /// When the pointer last came onto the AI page's row in the pages' list (Qiuqiu greets it, see `waving`).
+    waved: Option<Instant>,
     /// Where what is drawn follows the pointer itself, not what it is over (what plays, in its preview), as the last
     /// frame was drawn: a move there, or out of there, is drawn.
     follows_pointer: Vec<Rect>,
@@ -2487,6 +2489,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             pointer: None,
             pressed: None,
             hovered_now: None,
+            waved: None,
             follows_pointer: Vec::new(),
             screens: crate::screens::all(),
             shown_edge: None,
@@ -6448,7 +6451,7 @@ It can be disconnected here at any time, and the status line command put back.",
             self.gfx.settle();
         }
         // (A row held still moves only as the pointer does, which asks for a frame itself.)
-        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning(now);
+        let moving = self.dots_moving || self.motion.values().any(|t| !t.done(now)) || self.scroll != self.scroll_target || self.layers.turn.turning(now) || self.waving(now).is_some();
         self.settle_thumbs = false;
         self.next_frame = if moving {
             now
@@ -6476,10 +6479,16 @@ It can be disconnected here at any time, and the status line command put back.",
         if !self.mica {
             fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
         }
-        self.hovered_now = self.hovered();
+        let hovered = self.hovered();
+        // The pointer come onto the AI page's row: Qiuqiu greets it there, once (see `icons::ai_waving`), unless
+        // Windows is told to show no animations.
+        if hovered == Some(Target::Nav(Page::Ai)) && self.hovered_now != hovered && !crate::panel::reduced_motion() {
+            self.waved = Some(now);
+        }
+        self.hovered_now = hovered;
         self.targets.clear();
         self.follows_pointer.clear();
-        self.paint_nav(frame, &palette);
+        self.paint_nav(frame, &palette, now);
         // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
         // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
         // largest there is, and its knob jumped as the window first showed).
@@ -6502,7 +6511,7 @@ It can be disconnected here at any time, and the status line command put back.",
     /// The pages' list: the window's name, then each page, the one shown lit and marked in the accent. The components'
     /// own pages come under their heading (a name, not a page), and a rule sets them apart from the phone's and
     /// Glance's own after them.
-    fn paint_nav(&mut self, frame: &Frame, palette: &Palette) {
+    fn paint_nav(&mut self, frame: &Frame, palette: &Palette, now: Instant) {
         let lang = self.lang;
         let hovered = self.hovered_now.clone();
         let left = 16.0;
@@ -6539,7 +6548,11 @@ It can be disconnected here at any time, and the status line command put back.",
                 fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
             }
             let cy = r.y + r.h / 2.0;
-            frame.icon(page.icon(), Point { x: r.x + 22.0, y: cy }, 16.0, palette.text);
+            let at = Point { x: r.x + 22.0, y: cy };
+            match self.waving(now).filter(|_| page == Page::Ai) {
+                Some(ms) => frame.ai_waving(ms, at, 16.0, palette.text),
+                None => frame.icon(page.icon(), at, 16.0, palette.text),
+            }
             text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
             // A newer Glance is out, the site has a notice unread, or a report sent has news unread: a dot on the page
             // they are seen from.
@@ -6548,6 +6561,12 @@ It can be disconnected here at any time, and the status line command put back.",
             }
             self.targets.push((r, target));
         }
+    }
+
+    /// How far Qiuqiu, the AI page's icon in the pages' list, is into greeting the pointer (ms), while it is.
+    fn waving(&self, now: Instant) -> Option<f32> {
+        let gone = now.saturating_duration_since(self.waved?);
+        (gone < crate::ui::icons::AI_WAVE).then_some(gone.as_secs_f32() * 1000.0)
     }
 
     fn paint_list(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {

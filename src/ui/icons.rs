@@ -241,7 +241,7 @@ impl Icon {
             Icon::MoveDiagonal => &["M11 19H5v-6", "M13 5h6v6", "M19 5 5 19"],
             Icon::MoveDiagonal2 => &["M19 13v6h-6", "M5 11V5h6", "m5 5 14 14"],
             Icon::MonitorSmartphone => &["M18 8V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h8", "M10 19v-3.96 3.15", "M7 19h5", "M18 12h2a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-2a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"],
-            Icon::Ai => &["M19.3 13a8.3 8.3 0 1 1-16.6 0a8.3 8.3 0 1 1 16.6 0z", "M10.41 10.23 9.79 13.17", "M14.81 10.23 14.19 13.17"],
+            Icon::Ai => &[AI_FACE, "M10.41 10.23 9.79 13.17", "M14.81 10.23 14.19 13.17"],
             Icon::Laptop => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
             Icon::Calendar => &["M8 2v4", "M16 2v4", "M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M3 10h18"],
             Icon::File => &["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z", "M14 2v4a2 2 0 0 0 2 2h4"],
@@ -336,7 +336,7 @@ impl Icon {
     fn spot_data(self) -> &'static [&'static str] {
         match self {
             // (Qiuqiu's spark, beside its face at the top right.)
-            Icon::Ai => &["M20 1.4Q20.42 3.58 22.6 4 20.42 4.42 20 6.6 19.58 4.42 17.4 4 19.58 3.58 20 1.4Z"],
+            Icon::Ai => &[AI_SPARK],
             _ => &[],
         }
     }
@@ -350,6 +350,75 @@ impl Icon {
 /// How an icon is stroked: this wide on its 24-unit grid, with round ends
 /// and joins.
 pub const STROKE: f32 = 2.0;
+
+/// Qiuqiu's (the AI icon's) face, and its spark (see `Icon::spots`), about `AI_SPARK_AT`.
+const AI_FACE: &str = "M19.3 13a8.3 8.3 0 1 1-16.6 0a8.3 8.3 0 1 1 16.6 0z";
+const AI_SPARK: &str = "M20 1.4Q20.42 3.58 22.6 4 20.42 4.42 20 6.6 19.58 4.42 17.4 4 19.58 3.58 20 1.4Z";
+const AI_SPARK_AT: (f32, f32) = (20.0, 4.0);
+
+/// Its eyes (each a line from one end to the other): open, closing (a point), shut (a short line across).
+const EYES_OPEN: [[f32; 4]; 2] = [[10.41, 10.23, 9.79, 13.17], [14.81, 10.23, 14.19, 13.17]];
+const EYES_CLOSING: [[f32; 4]; 2] = [[10.1, 11.7, 10.1, 11.7], [14.5, 11.7, 14.5, 11.7]];
+const EYES_SHUT: [[f32; 4]; 2] = [[9.2, 11.55, 11.0, 11.85], [13.6, 11.55, 15.4, 11.85]];
+
+/// How long Qiuqiu greets the pointer come onto it (see `ai_waving`).
+pub const AI_WAVE: std::time::Duration = std::time::Duration::from_millis(760);
+
+/// The AI icon `ms` into its greeting (`AI_WAVE` long, as it is at rest at either end): its lines and what of it is
+/// filled (see `Icon::spots`), on the 24-unit grid. Its spark shrinks to under a third (300 ms, easing in and out) and
+/// springs back past its size (460 ms), and as it does the eyes blink (280 ms from 140 ms: closing to a point, shut a
+/// moment, open again).
+pub fn ai_waving(ms: f32) -> (Vec<Figure>, Vec<Figure>) {
+    let blink = [(140.0, EYES_OPEN), (210.0, EYES_CLOSING), (245.0, EYES_SHUT), (315.0, EYES_SHUT), (350.0, EYES_CLOSING), (420.0, EYES_OPEN)];
+    let eyes = match blink.windows(2).find(|pair| ms < pair[1].0) {
+        Some([(from, a), (to, b)]) if ms > *from => {
+            let k = (ms - from) / (to - from);
+            std::array::from_fn(|eye| std::array::from_fn(|i| a[eye][i] + (b[eye][i] - a[eye][i]) * k))
+        }
+        _ => EYES_OPEN,
+    };
+    let spark = if ms <= 300.0 {
+        1.0 - 0.7 * eased((0.4, 0.0, 0.6, 1.0), (ms / 300.0).max(0.0))
+    } else {
+        0.3 + 0.7 * eased((0.3, 0.0, 0.2, 1.6), ((ms - 300.0) / 460.0).min(1.0))
+    };
+    let mut lines = parse(AI_FACE);
+    for [x0, y0, x1, y1] in eyes {
+        lines.push(Figure { start: (x0, y0), segments: vec![Segment::Line((x1, y1))], closed: false });
+    }
+    (lines, parse(AI_SPARK).iter().map(|figure| scaled(figure, AI_SPARK_AT, spark)).collect())
+}
+
+/// `figure` made `k` times as large about `about`.
+fn scaled(figure: &Figure, about: (f32, f32), k: f32) -> Figure {
+    let point = |(x, y): (f32, f32)| (about.0 + (x - about.0) * k, about.1 + (y - about.1) * k);
+    let segments = figure
+        .segments
+        .iter()
+        .map(|segment| match *segment {
+            Segment::Line(to) => Segment::Line(point(to)),
+            Segment::Arc { to, radii, rotation, large, clockwise } => Segment::Arc { to: point(to), radii: (radii.0 * k, radii.1 * k), rotation, large, clockwise },
+            Segment::Cubic(c1, c2, to) => Segment::Cubic(point(c1), point(c2), point(to)),
+        })
+        .collect();
+    Figure { start: point(figure.start), segments, closed: figure.closed }
+}
+
+/// How far along a CSS cubic-bezier ease with control points (`x1`, `y1`) and (`x2`, `y2`) is at `x` (0 to 1) of its
+/// time: found by halving on the curve's parameter (its time rises with it where `x1` and `x2` are within 0 to 1).
+fn eased((x1, y1, x2, y2): (f32, f32, f32, f32), x: f32) -> f32 {
+    let at = |a: f32, b: f32, t: f32| 3.0 * a * t * (1.0 - t) * (1.0 - t) + 3.0 * b * t * t * (1.0 - t) + t * t * t;
+    let (mut low, mut high) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let t = (low + high) / 2.0;
+        if at(x1, x2, t) < x {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    at(y1, y2, (low + high) / 2.0)
+}
 
 /// How wide the edge of what of an icon is filled is drawn (see `Icon::spots`), round as its strokes are.
 pub const SPOT_EDGE: f32 = 1.0;
@@ -575,6 +644,28 @@ mod tests {
         let quad = parse("M0 0Q3 6 6 0t6 0");
         assert_eq!(quad[0].segments[0], Segment::Cubic((2.0, 4.0), (4.0, 4.0), (6.0, 0.0)));
         assert_eq!(quad[0].segments[1], Segment::Cubic((8.0, -4.0), (10.0, -4.0), (12.0, 0.0)));
+    }
+
+    /// Qiuqiu greets the pointer from its icon at rest and back to it (no jump as it starts or ends), its eyes shut
+    /// across in the middle of the blink, its spark shrunk to 0.3 at 300 ms and sprung past its size on its way back.
+    #[test]
+    fn qiuqiu_greets_from_rest_to_rest_blinking_as_its_spark_springs() {
+        let rest = (Icon::Ai.figures(), Icon::Ai.spots());
+        let near = |a: &[Figure], b: &[Figure]| a.len() == b.len() && a.iter().zip(b).all(|(a, b)| (a.start.0 - b.start.0).abs() < 1e-3 && (a.start.1 - b.start.1).abs() < 1e-3 && a.segments.len() == b.segments.len());
+        for ms in [0.0, AI_WAVE.as_millis() as f32] {
+            let (lines, spots) = ai_waving(ms);
+            assert!(near(&lines, &rest.0) && near(&spots, &rest.1), "{ms}");
+            assert_eq!(lines[1].segments, rest.0[1].segments, "{ms}");
+        }
+        // (Shut: each eye a short line across.)
+        let (lines, _) = ai_waving(280.0);
+        assert_eq!(lines[1].start, (EYES_SHUT[0][0], EYES_SHUT[0][1]));
+        assert_eq!(lines[2].segments, vec![Segment::Line((EYES_SHUT[1][2], EYES_SHUT[1][3]))]);
+        // (The spark's top point, 2.6 above its middle at rest.)
+        let top = |ms: f32| AI_SPARK_AT.1 - ai_waving(ms).1[0].start.1;
+        assert!((top(300.0) - 0.3 * 2.6).abs() < 1e-3, "{}", top(300.0));
+        assert!((500..700).any(|ms| top(ms as f32) > 2.6 * 1.05), "springs past its size");
+        assert!((top(0.0) - 2.6).abs() < 1e-4);
     }
 
     #[test]
