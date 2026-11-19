@@ -2527,6 +2527,9 @@ impl Lane {
     }
 }
 
+/// The share of echoes lost (see `latency::loss`) told in the signal colour: one in twenty or more.
+const LOSS_HOT: f32 = 0.05;
+
 /// A row of parts side by side (see `Block::Across`): as tall as the tallest.
 fn across_tall(row: &[Lane]) -> f32 {
     row.iter().map(|lane| lane.blocks.iter().map(Block::height).sum::<f32>()).fold(0.0, f32::max)
@@ -2973,12 +2976,18 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             if on("address") && scene.seen.address {
                 facts.push((lang.pick("地址", "Address").into(), shown(adapter.and_then(|a| a.ipv4.clone()), |ip| ip), false));
             }
+            if on("gateway") && scene.seen.gateway {
+                facts.push((lang.pick("网关", "Gateway").into(), shown(adapter.and_then(|a| a.gateway.clone()), |ip| ip), false));
+            }
             let link = |s: &Sample| s.network.as_ref().map(|a| a.link_bps).filter(|bps| *bps > 0);
             if on("link") && scene.seen.link {
                 facts.push((lang.pick("链路", "Link").into(), shown(link(s), text::link_speed), false));
             }
             if on("latency") {
                 facts.push((lang.pick("延迟", "Latency").into(), shown(s.ping_ms, |ms| format!("{ms:.0} ms")), false));
+            }
+            if on("loss") {
+                facts.push((lang.pick("丢包", "Loss").into(), shown(s.ping_loss, |loss| if loss == 0.0 { "0%".into() } else { text::percent(loss * 100.0) }), s.ping_loss.is_some_and(|loss| loss >= LOSS_HOT)));
             }
             if on("totals") {
                 let (down, up) = (text::bytes(s.net_total_down as f64), text::bytes(s.net_total_up as f64));
@@ -7672,6 +7681,7 @@ otepad.exe", "Notepad"),
             net_total_down: 0,
             net_total_up: 0,
             ping_ms: None,
+            ping_loss: None,
             network: None,
             disk_read: Some(0.0),
             disk_write: Some(0.0),

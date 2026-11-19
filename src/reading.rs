@@ -94,6 +94,9 @@ pub struct Sample {
     /// back in time.
     #[serde(default)]
     pub ping_ms: Option<f32>,
+    /// The share of the last echoes sent that went unanswered (0 to 1, see `latency::loss`), while they are sent.
+    #[serde(default)]
+    pub ping_loss: Option<f32>,
     pub disk_read: Option<f64>,
     pub disk_write: Option<f64>,
     /// Percent of the time the disks were busy.
@@ -289,6 +292,10 @@ pub struct NetworkInfo {
     pub name: String,
     pub model: String,
     pub ipv4: Option<String>,
+    /// The router traffic to the internet goes through, by its IPv4 address; none where there is none (a network of
+    /// one's own, nothing between), or where it is not read (macOS, as yet).
+    #[serde(default)]
+    pub gateway: Option<String>,
     pub link_bps: u64,
     /// The wireless network it is on, by its name; none on a wire, or
     /// where Windows does not say (it asks for its location service to be

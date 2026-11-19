@@ -96,8 +96,18 @@ const GPU: [Item; 9] = [
     item("engines", false),
 ];
 const MEMORY: [Item; 5] = [item("chart", true), item("speed", true), item("dimms", true), item("committed", false), item("cached", false)];
-/// (Its latency off till asked for: it sends echoes out, see `latency`.)
-const NETWORK: [Item; 7] = [item("chart", true), item("adapter", false), item("wifi", false), item("address", false), item("link", false), item("totals", false), item("latency", false)];
+/// (Its latency and loss off till asked for: they send echoes out, see `latency`.)
+const NETWORK: [Item; 9] = [
+    item("chart", true),
+    item("adapter", false),
+    item("wifi", false),
+    item("address", false),
+    item("gateway", false),
+    item("link", false),
+    item("totals", false),
+    item("latency", false),
+    item("loss", false),
+];
 const DISK: [Item; 3] = [item("chart", true), item("drives", true), item("active", false)];
 const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 /// Each drive the machine has, by its letter ("volumes:C:"), as the group.

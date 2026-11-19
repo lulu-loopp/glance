@@ -31,8 +31,8 @@ use windows::Win32::System::Power::{CM_POWER_DATA, DEVICE_POWER_STATE, PowerDevi
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, LUID, UNICODE_STRING};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 use windows::Win32::NetworkManagement::IpHelper::{
-    FreeMibTable, GetAdaptersAddresses, GetBestInterface, GetIfTable2, GAA_FLAG_SKIP_ANYCAST,
-    GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, MIB_IF_TABLE2,
+    FreeMibTable, GetAdaptersAddresses, GetBestInterface, GetBestRoute, GetIfTable2, GAA_FLAG_SKIP_ANYCAST,
+    GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, MIB_IF_TABLE2, MIB_IPFORWARDROW,
 };
 use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
@@ -575,6 +575,7 @@ impl Sampler {
             net_total_down: down,
             net_total_up: up,
             ping_ms: None,
+            ping_loss: None,
             network: self.slow.network.clone(),
             disk_read: counter(self.disk_read).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
             disk_write: counter(self.disk_write).and_then(|c| read_scalar(c, PDH_FMT_DOUBLE)),
@@ -1618,14 +1619,27 @@ fn net_octets() -> Option<HashMap<u64, (u64, u64)>> {
     Some(adapters)
 }
 
-/// The interface that traffic to the internet would leave by. Asking for the
+/// An IPv4 address as the system gives one (its bytes in order: network order), written as it is read.
+fn dotted(address: u32) -> String {
+    std::net::Ipv4Addr::from(address.to_ne_bytes()).to_string()
+}
+
+/// The interface that traffic to the internet would leave by, and the router it goes through. Asking for the
 /// route sends nothing.
 fn default_interface() -> Option<NetworkInfo> {
     let mut index = 0u32;
     // 1.1.1.1, in network byte order as the API wants it.
-    if unsafe { GetBestInterface(u32::from_ne_bytes([1, 1, 1, 1]), &mut index) } != ERROR_SUCCESS.0 {
+    let internet = u32::from_ne_bytes([1, 1, 1, 1]);
+    if unsafe { GetBestInterface(internet, &mut index) } != ERROR_SUCCESS.0 {
         return None;
     }
+    // The router the way out goes through (as the latency measured to it is: see `latency::address`), where there is
+    // one (none on a network of one's own, nothing between).
+    let gateway = {
+        let mut route = MIB_IPFORWARDROW::default();
+        let found = unsafe { GetBestRoute(internet, None, &mut route) } == ERROR_SUCCESS.0;
+        (found && route.dwForwardIfIndex == index && route.dwForwardNextHop != 0).then(|| dotted(route.dwForwardNextHop))
+    };
     let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
     let mut buf: Vec<u64> = Vec::new();
     let mut size = 0u32;
@@ -1645,13 +1659,13 @@ fn default_interface() -> Option<NetworkInfo> {
             if unsafe { a.Anonymous1.Anonymous.IfIndex } == index {
                 let ipv4 = (!a.FirstUnicastAddress.is_null()).then(|| {
                     let socket = unsafe { (*a.FirstUnicastAddress).Address.lpSockaddr as *const SOCKADDR_IN };
-                    let octets = unsafe { (*socket).sin_addr.S_un.S_addr }.to_ne_bytes();
-                    format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3])
+                    dotted(unsafe { (*socket).sin_addr.S_un.S_addr })
                 });
                 return Some(NetworkInfo {
                     name: unsafe { a.FriendlyName.to_string() }.unwrap_or_default(),
                     model: unsafe { a.Description.to_string() }.unwrap_or_default(),
                     ipv4,
+                    gateway,
                     link_bps: a.ReceiveLinkSpeed,
                     wifi: unsafe { a.AdapterName.to_string() }.ok().and_then(|adapter| wifi_name_on(&adapter, a.NetworkGuid)),
                 });
@@ -2180,7 +2194,7 @@ mod network_tests {
     fn says_the_default_interface() {
         for _ in 0..3 {
             let found = super::default_interface();
-            println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.link_bps, network.wifi)));
+            println!("{:?}", found.map(|network| (network.name, network.ipv4.is_some(), network.gateway.is_some(), network.link_bps, network.wifi.is_some())));
         }
     }
 }

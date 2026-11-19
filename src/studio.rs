@@ -1221,10 +1221,12 @@ pub(crate) fn made_up(info: &StaticInfo, t_ms: f64, seed: u64, load: f32, game: 
         net_total_down: 38 * gb + seed * 900_000,
         net_total_up: 4 * gb + seed * 120_000,
         ping_ms: Some(12.0 + (seed % 7) as f32),
+        ping_loss: Some(0.0),
         network: Some(NetworkInfo {
             name: "WLAN".into(),
             model: info.network_adapter.clone().unwrap_or_default(),
             ipv4: Some("192.168.1.23".into()),
+            gateway: Some("192.168.1.1".into()),
             link_bps: 2_401_000_000,
             wifi: None,
         }),

@@ -30,6 +30,7 @@ pub struct Seen {
     /// The disks' busy time (which macOS does not keep).
     pub disk_active: bool,
     pub address: bool,
+    pub gateway: bool,
     pub wifi: bool,
     pub link: bool,
     /// The drives that give their temperature: number, and name.
@@ -116,6 +117,7 @@ impl Seen {
         self.disk_active |= s.disk_active.is_some();
         if let Some(network) = &s.network {
             self.address |= network.ipv4.is_some();
+            self.gateway |= network.gateway.is_some();
             self.wifi |= network.wifi.is_some();
             self.link |= network.link_bps > 0;
         }
@@ -176,6 +178,7 @@ impl Seen {
             "wsl" => flag(self.wsl, other.wsl, Item::Wsl),
             "network" => {
                 flag(self.address, other.address, Item::Address);
+                flag(self.gateway, other.gateway, Item::Gateway);
                 flag(self.wifi, other.wifi, Item::Wifi);
                 flag(self.link, other.link, Item::Link);
             }
@@ -259,6 +262,7 @@ impl Seen {
             Item::Dimms(count) => seen.dimms = *count,
             Item::Containers(count) => seen.containers = *count,
             Item::Address => seen.address = true,
+            Item::Gateway => seen.gateway = true,
             Item::Wifi => seen.wifi = true,
             Item::Link => seen.link = true,
             Item::Drive(id) => add(&mut seen.drives, &other.drives, |key| key.0 == *id, |a, b| a.0 == b.0),
@@ -325,6 +329,7 @@ pub enum Item {
     /// Docker's containers, this many (one more).
     Containers(usize),
     Address,
+    Gateway,
     Wifi,
     Link,
     Drive(u32),
