@@ -121,6 +121,26 @@ impl Source {
     }
 }
 
+/// What of the dock the pointer rests on, the card beside the dock showing it: what every source spent today, a
+/// source's ring, or the sessions at work.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Spot {
+    Today,
+    Ring(Source),
+    Sessions,
+}
+
+impl Spot {
+    /// The id of the lane its card shows (its ink's).
+    pub fn id(self) -> &'static str {
+        match self {
+            Spot::Today => "ai:today",
+            Spot::Ring(source) => source.id(),
+            Spot::Sessions => "ai:sessions",
+        }
+    }
+}
+
 /// The sources whose lanes are opened (one bit each: see `Source::bit`), in every window alike.
 static OPEN: AtomicU16 = AtomicU16::new(0);
 
@@ -148,11 +168,13 @@ pub enum AiBlock {
     Windows(Vec<Window>),
     /// What each model spent today, the most first: its name, its share, and how much.
     Models(Vec<(String, f32, String)>),
+    /// What each source spent today, the most first: the source, its name, its share, and how much.
+    Sources(Vec<(Source, String, f32, String)>),
     /// Facts two to a row: what, and how much.
     Pairs(Vec<(String, String)>),
     /// The sessions that spent today, the latest first: each one's title, its model and when it last spent, how
-    /// much it spent today, and whether it is at work now.
-    Sessions(Vec<(String, String, String, bool)>),
+    /// much it spent today, whether it is at work now, and the source it is of where sessions of several are told.
+    Sessions(Vec<(String, String, String, bool, Option<Source>)>),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -171,6 +193,7 @@ impl Hash for AiBlock {
             AiBlock::Today { figure, unit, mounted } => (figure, unit, mounted.iter().map(|f| f.to_bits()).collect::<Vec<_>>()).hash(state),
             AiBlock::Windows(windows) => windows.iter().for_each(|w| (&w.name, w.used.to_bits(), w.gone.map(f32::to_bits), &w.resets).hash(state)),
             AiBlock::Models(rows) => rows.iter().for_each(|(name, share, value)| (name, share.to_bits(), value).hash(state)),
+            AiBlock::Sources(rows) => rows.iter().for_each(|(source, name, share, value)| (source, name, share.to_bits(), value).hash(state)),
             AiBlock::Pairs(rows) => rows.hash(state),
             AiBlock::Sessions(rows) => rows.hash(state),
         }
@@ -195,8 +218,12 @@ const MODELS_BAR_GAP: f32 = 10.0;
 const SESSION_LINES: f32 = 2.0;
 const SESSION_GAP: f32 = 10.0;
 const SESSION: f32 = LINE + SESSION_LINES + LINE + SESSION_GAP;
-/// The most sessions told of.
+/// The most sessions told of in a source's lane.
 const SESSIONS: usize = 4;
+/// The sessions the card beside the dock's 会话 tells of: as many as there are at work, up to the most, and at least
+/// so many with the others of today.
+const SESSIONS_AT_WORK: usize = 8;
+const SESSIONS_TOLD: usize = 6;
 /// The most models told apart (the rest as one).
 const MODELS: usize = 3;
 /// A session is at work while it spent this lately (ms).
@@ -214,6 +241,7 @@ impl AiBlock {
                 GAP + rows * WINDOW + (rows - 1.0).max(0.0) * WINDOW_GAP
             }
             AiBlock::Models(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
+            AiBlock::Sources(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Sessions(rows) => GAP + rows.len() as f32 * SESSION - SESSION_GAP,
         }
@@ -432,11 +460,123 @@ pub(super) fn ai_lane(id: &str, prefs: &Prefs, lang: Lang) -> Option<Vec<Block>>
     lane_of(id, prefs, lang, crate::ai::usage().as_deref(), crate::station::now_ms(), Some(Source::of(id).is_some_and(opened)))
 }
 
-/// `source`'s lane as the card beside the dock shows it: all it tells, its head opening nothing.
+/// The card beside the dock for `spot`: a source's lane, all it tells, its head opening nothing; what every source spent
+/// today (see `today_card`); or the sessions of the sources docked (see `sessions_card`).
 #[cfg(windows)]
-pub fn card(scene: &Scene, source: Source) -> Option<Lane> {
-    let blocks = lane_of(source.id(), scene.prefs, scene.lang, crate::ai::usage().as_deref(), crate::station::now_ms(), None)?;
-    Some(Lane { id: source.id().into(), blocks, ink: scene.theme.ink(source.id()) })
+pub fn card(scene: &Scene, spot: Spot) -> Option<Lane> {
+    let (usage, now) = (crate::ai::usage(), crate::station::now_ms());
+    let blocks = match spot {
+        Spot::Ring(source) => lane_of(source.id(), scene.prefs, scene.lang, usage.as_deref(), now, None)?,
+        Spot::Today => today_card(scene.lang, usage.as_deref()),
+        Spot::Sessions => sessions_card(scene.prefs, scene.lang, usage.as_deref(), now),
+    };
+    Some(Lane { id: spot.id().into(), blocks, ink: scene.theme.ink(spot.id()) })
+}
+
+/// What every source spent today, as the card beside the dock's 今日 tells it: the figure and how it mounted through the
+/// day, each source's share (the most first), and the whole by kind.
+pub(super) fn today_card(lang: Lang, usage: Option<&crate::ai::Usage>) -> Vec<Block> {
+    let head = head(lang.pick("今日用量", "Today's usage"), "", "", false);
+    let Some(usage) = usage else { return vec![head, reading(lang)] };
+    let mut blocks = vec![head, today_block(usage, lang)];
+    let mut by: Vec<(Source, u64)> = Vec::new();
+    let mut whole = crate::ai::Tokens::default();
+    for (tool, _, tokens) in &usage.spent_today {
+        whole.add(*tokens);
+        let Some(source) = SOURCES.into_iter().find(|source| tool_of(*source) == *tool) else { continue };
+        match by.iter_mut().find(|(of, _)| *of == source) {
+            Some((_, spent)) => *spent += tokens.total(),
+            None => by.push((source, tokens.total())),
+        }
+    }
+    by.retain(|(_, spent)| *spent > 0);
+    by.sort_by(|a, b| b.1.cmp(&a.1));
+    let told: u64 = by.iter().map(|(_, spent)| spent).sum();
+    if told > 0 {
+        let name = |source: Source| if source.keyed() { source.name(lang).to_string() } else { source.tool_name().to_string() };
+        blocks.push(Block::Ai(AiBlock::Sources(by.iter().map(|&(source, spent)| (source, name(source), spent as f32 / told as f32, short(spent, lang))).collect())));
+    }
+    let sessions = usage.sessions.iter().filter(|session| session.spent_between(usage.today, usage.now) > 0).count();
+    blocks.push(Block::Ai(AiBlock::Pairs(kinds(whole, sessions, lang))));
+    blocks
+}
+
+/// The sessions of the sources docked, as the card beside the dock's 会话 tells them: those at work (how many in its
+/// head), the latest first, then the others of today, each with its source's mark.
+pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64) -> Vec<Block> {
+    let docked = docked(prefs);
+    let Some(usage) = usage else { return vec![head(lang.pick("会话", "Sessions"), "", "", false), reading(lang)] };
+    let at_work = |session: &crate::ai::Session| now.saturating_sub(session.last) < AT_WORK_MS;
+    let mut sessions: Vec<(Source, &crate::ai::Session)> = usage
+        .sessions
+        .iter()
+        .filter(|session| at_work(session) || session.spent_between(usage.today, usage.now) > 0)
+        .filter_map(|session| Some((docked.iter().copied().find(|source| tool_of(*source) == session.tool)?, session)))
+        .collect();
+    sessions.sort_by(|(_, a), (_, b)| at_work(b).cmp(&at_work(a)).then(b.last.cmp(&a.last)));
+    let working = sessions.iter().filter(|(_, session)| at_work(session)).count();
+    let aside = match lang {
+        Lang::Zh => format!("{working} 个进行中"),
+        Lang::En => format!("{working} at work"),
+    };
+    let mut blocks = vec![head(lang.pick("会话", "Sessions"), "", aside, false)];
+    if sessions.is_empty() {
+        blocks.push(Block::Facts { rows: vec![(lang.pick("今日会话", "Today").into(), lang.pick("暂无", "None").into(), false)], gap: GAP });
+        return blocks;
+    }
+    let shown = working.min(SESSIONS_AT_WORK).max(SESSIONS_TOLD);
+    blocks.push(Block::Ai(AiBlock::Sessions(sessions.into_iter().take(shown).map(|(source, session)| session_row(session, usage, now, lang, Some(source))).collect())));
+    blocks
+}
+
+/// Today's figure and how it mounted through the day, every tool's quarters added up.
+fn today_block(usage: &crate::ai::Usage, lang: Lang) -> Block {
+    let total: u64 = usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum();
+    let (figure, unit) = tokens(total, lang);
+    // (Every tool's quarters added up, then how far the day had come by each.)
+    let quarters = usage.quarters.iter().map(|(_, spent)| spent.len()).max().unwrap_or(0);
+    let mut mounted = Vec::with_capacity(quarters);
+    let mut sum = 0;
+    for at in 0..quarters {
+        sum += usage.quarters.iter().map(|(_, spent)| spent.get(at).copied().unwrap_or(0)).sum::<u64>();
+        mounted.push(if total == 0 { 0.0 } else { sum as f32 / total as f32 });
+    }
+    Block::Ai(AiBlock::Today { figure, unit, mounted })
+}
+
+/// What `total` was spent on by kind, and how many `sessions` spent it.
+fn kinds(total: crate::ai::Tokens, sessions: usize, lang: Lang) -> Vec<(String, String)> {
+    let read_from = total.input + total.cache_read + total.cache_write;
+    let hit = if read_from == 0 { 0.0 } else { total.cache_read as f32 / read_from as f32 };
+    let mut pairs = vec![
+        (lang.pick("输入", "Input").to_string(), short(total.input, lang)),
+        (lang.pick("输出", "Output").to_string(), short(total.output, lang)),
+        (lang.pick("缓存读取", "Cache read").to_string(), short(total.cache_read, lang)),
+    ];
+    // (Codex tells no cache written, and tells its reasoning apart.)
+    if total.cache_write > 0 || total.reasoning == 0 {
+        pairs.push((lang.pick("缓存写入", "Cache write").into(), short(total.cache_write, lang)));
+    } else {
+        pairs.push((lang.pick("推理", "Reasoning").into(), short(total.reasoning, lang)));
+    }
+    pairs.push((lang.pick("缓存命中", "Cache hits").into(), format!("{:.0}%", hit * 100.0)));
+    pairs.push((lang.pick("会话", "Sessions").into(), sessions.to_string()));
+    pairs
+}
+
+/// A session as a row: its title (else its folder's name), its model and when it last spent, what it spent today,
+/// whether it is at work, and `source` where sessions of several are told.
+fn session_row(session: &crate::ai::Session, usage: &crate::ai::Usage, now: u64, lang: Lang, source: Option<Source>) -> (String, String, String, bool, Option<Source>) {
+    let title = session.title.clone().or_else(|| session.folder.as_deref().and_then(folder_name)).unwrap_or_else(|| lang.pick("未命名会话", "Untitled session").into());
+    let model = session.model.as_deref().map(model_name).unwrap_or_default();
+    let when = text::since(session.last, now, lang);
+    let about = if model.is_empty() { when } else { format!("{model} · {when}") };
+    (title, about, short(session.spent_between(usage.today, usage.now), lang), now.saturating_sub(session.last) < AT_WORK_MS, source)
+}
+
+/// A lane's row while it is being read.
+fn reading(lang: Lang) -> Block {
+    Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), lang.pick("正在读取", "Reading").into(), false)], gap: GAP }
 }
 
 /// The limit `tool` last told: its own (Codex's "codex"), else the first told.
@@ -494,21 +634,11 @@ fn spent_by(usage: &crate::ai::Usage, tool: crate::ai::Tool) -> (Vec<&(crate::ai
 /// toggled, or (none) showing all it tells, opening nothing.
 #[cfg(windows)]
 pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64, open: Option<bool>) -> Option<Vec<Block>> {
-    let reading = || Block::Facts { rows: vec![(lang.pick("今日用量", "Today").into(), lang.pick("正在读取", "Reading").into(), false)], gap: GAP };
+    let reading = || reading(lang);
     if id == "ai:today" {
         let head = head(lang.pick("AI 用量", "AI usage"), "", lang.pick("今日", "Today"), false);
         let Some(usage) = usage else { return Some(vec![head, reading()]) };
-        let total: u64 = usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum();
-        let (figure, unit) = tokens(total, lang);
-        // (Every tool's quarters added up, then how far the day had come by each.)
-        let quarters = usage.quarters.iter().map(|(_, spent)| spent.len()).max().unwrap_or(0);
-        let mut mounted = Vec::with_capacity(quarters);
-        let mut sum = 0;
-        for at in 0..quarters {
-            sum += usage.quarters.iter().map(|(_, spent)| spent.get(at).copied().unwrap_or(0)).sum::<u64>();
-            mounted.push(if total == 0 { 0.0 } else { sum as f32 / total as f32 });
-        }
-        let mut blocks = vec![head, Block::Ai(AiBlock::Today { figure, unit, mounted })];
+        let mut blocks = vec![head, today_block(usage, lang)];
         // Each tool's share, where there are more than one.
         let tools: Vec<(crate::ai::Tool, u64)> = usage.days.iter().map(|(tool, days)| (*tool, days[6])).filter(|(_, spent)| *spent > 0).collect();
         if tools.len() > 1 {
@@ -560,35 +690,9 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     if prefs.shows(id, "models") {
         blocks.push(Block::Ai(AiBlock::Models(models)));
     }
-    let read_from = total.input + total.cache_read + total.cache_write;
-    let hit = if read_from == 0 { 0.0 } else { total.cache_read as f32 / read_from as f32 };
-    let mut pairs = vec![
-        (lang.pick("输入", "Input").to_string(), short(total.input, lang)),
-        (lang.pick("输出", "Output").to_string(), short(total.output, lang)),
-        (lang.pick("缓存读取", "Cache read").to_string(), short(total.cache_read, lang)),
-    ];
-    // (Codex tells no cache written, and tells its reasoning apart.)
-    if total.cache_write > 0 || total.reasoning == 0 {
-        pairs.push((lang.pick("缓存写入", "Cache write").into(), short(total.cache_write, lang)));
-    } else {
-        pairs.push((lang.pick("推理", "Reasoning").into(), short(total.reasoning, lang)));
-    }
-    pairs.push((lang.pick("缓存命中", "Cache hits").into(), format!("{:.0}%", hit * 100.0)));
-    pairs.push((lang.pick("会话", "Sessions").into(), sessions.len().to_string()));
-    blocks.push(Block::Ai(AiBlock::Pairs(pairs)));
+    blocks.push(Block::Ai(AiBlock::Pairs(kinds(total, sessions.len(), lang))));
     if prefs.shows(id, "sessions") && !sessions.is_empty() {
-        let rows = sessions
-            .iter()
-            .take(SESSIONS)
-            .map(|session| {
-                let title = session.title.clone().or_else(|| session.folder.as_deref().and_then(folder_name)).unwrap_or_else(|| lang.pick("未命名会话", "Untitled session").into());
-                let model = session.model.as_deref().map(model_name).unwrap_or_default();
-                let when = text::since(session.last, now, lang);
-                let about = if model.is_empty() { when } else { format!("{model} · {when}") };
-                (title, about, short(session.spent_between(usage.today, usage.now), lang), now.saturating_sub(session.last) < AT_WORK_MS)
-            })
-            .collect();
-        blocks.push(Block::Ai(AiBlock::Sessions(rows)));
+        blocks.push(Block::Ai(AiBlock::Sessions(sessions.iter().take(SESSIONS).map(|session| session_row(session, usage, now, lang, None)).collect())));
     }
     Some(blocks)
 }
@@ -691,6 +795,20 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 frame.text(value, theme.small, theme.text, left, row_y, width, Align::End);
             }
         }
+        AiBlock::Sources(rows) => {
+            const MARK: f32 = 12.0;
+            let bar_y = y + GAP;
+            part("bar");
+            let parts: Vec<_> = rows.iter().map(|(source, _, share, _)| (*share, theme.ink(source.id()).trace)).collect();
+            shares(frame, theme, (left, bar_y + (MODELS_BAR - theme.meter_height) / 2.0, width), &parts);
+            for (at, (source, name, _, value)) in rows.iter().enumerate() {
+                let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + ROW_GAP);
+                part(&at.to_string());
+                frame.mark(source.mark(), Point { x: left + MARK / 2.0, y: row_y + LINE / 2.0 }, MARK, theme.text2, 1.0);
+                frame.text(name, theme.small, theme.text2, left + MARK + 6.0, row_y, width - MARK - 6.0, Align::Start);
+                frame.text(value, theme.small, theme.text, left, row_y, width, Align::End);
+            }
+        }
         AiBlock::Pairs(pairs) => {
             let column = (width - WINDOW_GAP) / 2.0;
             for (at, (label, value)) in pairs.iter().enumerate() {
@@ -702,17 +820,28 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
         }
         AiBlock::Sessions(rows) => {
             const DOT: f32 = 3.5;
-            for (at, (title, about, value, at_work)) in rows.iter().enumerate() {
+            const MARK: f32 = 13.0;
+            for (at, (title, about, value, at_work, source)) in rows.iter().enumerate() {
                 let row_y = y + GAP + at as f32 * SESSION;
                 part(&at.to_string());
-                // At work: a dot in its ink; else a ring.
-                let centre = Point { x: left + DOT, y: row_y + LINE / 2.0 };
-                if *at_work {
-                    frame.fill_circle(ink.trace, centre, DOT);
-                } else {
-                    frame.arc(centre, DOT - 0.5, 0.0, 360.0, theme.text3, 1.0);
-                }
-                let words = left + 2.0 * DOT + 8.0;
+                let lead = match source {
+                    // Its source's mark: whole at work, else faint.
+                    Some(source) => {
+                        frame.mark(source.mark(), Point { x: left + MARK / 2.0, y: row_y + LINE / 2.0 }, MARK, theme.text, if *at_work { 1.0 } else { 0.4 });
+                        MARK
+                    }
+                    // At work: a dot in its ink; else a ring.
+                    None => {
+                        let centre = Point { x: left + DOT, y: row_y + LINE / 2.0 };
+                        if *at_work {
+                            frame.fill_circle(ink.trace, centre, DOT);
+                        } else {
+                            frame.arc(centre, DOT - 0.5, 0.0, 360.0, theme.text3, 1.0);
+                        }
+                        2.0 * DOT
+                    }
+                };
+                let words = left + lead + 8.0;
                 let value_width = frame.measure(value, theme.small);
                 frame.text(title, theme.body, theme.text, words, row_y, left + width - value_width - 12.0 - words, Align::Start);
                 frame.text(about, theme.small, theme.text3, words, row_y + LINE + SESSION_LINES, left + width - words, Align::Start);
@@ -852,7 +981,7 @@ fn ring(frame: &dyn Canvas, theme: &Theme, slot: &Slot, centre: Point, radius: f
 
 pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: bool, (w, h): (f32, f32)) -> Vec<HitBox> {
     let (theme, lang) = (scene.theme, scene.lang);
-    let mut hits = Vec::new();
+    let hits = std::cell::RefCell::new(Vec::new());
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let big = Font { size: 14.0, weight: 650.0, ..theme.figure };
     let figure = Font { size: 13.0, weight: 650.0, ..theme.figure };
@@ -862,7 +991,14 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     // (Drawn larger than designed: the room left over shared out round its parts.)
     let spread = if across { (w - natural.0) / (count as f32 + 2.0) } else { (h - natural.1) / (count as f32 + 2.0) }.max(0.0);
     let figure_of = |slot: &Slot| if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text };
-    let lit = |source: Source| scene.hover == Some(Hit::AiSlot(source));
+    let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
+    // Each spot the pointer rests on to show its card beside the dock: where it is, and its plate lit under the pointer.
+    let spot = |frame: &dyn Canvas, spot: Spot, (x, y, w, h): (f32, f32, f32, f32), (px, py, pw, ph, round): (f32, f32, f32, f32, f32)| {
+        if lit(spot) {
+            frame.fill_rounded(theme.hover, px, py, pw, ph, round);
+        }
+        hits.borrow_mut().push((x, y, w, h, Hit::AiSlot(spot)));
+    };
     let sessions = (lang.pick("会话", "Sessions"), dock.working.to_string());
     // The sessions at work: their sources' marks in a row, its middle at `centre`.
     let marks = |centre: f32, y: f32| {
@@ -876,17 +1012,14 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     if across {
         let middle = h / 2.0;
         let mut x = DOCK_PAD + spread / 2.0;
+        spot(frame, Spot::Today, (x, 0.0, BAR_END, h), (x, 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
         frame.key("ai:today.label");
         centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         frame.key("ai:today.value");
         centred(frame, &dock.today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
         x += BAR_END + spread;
         for slot in &dock.slots {
-            let hit = Hit::AiSlot(slot.source);
-            if lit(slot.source) {
-                frame.fill_rounded(theme.hover, x, 5.0, BAR_SLOT, h - 10.0, (h - 10.0) / 2.0);
-            }
-            hits.push((x, 0.0, BAR_SLOT, h, hit));
+            spot(frame, Spot::Ring(slot.source), (x, 0.0, BAR_SLOT, h), (x, 5.0, BAR_SLOT, h - 10.0, (h - 10.0) / 2.0));
             ring(frame, theme, slot, Point { x: x + 8.0 + 17.0, y: middle }, 16.0, 2.6, 15.0);
             let words = x + 8.0 + 34.0 + 9.0;
             let (top, room) = (if slot.label.is_empty() { middle - 9.0 } else { middle - 17.0 }, x + BAR_SLOT - 8.0 - words);
@@ -896,6 +1029,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
             frame.text(&slot.label, under, theme.text3, words, middle + 1.0, room, Align::Start);
             x += BAR_SLOT + spread;
         }
+        spot(frame, Spot::Sessions, (x, 0.0, BAR_END, h), (x, 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
         frame.key("ai:dock.sessions");
         centred(frame, sessions.0, label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         let count_width = frame.measure(&sessions.1, big);
@@ -904,21 +1038,19 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         frame.key("ai:dock.at_work");
         frame.text(&sessions.1, big, theme.text, start, middle - 2.0, count_width + 2.0, Align::Start);
         marks(start + count_width + 4.0 + (row - 4.0) / 2.0, middle + 7.0);
-        return hits;
+        return hits.into_inner();
     }
     let centre = w / 2.0;
     let mut y = DOCK_PAD + spread / 2.0;
+    let round = 16.0_f32.min((w - 10.0) / 2.0);
+    spot(frame, Spot::Today, (0.0, y, w, DOCK_TODAY), (5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
     frame.key("ai:today.label");
     centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
     frame.key("ai:today.value");
     centred(frame, &dock.today, big, theme.text, centre, y + 18.0);
     y += DOCK_TODAY + spread;
     for slot in &dock.slots {
-        let hit = Hit::AiSlot(slot.source);
-        if lit(slot.source) {
-            frame.fill_rounded(theme.hover, 5.0, y, w - 10.0, DOCK_SLOT - 4.0, 16.0_f32.min((w - 10.0) / 2.0));
-        }
-        hits.push((0.0, y, w, DOCK_SLOT, hit));
+        spot(frame, Spot::Ring(slot.source), (0.0, y, w, DOCK_SLOT), (5.0, y, w - 10.0, DOCK_SLOT - 4.0, round));
         ring(frame, theme, slot, Point { x: centre, y: y + 8.0 + 22.0 }, 21.5, 3.0, 20.0);
         frame.key(&format!("{}.value", slot.source.id()));
         centred(frame, &slot.figure, figure, figure_of(slot), centre, y + 56.0);
@@ -926,12 +1058,13 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         centred(frame, &slot.label, under, theme.text3, centre, y + 74.0);
         y += DOCK_SLOT + spread;
     }
+    spot(frame, Spot::Sessions, (0.0, y, w, DOCK_FOOT), (5.0, y, w - 10.0, DOCK_FOOT + 4.0, round));
     frame.key("ai:dock.sessions");
     centred(frame, sessions.0, label, theme.text3, centre, y + 4.0);
     frame.key("ai:dock.at_work");
     centred(frame, &sessions.1, big, theme.text, centre, y + 19.0);
     marks(centre, y + 44.0);
-    hits
+    hits.into_inner()
 }
 
 /// The name of folder `folder` (its last part, as written on Windows or elsewhere): none for a drive's root.
@@ -1191,6 +1324,56 @@ pub(super) mod tests {
             assert!(matches!(&blocks[1], Block::Facts { rows, .. } if rows[0].1 == "正在读取"));
         }
 
+        /// The card beside the dock's 今日: the figure and how it mounted, each source's share of it (the most first, a
+        /// source of records by its tool's name), and the whole by kind with every session of today.
+        #[test]
+        fn the_today_card_tells_each_sources_share_and_the_whole_by_kind() {
+            let mut usage = day();
+            // (Codex spent half again as much as Claude Code, read after it.)
+            usage.spent_today.push((crate::ai::Tool::Codex, "gpt-5.5-mini".into(), spent(50_000, 0, 0, 0, 0)));
+            let blocks = today_card(Lang::Zh, Some(&usage));
+            assert!(matches!(&blocks[0], Block::Head { title, .. } if title == "今日用量"));
+            assert!(matches!(&blocks[1], Block::Ai(AiBlock::Today { figure, unit, .. }) if figure == "25" && unit == "万 tokens"));
+            let Block::Ai(AiBlock::Sources(sources)) = &blocks[2] else { panic!("no sources") };
+            assert_eq!(sources.iter().map(|(source, name, _, value)| (*source, name.as_str(), value.as_str())).collect::<Vec<_>>(), [(Source::Codex, "Codex", "15 万"), (Source::Claude, "Claude Code", "10 万")]);
+            assert!((sources[0].2 - 0.6).abs() < 1e-4 && (sources.iter().map(|(_, _, share, _)| share).sum::<f32>() - 1.0).abs() < 1e-5);
+            let Block::Ai(AiBlock::Pairs(pairs)) = &blocks[3] else { panic!("no pairs") };
+            assert_eq!(pairs[0], ("输入".to_string(), "8.2 万".to_string()));
+            assert!(pairs.contains(&("缓存写入".into(), "7,000".into())) && pairs.contains(&("会话".into(), "3".into())));
+            // (Not read yet: it says so.)
+            assert!(matches!(&today_card(Lang::Zh, None)[1], Block::Facts { rows, .. } if rows[0].1 == "正在读取"));
+        }
+
+        /// The card beside the dock's 会话: the sessions of the sources docked, those at work first (how many in its head),
+        /// then the others of today, the latest first, each with its source.
+        #[test]
+        fn the_sessions_card_tells_every_sources_sessions_at_work_first() {
+            let mut usage = day();
+            let prefs = Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai);
+            let told = |usage: &crate::ai::Usage| {
+                let blocks = sessions_card(&prefs, Lang::Zh, Some(usage), NOON);
+                let Block::Head { aside, .. } = &blocks[0] else { panic!() };
+                let Some(Block::Ai(AiBlock::Sessions(rows))) = blocks.get(1) else { return (aside.clone(), Vec::new()) };
+                (aside.clone(), rows.iter().map(|(title, _, value, at_work, source)| (title.clone(), value.clone(), *at_work, source.unwrap())).collect::<Vec<_>>())
+            };
+            assert_eq!(
+                told(&usage),
+                ("1 个进行中".to_string(), vec![
+                    ("Review the release".to_string(), "7.0 万".to_string(), true, Source::Codex),
+                    ("未命名会话".to_string(), "10 万".to_string(), false, Source::Claude),
+                    ("未命名会话".to_string(), "3.0 万".to_string(), false, Source::Codex),
+                ])
+            );
+            // (Claude's at work now: before the one that was at work first, being the later.)
+            usage.sessions[1].last = NOON - 30_000;
+            assert_eq!(told(&usage).0, "2 个进行中");
+            assert_eq!(told(&usage).1.iter().map(|row| row.3).collect::<Vec<_>>(), [Source::Claude, Source::Codex, Source::Codex]);
+            // (None of today: it says so.)
+            usage.sessions.clear();
+            let blocks = sessions_card(&prefs, Lang::Zh, Some(&usage), NOON);
+            assert!(matches!(&blocks[1], Block::Facts { rows, .. } if rows[0].1 == "暂无"));
+        }
+
         /// A session nothing names (one whose every prompt another program sent it) is told by the folder it was worked
         /// in, the folder's own name: as untitled only with neither, or a folder that is a drive's root.
         #[test]
@@ -1224,7 +1407,7 @@ pub(super) mod tests {
             assert!(pairs.contains(&("推理".into(), "4,000".into())) && !pairs.iter().any(|(label, _)| label == "缓存写入"));
             assert!(pairs.contains(&("缓存命中".into(), "66%".into())) && pairs.contains(&("会话".into(), "2".into())));
             let sessions = blocks.iter().find_map(|block| if let Block::Ai(AiBlock::Sessions(rows)) = block { Some(rows.clone()) } else { None }).unwrap();
-            assert_eq!(sessions.iter().map(|(title, _, value, at_work)| (title.as_str(), value.as_str(), *at_work)).collect::<Vec<_>>(), [("Review the release", "7.0 万", true), ("未命名会话", "3.0 万", false)]);
+            assert_eq!(sessions.iter().map(|(title, _, value, at_work, source)| (title.as_str(), value.as_str(), *at_work, *source)).collect::<Vec<_>>(), [("Review the release", "7.0 万", true, None), ("未命名会话", "3.0 万", false, None)]);
             // (Closed: its head and its windows alone.)
             assert_eq!(lane("ai:codex", Some(&usage)).len(), 2);
             // Beside the dock: all of it, its head opening nothing.

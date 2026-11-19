@@ -1,9 +1,10 @@
-//! The card beside the AI component's dock: the lane of the source whose ring the pointer rests on, all it tells (its
-//! limit's windows, what it spent today by model and by kind, its sessions), on a sheet of the dock's skin as a menu
-//! opened on the dock is (glass's a piece of the glass, frosted as the dock is), beside the dock, its middle by that
-//! ring's, on its screen. A window of its own, one for this thread, that takes the pointer on its sheet alone: it stays
-//! while the pointer is on the ring, on the card or on its way between them (see `holds`), and goes as the window the
-//! dock is drawn in is hidden or destroyed.
+//! The card beside the AI component's dock: of the spot of the dock the pointer rests on, a source's ring (the source's
+//! lane, all it tells: its limit's windows, what it spent today by model and by kind, its sessions), what every source
+//! spent today, or the sessions at work (see `view::ai::card`), on a sheet of the dock's skin as a menu opened on the
+//! dock is (glass's a piece of the glass, frosted as the dock is), beside the dock, its middle by that spot's, on its
+//! screen. A window of its own, one for this thread, that takes the pointer on its sheet alone: it stays while the
+//! pointer is on the spot, on the card or on its way between them (see `holds`), and goes as the window the dock is
+//! drawn in is hidden or destroyed.
 
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -20,7 +21,7 @@ use super::menu::{Drawn, Look};
 use super::prefs::Prefs;
 use super::text::Lang;
 use super::theme::Theme;
-use super::view::{self, ai::Source, Layout, Pass, Scene};
+use super::view::{self, ai::Spot, Layout, Pass, Scene};
 use super::backdrop::Capture;
 use super::window::Window;
 
@@ -42,7 +43,7 @@ struct Card {
     words: gfx::Layer,
     /// Where the pointer keeps it (see `holds`), on the screen, while it shows.
     holds: Option<RECT>,
-    /// Glass's, while it shows: where the card of each ring on the dock shows (see `reach`), and what is behind there
+    /// Glass's, while it shows: where the card of each spot on the dock shows (see `reach`), and what is behind there
     /// as last seen with no card over it; the windows behind it put together (see `scene`) to see that again, and when
     /// it last asked for them; how frosted it was last drawn.
     reach: Option<RECT>,
@@ -97,7 +98,7 @@ impl Card {
     /// How frosted glass is drawn over what is behind `sheet` (physical px, `px` to a DIP), `dark` or light, a card
     /// beside the dock showing within `reach` wherever it shows: as the panel's glass is over what is behind it (see
     /// `frost_over`), not as the dock's is (what is behind the dock may be calm, and what is behind the card busy).
-    /// Known as it first shows, and as it moves from ring to ring: what is behind all of `reach` is taken at once while
+    /// Known as it first shows, and as it moves from spot to spot: what is behind all of `reach` is taken at once while
     /// no card is over it (a few milliseconds: it is no larger than the cards). While one is, the windows behind it are
     /// put together and taken instead (the screen has the card in it), every `LOOK_AGAIN` and as `reach` moves. Where
     /// none of that holds the sheet, as frosted as it was.
@@ -168,22 +169,22 @@ fn within_area(inner: RECT, outer: RECT) -> bool {
     inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
 }
 
-/// What the card shows of: `source`, in `theme`, as `prefs` show the AI component (its modules held: see
+/// What the card shows of: `spot` of the dock, in `theme`, as `prefs` show the AI component (its modules held: see
 /// `Prefs::holding`), in `lang`, on a sheet that looks as a menu opened on the dock does (`look`).
 pub struct Of<'a> {
-    pub source: Source,
+    pub spot: Spot,
     pub theme: &'a Theme,
     pub prefs: &'a Prefs,
     pub lang: Lang,
     pub look: Look,
 }
 
-/// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by its source's ring's (among
-/// `rings`, every ring on the dock and its source), all of it on that screen, till `hide` or till `owner` (the window
-/// the dock is drawn in) is hidden or destroyed. Shown again as it is, nothing is drawn.
-pub fn show(owner: HWND, of: Of, by: RECT, rings: &[(Source, RECT)], side: Side) {
-    let Some(&(_, about)) = rings.iter().find(|(source, _)| *source == of.source) else { return };
-    let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.source));
+/// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by its spot's (among `spots`, every
+/// spot on the dock and where it is), all of it on that screen, till `hide` or till `owner` (the window the dock is
+/// drawn in) is hidden or destroyed. Shown again as it is, nothing is drawn.
+pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side) {
+    let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.spot) else { return };
+    let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.spot));
     let controller = &crate::app().controller;
     let (info, history) = (controller.info(), controller.history.samples());
     // (Nothing read of the machine yet: the lanes are drawn from its last sample.)
@@ -211,7 +212,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, rings: &[(Source, RECT)], side: Side)
         settings_lit: None,
         music_apart: false,
     };
-    let Some(lane) = view::ai::card(&scene, of.source) else { return hide() };
+    let Some(lane) = view::ai::card(&scene, of.spot) else { return hide() };
     let laid = |lane: &view::Lane| Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
     let layout = laid(&lane);
     let (plate, (shift_x, shift_y)) = sheet_of(of.theme, layout.lanes()[0]);
@@ -250,14 +251,14 @@ pub fn show(owner: HWND, of: Of, by: RECT, rings: &[(Source, RECT)], side: Side)
         card.holds = Some(holds);
         // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's.)
         card.window.take_pointer_within(Some(sheet));
-        // Glass frosted as what is behind the card asks (see `Card::frost`), what is behind every ring's card taken
+        // Glass frosted as what is behind the card asks (see `Card::frost`), what is behind every spot's card taken
         // (where they show found again as the dock or what a card tells moves this one out of it).
         let look = match of.theme.skin {
             super::theme::Skin::Glass => {
                 if card.reach.is_none_or(|reach| !within_area(sheet, reach)) {
-                    let sheets = rings.iter().filter_map(|&(source, ring)| {
-                        let (plate, _) = sheet_of(of.theme, laid(&view::ai::card(&scene, source)?).lanes()[0]);
-                        Some(placed(by, middle(ring), side, (px(plate.0), px(plate.1)), gap, work))
+                    let sheets = spots.iter().filter_map(|&(spot, at)| {
+                        let (plate, _) = sheet_of(of.theme, laid(&view::ai::card(&scene, spot)?).lanes()[0]);
+                        Some(placed(by, middle(at), side, (px(plate.0), px(plate.1)), gap, work))
                     });
                     card.reach = reach(sheets.chain([sheet]));
                 }
@@ -329,7 +330,7 @@ pub fn screens_changed() {
     drop(gone);
 }
 
-/// Where the pointer keeps the card at `card` (on the screen) up, beside the ring `about`: on the ring, on the card, and
+/// Where the pointer keeps the card at `card` (on the screen) up, beside the spot `about`: on the spot, on the card, and
 /// on its way between them.
 fn held_by(about: RECT, card: RECT) -> RECT {
     RECT { left: about.left.min(card.left), top: about.top.min(card.top), right: about.right.max(card.right), bottom: about.bottom.max(card.bottom) }
@@ -354,7 +355,7 @@ fn within(at: POINT, area: RECT) -> bool {
     at.x >= area.left && at.x < area.right && at.y >= area.top && at.y < area.bottom
 }
 
-/// Whether it shows, and the pointer at `at` (on the screen) keeps it: on the ring it is of, on the card, or on its
+/// Whether it shows, and the pointer at `at` (on the screen) keeps it: on the spot it is of, on the card, or on its
 /// way between them.
 pub fn holds(at: POINT) -> bool {
     CARD.with(|kept| {

@@ -2110,7 +2110,7 @@ impl Widgets {
         // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
         // ring stays lit, its card up.)
         let hit = match (hit, widget.hit_hover) {
-            (hit, Some(view::Hit::AiSlot(source))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(source)),
+            (hit, Some(view::Hit::AiSlot(spot))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(spot)),
             (hit, _) => hit,
         };
         if hit != widget.hit_hover {
@@ -3768,12 +3768,12 @@ impl Widget {
         });
     }
 
-    /// The card beside the AI component's dock, as it was just drawn in `theme` from `prefs`: the lane of the source
-    /// whose ring the pointer is on, beside it on the side of the screen with more room (under or over it, laid
-    /// across); else none.
+    /// The card beside the AI component's dock, as it was just drawn in `theme` from `prefs`: of the spot the pointer
+    /// is on (what every source spent today, a source's ring, the sessions at work), beside it on the side of the screen
+    /// with more room (under or over it, laid across); else none.
     fn follow_card(&mut self, theme: &Theme, prefs: &crate::ui::prefs::Prefs, lang: crate::ui::text::Lang) {
-        let source = match self.hit_hover {
-            Some(view::Hit::AiSlot(source)) => source,
+        let spot = match self.hit_hover {
+            Some(view::Hit::AiSlot(spot)) => spot,
             _ => {
                 if std::mem::take(&mut self.carding) {
                     crate::ui::ai_card::hide();
@@ -3781,9 +3781,9 @@ impl Widget {
                 return;
             }
         };
-        // (Every ring on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
-        let rings: Vec<_> = self.hits_on_screen().into_iter().filter_map(|(rect, hit)| match hit {
-            view::Hit::AiSlot(source) => Some((source, rect)),
+        // (Every spot on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
+        let spots: Vec<_> = self.hits_on_screen().into_iter().filter_map(|(rect, hit)| match hit {
+            view::Hit::AiSlot(spot) => Some((spot, rect)),
             _ => None,
         }).collect();
         use crate::ui::ai_card::Side;
@@ -3796,7 +3796,7 @@ impl Widget {
             Side::Left
         };
         let look = self.menu_look();
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme, prefs, lang, look }, by, &rings, side);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme, prefs, lang, look }, by, &spots, side);
         self.carding = true;
     }
 

@@ -4806,11 +4806,11 @@ impl<'a> Panel<'a> {
         self.follow_card();
     }
 
-    /// The card beside the AI component's dock: the lane of the source whose ring the pointer is on, beside the panel
-    /// away from its edge (kept as what it tells changes); else none.
+    /// The card beside the AI component's dock: of the spot the pointer is on (what every source spent today, a source's
+    /// ring, the sessions at work), beside the panel away from its edge (kept as what it tells changes); else none.
     fn follow_card(&mut self) {
-        let source = match self.hover {
-            Some(Hit::AiSlot(source)) => source,
+        let spot = match self.hover {
+            Some(Hit::AiSlot(spot)) => spot,
             _ => {
                 if std::mem::take(&mut self.carding) {
                     crate::ui::ai_card::hide();
@@ -4819,9 +4819,9 @@ impl<'a> Panel<'a> {
             }
         };
         let Some(placement) = self.placement.as_ref() else { return };
-        // (Every ring on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
-        let rings: Vec<_> = self.hits.iter().filter_map(|&(x, y, w, h, hit)| match hit {
-            Hit::AiSlot(source) => Some((source, self.box_on_screen((x, y, w, h))?)),
+        // (Every spot on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
+        let spots: Vec<_> = self.hits.iter().filter_map(|&(x, y, w, h, hit)| match hit {
+            Hit::AiSlot(spot) => Some((spot, self.box_on_screen((x, y, w, h))?)),
             _ => None,
         }).collect();
         use crate::ui::ai_card::Side;
@@ -4831,7 +4831,7 @@ impl<'a> Panel<'a> {
             Edge::Top => Side::Below,
         };
         let look = self.menu_look();
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { source, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &rings, side);
+        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side);
         self.carding = true;
     }
 
@@ -4857,12 +4857,12 @@ impl<'a> Panel<'a> {
     }
 
     /// What the pointer at `client` (physical px in the window) lights: what it is on (a list itself is not lit, its
-    /// rows are), or, on its way from a ring of the AI component's dock to the card beside it (over the rest of the
-    /// dock, across to the card), that ring still, its card up.
+    /// rows are), or, on its way from a spot of the AI component's dock to the card beside it (over the rest of the
+    /// dock, across to the card), that spot still, its card up.
     fn lit_at(&self, client: POINT) -> Option<Hit> {
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         match (hover, self.hover) {
-            (hover, Some(Hit::AiSlot(source))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(source)),
+            (hover, Some(Hit::AiSlot(spot))) if !matches!(hover, Some(Hit::AiSlot(_))) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(spot)),
             (hover, _) => hover,
         }
     }

@@ -273,8 +273,9 @@ pub enum Hit {
     Todo(TodoHit),
     /// An AI source's head: its lane opened or closed (see `ai`).
     Ai(ai::Source),
-    /// An AI source in the dock: its lane shown beside it as the pointer rests there (see `ai::paint_dock`).
-    AiSlot(ai::Source),
+    /// A spot of the AI component's dock (what every source spent today, a source's ring, the sessions at work): its
+    /// card shown beside the dock as the pointer rests there (see `ai::paint_dock`).
+    AiSlot(ai::Spot),
 }
 
 impl Hit {
@@ -6810,7 +6811,7 @@ otepad.exe", "Notepad"),
                 crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
                 // The dock, down a side and across, and the card beside it.
                 let held = Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai);
-                let scene = Scene { prefs: &held, hover: Some(Hit::AiSlot(ai::Source::Codex)), ..scene };
+                let scene = Scene { prefs: &held, hover: Some(Hit::AiSlot(ai::Spot::Ring(ai::Source::Codex))), ..scene };
                 let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
                 let (down, across) = (ai::dock_size(false, dock.slots.len()), ai::dock_size(true, dock.slots.len()));
                 let card = Lane { id: "ai:codex".into(), blocks: ai::lane_of("ai:codex", &held, Lang::Zh, Some(&usage), now, None).unwrap(), ink: theme.ink("ai:codex") };
@@ -6831,6 +6832,36 @@ otepad.exe", "Notepad"),
                     .expect("drawn");
                 let name = format!("{skin:?}-{}-dock.png", if dark { "dark" } else { "light" });
                 crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+            }
+        }
+    }
+
+    /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
+    /// work at its end, as for each source's ring between them: each spot is where it is drawn, down a side and across.
+    #[test]
+    fn the_ai_dock_offers_a_card_for_today_its_rings_and_its_sessions() {
+        let theme = Theme::new(Skin::Glass, false);
+        let (info, prefs) = (info(), Prefs::default());
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new() };
+        let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
+        let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
+        use ai::{Source, Spot};
+        let (w, h) = ai::dock_size(true, 2);
+        let across = spots(ai::draw_dock(&Nothing, &scene, &dock, true, (w, h)));
+        assert_eq!(across.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
+        assert_eq!((across[0].1, across[3].1), ((12.0, 0.0, 76.0, h), (12.0 + 76.0 + 2.0 * 120.0, 0.0, 76.0, h)));
+        let (w, h) = ai::dock_size(false, 2);
+        let down = spots(ai::draw_dock(&Nothing, &scene, &dock, false, (w, h)));
+        assert_eq!(down.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
+        assert_eq!((down[0].1, down[3].1), ((0.0, 12.0, w, 42.0), (0.0, 12.0 + 42.0 + 2.0 * 92.0, w, 50.0)));
+        // (Every spot within the dock, none over another.)
+        for spots in [&across, &down] {
+            for pair in spots.windows(2) {
+                let ((_, a), (_, b)) = (pair[0], pair[1]);
+                assert!(a.0 + a.2 <= b.0 + 1e-3 || a.1 + a.3 <= b.1 + 1e-3, "{a:?} {b:?}");
             }
         }
     }
