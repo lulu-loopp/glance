@@ -200,6 +200,18 @@ const FLICK: f32 = 0.3;
 /// `view::Shape`) down to this.
 const SHAPE_LEAST: (f32, f32) = (40.0, 40.0);
 
+/// How large a widget of the workbench's lanes or the AI component's is made, as `choice` has it (DIPs): all of its lanes
+/// as designed (`designed`, laid out in its columns) with what it was made larger or smaller by; or, torn off a panel
+/// that showed a form of its own (the AI component's dock), as large as that form showed there for `count` readings, in
+/// a skin whose corners are `radius` round, as the panel drew it. (Laid out from all of its lanes, the dock torn off came
+/// off as large a plate as the panel shows all of the component in, not the dock's strip.)
+fn made_size(choice: Choice, designed: (f32, f32), count: usize, radius: f32) -> (f32, f32) {
+    match choice.form {
+        Form::Small(small) => small.size_within(count, radius),
+        Form::Lanes { .. } => (designed.0 + choice.extra.0, designed.1 + choice.extra.1),
+    }
+}
+
 const STICK: f32 = 36.0;
 const UNSTICK: f32 = 52.0;
 /// A frame that takes longer than this is noted in the journal, its parts'
@@ -4553,8 +4565,17 @@ impl Widget {
                                 (designed, least, SHAPE_LEAST)
                             }
                         };
-                        let wanted = sized_to.unwrap_or((designed.width() + readings.choice.extra.0, designed.height() + readings.choice.extra.1));
-                        let size = within(wanted, shape_least);
+                        // Drawn as large as it was made: torn off a panel shown smaller or larger (its size in the
+                        // settings), as large as there, and kept so (it came off larger than the panel showed it, drawn
+                        // as large as its lanes are designed). The hand's room is on the screen: its lanes', so much
+                        // smaller or larger.
+                        let zoom = readings.choice.scale;
+                        let wanted = match sized_to {
+                            Some(room) => (room.0 / zoom, room.1 / zoom),
+                            None => made_size(readings.choice, (designed.width(), designed.height()), forms::shows(&scene).count(), theme.radius),
+                        };
+                        let size = within((wanted.0 * zoom, wanted.1 * zoom), (shape_least.0 * zoom, shape_least.1 * zoom));
+                        let size = (size.0 / zoom, size.1 / zoom);
                         let extra = (size.0 - designed.width(), size.1 - designed.height());
                         // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across
                         // side by side, else one over another.
@@ -4569,8 +4590,8 @@ impl Widget {
                         };
                         // (Its columns kept as chosen, whatever its shape: sized up again, it is laid out as it was.)
                         let form = Form::Lanes { detail, columns };
-                        readings.choice = Choice { form, scale: 1.0, extra };
-                        Shown { form, zoom: 1.0, size: (layout.width(), layout.height()), layout, small: None, detail }
+                        readings.choice = Choice { form, scale: zoom, extra };
+                        Shown { form, zoom, size: (layout.width(), layout.height()), layout, small: None, detail }
                     }
                     None => {
                         let heights = view::heights(&scene);
@@ -5423,6 +5444,25 @@ fn rounded(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<Point> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The AI component's dock torn off a panel is made as large as the panel drew it, a strip across or down as it lay,
+    /// and so shown as the dock's strip: not as large as all of the component, which showed as a plate. A widget of
+    /// lanes is made as large as they are designed, with what it was sized by.
+    #[test]
+    fn the_dock_torn_off_keeps_its_shape() {
+        let theme = Theme::new(crate::ui::theme::Skin::Glass, false);
+        // (All of the component, three sources, as designed: one column, tall.)
+        let designed = (view::COLUMN_WIDTH, 620.0);
+        for (across, shape) in [(true, view::Shape::Across), (false, view::Shape::Down)] {
+            let dock = Small::Dock { across };
+            let choice = Choice { form: Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) };
+            let made = made_size(choice, designed, 3, theme.radius);
+            assert_eq!(made, dock.size_within(3, theme.radius), "{dock:?}");
+            assert_eq!(view::Shape::of(made), shape, "{dock:?} {made:?}");
+        }
+        let lanes = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (20.0, -100.0) };
+        assert_eq!(made_size(lanes, designed, 3, theme.radius), (view::COLUMN_WIDTH + 20.0, 520.0));
+    }
 
     /// A note pulled off the panel is its card while the pointer is over the panel, and a note off it (none to be had:
     /// off it). Held where it was pressed on its card, across by share as it grows; down, as far as on its card while it
