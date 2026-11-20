@@ -7009,6 +7009,162 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// A day of made-up AI use, for pictures to be shown (nothing in it is anyone's): Claude Code and Codex at work on
+    /// their plans' windows, the GLM Coding Plan's, and DeepSeek's balance; three models of Claude's, sessions named as
+    /// a Chinese user names them.
+    #[cfg(feature = "studio")]
+    fn post_usage(now: u64) -> crate::ai::Usage {
+        use crate::ai::{Balance, Limit, Tokens, Tool, Window};
+        const HOUR: u64 = 3_600_000;
+        let today = now - 21 * HOUR;
+        let session = |tool: Tool, id: &str, title: &str, folder: &str, model: &str, ago: u64, spent: u64| {
+            let mut session: crate::ai::Session = serde_json::from_value(serde_json::json!({
+                "tool": tool, "id": id, "title": title, "folder": folder, "model": model, "last": now - ago, "spent": {}
+            }))
+            .unwrap();
+            for back in 0..4u64 {
+                session.spent.insert(crate::ai::quarter(now - ago - back * 900_000), spent / (back + 1));
+            }
+            session
+        };
+        let tokens = |input, output, cache_read, cache_write, reasoning| Tokens { input, output, cache_read, cache_write, reasoning };
+        // (Each quarter hour of the day so far: quiet in the night, busy in the morning and after lunch.)
+        let curve = |peak: f64, shift: f64| -> Vec<u64> {
+            (0..84).map(|q| {
+                let hour = q as f64 / 4.0 + shift;
+                let busy = (-(hour - 10.0).powi(2) / 3.0).exp() + 0.8 * (-(hour - 15.0).powi(2) / 2.5).exp() + 0.6 * (-(hour - 20.0).powi(2) / 1.5).exp();
+                (peak * busy * (0.85 + 0.3 * ((q * 37 % 11) as f64 / 11.0))) as u64
+            }).collect()
+        };
+        let limit = |tool, plan: Option<&str>, windows, balance| Limit { tool, id: if tool == Tool::Codex { "codex".into() } else if tool == Tool::Claude { "claude".into() } else { String::new() }, name: None, plan: plan.map(String::from), windows, balance, told: now - 60_000 };
+        crate::ai::Usage {
+            now,
+            today,
+            spent_today: vec![
+                (Tool::Claude, "claude-opus-5-5".into(), tokens(310_000, 420_000, 38_200_000, 1_900_000, 0)),
+                (Tool::Claude, "claude-sonnet-5-5".into(), tokens(120_000, 160_000, 9_400_000, 700_000, 0)),
+                (Tool::Claude, "claude-haiku-5-5".into(), tokens(60_000, 40_000, 1_300_000, 200_000, 0)),
+                (Tool::Codex, "gpt-5.5-codex".into(), tokens(2_100_000, 260_000, 11_800_000, 0, 90_000)),
+                (Tool::Codex, "gpt-5.5".into(), tokens(300_000, 40_000, 1_200_000, 0, 20_000)),
+                (Tool::Glm, "glm-5".into(), tokens(900_000, 120_000, 4_100_000, 0, 30_000)),
+            ],
+            days: vec![
+                (Tool::Claude, [31_000_000, 44_000_000, 12_000_000, 8_000_000, 39_000_000, 47_000_000, 52_600_000]),
+                (Tool::Codex, [9_000_000, 14_000_000, 3_000_000, 2_000_000, 11_000_000, 16_000_000, 15_800_000]),
+                (Tool::Glm, [2_000_000, 4_000_000, 1_000_000, 0, 3_000_000, 5_000_000, 5_200_000]),
+            ],
+            quarters: vec![(Tool::Claude, curve(1_900_000.0, 0.0)), (Tool::Codex, curve(560_000.0, 0.4)), (Tool::Glm, curve(190_000.0, -0.3))],
+            sessions: vec![
+                session(Tool::Claude, "s1", "重构登录流程", "shop-app", "claude-opus-5-5", 40_000, 2_400_000),
+                session(Tool::Codex, "s2", "修复构建脚本", "shop-app", "gpt-5.5-codex", 3 * 60_000, 900_000),
+                session(Tool::Claude, "s3", "给首页加深色模式", "my-blog", "claude-sonnet-5-5", 9 * 60_000, 1_300_000),
+                session(Tool::Glm, "s4", "整理周报数据", "weekly", "glm-5", 25 * 60_000, 600_000),
+                session(Tool::Claude, "s5", "写单元测试", "shop-app", "claude-opus-5-5", 2 * HOUR, 1_800_000),
+                session(Tool::Codex, "s6", "检查依赖更新", "my-blog", "gpt-5.5-codex", 3 * HOUR, 400_000),
+            ],
+            limits: vec![
+                limit(Tool::Claude, Some("max"), vec![Window { minutes: 300, used: 46.0, resets: Some(now + 2 * HOUR + 10 * 60_000) }, Window { minutes: 10080, used: 31.0, resets: Some(now + 3 * 24 * HOUR + 5 * HOUR) }], None),
+                limit(Tool::Codex, Some("plus"), vec![Window { minutes: 300, used: 23.0, resets: Some(now + 3 * HOUR + 20 * 60_000) }, Window { minutes: 10080, used: 41.0, resets: Some(now + 4 * 24 * HOUR) }], None),
+                limit(Tool::Glm, Some("pro"), vec![Window { minutes: 300, used: 18.0, resets: Some(now + HOUR + 45 * 60_000) }, Window { minutes: 43200, used: 27.0, resets: Some(now + 17 * 24 * HOUR) }], None),
+                limit(Tool::DeepSeek, None, Vec::new(), Some(Balance { currency: "CNY".into(), amount: Some(86.4), today: Some(3.2), since: None, spent: None })),
+            ],
+            failed: Vec::new(),
+            unkeyed: Vec::new(),
+        }
+    }
+
+    /// The AI component's pictures for a post: Xiaohongshu's 3:4 pages (1242 by 1656, two pixels a DIP) over the dark
+    /// wallpaper the studio's posts are made on, each holding the component as a page shows it, the words put on later
+    /// (see the studio's xhs_ai.py): `cargo test --features studio --lib -- --ignored ai_post` writes
+    /// `target/studio/xhs-ai/<page>.png`. The use shown is made up (`post_usage`).
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn ai_post() {
+        let _device = crate::ui::gfx::held().unwrap();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let (width, height, px) = (1242.0f32, 1656.0f32, 2.0f32);
+        let root = env!("CARGO_MANIFEST_DIR");
+        let wall = format!("{root}/target/studio/wall-xhs-dark.png");
+        let desktop = crate::ui::wallpaper::picture(&wall, (width * px) as u32, (height * px) as u32).expect("wallpaper");
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let out = std::path::PathBuf::from(format!("{root}/target/studio/xhs-ai"));
+        std::fs::create_dir_all(&out).unwrap();
+        // 21:00 on 2026-11-20 where this PC is (UTC-5): its sessions' times told as of an evening.
+        let now = 1_795_226_400_000;
+        let usage = post_usage(now);
+        let shown = ["ai:today", "ai:claude", "ai:codex", "ai:glm", "ai:deepseek"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        // (A widget's plate, without the panel's bar.)
+        let mut theme = Theme::new(Skin::Glass, true);
+        (theme.bar_gap, theme.bar_height) = (0.0, 0.0);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let lane_at = |detail: Detail, opened: Option<ai::Source>| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| Some(source) == opened, &theme).unwrap(), ink: theme.ink(AI_LANE) };
+        let dock = ai::dock_size(true, 4);
+        let down = ai::dock_size(false, 4);
+        // Each page: what it holds, each its form (none: as in the panel, a source opened), its size, where, how large.
+        type Piece = (Option<Shape>, Option<ai::Source>, (f32, f32), (f32, f32), f32);
+        // The sizes, all drawn as large, in rows of a grid the page's width (DIPs of the widgets, from its corner):
+        // the dock's strip across, a small widget beside a wide one, the dock's strip down beside a large one.
+        let sizes = |dock: (f32, f32), down: (f32, f32)| -> Vec<Piece> {
+            let (zoom, corner, gap) = (1.4, (84.0, 430.0), 20.0);
+            let (wide, middle) = ((1242.0 - 2.0 * 84.0) / zoom, 220.0);
+            let at = |x: f32, y: f32| (corner.0 + x * zoom, corner.1 + y * zoom);
+            let across = dock.1 + 12.0;
+            let (second, third) = (across + gap, across + gap + middle + gap);
+            let small = 140.0;
+            let thin = down.0 + 8.0;
+            vec![
+                (Some(Shape::Across), None, (wide, across), at(0.0, 0.0), zoom),
+                (Some(Shape::Least), None, (small, middle), at(0.0, second), zoom),
+                (Some(Shape::Least), None, (wide - small - gap, middle), at(small + gap, second), zoom),
+                (Some(Shape::Down), None, (thin, down.1), at(0.0, third), zoom),
+                (Some(Shape::Least), None, (wide - thin - gap, down.1), at(thin + gap, third), zoom),
+            ]
+        };
+        let pages: Vec<(&str, Vec<Piece>)> = vec![
+            ("cover", vec![(Some(Shape::Least), None, (520.0, 470.0), (84.0, 640.0), 2.06)]),
+            ("sizes", sizes(dock, down)),
+            ("limits", vec![(None, Some(ai::Source::Claude), (COLUMN_WIDTH, 0.0), (171.0, 440.0), 2.6)]),
+            ("models", vec![(Some(Shape::Least), None, (560.0, 640.0), (117.0, 430.0), 1.8)]),
+        ];
+        for pass in 0..2 {
+            for (name, pieces) in &pages {
+                let pixels = gfx
+                    .draw_offscreen(((width * px) as u32, (height * px) as u32), px, |frame| {
+                        if let Ok(bitmap) = desktop.bitmap(&frame.dc, px) {
+                            unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, windows::Win32::Graphics::Direct2D::D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                        }
+                        for (shape, opened, size, at, zoom) in pieces {
+                            let lanes = vec![shape.map_or_else(|| lane_at(Detail::Full, *opened), |shape| lane_at(Detail::Shape(shape), None))];
+                            let layout = match shape {
+                                Some(_) => Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).fitted(*size),
+                                None => Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).widened(lanes[0].wide(&theme)),
+                            };
+                            let behind = desktop.bitmap(&frame.dc, px * zoom).ok();
+                            let backdrop = behind.as_ref().map(|bitmap| (bitmap, windows_numerics::Vector2 { X: at.0 / zoom, Y: at.1 / zoom }, desktop.digest, px * zoom));
+                            let picture = crate::ui::render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size: (layout.width(), layout.height()), at: (0.0, 0.0), edge: None, backdrop, frost: 0.4, rough: false };
+                            let mut layers = crate::ui::render::PanelLayers::default();
+                            let local = windows_numerics::Matrix3x2::scale(*zoom, *zoom) * windows_numerics::Matrix3x2::translation(at.0, at.1);
+                            let _ = layers.draw(frame, &picture, local, px * zoom);
+                            println!("{name}: {:?} at {at:?}, {:.0} by {:.0} drawn {zoom} times as large", shape, layout.width() * zoom, layout.height() * zoom);
+                        }
+                    })
+                    .expect("drawn");
+                if pass == 1 {
+                    crate::studio::save_png(&out.join(format!("{name}.png")), (width * px) as u32, (height * px) as u32, &pixels).unwrap();
+                }
+            }
+            // (The first pass draws what the second shows: pictures and plates made on their own threads.)
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    }
+
     /// Every part of the AI component draws in any room it is given, down to none (a widget sized small lays its lanes
     /// out as narrow as that leaves them): a window's mark of the time gone by kept within its bar however short.
     #[test]

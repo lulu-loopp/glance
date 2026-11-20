@@ -135,6 +135,23 @@ struct Shot {
     /// How large the panel is drawn, as the user sizes it (1 as it first opens).
     #[serde(default = "opaque")]
     size: f32,
+    /// The devices nearby risen at the station's foot, as while something is dragged off it (see `station::send`).
+    #[serde(default)]
+    strip: Option<Vec<ChipShot>>,
+}
+
+/// A device on the station's strip of devices nearby: what it calls itself, its kind (as LocalSend names kinds:
+/// "mobile", "desktop" and so on), whether the pointer is over it with something to let go there, and how a sending
+/// to it goes, if one does.
+#[derive(Deserialize)]
+struct ChipShot {
+    alias: String,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    lit: bool,
+    #[serde(default)]
+    sending: Option<crate::nearby::Sending>,
 }
 
 /// A song as the music widget or the full screen shows it: its lines (as Glance's lyrics hold them, in a JSON file),
@@ -783,6 +800,23 @@ fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &cr
         prefs.modules.iter_mut().for_each(|entry| entry.on = shown.contains(&entry.id));
     }
 
+    // (The devices nearby, where a shot shows them: grown under the pointer as the strip grows them, a tick ticked.)
+    crate::station::send::pretend(shot.strip.as_ref().map(|chips| crate::station::send::Shown {
+        up: 1.0,
+        open: chips.iter().any(|chip| chip.lit),
+        stays_here: false,
+        chips: chips
+            .iter()
+            .map(|chip| crate::station::send::ChipShown {
+                key: crate::station::send::key_of(&chip.alias),
+                alias: chip.alias.clone(),
+                kind: chip.kind.clone(),
+                grown: if chip.lit { 1.0 } else { 0.0 },
+                lit: chip.lit,
+                sending: chip.sending.clone().map(|sending| (sending, 1.0)),
+            })
+            .collect(),
+    }));
     // (The media module, where a shot shows it: a track made up.)
     crate::playing::pretend(crate::playing::Now { timeline: None, players: 1, title: "Clair de lune".into(), artist: "Claude Debussy".into(), album: "Suite bergamasque".into(), app: lang.pick("音乐", "Music").into(), playing: true, volume: Some(40), muted: false, sung: None });
     let frames = (shot.seconds * script.fps).round() as usize;

@@ -1652,4 +1652,75 @@ mod pictures {
         drop(gfx);
         gfx::let_go();
     }
+
+    /// The notice for a post's pages, on glass, dark, four pixels a DIP over nothing (the page put under it later):
+    /// a phone asking to send a photo, the box ticked and Accept under the pointer; the photo come; words come; and
+    /// a PIN asked by an iPhone sent to (`cargo test --features studio --lib -- --ignored peek_post` writes
+    /// `target/studio/xhs-peek/<state>.png`).
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    fn peek_post() {
+        let _pretending = crate::pretending();
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+        }
+        crate::station::thumbs::start(|| {});
+        use crate::station::shelf::{Device, Item, What};
+        let photo = std::path::PathBuf::from(r"C:\Windows\Web\Screen\img100.jpg");
+        let from = Device { alias: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), fingerprint: "AB".into() };
+        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from) };
+        crate::station::run::pretend(vec![item], crate::settings::ShelfView::Cards);
+        let sender = crate::nearby::Sender { alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
+        let photo = Offered { name: "IMG_20261120_193012.jpg".into(), size: 3_500_000, kind: "image/jpeg".into(), words: None };
+        let gfx = gfx::for_main_screen().unwrap();
+        let theme = Theme::new(Skin::Glass, true);
+        let (shown, tall_words) = gfx.wrapped_within("晚上七点半在体育馆门口见，记得带上球拍和两瓶水", theme.body, WORDS_WIDE, WORDS_LINES);
+        let states = [
+            ("ask", Says::Ask(Asking { id: 1, from: sender.clone(), files: vec![photo.clone()] }), (Some(Spot::Accept), true, false, false)),
+            ("coming", Says::Coming(Receiving { session: "s".into(), from: sender, files: vec![photo], done: 2_300_000, of: 3_500_000 }), (None, false, false, false)),
+            ("came", Says::Came { id: 7, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Files { count: 1, pictures: true } }, (None, false, false, false)),
+            ("came-text", Says::Came { id: 9, from: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), got: Got::Words { link: false, shown, tall: tall_words } }, (Some(Spot::Copy), false, false, false)),
+            ("pin", Says::Pin { job: 1, to: "iPhone 16".into(), what: "第三季度报表.xlsx · 1.2 MB".into(), tried: 0 }, (Some(Spot::Accept), false, false, false)),
+        ];
+        let mut written = Typing::most(PIN_MOST);
+        written.put(&"4827".encode_utf16().collect::<Vec<u16>>());
+        let out = std::path::PathBuf::from(format!("{}/target/studio/xhs-peek", env!("CARGO_MANIFEST_DIR")));
+        std::fs::create_dir_all(&out).unwrap();
+        let scale = 4.0;
+        for (label, says, state) in &states {
+            let (w, h) = (WIDE + 2.0 * ROOM, tall(says) + 2.0 * ROOM);
+            let size = ((w * scale) as u32, (h * scale) as u32);
+            // Drawn again till its picture has come (made on a thread of its own), for at most ten seconds.
+            for tries in 0.. {
+                let mut whole = false;
+                let pixels = gfx
+                    .draw_offscreen(size, scale, |frame| {
+                        frame.origin(ROOM, ROOM);
+                        let field = (*label == "pin").then(|| Field { typing: &written, keys: true, caret: true, shaken: 0.0, trying: false });
+                        // (Drawn as over the screen frosted, as glass's is: the post puts what is behind it under it, frosted.)
+                        whole = paint(frame, &theme, Lang::Zh, says, *state, true, field.as_ref(), &mut Vec::new(), &mut Vec::new());
+                    })
+                    .unwrap();
+                if whole || tries == 50 {
+                    println!("{label}: whole {whole} after {tries} tries");
+                    crate::studio::save_png(&out.join(format!("{label}.png")), size.0, size.1, &pixels).unwrap();
+                    // Where its plate is in the picture (px), and how frosted what is behind it is: blurred by so many px, its colour lifted so much.
+                    let look = super::super::menu::Look::of(theme.skin, theme.dark);
+                    let radius = super::super::menu::sheet_radius(look, true, tall(says));
+                    let ((blur, saturation), frost) = super::super::menu::frosting(look).unwrap();
+                    let plate = serde_json::json!({ "plate": [ROOM * scale, ROOM * scale, WIDE * scale, tall(says) * scale], "radius": radius * scale, "blur": blur * frost * scale, "saturation": saturation });
+                    std::fs::write(out.join(format!("{label}.json")), plate.to_string()).unwrap();
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        // The devices' marks, as the strip draws them, for the post's pictures of which devices send to which.
+        for (name, icon) in [("smartphone", Icon::Smartphone), ("monitor", Icon::Monitor), ("laptop", Icon::Laptop)] {
+            let pixels = gfx.draw_offscreen((96 * 4, 96 * 4), 4.0, |frame| frame.icon(icon, Point { x: 48.0, y: 48.0 }, 88.0, super::super::canvas::Color::hex(0xFFFFFF, 1.0))).unwrap();
+            crate::studio::save_png(&out.join(format!("icon-{name}.png")), 96 * 4, 96 * 4, &pixels).unwrap();
+        }
+        drop(gfx);
+        gfx::let_go();
+    }
 }

@@ -8639,7 +8639,7 @@ mod pictures {
         ui.remote = true;
         let trusted = |fingerprint: &str, alias: &str, kind: &str, since: u64, phone: Option<&str>, glance: bool| crate::phone::Trusted { fingerprint: fingerprint.into(), alias: alias.into(), kind: Some(kind.into()), since, phone: phone.map(str::to_string), glance };
         ui.nearby = Some(crate::phone::Nearby {
-            name: "DESKTOP-9950X".into(),
+            name: "DESKTOP-7Q2K8LM".into(),
             trusted: vec![
                 trusted("AA", "Galaxy Z Fold6", "mobile", 1_762_300_000, Some("p1"), true),
                 trusted("BB", "MacBook Air", "desktop", 1_762_732_800, None, false),
