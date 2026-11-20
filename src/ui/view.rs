@@ -3960,7 +3960,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (_, Pass::Plots) => {}
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "todo" => todo::paint_head(frame, scene, (left, y, width), title, device, hits),
             (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), pad_x, lane, *tall + spare, hits),
-            (Block::Ai(ai::AiBlock::Shaped { shape, dock, mounted }), Pass::Content) => ai::paint_shaped(frame, scene, ink, (*shape, dock, mounted), (area.x, area.y, area.w, area.h), hits),
+            (Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. }), Pass::Content) => ai::paint_shaped(frame, scene, ink, (dock, mounted, rich), (area.x, area.y, area.w, area.h), hits),
             (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part, hits),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
@@ -7035,13 +7035,12 @@ otepad.exe", "Notepad"),
                 ai::paint(&Nothing, &scene, theme.ink("ai:codex"), block, (12.0, 0.0, width), &|_| {}, &mut Vec::new());
             }
         }
-        // (And in a widget too small for all of it, at every size in each shape.)
-        let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
-        for shape in [Shape::Across, Shape::Down, Shape::Least] {
-            for w in (0..=400).step_by(3) {
-                for h in (0..=400).step_by(7) {
-                    ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (shape, &dock, &[0.0, 0.5, 1.0]), (0.0, 0.0, w as f32, h as f32), &mut Vec::new());
-                }
+        // (And in a widget too small for all of it, at every size, in each form it takes.)
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        for w in (0..=1200).step_by(7) {
+            for h in (0..=900).step_by(9) {
+                ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (dock, &[0.0, 0.5, 1.0], rich), (0.0, 0.0, w as f32, h as f32), &mut Vec::new());
             }
         }
     }
@@ -7138,14 +7137,15 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let prefs = Prefs::default();
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new() };
+        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
+        let rich = ai::Rich::default();
         use ai::{Source, Spot};
         let every = [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot).to_vec();
         let rings = [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex)].map(Hit::AiSlot).to_vec();
         let spots = |shape: Shape, size: (f32, f32)| {
             let mut hits = Vec::new();
-            ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (shape, &dock, &[0.2, 0.6, 1.0]), (30.0, 40.0, size.0, size.1), &mut hits);
+            ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (&dock, &[0.2, 0.6, 1.0], &rich), (30.0, 40.0, size.0, size.1), &mut hits);
             for &(x, y, w, h, _) in &hits {
                 assert!(x >= 30.0 - 1e-3 && y >= 40.0 - 1e-3 && x + w <= 30.0 + size.0 + 1e-3 && y + h <= 40.0 + size.1 + 1e-3, "{shape:?} {size:?}: {:?}", (x, y, w, h));
             }
@@ -7162,6 +7162,76 @@ otepad.exe", "Notepad"),
         assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today)]);
     }
 
+    /// The AI component's widget shows more the larger it is made, each form drawn only a little larger than designed
+    /// (see `ai::fit_of`). Sized as the owner sized it (830 by 400), its parts side by side, no spot of it as tall as it:
+    /// it was the dock's strip stretched to fill it, its spots as tall as the widget and far apart, and nothing more.
+    /// Made taller, what each source spent by model, then its sessions a row at a time, never its sessions without what
+    /// was spent by model, all of it within the widget. A strip made wider, and the dock down a side made taller, its
+    /// spots kept together in the middle and no farther apart than so far, each slot down telling each of its windows.
+    /// As near a square, its rings side by side. Tall and narrow, its parts one over another with their limits.
+    #[test]
+    fn the_ai_widget_shows_more_as_it_is_made_larger() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Across), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        let spots = |size: (f32, f32)| {
+            let mut hits = Vec::new();
+            ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
+            hits.into_iter().filter(|hit| matches!(hit.4, Hit::AiSlot(_))).map(|(x, y, w, h, _)| (x, y, w, h)).collect::<Vec<_>>()
+        };
+        use ai::Fit;
+        assert_eq!([(830.0, 400.0), (920.0, 84.0), (400.0, 340.0), (110.0, 560.0), (320.0, 680.0), (150.0, 100.0)].map(ai::fit_of), [Fit::Board, Fit::Strip, Fit::Square, Fit::Down, Fit::Column, Fit::Least]);
+        // As the owner sized it: its parts side by side, no spot as tall as it.
+        assert!(spots((830.0, 400.0)).iter().all(|spot| spot.3 <= ai::BAR_HEIGHT), "{:?}", spots((830.0, 400.0)));
+        assert!(ai::board_of(rich, &theme, Lang::Zh, (830.0, 400.0)).is_some());
+        // Made taller: what each source spent by model, then its sessions, all within it.
+        let told = |h: f32| {
+            let rows = ai::board_of(rich, &theme, Lang::Zh, (830.0, h))?;
+            let blocks: Vec<&Block> = rows.iter().flatten().flat_map(|lane| &lane.blocks).collect();
+            let models = blocks.iter().any(|block| matches!(block, Block::Ai(ai::AiBlock::Models(_))));
+            let sessions: usize = blocks.iter().map(|block| if let Block::Ai(ai::AiBlock::Sessions(rows)) = block { rows.len() } else { 0 }).sum();
+            let tall = rows.iter().map(|row| across_tall(row)).sum::<f32>() + (rows.len() - 1) as f32 * ACROSS_ROW_GAP;
+            assert!(tall <= h - theme.pad_top - theme.pad_bottom + 1e-3, "{h}: {tall}");
+            Some((models, sessions))
+        };
+        let grown: Vec<(bool, usize)> = (150..=900).step_by(10).filter_map(|h| told(h as f32)).collect();
+        assert!(grown.windows(2).all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1), "{grown:?}");
+        assert!(grown.iter().all(|&(models, sessions)| models || sessions == 0), "{grown:?}");
+        assert_eq!((grown[0], *grown.last().unwrap()), ((false, 0), (true, 3)), "{grown:?}");
+        // A strip made wider, and the dock down made taller: its spots together in the middle.
+        let together = |spots: &[(f32, f32, f32, f32)], across: bool, (w, h): (f32, f32), most: f32| {
+            let (start, end) = if across { (spots[0].0, w - spots[3].0 - spots[3].2) } else { (spots[0].1, h - spots[3].1 - spots[3].3) };
+            assert!((start - end).abs() < 1e-3, "{start} {end}");
+            for pair in spots.windows(2) {
+                let apart = if across { pair[1].0 - pair[0].0 - pair[0].2 } else { pair[1].1 - pair[0].1 - pair[0].3 };
+                assert!((0.0..=most + 1e-3).contains(&apart), "{apart}");
+            }
+        };
+        let strip = spots((1400.0, 84.0));
+        assert_eq!(strip.len(), 4);
+        assert!(strip.iter().all(|spot| spot.3 <= ai::BAR_HEIGHT));
+        together(&strip, true, (1400.0, 84.0), ai::STRIP_GAP);
+        let down = spots((110.0, 900.0));
+        together(&down, false, (110.0, 900.0), ai::DOWN_GAP);
+        // (Each slot taller, telling the windows of the source with the most of them.)
+        assert!(down[2].3 > 92.0, "{down:?}");
+        // As near a square: its rings side by side, not one over another (the sessions had no room under them).
+        let square = spots((440.0, 500.0));
+        assert_eq!(square.len(), 3, "{square:?}");
+        assert_eq!(square[1].1, square[2].1, "{square:?}");
+        // Tall and narrow: its parts one over another, with their limits, within it.
+        let column = ai::column_of(rich, &theme, Lang::Zh, (320.0, 680.0)).expect("one over another");
+        assert!(column.blocks.iter().any(|block| matches!(block, Block::Ai(ai::AiBlock::Windows(_)))));
+        assert!(column.height(&theme) <= 680.0);
+    }
+
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
     /// work at its end, as for each source's ring between them: each spot is where it is drawn, down a side and across.
     #[test]
@@ -7171,7 +7241,7 @@ otepad.exe", "Notepad"),
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new() };
+        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
         use ai::{Source, Spot};

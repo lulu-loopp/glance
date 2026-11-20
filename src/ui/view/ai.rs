@@ -179,9 +179,9 @@ pub enum AiBlock {
     Sessions(Vec<(String, String, String, bool, Option<Source>)>),
     /// The sessions of the sources shown: how many are at work, and how many spent today.
     Working { at_work: usize, today: usize },
-    /// The whole component in a widget too small for all of it, in `shape`: what the dock shows, and how today's
-    /// spending mounted (see `paint_shaped`).
-    Shaped { shape: Shape, dock: Dock, mounted: Vec<f32> },
+    /// The whole component in a widget too small for all of it, in `shape`: what the dock shows, how today's spending
+    /// mounted, and what it tells in a widget roomy enough for more (see `paint_shaped`).
+    Shaped { shape: Shape, dock: Dock, mounted: Vec<f32>, rich: Box<Rich> },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -190,6 +190,58 @@ pub struct Window {
     pub used: f32,
     pub gone: Option<f32>,
     pub resets: String,
+}
+
+/// What the component tells in a widget roomy enough for more than its dock tells (see `paint_shaped`), each part as
+/// its lane laid out across tells it (see `across`): what every source spent today, and each source's head and limits
+/// with what it spent by model; the sessions at work and of today; and the sessions of the sources docked.
+#[derive(Clone, PartialEq, Debug, Default, Hash)]
+pub struct Rich {
+    pub parts: Vec<Part>,
+    pub working: Option<AiBlock>,
+    pub sessions: Vec<SessionRow>,
+}
+
+/// A session as a row (see `AiBlock::Sessions`).
+pub type SessionRow = (String, String, String, bool, Option<Source>);
+
+/// A part of what the component tells in a roomy widget (see `Rich`): its module, what it shows, and (a source's) what it
+/// spent by model, told where there is room for it.
+#[derive(Clone, PartialEq, Debug, Hash)]
+pub struct Part {
+    pub id: String,
+    pub shows: Vec<Told>,
+    pub models: Option<AiBlock>,
+}
+
+/// A block a part shows (see `Part`), kept as what it tells, compared and copied with the rest of the widget's shape: a
+/// head, one of the component's own, or facts.
+#[derive(Clone, PartialEq, Debug, Hash)]
+pub enum Told {
+    Head { title: String, aside: String },
+    Ai(AiBlock),
+    Facts(Vec<(String, String, bool)>),
+}
+
+impl Told {
+    /// What `block` tells, where a part shows it.
+    fn of(block: Block) -> Option<Told> {
+        match block {
+            Block::Head { title, aside, .. } => Some(Told::Head { title, aside }),
+            Block::Ai(block) => Some(Told::Ai(block)),
+            Block::Facts { rows, .. } => Some(Told::Facts(rows)),
+            _ => None,
+        }
+    }
+
+    /// It as a block of a lane, as it was.
+    fn block(&self) -> Block {
+        match self {
+            Told::Head { title, aside } => head(title.clone(), "", aside.clone(), false),
+            Told::Ai(block) => Block::Ai(block.clone()),
+            Told::Facts(rows) => Block::Facts { rows: rows.clone(), gap: GAP },
+        }
+    }
 }
 
 impl Hash for AiBlock {
@@ -204,10 +256,14 @@ impl Hash for AiBlock {
             AiBlock::Pairs(rows) => rows.hash(state),
             AiBlock::Sessions(rows) => rows.hash(state),
             AiBlock::Working { at_work, today } => (at_work, today).hash(state),
-            AiBlock::Shaped { shape, dock, mounted } => {
+            AiBlock::Shaped { shape, dock, mounted, rich } => {
                 (shape, &dock.today, &dock.at_work, dock.working).hash(state);
-                dock.slots.iter().for_each(|slot| (slot.source, slot.used.map(f32::to_bits), &slot.figure, &slot.label).hash(state));
+                dock.slots.iter().for_each(|slot| {
+                    (slot.source, slot.used.map(f32::to_bits), &slot.figure, &slot.label, &slot.resets).hash(state);
+                    slot.windows.iter().for_each(|(name, used)| (name, used.to_bits()).hash(state));
+                });
                 mounted.iter().for_each(|share| share.to_bits().hash(state));
+                rich.hash(state);
             }
         }
     }
@@ -505,7 +561,8 @@ pub(super) fn together(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usag
     }
     if let Detail::Shape(shape) = detail {
         let mounted = usage.map_or(Vec::new(), mounted);
-        return Some(vec![Block::Ai(AiBlock::Shaped { shape, dock: dock_of(prefs, lang, usage, now), mounted })]);
+        let rich = Box::new(rich(prefs, &ids, lang, usage, now));
+        return Some(vec![Block::Ai(AiBlock::Shaped { shape, dock: dock_of(prefs, lang, usage, now), mounted, rich })]);
     }
     if prefs.across {
         return Some(vec![Block::Across(across(prefs, &ids, lang, usage, now, &opened, theme))]);
@@ -596,6 +653,39 @@ fn spent_today(lang: Lang, usage: Option<&crate::ai::Usage>) -> Vec<Block> {
     vec![head(lang.pick("AI 用量", "AI usage"), "", lang.pick("今日", "Today"), false), usage.map_or_else(|| reading(lang), |usage| today_block(usage, lang))]
 }
 
+/// What the component tells in a widget roomy enough for more than its dock tells (see `Rich`), of `ids` (the modules
+/// shown, in their order): each source as its lane closed shows it, its head opening nothing, and what it spent by
+/// model, as opened.
+#[cfg(windows)]
+fn rich(prefs: &Prefs, ids: &[&str], lang: Lang, usage: Option<&crate::ai::Usage>, now: u64) -> Rich {
+    let mut parts = Vec::new();
+    for id in ids {
+        if *id == "ai:today" {
+            parts.push(Part { id: id.to_string(), shows: spent_today(lang, usage).into_iter().filter_map(Told::of).collect(), models: None });
+            continue;
+        }
+        let Some(closed) = lane_of(id, prefs, lang, usage, now, Some(false)) else { continue };
+        let shows = closed
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::Ai(AiBlock::Head { source, title, device, aside, .. }) => Some(Told::Ai(AiBlock::Head { source, title, device, aside, opened: None })),
+                block => Told::of(block),
+            })
+            .collect();
+        let models = lane_of(id, prefs, lang, usage, now, Some(true)).into_iter().flatten().find_map(|block| match block {
+            Block::Ai(models @ AiBlock::Models(_)) => Some(models),
+            _ => None,
+        });
+        parts.push(Part { id: id.to_string(), shows, models });
+    }
+    let working = working(prefs, usage, now).and_then(|block| match block {
+        Block::Ai(working) => Some(working),
+        _ => None,
+    });
+    let sessions = usage.map_or(Vec::new(), |usage| docked_sessions(prefs, lang, usage, now).0);
+    Rich { parts, working, sessions }
+}
+
 /// The sessions of the sources shown (see `docked`): how many are at work, and of today; none where there are none.
 fn working(prefs: &Prefs, usage: Option<&crate::ai::Usage>, now: u64) -> Option<Block> {
     let tools: Vec<crate::ai::Tool> = docked(prefs).into_iter().map(tool_of).collect();
@@ -649,17 +739,8 @@ pub(super) fn today_card(lang: Lang, usage: Option<&crate::ai::Usage>) -> Vec<Bl
 /// The sessions of the sources docked, as the card beside the dock's 会话 tells them: those at work (how many in its
 /// head), the latest first, then the others of today, each with its source's mark.
 pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64) -> Vec<Block> {
-    let docked = docked(prefs);
     let Some(usage) = usage else { return vec![head(lang.pick("会话", "Sessions"), "", "", false), reading(lang)] };
-    let at_work = |session: &crate::ai::Session| now.saturating_sub(session.last) < AT_WORK_MS;
-    let mut sessions: Vec<(Source, &crate::ai::Session)> = usage
-        .sessions
-        .iter()
-        .filter(|session| at_work(session) || session.spent_between(usage.today, usage.now) > 0)
-        .filter_map(|session| Some((docked.iter().copied().find(|source| tool_of(*source) == session.tool)?, session)))
-        .collect();
-    sessions.sort_by(|(_, a), (_, b)| at_work(b).cmp(&at_work(a)).then(b.last.cmp(&a.last)));
-    let working = sessions.iter().filter(|(_, session)| at_work(session)).count();
+    let (sessions, working) = docked_sessions(prefs, lang, usage, now);
     let aside = match lang {
         Lang::Zh => format!("{working} 个进行中"),
         Lang::En => format!("{working} at work"),
@@ -670,8 +751,24 @@ pub(super) fn sessions_card(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai:
         return blocks;
     }
     let shown = working.clamp(SESSIONS_TOLD, SESSIONS_AT_WORK);
-    blocks.push(Block::Ai(AiBlock::Sessions(sessions.into_iter().take(shown).map(|(source, session)| session_row(session, usage, now, lang, Some(source))).collect())));
+    blocks.push(Block::Ai(AiBlock::Sessions(sessions.into_iter().take(shown).collect())));
     blocks
+}
+
+/// The sessions of the sources docked, as rows: those at work, the latest first, then the others of today, each with
+/// its source's mark; and how many are at work.
+fn docked_sessions(prefs: &Prefs, lang: Lang, usage: &crate::ai::Usage, now: u64) -> (Vec<SessionRow>, usize) {
+    let docked = docked(prefs);
+    let at_work = |session: &crate::ai::Session| now.saturating_sub(session.last) < AT_WORK_MS;
+    let mut sessions: Vec<(Source, &crate::ai::Session)> = usage
+        .sessions
+        .iter()
+        .filter(|session| at_work(session) || session.spent_between(usage.today, usage.now) > 0)
+        .filter_map(|session| Some((docked.iter().copied().find(|source| tool_of(*source) == session.tool)?, session)))
+        .collect();
+    sessions.sort_by(|(_, a), (_, b)| at_work(b).cmp(&at_work(a)).then(b.last.cmp(&a.last)));
+    let working = sessions.iter().filter(|(_, session)| at_work(session)).count();
+    (sessions.into_iter().map(|(source, session)| session_row(session, usage, now, lang, Some(source))).collect(), working)
 }
 
 /// Today's figure and how it mounted through the day, every tool's quarters added up.
@@ -1035,27 +1132,214 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
     }
 }
 
-/// The whole component in a widget too small for all of it, filling `room` (DIPs) on the widget's plate: in `shape`,
-/// the dock's strip across or down where the dock fits (each source as a ring round its mark), else as near a square as
-/// the widget is (see `paint_least`). Where the pointer rests to show a spot's card beside it, as on the dock.
-pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, (shape, dock, mounted): (Shape, &Dock, &[f32]), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
-    let (x, y, w, h) = room;
+/// The whole component in a widget too small for all of it, filling `room` (DIPs) on the widget's plate, in the form its
+/// room takes (see `fit_of`): the dock's strip across or down where the dock fits it; its parts side by side or one over
+/// another where they fit, what each source spent by model as there is room, then its sessions; else as near a square
+/// as the widget is (see `paint_least`). On the dock's forms, where the pointer rests to show a spot's card beside it.
+pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    let (_, _, w, h) = room;
     let count = dock.slots.len();
     let fits = |across: bool| {
         let (dw, dh) = dock_size(across, count);
         if across { w >= dw && h >= BAR_HEIGHT } else { w >= DOCK_WIDTH * 0.8 && h >= dh }
     };
-    match shape {
-        Shape::Across if fits(true) => hits.extend(draw_dock(frame, scene, dock, true, room)),
-        Shape::Down if fits(false) => hits.extend(draw_dock(frame, scene, dock, false, room)),
-        _ => paint_least(frame, scene, ink, dock, mounted, (x, y, w, h), hits),
+    let fit = fit_of((w, h));
+    if fit == Fit::Strip && fits(true) {
+        hits.extend(draw_dock(frame, scene, dock, true, room));
+    } else if fit == Fit::Down && fits(false) {
+        hits.extend(draw_dock(frame, scene, dock, false, room));
+    } else if fit == Fit::Board && paint_board(frame, scene, rich, room, hits) {
+    } else if fit == Fit::Column && paint_column(frame, scene, ink, rich, room, hits) {
+    } else {
+        paint_least(frame, scene, ink, dock, mounted, &rich.sessions, room, hits);
     }
 }
 
+/// The form the component takes in a widget too small for all of it (see `fit_of`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// Today's figure over each source's ring, small.
+    Least,
+    /// The dock's strip across.
+    Strip,
+    /// The dock's strip down.
+    Down,
+    /// As near a square as the widget is: its head, today's figure and how it mounted, each source's ring, and its
+    /// sessions as there is room.
+    Square,
+    /// Its parts one over another, as its lane is: each source's head and limits, then what each spent by model and its
+    /// sessions as there is room.
+    Column,
+    /// Its parts side by side, as from a top edge: what every source spent today beside each source's head and limits,
+    /// then what each spent by model and its sessions as there is room.
+    Board,
+}
+
+/// Lower than this, a widget of the component is its dock's strip across (the least, narrower than `FIT_NARROW`);
+/// narrower, its strip down (DIPs).
+const FIT_LOW: f32 = 150.0;
+const FIT_NARROW: f32 = 200.0;
+/// So many times wider than tall, and at least so wide, its parts side by side.
+const BOARD_RATIO: f32 = 1.6;
+const BOARD_LEAST: f32 = 600.0;
+/// Narrower than this, or so much taller than wide, its parts one over another.
+const COLUMN_WIDEST: f32 = 300.0;
+const COLUMN_RATIO: f32 = 0.75;
+
+/// The form a widget of the component takes in `room` (DIPs): the larger, the more it shows, each form drawn only a
+/// little larger than designed, the next, showing more, taking over. (Stretched, the dock's strip across filled a
+/// widget as large as the owner made it, its parts far apart, its spots as tall as it, and nothing more.)
+pub(super) fn fit_of((w, h): (f32, f32)) -> Fit {
+    if h < FIT_LOW {
+        return if w < FIT_NARROW { Fit::Least } else { Fit::Strip };
+    }
+    if w < FIT_NARROW {
+        return Fit::Down;
+    }
+    let ratio = w / h;
+    if ratio >= BOARD_RATIO && w >= BOARD_LEAST {
+        Fit::Board
+    } else if w < COLUMN_WIDEST || ratio < COLUMN_RATIO {
+        Fit::Column
+    } else {
+        Fit::Square
+    }
+}
+
+/// How wide each part side by side is at least to be given a row of fewer, and at least (DIPs, inside its padding).
+const BOARD_COLUMN: f32 = 220.0;
+const BOARD_COLUMN_LEAST: f32 = 160.0;
+
+/// `part` as a lane: what it shows, and what it spent by model where `models`.
+fn part_lane(part: &Part, theme: &Theme, models: bool) -> Lane {
+    let mut blocks: Vec<Block> = part.shows.iter().map(Told::block).collect();
+    if models {
+        blocks.extend(part.models.clone().map(Block::Ai));
+    }
+    Lane { id: part.id.clone(), blocks, ink: theme.ink(&part.id) }
+}
+
+/// `sessions` in `columns` side by side, as many in each, the first under the head, each with its source's mark.
+fn sessions_lanes(sessions: &[SessionRow], columns: usize, theme: &Theme, lang: Lang) -> Vec<Lane> {
+    let titled = || head(lang.pick("会话", "Sessions"), "", "", false);
+    let above = titled().height();
+    let each = sessions.len().div_ceil(columns.max(1)).max(1);
+    sessions
+        .chunks(each)
+        .enumerate()
+        .map(|(at, rows)| Lane { id: format!("ai:sessions.{at}"), blocks: vec![if at == 0 { titled() } else { Block::Room(above) }, Block::Ai(AiBlock::Sessions(rows.to_vec()))], ink: theme.ink("ai:sessions") })
+        .collect()
+}
+
+/// `rich`'s parts in rows of `per`, the sessions at work under the first, each source with what it spent by model where
+/// `models`, and the first `sessions` of its sessions in a row under them, in as many columns.
+fn board_rows(rich: &Rich, theme: &Theme, lang: Lang, per: usize, models: bool, sessions: usize) -> Vec<Vec<Lane>> {
+    let mut parts: Vec<Lane> = rich.parts.iter().map(|part| part_lane(part, theme, models)).collect();
+    if let Some(working) = &rich.working {
+        match parts.first_mut() {
+            Some(first) => first.blocks.push(Block::Ai(working.clone())),
+            None => parts.push(Lane { id: "ai:sessions".into(), blocks: vec![Block::Ai(working.clone())], ink: theme.ink("ai:sessions") }),
+        }
+    }
+    let mut rows = Vec::new();
+    let mut parts = parts.into_iter().peekable();
+    while parts.peek().is_some() {
+        rows.push(parts.by_ref().take(per).collect());
+    }
+    if sessions > 0 {
+        rows.push(sessions_lanes(&rich.sessions[..sessions], per, theme, lang));
+    }
+    rows
+}
+
+/// How tall `rows` of parts side by side are (see `paint_across`).
+fn rows_tall(rows: &[Vec<Lane>]) -> f32 {
+    rows.iter().map(|row| across_tall(row)).sum::<f32>() + rows.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP
+}
+
+/// `rich` laid out side by side in a widget `room` large (DIPs): its parts in as few rows as leave each its room, else
+/// all in one where each has the least; then, as far as they fit, what each source spent by model, and after that its
+/// sessions, a row of them at a time. None where its parts do not fit.
+pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32)) -> Option<Vec<Vec<Lane>>> {
+    let count = rich.parts.len().max(1);
+    let (width, room) = (w - 2.0 * theme.pad_x, h - theme.pad_top - theme.pad_bottom);
+    let column = |per: usize| (width - (per as f32 - 1.0) * ACROSS_GAP) / per as f32;
+    let fewest = (((width + ACROSS_GAP) / (BOARD_COLUMN + ACROSS_GAP)).floor() as usize).clamp(1, count);
+    let fits = |per: usize, models: bool, sessions: usize| rows_tall(&board_rows(rich, theme, lang, per, models, sessions)) <= room;
+    let per = [fewest, count].into_iter().filter(|&per| column(per) >= BOARD_COLUMN_LEAST).find(|&per| fits(per, false, 0))?;
+    if !fits(per, true, 0) {
+        return Some(board_rows(rich, theme, lang, per, false, 0));
+    }
+    let mut sessions = 0;
+    while sessions < rich.sessions.len() {
+        let more = (sessions / per + 1) * per;
+        let more = more.min(rich.sessions.len());
+        if !fits(per, true, more) {
+            break;
+        }
+        sessions = more;
+    }
+    Some(board_rows(rich, theme, lang, per, true, sessions))
+}
+
+/// Draws `rich` side by side in `room` (see `board_of`), in its middle; whether it fit.
+fn paint_board(frame: &dyn Canvas, scene: &Scene, rich: &Rich, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
+    let theme = scene.theme;
+    let Some(rows) = board_of(rich, theme, scene.lang, (w, h)) else { return false };
+    let room = h - theme.pad_top - theme.pad_bottom;
+    paint_across(frame, scene, &rows, (x + theme.pad_x, y + theme.pad_top + (room - rows_tall(&rows)) / 2.0, w - 2.0 * theme.pad_x), Pass::Content, hits);
+    true
+}
+
+/// `rich`'s parts one over another, each source with what it spent by model where `models`, the sessions at work, and the
+/// first `sessions` of its sessions.
+fn column_lane(rich: &Rich, theme: &Theme, lang: Lang, models: bool, sessions: usize) -> Lane {
+    let mut blocks = Vec::new();
+    for part in &rich.parts {
+        if !blocks.is_empty() {
+            blocks.push(Block::Room(SOURCE_GAP));
+        }
+        blocks.extend(part_lane(part, theme, models).blocks);
+    }
+    blocks.extend(rich.working.clone().map(Block::Ai));
+    if sessions > 0 {
+        blocks.push(Block::Room(SOURCE_GAP));
+        blocks.extend(sessions_lanes(&rich.sessions[..sessions], 1, theme, lang).into_iter().flat_map(|lane| lane.blocks));
+    }
+    Lane { id: AI_LANE.into(), blocks, ink: theme.ink(AI_LANE) }
+}
+
+/// `rich` one over another in a widget `room` large (DIPs): its parts, then, as far as they fit, what each source spent by
+/// model, and after that its sessions. None where its parts do not fit.
+pub(super) fn column_of(rich: &Rich, theme: &Theme, lang: Lang, (_, h): (f32, f32)) -> Option<Lane> {
+    let fits = |lane: &Lane| lane.height(theme) <= h;
+    if !fits(&column_lane(rich, theme, lang, false, 0)) {
+        return None;
+    }
+    if !fits(&column_lane(rich, theme, lang, true, 0)) {
+        return Some(column_lane(rich, theme, lang, false, 0));
+    }
+    let sessions = (1..=rich.sessions.len()).take_while(|&sessions| fits(&column_lane(rich, theme, lang, true, sessions))).last().unwrap_or(0);
+    Some(column_lane(rich, theme, lang, true, sessions))
+}
+
+/// Draws `rich` one over another in `room` (see `column_of`), in its middle, in `ink`; whether it fit.
+fn paint_column(frame: &dyn Canvas, scene: &Scene, ink: Ink, rich: &Rich, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
+    let Some(mut lane) = column_of(rich, scene.theme, scene.lang, (w, h)) else { return false };
+    lane.ink = ink;
+    let tall = lane.height(scene.theme);
+    paint_lane(frame, scene, &lane, Rect { x, y: y + (h - tall) / 2.0, w, h: tall }, 0.0, Pass::Content, hits);
+    true
+}
+
+/// Between the rings as near a square and the sessions under them (DIPs).
+const LIST_ABOVE: f32 = 18.0;
+
 /// The component as near a square as its widget is, in `room`: today's figure; each source's ring round its mark and
 /// its figure under it, side by side, where they fit; and, roomier, the head, how today's spending mounted, what each
-/// figure is of, and the sessions at work.
-fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted: &[f32], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+/// figure is of and when its window starts again, and the sessions at work, or as many of `sessions` as there is room
+/// for under the rings.
+fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted: &[f32], sessions: &[SessionRow], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let count = dock.slots.len();
@@ -1070,8 +1354,9 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
         }
         hits.push((sx, sy, sw, sh, Hit::AiSlot(spot)));
     };
-    // The rings: in as many columns as leave them the largest in the room under the figure, each with its figure under it.
-    // Today's figure as large as its room across lets it be, and what it is of in as many words as fit.
+    // The rings: in as many columns as leave them the largest in the room under the figure (the most of them, as large in
+    // more: one over another, the sessions had no room under them), each with its figure under it. Today's figure as
+    // large as its room across lets it be, and what it is of in as many words as fit.
     let figure_font = Font { size: if roomy { 30.0 } else { (height * 0.2).clamp(15.0, 24.0) }, weight: 650.0, ..theme.figure };
     let natural = frame.measure(&dock.today, figure_font);
     let figure_font = if natural > width && natural > 0.0 { Font { size: (figure_font.size * width / natural).max(11.0), ..figure_font } } else { figure_font };
@@ -1079,7 +1364,9 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
     let head_tall = if roomy { HEAD + 4.0 } else { 0.0 };
     let today_tall = label.size + 4.0 + figure_font.size;
     let rings_top = top + head_tall + today_tall + 12.0;
-    let under = if roomy { 36.0 } else { 18.0 };
+    // (Roomier, when each window starts again under what its figure is of.)
+    let resets = roomy && dock.slots.iter().any(|slot| !slot.resets.is_empty());
+    let under = if roomy { 36.0 + if resets { 14.0 } else { 0.0 } } else { 18.0 };
     let foot = if roomy && dock.working > 0 { LINE + 10.0 } else { 0.0 };
     let most = if roomy { 56.0 } else { 44.0 };
     let below = top + height - foot - rings_top;
@@ -1089,11 +1376,17 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
             let cell = (width - (columns as f32 - 1.0) * 8.0) / columns as f32;
             (columns, cell, ((below - (rows - 1.0) * 8.0) / rows - under).min(cell).min(most))
         })
-        .fold((1, 0.0, f32::MIN), |best, this| if this.2 > best.2 { this } else { best });
+        .fold((1, 0.0, f32::MIN), |best, this| if this.2 >= best.2 { this } else { best });
     let rings = count > 0 && ring_room >= 26.0;
-    // (In the middle of the room under the figure, where they leave some.)
     let rows = count.div_ceil(columns) as f32;
-    let ring_from = rings_top + ((below - rows * (ring_room + under) - (rows - 1.0) * 8.0) / 2.0).max(0.0);
+    // The sessions under the rings, roomier, as many as there is room for there (the sessions at work at its foot giving
+    // way to them), in two columns where it is wide.
+    let rings_tall = rows * (ring_room + under) + (rows - 1.0) * 8.0;
+    let list_columns = if width >= 2.0 * BOARD_COLUMN { 2 } else { 1 };
+    let list_room = below + foot - rings_tall - LIST_ABOVE;
+    let listed = if roomy && rings { (1..=sessions.len()).take_while(|&shown| across_tall(&sessions_lanes(&sessions[..shown], list_columns, theme, lang)) <= list_room).last().unwrap_or(0) } else { 0 };
+    // (In the middle of the room under the figure, where they leave some and no sessions are under them.)
+    let ring_from = if listed > 0 { rings_top } else { rings_top + ((below - rings_tall) / 2.0).max(0.0) };
     // Too small for the rings: today's figure alone, in the middle.
     if !rings {
         let tall = today_tall.min(height);
@@ -1155,25 +1448,30 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
             frame.fill_circle(ink.trace, *last, 2.4);
         }
     }
-    // Each source's ring in its cell, its figure (and, roomier, what it is of) under it.
+    // Each source's ring in its cell, its figure (and, roomier, what it is of and when it starts again) under it.
     let figure = Font { size: if roomy { 15.0 } else { 12.0 }, weight: 650.0, ..theme.figure };
     let under_font = Font { size: 10.5, weight: 500.0, ..theme.body };
     let radius = ring_room / 2.0 - 2.0;
     for (at, slot) in dock.slots.iter().enumerate() {
-        let (cell_left, rings_top) = (left + (at % columns) as f32 * (cell + 8.0), ring_from + (at / columns) as f32 * (ring_room + under + 8.0));
-        let centre = Point { x: cell_left + cell / 2.0, y: rings_top + ring_room / 2.0 };
-        spot(Spot::Ring(slot.source), (cell_left, rings_top, cell, ring_room + under));
+        let (cell_left, cell_top) = (left + (at % columns) as f32 * (cell + 8.0), ring_from + (at / columns) as f32 * (ring_room + under + 8.0));
+        let centre = Point { x: cell_left + cell / 2.0, y: cell_top + ring_room / 2.0 };
+        spot(Spot::Ring(slot.source), (cell_left, cell_top, cell, ring_room + under));
         ring(frame, theme, slot, centre, radius, if roomy { 4.0 } else { 3.0 }, radius * 0.9);
         let hot = slot.used.is_some_and(|used| used >= HOT);
         frame.key(&format!("{}.value", slot.source.id()));
-        centred(frame, &slot.figure, figure, if hot { theme.signal } else { theme.text }, centre.x, rings_top + ring_room + 4.0);
+        centred(frame, &slot.figure, figure, if hot { theme.signal } else { theme.text }, centre.x, cell_top + ring_room + 4.0);
         if roomy {
+            let label_top = cell_top + ring_room + 4.0 + figure.size + 3.0;
             frame.key(&format!("{}.label", slot.source.id()));
-            centred(frame, &slot.label, under_font, theme.text3, centre.x, rings_top + ring_room + 4.0 + figure.size + 3.0);
+            centred(frame, &slot.label, under_font, theme.text3, centre.x, label_top);
+            if resets {
+                frame.key(&format!("{}.resets", slot.source.id()));
+                centred(frame, &slot.resets, under_font, theme.text3, centre.x, label_top + under_font.size + 3.0);
+            }
         }
     }
-    // The sessions at work, at its foot.
-    if foot > 0.0 {
+    // The sessions at work, at its foot, where no sessions are listed.
+    if foot > 0.0 && listed == 0 {
         let row_y = top + height - LINE;
         spot(Spot::Sessions, (left, row_y, width, LINE));
         frame.key("ai:dock.at_work");
@@ -1183,6 +1481,10 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
             Lang::En => format!("{} at work", dock.working),
         };
         frame.text(&said, theme.small, theme.text2, left + 15.0, row_y, width - 15.0, Align::Start);
+    }
+    if listed > 0 {
+        let lanes = sessions_lanes(&sessions[..listed], list_columns, theme, lang);
+        paint_across(frame, scene, &[lanes], (left, ring_from + rings_tall + LIST_ABOVE, width), Pass::Content, hits);
     }
 }
 
@@ -1198,6 +1500,11 @@ pub struct Slot {
     pub used: Option<f32>,
     pub figure: String,
     pub label: String,
+    /// When its tightest window starts again, else what it spent today beside its balance (else none): told under what
+    /// its figure is of where its slot has room.
+    pub resets: String,
+    /// Each window of its limit, by name, and how much of it is used: told under its ring down a tall widget.
+    pub windows: Vec<(String, f32)>,
 }
 
 /// What the dock shows: what every source spent today, each source docked, those with a session at work, and how many
@@ -1218,7 +1525,7 @@ const DOCK_TODAY: f32 = 42.0;
 const DOCK_SLOT: f32 = 92.0;
 const DOCK_FOOT: f32 = 50.0;
 /// Across a top edge: how tall it is, the room of today's figure and of the sessions at its ends, and a source's.
-const BAR_HEIGHT: f32 = 60.0;
+pub(super) const BAR_HEIGHT: f32 = 60.0;
 const BAR_END: f32 = 76.0;
 const BAR_SLOT: f32 = 120.0;
 
@@ -1242,7 +1549,7 @@ pub fn dock_size(across: bool, count: usize) -> (f32, f32) {
 pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage>, now: u64) -> Dock {
     let sources = docked(prefs);
     let Some(usage) = usage else {
-        let slots = sources.into_iter().map(|source| Slot { source, used: None, figure: "—".into(), label: lang.pick("正在读取", "Reading").into() }).collect();
+        let slots = sources.into_iter().map(|source| Slot { source, used: None, figure: "—".into(), label: lang.pick("正在读取", "Reading").into(), resets: String::new(), windows: Vec::new() }).collect();
         return Dock { today: "—".into(), slots, at_work: Vec::new(), working: 0 };
     };
     let today = short(usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum(), lang);
@@ -1254,7 +1561,7 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
             let windows = windows_of(limit, now, lang);
             let failed = usage.failed.iter().find(|(of, _)| *of == tool).map(|(_, failed)| *failed);
             let balance = limit.and_then(|limit| limit.balance.as_ref()).and_then(|balance| Some((balance.amount?, balance.currency.as_str())));
-            let none = |label: &str| Slot { source, used: None, figure: "—".into(), label: label.into() };
+            let none = |label: &str| Slot { source, used: None, figure: "—".into(), label: label.into(), resets: String::new(), windows: Vec::new() };
             let spent = spent_by(usage, tool).1.total();
             // (A provider whose records on this PC tell it spent today shows that where its key is not set.)
             if source.keyed() && usage.unkeyed.contains(&tool) && spent == 0 {
@@ -1270,11 +1577,20 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
                     used: Some(tightest.used),
                     figure: format!("{:.0}%", tightest.used * 100.0),
                     label: if windows.len() > 1 { tightest.name.clone() } else { String::new() },
+                    resets: tightest.resets.clone(),
+                    windows: windows.iter().map(|window| (window.name.clone(), window.used)).collect(),
                 },
                 None => match balance {
-                    Some((amount, currency)) => Slot { source, used: None, figure: money_short(amount, currency), label: lang.pick("余额", "Balance").into() },
+                    Some((amount, currency)) => Slot {
+                        source,
+                        used: None,
+                        figure: money_short(amount, currency),
+                        label: lang.pick("余额", "Balance").into(),
+                        resets: if spent > 0 { format!("{} {}", lang.pick("今日", "Today"), short(spent, lang)) } else { String::new() },
+                        windows: Vec::new(),
+                    },
                     None if source.keyed() && spent == 0 && !usage.unkeyed.contains(&tool) => none(lang.pick("正在读取", "Reading")),
-                    None => Slot { source, used: None, figure: short(spent, lang), label: lang.pick("今日", "Today").into() },
+                    None => Slot { source, used: None, figure: short(spent, lang), label: lang.pick("今日", "Today").into(), resets: String::new(), windows: Vec::new() },
                 },
             }
         })
@@ -1291,7 +1607,7 @@ pub fn paint_dock(frame: &dyn Canvas, scene: &Scene, across: bool, (w, h): (f32,
     #[cfg(windows)]
     let dock = dock_of(scene.prefs, scene.lang, crate::ai::usage().as_deref(), crate::station::now_ms());
     #[cfg(not(windows))]
-    let dock = Dock { slots: docked(scene.prefs).into_iter().map(|source| Slot { source, used: None, figure: String::new(), label: String::new() }).collect(), ..Dock::default() };
+    let dock = Dock { slots: docked(scene.prefs).into_iter().map(|source| Slot { source, used: None, figure: String::new(), label: String::new(), resets: String::new(), windows: Vec::new() }).collect(), ..Dock::default() };
     draw_dock(frame, scene, &dock, across, (0.0, 0.0, w, h))
 }
 
@@ -1317,7 +1633,10 @@ fn ring(frame: &dyn Canvas, theme: &Theme, slot: &Slot, centre: Point, radius: f
     frame.mark(slot.source.mark(), centre, mark, theme.text, 1.0);
 }
 
-/// Draws `dock` filling the box `(x0, y0, w, h)`, down a side or `across` a top edge (see `paint_dock`).
+/// Draws `dock` filling the box `(x0, y0, w, h)`, down a side or `across` a top edge (see `paint_dock`). Drawn larger than
+/// designed (a widget's), its parts kept together, so far apart at most, the rest of its room round them all: across,
+/// each slot wider, telling its source's name and when its window starts again; down, each slot taller, telling each of
+/// its windows, where there is room for them. Each spot as tall across as designed, not as the widget is.
 pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: bool, (x0, y0, w, h): (f32, f32, f32, f32)) -> Vec<HitBox> {
     let (theme, lang) = (scene.theme, scene.lang);
     let hits = std::cell::RefCell::new(Vec::new());
@@ -1326,9 +1645,8 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     let figure = Font { size: 13.0, weight: 650.0, ..theme.figure };
     let under = Font { size: 10.5, weight: 500.0, ..theme.body };
     let count = dock.slots.len();
+    let parts = count as f32 + 2.0;
     let natural = dock_size(across, count);
-    // (Drawn larger than designed: the room left over shared out round its parts.)
-    let spread = if across { (w - natural.0) / (count as f32 + 2.0) } else { (h - natural.1) / (count as f32 + 2.0) }.max(0.0);
     let figure_of = |slot: &Slot| if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text };
     let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
     // Each spot the pointer rests on to show its card beside the dock: where it is, and its plate lit under the pointer.
@@ -1350,25 +1668,55 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     };
     if across {
         let middle = y0 + h / 2.0;
-        let mut x = x0 + DOCK_PAD + spread / 2.0;
-        spot(frame, Spot::Today, (x, y0, BAR_END, h), (x, y0 + 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
+        let extra = (w - natural.0).max(0.0);
+        let grow = (extra / count.max(1) as f32).min(STRIP_GROW);
+        let gap = ((extra - grow * count as f32) / parts).min(STRIP_GAP);
+        let round_it = extra - grow * count as f32 - gap * parts;
+        let slot_w = BAR_SLOT + grow;
+        // (A spot and its plate as tall as designed, in the middle.)
+        let band = h.min(BAR_HEIGHT);
+        let pill = band - 10.0;
+        let at = |x: f32, wide: f32| ((x, middle - band / 2.0, wide, band), (x, middle - pill / 2.0, wide, pill, pill / 2.0));
+        let named = slot_w >= STRIP_NAMED;
+        let mut x = x0 + DOCK_PAD + gap / 2.0 + round_it / 2.0;
+        let (hit, plate) = at(x, BAR_END);
+        spot(frame, Spot::Today, hit, plate);
         frame.key("ai:today.label");
         centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         frame.key("ai:today.value");
         centred(frame, &dock.today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
-        x += BAR_END + spread;
+        x += BAR_END + gap;
         for slot in &dock.slots {
-            spot(frame, Spot::Ring(slot.source), (x, y0, BAR_SLOT, h), (x, y0 + 5.0, BAR_SLOT, h - 10.0, (h - 10.0) / 2.0));
+            let (hit, plate) = at(x, slot_w);
+            spot(frame, Spot::Ring(slot.source), hit, plate);
             ring(frame, theme, slot, Point { x: x + 8.0 + 17.0, y: middle }, 16.0, 2.6, 15.0);
             let words = x + 8.0 + 34.0 + 9.0;
-            let (top, room) = (if slot.label.is_empty() { middle - 9.0 } else { middle - 17.0 }, x + BAR_SLOT - 8.0 - words);
+            let room = x + slot_w - 8.0 - words;
+            // (Wider, its source named before what its figure is of, and when its window starts again under them.)
+            let name = slot.source.name(lang);
+            let told = match (named, slot.label.is_empty()) {
+                (false, _) => slot.label.clone(),
+                (true, true) => name.to_string(),
+                (true, false) => format!("{name} · {}", slot.label),
+            };
+            let resets = (named && !slot.resets.is_empty()).then_some(slot.resets.as_str());
+            let (figure_top, told_top) = match (resets, told.is_empty()) {
+                (Some(_), _) => (middle - 24.0, middle - 7.0),
+                (None, true) => (middle - 9.0, middle + 1.0),
+                (None, false) => (middle - 17.0, middle + 1.0),
+            };
             frame.key(&format!("{}.value", slot.source.id()));
-            frame.text(&slot.figure, figure, figure_of(slot), words, top, room, Align::Start);
+            frame.text(&slot.figure, figure, figure_of(slot), words, figure_top, room, Align::Start);
             frame.key(&format!("{}.label", slot.source.id()));
-            frame.text(&slot.label, under, theme.text3, words, middle + 1.0, room, Align::Start);
-            x += BAR_SLOT + spread;
+            frame.text(&told, under, theme.text3, words, told_top, room, Align::Start);
+            if let Some(resets) = resets {
+                frame.key(&format!("{}.resets", slot.source.id()));
+                frame.text(resets, under, theme.text3, words, middle + 8.0, room, Align::Start);
+            }
+            x += slot_w + gap;
         }
-        spot(frame, Spot::Sessions, (x, y0, BAR_END, h), (x, y0 + 5.0, BAR_END, h - 10.0, (h - 10.0) / 2.0));
+        let (hit, plate) = at(x, BAR_END);
+        spot(frame, Spot::Sessions, hit, plate);
         frame.key("ai:dock.sessions");
         centred(frame, sessions.0, label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
         let count_width = frame.measure(&sessions.1, big);
@@ -1380,22 +1728,45 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         return hits.into_inner();
     }
     let centre = x0 + w / 2.0;
-    let mut y = y0 + DOCK_PAD + spread / 2.0;
+    // What each slot tells under its figure where the dock is tall enough for all of it: each of its windows by name and
+    // how much is used, else what its figure is of and when it starts again.
+    let lines_of = |slot: &Slot| -> Vec<String> {
+        if slot.windows.is_empty() {
+            [&slot.label, &slot.resets].into_iter().filter(|line| !line.is_empty()).cloned().collect()
+        } else {
+            slot.windows.iter().take(DOWN_LINES).map(|(name, used)| format!("{name} {:.0}%", used * 100.0)).collect()
+        }
+    };
+    let most = dock.slots.iter().map(|slot| lines_of(slot).len()).max().unwrap_or(0);
+    let more = most.saturating_sub(1) as f32 * DOWN_LINE;
+    let lined = more > 0.0 && h >= natural.1 + count as f32 * more;
+    let slot_h = DOCK_SLOT + if lined { more } else { 0.0 };
+    let tall = natural.1 + count as f32 * (slot_h - DOCK_SLOT);
+    let gap = ((h - tall) / parts).clamp(0.0, DOWN_GAP);
+    let round_it = (h - tall - gap * parts).max(0.0);
+    let mut y = y0 + DOCK_PAD + gap / 2.0 + round_it / 2.0;
     let round = 16.0_f32.min((w - 10.0) / 2.0);
     spot(frame, Spot::Today, (x0, y, w, DOCK_TODAY), (x0 + 5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
     frame.key("ai:today.label");
     centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
     frame.key("ai:today.value");
     centred(frame, &dock.today, big, theme.text, centre, y + 18.0);
-    y += DOCK_TODAY + spread;
+    y += DOCK_TODAY + gap;
     for slot in &dock.slots {
-        spot(frame, Spot::Ring(slot.source), (x0, y, w, DOCK_SLOT), (x0 + 5.0, y, w - 10.0, DOCK_SLOT - 4.0, round));
+        spot(frame, Spot::Ring(slot.source), (x0, y, w, slot_h), (x0 + 5.0, y, w - 10.0, slot_h - 4.0, round));
         ring(frame, theme, slot, Point { x: centre, y: y + 8.0 + 22.0 }, 21.5, 3.0, 20.0);
         frame.key(&format!("{}.value", slot.source.id()));
         centred(frame, &slot.figure, figure, figure_of(slot), centre, y + 56.0);
-        frame.key(&format!("{}.label", slot.source.id()));
-        centred(frame, &slot.label, under, theme.text3, centre, y + 74.0);
-        y += DOCK_SLOT + spread;
+        if lined {
+            for (at, line) in lines_of(slot).iter().enumerate() {
+                frame.key(&if at == 0 { format!("{}.label", slot.source.id()) } else { format!("{}.line{at}", slot.source.id()) });
+                centred(frame, line, under, theme.text3, centre, y + 74.0 + at as f32 * DOWN_LINE);
+            }
+        } else {
+            frame.key(&format!("{}.label", slot.source.id()));
+            centred(frame, &slot.label, under, theme.text3, centre, y + 74.0);
+        }
+        y += slot_h + gap;
     }
     spot(frame, Spot::Sessions, (x0, y, w, DOCK_FOOT), (x0 + 5.0, y, w - 10.0, DOCK_FOOT + 4.0, round));
     frame.key("ai:dock.sessions");
@@ -1405,6 +1776,17 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     marks(centre, y + 44.0);
     hits.into_inner()
 }
+
+/// The dock's strip drawn wider than designed: how much wider each slot is at most, how far apart its parts are at most,
+/// and how wide a slot is to name its source and tell when its window starts again (DIPs).
+pub(super) const STRIP_GROW: f32 = 80.0;
+pub(super) const STRIP_GAP: f32 = 32.0;
+const STRIP_NAMED: f32 = 150.0;
+/// Drawn taller down a side: how far apart its parts are at most, the lines each slot tells under its figure at most,
+/// and a line's (DIPs).
+pub(super) const DOWN_GAP: f32 = 28.0;
+const DOWN_LINES: usize = 3;
+const DOWN_LINE: f32 = 14.0;
 
 /// The name of folder `folder` (its last part, as written on Windows or elsewhere): none for a drive's root.
 fn folder_name(folder: &str) -> Option<String> {

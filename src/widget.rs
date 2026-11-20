@@ -4578,8 +4578,10 @@ impl Widget {
                         let size = (size.0 / zoom, size.1 / zoom);
                         let extra = (size.0 - designed.width(), size.1 - designed.height());
                         // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across
-                        // side by side, else one over another.
-                        let (detail, layout) = if size.0 >= least.0 && size.1 >= least.1 {
+                        // side by side, else one over another. The AI component's always: it shows more in the room it
+                        // has the larger it is (see `view::ai::fit_of`), where all of its lane laid out down left the
+                        // rest of a widget made larger empty under it.
+                        let (detail, layout) = if readings.lanes != crate::settings::Part::Ai && size.0 >= least.0 && size.1 >= least.1 {
                             (view::Detail::Full, designed.fitted(size))
                         } else {
                             let shape = view::Shape::of(size);
