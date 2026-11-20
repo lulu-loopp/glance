@@ -431,6 +431,12 @@ pub fn run() {
         // Claude Code's status line, where the user put Glance there (see `ai::statusline`).
         [_, flag] if flag == ai::statusline::ASKED => std::process::exit(ai::statusline::run()),
         [_, flag, folder] if flag == "--uninstall-from" => done(elevation::uninstall_from(std::path::Path::new(folder))),
+        // The last of an uninstall, not waited for: the uninstaller that ran, once nothing holds it any more.
+        [_, flag, folder, uninstaller] if flag == elevation::FINISH_UNINSTALL => done(
+            elevation::uninstaller_of(uninstaller)
+                .ok_or(elevation::InstallFolder::Failed)
+                .and_then(|uninstaller| elevation::finish_uninstall(std::path::Path::new(folder), uninstaller)),
+        ),
         // An update taken elevated for a Glance without its sensors (see `update`).
         [_, flag, ..] if flag == "--update" => std::process::exit(if elevation::is_elevated() { update::run_asked(&args[1..]).unwrap_or(1) } else { 1 }),
         // Where the threads of the Glance that ran this one stand, written from outside it (see `hang`).

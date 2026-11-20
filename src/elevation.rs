@@ -1071,8 +1071,34 @@ pub fn moved_from(earlier: &Path, now: &Path) -> Result<(), InstallFolder> {
 /// Takes Glance's own files out of `folder`: held, and only if only administrators can change it (then no one else
 /// can have put anything in its place or make it a link); its programs running from there ended first; only what
 /// Glance puts there, then the folder itself, by its handle, if nothing else is left. With what Glance kept beside
-/// it (`forgetting`: the lights' program fetched), for an uninstall.
+/// it (`forgetting`: the lights' program fetched), for an uninstall, and then the uninstaller is taken, and the
+/// folder, by another copy of this program, not waited for (see `take_out_files`).
 fn take_out(folder: &Path, forgetting: bool) -> Result<(), InstallFolder> {
+    let (folder, held) = held_to_take_out(folder)?;
+    // (Its tasks are gone by now: see `remove_all_tasks`.)
+    if !end_programs_in(&folder) {
+        return Err(InstallFolder::Failed);
+    }
+    if forgetting {
+        crate::openrgb::forget();
+    }
+    let left = take_out_files(&folder, forgetting);
+    let_go_of(&folder, held);
+    match left {
+        Err(()) => Err(InstallFolder::Failed),
+        Ok(None) => Ok(()),
+        // Taken by another copy of this program, not waited for; or here, waited for, if it could not be started.
+        Ok(Some(uninstaller)) if finish_later(&folder, uninstaller) => Ok(()),
+        Ok(Some(uninstaller)) => finish_uninstall(&folder, uninstaller),
+    }
+}
+
+/// The uninstaller's file in the install folder.
+const UNINSTALLER: &str = "uninstall.exe";
+
+/// `folder`, where it says (see `direct`), held (see `hold`): to take Glance's files out of, only if only
+/// administrators can change it (then no one else can have put anything in its place or make it a link).
+fn held_to_take_out(folder: &Path) -> Result<(PathBuf, Held), InstallFolder> {
     let folder = direct(folder).ok_or(InstallFolder::Indirect)?;
     let held = hold(&folder).ok_or(InstallFolder::Indirect)?;
     if direct(&folder).is_none() || !held.place().is_some_and(|place| same_path(&place, &folder)) {
@@ -1081,29 +1107,85 @@ fn take_out(folder: &Path, forgetting: bool) -> Result<(), InstallFolder> {
     if !only_trusted_can(&folder, FOLDER_CHANGES) {
         return Err(InstallFolder::Occupied);
     }
-    // (Its tasks are gone by now: see `remove_all_tasks`.)
-    if !end_programs_in(&folder) {
-        return Err(InstallFolder::Failed);
-    }
-    if forgetting {
-        crate::openrgb::forget();
-    }
-    // The uninstaller last, and only once all the rest is gone: left, it is there to try again with (as Glance is
-    // left in the installed programs: see the installer).
+    Ok((folder, held))
+}
+
+/// Takes Glance's own files out of `folder` (held and checked by `take_out`), the uninstaller last, and only once all
+/// the rest is gone: left, it is there to try again with (as Glance is left in the installed programs: see the
+/// installer). Uninstalling, the uninstaller is not taken here but left to be taken later, and which file it is is
+/// told: it has just run, and an antivirus may hold it a while after (Windows Defender, scanning it once it ran, held
+/// it up to four minutes, and deleting it, or renaming it, waits till it lets go), and the uninstall is not to wait
+/// for that. `Err` where something of Glance's could not be taken away.
+fn take_out_files(folder: &Path, uninstalling: bool) -> Result<Option<(u32, u64)>, ()> {
     let mut removed = true;
-    for name in INSTALLED.iter().filter(|name| **name != "uninstall.exe") {
+    for name in INSTALLED.iter().filter(|name| **name != UNINSTALLER) {
         removed &= remove(&folder.join(name)).is_ok();
     }
-    if removed {
-        removed = remove(&folder.join("uninstall.exe")).is_ok();
+    if !removed {
+        return Err(());
     }
-    // Gone, if nothing else is in it: by a handle able to delete it, if it is still the one held (which is let go
-    // first: it shares no deletion).
+    let uninstaller = folder.join(UNINSTALLER);
+    // (Looked at only: opened sharing all but deletion, which the one holding it shares.)
+    if let Some(id) = uninstalling.then(|| Held::open_to_hold(&uninstaller).filter(|file| !file.is_folder()).and_then(|file| file.id())).flatten() {
+        return Ok(Some(id));
+    }
+    remove(&uninstaller).map(|()| None).map_err(|_| ())
+}
+
+/// Lets go of `folder` (held as `held`), and deletes it if nothing is left in it: by a handle able to delete it, if
+/// it is still the one held (which is let go first: it shares no deletion).
+fn let_go_of(folder: &Path, held: Held) {
     drop(held);
-    if let Some(deletable) = pin(&folder).filter(|again| again.place().is_some_and(|place| same_path(&place, &folder))) {
+    if let Some(deletable) = pin(folder).filter(|again| again.place().is_some_and(|place| same_path(&place, folder))) {
         deletable.delete();
     }
-    removed.then_some(()).ok_or(InstallFolder::Failed)
+}
+
+/// Starts another copy of this program to take the uninstaller `uninstaller` out of `folder` (see
+/// `finish_uninstall`), not waited for; whether it started.
+fn finish_later(folder: &Path, (volume, index): (u32, u64)) -> bool {
+    let Ok(this) = std::env::current_exe() else { return false };
+    Command::new(this)
+        .arg(FINISH_UNINSTALL)
+        .arg(folder)
+        .arg(format!("{volume}:{index}"))
+        .creation_flags(NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// What the copy of this program that ends an uninstall is asked: `FINISH_UNINSTALL <folder> <volume>:<index>`.
+pub const FINISH_UNINSTALL: &str = "--finish-uninstall";
+
+/// Which uninstaller `FINISH_UNINSTALL` is asked to take: `<volume>:<index>`, as `finish_later` writes it.
+pub fn uninstaller_of(asked: &str) -> Option<(u32, u64)> {
+    let (volume, index) = asked.split_once(':')?;
+    Some((volume.parse().ok()?, index.parse().ok()?))
+}
+
+/// The last of an uninstall: takes the uninstaller `uninstaller` (its volume's serial number and its number there)
+/// out of `folder`, waiting as long as it is held, and then the folder, if nothing else is left in it. That very file
+/// only (a Glance installed there again meanwhile has an uninstaller of its own), and only as `take_out` takes it:
+/// the folder where it says, held, and only administrators able to change it.
+pub fn finish_uninstall(folder: &Path, uninstaller: (u32, u64)) -> Result<(), InstallFolder> {
+    let (folder, held) = held_to_take_out(folder)?;
+    let taken = take_uninstaller(&folder, &held, uninstaller);
+    let_go_of(&folder, held);
+    taken.then_some(()).ok_or(InstallFolder::Failed)
+}
+
+/// Takes the uninstaller `uninstaller` out of `folder` (held as `held`) by its handle, waiting as long as another
+/// holds it; whether it is gone (or was never there: another file in its place is left, as not this one).
+fn take_uninstaller(folder: &Path, held: &Held, uninstaller: (u32, u64)) -> bool {
+    let path = folder.join(UNINSTALLER);
+    match Held::open(&path) {
+        Some(file) if !file.is_folder() && !is_link(&path) && file.lies_in(held) && file.id() == Some(uninstaller) => file.delete(),
+        Some(_) => true,
+        None => !path.exists(),
+    }
 }
 
 /// `folder` held, if it is really where its path says: Windows, asked by
@@ -2153,6 +2235,129 @@ mod tests {
         std::fs::write(earlier.join(APP), b"MZ").unwrap();
         assert_eq!(moved_from(&earlier, &now), Err(InstallFolder::Occupied));
         assert!(earlier.join(APP).exists() && earlier.join("notes.txt").exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Holds a file as an antivirus holds a program it scans once it ran (Windows Defender, the uninstaller, for up to
+    /// four minutes): with a read-handle oplock whose breaking is never acknowledged, so that deleting or renaming it
+    /// waits till this lets go of it, dropped.
+    struct Scanning {
+        file: std::fs::File,
+        overlapped: Box<windows::Win32::System::IO::OVERLAPPED>,
+        _told: Box<windows::Win32::System::Ioctl::REQUEST_OPLOCK_OUTPUT_BUFFER>,
+    }
+
+    impl Scanning {
+        fn hold(path: &Path) -> Self {
+            use std::os::windows::fs::OpenOptionsExt;
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, FILE_SHARE_DELETE};
+            use windows::Win32::System::IO::{DeviceIoControl, OVERLAPPED};
+            use windows::Win32::System::Ioctl::*;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE).0)
+                .custom_flags(FILE_FLAG_OVERLAPPED.0)
+                .open(path)
+                .unwrap();
+            let asked = REQUEST_OPLOCK_INPUT_BUFFER {
+                StructureVersion: REQUEST_OPLOCK_CURRENT_VERSION as u16,
+                StructureLength: size_of::<REQUEST_OPLOCK_INPUT_BUFFER>() as u16,
+                RequestedOplockLevel: OPLOCK_LEVEL_CACHE_READ | OPLOCK_LEVEL_CACHE_HANDLE,
+                Flags: REQUEST_OPLOCK_INPUT_FLAG_REQUEST,
+            };
+            let mut told = Box::new(REQUEST_OPLOCK_OUTPUT_BUFFER {
+                StructureVersion: REQUEST_OPLOCK_CURRENT_VERSION as u16,
+                StructureLength: size_of::<REQUEST_OPLOCK_OUTPUT_BUFFER>() as u16,
+                ..Default::default()
+            });
+            let mut overlapped = Box::new(OVERLAPPED::default());
+            let granted = unsafe {
+                DeviceIoControl(
+                    HANDLE(file.as_raw_handle()),
+                    FSCTL_REQUEST_OPLOCK,
+                    Some((&asked as *const REQUEST_OPLOCK_INPUT_BUFFER).cast()),
+                    size_of::<REQUEST_OPLOCK_INPUT_BUFFER>() as u32,
+                    Some((&mut *told as *mut REQUEST_OPLOCK_OUTPUT_BUFFER).cast()),
+                    size_of::<REQUEST_OPLOCK_OUTPUT_BUFFER>() as u32,
+                    None,
+                    Some(&mut *overlapped),
+                )
+            };
+            // Granted, the request is pending till the oplock is broken.
+            assert_eq!(granted.unwrap_err().code(), windows::Win32::Foundation::ERROR_IO_PENDING.to_hresult());
+            Self { file, overlapped, _told: told }
+        }
+    }
+
+    impl Drop for Scanning {
+        fn drop(&mut self) {
+            use std::os::windows::io::AsRawHandle;
+            use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult};
+            // The request ended (cancelled, if not broken yet) before what it writes to goes; then the file closed,
+            // which lets whoever waits for the oplock's breaking go on.
+            let handle = HANDLE(self.file.as_raw_handle());
+            let mut moved = 0;
+            unsafe {
+                let _ = CancelIoEx(handle, Some(&*self.overlapped));
+                let _ = GetOverlappedResult(handle, &*self.overlapped, &mut moved, true);
+            }
+        }
+    }
+
+    /// Runs `act` on its own thread; what it returned within `within`, if it did.
+    fn within<T: Send + 'static>(within: std::time::Duration, act: impl FnOnce() -> T + Send + 'static) -> (Option<T>, std::sync::mpsc::Receiver<T>) {
+        let (tell, told) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tell.send(act());
+        });
+        (told.recv_timeout(within).ok(), told)
+    }
+
+    /// Uninstalling, the uninstaller that ran, held a while after by an antivirus, is not waited for: all else of
+    /// Glance's is taken out at once and the uninstaller is left to be taken later, as the very file it is; taken later,
+    /// it is waited for as long as it is held and then gone, and the folder with it; another file in its place since is
+    /// not taken.
+    #[test]
+    fn leaves_the_uninstaller_held_after_it_ran_to_be_taken_later() {
+        use std::time::Duration;
+        let base = std::env::temp_dir().join(format!("glance-uninstaller-test-{}", std::process::id()));
+        let folder = base.join("Glance");
+        std::fs::create_dir_all(folder.join("resources")).unwrap();
+        for name in [APP, SENSORS, "glance-remote.exe", UNINSTALLER] {
+            std::fs::write(folder.join(name), b"MZ").unwrap();
+        }
+        std::fs::write(folder.join("resources").join("icon.png"), b"png").unwrap();
+        let uninstaller = folder.join(UNINSTALLER);
+        let id = Held::open_to_hold(&uninstaller).and_then(|file| file.id()).unwrap();
+        let scanning = Scanning::hold(&uninstaller);
+
+        let taking = folder.clone();
+        let (left, _) = within(Duration::from_secs(5), move || take_out_files(&taking, true));
+        assert_eq!(left, Some(Ok(Some(id))), "the uninstall waited for the uninstaller's holder");
+        assert_eq!(std::fs::read_dir(&folder).unwrap().map(|entry| entry.unwrap().file_name()).collect::<Vec<_>>(), [UNINSTALLER]);
+
+        // Taken later: waited for while it is held, gone once it is let go, then the folder.
+        let held = hold(&folder).unwrap();
+        let taking = folder.clone();
+        let (taken, still) = within(Duration::from_secs(1), move || {
+            let held = hold(&taking).unwrap();
+            take_uninstaller(&taking, &held, id)
+        });
+        assert_eq!(taken, None, "taken while it was held");
+        drop(scanning);
+        assert_eq!(still.recv_timeout(Duration::from_secs(5)).ok(), Some(true));
+        assert!(!uninstaller.exists());
+        let_go_of(&folder, held);
+        assert!(!folder.exists());
+
+        // Another uninstaller in its place since (Glance installed there again): left.
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&uninstaller, b"MZ again").unwrap();
+        let held = hold(&folder).unwrap();
+        assert!(take_uninstaller(&folder, &held, id));
+        assert!(uninstaller.exists());
+        drop(held);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
