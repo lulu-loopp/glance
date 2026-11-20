@@ -7154,8 +7154,9 @@ otepad.exe", "Notepad"),
         let (across, down) = (ai::dock_size(true, 2), ai::dock_size(false, 2));
         assert_eq!(spots(Shape::Across, across), every);
         assert_eq!(spots(Shape::Down, (down.0 + 20.0, down.1)), every);
-        // (The dock not fitting it: as near a square as it is, too short for the rings there.)
-        assert_eq!(spots(Shape::Across, (across.0 - 60.0, across.1)), [Hit::AiSlot(Spot::Today)]);
+        // (A little narrower than designed: the strip, its slots narrower. The dock not fitting it: as near a square as
+        // it is.)
+        assert_eq!(spots(Shape::Across, (across.0 - 60.0, across.1)), every);
         assert_eq!(spots(Shape::Down, (down.0, down.1 - 40.0)), rings);
         assert_eq!(spots(Shape::Least, (156.0, 156.0)), rings);
         assert_eq!(spots(Shape::Least, (300.0, 240.0)), every);
@@ -7163,7 +7164,7 @@ otepad.exe", "Notepad"),
     }
 
     /// The AI component's widget shows more the larger it is made, each form drawn only a little larger than designed
-    /// (see `ai::fit_of`). Sized as the owner sized it (830 by 400), its parts side by side, no spot of it as tall as it:
+    /// (see `ai::paint_shaped`). Sized as the owner sized it (830 by 400), no spot of it as tall as it:
     /// it was the dock's strip stretched to fill it, its spots as tall as the widget and far apart, and nothing more.
     /// Made taller, what each source spent by model, then its sessions a row at a time, never its sessions without what
     /// was spent by model, all of it within the widget. A strip made wider, and the dock down a side made taller, its
@@ -7186,10 +7187,8 @@ otepad.exe", "Notepad"),
             ai::paint_shaped(&Nothing, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
             hits.into_iter().filter(|hit| matches!(hit.4, Hit::AiSlot(_))).map(|(x, y, w, h, _)| (x, y, w, h)).collect::<Vec<_>>()
         };
-        use ai::Fit;
-        assert_eq!([(830.0, 400.0), (920.0, 84.0), (400.0, 340.0), (110.0, 560.0), (320.0, 680.0), (150.0, 100.0)].map(ai::fit_of), [Fit::Board, Fit::Strip, Fit::Square, Fit::Down, Fit::Column, Fit::Least]);
-        // As the owner sized it: its parts side by side, no spot as tall as it.
-        assert!(spots((830.0, 400.0)).iter().all(|spot| spot.3 <= ai::BAR_HEIGHT), "{:?}", spots((830.0, 400.0)));
+        // As the owner sized it: no spot as tall as it, its parts side by side fitting it.
+        assert!(spots((830.0, 400.0)).iter().all(|spot| spot.3 < 200.0), "{:?}", spots((830.0, 400.0)));
         assert!(ai::board_of(rich, &theme, Lang::Zh, (830.0, 400.0)).is_some());
         // Made taller: what each source spent by model, then its sessions, all within it.
         let told = |h: f32| {
@@ -7222,12 +7221,15 @@ otepad.exe", "Notepad"),
         together(&down, false, (110.0, 900.0), ai::DOWN_GAP);
         // (Each slot taller, telling the windows of the source with the most of them.)
         assert!(down[2].3 > 92.0, "{down:?}");
-        // As near a square: its rings side by side, not one over another, wherever they are drawn so.
+        // As near a square: its rings side by side, not one over another, in every way it lays out so.
         for w in (300..=900).step_by(10) {
             for h in (200..=900).step_by(10) {
-                let square = spots((w as f32, h as f32));
-                if ai::fit_of((w as f32, h as f32)) == Fit::Square && square.len() >= 3 {
-                    assert_eq!(square[1].1, square[2].1, "{w} by {h}: {square:?}");
+                for plan in 0..4 {
+                    let mut hits = Vec::new();
+                    if ai::paint_least(&Nothing, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, w as f32, h as f32), (plan, false), &mut hits).is_some() {
+                        let rings: Vec<f32> = hits.iter().filter(|hit| matches!(hit.4, Hit::AiSlot(ai::Spot::Ring(_)))).map(|hit| hit.1).collect();
+                        assert!(rings.windows(2).all(|pair| pair[0] == pair[1]), "{w} by {h}, {plan}: {rings:?}");
+                    }
                 }
             }
         }
@@ -7240,7 +7242,10 @@ otepad.exe", "Notepad"),
     /// The AI component's widget tells what each source spent by model before its sessions at every size (the owner's
     /// choice), and wide and low its rings, not today's figure alone. As the owner sized it, 761 by 613, as near a square,
     /// it listed its sessions under its rings and told nothing of what was spent by model; 500 by 203, it gave its rings
-    /// no room under the head and showed today's figure alone.
+    /// no room under the head and showed today's figure alone. Made larger, wider or taller, it tells no less: what was
+    /// spent by model never gone, and never fewer things told while it is so (a little narrower than the dock's strip, 530
+    /// by 95, it showed today's figure alone, where 562 by 70 showed the strip, and a little taller than the strip as near
+    /// a square it told less than the strip).
     #[test]
     fn the_ai_widget_tells_its_models_before_its_sessions() {
         let theme = Theme::new(Skin::Glass, true);
@@ -7259,27 +7264,39 @@ otepad.exe", "Notepad"),
         }).flatten().collect();
         let sessions: Vec<&str> = rich.sessions.iter().map(|row| row.0.as_str()).collect();
         assert!(!models.is_empty() && !sessions.is_empty());
-        // (Its parts drawn: a source's name among what is drawn.)
-        let parts_drawn = |said: &Said| said.0.borrow().iter().any(|text| text == "Claude");
         // (Sessions at work, as the owner's were.)
-        let dock = &ai::Dock { working: 2, ..dock.clone() };
+        let mut dock = ai::Dock { working: 2, ..dock.clone() };
+        // (And a source with a balance, as the owner's three were.)
+        dock.slots.push(ai::Slot { source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
+        let dock = &dock;
         let drawn = |size: (f32, f32)| {
             let said = Said::default();
             let mut hits = Vec::new();
             ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
-            assert!(hits.iter().any(|hit| !matches!(hit.4, Hit::AiSlot(ai::Spot::Today))) || parts_drawn(&said), "{size:?}: today's figure alone");
             let texts = said.0.into_inner();
             let rings = hits.iter().filter(|hit| matches!(hit.4, Hit::AiSlot(ai::Spot::Ring(_)))).count();
-            (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings)
+            let told = texts.iter().filter(|text| !text.trim().is_empty()).count();
+            (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings, told)
         };
         // As the owner sized it: what was spent by model, and then its sessions.
         assert_eq!(drawn((761.0, 613.0)).0, true, "{:?}", drawn((761.0, 613.0)));
         // Wide and low: its rings.
         assert_eq!(drawn((500.0, 203.0)).2, dock.slots.len());
-        for w in (200..=1300).step_by(20) {
-            for h in (150..=950).step_by(20) {
-                let (models, sessions, _) = drawn((w as f32, h as f32));
+        assert_eq!(drawn((530.0, 95.0)).2, dock.slots.len());
+        let sizes: Vec<(f32, f32)> = (60..=1300).step_by(20).flat_map(|w| (40..=950).step_by(15).map(move |h| (w as f32, h as f32))).collect();
+        let all: std::collections::HashMap<(u32, u32), (bool, usize)> = sizes
+            .iter()
+            .map(|&(w, h)| {
+                let (models, sessions, _, told) = drawn((w, h));
                 assert!(models || !sessions, "{w} by {h}: its sessions without what was spent by model");
+                ((w as u32, h as u32), (models, told))
+            })
+            .collect();
+        for (&(w, h), &says) in &all {
+            for larger in [(w + 20, h), (w, h + 15)] {
+                if let Some(&more) = all.get(&larger) {
+                    assert!(more >= says, "{w} by {h} tells {says:?}, {larger:?} larger tells {more:?}");
+                }
             }
         }
     }
