@@ -115,12 +115,12 @@ pub(super) fn line(bytes: &[u8], read: &mut Read, told: &mut Vec<Told>) {
 }
 
 /// What the runtime's database at `path` tells of its sessions: the name each was given, and the folder it works in
-/// (none where it works in the runtime's own).
+/// (none where it works in the runtime's own). None where it could not be read, to be read again.
 #[cfg(windows)]
-pub(super) fn told_in(path: &Path) -> Vec<Told> {
-    let Some(database) = super::sqlite::Database::read(path) else { return Vec::new() };
+pub(super) fn told_in(path: &Path) -> Option<Vec<Told>> {
+    let database = super::sqlite::Database::read(path)?;
     let ask = "SELECT session_id, title, CASE WHEN is_default_workspace = 1 THEN NULL ELSE COALESCE(NULLIF(project_workspace_dir, ''), workspace_dir) END FROM local_runtime_sessions";
-    let Some(rows) = database.rows(ask) else { return Vec::new() };
+    let rows = database.rows(ask)?;
     let mut told = Vec::new();
     for row in rows {
         let at = |index: usize| row.get(index).and_then(super::sqlite::Value::text);
@@ -130,5 +130,5 @@ pub(super) fn told_in(path: &Path) -> Vec<Told> {
         }
         super::claude::title(&mut told, session, at(1), super::TitleKind::Named);
     }
-    told
+    Some(told)
 }

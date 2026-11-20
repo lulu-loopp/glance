@@ -48,13 +48,14 @@ enum Heard {
     /// again.
     Ended(PathBuf),
     /// How reading a provider's account went.
-    Read(Tool, Result<super::Limit, super::Failed>),
+    Read(Tool, u64, Result<super::Limit, super::Failed>),
     /// A provider's key was taken away.
     Unkeyed(Tool),
 }
 
-/// What was spent as last read (none: not yet read, or not wanted).
+/// What was spent as last read (none: not yet read, or not wanted), and a number that changes as it does (see `stamp`).
 static NOW: Mutex<Option<Arc<Usage>>> = Mutex::new(None);
+static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The thread's ear, once it has started.
 static EAR: Mutex<Option<Sender<Heard>>> = Mutex::new(None);
 /// The providers' thread's ear: told to look whether one is due, or (true) that keys changed.
@@ -64,6 +65,18 @@ static ASK: Mutex<Option<Sender<bool>>> = Mutex::new(None);
 pub fn usage() -> Option<Arc<Usage>> {
     crate::settle::want(crate::settle::Work::AiUsage);
     NOW.lock().unwrap().clone()
+}
+
+/// A number that changes whenever what was spent as last read does: what shows it, read as it is drawn (the AI
+/// component's dock), is drawn again as it changes, not drawn from what was kept of it.
+pub fn stamp() -> u64 {
+    STAMP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What was spent as last read, as it now is.
+fn publish(usage: Option<Arc<Usage>>, held: &mut Option<Arc<Usage>>) {
+    *held = usage;
+    STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Asked to look at once whether what was spent is wanted (something that shows it came on or went).
@@ -132,7 +145,7 @@ fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Send
                 }
                 let told = provider.read(&keys, crate::station::now_ms());
                 read.insert(tool, (Instant::now(), hash));
-                if ear.send(Heard::Read(tool, told)).is_err() {
+                if ear.send(Heard::Read(tool, hash, told)).is_err() {
                     return;
                 }
             }
@@ -152,7 +165,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
     loop {
         // (Not wanted: what Windows tells is let go of, all read again as it is.)
         while !wanted() {
-            *NOW.lock().unwrap() = None;
+            publish(None, &mut NOW.lock().unwrap());
             if heard.recv().is_err() {
                 return;
             }
@@ -223,7 +236,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
             let mut changed = limits && limits_told(ledger, &told_in);
             for account in accounts {
                 changed |= match account {
-                    Heard::Read(tool, told) => ledger.read_of(tool, told, now),
+                    Heard::Read(tool, key, told) => ledger.read_of(tool, key, told, now),
                     Heard::Unkeyed(tool) => ledger.unkeyed(tool),
                     _ => false,
                 };
@@ -272,7 +285,7 @@ fn tell(ledger: &Ledger, now: u64, told: &impl Fn()) {
     if held.as_deref().is_some_and(|held| Usage { now: usage.now, ..held.clone() } == usage) {
         return;
     }
-    *held = Some(Arc::new(usage));
+    publish(Some(Arc::new(usage)), &mut held);
     drop(held);
     told();
 }
@@ -355,6 +368,23 @@ mod tests {
     fn what_was_spent_asked_for_is_read_at_once() {
         let _ = usage();
         assert!(crate::settle::ready(crate::settle::Work::AiUsage));
+    }
+
+    /// What was spent told anew changes the stamp what shows it is drawn again by (the dock reads it as it is drawn,
+    /// and what is drawn of it is kept by that), told again as it was it does not (what is drawn of it is kept).
+    #[test]
+    fn what_was_spent_told_anew_is_stamped() {
+        let mut ledger = Ledger::default();
+        ledger.unkeyed(Tool::DeepSeek);
+        let before = stamp();
+        tell(&ledger, 1, &|| {});
+        let told = stamp();
+        assert!(told > before, "told anew: stamped");
+        tell(&ledger, 2, &|| {});
+        assert_eq!(stamp(), told, "only the time it was told at changed: not stamped");
+        ledger.unkeyed(Tool::Kimi);
+        tell(&ledger, 3, &|| {});
+        assert!(stamp() > told, "changed: stamped");
     }
 
     /// Claude's limits taken from what the status line kept, where newer than those taken before; what it kept gone

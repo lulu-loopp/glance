@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 pub use time::today_start;
 #[cfg(windows)]
-pub use watch::{keys_changed, look_now, start, usage};
+pub use watch::{keys_changed, look_now, stamp, start, usage};
 
 /// How long what was spent is kept: a month, and a day more for a month counted from any day of it.
 pub const KEPT_DAYS: u64 = 32;
@@ -171,7 +171,8 @@ pub struct Balance {
 }
 
 /// What today's spending of a provider's account is counted from: what its balance was last read as (or all it spent),
-/// in which currency, which day it is of, what was spent that day so far, and since when it was counted.
+/// in which currency, which day it is of, what was spent that day so far, since when it was counted, and by which key
+/// it was read (a hash of it: another key is another account, whose balance is not counted from this one's).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 struct Paid {
     tool: Tool,
@@ -182,6 +183,8 @@ struct Paid {
     day: u64,
     today: f64,
     since: u64,
+    #[serde(default)]
+    key: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -209,18 +212,61 @@ struct Read {
     summary: Option<String>,
     /// How the file began as it was read (see `head_of`): one that begins otherwise was written anew.
     head: Option<u64>,
+    /// How what was read of it ended (see `tail_of`): one that ends there otherwise was written anew, though it begins
+    /// as it did and is longer (a file rewritten whole as its tool compacts it, then grown past where it was read to).
+    tail: Option<u64>,
 }
 
-/// How many of a file's first bytes tell it apart from one written anew in its place.
+/// How many of a file's first bytes, and of the last of it read, tell it apart from one written anew in its place.
 const HEAD: u64 = 1024;
 
 /// A hash of the first bytes of `file` (as many as `HEAD`, or `upto` where that is fewer: those of it read, which
 /// lines added after them leave as they were).
 fn head_of(file: &mut std::fs::File, upto: u64) -> Option<u64> {
-    file.seek(std::io::SeekFrom::Start(0)).ok()?;
+    hash_of(file, 0, upto.min(HEAD))
+}
+
+/// A hash of the bytes of `file` just before `upto` (as many as `HEAD`): the last of it read.
+fn tail_of(file: &mut std::fs::File, upto: u64) -> Option<u64> {
+    hash_of(file, upto.saturating_sub(HEAD), upto.min(HEAD))
+}
+
+/// A hash of the `len` bytes of `file` from `start`.
+fn hash_of(file: &mut std::fs::File, start: u64, len: u64) -> Option<u64> {
+    file.seek(std::io::SeekFrom::Start(start)).ok()?;
     let mut bytes = Vec::new();
-    file.take(upto.min(HEAD)).read_to_end(&mut bytes).ok()?;
+    file.take(len).read_to_end(&mut bytes).ok()?;
     Some(bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01B3)))
+}
+
+/// The longest line of a record read (bytes): one longer is let pass unread, never held whole (what a line of the
+/// tools' records tells of what was spent is far shorter, a line holding a picture a few megabytes).
+const LINE_MOST: usize = 64 << 20;
+
+/// The next whole line of `lines` into `line` (its ending kept), at most `most` of it held (of one longer, a byte more
+/// than that, to be let pass), and how many bytes it took: none at the end, or where the line has not ended yet.
+fn next_line(lines: &mut impl BufRead, line: &mut Vec<u8>, most: usize) -> Option<usize> {
+    line.clear();
+    let mut took = 0;
+    loop {
+        let buffer = lines.fill_buf().ok()?;
+        if buffer.is_empty() {
+            return None;
+        }
+        let (part, ended) = match buffer.iter().position(|byte| *byte == b'\n') {
+            Some(at) => (&buffer[..=at], true),
+            None => (buffer, false),
+        };
+        let n = part.len();
+        if line.len() <= most {
+            line.extend_from_slice(&part[..n.min(most + 1 - line.len())]);
+        }
+        lines.consume(n);
+        took += n;
+        if ended {
+            return Some(took);
+        }
+    }
 }
 
 /// What a line of a record says, as the reader of its tool makes of it.
@@ -372,11 +418,14 @@ impl Ledger {
         // A database (ZCode's, or MiniMax Code's of its sessions' names) asked again whole as it is written to: what
         // was counted is not counted again.
         if is_database(path) {
+            // (Not read, the database busy or failing: not taken as read, to be read again.)
             #[cfg(windows)]
-            let told = match tool {
+            let Some(told) = (match tool {
                 Tool::Glm => zcode::told_in(path, from, modified),
                 Tool::MiniMax => minimax::told_in(path),
-                _ => Vec::new(),
+                _ => Some(Vec::new()),
+            }) else {
+                return false;
             };
             #[cfg(not(windows))]
             let told: Vec<Told> = Vec::new();
@@ -388,8 +437,8 @@ impl Ledger {
             return changed;
         }
         let Ok(mut file) = std::fs::File::open(path) else { return false };
-        // (Written anew: shorter than it was read, or beginning otherwise than it did.)
-        if len < read.at || read.head.is_some_and(|head| head_of(&mut file, read.at) != Some(head)) {
+        // (Written anew: shorter than it was read, or beginning, or ending where it was read to, otherwise than it did.)
+        if len < read.at || read.head.is_some_and(|head| head_of(&mut file, read.at) != Some(head)) || read.tail.is_some_and(|tail| tail_of(&mut file, read.at) != Some(tail)) {
             read = Read::default();
         }
         // (Kimi Code names a record's session by its folder alone, MiniMax Code by its folder's manifest.)
@@ -406,33 +455,32 @@ impl Ledger {
         let mut lines = std::io::BufReader::with_capacity(1 << 20, file.take(len - read.at));
         let mut line = Vec::new();
         let mut told = Vec::new();
-        loop {
-            line.clear();
-            match lines.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) if line.last() != Some(&b'\n') => break,
-                Ok(n) => {
-                    read.at += n as u64;
-                    match tool {
-                        Tool::Claude => claude::line(&line, &mut read, &mut told),
-                        Tool::Codex => codex::line(&line, &mut read, &mut told),
-                        Tool::Kimi => kimi::line(&line, &mut read, &mut told),
-                        Tool::Qwen => qwen::line(&line, &mut read, &mut told),
-                        Tool::MiniMax => minimax::line(&line, &mut read, &mut told),
-                        // (The providers keep no records here: see `providers`.)
-                        _ => {}
-                    }
-                }
+        let mut changed = false;
+        // Each whole line (one not ended yet left to be read once it is), what it told taken in at once.
+        while let Some(n) = next_line(&mut lines, &mut line, LINE_MOST) {
+            read.at += n as u64;
+            if line.len() > LINE_MOST {
+                continue;
+            }
+            match tool {
+                Tool::Claude => claude::line(&line, &mut read, &mut told),
+                Tool::Codex => codex::line(&line, &mut read, &mut told),
+                Tool::Kimi => kimi::line(&line, &mut read, &mut told),
+                Tool::Qwen => qwen::line(&line, &mut read, &mut told),
+                Tool::MiniMax => minimax::line(&line, &mut read, &mut told),
+                // (The providers keep no records here: see `providers`.)
+                _ => {}
+            }
+            for told in told.drain(..) {
+                changed |= self.take(tool, told, from, modified);
             }
         }
-        read.head = head_of(&mut lines.into_inner().into_inner(), read.at);
+        let mut file = lines.into_inner().into_inner();
+        read.head = head_of(&mut file, read.at);
+        read.tail = tail_of(&mut file, read.at);
         read.len = len;
         read.modified = modified;
         self.files.insert(path.to_path_buf(), read);
-        let mut changed = false;
-        for told in told {
-            changed |= self.take(tool, told, from, modified);
-        }
         changed
     }
 
@@ -474,15 +522,15 @@ impl Ledger {
         }
     }
 
-    /// How reading provider `tool`'s account at `now` went: what it told kept (today's spending counted, where it does
-    /// not tell it, from what it told before), or how it failed (what it told before kept, shown as it was). Whether
-    /// what is shown changed.
-    pub(crate) fn read_of(&mut self, tool: Tool, read: Result<Limit, Failed>, now: u64) -> bool {
+    /// How reading provider `tool`'s account by the key hashed as `key` at `now` went: what it told kept (today's
+    /// spending counted, where it does not tell it, from what it told before by that key), or how it failed (what it
+    /// told before kept, shown as it was). Whether what is shown changed.
+    pub(crate) fn read_of(&mut self, tool: Tool, key: u64, read: Result<Limit, Failed>, now: u64) -> bool {
         let keyed = self.unkeyed.remove(&tool);
         keyed | match read {
             Ok(mut limit) => {
                 if let Some(balance) = limit.balance.as_mut() {
-                    self.count_spent(tool, balance, now);
+                    self.count_spent(tool, key, balance, now);
                 }
                 let failed = self.failed.remove(&tool).is_some();
                 self.told_limit(limit) | failed
@@ -503,7 +551,7 @@ impl Ledger {
     /// Today's spending of `tool`'s account, where it does not tell it, counted into `balance` at `now`: from what it
     /// spent in all (as that mounts), else from what is left (as that falls: a rise is money paid in, from which it is
     /// counted on). The day's first reading counts from itself; one in another currency counts anew.
-    fn count_spent(&mut self, tool: Tool, balance: &mut Balance, now: u64) {
+    fn count_spent(&mut self, tool: Tool, key: u64, balance: &mut Balance, now: u64) {
         if balance.today.is_some() {
             return;
         }
@@ -515,19 +563,20 @@ impl Ledger {
         let day = time::today_start(now);
         let at = self.paid.iter().position(|paid| paid.tool == tool);
         let paid = match at {
-            Some(at) if self.paid[at].currency == balance.currency && self.paid[at].mounting == mounting => &mut self.paid[at],
+            Some(at) if self.paid[at].currency == balance.currency && self.paid[at].mounting == mounting && self.paid[at].key == key => &mut self.paid[at],
             _ => {
                 self.paid.retain(|paid| paid.tool != tool);
-                self.paid.push(Paid { tool, currency: balance.currency.clone(), mounting, last: value, day, today: 0.0, since: now });
+                self.paid.push(Paid { tool, currency: balance.currency.clone(), mounting, last: value, day, today: 0.0, since: now, key });
                 self.paid.last_mut().unwrap()
             }
         };
         if paid.day != day {
-            // (What was spent since the last reading, the day before, is today's: it is not known when it was. Today's
-            // is counted from its start.)
-            paid.since = day;
+            // (What was spent since the last reading, a day or more before, is not known to be today's, nor how much of
+            // it was: today's is counted from this reading, told as counted since it.)
+            paid.since = now;
             paid.day = day;
             paid.today = 0.0;
+            paid.last = value;
         }
         let spent = if mounting { value - paid.last } else { paid.last - value };
         paid.today += spent.max(0.0);

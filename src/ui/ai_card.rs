@@ -72,12 +72,30 @@ impl Lives for Card {
             Some((Drawn::Frosted(frosted), _)) => frosted.release(),
             None => {}
         }
+        self.words.release();
     }
 
     fn let_go_of_kept(&mut self) {
         self.surface = None;
         self.seen = None;
         self.behind = None;
+    }
+}
+
+impl Card {
+    /// Drawn with `gfx` from now on: where that is another device, what it drew with on the one before goes with it
+    /// (see `life`), what is written on it among that (made there, it cannot be drawn on another).
+    fn moved_to(&mut self, gfx: &Rc<Gfx>) {
+        if !Rc::ptr_eq(&self.gfx, gfx) {
+            self.gone();
+            self.gfx = gfx.clone();
+        }
+    }
+
+    /// Whether it shows what is known by `key` as it is, drawn: not where what it drew with went (moved to another
+    /// device), though it shows the same.
+    fn drawn_as(&self, key: u64) -> bool {
+        self.shown == Some(key) && self.surface.is_some()
     }
 }
 
@@ -273,11 +291,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         }
         let card = kept.as_mut().unwrap();
         OWNER.set(owner);
-        // (What it drew with on another device goes with it: see `life`.)
-        if !Rc::ptr_eq(&card.gfx, &gfx) {
-            card.gone();
-            card.gfx = gfx.clone();
-        }
+        card.moved_to(&gfx);
         card.holds = Some(holds);
         // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's.)
         card.window.take_pointer_within(Some(sheet));
@@ -299,7 +313,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         let mut key = std::hash::DefaultHasher::new();
         (&lane, of.theme.skin, of.theme.dark, look.frost.to_bits(), look.zoom.to_bits(), left, top, plate_w, plate_h).hash(&mut key);
         let key = key.finish();
-        if card.shown == Some(key) {
+        if card.drawn_as(key) {
             return;
         }
         // (Made anew for another look: the dock's skin, its light, or how large it is drawn changed. Frosted otherwise
@@ -416,6 +430,38 @@ pub fn hide() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card moved to another device (its screen driven by another adapter, or its device lost) lets go of what it
+    /// drew with on the one before, what is written on it among that, and is drawn again there though it shows the
+    /// same: what was written on it is written again on its new device, not drawn there from the old one's.
+    #[test]
+    fn a_card_moved_to_another_device_draws_its_words_again_there() {
+        let _device = gfx::held().unwrap();
+        let window = Window::new().expect("a window");
+        let mut card = Card { window, gfx: gfx::for_main_screen().expect("graphics"), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: None };
+        let painted = Cell::new(0);
+        let draw = |card: &mut Card| {
+            let device = card.gfx.clone();
+            gfx::Frame::whole(&device, (32, 32), 1.0, |frame| {
+                card.words.draw(frame, 7, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, 16.0, 16.0), 1.0, None, |_| {
+                    painted.set(painted.get() + 1);
+                    Ok(())
+                })
+                .expect("drawn");
+            })
+            .expect("frame");
+            painted.get()
+        };
+        assert_eq!(draw(&mut card), 1);
+        assert_eq!(draw(&mut card), 1, "the same: drawn from what was kept");
+        let look = Look::of(super::super::theme::Skin::Paper, false);
+        card.surface = Some((Drawn::new(&card.gfx, card.window.hwnd, look).expect("a surface"), look));
+        card.shown = Some(7);
+        assert!(card.drawn_as(7));
+        card.moved_to(&gfx::in_software());
+        assert!(!card.drawn_as(7), "moved to another device: drawn again there though it shows the same");
+        assert_eq!(draw(&mut card), 2, "what is written on it written again on its new device");
+    }
 
     /// What the lane shows is as far in from every edge of the sheet as the sheet's corners are round, in every skin.
     #[test]

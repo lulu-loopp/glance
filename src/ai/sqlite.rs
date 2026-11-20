@@ -10,6 +10,7 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryExW, LOAD
 
 const OK: c_int = 0;
 const ROW: c_int = 100;
+const DONE: c_int = 101;
 const INTEGER: c_int = 1;
 const NULL: c_int = 5;
 const OPEN_READONLY: c_int = 0x1;
@@ -132,7 +133,7 @@ impl Database {
     }
 
     /// Each row `sql` gives, its columns' values (none: it could not be asked, as of a table or a column the
-    /// database does not have).
+    /// database does not have, or not read to its end, the database busy or failing: what was read of it is not all).
     pub(super) fn rows(&self, sql: &str) -> Option<Vec<Vec<Value>>> {
         let library = self.library;
         let sql = CString::new(sql).ok()?;
@@ -143,11 +144,14 @@ impl Database {
         }
         let width = unsafe { (library.column_count)(statement) };
         let mut rows = Vec::new();
-        while unsafe { (library.step)(statement) } == ROW {
-            rows.push((0..width).map(|at| unsafe { self.value(statement, at) }).collect());
-        }
+        let ended = loop {
+            match unsafe { (library.step)(statement) } {
+                ROW => rows.push((0..width).map(|at| unsafe { self.value(statement, at) }).collect()),
+                ended => break ended,
+            }
+        };
         unsafe { (library.finalize)(statement) };
-        Some(rows)
+        (ended == DONE).then_some(rows)
     }
 
     /// The value of column `at` of the row `statement` stands on.

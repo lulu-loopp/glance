@@ -65,16 +65,18 @@ fn limit_of(given: &[u8], plan: Option<String>, now: u64) -> Option<Limit> {
 }
 
 /// What is kept of the limit `told` and the one `kept` before it: each window as it is told, but where the one kept is
-/// the same window (it starts again at the same time) with more of it used. Each session tells the limits of its own
-/// last answer, and one idle since tells them again as its status line is drawn: a window's use within it only grows,
-/// so less of it is an older answer's.
+/// the same window (it starts again at the same time) with more of it used, or a later window of its length (one
+/// that starts again later). Each session tells the limits of its own last answer, and one idle since tells them again
+/// as its status line is drawn: a window's use within it only grows, so less of it is an older answer's, and so is a
+/// window that started again before the one kept.
 fn newest(told: Limit, kept: Option<Limit>) -> Limit {
     let Some(kept) = kept else { return told };
     let windows = told
         .windows
         .into_iter()
-        .map(|window| match kept.windows.iter().find(|was| was.minutes == window.minutes && was.resets.is_some() && was.resets == window.resets) {
-            Some(was) if was.used > window.used => Window { used: was.used, ..window },
+        .map(|window| match kept.windows.iter().find(|was| was.minutes == window.minutes && was.resets.is_some()) {
+            Some(was) if window.resets.is_some_and(|resets| Some(resets) < was.resets) => *was,
+            Some(was) if was.resets == window.resets && was.used > window.used => Window { used: was.used, ..window },
             _ => window,
         })
         .collect();
@@ -255,13 +257,16 @@ fn git_bash() -> bool {
 }
 
 /// The command that runs `exe` as the status line, written for the shell that runs it: its path with forward slashes
-/// (Git Bash takes backslashes away), quoted where it holds a space (PowerShell runs a quoted path with `&`).
+/// (Git Bash takes backslashes away), quoted where it holds anything but letters, digits and `/._:-`: in single quotes,
+/// which either shell takes as they are but for a quote itself (Git Bash's closed and opened again round an escaped
+/// one, PowerShell's doubled), and PowerShell runs a quoted path with `&`.
 fn command_for(exe: &Path, git_bash: bool) -> String {
     let path = exe.to_string_lossy().replace('\\', "/");
-    match (path.contains(' '), git_bash) {
-        (false, _) => format!("{path} {ASKED}"),
-        (true, true) => format!("\"{path}\" {ASKED}"),
-        (true, false) => format!("& \"{path}\" {ASKED}"),
+    let plain = path.chars().all(|c| c.is_ascii_alphanumeric() || "/._:-".contains(c));
+    match (plain, git_bash) {
+        (true, _) => format!("{path} {ASKED}"),
+        (false, true) => format!("'{}' {ASKED}", path.replace('\'', r"'\''")),
+        (false, false) => format!("& '{}' {ASKED}", path.replace('\'', "''")),
     }
 }
 
@@ -506,7 +511,8 @@ mod tests {
     }
 
     /// Told by sessions one after another: a window as the newest answer has it, the same window told with less of it
-    /// used again (a session idle since) kept as it was, and told again once it has started again; the plan as told.
+    /// used again (a session idle since) kept as it was, told again once it has started again, and the window before
+    /// told again after that not taking its place; the plan as told.
     #[test]
     fn keeps_the_newest_answers_limits_whichever_session_tells_them() {
         let folder = folder().join("newest");
@@ -520,6 +526,9 @@ mod tests {
         keep_told(week(52, 1795449600).as_bytes(), None, &folder, 3);
         assert_eq!(used(), [(52.0, Some(1_795_449_600_000))]);
         keep_told(week(3, 1796054400).as_bytes(), None, &folder, 4);
+        assert_eq!(used(), [(3.0, Some(1_796_054_400_000))]);
+        // (A session idle since the window before told that one again, more of it used: the later window kept.)
+        keep_told(week(95, 1795449600).as_bytes(), None, &folder, 5);
         assert_eq!(used(), [(3.0, Some(1_796_054_400_000))]);
         let _ = std::fs::remove_dir_all(&folder);
     }
@@ -555,8 +564,18 @@ mod tests {
     #[test]
     fn writes_the_command_for_the_shell_that_runs_it() {
         assert_eq!(command_for(Path::new(r"D:\Glance\glance.exe"), true), "D:/Glance/glance.exe --statusline");
-        assert_eq!(command_for(Path::new(r"C:\Program Files\Glance\glance.exe"), true), "\"C:/Program Files/Glance/glance.exe\" --statusline");
-        assert_eq!(command_for(Path::new(r"C:\Program Files\Glance\glance.exe"), false), "& \"C:/Program Files/Glance/glance.exe\" --statusline");
+        assert_eq!(command_for(Path::new(r"C:\Program Files\Glance\glance.exe"), true), "'C:/Program Files/Glance/glance.exe' --statusline");
+        assert_eq!(command_for(Path::new(r"C:\Program Files\Glance\glance.exe"), false), "& 'C:/Program Files/Glance/glance.exe' --statusline");
+        // (A path a shell would take otherwise than it is written, with brackets, a quote or a `$` in it: as it is.)
+        let odd = Path::new(r"C:\Users\O'Neil\Glance(test)\$x\glance.exe");
+        assert_eq!(command_for(odd, true), r"'C:/Users/O'\''Neil/Glance(test)/$x/glance.exe' --statusline");
+        assert_eq!(command_for(odd, false), "& 'C:/Users/O''Neil/Glance(test)/$x/glance.exe' --statusline");
+        // (Git Bash, where it is on this PC, takes it as a program it cannot find, 127, not as a command it cannot read.)
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let bash = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("bash.exe")).find(|bash| bash.is_file() && !bash.starts_with(&system)));
+        if let Some(bash) = bash {
+            assert_eq!(pass_on(&bash, &command_for(odd, true), b"{}"), 127);
+        }
         assert!(is_ours(r#"{"type":"command","command":"D:/Glance/glance.exe --statusline"}"#));
         assert!(!is_ours(r#"{"type":"command","command":"bash -c 'node hud.js'"}"#));
         assert_eq!(command_of(r#"{"type":"command","command":"bash -c 'node \"hud.js\"'"}"#).as_deref(), Some("bash -c 'node \"hud.js\"'"));

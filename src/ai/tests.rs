@@ -117,6 +117,90 @@ fn reads_a_record_written_anew_longer_from_its_start() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A record written anew that begins as it did and is longer than it was read (its first lines, a kilobyte and more,
+/// kept as its tool compacts it, what came after them written otherwise) is read from its start: what is new in it
+/// counted, what was counted not counted again, not read on from inside a line where the record it was was left.
+#[test]
+fn reads_a_record_written_anew_beginning_as_it_did_from_its_start() {
+    let dir = folder("written-anew-same-head");
+    let file = dir.join("p").join("s.jsonl");
+    let at = |minute: u32| format!("2026-11-18T11:{minute:02}:00Z");
+    // (A summary longer than the bytes the beginning is told by.)
+    let summary = format!("{{\"type\":\"summary\",\"summary\":\"{}\",\"leafUuid\":\"x\"}}
+", "a".repeat(2 * HEAD as usize));
+    append(&file, &summary);
+    append(&file, &claude("s1", "msg_1", "req_1", &at(0), "claude-opus-5-5", 1, 1, 1, 1));
+    append(&file, &claude("s1", "msg_2", "req_2", &at(1), "claude-opus-5-5", 1, 1, 1, 1));
+    let roots = [(Tool::Claude, dir.clone())];
+    let mut ledger = Ledger::default();
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 8);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let anew = [
+        summary.clone(),
+        claude("s1", "msg_3", "req_3", &at(2), "claude-opus-5-5", 10, 10, 10, 10),
+        claude("s1", "msg_2", "req_2", &at(1), "claude-opus-5-5", 1, 1, 1, 1),
+        claude("s1", "msg_4", "req_4", &at(3), "claude-opus-5-5", 100, 100, 100, 100),
+        claude("s1", "msg_5", "req_5", &at(4), "claude-opus-5-5", 1000, 1000, 1000, 1000),
+    ];
+    std::fs::write(&file, anew.concat()).unwrap();
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 8 + 40 + 400 + 4000);
+    // (Grown as records grow, at its end: read on from where it was left, nothing counted twice.)
+    append(&file, &claude("s1", "msg_6", "req_6", &at(5), "claude-opus-5-5", 2, 2, 2, 2));
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 8 + 40 + 400 + 4000 + 8);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A line is read whole however it comes, and of one longer than is ever held no more than that is: the bytes it
+/// took told all the same (what follows it read from after it), and a line not yet ended not read.
+#[test]
+fn holds_no_more_of_a_line_than_its_most() {
+    let text = format!("short
+{}
+after
+unended", "x".repeat(100));
+    let mut lines = std::io::BufReader::with_capacity(7, std::io::Cursor::new(text.into_bytes()));
+    let mut line = Vec::new();
+    assert_eq!(next_line(&mut lines, &mut line, 16), Some(6));
+    assert_eq!(line, b"short
+");
+    assert_eq!(next_line(&mut lines, &mut line, 16), Some(101));
+    assert_eq!(line.len(), 17, "a line longer than the most held to a byte more than it");
+    assert_eq!(next_line(&mut lines, &mut line, 16), Some(6));
+    assert_eq!(line, b"after
+");
+    assert_eq!(next_line(&mut lines, &mut line, 16), None);
+}
+
+/// ZCode's database busy as it is asked (written to by ZCode, held by its lock): not taken as read, so it is read once
+/// it is free, though it is no longer and no newer than it was.
+#[test]
+fn reads_a_database_again_that_was_busy_as_it_was_asked() {
+    let dir = folder("zcode-busy");
+    let db = dir.join("cli").join("db");
+    std::fs::create_dir_all(&db).unwrap();
+    let made = sqlite::Database::made(&db.join("db.sqlite")).expect("Windows' SQLite");
+    for sql in [
+        "CREATE TABLE session (id TEXT, directory TEXT, path TEXT)".to_string(),
+        "CREATE TABLE model_usage (id TEXT, session_id TEXT, turn_id TEXT, model_id TEXT, started_at INTEGER, completed_at INTEGER, duration_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER, cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER, computed_total_tokens INTEGER, agent TEXT, mode TEXT)".into(),
+        format!("INSERT INTO model_usage VALUES ('r1', 'z1', 't1', 'glm-5.2', {}, NULL, NULL, 10, 5, 0, 0, 0, 15, 'main', NULL)", NOON - 60_000),
+    ] {
+        made.rows(&sql).expect(&sql);
+    }
+    let roots = [(Tool::Glm, db.clone())];
+    let mut ledger = Ledger::default();
+    made.rows("BEGIN EXCLUSIVE").unwrap();
+    ledger.refresh(&roots, NOON);
+    assert!(spent(&ledger).is_empty(), "nothing read while it is held");
+    made.rows("COMMIT").unwrap();
+    drop(made);
+    assert!(ledger.refresh(&roots, NOON));
+    assert_eq!(spent(&ledger)[0].2.total(), 15);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn names_a_claude_session_by_hand_before_by_summary_before_by_what_was_asked() {
     let dir = folder("claude-titles");
@@ -404,9 +488,9 @@ fn reads_this_pcs_records() {
 }
 
 /// What a provider's account spent today, counted from one reading to the next where it does not tell it: what its
-/// balance fell by (a rise is money paid in, counted on from), from the day's first reading, then from the day's
-/// start; what it tells of today kept as it is; a reading failed keeping what was read, told as failed; its key taken
-/// away, all of it let go of.
+/// balance fell by (a rise is money paid in, counted on from), from the day's first reading (what fell since a reading
+/// of a day before not counted, nor what another key's account was read as); what it tells of today kept as it is; a
+/// reading failed keeping what was read, told as failed; its key taken away, all of it let go of.
 #[test]
 fn counts_what_an_account_spent_today_from_its_balance() {
     const HOUR: u64 = 3_600_000;
@@ -416,30 +500,37 @@ fn counts_what_an_account_spent_today_from_its_balance() {
     };
     let shown = |ledger: &Ledger| ledger.limits[0].balance.as_ref().map(|balance| (balance.today, balance.since)).unwrap();
     let mut ledger = Ledger::default();
-    assert!(ledger.read_of(Tool::DeepSeek, read(100.0, None, NOON), NOON));
+    assert!(ledger.read_of(Tool::DeepSeek, 1, read(100.0, None, NOON), NOON));
     assert_eq!(shown(&ledger), (Some(0.0), Some(NOON)));
-    ledger.read_of(Tool::DeepSeek, read(97.5, None, NOON + HOUR), NOON + HOUR);
-    ledger.read_of(Tool::DeepSeek, read(147.5, None, NOON + 2 * HOUR), NOON + 2 * HOUR);
-    ledger.read_of(Tool::DeepSeek, read(146.0, None, NOON + 3 * HOUR), NOON + 3 * HOUR);
+    ledger.read_of(Tool::DeepSeek, 1, read(97.5, None, NOON + HOUR), NOON + HOUR);
+    ledger.read_of(Tool::DeepSeek, 1, read(147.5, None, NOON + 2 * HOUR), NOON + 2 * HOUR);
+    ledger.read_of(Tool::DeepSeek, 1, read(146.0, None, NOON + 3 * HOUR), NOON + 3 * HOUR);
     assert_eq!(shown(&ledger), (Some(4.0), Some(NOON)));
     // Failed: what was read kept, and told as failed till it is read again.
-    assert!(ledger.read_of(Tool::DeepSeek, Err(Failed::Key), NOON + 4 * HOUR));
-    assert!(!ledger.read_of(Tool::DeepSeek, Err(Failed::Key), NOON + 4 * HOUR));
+    assert!(ledger.read_of(Tool::DeepSeek, 1, Err(Failed::Key), NOON + 4 * HOUR));
+    assert!(!ledger.read_of(Tool::DeepSeek, 1, Err(Failed::Key), NOON + 4 * HOUR));
     assert_eq!((shown(&ledger), ledger.usage(NOON + 4 * HOUR).failed), ((Some(4.0), Some(NOON)), vec![(Tool::DeepSeek, Failed::Key)]));
-    // The next day, counted from its start.
-    ledger.read_of(Tool::DeepSeek, read(145.0, None, NOON + DAY_MS), NOON + DAY_MS);
-    assert_eq!((shown(&ledger), ledger.usage(NOON + DAY_MS).failed), ((Some(1.0), None), vec![]));
+    // Days later, counted from that reading: what fell since days before is not today's alone.
+    ledger.read_of(Tool::DeepSeek, 1, read(145.0, None, NOON + 4 * DAY_MS), NOON + 4 * DAY_MS);
+    assert_eq!((shown(&ledger), ledger.usage(NOON + 4 * DAY_MS).failed), ((Some(0.0), Some(NOON + 4 * DAY_MS)), vec![]));
+    ledger.read_of(Tool::DeepSeek, 1, read(144.0, None, NOON + 4 * DAY_MS + HOUR), NOON + 4 * DAY_MS + HOUR);
+    assert_eq!(shown(&ledger), (Some(1.0), Some(NOON + 4 * DAY_MS)));
+    // Read by another key: another account, counted from its own first reading, not from the balance of the first.
+    ledger.read_of(Tool::DeepSeek, 2, read(10.0, None, NOON + 4 * DAY_MS + 2 * HOUR), NOON + 4 * DAY_MS + 2 * HOUR);
+    assert_eq!(shown(&ledger), (Some(0.0), Some(NOON + 4 * DAY_MS + 2 * HOUR)));
+    ledger.read_of(Tool::DeepSeek, 2, read(8.0, None, NOON + 4 * DAY_MS + 3 * HOUR), NOON + 4 * DAY_MS + 3 * HOUR);
+    assert_eq!(shown(&ledger), (Some(2.0), Some(NOON + 4 * DAY_MS + 2 * HOUR)));
     // Kept from one run to the next.
     let again = Ledger::from_bytes(&ledger.to_bytes()).unwrap();
     assert_eq!(again.paid, ledger.paid);
     // Told by the provider: as it is told.
-    ledger.read_of(Tool::DeepSeek, read(140.0, Some(7.25), NOON + DAY_MS + HOUR), NOON + DAY_MS + HOUR);
+    ledger.read_of(Tool::DeepSeek, 2, read(140.0, Some(7.25), NOON + 4 * DAY_MS + 4 * HOUR), NOON + 4 * DAY_MS + 4 * HOUR);
     assert_eq!(shown(&ledger), (Some(7.25), None));
     // Its key taken away: what was read forgotten, and told as unkeyed (once) till it is read again.
     assert!(ledger.unkeyed(Tool::DeepSeek) && ledger.limits.is_empty() && ledger.paid.is_empty());
     assert!(!ledger.unkeyed(Tool::DeepSeek));
     assert_eq!(ledger.usage(NOON + DAY_MS).unkeyed, vec![Tool::DeepSeek]);
-    assert!(ledger.read_of(Tool::DeepSeek, Err(Failed::Unavailable), NOON + DAY_MS + 2 * HOUR));
+    assert!(ledger.read_of(Tool::DeepSeek, 1, Err(Failed::Unavailable), NOON + DAY_MS + 2 * HOUR));
     assert!(ledger.usage(NOON + DAY_MS).unkeyed.is_empty());
 }
 

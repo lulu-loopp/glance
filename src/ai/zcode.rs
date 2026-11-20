@@ -30,9 +30,10 @@ struct Row {
     folder: Option<String>,
 }
 
-/// What the database at `path` (written to at `modified`) tells was spent from `from` (ms since 1970) on.
-pub(super) fn told_in(path: &Path, from: u64, modified: u64) -> Vec<Told> {
-    let Some(database) = Database::read(path) else { return Vec::new() };
+/// What the database at `path` (written to at `modified`) tells was spent from `from` (ms since 1970) on (none where it
+/// could not be read, to be read again).
+pub(super) fn told_in(path: &Path, from: u64, modified: u64) -> Option<Vec<Told>> {
+    let database = Database::read(path)?;
     // (The database's first kind tells no total.)
     let first_kind = database.rows("SELECT computed_total_tokens FROM model_usage LIMIT 1").is_none();
     let total = if first_kind { "NULL" } else { "mu.computed_total_tokens" };
@@ -40,13 +41,13 @@ pub(super) fn told_in(path: &Path, from: u64, modified: u64) -> Vec<Told> {
         format!("SELECT {COLUMNS}, {total}, {folder} FROM model_usage mu {} WHERE COALESCE(mu.completed_at, mu.started_at, 0) >= {from}", if folder == "NULL" { "" } else { "LEFT JOIN session s ON s.id = mu.session_id" })
     };
     // (Its sessions' folders where it keeps them.)
-    let Some(rows) = database.rows(&ask("COALESCE(NULLIF(s.directory, ''), NULLIF(s.path, ''))")).or_else(|| database.rows(&ask("NULL"))) else { return Vec::new() };
+    let rows = database.rows(&ask("COALESCE(NULLIF(s.directory, ''), NULLIF(s.path, ''))")).or_else(|| database.rows(&ask("NULL")))?;
     let mut told = Vec::new();
     for values in rows {
         let row = row_of(&values);
         told.extend(told_of(row, first_kind, modified));
     }
-    told
+    Some(told)
 }
 
 fn row_of(values: &[Value]) -> Row {

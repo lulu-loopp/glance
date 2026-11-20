@@ -189,6 +189,8 @@ impl PanelLayers {
         scene.prefs.hash_drawn(&mut key);
         // (What plays and how loud change between samples: as they are pressed.)
         crate::playing::stamp().hash(&mut key);
+        // (What AI tools spent, read by the AI component's dock as it is drawn: as it is read anew.)
+        crate::ai::stamp().hash(&mut key);
         // (A thing on a station's lane pressed, carried off it, springing back as it is put back.)
         view::tiles_drawn().hash(&mut key);
         if let Some((small, drawn)) = picture.small {
