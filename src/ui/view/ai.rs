@@ -1133,10 +1133,15 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
 }
 
 /// The whole component in a widget too small for all of it, filling `room` (DIPs) on the widget's plate, in the form its
-/// room takes (see `fit_of`): the dock's strip across or down where the dock fits it; its parts side by side or one over
-/// another where they fit, what each source spent by model as there is room, then its sessions; else as near a square
-/// as the widget is (see `paint_least`). On the dock's forms, where the pointer rests to show a spot's card beside it.
+/// room takes (see `fit_of`): the dock's strip across or down where the dock fits it; else its parts with what each
+/// source spent by model, side by side or one over another (the way nearer its shape first), wherever they fit so, then
+/// its sessions as there is room; else its parts alone in the form its room takes; else as near a square as the widget
+/// is (see `paint_least`); else the dock's strip where it fits, else today's figure alone. What each source spent by
+/// model comes before its sessions in every form (the owner's choice): as near a square, its sessions were listed under
+/// its rings where its parts with what was spent by model fit as well. On the dock's forms, where the pointer rests to
+/// show a spot's card beside it.
 pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), room: (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    let (theme, lang) = (scene.theme, scene.lang);
     let (_, _, w, h) = room;
     let count = dock.slots.len();
     let fits = |across: bool| {
@@ -1145,13 +1150,45 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, m
     };
     let fit = fit_of((w, h));
     if fit == Fit::Strip && fits(true) {
-        hits.extend(draw_dock(frame, scene, dock, true, room));
-    } else if fit == Fit::Down && fits(false) {
-        hits.extend(draw_dock(frame, scene, dock, false, room));
-    } else if fit == Fit::Board && paint_board(frame, scene, rich, room, hits) {
-    } else if fit == Fit::Column && paint_column(frame, scene, ink, rich, room, hits) {
-    } else {
-        paint_least(frame, scene, ink, dock, mounted, &rich.sessions, room, hits);
+        return hits.extend(draw_dock(frame, scene, dock, true, room));
+    }
+    if fit == Fit::Down && fits(false) {
+        return hits.extend(draw_dock(frame, scene, dock, false, room));
+    }
+    if matches!(fit, Fit::Board | Fit::Column | Fit::Square) {
+        // (With what each source spent by model, where any did: a part's models among its blocks.)
+        let any_models = rich.parts.iter().any(|part| part.models.is_some());
+        let models = |block: &&Block| matches!(block, Block::Ai(AiBlock::Models(_)));
+        for side_by_side in if w >= h { [true, false] } else { [false, true] } {
+            if side_by_side {
+                if let Some(rows) = board_of(rich, theme, lang, (w, h)).filter(|rows| !any_models || rows.iter().flatten().flat_map(|lane| &lane.blocks).any(|block| models(&block))) {
+                    return draw_board(frame, scene, &rows, room, hits);
+                }
+            } else if let Some(lane) = column_of(rich, theme, lang, (w, h)).filter(|lane| !any_models || lane.blocks.iter().any(|block| models(&block))) {
+                return draw_column(frame, scene, ink, lane, room, hits);
+            }
+        }
+        if fit == Fit::Board {
+            if let Some(rows) = board_of(rich, theme, lang, (w, h)) {
+                return draw_board(frame, scene, &rows, room, hits);
+            }
+        }
+        if fit == Fit::Column {
+            if let Some(lane) = column_of(rich, theme, lang, (w, h)) {
+                return draw_column(frame, scene, ink, lane, room, hits);
+            }
+        }
+    }
+    if paint_least(frame, scene, ink, (dock, mounted, rich), room, hits) {
+        return;
+    }
+    // Too small for the rings as near a square (wide and low, its rings had no room under today's figure, and it showed
+    // today's figure alone): the dock's strip, the way nearer its shape first, where it fits.
+    match (fits(true), fits(false)) {
+        (true, false) => hits.extend(draw_dock(frame, scene, dock, true, room)),
+        (false, true) => hits.extend(draw_dock(frame, scene, dock, false, room)),
+        (true, true) => hits.extend(draw_dock(frame, scene, dock, w >= h, room)),
+        (false, false) => paint_today(frame, scene, dock, room, hits),
     }
 }
 
@@ -1164,8 +1201,8 @@ pub enum Fit {
     Strip,
     /// The dock's strip down.
     Down,
-    /// As near a square as the widget is: its head, today's figure and how it mounted, each source's ring, and its
-    /// sessions as there is room.
+    /// As near a square as the widget is: its head, today's figure and how it mounted, and each source's ring (its
+    /// parts with what each spent by model taking over where they fit).
     Square,
     /// Its parts one over another, as its lane is: each source's head and limits, then what each spent by model and its
     /// sessions as there is room.
@@ -1259,9 +1296,12 @@ fn rows_tall(rows: &[Vec<Lane>]) -> f32 {
 
 /// `rich` laid out side by side in a widget `room` large (DIPs): its parts in as few rows as leave each its room, else
 /// all in one where each has the least; then, as far as they fit, what each source spent by model, and after that its
-/// sessions, a row of them at a time. None where its parts do not fit.
+/// sessions, a row of them at a time. None where its parts do not fit, or it has none (drawn empty).
 pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32)) -> Option<Vec<Vec<Lane>>> {
-    let count = rich.parts.len().max(1);
+    if rich.parts.is_empty() {
+        return None;
+    }
+    let count = rich.parts.len();
     let (width, room) = (w - 2.0 * theme.pad_x, h - theme.pad_top - theme.pad_bottom);
     let column = |per: usize| (width - (per as f32 - 1.0) * ACROSS_GAP) / per as f32;
     let fewest = (((width + ACROSS_GAP) / (BOARD_COLUMN + ACROSS_GAP)).floor() as usize).clamp(1, count);
@@ -1282,13 +1322,11 @@ pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32
     Some(board_rows(rich, theme, lang, per, true, sessions))
 }
 
-/// Draws `rich` side by side in `room` (see `board_of`), in its middle; whether it fit.
-fn paint_board(frame: &dyn Canvas, scene: &Scene, rich: &Rich, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
+/// Draws `rows` of parts side by side (see `board_of`) in the middle of `room`.
+fn draw_board(frame: &dyn Canvas, scene: &Scene, rows: &[Vec<Lane>], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let Some(rows) = board_of(rich, theme, scene.lang, (w, h)) else { return false };
     let room = h - theme.pad_top - theme.pad_bottom;
-    paint_across(frame, scene, &rows, (x + theme.pad_x, y + theme.pad_top + (room - rows_tall(&rows)) / 2.0, w - 2.0 * theme.pad_x), Pass::Content, hits);
-    true
+    paint_across(frame, scene, rows, (x + theme.pad_x, y + theme.pad_top + (room - rows_tall(rows)) / 2.0, w - 2.0 * theme.pad_x), Pass::Content, hits);
 }
 
 /// `rich`'s parts one over another, each source with what it spent by model where `models`, the sessions at work, and the
@@ -1310,8 +1348,11 @@ fn column_lane(rich: &Rich, theme: &Theme, lang: Lang, models: bool, sessions: u
 }
 
 /// `rich` one over another in a widget `room` large (DIPs): its parts, then, as far as they fit, what each source spent by
-/// model, and after that its sessions. None where its parts do not fit.
+/// model, and after that its sessions. None where its parts do not fit, or it has none (drawn empty).
 pub(super) fn column_of(rich: &Rich, theme: &Theme, lang: Lang, (_, h): (f32, f32)) -> Option<Lane> {
+    if rich.parts.is_empty() {
+        return None;
+    }
     let fits = |lane: &Lane| lane.height(theme) <= h;
     if !fits(&column_lane(rich, theme, lang, false, 0)) {
         return None;
@@ -1323,29 +1364,87 @@ pub(super) fn column_of(rich: &Rich, theme: &Theme, lang: Lang, (_, h): (f32, f3
     Some(column_lane(rich, theme, lang, true, sessions))
 }
 
-/// Draws `rich` one over another in `room` (see `column_of`), in its middle, in `ink`; whether it fit.
-fn paint_column(frame: &dyn Canvas, scene: &Scene, ink: Ink, rich: &Rich, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
-    let Some(mut lane) = column_of(rich, scene.theme, scene.lang, (w, h)) else { return false };
+/// Draws `lane`, parts one over another (see `column_of`), in the middle of `room`, in `ink`.
+fn draw_column(frame: &dyn Canvas, scene: &Scene, ink: Ink, mut lane: Lane, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     lane.ink = ink;
     let tall = lane.height(scene.theme);
     paint_lane(frame, scene, &lane, Rect { x, y: y + (h - tall) / 2.0, w, h: tall }, 0.0, Pass::Content, hits);
-    true
 }
 
-/// Between the rings as near a square and the sessions under them (DIPs).
+/// How the component lays out as near a square as its widget is (see `paint_least`): whether roomier (the head, how
+/// today's spending mounted, what each figure is of), whether telling when each window starts again, the sessions at
+/// work at its foot; its inset box; today's figure's font; where the rings
+/// start, the room under each ring and under them all; in how many columns, each cell how wide, each ring how large.
+struct LeastPlan {
+    roomy: bool,
+    resets: bool,
+    foot: f32,
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+    figure_font: Font,
+    rings_top: f32,
+    under: f32,
+    below: f32,
+    columns: usize,
+    cell: f32,
+    ring_room: f32,
+}
+
+/// Between the rings as near a square and what is listed under them, and between the lists (DIPs).
 const LIST_ABOVE: f32 = 18.0;
 
+/// The least a ring is drawn as near a square (DIPs).
+const LEAST_RING: f32 = 26.0;
+
 /// The component as near a square as its widget is, in `room`: today's figure; each source's ring round its mark and
-/// its figure under it, side by side, where they fit; and, roomier, the head, how today's spending mounted, what each
-/// figure is of and when its window starts again, and the sessions at work, or as many of `sessions` as there is room
-/// for under the rings.
-fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted: &[f32], sessions: &[SessionRow], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+/// its figure under it, side by side; and, roomier, the head, how today's spending mounted, what each figure is of and
+/// when its window starts again, and the sessions at work, each giving way where the rings would not fit with it (when
+/// each window starts again first, the sessions at work next, then all the rest: roomy, the rings had no room under
+/// today's figure in a widget wide and low, and it showed the figure alone). Roomier still, with the rings in a row,
+/// what each source spent by model under its ring, and after that as many of its sessions as there is room for, in two
+/// columns where it is wide: what was spent by model before the sessions, as in every form (its sessions were listed
+/// under its rings, and nothing of what was spent by model). Whether the rings fit: else nothing drawn.
+fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mounted, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let count = dock.slots.len();
+    if count == 0 {
+        return false;
+    }
+    let plan = |roomy: bool, resets: bool, foot: bool| {
+        let inset = if roomy { theme.pad_x.min(24.0) } else { 14.0_f32.min(w / 6.0) };
+        let (left, top, width, height) = (x + inset, y + inset, (w - 2.0 * inset).max(0.0), (h - 2.0 * inset).max(0.0));
+        // Today's figure as large as its room across lets it be.
+        let figure_font = Font { size: if roomy { 30.0 } else { (height * 0.2).clamp(15.0, 24.0) }, weight: 650.0, ..theme.figure };
+        let natural = frame.measure(&dock.today, figure_font);
+        let figure_font = if natural > width && natural > 0.0 { Font { size: (figure_font.size * width / natural).max(11.0), ..figure_font } } else { figure_font };
+        let today_tall = label.size + 4.0 + figure_font.size;
+        let rings_top = top + if roomy { HEAD + 4.0 } else { 0.0 } + today_tall + 12.0;
+        let under = if roomy { 36.0 + if resets { 14.0 } else { 0.0 } } else { 18.0 };
+        let foot = if foot { LINE + 10.0 } else { 0.0 };
+        let most = if roomy { 56.0 } else { 44.0 };
+        let below = top + height - foot - rings_top;
+        // In as many columns as leave the rings the largest (the most of them, as large in more), each with its figure
+        // under it.
+        let (columns, cell, ring_room) = (1..=count)
+            .map(|columns| {
+                let rows = count.div_ceil(columns) as f32;
+                let cell = (width - (columns as f32 - 1.0) * 8.0) / columns as f32;
+                (columns, cell, ((below - (rows - 1.0) * 8.0) / rows - under).min(cell).min(most))
+            })
+            .fold((1, 0.0, f32::MIN), |best, this| if this.2 >= best.2 { this } else { best });
+        LeastPlan { roomy, resets, foot, left, top, width, height, figure_font, rings_top, under, below, columns, cell, ring_room }
+    };
     let roomy = w >= LEAST_ROOMY.0 && h >= LEAST_ROOMY.1;
-    let inset = if roomy { theme.pad_x.min(24.0) } else { 14.0_f32.min(w / 6.0) };
-    let (left, top, width, height) = (x + inset, y + inset, (w - 2.0 * inset).max(0.0), (h - 2.0 * inset).max(0.0));
+    let (resets, working) = (dock.slots.iter().any(|slot| !slot.resets.is_empty()), dock.working > 0);
+    let plans = [(roomy, roomy && resets, roomy && working), (roomy, false, roomy && working), (roomy, false, false), (false, false, false)];
+    let Some(LeastPlan { roomy, resets, foot, left, top, width, height, figure_font, rings_top, under, below, columns, cell, ring_room }) =
+        plans.into_iter().map(|(roomy, resets, foot)| plan(roomy, resets, foot)).find(|plan| plan.ring_room >= LEAST_RING)
+    else {
+        return false;
+    };
     // Each spot the pointer rests on to show its card, as on the dock.
     let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
     let mut spot = |spot: Spot, (sx, sy, sw, sh): (f32, f32, f32, f32)| {
@@ -1354,53 +1453,33 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
         }
         hits.push((sx, sy, sw, sh, Hit::AiSlot(spot)));
     };
-    // The rings: in as many columns as leave them the largest in the room under the figure (the most of them, as large in
-    // more: one over another, the sessions had no room under them), each with its figure under it. Today's figure as
-    // large as its room across lets it be, and what it is of in as many words as fit.
-    let figure_font = Font { size: if roomy { 30.0 } else { (height * 0.2).clamp(15.0, 24.0) }, weight: 650.0, ..theme.figure };
-    let natural = frame.measure(&dock.today, figure_font);
-    let figure_font = if natural > width && natural > 0.0 { Font { size: (figure_font.size * width / natural).max(11.0), ..figure_font } } else { figure_font };
+    // What today's figure is of, in as many words as fit.
     let of = [lang.pick("今日 tokens", "Tokens today"), lang.pick("今日", "Today")].into_iter().find(|of| frame.measure(of, label) <= width).unwrap_or(lang.pick("今日", "Today"));
-    let head_tall = if roomy { HEAD + 4.0 } else { 0.0 };
-    let today_tall = label.size + 4.0 + figure_font.size;
-    let rings_top = top + head_tall + today_tall + 12.0;
-    // (Roomier, when each window starts again under what its figure is of.)
-    let resets = roomy && dock.slots.iter().any(|slot| !slot.resets.is_empty());
-    let under = if roomy { 36.0 + if resets { 14.0 } else { 0.0 } } else { 18.0 };
-    let foot = if roomy && dock.working > 0 { LINE + 10.0 } else { 0.0 };
-    let most = if roomy { 56.0 } else { 44.0 };
-    let below = top + height - foot - rings_top;
-    let (columns, cell, ring_room) = (1..=count.max(1))
-        .map(|columns| {
-            let rows = count.div_ceil(columns) as f32;
-            let cell = (width - (columns as f32 - 1.0) * 8.0) / columns as f32;
-            (columns, cell, ((below - (rows - 1.0) * 8.0) / rows - under).min(cell).min(most))
-        })
-        .fold((1, 0.0, f32::MIN), |best, this| if this.2 >= best.2 { this } else { best });
-    let rings = count > 0 && ring_room >= 26.0;
     let rows = count.div_ceil(columns) as f32;
-    // The sessions under the rings, roomier, as many as there is room for there (the sessions at work at its foot giving
-    // way to them), in two columns where it is wide.
     let rings_tall = rows * (ring_room + under) + (rows - 1.0) * 8.0;
+    // What each source spent by model, under its ring, where there is room for all of it; the sessions after it, where
+    // there is room for them, the sessions at work at its foot giving way to them.
+    let models: Vec<Option<Lane>> = dock
+        .slots
+        .iter()
+        .map(|slot| {
+            let part = rich.parts.iter().find(|part| part.id == slot.source.id())?;
+            Some(Lane { id: part.id.clone(), blocks: vec![Block::Ai(part.models.clone()?)], ink: theme.ink(&part.id) })
+        })
+        .collect();
+    let models_tall = models.iter().flatten().map(|lane| lane.height(theme)).fold(0.0, f32::max);
+    let any_models = models.iter().any(Option::is_some);
+    let models_shown = roomy && rows == 1.0 && any_models && models_tall <= below - rings_tall - LIST_ABOVE;
     let list_columns = if width >= 2.0 * BOARD_COLUMN { 2 } else { 1 };
-    let list_room = below + foot - rings_tall - LIST_ABOVE;
-    let listed = if roomy && rings { (1..=sessions.len()).take_while(|&shown| across_tall(&sessions_lanes(&sessions[..shown], list_columns, theme, lang)) <= list_room).last().unwrap_or(0) } else { 0 };
-    // (In the middle of the room under the figure, where they leave some and no sessions are under them.)
-    let ring_from = if listed > 0 { rings_top } else { rings_top + ((below - rings_tall) / 2.0).max(0.0) };
-    // Too small for the rings: today's figure alone, in the middle.
-    if !rings {
-        let tall = today_tall.min(height);
-        let middle = y + h / 2.0;
-        spot(Spot::Today, (left, middle - tall / 2.0, width, tall));
-        if h >= 60.0 {
-            frame.key("ai:today.label");
-            centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + w / 2.0, middle - tall / 2.0);
-        }
-        frame.key("ai:today.value");
-        let font = Font { size: (w * 0.26).clamp(11.0, 22.0), ..figure_font };
-        centred(frame, &dock.today, font, theme.text, x + w / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
-        return;
-    }
+    let list_room = below + foot - rings_tall - LIST_ABOVE - if models_shown { models_tall + LIST_ABOVE } else { 0.0 };
+    let sessions = &rich.sessions;
+    let listed = if roomy && (models_shown || !any_models) {
+        (1..=sessions.len()).take_while(|&shown| across_tall(&sessions_lanes(&sessions[..shown], list_columns, theme, lang)) <= list_room).last().unwrap_or(0)
+    } else {
+        0
+    };
+    // (In the middle of the room under the figure, where they leave some and nothing is under them.)
+    let ring_from = if models_shown || listed > 0 { rings_top } else { rings_top + ((below - rings_tall) / 2.0).max(0.0) };
     let mut row = top;
     if roomy {
         let row_y = row + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -1408,7 +1487,7 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
         frame.text(lang.pick("AI 用量", "AI usage"), theme.title, theme.text, left, row_y, width, Align::Start);
         frame.key("ai:today.aside");
         frame.text(lang.pick("今日", "Today"), theme.small, theme.text3, left, row_y + 1.0, width, Align::End);
-        row += head_tall;
+        row += HEAD + 4.0;
     } else {
         frame.key("ai:today.label");
         // (Over one column of rings, in the middle as they are.)
@@ -1482,10 +1561,40 @@ fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, dock: &Dock, mounted
         };
         frame.text(&said, theme.small, theme.text2, left + 15.0, row_y, width - 15.0, Align::Start);
     }
-    if listed > 0 {
-        let lanes = sessions_lanes(&sessions[..listed], list_columns, theme, lang);
-        paint_across(frame, scene, &[lanes], (left, ring_from + rings_tall + LIST_ABOVE, width), Pass::Content, hits);
+    let mut list_top = ring_from + rings_tall + LIST_ABOVE;
+    if models_shown {
+        for (at, lane) in models.iter().enumerate() {
+            let Some(lane) = lane else { continue };
+            let cell_left = left + (at % columns) as f32 * (cell + 8.0);
+            paint_lane(frame, scene, lane, Rect { x: cell_left + 4.0, y: list_top, w: cell - 8.0, h: models_tall }, 0.0, Pass::Content, hits);
+        }
+        list_top += models_tall + LIST_ABOVE;
     }
+    if listed > 0 {
+        paint_across(frame, scene, &[sessions_lanes(&sessions[..listed], list_columns, theme, lang)], (left, list_top, width), Pass::Content, hits);
+    }
+    true
+}
+
+/// Today's figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
+/// enough.
+fn paint_today(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+    let (theme, lang) = (scene.theme, scene.lang);
+    let label = Font { size: 11.0, weight: 500.0, ..theme.body };
+    let inset = 14.0_f32.min(w / 6.0);
+    let font = Font { size: (w * 0.26).clamp(11.0, 22.0), weight: 650.0, ..theme.figure };
+    let tall = (label.size + 4.0 + font.size).min((h - 2.0 * inset).max(0.0));
+    let middle = y + h / 2.0;
+    if scene.hover == Some(Hit::AiSlot(Spot::Today)) {
+        frame.fill_rounded(theme.hover, x + inset - 4.0, middle - tall / 2.0 - 4.0, w - 2.0 * inset + 8.0, tall + 8.0, 12.0);
+    }
+    hits.push((x + inset, middle - tall / 2.0, (w - 2.0 * inset).max(0.0), tall, Hit::AiSlot(Spot::Today)));
+    if h >= 60.0 {
+        frame.key("ai:today.label");
+        centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + w / 2.0, middle - tall / 2.0);
+    }
+    frame.key("ai:today.value");
+    centred(frame, &dock.today, font, theme.text, x + w / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
 }
 
 /// The least a widget is to show the head, how today's spending mounted and what each ring's figure is of (DIPs).

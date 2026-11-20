@@ -7222,14 +7222,104 @@ otepad.exe", "Notepad"),
         together(&down, false, (110.0, 900.0), ai::DOWN_GAP);
         // (Each slot taller, telling the windows of the source with the most of them.)
         assert!(down[2].3 > 92.0, "{down:?}");
-        // As near a square: its rings side by side, not one over another (the sessions had no room under them).
-        let square = spots((440.0, 500.0));
-        assert_eq!(square.len(), 3, "{square:?}");
-        assert_eq!(square[1].1, square[2].1, "{square:?}");
+        // As near a square: its rings side by side, not one over another, wherever they are drawn so.
+        for w in (300..=900).step_by(10) {
+            for h in (200..=900).step_by(10) {
+                let square = spots((w as f32, h as f32));
+                if ai::fit_of((w as f32, h as f32)) == Fit::Square && square.len() >= 3 {
+                    assert_eq!(square[1].1, square[2].1, "{w} by {h}: {square:?}");
+                }
+            }
+        }
         // Tall and narrow: its parts one over another, with their limits, within it.
         let column = ai::column_of(rich, &theme, Lang::Zh, (320.0, 680.0)).expect("one over another");
         assert!(column.blocks.iter().any(|block| matches!(block, Block::Ai(ai::AiBlock::Windows(_)))));
         assert!(column.height(&theme) <= 680.0);
+    }
+
+    /// The AI component's widget tells what each source spent by model before its sessions at every size (the owner's
+    /// choice), and wide and low its rings, not today's figure alone. As the owner sized it, 761 by 613, as near a square,
+    /// it listed its sessions under its rings and told nothing of what was spent by model; 500 by 203, it gave its rings
+    /// no room under the head and showed today's figure alone.
+    #[test]
+    fn the_ai_widget_tells_its_models_before_its_sessions() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        let models: Vec<&str> = rich.parts.iter().filter_map(|part| match &part.models {
+            Some(ai::AiBlock::Models(rows)) => Some(rows.iter().map(|row| row.0.as_str())),
+            _ => None,
+        }).flatten().collect();
+        let sessions: Vec<&str> = rich.sessions.iter().map(|row| row.0.as_str()).collect();
+        assert!(!models.is_empty() && !sessions.is_empty());
+        // (Its parts drawn: a source's name among what is drawn.)
+        let parts_drawn = |said: &Said| said.0.borrow().iter().any(|text| text == "Claude");
+        // (Sessions at work, as the owner's were.)
+        let dock = &ai::Dock { working: 2, ..dock.clone() };
+        let drawn = |size: (f32, f32)| {
+            let said = Said::default();
+            let mut hits = Vec::new();
+            ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
+            assert!(hits.iter().any(|hit| !matches!(hit.4, Hit::AiSlot(ai::Spot::Today))) || parts_drawn(&said), "{size:?}: today's figure alone");
+            let texts = said.0.into_inner();
+            let rings = hits.iter().filter(|hit| matches!(hit.4, Hit::AiSlot(ai::Spot::Ring(_)))).count();
+            (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings)
+        };
+        // As the owner sized it: what was spent by model, and then its sessions.
+        assert_eq!(drawn((761.0, 613.0)).0, true, "{:?}", drawn((761.0, 613.0)));
+        // Wide and low: its rings.
+        assert_eq!(drawn((500.0, 203.0)).2, dock.slots.len());
+        for w in (200..=1300).step_by(20) {
+            for h in (150..=950).step_by(20) {
+                let (models, sessions, _) = drawn((w as f32, h as f32));
+                assert!(models || !sessions, "{w} by {h}: its sessions without what was spent by model");
+            }
+        }
+    }
+
+    /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw.
+    #[derive(Default)]
+    struct Said(std::cell::RefCell<Vec<String>>);
+
+    impl Canvas for Said {
+        fn text(&self, text: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {
+            self.0.borrow_mut().push(text.to_string());
+        }
+        fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
+            0.0
+        }
+        fn measure(&self, text: &str, font: Font) -> f32 {
+            Nothing.measure(text, font)
+        }
+        fn baseline(&self, font: Font) -> (f32, f32) {
+            Nothing.baseline(font)
+        }
+        fn ink(&self, text: &str, font: Font) -> (f32, f32) {
+            Nothing.ink(text, font)
+        }
+        fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
+        fn unclip(&self) {}
+        fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn fill_circle(&self, _: Color, _: Point, _: f32) {}
+        fn stroke(&self, _: &[Point], _: Color, _: f32) {}
+        fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
+        fn fill_shape(&self, _: &[Point], _: Fill) {}
+        fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
+        fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
+        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
+        fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
+        fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
     }
 
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
