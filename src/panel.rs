@@ -312,6 +312,7 @@ pub struct Controller {
 impl Controller {
     pub fn new(info: StaticInfo, settings: &Settings) -> Self {
         crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
+        crate::ui::view::ai::follow(&settings.ai_folded);
         Controller {
             info: RwLock::new(Arc::new(info)),
             config: Mutex::new(config_from(settings)),
@@ -341,6 +342,7 @@ impl Controller {
 
     pub fn apply(&self, settings: &Settings) {
         crate::media::choose_music(settings.music_source.as_ref().map(|source| source.id.clone()));
+        crate::ui::view::ai::follow(&settings.ai_folded);
         *self.config.lock().unwrap() = config_from(settings);
         self.post(RESTYLE);
     }

@@ -790,6 +790,9 @@ pub struct Settings {
     pub ai_columns: Option<usize>,
     /// What an edge holding the AI component opens.
     pub ai_form: AiForm,
+    /// The AI component's sources folded by hand (their lanes' ids): the others show, under their limits, what they
+    /// spent by kind and by model and their sessions.
+    pub ai_folded: Vec<String>,
     #[serde(default)]
     columns_apart: bool,
     /// How large a panel is drawn, 1 as designed (0.75 to 2), where it was not sized (see `part_sizes`). Up to 0.4.3,
@@ -1029,6 +1032,7 @@ impl Default for Settings {
             workbench_columns: None,
             ai_columns: None,
             ai_form: AiForm::default(),
+            ai_folded: Vec::new(),
             columns_apart: true,
             panel_size: 1.0,
             part_sizes: PanelSizes::default(),

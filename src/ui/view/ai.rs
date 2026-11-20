@@ -143,16 +143,27 @@ impl Spot {
     }
 }
 
-/// The sources whose lanes are opened (one bit each: see `Source::bit`), in every window alike.
-static OPEN: AtomicU16 = AtomicU16::new(0);
+/// The sources whose lanes are folded (one bit each: see `Source::bit`), in every window alike: as the settings keep
+/// them (see `Settings::ai_folded`), the others opened.
+static FOLDED: AtomicU16 = AtomicU16::new(0);
 
-/// `source`'s lane opened, or closed again.
+/// The sources folded as the settings keep them (`folded`, their lanes' ids).
+pub fn follow(folded: &[String]) {
+    let bits = SOURCES.into_iter().filter(|source| folded.iter().any(|id| id == source.id())).fold(0, |bits, source| bits | source.bit());
+    FOLDED.store(bits, Ordering::Relaxed);
+}
+
+/// `source`'s lane folded, or opened again: shown so at once, and kept in the settings (off this thread, which they tell
+/// to restyle).
+#[cfg(windows)]
 pub fn toggle(source: Source) {
-    OPEN.fetch_xor(source.bit(), Ordering::Relaxed);
+    let bits = FOLDED.fetch_xor(source.bit(), Ordering::Relaxed) ^ source.bit();
+    let folded: Vec<String> = SOURCES.into_iter().filter(|source| bits & source.bit() != 0).map(|source| source.id().to_string()).collect();
+    std::thread::spawn(move || crate::app().change(|settings| settings.ai_folded = folded));
 }
 
 fn opened(source: Source) -> bool {
-    OPEN.load(Ordering::Relaxed) & source.bit() != 0
+    FOLDED.load(Ordering::Relaxed) & source.bit() == 0
 }
 
 /// What an AI lane draws, under its head.
@@ -1986,6 +1997,15 @@ fn shares(frame: &dyn Canvas, theme: &Theme, (x, y, width): (f32, f32, f32), par
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn every_source_opens_but_those_folded_by_hand() {
+        follow(&[]);
+        assert!(SOURCES.into_iter().all(opened));
+        follow(&["ai:codex".to_string(), "ai:glm".to_string()]);
+        assert!(!opened(Source::Codex) && !opened(Source::Glm) && opened(Source::Claude));
+        follow(&[]);
+    }
 
     type Box4 = (f32, f32, f32, f32);
     /// A fill: its colour, its box, how round (none, a plain rectangle), and the clip it was drawn in.
