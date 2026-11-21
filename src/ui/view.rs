@@ -1922,9 +1922,11 @@ fn apps_rows(count: usize, theme: &Theme) -> usize {
 }
 
 /// The picture of what is kept at hand (`target`, what opens it) in the square `side` wide at (`x`, `y`): as Explorer
-/// shows it; a web address, by its site's first letter.
+/// shows it; a web address, by its site's first letter. Where it is not `named` beside it, a folder, or a file shown by
+/// its kind's icon (as others of its kind are), carries a tag of its name's first two characters in a colour of its
+/// own (see `paint_tag`), so that those of a kind are told apart; a file with a thumbnail of its own is shown by that.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32) {
+pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32, named: bool) {
     let web = target.starts_with("https://") || target.starts_with("http://");
     let path = std::path::Path::new(target);
     // A file or folder on the disk: a folder, or a file not a program, by its mark on a plate (as the station draws
@@ -1940,9 +1942,15 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
     };
     if on_disk && (folder || !crate::station::apps::pictured(path)) {
         let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
-        match crate::station::thumbs::icon(path, APP_PIXELS).filter(|_| !gone) {
-            Some(icon) => frame.picture(&icon, x, y, side, side, 0.0, 1.0),
+        // (A file of a kind with thumbnails, by its own; till it is made, by its kind's icon.)
+        let thumbnailed = !folder && crate::station::thumbs::thumbnailed(path);
+        let thumbnail = thumbnailed.then(|| crate::station::thumbs::of(path, APP_PIXELS)).flatten().filter(|_| !gone);
+        match thumbnail.or_else(|| crate::station::thumbs::icon(path, APP_PIXELS)).filter(|_| !gone) {
+            Some(picture) => frame.picture(&picture, x, y, side, side, 0.0, 1.0),
             None => paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 26.0, gone),
+        }
+        if !named && !thumbnailed {
+            paint_tag(frame, theme, name, (x, y, side), gone);
         }
         return;
     }
@@ -1956,6 +1964,58 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
             let ink = if gone { theme.text2.alpha(theme.text2.a * 0.45) } else { theme.text2 };
             centred(frame, &letter, font, ink, x, frame.line_in(font, y, side), side);
         }
+    }
+}
+
+/// The least a picture is (DIPs) to carry its tag (see `paint_tag`): smaller, it would hide it.
+const TAG_LEAST: f32 = 24.0;
+
+/// The colours a tag is drawn in, one chosen by its name: each deep enough for white words on either ground.
+const TAG_COLOURS: [u32; 8] = [0xC8503A, 0x2F78CF, 0x2C9364, 0x8455CC, 0xB97C14, 0xC74478, 0x24909D, 0x60708F];
+
+/// The tag a picture `side` wide at (`x`, `y`) carries at its bottom right corner (where it is `TAG_LEAST` wide at
+/// least): `name`'s first two characters (see `tag_of`) in white on a colour chosen by the name, faint where what it
+/// is of is gone.
+fn paint_tag(frame: &dyn Canvas, theme: &Theme, name: &str, (x, y, side): (f32, f32, f32), faint: bool) {
+    let words = tag_of(name);
+    if side < TAG_LEAST || words.is_empty() {
+        return;
+    }
+    let font = Font { size: (side * 0.27).max(8.5), weight: 650.0, ..theme.body };
+    let tall = (font.size * 1.55).round();
+    let wide = (frame.measure(&words, font) + tall * 0.55).max(tall);
+    let (right, bottom) = (x + side + side * 0.05, y + side);
+    let colour = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        name.hash(&mut hasher);
+        TAG_COLOURS[(hasher.finish() % TAG_COLOURS.len() as u64) as usize]
+    };
+    let shade = if faint { 0.45 } else { 1.0 };
+    frame.fill_rounded(Color::hex(colour, shade), right - wide, bottom - tall, wide, tall, tall * 0.34);
+    centred(frame, &words, font, Color::hex(0xFFFFFF, shade), right - wide, frame.line_in(font, bottom - tall, tall), wide);
+}
+
+/// What a tag says of `name`: its first two characters where it starts with a Chinese, Japanese or Korean one (those
+/// of them, past spaces and figures); else the first letters of its first two words, as capitals, or its first two
+/// letters where it is one word, the first a capital; else (no letters) its first two characters.
+fn tag_of(name: &str) -> String {
+    let wide = |c: char| matches!(c as u32, 0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF);
+    let letters: Vec<char> = name.chars().filter(|c| c.is_alphabetic()).collect();
+    match letters.first() {
+        Some(&first) if wide(first) => letters.iter().filter(|&&c| wide(c)).take(2).collect(),
+        Some(_) => {
+            let words: Vec<&str> = name.split(|c: char| !c.is_alphabetic()).filter(|word| !word.is_empty()).collect();
+            match words.as_slice() {
+                [one, other, ..] => one.chars().take(1).chain(other.chars().take(1)).flat_map(char::to_uppercase).collect(),
+                [one] => {
+                    let mut chars = one.chars().take(2);
+                    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+                }
+                [] => String::new(),
+            }
+        }
+        None => name.chars().filter(|c| !c.is_whitespace()).take(2).collect(),
     }
 }
 
@@ -2047,7 +2107,7 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
             frame.fill_rounded(theme.hover, x - 2.0, y - 2.0, (if named { cell_w } else { APP_SIDE }) + 4.0, cell_h + 4.0, plate_round(theme, GLASS_ROW_ROUND, 2.0));
         }
         frame.key(&format!("app.{target}"));
-        paint_app(frame, theme, name, target, px, y, APP_SIDE);
+        paint_app(frame, theme, name, target, px, y, APP_SIDE, named);
         if named {
             centred(frame, &fitted(frame, name, theme.small, cell_w), theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w);
         }
@@ -2083,7 +2143,7 @@ fn paint_held_app(frame: &dyn Canvas, scene: &Scene, name: &str, target: &str, x
     let grown = side * 1.12;
     let (x, y) = (x - (grown - side) / 2.0, y - (grown - side) / 2.0);
     frame.shadow(Color::hex(0, if scene.theme.dark { 0.45 } else { 0.22 }), x, y, grown, grown, grown * 0.22, 8.0, 4.0);
-    paint_app(frame, scene.theme, name, target, x, y, grown);
+    paint_app(frame, scene.theme, name, target, x, y, grown, false);
 }
 
 /// Where the thing kept at hand `target` (at `at` among them) is drawn, its cell's corner (see `thumb::Dots::apps`):
@@ -2149,7 +2209,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         if lit_on(hit) {
             app_plate(frame, theme, (x + 2.0, y + 2.0, RAIL_CELL - 4.0), (RAIL_CELL - 4.0 - RAIL_SIDE) / 2.0);
         }
-        paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE);
+        paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE, false);
         placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
     }
     // The one held, lifted where the pointer has it along the rail; the places it may go to, standing still, all of
@@ -6316,7 +6376,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     }
                     frame.key(&format!("app.{target}"));
                 }
-                paint_app(frame, theme, name, target, cx, cy, side);
+                paint_app(frame, theme, name, target, cx, cy, side, false);
                 if current {
                     frame.key("");
                     hits.push((cx, cy, side, side, hit));
@@ -6325,7 +6385,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                     }
                 }
             };
-            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side);
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side, false);
             let hovered = apps.iter().find(|(_, target)| lit(Hit::App(crate::station::apps::number_of(target)))).map(|(name, _)| name.as_str());
             paint_grid(frame, scene, hits, (x, y, w, h), &grid, apps.len(), List::Apps, &draw, &small, hovered);
             hits.push((x, y, w, h, Hit::AppsArea));
@@ -7462,6 +7522,41 @@ otepad.exe", "Notepad"),
                 }
             }
         }
+    }
+
+    /// What is kept at hand shown by a picture alone (no name with it) is told apart from others of its kind: a folder,
+    /// or a file of a kind shown by its kind's icon, carries a tag of its name's first two characters (the user's folders
+    /// and documents all looked the same on the edge's rail); a file of a kind with thumbnails is shown by its own, a
+    /// program by its icon, and one named beside its picture, none of them tagged.
+    #[test]
+    fn what_is_kept_at_hand_shown_alone_is_told_apart() {
+        assert_eq!(tag_of("项目资料"), "项目");
+        assert_eq!(tag_of("预算 2027"), "预算");
+        assert_eq!(tag_of("2027 年预算"), "年预");
+        assert_eq!(tag_of("Downloads"), "Do");
+        assert_eq!(tag_of("tax returns 2026"), "TR");
+        assert_eq!(tag_of("my-notes"), "MN");
+        assert_eq!(tag_of("2027"), "20");
+        let theme = Theme::new(Skin::Glass, true);
+        let dir = std::env::temp_dir().join("glance-kept-at-hand");
+        let folder = dir.join("项目资料");
+        let (kind, thumbnailed) = (dir.join("周报.glancetest"), dir.join("海边.png"));
+        let said = |target: &std::path::Path, name: &str, named: bool| {
+            let said = Said::default();
+            paint_app(&said, &theme, name, &target.to_string_lossy(), 0.0, 0.0, 36.0, named);
+            said.0.into_inner()
+        };
+        assert!(crate::station::thumbs::thumbnailed(&thumbnailed) && !crate::station::thumbs::thumbnailed(&kind));
+        assert_eq!(said(&folder, "项目资料", false), ["项目"]);
+        assert_eq!(said(&kind, "周报", false), ["周报"]);
+        assert!(said(&folder, "项目资料", true).is_empty() && said(&kind, "周报", true).is_empty());
+        // (Its thumbnail not made here: the mark of its kind in its place, untagged.)
+        assert!(!said(&thumbnailed, "海边", false).iter().any(|text| text == "海边"));
+        assert!(said(std::path::Path::new(r"C:\Windows\notepad.exe"), "Notepad", false).iter().all(|text| text != "No"));
+        // (Too small for one: none.)
+        let small = Said::default();
+        paint_app(&small, &theme, "项目资料", &folder.to_string_lossy(), 0.0, 0.0, TAG_LEAST - 1.0, false);
+        assert!(small.0.into_inner().is_empty());
     }
 
     /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw.

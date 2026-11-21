@@ -1611,7 +1611,7 @@ impl Beside {
             if over || held.as_ref().is_some_and(|(moving, ..)| *moving == app.target) {
                 super::view::app_plate(frame, &theme, (cell.0, cell.1, cell.2), 6.0);
             }
-            super::view::paint_app(frame, &theme, &app.name, &app.target, x + 6.0, STRIP_TOP + 6.0, STRIP_CELL - 12.0);
+            super::view::paint_app(frame, &theme, &app.name, &app.target, x + 6.0, STRIP_TOP + 6.0, STRIP_CELL - 12.0, false);
             // Its cross, over the one under the pointer.
             if over {
                 let centre = Point { x: x + STRIP_CELL - 8.0, y: STRIP_TOP + 8.0 };
@@ -1763,7 +1763,7 @@ impl Beside {
             let face = 28.0;
             let face_x = PAD + ROW_IN;
             if row.on_disk {
-                super::view::paint_app(frame, &theme, &row.name, &row.target, face_x, ry + (tall - face) / 2.0, face);
+                super::view::paint_app(frame, &theme, &row.name, &row.target, face_x, ry + (tall - face) / 2.0, face, true);
             } else {
                 match crate::station::thumbs::icon(std::path::Path::new(&row.target), super::view::APP_PIXELS) {
                     Some(picture) => frame.picture(&picture, face_x, ry + (tall - face) / 2.0, face, face, 5.0, 1.0),

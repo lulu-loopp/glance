@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use crate::ui::canvas::Picture;
 use std::sync::{Arc, Mutex, OnceLock};
-use windows::core::HSTRING;
+use windows::core::{Interface, GUID, HSTRING, PWSTR};
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ};
-use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
+use windows::Win32::UI::Shell::{AssocQueryStringW, IShellItemImageFactory, IThumbnailProvider, SHCreateItemFromParsingName, ASSOCF_INIT_DEFAULTTOSTAR, ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY, SIIGBF_RESIZETOFIT};
 
 /// A picture: its pixels (BGRA, premultiplied, top row first) and how many across and down.
 #[derive(Clone, Debug)]
@@ -211,6 +211,36 @@ fn look(looks: Receiver<PathBuf>) {
 /// (asked for, and told when it is), or none to be had.
 pub fn of(path: &Path, side: u32) -> Option<Picture> {
     asked(path, side, Made::Fit)
+}
+
+/// Whether a file of `path`'s kind has a thumbnail as Explorer shows it (a picture's, a video's, a PDF's: its kind has
+/// a thumbnail maker), not its kind's icon alone. Asked of the shell once for each kind.
+pub fn thumbnailed(path: &Path) -> bool {
+    static KINDS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let Some(extension) = path.extension().map(|extension| extension.to_string_lossy().to_lowercase()) else { return false };
+    let kinds = KINDS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(&known) = kinds.lock().unwrap().get(&extension) {
+        return known;
+    }
+    let has = shell_extension(path, IThumbnailProvider::IID).is_some();
+    kinds.lock().unwrap().insert(extension, has);
+    has
+}
+
+/// The shell extension a file of `path`'s kind has for the interface `wanted` (as the shell finds it, by the kind's
+/// own and those of every file): none for a kind that has none.
+pub fn shell_extension(path: &Path, wanted: GUID) -> Option<GUID> {
+    let extension = path.extension()?;
+    let kind = HSTRING::from(format!(".{}", extension.to_string_lossy()));
+    let wanted = HSTRING::from(format!("{{{wanted:?}}}"));
+    let mut said = [0u16; 64];
+    let mut length = said.len() as u32;
+    let found = unsafe { AssocQueryStringW(ASSOCF_INIT_DEFAULTTOSTAR | ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION, &kind, &wanted, Some(PWSTR(said.as_mut_ptr())), &mut length) };
+    if found.is_err() {
+        return None;
+    }
+    let said = String::from_utf16_lossy(&said[..said.iter().position(|&unit| unit == 0).unwrap_or(said.len())]);
+    GUID::try_from(said.trim().trim_start_matches('{').trim_end_matches('}')).ok()
 }
 
 /// The icon of the file or folder at `path`, `side` physical px square: Windows' own for it (its program's for a

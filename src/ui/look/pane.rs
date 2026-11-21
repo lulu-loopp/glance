@@ -12,13 +12,13 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
-use windows::core::{w, Interface, GUID, HSTRING, PWSTR};
+use windows::core::{w, Interface, GUID, HSTRING};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, CreateSolidBrush, DeleteObject, FillRect, HDC};
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, STGM_READ, STGM_SHARE_DENY_NONE};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::PropertiesSystem::{IInitializeWithFile, IInitializeWithStream};
-use windows::Win32::UI::Shell::{AssocQueryStringW, IInitializeWithItem, IPreviewHandler, IPreviewHandlerVisuals, IShellItem, SHCreateItemFromParsingName, SHCreateStreamOnFileEx, ASSOCF_INIT_DEFAULTTOSTAR, ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION};
+use windows::Win32::UI::Shell::{IInitializeWithItem, IPreviewHandler, IPreviewHandlerVisuals, IShellItem, SHCreateItemFromParsingName, SHCreateStreamOnFileEx};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, TranslateMessage, MSG, WM_APP, GetWindow, GetWindowLongPtrW, GetWindowRect, GW_CHILD, GW_HWNDNEXT, SWP_NOZORDER, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, MA_NOACTIVATE, SWP_NOACTIVATE,
     SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WM_ERASEBKGND, WM_MOUSEACTIVATE, WNDCLASSW, WS_CLIPCHILDREN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -29,18 +29,9 @@ use super::super::canvas::Color;
 /// The previewer a file of `path`'s kind has, as Explorer's preview pane finds it (by its kind's shell extension for
 /// `IPreviewHandler`): none for a kind that has none.
 pub fn previewer(path: &Path) -> Option<GUID> {
-    let extension = path.extension()?;
-    let kind = HSTRING::from(format!(".{}", extension.to_string_lossy()));
-    let wanted = HSTRING::from(format!("{{{:?}}}", IPreviewHandler::IID));
-    let mut said = [0u16; 64];
-    let mut length = said.len() as u32;
-    let found = unsafe { AssocQueryStringW(ASSOCF_INIT_DEFAULTTOSTAR | ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION, &kind, &wanted, Some(PWSTR(said.as_mut_ptr())), &mut length) };
-    if found.is_err() {
-        return None;
-    }
-    let said = String::from_utf16_lossy(&said[..said.iter().position(|&unit| unit == 0).unwrap_or(said.len())]);
-    GUID::try_from(said.trim().trim_start_matches('{').trim_end_matches('}')).ok()
+    crate::station::thumbs::shell_extension(path, IPreviewHandler::IID)
 }
+
 
 /// The window a previewer draws in, run on a thread of its own (see `run`): a previewer is made, and the file it shows
 /// opened, there, never on the look's (a drive slow to answer, or a previewer slow to start, holds nothing of the
