@@ -154,12 +154,21 @@ pub fn follow(folded: &[String]) {
 }
 
 /// `source`'s lane folded, or opened again: shown so at once, and kept in the settings (off this thread, which they tell
-/// to restyle).
+/// to restyle). Each such change kept as what it changes, whatever order they come into the settings in.
 #[cfg(windows)]
 pub fn toggle(source: Source) {
-    let bits = FOLDED.fetch_xor(source.bit(), Ordering::Relaxed) ^ source.bit();
-    let folded: Vec<String> = SOURCES.into_iter().filter(|source| bits & source.bit() != 0).map(|source| source.id().to_string()).collect();
-    std::thread::spawn(move || crate::app().change(|settings| settings.ai_folded = folded));
+    FOLDED.fetch_xor(source.bit(), Ordering::Relaxed);
+    std::thread::spawn(move || crate::app().change(|settings| folded_again(&mut settings.ai_folded, source)));
+}
+
+/// `source` folded where the settings keep it opened (`folded`, the lanes folded), opened where they keep it folded.
+fn folded_again(folded: &mut Vec<String>, source: Source) {
+    match folded.iter().position(|id| id == source.id()) {
+        Some(at) => {
+            folded.remove(at);
+        }
+        None => folded.push(source.id().to_string()),
+    }
 }
 
 fn opened(source: Source) -> bool {
@@ -2005,6 +2014,19 @@ pub(super) mod tests {
         follow(&["ai:codex".to_string(), "ai:glm".to_string()]);
         assert!(!opened(Source::Codex) && !opened(Source::Glm) && opened(Source::Claude));
         follow(&[]);
+    }
+
+    #[test]
+    fn sources_folded_one_after_another_are_kept_whatever_order_their_changes_come_in() {
+        // Claude folded, then Codex, then Claude opened again: their changes into the settings in each order.
+        let changes = [Source::Claude, Source::Codex, Source::Claude];
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2], [1, 2, 0]] {
+            let mut kept = Vec::new();
+            for n in order {
+                folded_again(&mut kept, changes[n]);
+            }
+            assert_eq!(kept, vec!["ai:codex".to_string()], "{order:?}");
+        }
     }
 
     type Box4 = (f32, f32, f32, f32);
