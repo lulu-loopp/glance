@@ -208,9 +208,13 @@ pub enum Hit {
     /// A list turned through by pages (see `PAGE`), as far as it turns; and the way to its next page.
     Pages(List, u32),
     NextPage(List, u32),
-    /// The AI component's sources turned through by the wheel, a source a page, as far as they turn (see
-    /// `ai::paint_paged`): turned by the wheel alone, a press there the widget's (moved, sized) as ever.
-    AiPages(u32),
+    /// The AI component's sources turned round by the wheel, a source a page (see `ai::paint_paged`): how many pages
+    /// they are, and whether the first is what every source spent today (see `ai::paint_one`). Past the last comes the
+    /// first again, and before the first the last. Turned by the wheel and its dots alone, a press there the widget's
+    /// (moved, sized) as ever.
+    AiPages(u32, bool),
+    /// One of the dots beside the AI component's sources turned round (see `AiPages`): a press turns them to its page.
+    AiPage(u32),
     /// The overlay's switch.
     Overlay,
     /// The game button: the window in front taken for a game, or games turned off (see `presents::GameMode`).
@@ -285,7 +289,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(..))
     }
 
     /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
@@ -369,7 +373,6 @@ impl Hit {
     pub fn pages(self) -> Option<(List, f32)> {
         match self {
             Hit::Pages(list, bits) | Hit::NextPage(list, bits) => Some((list, f32::from_bits(bits))),
-            Hit::AiPages(bits) => Some((List::AiSources, f32::from_bits(bits))),
             _ => None,
         }
     }
@@ -469,6 +472,30 @@ impl Scrolls {
         *to = ((*turning / page).round() * page).clamp(0.0, most);
     }
 
+    /// `list`, turned round through pages `page` long (past the last, on to the first, and before the first, back to
+    /// the last: see `fold`), to be turned `by` more (DIPs): to the page nearest where that comes to, as `turn_pages`.
+    pub fn turn_round(&mut self, list: List, by: f32, page: f32) {
+        let (to, turning) = (&mut self.to[list as usize], &mut self.turning[list as usize]);
+        if (*turning - *to).abs() > page / 2.0 {
+            *turning = *to;
+        }
+        *turning += by;
+        *to = (*turning / page).round() * page;
+    }
+
+    /// `list`, turned round through all its pages in `round` (DIPs), kept within one turn of them: where it is, where
+    /// it is going and where it is turned to, moved back or on together by whole turns, so that where it is going is
+    /// within the first. (Drawn the same: a page comes again a turn on.)
+    pub fn fold(&mut self, list: List, round: f32) {
+        let list = list as usize;
+        let by = (self.to[list] / round).floor() * round;
+        if by != 0.0 {
+            self.at[list] -= by;
+            self.to[list] -= by;
+            self.turning[list] -= by;
+        }
+    }
+
     /// How far `list` is going (see `at`: how far it is now, on its way there).
     pub fn to(&self, list: List) -> f32 {
         self.to[list as usize]
@@ -564,6 +591,11 @@ pub fn under(hits: &[HitBox], (x, y): (f32, f32)) -> impl Iterator<Item = &HitBo
 pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> bool {
     let notches = delta as f32 / 120.0;
     let down = -notches * crate::panel::WHEEL_ROWS * TABLE_ROW;
+    // (The AI component's sources: turned round, past the last on to the first.)
+    if under.iter().any(|hit| matches!(hit, Hit::AiPages(..))) {
+        scrolls.turn_round(List::AiSources, if across { notches * PAGE } else { down }, PAGE);
+        return true;
+    }
     if let Some((list, most)) = under.iter().find_map(|hit| hit.pages()) {
         scrolls.turn_pages(list, if across { notches * PAGE } else { down }, PAGE, most);
         return true;
@@ -668,27 +700,28 @@ impl SourceShown {
     }
 }
 
-/// The AI component's sources turned through by the wheel (`sources`, their ids in their order: see `ai::paint_paged`)
-/// kept on the source shown first as their order changes or as a widget kept on one is put back: the same source
-/// shown, where it is now, at once; the first, where it is no longer shown. Turned no further than `reach` (as far as
-/// the pages drawn last turn, several to a page: see `Hit::AiPages`; none drawn, to the last): turned further (made
-/// wider, more to a page), back to as far as they turn, so that the wheel turns them back at once and the one kept is
-/// the one shown first. Whether the one shown first changed.
-pub fn keep_source(scrolls: &mut Scrolls, shown: &mut SourceShown, sources: &[String], reach: Option<f32>) -> bool {
-    let last = sources.len().saturating_sub(1);
-    let most = reach.unwrap_or(last as f32 * PAGE).min(last as f32 * PAGE);
-    if scrolls.to(List::AiSources) > most {
-        scrolls.to_page(List::AiSources, most, most);
+/// The AI component's pages turned round by the wheel (`pages`, their ids in their order: its sources, after what every
+/// source spent today where that is a page of them, see `Hit::AiPages`) kept within a turn of them (see
+/// `Scrolls::fold`), and on the page shown first as their order changes or as a widget kept on one is put back: the
+/// same page shown, where it is now, at once; the first, where it is no longer shown. Whether the one shown first
+/// changed.
+pub fn keep_source(scrolls: &mut Scrolls, shown: &mut SourceShown, pages: &[String]) -> bool {
+    let count = pages.len();
+    if count == 0 {
+        let changed = shown.kept.is_some();
+        shown.kept = None;
+        return changed;
     }
+    scrolls.fold(List::AiSources, count as f32 * PAGE);
     if let Some((id, at)) = &shown.kept {
-        // (Its place holding another: the order changed, or it was just put back, not the sources turned.)
-        if sources.get(*at).is_none_or(|source| source != id) {
-            let now = sources.iter().position(|source| source == id).unwrap_or(0);
-            scrolls.hold(List::AiSources, now as f32 * PAGE, most);
+        // (Its place holding another: the order changed, or it was just put back, not the pages turned.)
+        if pages.get(*at).is_none_or(|page| page != id) {
+            let now = pages.iter().position(|page| page == id).unwrap_or(0);
+            scrolls.hold(List::AiSources, now as f32 * PAGE, (count - 1) as f32 * PAGE);
         }
     }
-    let at = ((scrolls.to(List::AiSources) / PAGE).round().max(0.0) as usize).min(last);
-    let kept = sources.get(at).map(|source| (source.clone(), at));
+    let at = (scrolls.to(List::AiSources) / PAGE).round() as usize % count;
+    let kept = pages.get(at).map(|page| (page.clone(), at));
     let changed = kept.as_ref().map(|(id, _)| id) != shown.kept.as_ref().map(|(id, _)| id);
     shown.kept = kept;
     changed
@@ -7375,7 +7408,8 @@ otepad.exe", "Notepad"),
         assert_eq!(spots(Shape::Down, (down.0, down.1 - 40.0)), rings);
         assert_eq!(spots(Shape::Least, (156.0, 156.0)), rings);
         assert_eq!(spots(Shape::Least, (300.0, 240.0)), every);
-        assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today)]);
+        // (Today's figure first, the sources' turned to after it, by the wheel or its dots.)
+        assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today), Hit::AiPage(0), Hit::AiPage(1), Hit::AiPage(2), Hit::AiPages(3, true)]);
     }
 
     /// The AI component's widget shows more the larger it is made, each form drawn only a little larger than designed
@@ -7494,7 +7528,7 @@ otepad.exe", "Notepad"),
             let rings = hits.iter().filter(|hit| matches!(hit.4, Hit::AiSlot(ai::Spot::Ring(_)))).count();
             let told = texts.iter().filter(|text| !text.trim().is_empty()).count();
             // (Its sources all shown: not turned through, and not today's figure alone.)
-            let turned = hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(_)));
+            let turned = hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..)));
             let every = !turned && (rings > 0 || dock.slots.iter().any(|slot| texts.iter().any(|text| text == slot.source.name(Lang::Zh))));
             (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings, told, every)
         };
@@ -7522,9 +7556,12 @@ otepad.exe", "Notepad"),
     }
 
     /// The AI component's widget too small for any form that holds every source shows as many sources as fit whole, the
-    /// rest turned to by the wheel, a source a notch, and dots telling which is shown of how many. As the owner sized it,
-    /// 379 by 106 with three sources, it showed today's figure alone. Made larger, it tells no less; holding them all, it
-    /// shows no dots and the wheel turns nothing.
+    /// rest turned round to by the wheel, a source a notch (past the last, the first again, and back from the first to
+    /// the last: it stopped at the last, and the owner asked for them to go on round), and dots telling which is shown
+    /// of how many, a press on one turning to it. A source's head shows its card as the pointer rests on it. As the
+    /// owner sized it, 379 by 106 with three sources, it showed today's figure alone. Made larger, it tells no less;
+    /// holding them all, it shows no dots and the wheel turns nothing. Too small for more than one figure, today's is the
+    /// first page and the sources' come after it (with today shown, it showed that alone and turned to none).
     #[test]
     fn the_ai_widget_too_small_for_its_sources_turns_through_them() {
         let theme = Theme::new(Skin::Glass, true);
@@ -7549,27 +7586,50 @@ otepad.exe", "Notepad"),
         // As the owner sized it: a source whole (its head, its limits), the rest turned to by the wheel.
         let (texts, hits) = drawn((379.0, 106.0), Scrolls::default());
         assert_eq!(heads(&texts), [titles[0].clone()], "{texts:?}");
-        let pages = hits.iter().find_map(|hit| if let Hit::AiPages(most) = hit.4 { Some(f32::from_bits(most)) } else { None }).expect("turned through");
-        assert_eq!(pages, 2.0 * PAGE);
-        // A notch of the wheel over it: the next source, and the next, then no further.
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiPages(3, false)), "turned round");
+        // Its head, the source's card beside it; its dots, each to be pressed.
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[0].source))));
+        assert_eq!(hits.iter().filter(|hit| matches!(hit.4, Hit::AiPage(_))).count(), 3);
+        // A notch of the wheel over it: the next source, and the next, then the first again; and back, the last.
         let mut scrolls = Scrolls::default();
-        let under: Vec<Hit> = under(&hits, (200.0, 50.0)).map(|hit| hit.4).collect();
-        for next in 1..=3 {
-            assert!(wheel(&mut scrolls, &under, -120, false));
+        let over: Vec<Hit> = under(&hits, (200.0, 50.0)).map(|hit| hit.4).collect();
+        for (notch, (delta, shown)) in [(-120, 1), (-120, 2), (-120, 0), (-120, 1), (120, 0), (120, 2), (120, 1)].into_iter().enumerate() {
+            assert!(wheel(&mut scrolls, &over, delta, false));
             // (Its slide done.)
             while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
-            let (texts, _) = drawn((379.0, 106.0), scrolls);
-            assert_eq!(heads(&texts), [titles[next.min(2)].clone()], "notch {next}: {texts:?}");
+            let (texts, hits) = drawn((379.0, 106.0), scrolls);
+            assert_eq!(heads(&texts), [titles[shown].clone()], "notch {notch}: {texts:?}");
+            assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[shown].source))), "notch {notch}");
             // (Codex's every window, each with how much of it is used.)
-            if next == 1 {
+            if shown == 1 {
                 assert_eq!(texts.iter().filter(|text| text.ends_with('%')).count(), 3, "{texts:?}");
+            }
+        }
+        // Halfway from the last on to the first: the two of them, the first coming in after the last.
+        let mut scrolls = Scrolls::default();
+        scrolls.hold(List::AiSources, 2.5 * PAGE, f32::MAX);
+        let (texts, _) = drawn((379.0, 106.0), scrolls);
+        assert_eq!(heads(&texts), [titles[0].clone(), titles[2].clone()], "{texts:?}");
+        // The smallest: today's figure, then each source's, then today's again.
+        let (texts, hits) = drawn((120.0, 80.0), Scrolls::default());
+        assert!(texts.iter().any(|text| text == "今日"), "{texts:?}");
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiPages(4, true)));
+        let over: Vec<Hit> = under(&hits, (60.0, 40.0)).map(|hit| hit.4).collect();
+        let mut scrolls = Scrolls::default();
+        for slot in dock.slots.iter().map(Some).chain([None]) {
+            assert!(wheel(&mut scrolls, &over, -120, false));
+            while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
+            let (texts, _) = drawn((120.0, 80.0), scrolls);
+            match slot {
+                Some(slot) => assert!(texts.iter().any(|text| text.starts_with(slot.source.name(Lang::Zh))) && texts.contains(&slot.figure), "{texts:?}"),
+                None => assert!(texts.iter().any(|text| text == "今日"), "{texts:?}"),
             }
         }
         // Made larger, it tells no less (wider, sources side by side; taller, when each window starts again, then what
         // was spent by model), and holds them all before it tells more of one: once it does, it is not turned through.
         let told = |size: (f32, f32)| {
             let (texts, hits) = drawn(size, Scrolls::default());
-            (!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(_))), texts.iter().filter(|text| !text.trim().is_empty()).count())
+            (!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))), texts.iter().filter(|text| !text.trim().is_empty()).count())
         };
         for w in (380..=700).step_by(20) {
             for h in (100..=260).step_by(10) {
@@ -7582,7 +7642,7 @@ otepad.exe", "Notepad"),
         // Wide enough for all of them: no dots, and the wheel turns nothing.
         let (texts, hits) = drawn((900.0, 106.0), Scrolls::default());
         assert!(titles.iter().all(|title| texts.iter().any(|text| text.starts_with(title.as_str()))), "{texts:?}");
-        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(_))));
+        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))));
     }
 
     /// "Today" (what every source spent today) switched off is drawn nowhere: in no form of the widget at any size, in
@@ -7684,24 +7744,40 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// The sources turned to the last, a source to a page, then the widget made wider, two to a page: kept on the first
-    /// of the two shown, turned back as far as they turn, so that a notch of the wheel back turns them back at once (it
-    /// turned nothing, the first notch, and the last source was kept as shown first).
+    /// The widget's sources (and today's figure before them, where it is a page) turn round: a notch of the wheel past
+    /// the last turns to the first, a notch back from the first to the last, kept within a turn however often they go
+    /// round. Turned to the last, then made wider, two to a page, the last stays the one shown first (the first after
+    /// it), and a notch back turns to the one before it at once.
     #[test]
-    fn the_ai_widget_made_wider_keeps_the_source_shown_first() {
+    fn the_ai_widget_turns_its_sources_round() {
         let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<String>>();
+        for pages in [ids(&["ai:claude", "ai:codex", "ai:deepseek"]), ids(&[ai::TODAY_PAGE, "ai:claude", "ai:codex"])] {
+            let under = [Hit::AiPages(pages.len() as u32, pages[0] == ai::TODAY_PAGE)];
+            let mut scrolls = Scrolls::default();
+            let mut shown = SourceShown::of(None);
+            keep_source(&mut scrolls, &mut shown, &pages);
+            let mut turned = |delta: i16| {
+                assert!(wheel(&mut scrolls, &under, delta, false));
+                keep_source(&mut scrolls, &mut shown, &pages);
+                let to = scrolls.to(List::AiSources);
+                assert!((0.0..3.0 * PAGE).contains(&to), "{to}");
+                shown.id().unwrap().to_string()
+            };
+            let on: Vec<String> = (0..7).map(|_| turned(-120)).collect();
+            assert_eq!(on, [1, 2, 0, 1, 2, 0, 1].map(|at| pages[at].clone()));
+            let back: Vec<String> = (0..4).map(|_| turned(120)).collect();
+            assert_eq!(back, [0, 2, 1, 0].map(|at| pages[at].clone()));
+        }
+        // Made wider at the last: kept there.
         let sources = ids(&["ai:claude", "ai:codex", "ai:deepseek"]);
         let mut scrolls = Scrolls::default();
         let mut shown = SourceShown::of(None);
-        scrolls.hold(List::AiSources, 2.0 * PAGE, 2.0 * PAGE);
-        assert!(keep_source(&mut scrolls, &mut shown, &sources, Some(2.0 * PAGE)));
-        assert_eq!(shown.id(), Some("ai:deepseek"));
-        // Two to a page: as far as they turn, one page.
-        assert!(keep_source(&mut scrolls, &mut shown, &sources, Some(PAGE)));
-        assert_eq!((scrolls.to(List::AiSources), shown.id()), (PAGE, Some("ai:codex")));
-        let under = [Hit::AiPages(PAGE.to_bits())];
-        assert!(wheel(&mut scrolls, &under, 120, false));
-        assert_eq!(scrolls.to(List::AiSources), 0.0);
+        scrolls.hold(List::AiSources, 2.0 * PAGE, f32::MAX);
+        assert!(keep_source(&mut scrolls, &mut shown, &sources));
+        assert!(!keep_source(&mut scrolls, &mut shown, &sources));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (2.0 * PAGE, Some("ai:deepseek")));
+        assert!(wheel(&mut scrolls, &[Hit::AiPages(3, false)], 120, false));
+        assert_eq!(scrolls.to(List::AiSources), PAGE);
     }
 
     /// The widget's sources turned through stay on the source shown first as their order changes, go back to the first
@@ -7712,17 +7788,17 @@ otepad.exe", "Notepad"),
         let mut scrolls = Scrolls::default();
         // Put back on the one it was kept on.
         let mut shown = SourceShown::of(Some("ai:codex".into()));
-        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:claude", "ai:codex", "ai:deepseek"]), None));
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:claude", "ai:codex", "ai:deepseek"])));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (PAGE, Some("ai:codex")));
         // Its order changed: held on it where it is now.
-        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"]), None));
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
         // Turned by the wheel: the next one kept.
-        scrolls.turn_pages(List::AiSources, PAGE, PAGE, 2.0 * PAGE);
-        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"]), None));
+        scrolls.turn_round(List::AiSources, PAGE, PAGE);
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
         assert_eq!(shown.id(), Some("ai:claude"));
         // Switched off: the first.
-        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:deepseek"]), None));
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:deepseek"])));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
     }
 

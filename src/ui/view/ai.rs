@@ -1016,16 +1016,19 @@ pub(super) fn lane_of(id: &str, prefs: &Prefs, lang: Lang, usage: Option<&crate:
     Some(blocks)
 }
 
+/// A source's mark at the start of its head, and how far its name is from the head's start (DIPs).
+const HEAD_MARK_SIDE: f32 = 16.0;
+const HEAD_MARK: f32 = HEAD_MARK_SIDE + 7.0;
+
 /// Draws `block` in its lane's ink, from `y` across `width`; where a press opens or closes it, there.
 pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock, (left, y, width): (f32, f32, f32), part: &dyn Fn(&str), hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     match block {
         AiBlock::Head { source, title, device, aside, opened } => {
-            const MARK: f32 = 16.0;
             let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
             part("mark");
-            frame.mark(source.mark(), Point { x: left + MARK / 2.0, y: y + HEAD / 2.0 }, MARK, theme.text, 1.0);
-            let title_left = left + MARK + 7.0;
+            frame.mark(source.mark(), Point { x: left + HEAD_MARK_SIDE / 2.0, y: y + HEAD / 2.0 }, HEAD_MARK_SIDE, theme.text, 1.0);
+            let title_left = left + HEAD_MARK;
             let title_width = frame.measure(title, theme.title);
             part("label");
             frame.text(title, theme.title, theme.text, title_left, row, width - (title_left - left), Align::Start);
@@ -1271,15 +1274,21 @@ fn paged_lane(part: &Part, theme: &Theme, width: f32, level: usize) -> Lane {
     lane
 }
 
+/// The id of the page what every source spent today is, first of the pages the smallest form turns round (see
+/// `paint_one` and `view::keep_source`).
+pub const TODAY_PAGE: &str = "ai:today";
+
 /// The component in a widget too small for any form that holds every source (see `paint_shaped`), filling `room`: what
 /// every source spent today and the sessions at work at the left where there is room beside a source's part, then as
 /// many sources' parts side by side as fit whole (at least `PAGED_PART` wide), each telling as much as it has room for
-/// down (see `PAGED_LEVELS`); the rest turned to by the wheel, a source a notch (`List::AiSources`), one under another
-/// a part alone, else side by side, and dots at the right telling which are shown of how many. Whether it fits (else
-/// nothing drawn): a source's part, as little as it tells.
+/// down (see `PAGED_LEVELS`); the rest turned round to by the wheel, a source a notch (`List::AiSources`: past the
+/// last, the first again), one under another a part alone, else side by side, and dots at the right telling which are
+/// shown of how many, a press on one turning to it. A part's head shows the source's card beside the widget as the
+/// pointer rests on it, as the dock's spot does (a part tells no more than its limits). Whether it fits (else nothing
+/// drawn): a source's part, as little as it tells.
 pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
     let (theme, lang) = (scene.theme, scene.lang);
-    let parts: Vec<&Part> = dock.slots.iter().filter_map(|slot| rich.parts.iter().find(|part| part.id == slot.source.id())).collect();
+    let parts: Vec<(&Slot, &Part)> = dock.slots.iter().filter_map(|slot| rich.parts.iter().find(|part| part.id == slot.source.id()).map(|part| (slot, part))).collect();
     let count = parts.len();
     // (Inset as the least forms are: see `paint_least`.)
     let (inset_x, inset_y) = (14.0_f32.min(w / 6.0), 14.0_f32.min(h / 6.0));
@@ -1297,7 +1306,7 @@ pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&
         if each < PAGED_PART {
             return None;
         }
-        let lanes = parts.iter().map(|part| (0..PAGED_LEVELS).rev().map(|level| paged_lane(part, theme, each, level)).find(|lane| tall(lane) <= height)).collect::<Option<Vec<Lane>>>()?;
+        let lanes = parts.iter().map(|(_, part)| (0..PAGED_LEVELS).rev().map(|level| paged_lane(part, theme, each, level)).find(|lane| tall(lane) <= height)).collect::<Option<Vec<Lane>>>()?;
         Some((room, each, lanes))
     };
     // As many side by side as fit, then what every source spent beside them where it fits too. (So, made wider, it
@@ -1333,30 +1342,48 @@ pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&
             frame.text(&said, theme.small, theme.text2, left + 13.0, row, PAGED_TODAY - 13.0, Align::Start);
         }
     }
-    // The parts, turned to where the wheel turned them: a part alone one under another, else side by side.
-    let most = (count - per) as f32 * PAGE;
-    let at = scene.scrolls.at(List::AiSources).clamp(0.0, most) / PAGE;
+    // The parts, turned round to where the wheel turned them: a part alone one under another, else side by side.
+    let at = if paged { scene.scrolls.at(List::AiSources) / PAGE } else { 0.0 };
     let step = if per == 1 { height } else { each + PAGED_GAP };
     let reach = if per == 1 { height } else { room };
+    let round = count as f32;
     frame.clip(parts_left, top, room, height);
-    for (n, lane) in lanes.iter().enumerate() {
-        let off = (n as f32 - at) * step;
-        // (Not drawn where less than half a DIP of it would show: the wheel's slide settles within a twentieth of one.)
-        if off <= 0.5 - step || off >= reach - 0.5 {
-            continue;
+    for (n, (lane, (slot, _))) in lanes.iter().zip(&parts).enumerate() {
+        // (Each where it comes round to: past the last, the first again, a turn on.)
+        let turns = ((at - n as f32 - 1.0) / round).ceil() as i32..=((at - n as f32 + per as f32) / round).floor() as i32;
+        for turn in turns {
+            let off = (n as f32 + turn as f32 * round - at) * step;
+            // (Not drawn where less than half a DIP of it would show: the wheel's slide settles within a twentieth of one.)
+            if off <= 0.5 - step || off >= reach - 0.5 {
+                continue;
+            }
+            let lane_tall = tall(lane);
+            let (px, py) = if per == 1 { (parts_left, top + off + (height - lane_tall) / 2.0) } else { (parts_left + off, top + (height - lane_tall) / 2.0) };
+            // Its head (the source's mark and name): its card beside the widget as the pointer rests there.
+            if let Some(Block::Ai(AiBlock::Head { title, .. })) = lane.blocks.first() {
+                let spot = Spot::Ring(slot.source);
+                let named = (HEAD_MARK + frame.measure(title, theme.title)).min(each);
+                if scene.hover == Some(Hit::AiSlot(spot)) {
+                    frame.fill_rounded(theme.hover, px - 5.0, py - 3.0, named + 10.0, HEAD + 6.0, 6.0);
+                }
+                hits.push((px, py, named, HEAD, Hit::AiSlot(spot)));
+            }
+            let area = Rect { x: px - theme.pad_x, y: py - theme.pad_top, w: each + 2.0 * theme.pad_x, h: lane_tall + theme.pad_top + theme.pad_bottom };
+            paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
         }
-        let lane_tall = tall(lane);
-        let (px, py) = if per == 1 { (parts_left, top + off + (height - lane_tall) / 2.0) } else { (parts_left + off, top + (height - lane_tall) / 2.0) };
-        let area = Rect { x: px - theme.pad_x, y: py - theme.pad_top, w: each + 2.0 * theme.pad_x, h: lane_tall + theme.pad_top + theme.pad_bottom };
-        paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
     }
     frame.unclip();
     if paged {
         // Which are shown, of how many.
-        pager_dots(frame, theme, (left + width - PAGER / 2.0, top, height), count, (at.round() as usize, per));
-        hits.push((x, y, w, h, Hit::AiPages(most.to_bits())));
+        pager_dots(frame, scene, (left + width - PAGER / 2.0, top, height), count, (round_page(at, count), per), hits);
+        hits.push((x, y, w, h, Hit::AiPages(count as u32, false)));
     }
     true
+}
+
+/// The page shown first of `count` turned round, turned to `at` pages (see `Scrolls::fold`: within a turn or not).
+fn round_page(at: f32, count: usize) -> usize {
+    (at.round() as i64).rem_euclid(count.max(1) as i64) as usize
 }
 
 /// A form the component may take in a widget too small for all of it (see `paint_shaped`).
@@ -1806,32 +1833,34 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
 }
 
 /// One figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
-/// enough: what every source spent today, where it is shown; else a source's (its tightest window's share used, or
-/// what it has), the rest turned to by the wheel, a source a notch (`List::AiSources`, as in `paint_paged`), with dots
-/// at the right telling which is shown of how many where there is room for them beside it.
+/// enough: what every source spent today first, where it is shown, then each source's (its tightest window's share
+/// used, or what it has), turned round to by the wheel, a figure a notch (`List::AiSources`, as in `paint_paged`: past
+/// the last, the first again), with dots at the right telling which is shown of how many where there is room for them
+/// beside it, a press on one turning to it.
 fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let inset = 14.0_f32.min(w / 6.0);
-    let count = dock.slots.len();
-    let paged = dock.today.is_none() && count > 1;
+    let today_first = dock.today.is_some();
+    let count = dock.slots.len() + usize::from(today_first);
+    let paged = count > 1;
     // (The dots' room at the right, where there is any beside the figure.)
     let pager = if paged && w - 2.0 * inset >= 4.0 * PAGER && pager_fits(count, 1, (h - 2.0 * inset).max(0.0)) { PAGER } else { 0.0 };
     let (left, width) = (x + inset, (w - 2.0 * inset - pager).max(0.0));
     let font = Font { size: (w * 0.26).clamp(11.0, 22.0), weight: 650.0, ..theme.figure };
     let tall = (label.size + 4.0 + font.size).min((h - 2.0 * inset).max(0.0));
     let middle = y + h / 2.0;
-    let most = count.saturating_sub(1) as f32 * PAGE;
-    let at = scene.scrolls.at(List::AiSources).clamp(0.0, most) / PAGE;
-    let first = at.round() as usize;
-    let (spot, of, figure, color): (Spot, String, &str, Color) = match (&dock.today, dock.slots.get(first)) {
-        (Some(today), _) => (Spot::Today, lang.pick("今日", "Today").into(), today, theme.text),
-        (None, Some(slot)) => {
+    let first = if paged { round_page(scene.scrolls.at(List::AiSources) / PAGE, count) } else { 0 };
+    // (Today's the first page, where it is shown: a source's place one on.)
+    let slot = if today_first { first.checked_sub(1) } else { Some(first) }.map(|at| dock.slots.get(at));
+    let (spot, of, figure, color): (Spot, String, &str, Color) = match (slot, &dock.today) {
+        (None, Some(today)) => (Spot::Today, lang.pick("今日", "Today").into(), today, theme.text),
+        (Some(Some(slot)), _) => {
             let name = slot.source.name(lang);
             let of = if slot.label.is_empty() { name.to_string() } else { format!("{name} · {}", slot.label) };
             (Spot::Ring(slot.source), of, &slot.figure, if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text })
         }
-        (None, None) => return,
+        _ => return,
     };
     if scene.hover == Some(Hit::AiSlot(spot)) {
         frame.fill_rounded(theme.hover, left - 4.0, middle - tall / 2.0 - 4.0, width + 8.0, tall + 8.0, 12.0);
@@ -1849,26 +1878,31 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
     centred(frame, figure, font, color, left + width / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 }, width);
     if paged {
         if pager > 0.0 {
-            pager_dots(frame, theme, (left + width + pager / 2.0, y + inset, (h - 2.0 * inset).max(0.0)), count, (first, 1));
+            pager_dots(frame, scene, (left + width + pager / 2.0, y + inset, (h - 2.0 * inset).max(0.0)), count, (first, 1), hits);
         }
-        hits.push((x, y, w, h, Hit::AiPages(most.to_bits())));
+        hits.push((x, y, w, h, Hit::AiPages(count as u32, today_first)));
     }
 }
 
-/// The dots that tell which of `count` are shown (`shown`: the first of them and how many), down a column at `x` (their
-/// middle), in the middle of the room from `top` `tall`: a dot each, those shown drawn long; closer together and
-/// shorter where the column would be taller than the room (see `pager_fits`), none where they would be too small to
-/// tell apart.
-fn pager_dots(frame: &dyn Canvas, theme: &Theme, (x, top, tall): (f32, f32, f32), count: usize, (first, per): (usize, usize)) {
+/// The dots that tell which of `count` turned round are shown (`shown`: the first of them and how many, past the last
+/// the first again), down a column at `x` (their middle), in the middle of the room from `top` `tall`: a dot each,
+/// those shown drawn long; closer together and shorter where the column would be taller than the room (see
+/// `pager_fits`), none where they would be too small to tell apart. A press on one turns to its page (see
+/// `Hit::AiPage`): the one under the pointer drawn as those shown are, and its room to be pressed `PAGER` wide.
+fn pager_dots(frame: &dyn Canvas, scene: &Scene, (x, top, tall): (f32, f32, f32), count: usize, (first, per): (usize, usize), hits: &mut Vec<HitBox>) {
+    let theme = scene.theme;
     let Some(k) = pager_scale(count, per, tall) else { return };
     let (dot, long, gap) = (PAGER_DOT, PAGER_LONG * k, PAGER_DOT * k);
     let column = (count - per) as f32 * (dot + gap) + per as f32 * (long + gap) - gap;
     let mut dot_y = top + (tall - column) / 2.0;
     frame.key("ai:pages");
     for n in 0..count {
-        let on = n >= first && n < first + per;
+        let on = (n + count - first) % count < per;
         let length = if on { long } else { dot };
-        frame.fill_rounded(if on { theme.text } else { theme.text3 }, x - dot / 2.0, dot_y, dot, length, dot / 2.0);
+        let hit = Hit::AiPage(n as u32);
+        let lit = on || scene.hover == Some(hit);
+        frame.fill_rounded(if lit { theme.text } else { theme.text3 }, x - dot / 2.0, dot_y, dot, length, dot / 2.0);
+        hits.push((x - PAGER / 2.0, dot_y - gap / 2.0, PAGER, length + gap, hit));
         dot_y += length + gap;
     }
 }

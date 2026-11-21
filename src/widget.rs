@@ -4138,6 +4138,12 @@ impl Widget {
                                     }
                                     crate::station::select::turned(self.window.hwnd.0 as isize, tab);
                                 }
+                                // A dot beside the AI component's sources: turned to its page.
+                                Some(view::Hit::AiPage(page)) => {
+                                    if let Some(readings) = self.content.readings_mut() {
+                                        readings.scrolls.to_page(view::List::AiSources, page as f32 * view::PAGE, f32::MAX);
+                                    }
+                                }
                                 // A grid's way to its next page: turned to it.
                                 Some(view::Hit::NextPage(list, most)) => {
                                     if let Some(readings) = self.content.readings_mut() {
@@ -4465,8 +4471,8 @@ impl Widget {
         // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.
         let note_pages = shows(|hit| matches!(hit, view::Hit::Pages(view::List::Notes, _)));
         let writing = if note_pages { crate::ui::beside::writing_for(self.window.hwnd) } else { None };
-        // (How far its AI sources' pages turn, as last drawn.)
-        let source_reach = self.hits.iter().find_map(|hit| if let view::Hit::AiPages(most) = hit.4 { Some(f32::from_bits(most)) } else { None });
+        // (Whether what every AI source spent today is the first of the pages they are turned round, as last drawn.)
+        let today_page = self.hits.iter().any(|hit| matches!(hit.4, view::Hit::AiPages(_, true)));
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
             Content::Readings(readings) => vec![readings],
@@ -4478,9 +4484,10 @@ impl Widget {
             if note_pages {
                 view::keep_note(&mut readings.scrolls, &mut readings.note_shown, &crate::notes::listed(), writing.as_deref());
             }
-            // The AI component's sources turned through: kept on the one it shows first, and that one kept with it.
+            // The AI component's sources turned round: kept on the one it shows first, and that one kept with it.
             let sources = readings.ai_sources(look.prefs);
-            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &sources, source_reach) {
+            let pages: Vec<String> = if today_page { std::iter::once(view::ai::TODAY_PAGE.to_string()).chain(sources.iter().cloned()).collect() } else { sources.clone() };
+            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &pages) {
                 self.unsaved = true;
             }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
