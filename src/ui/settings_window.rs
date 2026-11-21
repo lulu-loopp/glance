@@ -1191,6 +1191,13 @@ impl Page {
     }
 }
 
+/// What the menu up is of: where what devices nearby send goes, or the choices of a module's field.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuOf {
+    KeptIn,
+    Choice(Field),
+}
+
 /// A row of choices, one of which is picked.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Field {
@@ -1537,6 +1544,8 @@ fn sensor_of(name: &str) -> Option<(&str, &str)> {
 enum Target {
     Skin(Skin),
     Choice(Field, usize),
+    /// The button of a module's choice offered in a menu (see `Ui::in_menu`), which opens it.
+    ChoiceMenu(Field),
     Switch(Switch),
     /// A module's switch, and the rest of its row, which opens and closes
     /// its card.
@@ -2161,8 +2170,10 @@ struct Ui {
     choosing_folders: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
     /// The same, for the folder what devices nearby send goes to.
     choosing_kept: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
-    /// A menu up (where what devices nearby send goes), run by this window's thread (see `menu_message`).
+    /// A menu up (where what devices nearby send goes, or a module's choices: see `in_menu`), run by this window's thread
+    /// (see `menu_message`), and what it is of.
     menu: Option<super::menu::Menu>,
+    menu_of: MenuOf,
     /// Nearby transfer's sending pane (see `send`).
     send: send::Pane,
     /// Since when the fans in the phone remote's picture have been turning.
@@ -2464,6 +2475,7 @@ fn make(gfx: Rc<Gfx>, shown: Option<Option<RECT>>, to: Option<To>) -> Option<HWN
             choosing_folders: None,
             choosing_kept: None,
             menu: None,
+            menu_of: MenuOf::KeptIn,
             send: send::Pane::default(),
             laptop: crate::laptop::this_machine(),
             may_autostart: elevation::may_start_unasked(),
@@ -3439,7 +3451,7 @@ impl Ui {
                 Row::ModuleChoice(_, field) => {
                     let (name, options, _) = self.choices(*field);
                     let room = self.module_choices_room();
-                    let under = if self.beside_name(name, &options, room) { 0.0 } else { CHOICE_LINE * self.choice_lines(&options, room).len() as f32 };
+                    let under = if Self::in_menu(*field) || self.beside_name(name, &options, room) { 0.0 } else { CHOICE_LINE * self.choice_lines(&options, room).len() as f32 };
                     (0.0, ITEM_ROW + under)
                 }
                 Row::Choice(field) if self.choice_hint(*field).is_none() && !self.beside_name(self.choices(*field).0, &self.choices(*field).1, self.choices_room()) => {
@@ -3552,6 +3564,45 @@ impl Ui {
         }
         let look = super::menu::Look { skin: None, dark: self.dark, frost: 1.0, zoom: 1.0 };
         self.menu = super::menu::Menu::open_at(items, look, at, false, false);
+        self.menu_of = MenuOf::KeptIn;
+    }
+
+    /// Whether a module's `field` offers its choices in a menu under a button saying the one chosen, not side by side:
+    /// too many for a row (the hour all-day to-dos are told at).
+    fn in_menu(field: Field) -> bool {
+        matches!(field, Field::TodoDayAt)
+    }
+
+    /// The menu of `field`'s choices (see `in_menu`) under its button, the one chosen ticked. (One at a time, as the
+    /// other menu.)
+    fn open_choice_menu(&mut self, field: Field) {
+        if self.menu.is_some() || self.choosing_kept.is_some() {
+            return;
+        }
+        let Some(rect) = self.targets.iter().find(|(_, target)| *target == Target::ChoiceMenu(field)).map(|(rect, _)| *rect) else { return };
+        let mut at = windows::Win32::Foundation::POINT { x: (rect.x * self.scale).round() as i32, y: ((rect.y + rect.h + 4.0) * self.scale).round() as i32 };
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut at);
+        }
+        let look = super::menu::Look { skin: None, dark: self.dark, frost: 1.0, zoom: 1.0 };
+        self.menu = super::menu::Menu::open_at(self.choice_menu(field), look, at, false, false);
+        self.menu_of = MenuOf::Choice(field);
+    }
+
+    /// The items of `field`'s menu: each of its choices, the one chosen ticked.
+    fn choice_menu(&self, field: Field) -> Vec<super::menu::Item<'static>> {
+        let (_, options, chosen) = self.choices(field);
+        options.into_iter().enumerate().map(|(at, option)| super::menu::Item::new(option, None, chosen == Some(at), false)).collect()
+    }
+
+    /// What `field`'s button says: the choice made, or what is kept where it is none of them (a file written by hand).
+    fn choice_shown(&self, field: Field) -> String {
+        let (_, options, chosen) = self.choices(field);
+        match (chosen, field) {
+            (Some(at), _) => options[at].clone(),
+            (None, Field::TodoDayAt) => self.settings.todo_day_at.clone(),
+            (None, _) => String::new(),
+        }
     }
 
     /// A message for the menu up, if it is its own: taken (a choice made in it, done).
@@ -3582,6 +3633,18 @@ impl Ui {
     fn end_menu(&mut self, choice: Option<usize>) {
         let Some(menu) = self.menu.take() else { return };
         menu.close();
+        self.menu_chosen(self.menu_of, choice);
+        self.next_frame = Instant::now();
+    }
+
+    /// What was chosen (none: nothing) in the menu of `of` done: the station or a folder, or a module's choice.
+    fn menu_chosen(&mut self, of: MenuOf, choice: Option<usize>) {
+        if let MenuOf::Choice(field) = of {
+            if let Some(at) = choice {
+                self.choose(field, at);
+            }
+            return;
+        }
         match choice {
             Some(0) if self.settings.nearby_folder.is_some() => {
                 self.settings.nearby_folder = None;
@@ -4271,11 +4334,11 @@ impl Ui {
                 crate::settings::TODO_LEADS.iter().map(|&lead| if lead == 0 { s("准时", "On time") } else { lead.to_string() }).collect(),
                 at(&crate::settings::TODO_LEADS.map(u64::from), u64::from(settings.todo_lead)),
             ),
-            Field::TodoDayAt => (
-                pick(lang, "全天的待办", "All-day to-dos"),
-                crate::settings::TODO_DAY_TIMES.iter().map(|time| time.to_string()).collect(),
-                crate::settings::TODO_DAY_TIMES.iter().position(|time| *time == settings.todo_day_at),
-            ),
+            Field::TodoDayAt => {
+                let times = crate::settings::todo_day_times();
+                let chosen = times.iter().position(|time| *time == settings.todo_day_at);
+                (pick(lang, "全天的待办", "All-day to-dos"), times, chosen)
+            }
             Field::RecentScope => (pick(lang, "列出范围", "Listed from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -4318,7 +4381,7 @@ impl Ui {
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
             Field::RecentScope => settings.recent_only = index == 1,
             Field::TodoLead => settings.todo_lead = crate::settings::TODO_LEADS[index],
-            Field::TodoDayAt => settings.todo_day_at = crate::settings::TODO_DAY_TIMES[index].to_string(),
+            Field::TodoDayAt => settings.todo_day_at = crate::settings::todo_day_times()[index].clone(),
             // (Not kept: the stage shows the pairing code each time the page is opened.)
             Field::Adding => {
                 self.stage_shows = [CodeFor::Pairing, CodeFor::App][index];
@@ -5974,6 +6037,7 @@ It can be disconnected here at any time, and the status line command put back.",
             | Target::SendWordsAdd
             | Target::SendWordsCancel => self.send_press(target),
             Target::KeptIn => self.open_kept_menu(),
+            Target::ChoiceMenu(field) => self.open_choice_menu(field),
             Target::OpenStation => {
                 let folder = self.settings.nearby_folder.clone().unwrap_or_else(|| crate::settings::local_dir().join(crate::station::folder::OWN));
                 let _ = std::fs::create_dir_all(&folder);
@@ -6027,6 +6091,7 @@ It can be disconnected here at any time, and the status line command put back.",
                 // A sensor of the board's switch, then the button that names it.
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) && sensor_of(&name).is_some() => vec![Target::Item(id.clone(), name.clone()), Target::Rename(id, name)],
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
+                Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) && Self::in_menu(field) => vec![Target::ChoiceMenu(field)],
                 Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::AiKey(id, field) if self.expanded.contains(&id) => match self.ai_key(&id, field).map(|(_, kept)| kept) {
@@ -6232,7 +6297,7 @@ It can be disconnected here at any time, and the status line command put back.",
             (Row::Slider(f), Target::Slider(g)) => f == g,
             (Row::Module(m), Target::Module(n) | Target::Expand(n)) => m == n,
             (Row::Item(m, a), Target::Item(n, b) | Target::Rename(n, b)) => m == n && a == b,
-            (Row::ModuleChoice(_, f), Target::Choice(g, _)) => f == g,
+            (Row::ModuleChoice(_, f), Target::Choice(g, _) | Target::ChoiceMenu(g)) => f == g,
             _ => false,
         });
         let Some((_, top, height)) = row else { return };
@@ -7229,7 +7294,12 @@ It can be disconnected here at any time, and the status line command put back.",
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
                     let targets = self.targets.len();
                     let room = self.module_choices_room();
-                    if self.beside_name(name, &options, room) {
+                    if Self::in_menu(field) {
+                        text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
+                        let shown = self.choice_shown(field);
+                        let kind = if active { Button::Menu } else { Button::QuietMenu };
+                        self.button(frame, palette, &shown, right, y + row_height / 2.0, Target::ChoiceMenu(field), kind, &hovered);
+                    } else if self.beside_name(name, &options, room) {
                         text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                         self.segmented(frame, palette, field, &options, chosen, active, right, y + row_height / 2.0, f32::INFINITY, now, &hovered);
                     } else {
@@ -9227,6 +9297,63 @@ mod pictures {
             assert_eq!(targets, vec![Target::NoticeRead]);
         });
         crate::notice::pretend(None);
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+        if let Err(failed) = outcome {
+            std::panic::resume_unwind(failed);
+        }
+    }
+
+    /// The hour all-day to-dos are told at is chosen in a menu under a button saying it, in the to-do's card: each hour
+    /// from 06:00 to 22:00, the one chosen ticked, not six hours side by side. Chosen there, it is kept; one written by
+    /// hand that is none of them is said on the button, none ticked.
+    #[test]
+    fn the_all_day_hour_is_chosen_from_a_menu() {
+        let (gfx, hwnd) = pretended();
+        // (The window closed before what failed is told: see `the_settings_are_at_the_page_asked_for_from_their_first_frame`.)
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let todo = format!("{WORKBENCH}todo");
+            with_ui(|ui| {
+                ui.turn_to(Page::Workbench);
+                ui.settings.todo_day_at = "09:00".into();
+                for entry in ui.prefs.workbench.iter_mut().filter(|entry| entry.id == "todo") {
+                    entry.on = true;
+                }
+                ui.set_open(&todo, true, true);
+            });
+            let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+            gfx.draw_offscreen((cw.ceil() as u32, ch.ceil() as u32), 1.0, |frame| {
+                with_ui(|ui| ui.paint(frame, Instant::now()));
+            })
+            .unwrap();
+            with_ui(|ui| {
+                let stops = ui.stops();
+                assert!(stops.contains(&Target::ChoiceMenu(Field::TodoDayAt)), "{stops:?}");
+                assert!(!stops.iter().any(|stop| matches!(stop, Target::Choice(Field::TodoDayAt, _))));
+                // (The lead before a to-do with a time stays a row of choices: five, short.)
+                assert!(stops.iter().any(|stop| matches!(stop, Target::Choice(Field::TodoLead, _))));
+                assert!(ui.targets.iter().any(|(_, target)| *target == Target::ChoiceMenu(Field::TodoDayAt)), "its button drawn");
+                let items = ui.choice_menu(Field::TodoDayAt);
+                let labels: Vec<&str> = items.iter().map(|item| item.label.as_ref()).collect();
+                assert_eq!(labels, (6..=22).map(|hour| format!("{hour:02}:00")).collect::<Vec<_>>());
+                assert_eq!(items.iter().filter(|item| item.checked).map(|item| item.label.as_ref()).collect::<Vec<_>>(), ["09:00"]);
+                assert_eq!(ui.choice_shown(Field::TodoDayAt), "09:00");
+                // Chosen in the menu: kept.
+                ui.menu_chosen(MenuOf::Choice(Field::TodoDayAt), Some(0));
+                assert_eq!(ui.settings.todo_day_at, "06:00");
+                ui.menu_chosen(MenuOf::Choice(Field::TodoDayAt), None);
+                assert_eq!(ui.settings.todo_day_at, "06:00");
+                // One written by hand, none of them: said, none ticked.
+                ui.settings.todo_day_at = "09:30".into();
+                assert_eq!(ui.choice_shown(Field::TodoDayAt), "09:30");
+                assert!(!ui.choice_menu(Field::TodoDayAt).iter().any(|item| item.checked));
+                ui.settings.todo_day_at = "09:00".into();
+                ui.save();
+            })
+            .unwrap();
+            assert_eq!(crate::app().settings.lock().unwrap().todo_day_at, "09:00");
+        }));
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
