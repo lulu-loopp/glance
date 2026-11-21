@@ -1026,7 +1026,7 @@ fn look() -> (Skin, bool, Lang) {
 
 /// The screen the notice stands on (the pointer's) and the edge it slides out of there: the one that opens the
 /// workbench (where the station is), else what a panel opened by hand opens at.
-fn where_now() -> Option<(Contact, Edge)> {
+pub(crate) fn where_now() -> Option<(Contact, Edge)> {
     let at = crate::mouse::cursor_position()?;
     let contact = crate::mouse::monitor_at(at)?;
     let places = crate::app().controller.edges().places;

@@ -1054,6 +1054,7 @@ fn module_fields(id: &str) -> &'static [Field] {
         "network" => &[Field::RateUnit, Field::PingTarget],
         "processes" => &[Field::ProcessCount],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
+        "todo" => &[Field::TodoLead, Field::TodoDayAt],
         _ => &[],
     }
 }
@@ -1228,6 +1229,9 @@ enum Field {
     StationKeep,
     StationCopy,
     StationAfterDrag,
+    /// How long before a to-do's time it is told of, and when on its day one of the whole day (see `remind`).
+    TodoLead,
+    TodoDayAt,
     /// What Recent files lists from: the drives, each on or off, or only the folders chosen, whatever drive they are
     /// on (see `Settings::recent_only`). Each kept as the other is chosen.
     RecentScope,
@@ -4262,6 +4266,16 @@ impl Ui {
             ),
             Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
             Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
+            Field::TodoLead => (
+                pick(lang, "有时间的待办提前（分钟）", "Timed to-dos, minutes before"),
+                crate::settings::TODO_LEADS.iter().map(|&lead| if lead == 0 { s("准时", "On time") } else { lead.to_string() }).collect(),
+                at(&crate::settings::TODO_LEADS.map(u64::from), u64::from(settings.todo_lead)),
+            ),
+            Field::TodoDayAt => (
+                pick(lang, "全天的待办", "All-day to-dos"),
+                crate::settings::TODO_DAY_TIMES.iter().map(|time| time.to_string()).collect(),
+                crate::settings::TODO_DAY_TIMES.iter().position(|time| *time == settings.todo_day_at),
+            ),
             Field::RecentScope => (pick(lang, "列出范围", "Listed from"), vec![s("按磁盘", "By drive"), s("指定文件夹", "Chosen folders")], Some(usize::from(settings.recent_only))),
             Field::TempAlert => (
                 pick(lang, "温度警示", "Temperature alert"),
@@ -4303,6 +4317,8 @@ impl Ui {
             Field::StationCopy => settings.station.always_copy = index == 1,
             Field::StationAfterDrag => settings.station.remove_after_drag = index == 1,
             Field::RecentScope => settings.recent_only = index == 1,
+            Field::TodoLead => settings.todo_lead = crate::settings::TODO_LEADS[index],
+            Field::TodoDayAt => settings.todo_day_at = crate::settings::TODO_DAY_TIMES[index].to_string(),
             // (Not kept: the stage shows the pairing code each time the page is opened.)
             Field::Adding => {
                 self.stage_shows = [CodeFor::Pairing, CodeFor::App][index];
@@ -5288,7 +5304,7 @@ It can be disconnected here at any time, and the status line command put back.",
 
     /// Whether item `name` of a row's module `id` is chosen.
     fn item_on(&self, id: &str, name: &str) -> bool {
-        if let Some(on) = self.station_item(id, name) {
+        if let Some(on) = self.settings_item(id, name) {
             return on;
         }
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
@@ -5308,13 +5324,14 @@ It can be disconnected here at any time, and the status line command put back.",
         module_fields(id).iter().copied()
     }
 
-    /// The station's items (`id` its module, and the workbench's): what is copied kept, and the files come lately
-    /// listed. Of the station's settings, not of what the panel shows (see `settings::StationSettings`).
-    fn station_item(&self, id: &str, name: &str) -> Option<bool> {
-        (id.trim_start_matches(WORKBENCH) == "station").then_some(())?;
-        match name {
-            "history" => Some(self.settings.station.history),
-            "recent" => Some(self.settings.station.recent),
+    /// The items of Glance's settings, not of what the panel shows (`id` their module, and the workbench's): the
+    /// station's, what is copied kept and the files come lately listed (see `settings::StationSettings`); the to-dos'
+    /// reminders (see `remind`).
+    fn settings_item(&self, id: &str, name: &str) -> Option<bool> {
+        match (id.trim_start_matches(WORKBENCH), name) {
+            ("station", "history") => Some(self.settings.station.history),
+            ("station", "recent") => Some(self.settings.station.recent),
+            ("todo", "remind") => Some(self.settings.todo_remind),
             _ => None,
         }
     }
@@ -5330,6 +5347,9 @@ It can be disconnected here at any time, and the status line command put back.",
         }
         if id == "station" {
             return ["history", "recent"].map(String::from).to_vec();
+        }
+        if id == "todo" {
+            return vec!["remind".into()];
         }
         // An overlay's group of one item has no card: its switch is the item's. (The drives': one for each drive
         // that has told its temperature.)
@@ -5499,6 +5519,7 @@ It can be disconnected here at any time, and the status line command put back.",
             ("overlay", "time") => (p("时间", "Time"), None),
             ("station", "history") => (p("记录最近复制", "Keep what is copied"), Some(p("关闭后不再记录，已有记录保留", "Off, nothing more is kept. What was is still there"))),
             ("station", "recent") => (p("列出最近文件", "List recent files"), None),
+            ("todo", "remind") => (p("到时提醒", "Remind when due"), Some(p("通过 Windows 通知提醒设了日期的待办，Glance 运行时有效", "Windows notifications tell of to-dos with a day as they come due, while Glance runs"))),
             ("time", "sound") => (p("音量", "Volume"), None),
             ("time", "media") => (p("正在播放", "Now playing"), None),
             ("time", "lyrics") => (p("歌词", "Lyrics"), Some(p("正在演唱的一句与下一句", "The line sung now and the next"))),
@@ -5811,8 +5832,9 @@ It can be disconnected here at any time, and the status line command put back.",
             Target::Item(id, name) if self.module_on(&id) => {
                 let on = self.item_on(&id, &name);
                 match (id.strip_prefix(OVERLAY), id.strip_prefix(WORKBENCH)) {
-                    _ if self.station_item(&id, &name).is_some() => match name.as_str() {
+                    _ if self.settings_item(&id, &name).is_some() => match name.as_str() {
                         "history" => self.settings.station.history = !on,
+                        "remind" => self.settings.todo_remind = !on,
                         _ => self.settings.station.recent = !on,
                     },
                     (Some(group), _) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),

@@ -107,6 +107,11 @@ pub fn shown() -> Arc<Vec<Note>> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+/// Whether the notes' folder has been read yet (till it is, there are no notes, nor to-dos).
+pub fn read_yet() -> bool {
+    SHOWN.lock().unwrap().is_some()
+}
+
 /// The notes listed as notes: all but the to-do note, which is the to-dos' (see `todo`).
 pub fn listed() -> Arc<Vec<Note>> {
     #[cfg(any(test, feature = "studio"))]

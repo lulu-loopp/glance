@@ -8337,7 +8337,7 @@ seven".into()));
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.
-    struct Nothing;
+    pub(crate) struct Nothing;
 
     impl Canvas for Nothing {
         fn text(&self, _: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {}

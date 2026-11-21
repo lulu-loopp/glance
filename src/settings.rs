@@ -917,6 +917,13 @@ pub struct Settings {
     /// The times of day a to-do's time is chosen from (`HH:MM`, in order), as the user keeps them (see `ui::todo`).
     #[serde(default = "todo_times")]
     pub todo_times: Vec<String>,
+    /// Whether a to-do with a day is told of by a notification of Windows' as it comes due, while Glance runs (see
+    /// `remind`).
+    pub todo_remind: bool,
+    /// How many minutes before its time a to-do with a time of day is told of (one of `TODO_LEADS`).
+    pub todo_lead: u32,
+    /// When on its day a to-do of the whole day is told of (`HH:MM`).
+    pub todo_day_at: String,
     /// Whether what a device nearby sends is told at the screen's edge while the panel is put away (see `ui::peek`): a
     /// device asking to send is asked about there either way.
     pub nearby_notice: bool,
@@ -938,6 +945,12 @@ pub enum ShelfView {
     Large,
     List,
 }
+
+/// How many minutes before its time a to-do with a time of day may be told of: as it comes, or so many before.
+pub const TODO_LEADS: [u32; 5] = [0, 5, 10, 15, 30];
+
+/// The times of day a to-do of the whole day may be told of on its day.
+pub const TODO_DAY_TIMES: [&str; 6] = ["07:00", "08:00", "09:00", "10:00", "12:00", "14:00"];
 
 /// The times of day a to-do's time is chosen from, till the user keeps others: the morning's and the evening's.
 fn todo_times() -> Vec<String> {
@@ -1078,6 +1091,9 @@ impl Default for Settings {
             notes_view: NotesView::Deck,
             notes_source: false,
             todo_times: todo_times(),
+            todo_remind: true,
+            todo_lead: 10,
+            todo_day_at: "09:00".into(),
             nearby_notice: true,
             nearby_folder: None,
             view: serde_json::Value::Null,
@@ -1211,6 +1227,12 @@ impl Settings {
         settings.close_delay_ms = settings.close_delay_ms.min(10_000);
         settings.overlay.clear = settings.overlay.clear.clamp(0.0, 1.0);
         settings.station.keep_days = settings.station.keep_days.clamp(1, 365);
+        if !TODO_LEADS.contains(&settings.todo_lead) {
+            settings.todo_lead = Settings::default().todo_lead;
+        }
+        if crate::todo::clock(&settings.todo_day_at).is_none() || settings.todo_day_at.len() != 5 {
+            settings.todo_day_at = Settings::default().todo_day_at;
+        }
         settings.carry_over();
         settings
     }

@@ -1318,8 +1318,10 @@ pub fn remove_settings() -> bool {
     let local = crate::settings::local_dir();
     let station = remove_all_kept(&local.join(crate::station::folder::OWN));
     let fetched = remove_kept(&crate::lyrics::kept::folder(), &lyrics.iter().map(String::as_str).collect::<Vec<_>>())
-        && remove_kept(&local, &[crate::library::INDEX_FILE, crate::serif::FILE, crate::station::recent::FILE]);
-    reports && hangs && own && remotes && station && fetched
+        && remove_kept(&local, &[crate::library::INDEX_FILE, crate::serif::FILE, crate::station::recent::FILE, crate::remind::KEPT, crate::toast::ICON_FILE]);
+    // (Glance named to Windows for its notifications, and those it showed: see `toast`.)
+    let named = crate::toast::forget();
+    reports && hangs && own && remotes && station && fetched && named
 }
 
 /// Takes all that is in `folder` out of it, the folders in it each so too, then `folder`: as `remove_kept` takes each
