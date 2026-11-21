@@ -243,6 +243,9 @@ const DETAIL: f32 = 12.0;
 const SUB_OVER: f32 = 2.0;
 const RULE: f32 = 9.0;
 const INSET: f32 = 4.0;
+/// The most values a list to pick one from shows at once (see `Menu::open_list`): an odd count, the one ticked in the
+/// middle with as many on either side.
+pub const LIST_ROWS: usize = 9;
 const RADIUS: f32 = 8.0;
 const ICON: f32 = 16.0;
 const TEXT_LEFT: f32 = 44.0;
@@ -331,8 +334,20 @@ impl Menu {
     /// Shows `items` with a corner at `at` (physical px), its bottom there for `above` (as a menu from the taskbar
     /// opens), light or `dark`. None where it could not be shown, or was not let to the front.
     pub fn open_at(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool) -> Option<Menu> {
+        Menu::open_showing(items, look, at, above, with_the_panel, None)
+    }
+
+    /// As `open_at`, a list of values to pick one from under the button that says the one picked (the hour all-day
+    /// to-dos are told at): no more than `LIST_ROWS` of them shown at once, the rest turned through, the one ticked in
+    /// the middle. (Shown all, as tall as its screen, it reached far past its button and looked out of place.)
+    pub fn open_list(items: Vec<Item<'static>>, look: Look, at: POINT, with_the_panel: bool) -> Option<Menu> {
+        Menu::open_showing(items, look, at, false, with_the_panel, Some(LIST_ROWS))
+    }
+
+    /// As `open_at`, no more than `most` of its choices shown at once, where it is given.
+    fn open_showing(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool, most: Option<usize>) -> Option<Menu> {
         // At the pointer, turned back where it would leave its screen.
-        let mut menu = Menu::made(items, look, at, Window::activating(), with_the_panel, |(w, h), margin, _, work| {
+        let mut menu = Menu::made(items, look, at, Window::activating(), with_the_panel, most, |(w, h), margin, _, work| {
             let mut left = at.x - margin;
             if left + w - margin > work.right {
                 left = at.x - w + margin;
@@ -360,7 +375,7 @@ impl Menu {
     /// A menu of `items` in `look`, its window (`window`) made, drawn and put where `place` says from its size and the
     /// room round its sheet for its shadow (physical px), the scale it is drawn at and the work area of the screen
     /// `at` is on (its top left corner, kept on that screen), and shown, not yet in front. None where it could not be.
-    fn made(items: Vec<Item<'static>>, look: Look, at: POINT, window: windows::core::Result<Window>, with_the_panel: bool, place: impl FnOnce((i32, i32), i32, f32, RECT) -> (i32, i32)) -> Option<Menu> {
+    fn made(items: Vec<Item<'static>>, look: Look, at: POINT, window: windows::core::Result<Window>, with_the_panel: bool, most: Option<usize>, place: impl FnOnce((i32, i32), i32, f32, RECT) -> (i32, i32)) -> Option<Menu> {
         let contact = crate::mouse::monitor_at(at)?;
         // (On the device for its screen: see `gfx::on_screen`.)
         let gfx = gfx::for_area(contact.monitor).ok()?;
@@ -380,6 +395,9 @@ impl Menu {
         let work = contact.work;
         // (No taller than its screen's work area: more choices than fit are turned through, the one ticked in view.)
         sheet.shown = sheet.height.min(((work.bottom - work.top) as f32 / scale).floor());
+        if let Some(most) = most {
+            sheet.show_at_most(most);
+        }
         if let Some(ticked) = items.iter().position(|item| item.checked) {
             sheet.scroll = sheet.turned_to_middle(ticked);
         }
@@ -582,7 +600,7 @@ impl Menu {
         let Some(row) = row.filter(|row| !self.items[*row].more.is_empty() && self.items[*row].open()) else { return };
         let Some(beside) = self.row_on_screen(row) else { return };
         let (inset, over) = ((INSET * self.scale).round() as i32, (SUB_OVER * self.scale).round() as i32);
-        let sub = Menu::made(self.items[row].more.clone(), self.look, POINT { x: beside.right, y: beside.top }, Window::new(), self.with_the_panel, |(w, _), margin, _, work| {
+        let sub = Menu::made(self.items[row].more.clone(), self.look, POINT { x: beside.right, y: beside.top }, Window::new(), self.with_the_panel, None, |(w, _), margin, _, work| {
             // Beside the menu's sheet, its first choice level with the one it is opened from: on its right, or its
             // left where the right would leave the screen.
             let right = beside.right - over - margin;
@@ -725,6 +743,14 @@ impl Sheet {
             .collect();
         let height = tops.last().zip(items.last()).map_or(INSET, |(top, item)| top + item.tall()) + INSET;
         Sheet { width, height, tops, shown: height, scroll: 0.0 }
+    }
+
+    /// No more than `most` of its rows shown at once (as many as there are, where there are no more), the next row's
+    /// top just within its edge: there is more to turn to.
+    fn show_at_most(&mut self, most: usize) {
+        if let Some(top) = self.tops.get(most) {
+            self.shown = self.shown.min(top + INSET);
+        }
     }
 
     /// Where each row starts on what is shown of it, as it is turned.
@@ -973,6 +999,27 @@ mod tests {
         let mut short = Sheet::new(&gfx, &items[..3], Look::system());
         short.scroll = short.turned_to_middle(2);
         assert_eq!(short.scroll, 0.0);
+    }
+
+    /// A list to pick a value from (the hour all-day to-dos are told at: twenty-four) shows nine rows at once, however
+    /// tall its screen, the one ticked in their middle; one of fewer, all of them. (It showed all twenty-four, as tall as
+    /// the screen, far past its button.)
+    #[test]
+    fn a_list_to_pick_from_shows_nine_rows() {
+        let _device = super::super::gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().unwrap();
+        let items: Vec<Item> = (0..=23).map(|hour| Item::new(format!("{hour:02}:00"), None, hour == 9, false)).collect();
+        let mut sheet = Sheet::new(&gfx, &items, Look::system());
+        sheet.shown = 1400.0_f32.min(sheet.height);
+        sheet.show_at_most(LIST_ROWS);
+        assert_eq!(sheet.shown, 9.0 * ROW + 2.0 * INSET);
+        sheet.scroll = sheet.turned_to_middle(9);
+        let middle = sheet.shown_tops().nth(9).unwrap() + ROW / 2.0;
+        assert!((middle - sheet.shown / 2.0).abs() < ROW / 2.0, "{middle} of {}", sheet.shown);
+        let mut short = Sheet::new(&gfx, &items[..5], Look::system());
+        let all = short.shown;
+        short.show_at_most(LIST_ROWS);
+        assert_eq!(short.shown, all);
     }
 
     /// A choice made among those one opens is told after all the menu's own, after those of the choices before it that

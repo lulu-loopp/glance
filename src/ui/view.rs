@@ -2131,10 +2131,14 @@ fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, 
         }
         frame.key(&format!("app.{target}"));
         paint_app(frame, theme, name, target, px, y, APP_SIDE, named);
+        // (Its name under it where it is named, shortened to the cell: its whole name said as the pointer comes over it
+        // where it is shortened, or not shown.)
+        let shown = if named { fitted(frame, name, theme.small, cell_w) } else { "".into() };
         if named {
-            centred(frame, &fitted(frame, name, theme.small, cell_w), theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w);
+            centred(frame, &shown, theme.small, theme.text2, x, y + APP_SIDE + 4.0, cell_w);
         }
         placed.push((x, y, if named { cell_w } else { APP_SIDE }, cell_h, hit));
+        name_shown(&mut placed, hit, name, &shown);
     }
     frame.key("");
     if let Some((held, point)) = scene.thumbs.app_held() {
@@ -2244,11 +2248,14 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
             frame.fill_rounded(theme.hover, x + 2.0, y + 2.0, cell_w - 4.0, cell_h - 4.0, plate_round(theme, GLASS_ROW_ROUND, (cell_w.min(cell_h) - 4.0 - RAIL_SIDE) / 2.0));
         }
         paint_app(frame, theme, name, target, x + picture_x, y + picture_y, RAIL_SIDE, named);
+        // (As in the station's lane: its whole name said on hover where it is shortened or not shown.)
+        let room = cell_w - 4.0;
+        let shown = if named { fitted(frame, name, name_font, room) } else { "".into() };
         if named {
-            let room = cell_w - 4.0;
-            centred(frame, &fitted(frame, name, name_font, room), name_font, theme.text2, x + 2.0, y + picture_y + RAIL_SIDE + RAIL_NAME_GAP, room);
+            centred(frame, &shown, name_font, theme.text2, x + 2.0, y + picture_y + RAIL_SIDE + RAIL_NAME_GAP, room);
         }
         placed.push((x, y, cell_w, cell_h, hit));
+        name_shown(&mut placed, hit, name, &shown);
     }
     // The one held, lifted where the pointer has it along the rail; the places it may go to, standing still, all of
     // the rail between them (before the first, past the last).
@@ -9430,6 +9437,35 @@ seven".into()));
         }
         // A rail down a side named is as long as its longer cells take.
         assert!(rail_length(2, true) > rail_length(2, false));
+    }
+
+    /// A thing kept at hand whose name is not shown whole (by its picture alone, or its name shortened to its cell) has
+    /// its whole name said as the pointer comes over it, on the rail and in the station's lane alike; one whose name is
+    /// shown whole, none. (The rail and the lane said nothing: a folder was told only by its tag.)
+    #[test]
+    fn a_thing_kept_at_hand_not_named_whole_is_named_on_hover() {
+        let theme = Theme::new(Skin::Glass, false);
+        let long = "项目资料与二〇二六年归档文件夹";
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into(), alias: None };
+        crate::station::apps::pretend(vec![app(r"Q:\工作\Docs", "Docs"), app(r"Q:\归档", long)]);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let apps = crate::station::apps::named();
+        let said_on = |hits: &[HitBox]| apps.iter().map(|(_, target)| named(hits, Hit::App(crate::station::apps::number_of(target)), Lang::En)).collect::<Vec<_>>();
+        for named_under in [false, true] {
+            crate::station::apps::pretend_named(named_under);
+            // (Not named, each by its name. Named, the long one alone: the short one shows whole.)
+            let want = if named_under { vec![None, Some(long.to_string())] } else { vec![Some("Docs".to_string()), Some(long.to_string())] };
+            let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
+            let layout = Layout::with_columns(vec![lanes[0].height(&theme)], 1, &theme).with_rail(1, RailSide::Start, rail_length(2, named_under));
+            let hits = paint(&Nothing, &scene, &lanes, &layout, Pass::Content);
+            assert_eq!(said_on(&hits), want, "rail, named {named_under}");
+            let mut hits = Vec::new();
+            paint_apps(&Nothing, &scene, (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, named_under), named_under, false, &mut hits);
+            assert_eq!(said_on(&hits), want, "lane, named {named_under}");
+        }
     }
 
     /// One kept at hand held and dragged: the places it may go to stand still where the things were, whatever the

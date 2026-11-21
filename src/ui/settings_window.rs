@@ -3585,7 +3585,7 @@ impl Ui {
             let _ = windows::Win32::Graphics::Gdi::ClientToScreen(self.hwnd, &mut at);
         }
         let look = super::menu::Look { skin: None, dark: self.dark, frost: 1.0, zoom: 1.0 };
-        self.menu = super::menu::Menu::open_at(self.choice_menu(field), look, at, false, false);
+        self.menu = super::menu::Menu::open_list(self.choice_menu(field), look, at, false);
         self.menu_of = MenuOf::Choice(field);
     }
 
