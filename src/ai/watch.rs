@@ -149,6 +149,25 @@ fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Send
                     return;
                 }
             }
+            // Codex's limits, asked of the ChatGPT account it is signed in with (its logs here tell them only as Codex
+            // last worked here: see `codex`). Where it cannot be asked (signed out, its sign-in expired, ChatGPT not
+            // reached), what its logs tell stands: nothing is told but what it answers.
+            if on(Tool::Codex) {
+                if let Some((token, account)) = super::codex::signed_in() {
+                    let mut hash = std::hash::DefaultHasher::new();
+                    (&token, &account).hash(&mut hash);
+                    let hash = hash.finish();
+                    if read.get(&Tool::Codex).is_none_or(|(at, with)| at.elapsed() >= ASKED_EVERY || *with != hash) {
+                        let told = super::providers::codex(&token, account.as_deref(), crate::station::now_ms());
+                        read.insert(Tool::Codex, (Instant::now(), hash));
+                        if let Ok(limit) = told {
+                            if ear.send(Heard::Read(Tool::Codex, hash, Ok(limit))).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         }
         match asked.recv_timeout(ASK_TICK) {
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}

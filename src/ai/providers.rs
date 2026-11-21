@@ -206,6 +206,36 @@ fn openrouter_key(body: &Value) -> (Vec<Window>, Option<String>, Option<f64>) {
     (window.into_iter().collect(), plan, number(&data["usage_daily"]).map(|spent| spent.max(0.0)))
 }
 
+// Codex: the ChatGPT account's limits, asked as Codex asks for them (`/wham/usage`), with the sign-in Codex keeps.
+
+/// Codex's limits as the ChatGPT account signed in with `token` (of account `account`, where it names one) tells them
+/// at `now`.
+pub fn codex(token: &str, account: Option<&str>, now: u64) -> Result<Limit, Failed> {
+    let authorization = bearer(token);
+    let mut headers = vec![("Authorization", authorization.as_str())];
+    headers.extend(account.map(|account| ("chatgpt-account-id", account)));
+    let (status, body) = ask("https://chatgpt.com/backend-api/wham/usage", &headers, None)?;
+    passed(status, true)?;
+    codex_limit(&body, now).ok_or(Failed::Unavailable)
+}
+
+/// The account's own limit the answer `body` tells, as it stood at `now`: its plan, and its windows (each how long it
+/// is, how much of it is used, when it starts again). None where it tells no window.
+fn codex_limit(body: &Value, now: u64) -> Option<Limit> {
+    let window = |window: &Value| -> Option<Window> {
+        let seconds = number(&window["limit_window_seconds"]).filter(|seconds| *seconds > 0.0)?;
+        let used = number(&window["used_percent"])?;
+        let resets = number(&window["reset_at"]).filter(|at| *at > 0.0).map(|at| at as u64 * 1000).or_else(|| number(&window["reset_after_seconds"]).map(|after| now + after.max(0.0) as u64 * 1000));
+        Some(Window { minutes: (seconds / 60.0).round() as u32, used: share(used), resets })
+    };
+    let windows: Vec<Window> = ["primary_window", "secondary_window"].iter().filter_map(|name| window(&body["rate_limit"][*name])).collect();
+    if windows.is_empty() {
+        return None;
+    }
+    let plan = body["plan_type"].as_str().filter(|plan| !plan.is_empty() && *plan != "unknown").map(str::to_string);
+    Some(Limit { tool: Tool::Codex, id: super::codex::ACCOUNT_LIMIT.into(), name: None, plan, windows, balance: None, told: now })
+}
+
 // Kimi Code: its plan's windows.
 
 fn kimi(keys: &[String], now: u64) -> Result<Limit, Failed> {
@@ -539,6 +569,39 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The ChatGPT account this PC's Codex is signed in with, asked for its limits (by hand: it asks ChatGPT): what it
+    /// answers, its windows alone printed.
+    #[test]
+    #[ignore]
+    fn asks_this_pcs_chatgpt_account_for_its_limits() {
+        let (token, account) = super::super::codex::signed_in().expect("Codex signed in with ChatGPT here");
+        let limit = codex(&token, account.as_deref(), crate::station::now_ms());
+        println!("{:?}", limit.as_ref().map(|limit| (&limit.plan, &limit.windows)));
+        assert!(limit.is_ok());
+    }
+
+    /// The ChatGPT account's limits as `/wham/usage` answers (as Codex reads it): a Plus plan's five hours and week,
+    /// each its share used and when it starts again; a Pro plan's week alone; nothing where it tells no window.
+    #[test]
+    fn reads_the_chatgpt_accounts_limits_as_codex_does() {
+        let now = 1_795_000_000_000;
+        let plus = json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": true, "limit_reached": false,
+                "primary_window": { "used_percent": 13, "limit_window_seconds": 18000, "reset_after_seconds": 13140, "reset_at": 1795013140 },
+                "secondary_window": { "used_percent": 21, "limit_window_seconds": 604800, "reset_after_seconds": 84240, "reset_at": 1795084240 }
+            },
+            "credits": { "has_credits": false, "unlimited": false, "balance": "0" }
+        });
+        let limit = codex_limit(&plus, now).unwrap();
+        assert_eq!((limit.tool, limit.id.as_str(), limit.plan.as_deref(), limit.told), (Tool::Codex, "codex", Some("plus"), now));
+        assert_eq!(limit.windows, [Window { minutes: 300, used: 13.0, resets: Some(1_795_013_140_000) }, Window { minutes: 10080, used: 21.0, resets: Some(1_795_084_240_000) }]);
+        let pro = json!({ "plan_type": "pro", "rate_limit": { "primary_window": { "used_percent": 31, "limit_window_seconds": 604800, "reset_after_seconds": 60 }, "secondary_window": null } });
+        assert_eq!(codex_limit(&pro, now).unwrap().windows, [Window { minutes: 10080, used: 31.0, resets: Some(now + 60_000) }]);
+        assert!(codex_limit(&json!({ "plan_type": "free", "rate_limit": null }), now).is_none());
+    }
 
     /// Volcengine's request signed as token-monitor's test of it has it (its access key `ak`, its secret `sk`).
     #[test]
