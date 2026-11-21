@@ -309,6 +309,8 @@ pub struct Controller {
     widget_processes: AtomicBool,
     /// Whether a widget is on the screen, or the music full screen is up.
     widgets_seen: AtomicBool,
+    /// The workbench asked for from a notification, not yet opened, and the to-do to light in it (see `open_todo`).
+    todo_asked: Mutex<Option<Option<String>>>,
 }
 
 impl Controller {
@@ -327,6 +329,7 @@ impl Controller {
             widget_put_away: AtomicBool::new(false),
             widget_processes: AtomicBool::new(false),
             widgets_seen: AtomicBool::new(false),
+            todo_asked: Mutex::new(None),
         }
     }
 
@@ -494,10 +497,11 @@ impl Controller {
         self.post(OPEN_FROM_TRAY);
     }
 
-    /// Opens the workbench, where the to-dos are, as a notice opens it (on the pointer's screen, at the edge that opens it
-    /// there), the to-do `key` lit (see `ui::todo::light`), from any thread.
+    /// Opens the workbench, where the to-dos are, as a notice opens it (see `open_workbench`), the to-do `key` lit (see
+    /// `ui::todo::light`), from any thread. Asked as Windows starts Glance for it, before the panel's thread is there or
+    /// has anything to show, it is opened once it has (its first reading told: see `record`).
     pub fn open_todo(&self, key: Option<String>) {
-        crate::ui::todo::light(key);
+        *self.todo_asked.lock().unwrap() = Some(key);
         self.post(OPEN_TODO);
     }
 
@@ -753,6 +757,12 @@ impl Controller {
             }
             if !got {
                 let now = Instant::now();
+                // The workbench asked for from a notification, once there is something to show in it: lit from now.
+                let asked = if self.history.latest().is_some() { self.todo_asked.lock().unwrap().take() } else { None };
+                if let Some(key) = asked {
+                    crate::ui::todo::light(key);
+                    self.open_workbench(&mut panels, &mut last_place, None, now);
+                }
                 if frame_at.is_some_and(|at| now < at) {
                     // The refresh timer is set for it.
                     unsafe { MsgWaitForMultipleObjects(Some(&[refresh]), false, INFINITE, QS_ALLINPUT) };
@@ -1095,15 +1105,7 @@ impl Controller {
                     }
                     WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP => {
                         if let Some(crate::ui::peek::Act::Open { edge, at }) = peek.handle(&msg, now) {
-                            if self.config.lock().unwrap().panel_at.is_some() {
-                                let target = self.hand_target(&mut panels, last_place);
-                                self.open_by_hand(&mut panels[target], last_place, now);
-                                last_place = panels[target].place().or(last_place);
-                            } else if let Some(contact) = monitor_at(at) {
-                                let target = panel_for(&mut panels, self, contact.monitor, edge);
-                                panels[target].open(at, contact, edge, None, false, now);
-                                last_place = Some((at, edge));
-                            }
+                            self.open_workbench(&mut panels, &mut last_place, Some((at, edge)), now);
                         }
                         continue;
                     }
@@ -1129,28 +1131,8 @@ impl Controller {
                         last_place = panels[at].place().or(last_place);
                     }
                 }
-                // The to-dos, from a notification of one: the workbench opened as a notice opens it.
-                OPEN_TODO => {
-                    if self.config.lock().unwrap().panel_at.is_some() {
-                        let target = self.hand_target(&mut panels, last_place);
-                        if !panels[target].is_open() {
-                            self.open_by_hand(&mut panels[target], last_place, now);
-                        }
-                        last_place = panels[target].place().or(last_place);
-                    } else if let Some((contact, edge)) = crate::ui::peek::where_now() {
-                        let monitor = contact.monitor;
-                        let at = match edge {
-                            Edge::Left => POINT { x: monitor.left, y: (monitor.top + monitor.bottom) / 2 },
-                            Edge::Right => POINT { x: monitor.right - 1, y: (monitor.top + monitor.bottom) / 2 },
-                            Edge::Top => POINT { x: (monitor.left + monitor.right) / 2, y: monitor.top },
-                        };
-                        let target = panel_for(&mut panels, self, monitor, edge);
-                        if !panels[target].is_open() {
-                            panels[target].open(at, contact, edge, None, false, now);
-                        }
-                        last_place = Some((at, edge));
-                    }
-                }
+                // The to-dos, from a notification of one: opened as the messages are taken (see `open_todo`).
+                OPEN_TODO => {}
                 // A panel that stays (pinned, or moved away from the edge)
                 // stays, the settings window coming up or not.
                 DISMISS => {
@@ -2003,6 +1985,55 @@ impl Controller {
                 panels.len() - 1
             }
         })
+    }
+
+    /// The workbench opened from a notice (pressed at `near`, on its edge) or a notification: the panel moved away from
+    /// its edge, where that is the workbench; else at the edge that holds it (see `peek::workbench_now`), at `near`
+    /// where that is the edge, else along its middle. Where no edge holds it, nothing (its widgets show what is asked).
+    fn open_workbench<'a>(&'a self, panels: &mut Vec<Panel<'a>>, last_place: &mut Option<(POINT, Edge)>, near: Option<(POINT, Edge)>, now: Instant) {
+        if self.config.lock().unwrap().panel_at.is_some() && self.by_hand_part(panels) == Some(Part::Workbench) {
+            let target = self.hand_target(panels, *last_place);
+            if !panels[target].is_open() {
+                self.open_by_hand(&mut panels[target], *last_place, now);
+            }
+            *last_place = panels[target].place().or(*last_place);
+            return;
+        }
+        let Some((contact, edge)) = crate::ui::peek::workbench_now() else { return };
+        let monitor = contact.monitor;
+        let middle = match edge {
+            Edge::Left => POINT { x: monitor.left, y: (monitor.top + monitor.bottom) / 2 },
+            Edge::Right => POINT { x: monitor.right - 1, y: (monitor.top + monitor.bottom) / 2 },
+            Edge::Top => POINT { x: (monitor.left + monitor.right) / 2, y: monitor.top },
+        };
+        let at = near.filter(|&(at, on)| on == edge && monitor_at(at).is_some_and(|there| there.monitor == monitor)).map_or(middle, |(at, _)| at);
+        let target = panel_for(panels, self, monitor, edge);
+        if !panels[target].is_open() {
+            panels[target].open(at, contact, edge, None, false, now);
+        }
+        *last_place = Some((at, edge));
+    }
+
+    /// What the panel opened by hand shows, where it is kept moved away from its edge: the one up there, what it shows;
+    /// else what the edge it opens at holds (see `Panel::open_by_hand`). None, where it is not kept so.
+    fn by_hand_part(&self, panels: &[Panel]) -> Option<Part> {
+        if let Some(panel) = panels.iter().find(|panel| panel.is_shown() && panel.floating()) {
+            return Some(panel.part);
+        }
+        let PanelAt { screen: (x, y), .. } = self.config.lock().unwrap().panel_at?;
+        let point = POINT { x, y };
+        Some(self.by_hand_at(point, monitor_at(point)?).1)
+    }
+
+    /// The edge a panel opened by hand at `point` on `contact`'s screen opens from, and what it shows: of the edges that
+    /// open one there, the nearest to `point`; where none does, the one a panel opened so shows (see `Places::by_hand`).
+    fn by_hand_at(&self, point: POINT, contact: Contact) -> (Edge, Part) {
+        let config = self.config.lock().unwrap();
+        let places = &config.edges.places;
+        let m = contact.monitor;
+        let edge = crate::screens::lit(places, m).nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(places.by_hand().0);
+        let part = crate::screens::id_of(m).and_then(|id| places.part(&id, edge)).unwrap_or(places.by_hand().1);
+        (edge, part)
     }
 
     /// `panel` opened by hand (the shortcut, the tray): where the panel is kept moved away from its edge, or at the
@@ -2943,9 +2974,7 @@ impl<'a> Panel<'a> {
     }
 
     fn edge_for(&self, point: POINT, contact: Contact) -> Edge {
-        let config = self.controller.config.lock().unwrap();
-        let m = contact.monitor;
-        crate::screens::lit(&config.edges.places, m).nearest((m.left, m.top, m.right, m.bottom), (point.x, point.y)).unwrap_or(config.edges.places.by_hand().0)
+        self.controller.by_hand_at(point, contact).0
     }
 
     /// Opens the panel on `contact`'s screen: along its `edge` at `cursor`,

@@ -1026,11 +1026,33 @@ fn look() -> (Skin, bool, Lang) {
 
 /// The screen the notice stands on (the pointer's) and the edge it slides out of there: the one that opens the
 /// workbench (where the station is), else what a panel opened by hand opens at.
-pub(crate) fn where_now() -> Option<(Contact, Edge)> {
+fn where_now() -> Option<(Contact, Edge)> {
     let at = crate::mouse::cursor_position()?;
     let contact = crate::mouse::monitor_at(at)?;
     let places = crate::app().controller.edges().places;
     Some((contact, edge_on(&places, crate::screens::id_of(contact.monitor).as_deref())))
+}
+
+/// Where the workbench opens now, from a notice or a notification: at the edge of the pointer's screen that holds it,
+/// else at that of the first other screen that does; none where no edge does.
+pub(crate) fn workbench_now() -> Option<(Contact, Edge)> {
+    let places = crate::app().controller.edges().places;
+    let here = crate::mouse::cursor_position().and_then(crate::mouse::monitor_at);
+    let (monitor, edge) = workbench_on(&places, here.map(|contact| contact.monitor), &crate::screens::monitors(), crate::screens::id_of)?;
+    let contact = match here {
+        Some(contact) if contact.monitor == monitor => contact,
+        _ => crate::mouse::monitor_at(POINT { x: (monitor.left + monitor.right) / 2, y: (monitor.top + monitor.bottom) / 2 })?,
+    };
+    Some((contact, edge))
+}
+
+/// Of the screens `monitors` (each named by `id_of`), `here` first (the pointer's), the first whose edge holds the
+/// workbench as `places` have it, and that edge.
+fn workbench_on(places: &Places, here: Option<RECT>, monitors: &[RECT], id_of: impl Fn(RECT) -> Option<String>) -> Option<(RECT, Edge)> {
+    here.into_iter().chain(monitors.iter().copied().filter(|monitor| Some(*monitor) != here)).find_map(|monitor| {
+        let id = id_of(monitor)?;
+        places.holds(&id).iter().find(|hold| hold.part == Part::Workbench).map(|hold| (monitor, hold.edge))
+    })
 }
 
 /// The edge of the screen named `screen` that opens the workbench, else the one a panel opened by hand opens at.
@@ -1533,6 +1555,32 @@ mod tests {
         assert_eq!(ask(4, true) - ask(3, true), MORE_ROW);
         assert_eq!(ask(9, true), ask(4, true));
         assert_eq!(ask(1, true) - ask(1, false), TRUST_ROW + SPACE);
+    }
+
+    /// What opens the workbench from a notice or a notification opens it where it is: at the pointer's screen's edge
+    /// that holds it, else at another screen's, never at an edge that holds something else.
+    #[test]
+    fn the_workbench_is_opened_where_an_edge_holds_it() {
+        let (a, b) = (RECT { left: 0, top: 0, right: 2560, bottom: 1440 }, RECT { left: 2560, top: 0, right: 4480, bottom: 1080 });
+        let id = |monitor: RECT| Some(if monitor == a { "a".to_string() } else { "b".to_string() });
+        let hold = |edge, part| crate::settings::Hold { edge, part };
+        let places = Places {
+            same: false,
+            every: Vec::new(),
+            screens: vec![
+                crate::settings::ScreenHolds { screen: "a".into(), holds: vec![hold(Edge::Right, Part::Monitor), hold(Edge::Top, Part::Workbench)] },
+                crate::settings::ScreenHolds { screen: "b".into(), holds: vec![hold(Edge::Right, Part::Monitor)] },
+            ],
+        };
+        assert_eq!(workbench_on(&places, Some(a), &[a, b], id), Some((a, Edge::Top)));
+        assert_eq!(workbench_on(&places, Some(b), &[a, b], id), Some((a, Edge::Top)));
+        assert_eq!(workbench_on(&places, None, &[a, b], id), Some((a, Edge::Top)));
+        let mut both = places.clone();
+        both.screens[1].holds.push(hold(Edge::Left, Part::Workbench));
+        assert_eq!(workbench_on(&both, Some(b), &[a, b], id), Some((b, Edge::Left)));
+        let mut none = places;
+        none.screens[0].holds.retain(|hold| hold.part != Part::Workbench);
+        assert_eq!(workbench_on(&none, Some(a), &[a, b], id), None);
     }
 
     /// It stands at the edge that opens the workbench on its screen, its plate off the edge by its gap, in the middle
