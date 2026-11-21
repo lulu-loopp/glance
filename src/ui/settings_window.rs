@@ -4267,8 +4267,8 @@ impl Ui {
             Field::StationCopy => (pick(lang, "拖入的文件", "Files dropped in"), vec![s("仅记位置", "Linked"), s("保留副本", "Copied")], Some(usize::from(settings.station.always_copy))),
             Field::StationAfterDrag => (pick(lang, "拖出以后", "Once dragged out"), vec![s("保留", "Kept"), s("移除", "Removed")], Some(usize::from(settings.station.remove_after_drag))),
             Field::TodoLead => (
-                pick(lang, "有时间的待办", "Timed to-dos"),
-                crate::settings::TODO_LEADS.iter().map(|&lead| if lead == 0 { s("准时", "On time") } else if lang == Lang::Zh { format!("提前 {lead} 分钟") } else { format!("{lead} min before") }).collect(),
+                pick(lang, "有时间的待办提前（分钟）", "Timed to-dos, minutes before"),
+                crate::settings::TODO_LEADS.iter().map(|&lead| if lead == 0 { s("准时", "On time") } else { lead.to_string() }).collect(),
                 at(&crate::settings::TODO_LEADS.map(u64::from), u64::from(settings.todo_lead)),
             ),
             Field::TodoDayAt => (
