@@ -32,6 +32,9 @@ pub struct Prefs {
     pub chart_seconds: f64,
     #[serde(rename = "hotTemp")]
     pub hot_temp: f32,
+    /// The AI component's limits told by how much of each is left, not used: its figures, its bars and its rings.
+    #[serde(rename = "aiLeft")]
+    pub ai_left: bool,
     pub theme: ThemePref,
     pub language: LanguagePref,
     /// The names the user gave the board's sensors, each by its board and its sensor (see `sensor_key`): what the
@@ -321,6 +324,7 @@ impl Default for Prefs {
             music: MusicPrefs::default(),
             chart_seconds: 60.0,
             hot_temp: 85.0,
+            ai_left: false,
             theme: ThemePref::System,
             language: LanguagePref::System,
             sensor_names: BTreeMap::new(),
@@ -464,7 +468,7 @@ impl Prefs {
     pub fn hash_drawn(&self, key: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
         (&self.modules, self.across).hash(key);
-        (self.hot_temp.to_bits(), self.chart_seconds.to_bits()).hash(key);
+        (self.hot_temp.to_bits(), self.chart_seconds.to_bits(), self.ai_left).hash(key);
     }
 
     /// The same, the AI component laid out across or not (see `across`).

@@ -7346,7 +7346,7 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let prefs = Prefs::default();
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let slot = |source| ai::Slot { left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let rich = ai::Rich::default();
         use ai::{Source, Spot};
@@ -7478,7 +7478,7 @@ otepad.exe", "Notepad"),
         // (Sessions at work, as the owner's were.)
         let mut dock = ai::Dock { working: 2, ..dock.clone() };
         // (And a source with a balance, as the owner's three were.)
-        dock.slots.push(ai::Slot { source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
+        dock.slots.push(ai::Slot { left: false, source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
         let dock = &dock;
         let drawn = |size: (f32, f32)| {
             let said = Said::default();
@@ -7664,7 +7664,7 @@ otepad.exe", "Notepad"),
     /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw (and every key
     /// what it draws is drawn under).
     #[derive(Default)]
-    struct Said(std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<String>>);
+    struct Said(std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<f32>>);
 
     impl Canvas for Said {
         fn key(&self, key: &str) {
@@ -7697,10 +7697,72 @@ otepad.exe", "Notepad"),
         fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
-        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn arc(&self, _: Point, _: f32, _: f32, sweep: f32, _: Color, _: f32) {
+            self.2.borrow_mut().push(sweep);
+        }
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
         fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+    }
+
+    /// The AI component's limits told by how much of each is left (the setting "Limits shown": "Left", kept as
+    /// `aiLeft`): each window's figure as what is left, said so where it fits, its bar drawn to it and the mark of how
+    /// much of it has gone by drawn as how much is to come; the dock's ring drawn to what is left of the tightest window
+    /// and its figure that, of that window's name and "left". Still drawn hot as it is used up, and told as before where
+    /// it is not chosen.
+    #[test]
+    fn ai_limits_told_by_what_is_left() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let prefs = |left: bool| {
+            let shown = ["ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+            Prefs::resolve(&serde_json::json!({ "ai": shown, "aiLeft": left }), &[]).holding(crate::settings::Part::Ai)
+        };
+        let scene = |prefs| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        // Codex's windows: five hours 62% used, 0.6 of it gone by; a week 95% used; a day started again, none used.
+        let windows = |prefs: &Prefs| match ai::lane_of("ai:codex", prefs, Lang::Zh, Some(&usage), now, Some(false)).unwrap().as_slice() {
+            [_, Block::Ai(block @ ai::AiBlock::Windows(windows))] => (block.clone(), windows.clone()),
+            blocks => panic!("{} blocks", blocks.len()),
+        };
+        let told = |scene: &Scene, block: &ai::AiBlock| {
+            let said = Said::default();
+            ai::paint(&said, scene, theme.ink(AI_LANE), block, (0.0, 0.0, 300.0), &|_| {}, &mut Vec::new());
+            said.0.into_inner()
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let (left, used) = (prefs(true), prefs(false));
+        let (on_left, on_used) = (scene(&left), scene(&used));
+        let (block, shown) = windows(&left);
+        assert!(near(shown[0].shown(), 0.38) && near(shown[0].mark().unwrap(), 0.4) && near(shown[1].shown(), 0.05) && near(shown[2].shown(), 1.0), "{shown:?}");
+        assert!(shown[1].used >= 0.9);
+        let texts = told(&on_left, &block);
+        for figure in ["剩余 38%", "剩余 5%", "剩余 100%"] {
+            assert!(texts.iter().any(|text| text == figure), "{figure} in {texts:?}");
+        }
+        let (block, shown) = windows(&used);
+        assert!(near(shown[0].shown(), 0.62) && near(shown[0].mark().unwrap(), 0.6), "{shown:?}");
+        let texts = told(&on_used, &block);
+        assert!(texts.iter().any(|text| text == "62%") && !texts.iter().any(|text| text.contains("剩余")), "{texts:?}");
+        // The dock: Codex's ring and figure, its week the tightest.
+        let codex = |scene: &Scene| {
+            let dock = ai::dock_of(scene.prefs, Lang::Zh, Some(&usage), now);
+            let slot = dock.slots.iter().find(|slot| slot.source == ai::Source::Codex).unwrap().clone();
+            let said = Said::default();
+            let one = ai::Dock { slots: vec![slot.clone()], ..dock };
+            let (w, h) = ai::dock_size(false, 1, one.today.is_some());
+            ai::draw_dock(&said, scene, &one, false, (0.0, 0.0, w, h));
+            (slot, said.2.into_inner())
+        };
+        let (slot, arcs) = codex(&on_left);
+        assert_eq!((slot.figure.as_str(), slot.label.as_str()), ("5%", "每周剩余"));
+        assert!(slot.used.is_some_and(|used| used >= 0.9));
+        assert!(arcs.iter().any(|sweep| near(*sweep, std::f32::consts::TAU * 0.05)), "{arcs:?}");
+        let (slot, arcs) = codex(&on_used);
+        assert_eq!((slot.figure.as_str(), slot.label.as_str()), ("95%", "每周"));
+        assert!(arcs.iter().any(|sweep| near(*sweep, std::f32::consts::TAU * 0.95)), "{arcs:?}");
     }
 
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
@@ -7712,7 +7774,7 @@ otepad.exe", "Notepad"),
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let slot = |source| ai::Slot { left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
         use ai::{Source, Spot};
