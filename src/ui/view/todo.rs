@@ -92,11 +92,13 @@ struct Row {
     soon: bool,
     /// How far its tick is drawn (0 not ticked, 1 ticked).
     tick: f32,
+    /// How lit it is, opened from its notification (see `ui::todo::lit`).
+    lit: f32,
 }
 
 impl Hash for Row {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (self.n, self.key, &self.text, self.done, &self.label, self.soon, self.tick.to_bits()).hash(state);
+        (self.n, self.key, &self.text, self.done, &self.label, self.soon, self.tick.to_bits(), self.lit.to_bits()).hash(state);
     }
 }
 
@@ -193,6 +195,7 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
             label: item.due.map(|due| due.label(today, zh)),
             soon: item.due.is_some_and(|due| due.by(today)) && !item.done,
             tick,
+            lit: crate::ui::todo::lit(item, now),
         }
     };
     // Those just ticked here stay where they were (and those unticked since are no longer).
@@ -210,7 +213,8 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
         undone.insert(slot.min(undone.len()), row(n, tick));
     }
     let done: Vec<Row> = (0..items.len()).filter(|n| items[*n].done && !ticked.iter().any(|(t, ..)| t == n)).map(|n| row(n, 1.0)).collect();
-    let moving = if MOVING.with(std::cell::Cell::get) || !ticked.is_empty() { crate::station::now_ms() } else { 0 };
+    let lit = undone.iter().any(|row| row.lit > 0.0);
+    let moving = if MOVING.with(std::cell::Cell::get) || !ticked.is_empty() || lit { crate::station::now_ms() } else { 0 };
     let count = match undone.iter().filter(|row| !row.done).count() {
         0 => String::new(),
         n => n.to_string(),
@@ -219,9 +223,11 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
     if full {
         return vec![head, Block::Todo { lane: TodoLane { undone, done, open: OPEN.with(std::cell::Cell::get), field: Some(Field::default()), moving }, tall: TODO_TALL }];
     }
-    // Small: the one due soonest (else the first), alone.
-    let soonest = soonest(&items).map(|n| row(n, 0.0));
-    vec![head, Block::Todo { lane: TodoLane { undone: soonest.into_iter().collect(), done: Vec::new(), open: false, field: None, moving }, tall: ROW }]
+    // Small: the one lit, opened from its notification, else the one due soonest (else the first), alone.
+    let lit = (0..items.len()).find(|&n| !items[n].done && crate::ui::todo::lit(items[n], now) > 0.0);
+    let shown = lit.or_else(|| soonest(&items)).map(|n| row(n, 0.0));
+    let moving = if lit.is_some() { crate::station::now_ms() } else { moving };
+    vec![head, Block::Todo { lane: TodoLane { undone: shown.into_iter().collect(), done: Vec::new(), open: false, field: None, moving }, tall: ROW }]
 }
 
 /// Of `items`, the one not done that is due soonest (else the first not done).
@@ -279,7 +285,12 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     let head_room = if done > 0 { DONE_HEAD } else { 0.0 };
     let fit_undone = if undone as f32 * ROW + head_room <= tall { undone } else { ((tall - head_room - MORE) / ROW).floor().max(0.0) as usize };
     let more = undone - fit_undone.min(undone);
-    let mut targets: Vec<(&Row, f32)> = lane.undone.iter().take(fit_undone).enumerate().map(|(at, row)| (row, at as f32 * ROW)).collect();
+    // (One lit, opened from its notification, past those that fit: in the last place of them while it is.)
+    let mut shown: Vec<&Row> = lane.undone.iter().take(fit_undone).collect();
+    if let (Some(lit), Some(last)) = (lane.undone.iter().skip(fit_undone).find(|row| row.lit > 0.0), shown.last_mut()) {
+        *last = lit;
+    }
+    let mut targets: Vec<(&Row, f32)> = shown.into_iter().enumerate().map(|(at, row)| (row, at as f32 * ROW)).collect();
     let after_undone = fit_undone as f32 * ROW + if more > 0 { MORE } else { 0.0 };
     let done_head = after_undone;
     let mut done_more = 0;
@@ -411,6 +422,10 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
     let on = matches!(scene.hover, Some(Hit::Todo(hit)) if hit.item() == Some((n as usize, key)));
     let (mark, on_mark) = mark(theme);
     let alpha = |color: Color| color.alpha(fade);
+    // Lit, opened from its notification: a wash of the accent behind it all.
+    if row.lit > 0.0 {
+        frame.fill_rounded(soon(theme).alpha(0.24 * row.lit * fade), left - 6.0, y + 1.0, width + 12.0, ROW - 2.0, theme.control_radius.min((ROW - 2.0) / 2.0));
+    }
     // Its box: ruled round; ticked, filled and its tick drawn left to right as it is ticked.
     let bx = left;
     let by = y + (ROW - BOX) / 2.0;
@@ -535,7 +550,7 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
     let top = y + ((h - tall) / 2.0).max(0.0).min(if fit > 1 { 0.0 } else { h });
     frame.clip(x - 4.0, y, w + 8.0, h);
     for (at, (text, label, soon, n, key)) in rows.iter().take(fit).enumerate() {
-        let row = Row { n: *n, key: *key, text: text.clone(), done: false, label: label.clone(), soon: *soon, tick: 0.0 };
+        let row = Row { n: *n, key: *key, text: text.clone(), done: false, label: label.clone(), soon: *soon, tick: 0.0, lit: 0.0 };
         paint_row(frame, scene, (x, top + at as f32 * ROW, w), &row, 1.0, hits);
     }
     frame.unclip();
@@ -603,6 +618,30 @@ mod tests {
             })
             .expect("drawn");
         crate::studio::save_png(&std::path::PathBuf::from(std::env::var("GLANCE_OUT").expect("GLANCE_OUT")), (w * scale) as u32, (h * scale) as u32, &pixels).unwrap();
+    }
+
+    /// A to-do lit, opened from its notification, shows where the lane has no room for all: past those that fit, it
+    /// takes the last place of them while it is lit (it was among those the lane only counted, lit where nothing showed).
+    #[test]
+    fn a_to_do_lit_past_those_that_fit_shows() {
+        use crate::ui::theme::Skin;
+        let theme = Theme::new(Skin::Glass, true);
+        let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
+        let prefs = crate::ui::prefs::Prefs::default();
+        let seen = crate::ui::seen::Seen::default();
+        let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+        let row = |n: u32, lit: f32| Row { n, key: 1000 + u64::from(n), text: format!("{n}"), done: false, label: None, soon: false, tick: 0.0, lit };
+        let ticks = |lit: Option<u32>| {
+            let lane = TodoLane { undone: (0..8).map(|n| row(n, if Some(n) == lit { 1.0 } else { 0.0 })).collect(), done: Vec::new(), open: false, field: None, moving: 0 };
+            let mut hits = Vec::new();
+            paint(&crate::ui::view::tests::Nothing, &scene, (0.0, 0.0, 300.0), 16.0, &lane, 3.0 * ROW + MORE, &mut hits);
+            let mut ticked: Vec<u32> = hits.iter().filter_map(|hit| match hit.4 { Hit::Todo(TodoHit::Tick(n, _)) => Some(n), _ => None }).collect();
+            ticked.sort();
+            ticked
+        };
+        assert_eq!(ticks(None), [0, 1, 2]);
+        assert_eq!(ticks(Some(6)), [0, 1, 6]);
+        assert_eq!(ticks(Some(1)), [0, 1, 2]);
     }
 
     /// The field's words stand in its middle in every skin: their ink as far below its top as above its foot (they

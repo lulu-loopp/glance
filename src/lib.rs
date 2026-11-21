@@ -133,6 +133,9 @@ mod nearby;
 
 mod notes;
 mod todo;
+mod remind;
+#[cfg(windows)]
+mod toast;
 #[cfg(windows)]
 mod watch;
 #[cfg(windows)]
@@ -595,6 +598,8 @@ pub fn run() {
     station::recent::follow_settings(&app().settings.lock().unwrap());
     notes::start(|| app().controller.wake());
     todo::start(|| app().controller.wake());
+    // The to-dos told of by Windows' notifications as they come due (see `remind`).
+    remind::start();
     // The phone remote, if it is on: running from now, whatever stopped it.
     thread::Builder::new().name("glance: phone remote".into()).spawn(phone::keep).expect("a thread started");
     // What touches the PC while the phone remote has the screens out, heard for it.

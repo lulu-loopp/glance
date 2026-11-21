@@ -159,6 +159,8 @@ const OPEN_FROM_TRAY: u32 = WM_APP + 1;
 const DISMISS: u32 = WM_APP + 2;
 const RESTYLE: u32 = WM_APP + 3;
 const OPEN_SETTINGS: u32 = WM_APP + 4;
+/// The to-dos asked to be opened, from a notification of one (see `Controller::open_todo`).
+const OPEN_TODO: u32 = WM_APP + 31;
 /// Notes asked to be stuck on the desktop (see `Controller::stick_note`).
 const STICK_NOTES: u32 = WM_APP + 30;
 /// Posted as Glance goes, for what is written in notes where they are to be kept (see `Controller::keep_writing`).
@@ -488,6 +490,13 @@ impl Controller {
     /// Opens the panel from the tray icon, on the monitor the pointer is on.
     pub fn open_from_tray(&self) {
         self.post(OPEN_FROM_TRAY);
+    }
+
+    /// Opens the workbench, where the to-dos are, as a notice opens it (on the pointer's screen, at the edge that opens it
+    /// there), the to-do `key` lit (see `ui::todo::light`), from any thread.
+    pub fn open_todo(&self, key: Option<String>) {
+        crate::ui::todo::light(key);
+        self.post(OPEN_TODO);
     }
 
     /// Whether a desktop widget was put away that can be brought back.
@@ -1116,6 +1125,28 @@ impl Controller {
                     } else if msg.message == OPEN_FROM_TRAY || may_open(fullscreen_hotkey) {
                         self.open_by_hand(&mut panels[at], last_place, now);
                         last_place = panels[at].place().or(last_place);
+                    }
+                }
+                // The to-dos, from a notification of one: the workbench opened as a notice opens it.
+                OPEN_TODO => {
+                    if self.config.lock().unwrap().panel_at.is_some() {
+                        let target = self.hand_target(&mut panels, last_place);
+                        if !panels[target].is_open() {
+                            self.open_by_hand(&mut panels[target], last_place, now);
+                        }
+                        last_place = panels[target].place().or(last_place);
+                    } else if let Some((contact, edge)) = crate::ui::peek::where_now() {
+                        let monitor = contact.monitor;
+                        let at = match edge {
+                            Edge::Left => POINT { x: monitor.left, y: (monitor.top + monitor.bottom) / 2 },
+                            Edge::Right => POINT { x: monitor.right - 1, y: (monitor.top + monitor.bottom) / 2 },
+                            Edge::Top => POINT { x: (monitor.left + monitor.right) / 2, y: monitor.top },
+                        };
+                        let target = panel_for(&mut panels, self, monitor, edge);
+                        if !panels[target].is_open() {
+                            panels[target].open(at, contact, edge, None, false, now);
+                        }
+                        last_place = Some((at, edge));
                     }
                 }
                 // A panel that stays (pinned, or moved away from the edge)

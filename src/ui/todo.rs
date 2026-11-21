@@ -29,6 +29,33 @@ const BLINK: Duration = Duration::from_millis(530);
 /// The most an item's words hold (UTF-16 units).
 const MOST: usize = 500;
 
+/// The to-do a notification of it opened the to-dos for, by its words and its time as kept (see `remind::key`), and
+/// since when: lit a moment where it shows (see `lit`).
+static LIT: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+
+/// How long a to-do opened from its notification is lit.
+const LIGHT: Duration = Duration::from_millis(2400);
+
+/// The to-do `key` (see `remind::key`) lit where it shows, from now (none: none).
+pub fn light(key: Option<String>) {
+    *LIT.lock().unwrap() = key.map(|key| (key, Instant::now()));
+}
+
+/// How lit `item` is drawn at `now` (0 not at all, 1 most), as the panel opens on it.
+pub fn lit(item: &Item, now: Instant) -> f32 {
+    let lit = LIT.lock().unwrap();
+    let Some((key, since)) = lit.as_ref() else { return 0.0 };
+    if crate::remind::key(item).as_ref() != Some(key) {
+        return 0.0;
+    }
+    let t = now.saturating_duration_since(*since).as_secs_f32() / LIGHT.as_secs_f32();
+    if t >= 1.0 {
+        return 0.0;
+    }
+    // (Up over the first part of it, held, and gone over the last two fifths.)
+    (t / 0.08).min(1.0) * ((1.0 - t) / 0.4).min(1.0)
+}
+
 /// What a press on the lane asks of the window it is in, besides what it did itself.
 pub enum Act {
     Nothing,
