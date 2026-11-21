@@ -2001,14 +2001,19 @@ pub(crate) fn rounded_outline(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Ve
     points
 }
 
-/// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across, in its `rows`:
-/// named cells spread over the width, scrolled through where they take more rows; or one row of pictures (as many as
-/// fit); the place to add more after them. What is dragged there may be dropped to be kept at hand.
+/// How tall quick launch's `rows` are: of named cells, or of its pictures alone.
+fn apps_tall(rows: usize, named: bool) -> f32 {
+    rows as f32 * if named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP
+}
+
+/// What is kept at hand as a lane lays it out (see `Block::Apps`) from (`left`, `top`), `width` across, `tall` down:
+/// named cells spread over the width, in as many rows as there is room for, scrolled through where they take more; or
+/// one row of pictures (as many as fit); the place to add more after them. What is dragged there may be dropped to be
+/// kept at hand.
 #[allow(clippy::too_many_arguments)]
-fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], rows: usize, named: bool, over: bool, hits: &mut Vec<HitBox>) {
+fn paint_apps(frame: &dyn Canvas, scene: &Scene, (left, top, width): (f32, f32, f32), apps: &[(String, String)], tall: f32, named: bool, over: bool, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (cell_w, cell_h) = if named { (APP_CELL_W, APP_CELL_H) } else { (APP_SIDE + APP_GAP, APP_SIDE) };
-    let tall = rows as f32 * cell_h + rows.saturating_sub(1) as f32 * APP_GAP;
     let mut placed = Vec::new();
     let across = ((width / cell_w) as usize).max(1);
     let gap = if named && across > 1 { (width - across as f32 * cell_w) / (across - 1) as f32 } else { 0.0 };
@@ -2352,6 +2357,8 @@ impl Block {
     fn list_tall(&self) -> Option<f32> {
         match self {
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } | Block::Todo { tall, .. } => Some(*tall),
+            // (Quick launch's named cells: its pictures in one row stay as they are.)
+            Block::Apps { rows, named: true, .. } => Some(apps_tall(*rows, true)),
             _ => None,
         }
     }
@@ -2380,7 +2387,7 @@ impl Block {
             Block::Ai(block) => block.height(),
             Block::Across(rows) => rows.iter().map(|row| across_tall(row)).sum::<f32>() + rows.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
-            Block::Apps { rows, named, .. } => SHELF_GAP + *rows as f32 * if *named { APP_CELL_H } else { APP_SIDE } + rows.saturating_sub(1) as f32 * APP_GAP,
+            Block::Apps { rows, named, .. } => SHELF_GAP + apps_tall(*rows, *named),
         }
     }
 }
@@ -4293,7 +4300,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 }
             }
             (Block::Apps { apps, rows, named, over }, Pass::Content) => {
-                paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, *rows, *named, *over, hits);
+                paint_apps(frame, scene, (left, y + SHELF_GAP, width), apps, apps_tall(*rows, *named) + spare, *named, *over, hits);
             }
             (Block::Recent { rows, filter, view, tall, nowhere }, Pass::Content) => {
                 paint_recent(frame, scene, ink, (left, y + SHELF_GAP, width), rows, *filter, *view, *tall + spare, *nowhere, hits);
@@ -8814,7 +8821,7 @@ seven".into()));
         }
         let apps: Vec<(String, String)> = (0..14).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let mut hits = Vec::new();
-        paint_apps(&Nothing, &scene, (0.0, top, width), &apps, APP_ROWS, true, false, &mut hits);
+        paint_apps(&Nothing, &scene, (0.0, top, width), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         within(&hits, top, APP_ROWS as f32 * APP_CELL_H + (APP_ROWS - 1) as f32 * APP_GAP, "apps");
     }
 
@@ -8974,7 +8981,7 @@ seven".into()));
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let apps: Vec<(String, String)> = ["C:/pressed-a.exe", "C:/pressed-b.exe"].iter().map(|target| (target.to_string(), target.to_string())).collect();
         let mut hits = Vec::new();
-        paint_apps(&Nothing, &scene, (0.0, 0.0, 300.0), &apps, APP_ROWS, true, false, &mut hits);
+        paint_apps(&Nothing, &scene, (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         let first = hits.iter().find_map(|hit| if let Hit::App(number) = hit.4 { Some(number) } else { None }).unwrap();
         crate::station::apps::pretend(vec![app("C:/pressed-b.exe"), app("C:/pressed-a.exe")]);
         assert_eq!(crate::station::apps::numbered(first).map(|app| app.target).as_deref(), Some("C:/pressed-a.exe"));
@@ -9161,7 +9168,7 @@ seven".into()));
         let still: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(super::super::thumb::Dots::new()));
         let scene = |thumbs: &'static super::super::thumb::Dots<Hit>| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let mut hits = Vec::new();
-        paint_apps(&Nothing, &scene(still), (0.0, 0.0, 300.0), &apps, APP_ROWS, true, false, &mut hits);
+        paint_apps(&Nothing, &scene(still), (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         let at_rest: Vec<(f32, f32)> = (0..4).map(|at| hits.iter().find(|hit| hit.4 == Hit::App(crate::station::apps::number_of(&format!("C:/{at}.exe")))).map(|hit| (hit.0, hit.1)).unwrap()).collect();
         // The last held over the first's place, the others on their way down.
         let mut moving = super::super::thumb::Dots::new();
@@ -9170,7 +9177,7 @@ seven".into()));
         moving.apps(start + std::time::Duration::from_millis(60), &order, Some((3, 0, Some((10.0, 10.0)))));
         let moving: &'static super::super::thumb::Dots<Hit> = Box::leak(Box::new(moving));
         let mut hits = Vec::new();
-        paint_apps(&Nothing, &scene(moving), (0.0, 0.0, 300.0), &apps, APP_ROWS, true, false, &mut hits);
+        paint_apps(&Nothing, &scene(moving), (0.0, 0.0, 300.0), &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         for (at, place) in at_rest.iter().enumerate() {
             let slot = hits.iter().find(|hit| hit.4 == Hit::AppSlot(at as u16)).map(|hit| (hit.0, hit.1));
             assert_eq!(slot, Some(*place), "place {at}");
@@ -9783,11 +9790,35 @@ seven".into()));
                 let rows = apps_rows(count, &theme);
                 let block = Block::Apps { apps: apps.clone(), rows, named: true, over: false };
                 let mut hits = Vec::new();
-                paint_apps(&Nothing, &scene, (0.0, 0.0, width), &apps, rows, true, false, &mut hits);
+                paint_apps(&Nothing, &scene, (0.0, 0.0, width), &apps, apps_tall(rows, true), true, false, &mut hits);
                 let adder = hits.iter().find(|hit| hit.4 == Hit::AddApp).copied().expect("the place to add more");
                 assert!(adder.1 + adder.3 <= block.height() - SHELF_GAP + 0.01, "{skin:?} {count}: {adder:?}");
             }
         }
+    }
+
+    /// Quick launch whole, given more room than it is laid out in (a column longer beside it, a widget made taller), shows
+    /// more of its things in it, row under row to the lane's foot; given less, it shows a couple of rows and scrolls.
+    /// (It showed three rows at most, the rest of the room left empty under them.)
+    #[test]
+    fn quick_launch_shows_more_of_its_things_given_more_room() {
+        let theme = Theme::new(Skin::Glass, true);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        let apps: Vec<(String, String)> = (0..40).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
+        let lane = Lane { id: "apps".into(), blocks: vec![head("Quick launch", "", "", false), Block::Apps { apps: apps.clone(), rows: apps_rows(apps.len(), &theme), named: true, over: false }], ink: theme.ink("apps") };
+        let natural = theme.pad_top + theme.pad_bottom + lane.blocks.iter().map(Block::height).sum::<f32>();
+        let shown = |tall: f32| {
+            let mut hits = Vec::new();
+            paint_lane(&Nothing, &scene, &lane, Rect { x: 0.0, y: 0.0, w: COLUMN_WIDTH, h: tall }, 0.0, Pass::Content, &mut hits);
+            hits.iter().filter(|hit| matches!(hit.4, Hit::App(_))).count()
+        };
+        let across = (((COLUMN_WIDTH - 2.0 * theme.pad_x) / APP_CELL_W) as usize).max(1);
+        assert_eq!(shown(natural), APP_ROWS * across);
+        assert_eq!(shown(natural + 2.0 * (APP_CELL_H + APP_GAP)), (APP_ROWS + 2) * across);
+        assert!(shown(natural - APP_CELL_H - APP_GAP) < APP_ROWS * across);
     }
 
     /// The station's places as each view lays them out: cards three across a column, filling it, each a plate as wide
@@ -9872,7 +9903,7 @@ seven".into()));
         }
         let apps: Vec<(String, String)> = (0..40).map(|at| (format!("{at}"), format!("C:/{at}.exe"))).collect();
         let mut hits = Vec::new();
-        paint_apps(&Nothing, &scene, room, &apps, APP_ROWS, true, false, &mut hits);
+        paint_apps(&Nothing, &scene, room, &apps, apps_tall(APP_ROWS, true), true, false, &mut hits);
         lists.push(("quick launch".to_string(), List::Apps, hits));
         lists
     }
