@@ -807,9 +807,9 @@ pub enum Bench {
     Time { figure: String, unit: String, date: String },
     /// The search box (see `Block::Search`).
     Search { keys: String },
-    /// The to-dos not done, the one due soonest first: each one's words, time, whether it is due by today, its place
-    /// among the note's and its key (see `todo::key_of`).
-    Todo(Vec<(String, Option<String>, bool, u32, u64)>),
+    /// The to-dos not done, the one lit or due soonest first: each one's words, time, whether it is due by today, its
+    /// place among the note's, its key (see `todo::key_of`) and how lit it is (an `f32`'s bits).
+    Todo(Vec<todo::BenchRow>),
 }
 
 /// The most of a note's lines under its title a workbench lane in a shape shows (as many as its room takes).

@@ -223,10 +223,9 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
     if full {
         return vec![head, Block::Todo { lane: TodoLane { undone, done, open: OPEN.with(std::cell::Cell::get), field: Some(Field::default()), moving }, tall: TODO_TALL }];
     }
-    // Small: the one lit, opened from its notification, else the one due soonest (else the first), alone.
-    let lit = (0..items.len()).find(|&n| !items[n].done && crate::ui::todo::lit(items[n], now) > 0.0);
-    let shown = lit.or_else(|| soonest(&items)).map(|n| row(n, 0.0));
-    let moving = if lit.is_some() { crate::station::now_ms() } else { moving };
+    // Small: the one shown first, alone.
+    let lits: Vec<f32> = items.iter().map(|item| crate::ui::todo::lit(item, now)).collect();
+    let shown = shown_first(&items, &lits).map(|n| row(n, 0.0));
     vec![head, Block::Todo { lane: TodoLane { undone: shown.into_iter().collect(), done: Vec::new(), open: false, field: None, moving }, tall: ROW }]
 }
 
@@ -234,6 +233,12 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
 fn soonest(items: &[&Item]) -> Option<usize> {
     let undone = || (0..items.len()).filter(|n| !items[*n].done);
     undone().filter(|n| items[*n].due.is_some()).min_by_key(|n| items[*n].due).or_else(|| undone().next())
+}
+
+/// Of `items` (each as lit as `lits` has it), the one a small lane shows, or shows first: the one lit, opened from its
+/// notification, else the one due soonest (else the first not done).
+fn shown_first(items: &[&Item], lits: &[f32]) -> Option<usize> {
+    (0..items.len()).find(|&n| !items[n].done && lits[n] > 0.0).or_else(|| soonest(items))
 }
 
 /// The field of `lanes`' to-do lane shown as it is being written (see `Field`).
@@ -525,19 +530,29 @@ fn paint_done_head(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f3
     hits.push((left, y, width, DONE_HEAD, Hit::Todo(TodoHit::Done)));
 }
 
-/// The to-dos for a lane in a shape: those not done, the one due soonest first, each as its row says it.
+/// The to-dos for a lane in a shape: those not done, the one shown first (see `shown_first`) first, each as its row
+/// says it.
 pub(super) fn bench(lang: Lang) -> Bench {
     let list = crate::todo::list();
     let items = list.items();
-    let today = Day::today();
-    let first = soonest(&items);
-    let order = first.into_iter().chain((0..items.len()).filter(|n| !items[*n].done && Some(*n) != first));
-    Bench::Todo(order.map(|n| (items[n].text.clone(), items[n].due.map(|due| due.label(today, lang == Lang::Zh)), items[n].due.is_some_and(|due| due.by(today)), n as u32, key_of(&items, n))).collect())
+    let now = Instant::now();
+    let lits: Vec<f32> = items.iter().map(|item| crate::ui::todo::lit(item, now)).collect();
+    Bench::Todo(bench_rows(&items, &lits, Day::today(), lang == Lang::Zh))
 }
+
+/// The rows of `items` (each as lit as `lits` has it) in a shape on `today` (see `bench`).
+fn bench_rows(items: &[&Item], lits: &[f32], today: Day, zh: bool) -> Vec<BenchRow> {
+    let first = shown_first(items, lits);
+    let order = first.into_iter().chain((0..items.len()).filter(|n| !items[*n].done && Some(*n) != first));
+    order.map(|n| (items[n].text.clone(), items[n].due.map(|due| due.label(today, zh)), items[n].due.is_some_and(|due| due.by(today)), n as u32, key_of(items, n), lits[n].to_bits())).collect()
+}
+
+/// A to-do's row in a shape (see `Bench::Todo`).
+pub type BenchRow = (String, Option<String>, bool, u32, u64, u32);
 
 /// The to-dos in a shape (`x`, `y`, `w`, `h`: within its lane's padding): as many of those not done as fit, a row each,
 /// the one due soonest first; nothing to do, said.
-pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), rows: &[(String, Option<String>, bool, u32, u64)], hits: &mut Vec<HitBox>) {
+pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), rows: &[BenchRow], hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     if rows.is_empty() {
         let says = scene.lang.pick("没有待办事项", "Nothing to do");
@@ -549,8 +564,8 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
     let tall = fit as f32 * ROW;
     let top = y + ((h - tall) / 2.0).max(0.0).min(if fit > 1 { 0.0 } else { h });
     frame.clip(x - 4.0, y, w + 8.0, h);
-    for (at, (text, label, soon, n, key)) in rows.iter().take(fit).enumerate() {
-        let row = Row { n: *n, key: *key, text: text.clone(), done: false, label: label.clone(), soon: *soon, tick: 0.0, lit: 0.0 };
+    for (at, (text, label, soon, n, key, lit)) in rows.iter().take(fit).enumerate() {
+        let row = Row { n: *n, key: *key, text: text.clone(), done: false, label: label.clone(), soon: *soon, tick: 0.0, lit: f32::from_bits(*lit) };
         paint_row(frame, scene, (x, top + at as f32 * ROW, w), &row, 1.0, hits);
     }
     frame.unclip();
@@ -642,6 +657,18 @@ mod tests {
         assert_eq!(ticks(None), [0, 1, 2]);
         assert_eq!(ticks(Some(6)), [0, 1, 6]);
         assert_eq!(ticks(Some(1)), [0, 1, 2]);
+    }
+
+    /// A to-do lit, opened from its notification, comes first in a shape too, and is drawn lit there.
+    #[test]
+    fn a_to_do_lit_comes_first_in_a_shape() {
+        let today = Day::of(2026, 11, 21).unwrap();
+        let item = |text: &str, hour: u32| Item { text: text.into(), done: false, due: Some(crate::todo::Due { day: today, time: Some((hour, 0)) }) };
+        let items = [item("a", 18), item("b", 15), item("c", 20)];
+        let items: Vec<&Item> = items.iter().collect();
+        let order = |lits: &[f32]| bench_rows(&items, lits, today, true).into_iter().map(|row| (row.0, f32::from_bits(row.5))).collect::<Vec<_>>();
+        assert_eq!(order(&[0.0, 0.0, 0.0]), [("b".to_string(), 0.0), ("a".to_string(), 0.0), ("c".to_string(), 0.0)]);
+        assert_eq!(order(&[0.0, 0.0, 0.5]), [("c".to_string(), 0.5), ("a".to_string(), 0.0), ("b".to_string(), 0.0)]);
     }
 
     /// The field's words stand in its middle in every skin: their ink as far below its top as above its foot (they
