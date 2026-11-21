@@ -9323,10 +9323,20 @@ mod pictures {
                 ui.set_open(&todo, true, true);
             });
             let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
-            gfx.draw_offscreen((cw.ceil() as u32, ch.ceil() as u32), 1.0, |frame| {
-                with_ui(|ui| ui.paint(frame, Instant::now()));
-            })
-            .unwrap();
+            let paint = || {
+                gfx.draw_offscreen((cw.ceil() as u32, ch.ceil() as u32), 1.0, |frame| {
+                    with_ui(|ui| ui.paint(frame, Instant::now()));
+                })
+                .unwrap()
+            };
+            paint();
+            // (Its row turned to, as the keys turn to it: below the window's first view.)
+            with_ui(|ui| {
+                ui.focus = Some(Target::ChoiceMenu(Field::TodoDayAt));
+                ui.reveal_focus();
+                ui.scroll = ui.scroll_target;
+            });
+            paint();
             with_ui(|ui| {
                 let stops = ui.stops();
                 assert!(stops.contains(&Target::ChoiceMenu(Field::TodoDayAt)), "{stops:?}");

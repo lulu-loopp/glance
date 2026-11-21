@@ -10,10 +10,10 @@ use std::borrow::Cow;
 use std::rc::Rc;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_UP};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SetCapture, VIRTUAL_KEY, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_TAB, VK_UP};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetForegroundWindow, IsIconic, PostMessageW, SetForegroundWindow, MSG, SC_RESTORE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WHEEL_DELTA, WM_MOUSEWHEEL, WM_SYSCOMMAND, WM_SYSKEYDOWN,
 };
 
 use super::canvas::{Align, Canvas, Color, Family, Fill, Font, Point};
@@ -375,11 +375,16 @@ impl Menu {
             }
         };
         let scale = look.px(contact.scale);
-        let sheet = Sheet::new(&gfx, &items, look);
+        let mut sheet = Sheet::new(&gfx, &items, look);
         let room = surface.room(look);
-        let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.height + 2.0 * room) * scale) as i32);
-        let margin = (room * scale) as i32;
         let work = contact.work;
+        // (No taller than its screen's work area: more choices than fit are turned through, the one ticked in view.)
+        sheet.shown = sheet.height.min(((work.bottom - work.top) as f32 / scale).floor());
+        if let Some(ticked) = items.iter().position(|item| item.checked) {
+            sheet.scroll = sheet.turned_to_middle(ticked);
+        }
+        let (w, h) = (((sheet.width + 2.0 * room) * scale) as i32, ((sheet.shown + 2.0 * room) * scale) as i32);
+        let margin = (room * scale) as i32;
         let (left, top) = place((w, h), margin, scale, work);
         let left = left.clamp(work.left - margin, (work.right - w + margin).max(work.left - margin));
         let top = top.clamp(work.top - margin, (work.bottom - h + margin).max(work.top - margin));
@@ -480,6 +485,20 @@ impl Menu {
             },
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP => Handled::Taken,
             WM_KEYDOWN => self.key(VIRTUAL_KEY(msg.wParam.0 as u16)),
+            // The wheel turns through choices more than fit (told where the pointer is on the screen).
+            WM_MOUSEWHEEL => {
+                let notches = (msg.wParam.0 >> 16) as u16 as i16 as f32 / WHEEL_DELTA as f32;
+                let turned = self.sheet.turned(self.sheet.scroll - notches * 3.0 * ROW);
+                if turned != self.sheet.scroll {
+                    self.sheet.scroll = turned;
+                    let under = self.row_at(x - self.rect.left, y - self.rect.top);
+                    self.lit = under.filter(|row| self.items[*row].open());
+                    if !self.draw() {
+                        return Handled::Done(None);
+                    }
+                }
+                Handled::Taken
+            }
             // Alt, as with a system menu, or the mouse taken from it.
             WM_SYSKEYDOWN | CAPTURE_LOST => Handled::Done(None),
             _ => Handled::Not,
@@ -508,10 +527,14 @@ impl Menu {
             };
         }
         match key {
-            VK_ESCAPE => Handled::Done(None),
+            // (Tab leaves it, as it leaves a list opened from a box.)
+            VK_ESCAPE | VK_TAB => Handled::Done(None),
             VK_UP | VK_DOWN => {
                 let row = self.step(self.lit, key == VK_UP);
                 self.follow_sub(row);
+                if let Some(row) = row {
+                    self.sheet.scroll = self.sheet.turned_to_show(row);
+                }
                 self.light(row)
             }
             VK_RIGHT | VK_RETURN if self.lit.is_some_and(|row| !self.items[row].more.is_empty()) => {
@@ -527,10 +550,15 @@ impl Menu {
         }
     }
 
-    /// The choice after `from` (before it, `up`) that can be chosen, round from the other end (none lit: the first, or
-    /// the last); none where none can be.
+    /// The choice after `from` (before it, `up`) that can be chosen, round from the other end (none lit: the one ticked,
+    /// as a list opened from a box starts at what it holds, else the first, or the last); none where none can be.
     fn step(&self, from: Option<usize>, up: bool) -> Option<usize> {
         let n = self.items.len();
+        if from.is_none() {
+            if let Some(ticked) = self.items.iter().position(|item| item.checked && item.open()) {
+                return Some(ticked);
+            }
+        }
         (1..=n)
             .map(|k| match (from, up) {
                 (None, true) => n - k,
@@ -634,7 +662,7 @@ impl Menu {
         let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
         let size = (self.size.0 as u32, self.size.1 as u32);
         // (Its choices' words are as they were whichever is lit.)
-        let drawn = self.surface.draw(&self.gfx, size, self.scale, look, self.room, (sheet.width, sheet.height), sheet_radius(look, true, sheet.height), &mut self.choices, 0, |frame, frosted| sheet.paint_rows(frame, items, look, lit, frosted), |frame, frosted| sheet.paint_choices(frame, items, look, frosted));
+        let drawn = self.surface.draw(&self.gfx, size, self.scale, look, self.room, (sheet.width, sheet.shown), sheet_radius(look, true, sheet.shown), &mut self.choices, sheet.scroll.to_bits() as u64, |frame, frosted| sheet.paint_rows(frame, items, look, lit, frosted), |frame, frosted| sheet.paint_choices(frame, items, look, frosted));
         if let Err(error) = &drawn {
             gfx::failed("menu", &self.gfx, Some(error));
         }
@@ -644,15 +672,16 @@ impl Menu {
     /// Which choice a point in the window (physical px) is on.
     fn row_at(&self, x: i32, y: i32) -> Option<usize> {
         let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
-        if x < 0.0 || x > self.sheet.width {
+        if x < 0.0 || x > self.sheet.width || y < 0.0 || y > self.sheet.shown {
             return None;
         }
+        let y = y + self.sheet.scroll;
         self.sheet.tops.iter().zip(&self.items).position(|(top, item)| y >= *top && y < top + item.tall())
     }
 
     /// Where the choice `row` is on the screen (physical px).
     pub fn row_on_screen(&self, row: usize) -> Option<RECT> {
-        let top = *self.sheet.tops.get(row)?;
+        let top = *self.sheet.tops.get(row)? - self.sheet.scroll;
         let tall = self.items.get(row)?.tall();
         let px = |dips: f32| (dips * self.scale).round() as i32;
         Some(RECT { left: self.rect.left + px(self.room), top: self.rect.top + px(self.room + top), right: self.rect.left + px(self.room + self.sheet.width), bottom: self.rect.top + px(self.room + top + tall) })
@@ -660,16 +689,18 @@ impl Menu {
 
     fn inside(&self, x: i32, y: i32) -> bool {
         let (x, y) = (x as f32 / self.scale - self.room, y as f32 / self.scale - self.room);
-        x >= 0.0 && x <= self.sheet.width && y >= 0.0 && y <= self.sheet.height
+        x >= 0.0 && x <= self.sheet.width && y >= 0.0 && y <= self.sheet.shown
     }
 }
 
-/// A menu's sheet laid out for its items: its size (DIPs) and where each
-/// row starts.
+/// A menu's sheet laid out for its items: its size (DIPs) and where each row starts; how much of it is shown (as tall
+/// as its screen lets it be) and how far it is turned (DIPs from its top: its choices more than fit).
 pub struct Sheet {
     pub width: f32,
     pub height: f32,
     tops: Vec<f32>,
+    pub shown: f32,
+    scroll: f32,
 }
 
 impl Sheet {
@@ -688,7 +719,29 @@ impl Sheet {
             })
             .collect();
         let height = tops.last().zip(items.last()).map_or(INSET, |(top, item)| top + item.tall()) + INSET;
-        Sheet { width, height, tops }
+        Sheet { width, height, tops, shown: height, scroll: 0.0 }
+    }
+
+    /// Where each row starts on what is shown of it, as it is turned.
+    fn shown_tops(&self) -> impl Iterator<Item = f32> + '_ {
+        self.tops.iter().map(|top| top - self.scroll)
+    }
+
+    /// `scroll` kept within how far it can be turned.
+    fn turned(&self, scroll: f32) -> f32 {
+        scroll.clamp(0.0, (self.height - self.shown).max(0.0))
+    }
+
+    /// How far it is turned for the choice `row` to be in its middle (as near as it can be).
+    fn turned_to_middle(&self, row: usize) -> f32 {
+        self.turned(self.tops[row] + ROW / 2.0 - self.shown / 2.0)
+    }
+
+    /// How far it is turned for the choice `row` to be shown whole, turned as little as that takes.
+    fn turned_to_show(&self, row: usize) -> f32 {
+        let (top, bottom) = (self.tops[row] - INSET, self.tops[row] + ROW + INSET);
+        let scroll = if top < self.scroll { top } else if bottom > self.scroll + self.shown { bottom - self.shown } else { self.scroll };
+        self.turned(scroll)
     }
 
     /// Draws it, its corner at the frame's origin (its shadow beyond),
@@ -703,32 +756,42 @@ impl Sheet {
     /// Its sheet: the plate, the rules between groups and the choice `lit`'s highlight.
     #[cfg(feature = "studio")]
     fn paint_sheet(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
-        let (width, height) = (self.width, self.height);
+        let (width, height) = (self.width, self.shown);
         let colours = Colours::new(look, frosted);
         paint_plate(frame, &colours, (0.0, 0.0, width, height), colours.radius);
         self.paint_rows(frame, items, look, lit, frosted);
     }
 
-    /// On its sheet: the rules between groups and the choice `lit`'s highlight.
+    /// On its sheet: the rules between groups and the choice `lit`'s highlight; where it is turned (more choices than
+    /// fit), how far, by a thumb along its right edge.
     fn paint_rows(&self, frame: &gfx::Frame, items: &[Item], look: Look, lit: Option<usize>, frosted: bool) {
         let width = self.width;
         let colours = Colours::new(look, frosted);
         let highlight_radius = colours.radius - INSET;
-        for (i, (item, top)) in items.iter().zip(&self.tops).enumerate() {
+        if self.shown < self.height {
+            let track = self.shown - 2.0 * INSET;
+            let thumb = (track * self.shown / self.height).max(24.0);
+            let at = INSET + (track - thumb) * self.scroll / (self.height - self.shown);
+            frame.fill_rounded(colours.icon.alpha(colours.icon.a * 0.45), width - 7.0, at, 3.0, thumb, 1.5);
+        }
+        frame.clip(0.0, 0.0, width, self.shown);
+        for (i, (item, top)) in items.iter().zip(self.shown_tops()).enumerate() {
             if item.rule_before {
                 frame.fill(colours.rule, 0.0, top - RULE / 2.0 - 0.5, width, 1.0);
             }
             if lit == Some(i) {
-                frame.fill_rounded(colours.highlight, INSET, *top, width - 2.0 * INSET, item.tall(), highlight_radius);
+                frame.fill_rounded(colours.highlight, INSET, top, width - 2.0 * INSET, item.tall(), highlight_radius);
             }
         }
+        frame.unclip();
     }
 
     /// What is on its sheet: each choice's mark, words and tick.
     fn paint_choices(&self, frame: &gfx::Frame, items: &[Item], look: Look, frosted: bool) {
         let width = self.width;
         let colours = Colours::new(look, frosted);
-        for (item, top) in items.iter().zip(&self.tops) {
+        frame.clip(0.0, 0.0, width, self.shown);
+        for (item, top) in items.iter().zip(self.shown_tops()) {
             let middle = top + item.tall() / 2.0;
             // (Dimmed: shown, not to be chosen.)
             let seen = |color: Color| if item.dimmed { color.alpha(0.45) } else { color };
@@ -753,6 +816,7 @@ impl Sheet {
                 frame.icon(Icon::ChevronRight, Point { x: width - INSET - 18.0, y: middle }, ICON, seen(colours.icon));
             }
         }
+        frame.unclip();
     }
 }
 
@@ -874,6 +938,37 @@ mod sized {
 #[cfg(all(test, feature = "studio"))]
 mod tests {
     use super::*;
+
+    /// A menu of more choices than its screen is tall for is no taller than its screen, turned through: opened with the
+    /// one ticked in its middle, turned as little as it takes for a choice moved to by the keys to be shown whole, never
+    /// past its ends; a choice is found where it is drawn, as it is turned. (The hour all-day to-dos are told at, from
+    /// 06:00 to 22:00: seventeen choices, taller than a 1080p screen at 200 %.)
+    #[test]
+    fn a_menu_taller_than_its_screen_is_turned_through() {
+        let _device = super::super::gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().unwrap();
+        let items: Vec<Item> = (6..=22).map(|hour| Item::new(format!("{hour:02}:00"), None, hour == 17, false)).collect();
+        let mut sheet = Sheet::new(&gfx, &items, Look::system());
+        assert_eq!(sheet.height, 17.0 * ROW + 2.0 * INSET);
+        sheet.shown = 200.0;
+        let ticked = 11;
+        sheet.scroll = sheet.turned_to_middle(ticked);
+        let middle = sheet.shown_tops().nth(ticked).unwrap() + ROW / 2.0;
+        assert!((middle - sheet.shown / 2.0).abs() < 0.5, "{middle}");
+        // (Moved to by the keys: shown whole, turned as little as that takes; one shown already, not turned.)
+        sheet.scroll = sheet.turned_to_show(16);
+        assert_eq!(sheet.scroll, sheet.height - sheet.shown);
+        let shown = sheet.scroll;
+        assert_eq!(sheet.turned_to_show(15), shown);
+        sheet.scroll = sheet.turned_to_show(0);
+        assert_eq!(sheet.scroll, 0.0);
+        assert_eq!(sheet.turned(-50.0), 0.0);
+        assert_eq!(sheet.turned(1e4), sheet.height - sheet.shown);
+        // (One that fits is never turned.)
+        let mut short = Sheet::new(&gfx, &items[..3], Look::system());
+        short.scroll = short.turned_to_middle(2);
+        assert_eq!(short.scroll, 0.0);
+    }
 
     /// A choice made among those one opens is told after all the menu's own, after those of the choices before it that
     /// open some; a row saying more under its words is taller.
