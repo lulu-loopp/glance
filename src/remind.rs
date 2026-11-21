@@ -151,10 +151,9 @@ pub fn look(items: Option<&[Item]>, kept: &mut Kept, now: Local, rules: Rules) -
             None
         };
         match when {
-            // Both gone by while Glance looked: written after its time.
-            None => {
-                kept.told.insert(key);
-            }
+            // Both gone by while Glance looked (written after its time, or its reminder's time moved back past now):
+            // not told of, nor kept as told, so that one moved on again past now is told of then.
+            None => {}
             Some(when) if when > now => sooner(&mut looked.next, when),
             Some(when) => {
                 kept.told.insert(key);
@@ -590,6 +589,20 @@ mod tests {
         items[0].done = false;
         let looked = look(Some(&items), &mut kept, time(16, 52), RULES);
         assert_eq!((looked.notices.len(), looked.next), (0, Some(time(17, 0))));
+    }
+
+    /// The hour all-day to-dos are told at moved back past now and on again (07:00 to 08:00 at 08:30, then back to
+    /// 09:00), a to-do of the whole day not yet told of is told of at 09:00: moved back, it was kept as told without
+    /// being told, and never told of that day.
+    #[test]
+    fn an_all_day_to_do_is_told_of_at_the_hour_moved_back_and_on_again() {
+        let items = [item("交水电费", Some((0, None)))];
+        let mut kept = Kept { last: Some(time(8, 0)), ..Kept::default() };
+        let earlier = Rules { day_at: (8, 0), ..RULES };
+        assert!(look(Some(&items), &mut kept, time(8, 30), RULES).notices.is_empty());
+        assert!(look(Some(&items), &mut kept, time(8, 31), earlier).notices.is_empty());
+        let shown = watched(&items, &mut kept, time(8, 32), time(10, 0));
+        assert_eq!(shown, vec![(time(9, 0), vec![vec!["交水电费".to_string()]])]);
     }
 
     #[test]
