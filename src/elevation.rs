@@ -339,13 +339,21 @@ impl Held {
     }
 
     fn open_with(path: &Path, rights: u32) -> Option<Self> {
+        Self::try_open_with(path, rights).ok()
+    }
+
+    /// As `open`, telling why it was not opened.
+    fn try_open(path: &Path) -> std::io::Result<Self> {
+        Self::try_open_with(path, DELETE.0)
+    }
+
+    fn try_open_with(path: &Path, rights: u32) -> std::io::Result<Self> {
         use std::os::windows::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .access_mode((FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE).0 | rights)
             .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
             .custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0)
             .open(path)
-            .ok()
             .map(Held)
     }
 
@@ -1177,14 +1185,24 @@ pub fn finish_uninstall(folder: &Path, uninstaller: (u32, u64)) -> Result<(), In
     taken.then_some(()).ok_or(InstallFolder::Failed)
 }
 
+/// How long the uninstaller is tried again while another holds it sharing no deletion (one that holds it as Defender
+/// does is waited for in the opening itself, as long as it holds it).
+const UNINSTALLER_HELD_AT_MOST: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// Takes the uninstaller `uninstaller` out of `folder` (held as `held`) by its handle, waiting as long as another
 /// holds it; whether it is gone (or was never there: another file in its place is left, as not this one).
 fn take_uninstaller(folder: &Path, held: &Held, uninstaller: (u32, u64)) -> bool {
     let path = folder.join(UNINSTALLER);
-    match Held::open(&path) {
-        Some(file) if !file.is_folder() && !is_link(&path) && file.lies_in(held) && file.id() == Some(uninstaller) => file.delete(),
-        Some(_) => true,
-        None => !path.exists(),
+    let began = std::time::Instant::now();
+    loop {
+        match Held::try_open(&path) {
+            Ok(file) if !file.is_folder() && !is_link(&path) && file.lies_in(held) && file.id() == Some(uninstaller) => return file.delete(),
+            Ok(_) => return true,
+            Err(error) if error.raw_os_error() == Some(windows::Win32::Foundation::ERROR_SHARING_VIOLATION.0 as i32) && began.elapsed() < UNINSTALLER_HELD_AT_MOST => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            Err(_) => return !path.exists(),
+        }
     }
 }
 
@@ -2353,8 +2371,25 @@ mod tests {
         let_go_of(&folder, held);
         assert!(!folder.exists());
 
-        // Another uninstaller in its place since (Glance installed there again): left.
+        // Held by one that shares no deletion: taken once it is let go.
         std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&uninstaller, b"MZ").unwrap();
+        let id = Held::open_to_hold(&uninstaller).and_then(|file| file.id()).unwrap();
+        let reading = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ.0).open(&uninstaller).unwrap()
+        };
+        let taking = folder.clone();
+        let (taken, still) = within(Duration::from_secs(1), move || {
+            let held = hold(&taking).unwrap();
+            take_uninstaller(&taking, &held, id)
+        });
+        assert_eq!(taken, None, "given up while it was held");
+        drop(reading);
+        assert_eq!(still.recv_timeout(Duration::from_secs(5)).ok(), Some(true));
+        assert!(!uninstaller.exists());
+
+        // Another uninstaller in its place since (Glance installed there again): left.
         std::fs::write(&uninstaller, b"MZ again").unwrap();
         let held = hold(&folder).unwrap();
         assert!(take_uninstaller(&folder, &held, id));
