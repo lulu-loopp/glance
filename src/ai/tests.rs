@@ -343,6 +343,33 @@ fn counts_codex_responses_by_their_last_usage_once_with_the_latest_limits() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Codex's limits are the ChatGPT account's, used elsewhere too (as a user's, shared with another, were used on another
+/// PC while their logs here last told of them the day before): those its account tells as it is asked stand over
+/// those its logs told before, and those its logs tell later over them. Asking it and failing changes nothing.
+#[test]
+fn codexs_limits_asked_of_its_account_stand_over_its_older_logs() {
+    let dir = folder("codex-account");
+    let file = dir.join("sessions").join("2026").join("11").join("18").join("rollout-a.jsonl");
+    append(&file, &codex_meta("t1"));
+    append(&file, &codex_turn("gpt-5.5-codex"));
+    append(&file, &codex_count("2026-11-18T10:01:00.000Z", 1100, 1000, 800, 100, 30, 12.5, 1795530000));
+    let mut ledger = Ledger::default();
+    ledger.refresh(&[(Tool::Codex, dir.join("sessions"))], NOON);
+    let asked = |used: f32, told: u64| Limit { tool: Tool::Codex, id: "codex".into(), name: None, plan: Some("plus".into()), windows: vec![Window { minutes: 300, used, resets: None }], balance: None, told };
+    let shown = |ledger: &Ledger| ledger.limits().iter().find(|limit| limit.tool == Tool::Codex && limit.id == "codex").map(|limit| limit.windows[0].used);
+    assert_eq!(shown(&ledger), Some(12.5));
+    assert!(ledger.read_of(Tool::Codex, 1, Ok(asked(13.0, NOON)), NOON));
+    assert_eq!(shown(&ledger), Some(13.0));
+    // (Failing, as with its sign-in expired: what was told stands.)
+    ledger.read_of(Tool::Codex, 1, Err(Failed::Key), NOON);
+    assert_eq!(shown(&ledger), Some(13.0));
+    // Its logs telling of a later response: theirs.
+    append(&file, &codex_count("2026-11-18T12:30:00.000Z", 1300, 200, 0, 0, 0, 30.0, 1795530000));
+    ledger.refresh(&[(Tool::Codex, dir.join("sessions"))], NOON + 3_600_000);
+    assert_eq!(shown(&ledger), Some(30.0));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn keeps_what_was_read_from_one_run_to_the_next() {
     let dir = folder("kept");
