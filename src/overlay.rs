@@ -43,6 +43,8 @@ use crate::ui::window::Window;
 
 /// What its right-click menu offers.
 pub enum Choice {
+    /// Put at the top of its screen, across its middle.
+    Centre,
     Lock(bool),
     Through(bool),
     Close,
@@ -879,6 +881,7 @@ impl Overlay {
         use crate::ui::icons::Icon;
         use crate::ui::menu::{Item, Menu};
         let items = vec![
+            Item::new(if zh { "屏幕顶部居中" } else { "Top centre of the screen" }, Some(crate::ui::menu::Mark::Icon(Icon::ArrowUpToLine)), false, false),
             Item::new(if zh { "锁定位置" } else { "Lock position" }, Some(crate::ui::menu::Mark::Icon(Icon::Pin)), self.locked, false),
             Item::new(if zh { "鼠标穿透" } else { "Let clicks through" }, Some(crate::ui::menu::Mark::Icon(Icon::Pointer)), self.through, false),
             Item::new(if zh { "关闭悬浮窗" } else { "Close the overlay" }, Some(crate::ui::menu::Mark::Icon(Icon::Close)), false, false),
@@ -890,9 +893,10 @@ impl Overlay {
     /// The choice at `row` of its menu made (see `menu`).
     pub fn chose(&self, row: usize) -> Choice {
         match row {
-            0 => Choice::Lock(!self.locked),
-            1 => Choice::Through(!self.through),
-            2 => Choice::Close,
+            0 => Choice::Centre,
+            1 => Choice::Lock(!self.locked),
+            2 => Choice::Through(!self.through),
+            3 => Choice::Close,
             _ => Choice::Settings,
         }
     }

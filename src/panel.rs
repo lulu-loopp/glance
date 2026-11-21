@@ -2082,6 +2082,9 @@ impl Controller {
                 }
                 settings_window::open_at_overlay(place);
             }
+            OverlayChoice::Centre => {
+                std::thread::spawn(|| crate::app().centre_overlay());
+            }
             OverlayChoice::Lock(locked) => {
                 std::thread::spawn(move || crate::app().lock_overlay(locked));
             }

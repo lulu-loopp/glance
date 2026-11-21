@@ -298,6 +298,11 @@ impl App {
         tray::notify(&title, &text);
     }
 
+    /// The overlay put at the top of its screen, across its middle (locked there or not, as it was).
+    pub fn centre_overlay(&self) {
+        self.change(|settings| settings.overlay.at = (0.5, 0.0));
+    }
+
     /// The overlay locked where it is, or let loose.
     pub fn lock_overlay(&self, locked: bool) {
         self.change(|settings| settings.overlay.locked = locked);
