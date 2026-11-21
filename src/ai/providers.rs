@@ -220,8 +220,10 @@ pub fn codex(token: &str, account: Option<&str>, now: u64) -> Result<Limit, Fail
 }
 
 /// The account's own limit the answer `body` tells, as it stood at `now`: its plan, and its windows (each how long it
-/// is, how much of it is used, when it starts again). None where it tells no window.
+/// is, how much of it is used, when it starts again), none where it says it has none (`rate_limit` null: what was told
+/// before of its windows no longer stands). None where it is no answer of the account's usage (no `rate_limit` at all).
 fn codex_limit(body: &Value, now: u64) -> Option<Limit> {
+    body.get("rate_limit")?;
     let window = |window: &Value| -> Option<Window> {
         let seconds = number(&window["limit_window_seconds"]).filter(|seconds| *seconds > 0.0)?;
         let used = number(&window["used_percent"])?;
@@ -229,9 +231,6 @@ fn codex_limit(body: &Value, now: u64) -> Option<Limit> {
         Some(Window { minutes: (seconds / 60.0).round() as u32, used: share(used), resets })
     };
     let windows: Vec<Window> = ["primary_window", "secondary_window"].iter().filter_map(|name| window(&body["rate_limit"][*name])).collect();
-    if windows.is_empty() {
-        return None;
-    }
     let plan = body["plan_type"].as_str().filter(|plan| !plan.is_empty() && *plan != "unknown").map(str::to_string);
     Some(Limit { tool: Tool::Codex, id: super::codex::ACCOUNT_LIMIT.into(), name: None, plan, windows, balance: None, told: now })
 }
@@ -600,7 +599,16 @@ mod tests {
         assert_eq!(limit.windows, [Window { minutes: 300, used: 13.0, resets: Some(1_795_013_140_000) }, Window { minutes: 10080, used: 21.0, resets: Some(1_795_084_240_000) }]);
         let pro = json!({ "plan_type": "pro", "rate_limit": { "primary_window": { "used_percent": 31, "limit_window_seconds": 604800, "reset_after_seconds": 60 }, "secondary_window": null } });
         assert_eq!(codex_limit(&pro, now).unwrap().windows, [Window { minutes: 10080, used: 31.0, resets: Some(now + 60_000) }]);
-        assert!(codex_limit(&json!({ "plan_type": "free", "rate_limit": null }), now).is_none());
+        // An account with no windows: its plan, and none (what was told of its windows before no longer stands).
+        let free = codex_limit(&json!({ "plan_type": "free", "rate_limit": null }), now).unwrap();
+        assert_eq!((free.plan.as_deref(), free.windows.len()), (Some("free"), 0));
+        let mut kept = crate::ai::Ledger::default();
+        assert!(kept.read_of(Tool::Codex, 1, Ok(codex_limit(&plus, now - 60_000).unwrap()), now - 60_000));
+        assert!(kept.read_of(Tool::Codex, 1, Ok(free), now));
+        let shown = kept.limits().iter().find(|limit| limit.tool == Tool::Codex && limit.id == "codex").unwrap();
+        assert_eq!((shown.plan.as_deref(), shown.windows.len()), (Some("free"), 0));
+        // No answer of its usage at all: nothing told.
+        assert!(codex_limit(&json!({ "detail": "Unauthorized" }), now).is_none());
     }
 
     /// Volcengine's request signed as token-monitor's test of it has it (its access key `ak`, its secret `sk`).
