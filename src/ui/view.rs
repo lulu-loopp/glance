@@ -7385,7 +7385,7 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let prefs = Prefs::default();
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let rich = ai::Rich::default();
         use ai::{Source, Spot};
@@ -7518,7 +7518,7 @@ otepad.exe", "Notepad"),
         // (Sessions at work, as the owner's were.)
         let mut dock = ai::Dock { working: 2, ..dock.clone() };
         // (And a source with a balance, as the owner's three were.)
-        dock.slots.push(ai::Slot { left: false, source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
+        dock.slots.push(ai::Slot { flag: None, faint: false, left: false, source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
         let dock = &dock;
         let drawn = |size: (f32, f32)| {
             let said = Said::default();
@@ -7915,7 +7915,7 @@ otepad.exe", "Notepad"),
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
         let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
         use ai::{Source, Spot};
