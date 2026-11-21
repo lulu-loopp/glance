@@ -67,13 +67,15 @@ pub fn key(item: &Item) -> Option<String> {
 }
 
 /// What is kept between one look at the to-dos and the next, and from one run of Glance to the next: the to-dos told
-/// of (by `key`), those to be told of again later and when, and when Glance last looked.
+/// of (by `key`), those to be told of again later and when, when Glance last looked, and those the notification of
+/// several missed together tells of.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Kept {
     pub told: BTreeSet<String>,
     pub later: BTreeMap<String, Local>,
     pub last: Option<Local>,
+    pub missed: Vec<String>,
 }
 
 /// A to-do to be told of: by its `key`, as it is now.
@@ -91,30 +93,38 @@ pub enum Notice {
 }
 
 /// What looking at the to-dos at `now` found: the notifications to show; the keys of those told of before that are
-/// told of no more (done, taken out, or changed), whose notifications are taken back; and when to look next for
-/// something due (none: nothing is).
+/// told of no more (done, taken out, or changed), whose notifications are taken back; when to look next for something
+/// due (none: nothing is); and, where some of those the notification of several missed together tells of are told of
+/// no more, those of them left (none left: it is taken back).
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Looked {
     pub notices: Vec<Notice>,
     pub gone: Vec<String>,
     pub next: Option<Local>,
+    pub missed_left: Option<Vec<Tell>>,
 }
 
 /// The to-dos `items` looked at `now`, as `rules` tell them, `kept` as told: each not done with a day told of once, as
 /// it comes due (see the module's words); those to be told of again later, as that comes. What is kept is changed as
-/// they are told of.
-pub fn look(items: &[Item], kept: &mut Kept, now: Local, rules: Rules) -> Looked {
+/// they are told of. None, where the to-dos are not to be read now (their note not there, or its folder not to be
+/// reached): nothing told of, and nothing of what is kept forgotten, those to be told of again later told of once
+/// they are read again, as they come then.
+pub fn look(items: Option<&[Item]>, kept: &mut Kept, now: Local, rules: Rules) -> Looked {
+    let Some(items) = items else {
+        kept.last = Some(now);
+        return Looked::default();
+    };
     let today = now.div_euclid(DAY);
     // (Never looked before: what came due today, from its beginning.)
     let last = kept.last.unwrap_or(today * DAY - 1);
     let mut looked = Looked::default();
     let mut on_time = Vec::new();
     let mut missed = Vec::new();
-    let mut live = BTreeSet::new();
+    let mut live = BTreeMap::new();
     let sooner = |next: &mut Option<Local>, at: Local| *next = Some(next.map_or(at, |next: Local| next.min(at)));
     for item in items.iter().filter(|item| !item.done) {
         let (Some(key), Some(due)) = (key(item), item.due) else { continue };
-        if !live.insert(key.clone()) {
+        if live.insert(key.clone(), item.clone()).is_some() {
             continue;
         }
         let tell = Tell { key: key.clone(), item: item.clone() };
@@ -156,15 +166,26 @@ pub fn look(items: &[Item], kept: &mut Kept, now: Local, rules: Rules) -> Looked
             }
         }
     }
-    looked.gone = kept.told.iter().chain(kept.later.keys()).filter(|key| !live.contains(*key)).cloned().collect::<BTreeSet<_>>().into_iter().collect();
-    kept.told.retain(|key| live.contains(key));
-    kept.later.retain(|key, _| live.contains(key));
+    looked.gone = kept.told.iter().chain(kept.later.keys()).filter(|key| !live.contains_key(*key)).cloned().collect::<BTreeSet<_>>().into_iter().collect();
+    kept.told.retain(|key| live.contains_key(key));
+    kept.later.retain(|key, _| live.contains_key(key));
     kept.last = Some(now);
+    // The notification of several missed together, some of them told of no more: of those left.
+    if kept.missed.iter().any(|key| !live.contains_key(key)) {
+        let left: Vec<Tell> = kept.missed.iter().filter_map(|key| Some(Tell { key: key.clone(), item: live.get(key)?.clone() })).collect();
+        kept.missed = left.iter().map(|tell| tell.key.clone()).collect();
+        looked.missed_left = Some(left);
+    }
     looked.notices = on_time.into_iter().map(Notice::One).collect();
     match missed.len() {
         0 => {}
         1 => looked.notices.push(Notice::One(missed.remove(0))),
-        _ => looked.notices.push(Notice::Missed(missed)),
+        _ => {
+            // (In its place: as Windows shows one notification by its tag.)
+            kept.missed = missed.iter().map(|tell| tell.key.clone()).collect();
+            looked.missed_left = None;
+            looked.notices.push(Notice::Missed(missed));
+        }
     }
     looked
 }
@@ -318,6 +339,8 @@ pub fn start() {
         let folder = crate::settings::local_dir();
         let mut kept: Kept = std::fs::read(folder.join(KEPT)).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
         let mut saved = (kept.clone(), std::time::Instant::now());
+        // (Not written: told in the journal once, till it is written again.)
+        let mut unwritten = false;
         loop {
             // (What was pressed is done once the to-dos are read: pressed as Windows started Glance for it, it came first.)
             let asked = {
@@ -337,18 +360,30 @@ pub fn start() {
             // (Not before the notes are read: the to-dos would be none, and what came due meanwhile taken as written after.)
             if crate::notes::read_yet() {
                 if on {
-                    let list = crate::todo::list();
-                    let items: Vec<Item> = list.items().into_iter().cloned().collect();
-                    let looked = look(&items, &mut kept, now, rules);
+                    let items: Option<Vec<Item>> = crate::todo::read().map(|list| list.items().into_iter().cloned().collect());
+                    let looked = look(items.as_deref(), &mut kept, now, rules);
                     for key in &looked.gone {
                         let _ = crate::toast::take_back(&tag(key), GROUP);
+                    }
+                    // Several missed told of together, some of them told of no more: told of those left, in its
+                    // place and without coming up again (where it is still among the notifications), else taken back.
+                    match &looked.missed_left {
+                        Some(left) if left.is_empty() => {
+                            let _ = crate::toast::take_back(MISSED, GROUP);
+                        }
+                        Some(left) if crate::toast::shown(MISSED, GROUP) => {
+                            if let Err(error) = crate::toast::show(&xml(&Notice::Missed(left.clone()), now, rules, zh), MISSED, GROUP, true) {
+                                crate::journal::note(format!("reminders: a notification not shown ({error})"));
+                            }
+                        }
+                        _ => {}
                     }
                     for notice in &looked.notices {
                         let tagged = match notice {
                             Notice::One(tell) => tag(&tell.key),
                             Notice::Missed(_) => MISSED.into(),
                         };
-                        if let Err(error) = crate::toast::show(&xml(notice, now, rules, zh), &tagged, GROUP) {
+                        if let Err(error) = crate::toast::show(&xml(notice, now, rules, zh), &tagged, GROUP, false) {
                             crate::journal::note(format!("reminders: a notification not shown ({error})"));
                         }
                     }
@@ -357,17 +392,22 @@ pub fn start() {
                     kept.last = Some(now);
                 }
             }
-            // Written as what is told changes, and now and then for when Glance last looked.
+            // Written as what is told changes, and now and then for when Glance last looked; not written, tried again at
+            // the next look.
             let (was, at) = &saved;
-            if kept != *was && (kept.told != was.told || kept.later != was.later || at.elapsed() >= std::time::Duration::from_secs(600)) {
+            if kept != *was && (kept.told != was.told || kept.later != was.later || kept.missed != was.missed || at.elapsed() >= std::time::Duration::from_secs(600)) {
                 let written = serde_json::to_vec(&kept).map_err(std::io::Error::other).and_then(|bytes| {
                     std::fs::create_dir_all(&folder)?;
                     std::fs::write(folder.join(KEPT), bytes)
                 });
-                if let Err(error) = written {
-                    crate::journal::note(format!("reminders: not kept ({error})"));
+                match written {
+                    Ok(()) => (saved, unwritten) = ((kept.clone(), std::time::Instant::now()), false),
+                    Err(error) if !unwritten => {
+                        crate::journal::note(format!("reminders: not kept ({error})"));
+                        unwritten = true;
+                    }
+                    Err(_) => {}
                 }
-                saved = (kept.clone(), std::time::Instant::now());
             }
         }
     });
@@ -428,7 +468,7 @@ mod tests {
         let mut shown = Vec::new();
         let mut now = from;
         while now <= to {
-            let looked = look(items, kept, now, RULES);
+            let looked = look(Some(items), kept, now, RULES);
             if !looked.notices.is_empty() {
                 shown.push((now, told(&looked.notices).into_iter().map(|names| names.into_iter().map(String::from).collect()).collect()));
             }
@@ -446,17 +486,17 @@ mod tests {
         // As the settings have it: 30 minutes before, and at 07:00.
         let mut kept = Kept { last: Some(time(6, 0)), ..Kept::default() };
         let rules = Rules { lead: 30, day_at: (7, 0) };
-        assert_eq!(look(&items, &mut kept, time(7, 0), rules).notices.len(), 1);
-        assert_eq!(look(&items, &mut kept, time(14, 30), rules).notices.len(), 1);
-        assert_eq!(look(&items, &mut kept, time(14, 31), rules).notices.len(), 0);
+        assert_eq!(look(Some(&items), &mut kept, time(7, 0), rules).notices.len(), 1);
+        assert_eq!(look(Some(&items), &mut kept, time(14, 30), rules).notices.len(), 1);
+        assert_eq!(look(Some(&items), &mut kept, time(14, 31), rules).notices.len(), 0);
     }
 
     #[test]
     fn the_next_look_is_when_the_soonest_comes_due() {
         let items = [item("a", Some((0, Some((15, 0))))), item("b", Some((1, None)))];
         let mut kept = Kept { last: Some(time(8, 0)), ..Kept::default() };
-        assert_eq!(look(&items, &mut kept, time(8, 0), RULES).next, Some(time(14, 50)));
-        assert_eq!(look(&items, &mut kept, time(14, 50), RULES).next, Some(at(day().plus(1), (9, 0))));
+        assert_eq!(look(Some(&items), &mut kept, time(8, 0), RULES).next, Some(time(14, 50)));
+        assert_eq!(look(Some(&items), &mut kept, time(14, 50), RULES).next, Some(at(day().plus(1), (9, 0))));
     }
 
     #[test]
@@ -470,25 +510,62 @@ mod tests {
         ];
         // Asleep from 13:00 to 16:42.
         let mut kept = Kept { last: Some(time(13, 0)), told: ["交水电费 @2026-11-21".to_string()].into(), ..Kept::default() };
-        let looked = look(&items, &mut kept, time(16, 42), RULES);
+        let looked = look(Some(&items), &mut kept, time(16, 42), RULES);
         assert_eq!(told(&looked.notices), vec![vec!["整理周报", "预约体检"]]);
         assert_eq!(says(&looked.notices[0], time(16, 42), true), ("今天有 2 项待办已过时间".into(), "整理周报、预约体检".into()));
         // Not again.
-        assert!(look(&items, &mut kept, time(16, 43), RULES).notices.is_empty());
+        assert!(look(Some(&items), &mut kept, time(16, 43), RULES).notices.is_empty());
         // Glance first run this morning: what came due today, and not what came due yesterday.
         let mut first = Kept::default();
-        assert_eq!(told(&look(&items, &mut first, time(10, 0), RULES).notices), vec![vec!["交水电费"]]);
+        assert_eq!(told(&look(Some(&items), &mut first, time(10, 0), RULES).notices), vec![vec!["交水电费"]]);
         // One alone missed: told of alone, as it is.
         let mut kept = Kept { last: Some(time(14, 0)), told: ["整理周报 @2026-11-21 14:00".to_string(), "交水电费 @2026-11-21".to_string()].into(), ..Kept::default() };
-        let looked = look(&items, &mut kept, time(16, 25), RULES);
+        let looked = look(Some(&items), &mut kept, time(16, 25), RULES);
         assert_eq!(told(&looked.notices), vec![vec!["预约体检"]]);
         assert_eq!(says(&looked.notices[0], time(16, 25), true), ("预约体检".into(), "今天 16:30 · 还有 5 分钟".into()));
     }
 
     #[test]
+    fn the_notification_of_those_missed_together_tells_of_those_left_as_they_are_done() {
+        let mut items = vec![item("整理周报", Some((0, Some((14, 0))))), item("预约体检", Some((0, Some((15, 0))))), item("交水电费", Some((0, None)))];
+        let mut kept = Kept { last: Some(time(13, 0)), told: ["交水电费 @2026-11-21".to_string()].into(), ..Kept::default() };
+        assert_eq!(told(&look(Some(&items), &mut kept, time(16, 0), RULES).notices), vec![vec!["整理周报", "预约体检"]]);
+        assert_eq!(look(Some(&items), &mut kept, time(16, 1), RULES).missed_left, None);
+        // One ticked: of the other alone. Both: taken back. Then nothing more.
+        items[0].done = true;
+        let left = look(Some(&items), &mut kept, time(16, 2), RULES).missed_left.unwrap();
+        assert_eq!(left.iter().map(|tell| tell.item.text.as_str()).collect::<Vec<_>>(), vec!["预约体检"]);
+        items[1].due = Some(Due { day: day(), time: Some((18, 0)) });
+        assert_eq!(look(Some(&items), &mut kept, time(16, 3), RULES).missed_left, Some(Vec::new()));
+        assert_eq!(look(Some(&items), &mut kept, time(16, 4), RULES).missed_left, None);
+        // (Another ticked, not among them: nothing to change in it.)
+        let mut kept = Kept { last: Some(time(13, 0)), ..Kept::default() };
+        look(Some(&items[1..]), &mut kept, time(16, 0), RULES);
+        items[2].done = true;
+        assert_eq!(look(Some(&items[1..]), &mut kept, time(16, 1), RULES).missed_left, None);
+    }
+
+    #[test]
+    fn nothing_is_forgotten_while_the_to_dos_are_not_to_be_read() {
+        let items = [item("回复邮件", Some((0, Some((15, 0))))), item("交水电费", Some((0, None)))];
+        let mut kept = Kept { last: Some(time(8, 0)), ..Kept::default() };
+        assert_eq!(look(Some(&items), &mut kept, time(9, 0), RULES).notices.len(), 1);
+        tell_later(&mut kept, &key(&items[1]).unwrap(), &items[1], Later::Minutes(60), time(9, 0), RULES);
+        // The notes' drive taken out from 9:30 to 11:00: nothing told, nothing forgotten.
+        let was = kept.clone();
+        for now in [time(9, 30), time(10, 0), time(10, 30)] {
+            assert_eq!(look(None, &mut kept, now, RULES), Looked::default());
+        }
+        assert_eq!((&kept.told, &kept.later), (&was.told, &was.later));
+        // Back: what was to be told again told then, and the other at its time.
+        assert_eq!(told(&look(Some(&items), &mut kept, time(11, 0), RULES).notices), vec![vec!["交水电费"]]);
+        assert_eq!(told(&look(Some(&items), &mut kept, time(14, 50), RULES).notices), vec![vec!["回复邮件"]]);
+    }
+
+    #[test]
     fn a_to_do_written_after_its_reminder_is_told_of_at_its_own_time_and_one_written_after_that_not_at_all() {
         let mut kept = Kept { last: Some(time(14, 0)), ..Kept::default() };
-        assert!(look(&[], &mut kept, time(14, 55), RULES).notices.is_empty());
+        assert!(look(Some(&[]), &mut kept, time(14, 55), RULES).notices.is_empty());
         // Written at 14:55, due at 15:00: its reminder (14:50) gone by, it is told of at 15:00.
         let soon = [item("开会", Some((0, Some((15, 0))))), item("早就过了", Some((0, Some((11, 0))))), item("今天全天", Some((0, None)))];
         let shown = watched(&soon, &mut kept, time(14, 55) + 10, time(16, 0));
@@ -500,18 +577,18 @@ mod tests {
     fn a_to_do_changed_is_told_of_at_its_new_time_and_its_notification_taken_back() {
         let mut items = vec![item("回复邮件", Some((0, Some((15, 0)))))];
         let mut kept = Kept { last: Some(time(14, 0)), ..Kept::default() };
-        assert_eq!(look(&items, &mut kept, time(14, 50), RULES).notices.len(), 1);
+        assert_eq!(look(Some(&items), &mut kept, time(14, 50), RULES).notices.len(), 1);
         // Moved to 17:00: the old one's notification taken back, the new told of at 16:50.
         items[0].due = Some(Due { day: day(), time: Some((17, 0)) });
-        let looked = look(&items, &mut kept, time(14, 51), RULES);
+        let looked = look(Some(&items), &mut kept, time(14, 51), RULES);
         assert_eq!(looked.gone, vec!["回复邮件 @2026-11-21 15:00".to_string()]);
         assert_eq!(looked.next, Some(time(16, 50)));
-        assert_eq!(look(&items, &mut kept, time(16, 50), RULES).notices.len(), 1);
+        assert_eq!(look(Some(&items), &mut kept, time(16, 50), RULES).notices.len(), 1);
         // Ticked: taken back. Unticked, its reminder's time gone by: told of at its own.
         items[0].done = true;
-        assert_eq!(look(&items, &mut kept, time(16, 51), RULES).gone, vec!["回复邮件 @2026-11-21 17:00".to_string()]);
+        assert_eq!(look(Some(&items), &mut kept, time(16, 51), RULES).gone, vec!["回复邮件 @2026-11-21 17:00".to_string()]);
         items[0].done = false;
-        let looked = look(&items, &mut kept, time(16, 52), RULES);
+        let looked = look(Some(&items), &mut kept, time(16, 52), RULES);
         assert_eq!((looked.notices.len(), looked.next), (0, Some(time(17, 0))));
     }
 
@@ -538,7 +615,7 @@ mod tests {
 
     #[test]
     fn kept_reads_back_as_written() {
-        let kept = Kept { told: ["a @2026-11-21".into()].into(), later: [("b @2026-11-21 15:00".into(), time(15, 10))].into(), last: Some(time(14, 0)) };
+        let kept = Kept { told: ["a @2026-11-21".into()].into(), later: [("b @2026-11-21 15:00".into(), time(15, 10))].into(), last: Some(time(14, 0)), missed: vec!["c @2026-11-21".into()] };
         assert_eq!(serde_json::from_str::<Kept>(&serde_json::to_string(&kept).unwrap()).unwrap(), kept);
         assert_eq!(serde_json::from_str::<Kept>("{}").unwrap(), Kept::default());
     }

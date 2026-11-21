@@ -531,6 +531,14 @@ pub fn list() -> List {
     state.list.clone()
 }
 
+/// The to-do note's items as they are now, none where there is no to-do note: none written yet, or its folder not to
+/// be reached (a drive taken out). Not that it holds none.
+pub fn read() -> Option<List> {
+    let mut state = STATE.lock().unwrap();
+    state.follow();
+    (state.name.is_some() || state.made != state.written).then(|| state.list.clone())
+}
+
 /// `text` added as an item, first among those not done, its time the one its words name (see `words`), or `due`
 /// where one is set for it: its words as kept. Nothing, with no words left.
 pub fn add(text: &str, due: Option<Due>) -> Option<String> {

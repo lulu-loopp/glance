@@ -124,14 +124,30 @@ fn icon() -> Option<std::path::PathBuf> {
     Some(path)
 }
 
-/// The notification `xml` shown, as `tag` of `group` (another of the same taking its place).
-pub fn show(xml: &str, tag: &str, group: &str) -> windows::core::Result<()> {
+/// The notification `xml` shown, as `tag` of `group` (another of the same taking its place): `quiet`, only among the
+/// notifications, without coming up on the screen.
+pub fn show(xml: &str, tag: &str, group: &str, quiet: bool) -> windows::core::Result<()> {
     let document = XmlDocument::new()?;
     document.LoadXml(&HSTRING::from(xml))?;
     let toast = ToastNotification::CreateToastNotification(&document)?;
     toast.SetTag(&HSTRING::from(tag))?;
     toast.SetGroup(&HSTRING::from(group))?;
+    toast.SetSuppressPopup(quiet)?;
     ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP))?.Show(&toast)
+}
+
+/// Whether the notification `tag` of `group` is still among the notifications (not pressed, not closed).
+pub fn shown(tag: &str, group: &str) -> bool {
+    let found = || -> windows::core::Result<bool> {
+        let kept = ToastNotificationManager::History()?.GetHistoryWithId(&HSTRING::from(APP))?;
+        for toast in kept {
+            if toast.Tag()? == tag && toast.Group()? == group {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    found().unwrap_or(false)
 }
 
 /// The notification `tag` of `group` taken back, on the screen or among the notifications kept.
@@ -139,7 +155,8 @@ pub fn take_back(tag: &str, group: &str) -> windows::core::Result<()> {
     ToastNotificationManager::History()?.RemoveGroupedTagWithId(&HSTRING::from(tag), &HSTRING::from(group), &HSTRING::from(APP))
 }
 
-/// `text` as it is written in a notification's XML, an attribute's value or words.
+/// `text` as it is written in a notification's XML, an attribute's value or words: a tab or a line's end written as
+/// the character it is, which an attribute's value would otherwise read as a space.
 pub fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -149,6 +166,9 @@ pub fn escaped(text: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
+            '\t' => out.push_str("&#9;"),
+            '\n' => out.push_str("&#10;"),
+            '\r' => out.push_str("&#13;"),
             // (Characters XML does not take: left out.)
             c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
             c => out.push(c),
@@ -163,10 +183,13 @@ mod tests {
 
     #[test]
     fn text_is_written_as_xml_takes_it() {
-        assert_eq!(escaped(r#"a<b>&"c" 'd'"#), "a&lt;b&gt;&amp;&quot;c&quot; &apos;d&apos;");
-        assert_eq!(escaped("x\u{1}y\tz"), "xy\tz");
+        // Read back as written: a to-do's words in a button's arguments (a tab among them) are those it is found by.
+        let launch = "open:\"<&>\ta\nb @2026-11-21";
         let document = XmlDocument::new().unwrap();
-        document.LoadXml(&HSTRING::from(format!("<toast launch=\"{}\"><visual><binding template=\"ToastGeneric\"><text>{}</text></binding></visual></toast>", escaped("open:\"<&>"), escaped("a & b < c")))).unwrap();
+        document.LoadXml(&HSTRING::from(format!("<toast launch=\"{}\"><visual><binding template=\"ToastGeneric\"><text>{}</text></binding></visual></toast>", escaped(launch), escaped("a & b < c")))).unwrap();
+        assert_eq!(document.DocumentElement().unwrap().GetAttribute(&HSTRING::from("launch")).unwrap().to_string(), launch);
+        assert_eq!(escaped(r#"a<b>&"c" 'd'"#), "a&lt;b&gt;&amp;&quot;c&quot; &apos;d&apos;");
+        assert_eq!(escaped("x\u{1}y\tz"), "xy&#9;z");
     }
 
     #[test]
