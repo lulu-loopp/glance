@@ -207,7 +207,7 @@ impl Ui {
             Part::Monitor => arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Corner), scale: 1.0, extra: (0.0, 0.0) }),
             // (The AI component as its edges open it: its dock, laid across to fill the tile as a top edge's is.)
             Part::Ai if self.settings.ai_form == crate::settings::AiForm::Dock => {
-                arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Dock { across: true }), scale: 1.0, extra: (0.0, 0.0) })
+                arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(super::super::forms::Small::Dock { across: true, today: !matches!(readings, super::super::forms::Shows::Ai(_, false)) }), scale: 1.0, extra: (0.0, 0.0) })
             }
             _ => arrange::Want::Itself,
         };

@@ -8232,7 +8232,7 @@ It can be disconnected here at any time, and the status line command put back.",
         // sources to dock, as the panel lays it out (see `Panel::arrange_lanes`); else its lanes.
         let shows = crate::ui::forms::shows(&probe);
         let dock = match shows {
-            crate::ui::forms::Shows::Ai(count) if part == Part::Ai && self.settings.ai_form == crate::settings::AiForm::Dock && count > 0 => Some(crate::ui::forms::Small::Dock { across: edge == Edge::Top }),
+            crate::ui::forms::Shows::Ai(count, today) if part == Part::Ai && self.settings.ai_form == crate::settings::AiForm::Dock && count > 0 => Some(crate::ui::forms::Small::Dock { across: edge == Edge::Top, today }),
             _ => None,
         };
         // What it is (another drawn in its place is not turned into: see `render::Turn::follow`).
@@ -8727,7 +8727,7 @@ mod pictures {
                     ui.settings.ai_form = form;
                     let prefs = ui.prefs.clone().holding(Part::Ai);
                     let edge = ui.preview_edge();
-                    let dock = view::ai::dock_size(edge == Edge::Top, view::ai::docked(&prefs).len());
+                    let dock = view::ai::dock_size(edge == Edge::Top, view::ai::docked(&prefs).len(), view::ai::shows_today(&prefs));
                     let panel = ui.stage_panel(frame, area, Some((edge, &prefs, Part::Ai)), Staging { draw: false, ..Staging::default() }).panel.unwrap();
                     (panel, dock)
                 });

@@ -4328,8 +4328,8 @@ impl<'a> Panel<'a> {
                 // else laid out itself.
                 let shows = crate::ui::forms::shows(&scene);
                 let want = match shows {
-                    crate::ui::forms::Shows::Ai(count) if self.docked && count > 0 => {
-                        let dock = crate::ui::forms::Small::Dock { across: self.edge == Edge::Top };
+                    crate::ui::forms::Shows::Ai(count, today) if self.docked && count > 0 => {
+                        let dock = crate::ui::forms::Small::Dock { across: self.edge == Edge::Top, today };
                         arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) })
                     }
                     _ => arrange::Want::Itself,

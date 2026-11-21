@@ -1189,7 +1189,7 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
             best = Some((form, says));
         }
     }
-    // No form holding every source (today's figure alone fits): as many sources as fit whole, the rest turned to by
+    // No form holding every source (one figure alone fits): as many sources as fit whole, the rest turned to by
     // the wheel (see `paint_paged`). (A widget only a little smaller than one holding them all showed today's figure
     // alone, as the owner saw.)
     if best.is_none_or(|(form, _)| form == Form::Today) && paint_paged(frame, scene, told, room, hits) {
@@ -1263,7 +1263,8 @@ pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&
     };
     // As many side by side as fit, then what every source spent beside them where it fits too. (So, made wider, it
     // shows no fewer: what fits narrower fits wider.)
-    let Some((per, today, (room, each, lanes))) = (1..=count).rev().flat_map(|per| [(per, true), (per, false)]).find_map(|(per, today)| Some((per, today, laid(per, today)?))) else { return false };
+    let today_shown = dock.today.is_some();
+    let Some((per, today, (room, each, lanes))) = (1..=count).rev().flat_map(|per| [(per, true), (per, false)]).filter(|(_, today)| today_shown || !today).find_map(|(per, today)| Some((per, today, laid(per, today)?))) else { return false };
     let paged = per < count;
     let parts_left = left + if today { PAGED_TODAY + PAGED_GAP } else { 0.0 };
     // What every source spent today, and the sessions at work under it, in the middle down.
@@ -1281,7 +1282,7 @@ pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&
         frame.text(lang.pick("今日", "Today"), label, theme.text3, left, row, PAGED_TODAY, Align::Start);
         row += label.size + 4.0;
         frame.key("ai:today.value");
-        frame.text(&dock.today, figure, theme.text, left, row, PAGED_TODAY, Align::Start);
+        frame.text(dock.today.as_deref().unwrap_or_default(), figure, theme.text, left, row, PAGED_TODAY, Align::Start);
         row += figure.size + 6.0;
         if working {
             frame.key("ai:dock.at_work");
@@ -1312,20 +1313,8 @@ pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&
     }
     frame.unclip();
     if paged {
-        // Which are shown, of how many: a dot each, those shown drawn long.
-        const DOT: f32 = 4.0;
-        const LONG: f32 = 12.0;
-        let first = at.round() as usize;
-        let column = (count - per) as f32 * (DOT + DOT) + per as f32 * (LONG + DOT) - DOT;
-        let mut dot_y = top + (height - column) / 2.0;
-        let dot_x = left + width - PAGER / 2.0 - DOT / 2.0;
-        frame.key("ai:pages");
-        for n in 0..count {
-            let on = n >= first && n < first + per;
-            let long = if on { LONG } else { DOT };
-            frame.fill_rounded(if on { theme.text } else { theme.text3 }, dot_x, dot_y, DOT, long, DOT / 2.0);
-            dot_y += long + DOT;
-        }
+        // Which are shown, of how many.
+        pager_dots(frame, theme, (left + width - PAGER / 2.0, top, height), count, (at.round() as usize, per));
         hits.push((x, y, w, h, Hit::AiPages(most.to_bits())));
     }
     true
@@ -1347,7 +1336,7 @@ enum Form {
     Board,
     /// Its parts one over another, as its lane is, then what each spent by model, then its sessions.
     Column,
-    /// Today's figure alone.
+    /// One figure alone: today's, where it is shown, else a source's, the rest turned to by the wheel (see `paint_one`).
     Today,
 }
 
@@ -1365,7 +1354,7 @@ fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
             Some(false)
         }
         Form::Down => {
-            let (dw, dh) = dock_size(false, dock.slots.len());
+            let (dw, dh) = dock_size(false, dock.slots.len(), dock.today.is_some());
             (w >= dw * 0.8 && h >= dh).then(|| hits.extend(draw_dock(frame, scene, dock, false, room)))?;
             Some(false)
         }
@@ -1384,7 +1373,7 @@ fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
             Some(told)
         }
         Form::Today => {
-            paint_today(frame, scene, dock, room, hits);
+            paint_one(frame, scene, dock, room, hits);
             Some(false)
         }
     }
@@ -1612,10 +1601,10 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
     // Today's figure as large as its room across lets it be, in the room it has as designed (made smaller where it is
     // narrower, it gave the rings room they did not have where it was wider).
     let figure_font = Font { size: if roomy { 30.0 } else { (height * 0.2).clamp(15.0, 24.0) }, weight: 650.0, ..theme.figure };
-    let today_tall = label.size + 4.0 + figure_font.size;
-    let natural = frame.measure(&dock.today, figure_font);
+    let today_tall = if dock.today.is_some() { label.size + 4.0 + figure_font.size + 12.0 } else { 0.0 };
+    let natural = dock.today.as_deref().map_or(0.0, |today| frame.measure(today, figure_font));
     let figure_font = if natural > width && natural > 0.0 { Font { size: (figure_font.size * width / natural).max(11.0), ..figure_font } } else { figure_font };
-    let rings_top = top + if roomy { HEAD + 4.0 } else { 0.0 } + today_tall + 12.0;
+    let rings_top = top + if roomy { HEAD + 4.0 } else { 0.0 } + today_tall;
     let under = if roomy { 36.0 + if resets { 14.0 } else { 0.0 } } else { 18.0 };
     let foot = if foot { LINE + 10.0 } else { 0.0 };
     let most = if roomy { 56.0 } else { 44.0 };
@@ -1678,12 +1667,14 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
     let mut row = top;
     if roomy {
         let row_y = row + (HEAD - theme.title.size) / 2.0 - 1.0;
-        frame.key("ai:today.head");
+        frame.key("ai:head");
         frame.text(lang.pick("AI 用量", "AI usage"), theme.title, theme.text, left, row_y, width, Align::Start);
-        frame.key("ai:today.aside");
-        frame.text(lang.pick("今日", "Today"), theme.small, theme.text3, left, row_y + 1.0, width, Align::End);
+        if dock.today.is_some() {
+            frame.key("ai:today.aside");
+            frame.text(lang.pick("今日", "Today"), theme.small, theme.text3, left, row_y + 1.0, width, Align::End);
+        }
         row += HEAD + 4.0;
-    } else {
+    } else if dock.today.is_some() {
         frame.key("ai:today.label");
         // (Over one column of rings, in the middle as they are.)
         if columns == 1 {
@@ -1693,18 +1684,22 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         }
         row += label.size + 4.0;
     }
-    spot(Spot::Today, (left, top, width, rings_top - 12.0 - top));
-    frame.key("ai:today.value");
-    let figure_width = frame.measure(&dock.today, figure_font);
-    let figure_top = if roomy { row + label.size + 4.0 - figure_font.size * 0.25 } else { row };
-    if columns == 1 && !roomy {
-        centred(frame, &dock.today, figure_font, theme.text, left + width / 2.0, figure_top);
+    // Today's figure, and how it mounted after it, where it is shown.
+    let figure_width = if let Some(today) = &dock.today {
+        spot(Spot::Today, (left, top, width, rings_top - 12.0 - top));
+        frame.key("ai:today.value");
+        let figure_top = if roomy { row + label.size + 4.0 - figure_font.size * 0.25 } else { row };
+        if columns == 1 && !roomy {
+            centred(frame, today, figure_font, theme.text, left + width / 2.0, figure_top);
+        } else {
+            frame.text(today, figure_font, theme.text, left, figure_top, width, Align::Start);
+        }
+        Some(frame.measure(today, figure_font))
     } else {
-        frame.text(&dock.today, figure_font, theme.text, left, figure_top, width, Align::Start);
-    }
-    // How it mounted, after the figure.
-    let spark_left = left + figure_width + 16.0;
-    if roomy && mounted.len() >= 2 && left + width - spark_left >= 40.0 {
+        None
+    };
+    let spark_left = left + figure_width.unwrap_or(0.0) + 16.0;
+    if figure_width.is_some() && roomy && mounted.len() >= 2 && left + width - spark_left >= 40.0 {
         let (spark_top, spark_foot) = (row + 6.0, rings_top - 16.0);
         let spark_width = left + width - spark_left;
         let points: Vec<Point> = mounted
@@ -1771,25 +1766,70 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
     Some(models_shown)
 }
 
-/// Today's figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
-/// enough.
-fn paint_today(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+/// One figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
+/// enough: what every source spent today, where it is shown; else a source's (its tightest window's share used, or
+/// what it has), the rest turned to by the wheel, a source a notch (`List::AiSources`, as in `paint_paged`), with dots
+/// at the right telling which is shown of how many where there is room for them beside it.
+fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let (theme, lang) = (scene.theme, scene.lang);
     let label = Font { size: 11.0, weight: 500.0, ..theme.body };
     let inset = 14.0_f32.min(w / 6.0);
+    let count = dock.slots.len();
+    let paged = dock.today.is_none() && count > 1;
+    // (The dots' room at the right, where there is any beside the figure.)
+    let pager = if paged && w - 2.0 * inset >= 4.0 * PAGER { PAGER } else { 0.0 };
+    let (left, width) = (x + inset, (w - 2.0 * inset - pager).max(0.0));
     let font = Font { size: (w * 0.26).clamp(11.0, 22.0), weight: 650.0, ..theme.figure };
     let tall = (label.size + 4.0 + font.size).min((h - 2.0 * inset).max(0.0));
     let middle = y + h / 2.0;
-    if scene.hover == Some(Hit::AiSlot(Spot::Today)) {
-        frame.fill_rounded(theme.hover, x + inset - 4.0, middle - tall / 2.0 - 4.0, w - 2.0 * inset + 8.0, tall + 8.0, 12.0);
+    let most = count.saturating_sub(1) as f32 * PAGE;
+    let at = scene.scrolls.at(List::AiSources).clamp(0.0, most) / PAGE;
+    let first = at.round() as usize;
+    let (spot, of, figure, color): (Spot, String, &str, Color) = match (&dock.today, dock.slots.get(first)) {
+        (Some(today), _) => (Spot::Today, lang.pick("今日", "Today").into(), today, theme.text),
+        (None, Some(slot)) => {
+            let name = slot.source.name(lang);
+            let of = if slot.label.is_empty() { name.to_string() } else { format!("{name} · {}", slot.label) };
+            (Spot::Ring(slot.source), of, &slot.figure, if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text })
+        }
+        (None, None) => return,
+    };
+    if scene.hover == Some(Hit::AiSlot(spot)) {
+        frame.fill_rounded(theme.hover, left - 4.0, middle - tall / 2.0 - 4.0, width + 8.0, tall + 8.0, 12.0);
     }
-    hits.push((x + inset, middle - tall / 2.0, (w - 2.0 * inset).max(0.0), tall, Hit::AiSlot(Spot::Today)));
+    hits.push((left, middle - tall / 2.0, width, tall, Hit::AiSlot(spot)));
+    let key = match spot {
+        Spot::Ring(source) => source.id(),
+        _ => "ai:today",
+    };
     if h >= 60.0 {
-        frame.key("ai:today.label");
-        centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + w / 2.0, middle - tall / 2.0);
+        frame.key(&format!("{key}.label"));
+        centred(frame, &of, label, theme.text3, left + width / 2.0, middle - tall / 2.0);
     }
-    frame.key("ai:today.value");
-    centred(frame, &dock.today, font, theme.text, x + w / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
+    frame.key(&format!("{key}.value"));
+    centred(frame, figure, font, color, left + width / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
+    if paged {
+        if pager > 0.0 {
+            pager_dots(frame, theme, (left + width + pager / 2.0, y + inset, (h - 2.0 * inset).max(0.0)), count, (first, 1));
+        }
+        hits.push((x, y, w, h, Hit::AiPages(most.to_bits())));
+    }
+}
+
+/// The dots that tell which of `count` are shown (`shown`: the first of them and how many), down a column at `x` (their
+/// middle), in the middle of the room from `top` `tall`: a dot each, those shown drawn long.
+fn pager_dots(frame: &dyn Canvas, theme: &Theme, (x, top, tall): (f32, f32, f32), count: usize, (first, per): (usize, usize)) {
+    const DOT: f32 = 4.0;
+    const LONG: f32 = 12.0;
+    let column = (count - per) as f32 * (DOT + DOT) + per as f32 * (LONG + DOT) - DOT;
+    let mut dot_y = top + (tall - column) / 2.0;
+    frame.key("ai:pages");
+    for n in 0..count {
+        let on = n >= first && n < first + per;
+        let long = if on { LONG } else { DOT };
+        frame.fill_rounded(if on { theme.text } else { theme.text3 }, x - DOT / 2.0, dot_y, DOT, long, DOT / 2.0);
+        dot_y += long + DOT;
+    }
 }
 
 /// The least a widget is to show the head, how today's spending mounted and what each ring's figure is of (DIPs).
@@ -1815,7 +1855,8 @@ pub struct Slot {
 /// sessions are at work.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Dock {
-    pub today: String,
+    /// What every source spent today, where "Today" is shown (see `shows_today`).
+    pub today: Option<String>,
     pub slots: Vec<Slot>,
     pub at_work: Vec<Source>,
     pub working: usize,
@@ -1834,6 +1875,12 @@ const BAR_END: f32 = 76.0;
 const BAR_SLOT: f32 = 120.0;
 
 /// The sources the dock shows, as `prefs` show the AI component: those switched on, in their order.
+/// Whether the component shows what every source spent today (its module "Today" on): drawn nowhere where it is not,
+/// in its lane, its dock or a widget.
+pub fn shows_today(prefs: &Prefs) -> bool {
+    prefs.modules.iter().any(|entry| entry.id == "ai:today" && shows_module(entry))
+}
+
 pub fn docked(prefs: &Prefs) -> Vec<Source> {
     prefs.modules.iter().filter(|entry| shows_module(entry)).filter_map(|entry| Source::of(&entry.id)).collect()
 }
@@ -1844,13 +1891,14 @@ pub fn sources_shown(prefs: &Prefs) -> Vec<String> {
     docked(prefs).into_iter().map(|source| source.id().to_string()).collect()
 }
 
-/// The dock's size as designed for `count` sources: down a side, or `across` a top edge (DIPs).
-pub fn dock_size(across: bool, count: usize) -> (f32, f32) {
-    let count = count as f32;
+/// The dock's size as designed for `count` sources, with what every source spent today or not (`today`): down a side,
+/// or `across` a top edge (DIPs).
+pub fn dock_size(across: bool, count: usize, today: bool) -> (f32, f32) {
+    let (count, today) = (count as f32, if today { 1.0 } else { 0.0 });
     if across {
-        (2.0 * DOCK_PAD + 2.0 * BAR_END + count * BAR_SLOT, BAR_HEIGHT)
+        (2.0 * DOCK_PAD + (1.0 + today) * BAR_END + count * BAR_SLOT, BAR_HEIGHT)
     } else {
-        (DOCK_WIDTH, 2.0 * DOCK_PAD + DOCK_TODAY + count * DOCK_SLOT + DOCK_FOOT)
+        (DOCK_WIDTH, 2.0 * DOCK_PAD + today * DOCK_TODAY + count * DOCK_SLOT + DOCK_FOOT)
     }
 }
 
@@ -1860,9 +1908,9 @@ pub(super) fn dock_of(prefs: &Prefs, lang: Lang, usage: Option<&crate::ai::Usage
     let sources = docked(prefs);
     let Some(usage) = usage else {
         let slots = sources.into_iter().map(|source| Slot { source, used: None, figure: "—".into(), label: lang.pick("正在读取", "Reading").into(), resets: String::new(), windows: Vec::new() }).collect();
-        return Dock { today: "—".into(), slots, at_work: Vec::new(), working: 0 };
+        return Dock { today: shows_today(prefs).then(|| "—".into()), slots, at_work: Vec::new(), working: 0 };
     };
-    let today = short(usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum(), lang);
+    let today = shows_today(prefs).then(|| short(usage.spent_today.iter().map(|(_, _, tokens)| tokens.total()).sum(), lang));
     let slots = sources
         .iter()
         .map(|&source| {
@@ -1954,8 +2002,8 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     let big = Font { size: 14.0, weight: 650.0, ..theme.figure };
     let (figure, under) = slot_fonts(theme);
     let count = dock.slots.len();
-    let parts = count as f32 + 2.0;
-    let natural = dock_size(across, count);
+    let parts = count as f32 + if dock.today.is_some() { 2.0 } else { 1.0 };
+    let natural = dock_size(across, count, dock.today.is_some());
     let figure_of = |slot: &Slot| if slot.used.is_some_and(|used| used >= HOT) { theme.signal } else { theme.text };
     let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
     // Each spot the pointer rests on to show its card beside the dock: where it is, and its plate lit under the pointer.
@@ -1989,13 +2037,15 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         let at = |x: f32, wide: f32| ((x, middle - band / 2.0, wide, band), (x, middle - pill / 2.0, wide, pill, pill / 2.0));
         let named = slot_w >= STRIP_NAMED;
         let mut x = x0 + DOCK_PAD + gap / 2.0 + round_it / 2.0;
-        let (hit, plate) = at(x, BAR_END);
-        spot(frame, Spot::Today, hit, plate);
-        frame.key("ai:today.label");
-        centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
-        frame.key("ai:today.value");
-        centred(frame, &dock.today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
-        x += BAR_END + gap;
+        if let Some(today) = &dock.today {
+            let (hit, plate) = at(x, BAR_END);
+            spot(frame, Spot::Today, hit, plate);
+            frame.key("ai:today.label");
+            centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
+            frame.key("ai:today.value");
+            centred(frame, today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
+            x += BAR_END + gap;
+        }
         for slot in &dock.slots {
             let (hit, plate) = at(x, slot_w);
             spot(frame, Spot::Ring(slot.source), hit, plate);
@@ -2056,12 +2106,14 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     let round_it = (h - tall - gap * parts).max(0.0);
     let mut y = y0 + DOCK_PAD + gap / 2.0 + round_it / 2.0;
     let round = 16.0_f32.min((w - 10.0) / 2.0);
-    spot(frame, Spot::Today, (x0, y, w, DOCK_TODAY), (x0 + 5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
-    frame.key("ai:today.label");
-    centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
-    frame.key("ai:today.value");
-    centred(frame, &dock.today, big, theme.text, centre, y + 18.0);
-    y += DOCK_TODAY + gap;
+    if let Some(today) = &dock.today {
+        spot(frame, Spot::Today, (x0, y, w, DOCK_TODAY), (x0 + 5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
+        frame.key("ai:today.label");
+        centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
+        frame.key("ai:today.value");
+        centred(frame, today, big, theme.text, centre, y + 18.0);
+        y += DOCK_TODAY + gap;
+    }
     for slot in &dock.slots {
         spot(frame, Spot::Ring(slot.source), (x0, y, w, slot_h), (x0 + 5.0, y, w - 10.0, slot_h - 4.0, round));
         ring(frame, theme, slot, Point { x: centre, y: y + 8.0 + 22.0 }, 21.5, 3.0, 20.0);
@@ -2097,7 +2149,7 @@ fn slot_fonts(theme: &Theme) -> (Font, Font) {
 pub(super) fn strip_least(frame: &dyn Canvas, theme: &Theme, dock: &Dock) -> f32 {
     let (figure, under) = slot_fonts(theme);
     let slot = dock.slots.iter().map(|slot| SLOT_WORDS + frame.measure(&slot.figure, figure).max(frame.measure(&slot.label, under)) + 8.0).fold(0.0, f32::max).min(BAR_SLOT);
-    2.0 * DOCK_PAD + 2.0 * BAR_END + dock.slots.len() as f32 * slot
+    2.0 * DOCK_PAD + (if dock.today.is_some() { 2.0 } else { 1.0 }) * BAR_END + dock.slots.len() as f32 * slot
 }
 
 /// Where a slot's words start across its strip (DIPs): its ring's room.
@@ -2511,7 +2563,7 @@ pub(super) mod tests {
         fn the_dock_shows_each_source_by_its_tightest_window() {
             let usage = day();
             let dock = dock_of(&Prefs::resolve(&serde_json::Value::Null, &[]).holding(crate::settings::Part::Ai), Lang::Zh, Some(&usage), NOON);
-            assert_eq!(dock.today, "20 万");
+            assert_eq!(dock.today.as_deref(), Some("20 万"));
             let slots: Vec<(Source, Option<f32>, &str, &str)> = dock.slots.iter().map(|slot| (slot.source, slot.used, slot.figure.as_str(), slot.label.as_str())).collect();
             assert_eq!(slots, [(Source::Claude, None, "10 万", "今日"), (Source::Codex, Some(0.95), "95%", "每周")]);
             assert_eq!((dock.at_work.as_slice(), dock.working), ([Source::Codex].as_slice(), 1));

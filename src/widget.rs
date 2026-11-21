@@ -5477,7 +5477,7 @@ mod tests {
         // (All of the component, three sources, as designed: one column, tall.)
         let designed = (view::COLUMN_WIDTH, 620.0);
         for (across, shape) in [(true, view::Shape::Across), (false, view::Shape::Down)] {
-            let dock = Small::Dock { across };
+            let dock = Small::Dock { across, today: true };
             let choice = Choice { form: Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) };
             let made = made_size(choice, designed, 3, theme.radius);
             assert_eq!(made, dock.size_within(3, theme.radius), "{dock:?}");
