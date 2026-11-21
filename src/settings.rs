@@ -398,6 +398,9 @@ pub struct PanelLayout {
     pub extra: (f32, f32),
     /// Whose lanes it shows: the readings', the workbench's or the AI component's (what plays is told by its form).
     pub lanes: Part,
+    /// The AI component's source it shows first, by its module's id, where it is too small for all of them and they are
+    /// turned through by the wheel (see `view::keep_source`).
+    pub ai_source: Option<String>,
 }
 
 /// A `PanelLayout` as it is written: whose lanes it shows said only where they are not the readings', the workbench's
@@ -411,6 +414,8 @@ struct KeptLayout {
     workbench: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     ai: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai_source: Option<String>,
 }
 
 impl From<KeptLayout> for PanelLayout {
@@ -420,13 +425,13 @@ impl From<KeptLayout> for PanelLayout {
             (true, false) => Part::Workbench,
             (false, false) => Part::Monitor,
         };
-        PanelLayout { form: kept.form, scale: kept.scale, extra: kept.extra, lanes }
+        PanelLayout { form: kept.form, scale: kept.scale, extra: kept.extra, lanes, ai_source: kept.ai_source }
     }
 }
 
 impl From<PanelLayout> for KeptLayout {
     fn from(layout: PanelLayout) -> Self {
-        KeptLayout { form: layout.form, scale: layout.scale, extra: layout.extra, workbench: layout.lanes == Part::Workbench, ai: layout.lanes == Part::Ai }
+        KeptLayout { form: layout.form, scale: layout.scale, extra: layout.extra, workbench: layout.lanes == Part::Workbench, ai: layout.lanes == Part::Ai, ai_source: layout.ai_source }
     }
 }
 
@@ -1759,10 +1764,14 @@ mod tests {
     }
 
     /// A widget keeps whose lanes it shows: the readings' as before (nothing said), the workbench's as an older
-    /// Glance reads them, the AI component's apart from both; and reads them back so.
+    /// Glance reads them, the AI component's apart from both; and reads them back so. The AI component's keeps the
+    /// source it shows first, said only where it is one.
     #[test]
     fn a_widget_keeps_whose_lanes_it_shows() {
-        let kept = |lanes| serde_json::to_value(PanelLayout { form: "full-2".into(), scale: 1.0, extra: (0.0, 0.0), lanes }).unwrap();
+        let kept = |lanes| serde_json::to_value(PanelLayout { form: "full-2".into(), scale: 1.0, extra: (0.0, 0.0), lanes, ai_source: None }).unwrap();
+        let source = serde_json::to_value(PanelLayout { form: "across-1".into(), scale: 1.5, extra: (0.0, 0.0), lanes: Part::Ai, ai_source: Some("ai:codex".into()) }).unwrap();
+        assert_eq!(source["ai_source"], "ai:codex");
+        assert_eq!(serde_json::from_value::<PanelLayout>(source).unwrap().ai_source.as_deref(), Some("ai:codex"));
         assert_eq!(kept(Part::Monitor), serde_json::json!({"form": "full-2", "scale": 1.0, "extra": [0.0, 0.0]}));
         assert_eq!(kept(Part::Workbench)["workbench"], true);
         assert_eq!((kept(Part::Ai)["ai"].clone(), kept(Part::Ai).get("workbench").is_none()), (serde_json::json!(true), true));

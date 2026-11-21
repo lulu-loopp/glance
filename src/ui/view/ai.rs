@@ -199,6 +199,9 @@ pub enum AiBlock {
     Sessions(Vec<(String, String, String, bool, Option<Source>)>),
     /// The sessions of the sources shown: how many are at work, and how many spent today.
     Working { at_work: usize, today: usize },
+    /// A source's windows all side by side in one row, without when each starts again (a source's part in a widget too
+    /// small for all of them: see `paint_paged`).
+    WindowsRow(Vec<Window>),
     /// The whole component in a widget too small for all of it, in `shape`: what the dock shows, how today's spending
     /// mounted, and what it tells in a widget roomy enough for more (see `paint_shaped`).
     Shaped { shape: Shape, dock: Dock, mounted: Vec<f32>, rich: Box<Rich> },
@@ -270,7 +273,7 @@ impl Hash for AiBlock {
         match self {
             AiBlock::Head { source, title, device, aside, opened } => (source, title, device, aside, opened).hash(state),
             AiBlock::Today { figure, unit, mounted } => (figure, unit, mounted.iter().map(|f| f.to_bits()).collect::<Vec<_>>()).hash(state),
-            AiBlock::Windows(windows) => windows.iter().for_each(|w| (&w.name, w.used.to_bits(), w.gone.map(f32::to_bits), &w.resets).hash(state)),
+            AiBlock::Windows(windows) | AiBlock::WindowsRow(windows) => windows.iter().for_each(|w| (&w.name, w.used.to_bits(), w.gone.map(f32::to_bits), &w.resets).hash(state)),
             AiBlock::Models(rows) => rows.iter().for_each(|(name, share, value)| (name, share.to_bits(), value).hash(state)),
             AiBlock::Sources(rows) => rows.iter().for_each(|(source, name, share, value)| (source, name, share.to_bits(), value).hash(state)),
             AiBlock::Pairs(rows) => rows.hash(state),
@@ -298,8 +301,13 @@ const SOURCE_GAP: f32 = 22.0;
 const ROW_GAP: f32 = 6.0;
 /// A window's bar, the room it is drawn in between its name and when it starts again (its middle there): clear of both.
 const BAR_BAND: f32 = 14.0;
-/// A window's: its name and how much is used, its bar, when it starts again.
+/// A window's: its name and how much is used, its bar, when it starts again (see `window_tall`).
 const WINDOW: f32 = LINE + BAR_BAND + LINE;
+
+/// How tall each of `windows` is: when it starts again under its bar only where any tells it.
+fn window_tall(windows: &[Window]) -> f32 {
+    if windows.iter().any(|window| !window.resets.is_empty()) { WINDOW } else { LINE + BAR_BAND }
+}
 /// Between two windows side by side, and two rows of them.
 const WINDOW_GAP: f32 = 16.0;
 /// The models' bar, and the room under it.
@@ -330,8 +338,9 @@ impl AiBlock {
             AiBlock::Today { .. } => PLOT,
             AiBlock::Windows(windows) => {
                 let rows = windows.len().div_ceil(2) as f32;
-                GAP + rows * WINDOW + (rows - 1.0).max(0.0) * WINDOW_GAP
+                GAP + rows * window_tall(windows) + (rows - 1.0).max(0.0) * WINDOW_GAP
             }
+            AiBlock::WindowsRow(_) => GAP + LINE + BAR_BAND,
             AiBlock::Models(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Sources(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + ROW_GAP) - ROW_GAP,
@@ -347,7 +356,7 @@ impl AiBlock {
         match self {
             AiBlock::Head { .. } => "head",
             AiBlock::Today { .. } => "today",
-            AiBlock::Windows(_) => "windows",
+            AiBlock::Windows(_) | AiBlock::WindowsRow(_) => "windows",
             AiBlock::Models(_) => "models",
             AiBlock::Sources(_) => "sources",
             AiBlock::Pairs(_) => "pairs",
@@ -1032,10 +1041,13 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 frame.fill_circle(ink.trace, *last, 2.6);
             }
         }
-        AiBlock::Windows(windows) => {
-            let column = (width - WINDOW_GAP) / 2.0;
+        AiBlock::Windows(windows) | AiBlock::WindowsRow(windows) => {
+            // (Two to a row, or all in one.)
+            let across = if matches!(block, AiBlock::WindowsRow(_)) { windows.len().max(1) } else { 2 };
+            let column = (width - (across - 1) as f32 * WINDOW_GAP) / across as f32;
+            let tall = window_tall(windows);
             for (at, window) in windows.iter().enumerate() {
-                let (x, top) = (left + (at % 2) as f32 * (column + WINDOW_GAP), y + GAP + (at / 2) as f32 * (WINDOW + WINDOW_GAP));
+                let (x, top) = (left + (at % across) as f32 * (column + WINDOW_GAP), y + GAP + (at / across) as f32 * (tall + WINDOW_GAP));
                 // (One alone across the lane.)
                 let wide = if windows.len() == 1 { width } else { column };
                 let hot = window.used >= HOT;
@@ -1177,9 +1189,146 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
             best = Some((form, says));
         }
     }
+    // No form holding every source (today's figure alone fits): as many sources as fit whole, the rest turned to by
+    // the wheel (see `paint_paged`). (A widget only a little smaller than one holding them all showed today's figure
+    // alone, as the owner saw.)
+    if best.is_none_or(|(form, _)| form == Form::Today) && paint_paged(frame, scene, told, room, hits) {
+        return;
+    }
     if let Some((form, _)) = best {
         paint_form(form, frame, scene, ink, told, room, hits);
     }
+}
+
+/// Laid out a page at a time (see `paint_paged`): how wide a source's part is at least, what every source spent beside
+/// the parts and the room between them, and the room the dots that tell the page take at the right (DIPs).
+const PAGED_PART: f32 = 200.0;
+const PAGED_TODAY: f32 = 92.0;
+const PAGED_GAP: f32 = 14.0;
+const PAGER: f32 = 12.0;
+
+/// How much a source's part tells laid out a page at a time, as there is room down: its head and its limits (or what
+/// it has and spent), then when each window starts again, then what it spent by model.
+const PAGED_LEVELS: usize = 3;
+
+/// The least a window is wide, its windows side by side in one row (see `AiBlock::WindowsRow`).
+const ROW_WINDOW_LEAST: f32 = 64.0;
+
+/// `part` (a source's) as a lane `width` wide telling as much as `level` (see `PAGED_LEVELS`): telling least, its
+/// windows in one row where they fit so, two to a row where they do not.
+fn paged_lane(part: &Part, theme: &Theme, width: f32, level: usize) -> Lane {
+    let mut lane = part_lane(part, theme, level >= 2);
+    if level == 0 {
+        for block in &mut lane.blocks {
+            if let Block::Ai(AiBlock::Windows(windows)) = block {
+                windows.iter_mut().for_each(|window| window.resets.clear());
+                let across = windows.len() as f32;
+                if windows.len() > 2 && (width - (across - 1.0) * WINDOW_GAP) / across >= ROW_WINDOW_LEAST {
+                    *block = Block::Ai(AiBlock::WindowsRow(std::mem::take(windows)));
+                }
+            }
+        }
+    }
+    lane
+}
+
+/// The component in a widget too small for any form that holds every source (see `paint_shaped`), filling `room`: what
+/// every source spent today and the sessions at work at the left where there is room beside a source's part, then as
+/// many sources' parts side by side as fit whole (at least `PAGED_PART` wide), each telling as much as it has room for
+/// down (see `PAGED_LEVELS`); the rest turned to by the wheel, a source a notch (`List::AiSources`), one under another
+/// a part alone, else side by side, and dots at the right telling which are shown of how many. Whether it fits (else
+/// nothing drawn): a source's part, as little as it tells.
+pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
+    let (theme, lang) = (scene.theme, scene.lang);
+    let parts: Vec<&Part> = dock.slots.iter().filter_map(|slot| rich.parts.iter().find(|part| part.id == slot.source.id())).collect();
+    let count = parts.len();
+    // (Inset as the least forms are: see `paint_least`.)
+    let (inset_x, inset_y) = (14.0_f32.min(w / 6.0), 14.0_f32.min(h / 6.0));
+    let (left, top, width, height) = (x + inset_x, y + inset_y, (w - 2.0 * inset_x).max(0.0), (h - 2.0 * inset_y).max(0.0));
+    if count == 0 || width < PAGED_PART {
+        return false;
+    }
+    let tall = |lane: &Lane| lane.blocks.iter().map(Block::height).sum::<f32>();
+    // Laid out with `per` parts side by side, what every source spent beside them or not: the room the parts take (the
+    // dots' taken where some are turned to), each part's width, and each part as much as it has room for down; none
+    // where a part is narrower than `PAGED_PART` or fits not even as little as it tells.
+    let laid = |per: usize, today: bool| -> Option<(f32, f32, Vec<Lane>)> {
+        let room = width - if today { PAGED_TODAY + PAGED_GAP } else { 0.0 } - if per < count { PAGER } else { 0.0 };
+        let each = (room - (per as f32 - 1.0) * PAGED_GAP) / per as f32;
+        if each < PAGED_PART {
+            return None;
+        }
+        let lanes = parts.iter().map(|part| (0..PAGED_LEVELS).rev().map(|level| paged_lane(part, theme, each, level)).find(|lane| tall(lane) <= height)).collect::<Option<Vec<Lane>>>()?;
+        Some((room, each, lanes))
+    };
+    // As many side by side as fit, then what every source spent beside them where it fits too. (So, made wider, it
+    // shows no fewer: what fits narrower fits wider.)
+    let Some((per, today, (room, each, lanes))) = (1..=count).rev().flat_map(|per| [(per, true), (per, false)]).find_map(|(per, today)| Some((per, today, laid(per, today)?))) else { return false };
+    let paged = per < count;
+    let parts_left = left + if today { PAGED_TODAY + PAGED_GAP } else { 0.0 };
+    // What every source spent today, and the sessions at work under it, in the middle down.
+    if today {
+        let label = Font { size: 11.0, weight: 500.0, ..theme.body };
+        let figure = Font { size: 20.0, weight: 650.0, ..theme.figure };
+        let working = dock.working > 0;
+        let column = label.size + 4.0 + figure.size + if working { 6.0 + LINE } else { 0.0 };
+        let mut row = top + (height - column) / 2.0;
+        if scene.hover == Some(Hit::AiSlot(Spot::Today)) {
+            frame.fill_rounded(theme.hover, left - 6.0, row - 4.0, PAGED_TODAY + 12.0, label.size + 4.0 + figure.size + 8.0, 10.0);
+        }
+        hits.push((left, row, PAGED_TODAY, label.size + 4.0 + figure.size, Hit::AiSlot(Spot::Today)));
+        frame.key("ai:today.label");
+        frame.text(lang.pick("今日", "Today"), label, theme.text3, left, row, PAGED_TODAY, Align::Start);
+        row += label.size + 4.0;
+        frame.key("ai:today.value");
+        frame.text(&dock.today, figure, theme.text, left, row, PAGED_TODAY, Align::Start);
+        row += figure.size + 6.0;
+        if working {
+            frame.key("ai:dock.at_work");
+            frame.fill_circle(theme.ink(AI_LANE).trace, Point { x: left + 3.5, y: row + LINE / 2.0 }, 3.5);
+            let said = match lang {
+                Lang::Zh => format!("{} 个会话", dock.working),
+                Lang::En => format!("{} at work", dock.working),
+            };
+            frame.text(&said, theme.small, theme.text2, left + 13.0, row, PAGED_TODAY - 13.0, Align::Start);
+        }
+    }
+    // The parts, turned to where the wheel turned them: a part alone one under another, else side by side.
+    let most = (count - per) as f32 * PAGE;
+    let at = scene.scrolls.at(List::AiSources).clamp(0.0, most) / PAGE;
+    let step = if per == 1 { height } else { each + PAGED_GAP };
+    let reach = if per == 1 { height } else { room };
+    frame.clip(parts_left, top, room, height);
+    for (n, lane) in lanes.iter().enumerate() {
+        let off = (n as f32 - at) * step;
+        // (Not drawn where less than half a DIP of it would show: the wheel's slide settles within a twentieth of one.)
+        if off <= 0.5 - step || off >= reach - 0.5 {
+            continue;
+        }
+        let lane_tall = tall(lane);
+        let (px, py) = if per == 1 { (parts_left, top + off + (height - lane_tall) / 2.0) } else { (parts_left + off, top + (height - lane_tall) / 2.0) };
+        let area = Rect { x: px - theme.pad_x, y: py - theme.pad_top, w: each + 2.0 * theme.pad_x, h: lane_tall + theme.pad_top + theme.pad_bottom };
+        paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
+    }
+    frame.unclip();
+    if paged {
+        // Which are shown, of how many: a dot each, those shown drawn long.
+        const DOT: f32 = 4.0;
+        const LONG: f32 = 12.0;
+        let first = at.round() as usize;
+        let column = (count - per) as f32 * (DOT + DOT) + per as f32 * (LONG + DOT) - DOT;
+        let mut dot_y = top + (height - column) / 2.0;
+        let dot_x = left + width - PAGER / 2.0 - DOT / 2.0;
+        frame.key("ai:pages");
+        for n in 0..count {
+            let on = n >= first && n < first + per;
+            let long = if on { LONG } else { DOT };
+            frame.fill_rounded(if on { theme.text } else { theme.text3 }, dot_x, dot_y, DOT, long, DOT / 2.0);
+            dot_y += long + DOT;
+        }
+        hits.push((x, y, w, h, Hit::AiPages(most.to_bits())));
+    }
+    true
 }
 
 /// A form the component may take in a widget too small for all of it (see `paint_shaped`).
@@ -1687,6 +1836,12 @@ const BAR_SLOT: f32 = 120.0;
 /// The sources the dock shows, as `prefs` show the AI component: those switched on, in their order.
 pub fn docked(prefs: &Prefs) -> Vec<Source> {
     prefs.modules.iter().filter(|entry| shows_module(entry)).filter_map(|entry| Source::of(&entry.id)).collect()
+}
+
+/// The ids of the sources shown, in their order: those a widget too small for all of them turns through (see
+/// `paint_paged`).
+pub fn sources_shown(prefs: &Prefs) -> Vec<String> {
+    docked(prefs).into_iter().map(|source| source.id().to_string()).collect()
 }
 
 /// The dock's size as designed for `count` sources: down a side, or `across` a top edge (DIPs).

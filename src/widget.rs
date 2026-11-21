@@ -1424,6 +1424,8 @@ struct Readings {
     only: Option<String>,
     /// Which note its notes turned through by pages show (see `view::keep_note`).
     note_shown: view::NoteShown,
+    /// Which of the AI component's sources it shows first, too small for all of them (see `view::keep_source`).
+    source_shown: view::SourceShown,
     /// Where a press finds what it shows, as it was last drawn anew (DIPs from its corner): merged, given with what
     /// plays' again each frame it is drawn from its layers as it was (see `draw_merged`).
     hits: Vec<view::HitBox>,
@@ -1431,7 +1433,7 @@ struct Readings {
 
 impl Readings {
     fn new(choice: Choice) -> Self {
-        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), hits: Vec::new() }
+        Readings { layers: PanelLayers::default(), choice, last: None, morph: None, drawn: Vec::new(), morph_layer: Layer::default(), away: render::Away::default(), station_was: None, taken: None, scrolls: view::Scrolls::default(), tab: view::Tab::default(), lanes: crate::settings::Part::Monitor, only: None, note_shown: view::NoteShown::default(), source_shown: view::SourceShown::default(), hits: Vec::new() }
     }
 
     /// Where a press finds what it shows, as it was drawn this frame: anew (where `drawn` says), or from its layers as
@@ -1447,7 +1449,21 @@ impl Readings {
     /// What it shows, as the settings keep it.
     fn kept(&self) -> crate::settings::PanelLayout {
         let kept = self.choice.kept();
-        crate::settings::PanelLayout { lanes: self.lanes, form: form_of(self.only.as_deref(), kept.form), ..kept }
+        let ai_source = self.source_shown.id().filter(|_| self.lanes == crate::settings::Part::Ai).map(str::to_string);
+        crate::settings::PanelLayout { lanes: self.lanes, form: form_of(self.only.as_deref(), kept.form), ai_source, ..kept }
+    }
+
+    /// The AI component's sources it turns through, too small for all of them (see `view::keep_source`): those shown,
+    /// or the one lane it shows alone; none where it shows another's lanes.
+    fn ai_sources(&self, prefs: &crate::ui::prefs::Prefs) -> Vec<String> {
+        if self.lanes != crate::settings::Part::Ai {
+            return Vec::new();
+        }
+        let sources = view::ai::sources_shown(&prefs.clone().holding(crate::settings::Part::Ai));
+        match &self.only {
+            Some(only) => sources.into_iter().filter(|source| source == only).collect(),
+            None => sources,
+        }
     }
 }
 
@@ -3328,7 +3344,7 @@ impl Widget {
                 form => {
                     let (only, form) = only_of(form);
                     let choice = Choice::from_kept(&crate::settings::PanelLayout { form, ..layout.clone() })?;
-                    Content::Readings(Readings { lanes: layout.lanes, only, ..Readings::new(choice) })
+                    Content::Readings(Readings { lanes: layout.lanes, only, source_shown: view::SourceShown::of(layout.ai_source.clone()), ..Readings::new(choice) })
                 }
             })
         };
@@ -3354,7 +3370,7 @@ impl Widget {
     fn kept(&self) -> WidgetAt {
         let layout_of = |content: &Content| match content {
             Content::Readings(readings) => readings.kept(),
-            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), lanes: crate::settings::Part::Music },
+            _ => crate::settings::PanelLayout { form: MUSIC_FORM.into(), scale: 1.0, extra: (0.0, 0.0), lanes: crate::settings::Part::Music, ai_source: None },
         };
         let (layout, size, parts, beside) = match &self.content {
             Content::Readings(readings) => (readings.kept(), None, None, false),
@@ -4459,6 +4475,11 @@ impl Widget {
             readings.scrolls.follow(view::lists_show(readings.tab));
             if note_pages {
                 view::keep_note(&mut readings.scrolls, &mut readings.note_shown, &crate::notes::listed(), writing.as_deref());
+            }
+            // The AI component's sources turned through: kept on the one it shows first, and that one kept with it.
+            let sources = readings.ai_sources(look.prefs);
+            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &sources) {
+                self.unsaved = true;
             }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
