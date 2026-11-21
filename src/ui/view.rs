@@ -1134,7 +1134,7 @@ pub fn named(hits: &[HitBox], hit: Hit, lang: Lang) -> Option<String> {
         Hit::Shelf(id) | Hit::Copied(id) => crate::station::run::shown().items.iter().find(|item| item.id == id).map(|item| Tile::of(item, &crate::station::folder::Folder::own(), lang, 0).label),
         Hit::Recent(crate::station::recent::Entry::File(key)) => crate::station::recent::shown().iter().find(|came| came.key == key).map(|came| Lately::of(came, lang, 0).label),
         Hit::Recent(entry @ crate::station::recent::Entry::Burst(filter, _)) => Lately::rows(&crate::station::recent::shown(), filter, lang, 0).into_iter().find(|row| row.entry == entry).map(|row| row.label),
-        Hit::App(number) => crate::station::apps::numbered(number).map(|app| app.name),
+        Hit::App(number) => crate::station::apps::numbered(number).and_then(|app| crate::station::apps::named().into_iter().find(|(_, target)| *target == app.target)).map(|(name, _)| name),
         _ => None,
     }
 }
@@ -1909,7 +1909,7 @@ const APP_ROWS: usize = 3;
 /// Quick launch's lane: whole (`full`), what is kept at hand under its name, named, in as many rows as they take (up
 /// to `APP_ROWS`, the place to add more after them); else their pictures in one row.
 fn apps_lane(full: bool, theme: &Theme, lang: Lang) -> Vec<Block> {
-    let apps: Vec<(String, String)> = crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect();
+    let apps = crate::station::apps::named();
     let rows = if full { apps_rows(apps.len(), theme) } else { 1 };
     vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full, over: crate::station::run::shown().apps_over }]
 }
@@ -1979,6 +1979,9 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
 /// The least a picture is (DIPs) to carry its tag (see `paint_tag`): smaller, it would hide it.
 const TAG_LEAST: f32 = 24.0;
 
+/// How high a tag's words are written for the side of its picture (10 for a rail's, 32 wide).
+const TAG_WORDS: f32 = 10.0 / 32.0;
+
 /// The colours a tag is drawn in, one chosen by its name: each deep enough for white words on either ground.
 const TAG_COLOURS: [u32; 8] = [0xC8503A, 0x2F78CF, 0x2C9364, 0x8455CC, 0xB97C14, 0xC74478, 0x24909D, 0x60708F];
 
@@ -1990,7 +1993,8 @@ fn paint_tag(frame: &dyn Canvas, theme: &Theme, name: &str, (x, y, side): (f32, 
     if side < TAG_LEAST || words.is_empty() {
         return;
     }
-    let font = Font { size: (side * 0.27).max(8.5), weight: 650.0, ..theme.body };
+    // (On a rail's picture, 32 wide, written 10 high: at 8.6 it was hard to read, as the owner found.)
+    let font = Font { size: (side * TAG_WORDS).max(8.5), weight: 650.0, ..theme.body };
     let tall = (font.size * 1.55).round();
     let wide = (frame.measure(&words, font) + tall * 0.55).max(tall);
     let (right, bottom) = (x + side + side * 0.05, y + side);
@@ -6015,7 +6019,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
             Bench::Station { tiles, tab }
         }
         "notes" => Bench::Notes(crate::notes::listed().iter().map(|note| note_card(note, lang, now, BENCH_LINES)).collect()),
-        "apps" => Bench::Apps(crate::station::apps::shown().iter().map(|app| (app.name.clone(), app.target.clone())).collect()),
+        "apps" => Bench::Apps(crate::station::apps::named()),
         "time" => {
             let now = text::Local::at(scene.latest().t);
             let (figure, unit) = now.time(text::twelve_hours(), lang);

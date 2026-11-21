@@ -57,6 +57,46 @@ pub fn shown() -> Arc<Vec<App>> {
     SHOWN.lock().unwrap().clone().unwrap_or_default()
 }
 
+/// What is kept at hand, in its order, each by the name it is told by (see `told_apart`), with what opens it.
+pub fn named() -> Vec<(String, String)> {
+    told_apart(&shown())
+}
+
+/// `apps`, each by the name it is told by, with what opens it: its own, or, where another of them bears the same (two
+/// folders named Documents, their pictures and tags alike), the name of the folder it is in, or of the one above that
+/// and so on, the fewest folders up where the names of all that bear it differ (as far as any of them goes, else the
+/// folder it is in). A web address or a program by its shell name, as it is named.
+pub fn told_apart(apps: &[App]) -> Vec<(String, String)> {
+    apps.iter()
+        .map(|app| {
+            let same: Vec<&App> = apps.iter().filter(|other| other.name == app.name).collect();
+            let name = if same.len() > 1 { by_folder(app, &same) } else { None };
+            (name.unwrap_or_else(|| app.name.clone()), app.target.clone())
+        })
+        .collect()
+}
+
+/// The name of the folder `target` is in `up` folders up from it (1: the one it is in), where it is on the disk.
+fn folder_up(target: &str, up: usize) -> Option<String> {
+    let on_disk = !target.contains("://") && !target.starts_with("shell:");
+    on_disk.then(|| Path::new(target).ancestors().nth(up)?.file_name().map(|name| name.to_string_lossy().into_owned())).flatten()
+}
+
+/// `app`'s name among `same` (those that bear its name, itself among them) by a folder it is in: see `told_apart`.
+fn by_folder(app: &App, same: &[&App]) -> Option<String> {
+    for up in 1.. {
+        let names: Vec<Option<String>> = same.iter().map(|other| folder_up(&other.target, up)).collect();
+        if names.iter().all(Option::is_none) {
+            break;
+        }
+        let apart = names.iter().enumerate().all(|(at, name)| name.is_some() && !names[..at].contains(name));
+        if apart {
+            return folder_up(&app.target, up);
+        }
+    }
+    folder_up(&app.target, 1)
+}
+
 static NUMBERS: crate::numbered::Numbered = crate::numbered::Numbered::new();
 
 /// The number a press on what is kept at hand opening `target` names it by (see `numbered`).
@@ -257,6 +297,29 @@ pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
+    /// Two kept at hand that bear one name (two folders named Documents) are told by the folders they are in, the
+    /// fewest folders up where those differ; one bearing a name of its own, a web address and a program by its shell
+    /// name, by their names. (They were told by the same name, their tags alike: the owner could not tell which was
+    /// which.)
+    #[test]
+    fn those_named_alike_are_told_by_their_folders() {
+        let app = |target: &str, name: &str| super::App { target: target.into(), name: name.into() };
+        let apps = [
+            app(r"D:\工作\Documents", "Documents"),
+            app(r"D:\个人\Documents", "Documents"),
+            app(r"E:\A\资料\周报", "周报"),
+            app(r"E:\B\资料\周报", "周报"),
+            app(r"C:\发票", "发票"),
+            app("https://example.com/", "example.com"),
+            app(r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", "Notepad"),
+        ];
+        let named: Vec<String> = super::told_apart(&apps).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(named, ["工作", "个人", "A", "B", "发票", "example.com", "Notepad"]);
+        // (A drive's root holds one: by the folder it is in where the other's has a name.)
+        let named: Vec<String> = super::told_apart(&[app(r"D:\Documents", "Documents"), app(r"E:\x\Documents", "Documents")]).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(named, ["Documents", "x"]);
+    }
+
     use super::*;
 
     /// A program the Start menu names by a known folder and the path in it is the program dropped from that folder,
