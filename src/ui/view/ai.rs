@@ -35,7 +35,7 @@ pub enum Source {
 }
 
 /// Every source, as the AI component lists them.
-const SOURCES: [Source; 10] = [
+pub(super) const SOURCES: [Source; 10] = [
     Source::Claude,
     Source::Codex,
     Source::Qwen,
@@ -1717,7 +1717,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         frame.key("ai:today.label");
         // (Over one column of rings, in the middle as they are.)
         if columns == 1 {
-            centred(frame, of, label, theme.text3, left + width / 2.0, row);
+            centred(frame, of, label, theme.text3, left + width / 2.0, row, width);
         } else {
             frame.text(of, label, theme.text3, left, row, width, Align::Start);
         }
@@ -1729,7 +1729,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         frame.key("ai:today.value");
         let figure_top = if roomy { row + label.size + 4.0 - figure_font.size * 0.25 } else { row };
         if columns == 1 && !roomy {
-            centred(frame, today, figure_font, theme.text, left + width / 2.0, figure_top);
+            centred(frame, today, figure_font, theme.text, left + width / 2.0, figure_top, width);
         } else {
             frame.text(today, figure_font, theme.text, left, figure_top, width, Align::Start);
         }
@@ -1767,14 +1767,14 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         ring(frame, theme, slot, centre, radius, if roomy { 4.0 } else { 3.0 }, radius * 0.9);
         let hot = slot.used.is_some_and(|used| used >= HOT);
         frame.key(&format!("{}.value", slot.source.id()));
-        centred(frame, &slot.figure, figure, if hot { theme.signal } else { theme.text }, centre.x, cell_top + ring_room + 4.0);
+        centred(frame, &slot.figure, figure, if hot { theme.signal } else { theme.text }, centre.x, cell_top + ring_room + 4.0, cell);
         if roomy {
             let label_top = cell_top + ring_room + 4.0 + figure.size + 3.0;
             frame.key(&format!("{}.label", slot.source.id()));
-            centred(frame, &slot.label, under_font, theme.text3, centre.x, label_top);
+            centred(frame, &slot.label, under_font, theme.text3, centre.x, label_top, cell);
             if resets {
                 frame.key(&format!("{}.resets", slot.source.id()));
-                centred(frame, &slot.resets, under_font, theme.text3, centre.x, label_top + under_font.size + 3.0);
+                centred(frame, &slot.resets, under_font, theme.text3, centre.x, label_top + under_font.size + 3.0, cell);
             }
         }
     }
@@ -1816,7 +1816,7 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
     let count = dock.slots.len();
     let paged = dock.today.is_none() && count > 1;
     // (The dots' room at the right, where there is any beside the figure.)
-    let pager = if paged && w - 2.0 * inset >= 4.0 * PAGER { PAGER } else { 0.0 };
+    let pager = if paged && w - 2.0 * inset >= 4.0 * PAGER && pager_fits(count, 1, (h - 2.0 * inset).max(0.0)) { PAGER } else { 0.0 };
     let (left, width) = (x + inset, (w - 2.0 * inset - pager).max(0.0));
     let font = Font { size: (w * 0.26).clamp(11.0, 22.0), weight: 650.0, ..theme.figure };
     let tall = (label.size + 4.0 + font.size).min((h - 2.0 * inset).max(0.0));
@@ -1843,10 +1843,10 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
     };
     if h >= 60.0 {
         frame.key(&format!("{key}.label"));
-        centred(frame, &of, label, theme.text3, left + width / 2.0, middle - tall / 2.0);
+        centred(frame, &of, label, theme.text3, left + width / 2.0, middle - tall / 2.0, width);
     }
     frame.key(&format!("{key}.value"));
-    centred(frame, figure, font, color, left + width / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 });
+    centred(frame, figure, font, color, left + width / 2.0, if h >= 60.0 { middle - tall / 2.0 + label.size + 4.0 } else { middle - font.size * 0.6 }, width);
     if paged {
         if pager > 0.0 {
             pager_dots(frame, theme, (left + width + pager / 2.0, y + inset, (h - 2.0 * inset).max(0.0)), count, (first, 1));
@@ -1856,19 +1856,40 @@ fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32,
 }
 
 /// The dots that tell which of `count` are shown (`shown`: the first of them and how many), down a column at `x` (their
-/// middle), in the middle of the room from `top` `tall`: a dot each, those shown drawn long.
+/// middle), in the middle of the room from `top` `tall`: a dot each, those shown drawn long; closer together and
+/// shorter where the column would be taller than the room (see `pager_fits`), none where they would be too small to
+/// tell apart.
 fn pager_dots(frame: &dyn Canvas, theme: &Theme, (x, top, tall): (f32, f32, f32), count: usize, (first, per): (usize, usize)) {
-    const DOT: f32 = 4.0;
-    const LONG: f32 = 12.0;
-    let column = (count - per) as f32 * (DOT + DOT) + per as f32 * (LONG + DOT) - DOT;
+    let Some(k) = pager_scale(count, per, tall) else { return };
+    let (dot, long, gap) = (PAGER_DOT, PAGER_LONG * k, PAGER_DOT * k);
+    let column = (count - per) as f32 * (dot + gap) + per as f32 * (long + gap) - gap;
     let mut dot_y = top + (tall - column) / 2.0;
     frame.key("ai:pages");
     for n in 0..count {
         let on = n >= first && n < first + per;
-        let long = if on { LONG } else { DOT };
-        frame.fill_rounded(if on { theme.text } else { theme.text3 }, x - DOT / 2.0, dot_y, DOT, long, DOT / 2.0);
-        dot_y += long + DOT;
+        let length = if on { long } else { dot };
+        frame.fill_rounded(if on { theme.text } else { theme.text3 }, x - dot / 2.0, dot_y, dot, length, dot / 2.0);
+        dot_y += length + gap;
     }
+}
+
+/// A page dot's width (and an unlit one's length), a lit one's length, and the least the room between them comes to.
+const PAGER_DOT: f32 = 4.0;
+const PAGER_LONG: f32 = 12.0;
+const PAGER_GAP_LEAST: f32 = 1.5;
+
+/// How much shorter the page dots' lit lengths and the room between them are drawn for `count` of them, `per` lit, to
+/// be no taller than `tall` (1: as designed); none where that would leave less than `PAGER_GAP_LEAST` between them.
+fn pager_scale(count: usize, per: usize, tall: f32) -> Option<f32> {
+    let dots = (count - per) as f32 * PAGER_DOT;
+    let scaled = per as f32 * PAGER_LONG + (count as f32 - 1.0) * PAGER_DOT;
+    let k = ((tall - dots) / scaled).min(1.0);
+    (k * PAGER_DOT >= PAGER_GAP_LEAST && k * PAGER_LONG >= PAGER_DOT).then_some(k)
+}
+
+/// Whether the page dots for `count`, `per` lit, fit in a column `tall`.
+fn pager_fits(count: usize, per: usize, tall: f32) -> bool {
+    pager_scale(count, per, tall).is_some()
 }
 
 /// The least a widget is to show the head, how today's spending mounted and what each ring's figure is of (DIPs).
@@ -2018,8 +2039,8 @@ pub fn paint_dock(frame: &dyn Canvas, scene: &Scene, across: bool, (w, h): (f32,
 }
 
 /// `text` in `font`, its middle at `centre` across, from `top`.
-fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, centre: f32, top: f32) {
-    let width = frame.measure(text, font);
+fn centred(frame: &dyn Canvas, text: &str, font: Font, color: Color, centre: f32, top: f32, room: f32) {
+    let width = frame.measure(text, font).min(room);
     frame.text(text, font, color, centre - width / 2.0, top, width + 2.0, Align::Start);
 }
 
@@ -2089,9 +2110,9 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
             let (hit, plate) = at(x, BAR_END);
             spot(frame, Spot::Today, hit, plate);
             frame.key("ai:today.label");
-            centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
+            centred(frame, lang.pick("今日", "Today"), label, theme.text3, x + BAR_END / 2.0, middle - 17.0, BAR_END);
             frame.key("ai:today.value");
-            centred(frame, today, big, theme.text, x + BAR_END / 2.0, middle - 2.0);
+            centred(frame, today, big, theme.text, x + BAR_END / 2.0, middle - 2.0, BAR_END);
             x += BAR_END + gap;
         }
         for slot in &dock.slots {
@@ -2126,7 +2147,7 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
         let (hit, plate) = at(x, BAR_END);
         spot(frame, Spot::Sessions, hit, plate);
         frame.key("ai:dock.sessions");
-        centred(frame, sessions.0, label, theme.text3, x + BAR_END / 2.0, middle - 17.0);
+        centred(frame, sessions.0, label, theme.text3, x + BAR_END / 2.0, middle - 17.0, BAR_END);
         let count_width = frame.measure(&sessions.1, big);
         let row = if dock.at_work.is_empty() { 0.0 } else { dock.at_work.len() as f32 * 15.0 + 2.0 };
         let start = x + BAR_END / 2.0 - (count_width + row) / 2.0;
@@ -2157,32 +2178,32 @@ pub(super) fn draw_dock(frame: &dyn Canvas, scene: &Scene, dock: &Dock, across: 
     if let Some(today) = &dock.today {
         spot(frame, Spot::Today, (x0, y, w, DOCK_TODAY), (x0 + 5.0, y - 4.0, w - 10.0, DOCK_TODAY, round));
         frame.key("ai:today.label");
-        centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0);
+        centred(frame, lang.pick("今日", "Today"), label, theme.text3, centre, y + 2.0, w - 10.0);
         frame.key("ai:today.value");
-        centred(frame, today, big, theme.text, centre, y + 18.0);
+        centred(frame, today, big, theme.text, centre, y + 18.0, w - 10.0);
         y += DOCK_TODAY + gap;
     }
     for slot in &dock.slots {
         spot(frame, Spot::Ring(slot.source), (x0, y, w, slot_h), (x0 + 5.0, y, w - 10.0, slot_h - 4.0, round));
         ring(frame, theme, slot, Point { x: centre, y: y + 8.0 + 22.0 }, 21.5, 3.0, 20.0);
         frame.key(&format!("{}.value", slot.source.id()));
-        centred(frame, &slot.figure, figure, figure_of(slot), centre, y + 56.0);
+        centred(frame, &slot.figure, figure, figure_of(slot), centre, y + 56.0, w - 10.0);
         if lined {
             for (at, line) in lines_of(slot).iter().enumerate() {
                 frame.key(&if at == 0 { format!("{}.label", slot.source.id()) } else { format!("{}.line{at}", slot.source.id()) });
-                centred(frame, line, under, theme.text3, centre, y + 74.0 + at as f32 * DOWN_LINE);
+                centred(frame, line, under, theme.text3, centre, y + 74.0 + at as f32 * DOWN_LINE, w - 10.0);
             }
         } else {
             frame.key(&format!("{}.label", slot.source.id()));
-            centred(frame, &slot.label, under, theme.text3, centre, y + 74.0);
+            centred(frame, &slot.label, under, theme.text3, centre, y + 74.0, w - 10.0);
         }
         y += slot_h + gap;
     }
     spot(frame, Spot::Sessions, (x0, y, w, DOCK_FOOT), (x0 + 5.0, y, w - 10.0, DOCK_FOOT + 4.0, round));
     frame.key("ai:dock.sessions");
-    centred(frame, sessions.0, label, theme.text3, centre, y + 4.0);
+    centred(frame, sessions.0, label, theme.text3, centre, y + 4.0, w - 10.0);
     frame.key("ai:dock.at_work");
-    centred(frame, &sessions.1, big, theme.text, centre, y + 19.0);
+    centred(frame, &sessions.1, big, theme.text, centre, y + 19.0, w - 10.0);
     marks(centre, y + 44.0);
     hits.into_inner()
 }

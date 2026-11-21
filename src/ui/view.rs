@@ -670,10 +670,16 @@ impl SourceShown {
 
 /// The AI component's sources turned through by the wheel (`sources`, their ids in their order: see `ai::paint_paged`)
 /// kept on the source shown first as their order changes or as a widget kept on one is put back: the same source
-/// shown, where it is now, at once; the first, where it is no longer shown. Whether the one shown first changed.
-pub fn keep_source(scrolls: &mut Scrolls, shown: &mut SourceShown, sources: &[String]) -> bool {
+/// shown, where it is now, at once; the first, where it is no longer shown. Turned no further than `reach` (as far as
+/// the pages drawn last turn, several to a page: see `Hit::AiPages`; none drawn, to the last): turned further (made
+/// wider, more to a page), back to as far as they turn, so that the wheel turns them back at once and the one kept is
+/// the one shown first. Whether the one shown first changed.
+pub fn keep_source(scrolls: &mut Scrolls, shown: &mut SourceShown, sources: &[String], reach: Option<f32>) -> bool {
     let last = sources.len().saturating_sub(1);
-    let most = last as f32 * PAGE;
+    let most = reach.unwrap_or(last as f32 * PAGE).min(last as f32 * PAGE);
+    if scrolls.to(List::AiSources) > most {
+        scrolls.to_page(List::AiSources, most, most);
+    }
     if let Some((id, at)) = &shown.kept {
         // (Its place holding another: the order changed, or it was just put back, not the sources turned.)
         if sources.get(*at).is_none_or(|source| source != id) {
@@ -7639,6 +7645,65 @@ otepad.exe", "Notepad"),
         assert!(texts.iter().any(|text| text.starts_with(dock.slots[1].source.name(Lang::Zh))), "{texts:?}");
     }
 
+    /// The AI widget draws nothing past its edges, at any size, in either language, with every source shown: the smallest
+    /// form's words (a source's name and its window's, "Codex · Weekly left", in a widget 80 wide) and its page dots (ten
+    /// sources' a column 84 DIPs tall, in a widget 40 tall) went past them.
+    #[test]
+    fn the_ai_widget_draws_within_itself() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        for today in [true, false] {
+            let shown = [("ai:today", today), ("ai:claude", true), ("ai:codex", true), ("ai:deepseek", true)].map(|(id, on)| serde_json::json!({ "id": id, "on": on }));
+            let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+            for lang in [Lang::Zh, Lang::En] {
+                let shaped = ai::together(&held, lang, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+                let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+                // (Every source, each told by its window's share left, named as long as the longest.)
+                let mut dock = dock.clone();
+                let like = dock.slots[0].clone();
+                let missing: Vec<ai::Source> = ai::SOURCES.iter().copied().filter(|source| !dock.slots.iter().any(|slot| slot.source == *source)).collect();
+                dock.slots.extend(missing.into_iter().map(|source| ai::Slot { source, ..like.clone() }));
+                for slot in &mut dock.slots {
+                    slot.label = lang.pick("每周剩余", "Weekly left").into();
+                }
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                for w in (60..=420).step_by(20) {
+                    for h in (40..=320).step_by(20) {
+                        let (w, h) = (w as f32, h as f32);
+                        let reach = Reach { shadows_left_out: true, ..Reach::default() };
+                        let mut hits = Vec::new();
+                        ai::paint_shaped(&reach, &scene, theme.ink(AI_LANE), (&dock, mounted, rich), (0.0, 0.0, w, h), &mut hits);
+                        let (left, top, right, bottom) = reach.reach.get().expect("drawn");
+                        assert!(left >= -0.5 && top >= -0.5 && right <= w + 0.5 && bottom <= h + 0.5, "{} today {today}, {w} by {h}: drawn over {:?}", lang.pick("zh", "en"), (left, top, right, bottom));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The sources turned to the last, a source to a page, then the widget made wider, two to a page: kept on the first
+    /// of the two shown, turned back as far as they turn, so that a notch of the wheel back turns them back at once (it
+    /// turned nothing, the first notch, and the last source was kept as shown first).
+    #[test]
+    fn the_ai_widget_made_wider_keeps_the_source_shown_first() {
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<String>>();
+        let sources = ids(&["ai:claude", "ai:codex", "ai:deepseek"]);
+        let mut scrolls = Scrolls::default();
+        let mut shown = SourceShown::of(None);
+        scrolls.hold(List::AiSources, 2.0 * PAGE, 2.0 * PAGE);
+        assert!(keep_source(&mut scrolls, &mut shown, &sources, Some(2.0 * PAGE)));
+        assert_eq!(shown.id(), Some("ai:deepseek"));
+        // Two to a page: as far as they turn, one page.
+        assert!(keep_source(&mut scrolls, &mut shown, &sources, Some(PAGE)));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (PAGE, Some("ai:codex")));
+        let under = [Hit::AiPages(PAGE.to_bits())];
+        assert!(wheel(&mut scrolls, &under, 120, false));
+        assert_eq!(scrolls.to(List::AiSources), 0.0);
+    }
+
     /// The widget's sources turned through stay on the source shown first as their order changes, go back to the first
     /// where it is switched off, and are put back on the source the widget was kept on.
     #[test]
@@ -7647,17 +7712,17 @@ otepad.exe", "Notepad"),
         let mut scrolls = Scrolls::default();
         // Put back on the one it was kept on.
         let mut shown = SourceShown::of(Some("ai:codex".into()));
-        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:claude", "ai:codex", "ai:deepseek"])));
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:claude", "ai:codex", "ai:deepseek"]), None));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (PAGE, Some("ai:codex")));
         // Its order changed: held on it where it is now.
-        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"]), None));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
         // Turned by the wheel: the next one kept.
         scrolls.turn_pages(List::AiSources, PAGE, PAGE, 2.0 * PAGE);
-        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"]), None));
         assert_eq!(shown.id(), Some("ai:claude"));
         // Switched off: the first.
-        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:deepseek"])));
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:deepseek"]), None));
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
     }
 

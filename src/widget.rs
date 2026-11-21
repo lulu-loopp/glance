@@ -4465,6 +4465,8 @@ impl Widget {
         // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.
         let note_pages = shows(|hit| matches!(hit, view::Hit::Pages(view::List::Notes, _)));
         let writing = if note_pages { crate::ui::beside::writing_for(self.window.hwnd) } else { None };
+        // (How far its AI sources' pages turn, as last drawn.)
+        let source_reach = self.hits.iter().find_map(|hit| if let view::Hit::AiPages(most) = hit.4 { Some(f32::from_bits(most)) } else { None });
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
             Content::Readings(readings) => vec![readings],
@@ -4478,7 +4480,7 @@ impl Widget {
             }
             // The AI component's sources turned through: kept on the one it shows first, and that one kept with it.
             let sources = readings.ai_sources(look.prefs);
-            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &sources) {
+            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &sources, source_reach) {
                 self.unsaved = true;
             }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
