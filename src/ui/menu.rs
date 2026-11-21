@@ -619,6 +619,11 @@ impl Menu {
         self.window.hwnd
     }
 
+    /// The look it is drawn in (what is opened from it is drawn so too).
+    pub fn look(&self) -> Look {
+        self.look
+    }
+
     /// Whether it has been left by something else coming to the front.
     pub fn left(&self) -> bool {
         (unsafe { GetForegroundWindow() }) != self.window.hwnd

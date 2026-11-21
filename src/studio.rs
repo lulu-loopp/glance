@@ -727,7 +727,7 @@ pub fn pretend_workbench(lang: Lang, props: &Path) -> Result<(), String> {
         came(7, own(&[downloads, "GlanceSetup-0.4.2.exe"], None)?, 150, 9_800_000, Kind::Program, Some("glancepc.com")),
         came(8, own(&[downloads, if zh { "合同扫描件.zip" } else { "Contract scans.zip" }], None)?, 60 * 26, 12_400_000, Kind::Archive, Some("pan.baidu.com")),
     ]);
-    let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+    let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into(), alias: None };
     crate::station::apps::pretend(vec![
         app(r"C:\Windows\explorer.exe", if zh { "文件资源管理器" } else { "File Explorer" }),
         app(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Microsoft Edge"),

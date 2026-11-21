@@ -81,7 +81,7 @@ fn arrange_designed(theme: &Theme, edge: Edge, heights: Vec<f32>, wide: f32, wor
     let (room_width, room) = room(theme, edge, work, gap);
     // A rail down a side as long as all quick launch holds takes, as far as the screen allows (scrolled along past
     // that): with few lanes beside it, or none, a thing or two showed and the rest were out of sight.
-    let rail_long = rail_length(crate::station::apps::shown().len()).min(room - theme.outer.0 - theme.outer.2);
+    let rail_long = rail_length(crate::station::apps::shown().len(), crate::station::apps::always_named()).min(room - theme.outer.0 - theme.outer.2);
     // The rail's lane out of the columns, the room it takes out of theirs.
     let side = match edge {
         Edge::Left => RailSide::Start,
@@ -537,16 +537,16 @@ mod tests {
     #[test]
     fn a_rail_alone_is_as_long_as_its_things() {
         let theme = Theme::new(Skin::Fluent, false);
-        let app = |at: usize| crate::station::apps::App { target: format!("C:\\{at}.exe"), name: at.to_string() };
+        let app = |at: usize| crate::station::apps::App { target: format!("C:\\{at}.exe"), name: at.to_string(), alias: None };
         crate::station::apps::pretend((0..6).map(app).collect());
         for edge in [Edge::Left, Edge::Right] {
             let (layout, zoom) = arrange(&theme, edge, vec![120.0], 0.0, (1920.0, 1080.0), None, 1.0, Some(0));
-            assert!(layout.lanes()[0].h >= rail_length(6) - 0.01, "{edge:?}: {:?}", layout.lanes()[0]);
+            assert!(layout.lanes()[0].h >= rail_length(6, false) - 0.01, "{edge:?}: {:?}", layout.lanes()[0]);
             assert_eq!(zoom, 1.0);
         }
         crate::station::apps::pretend((0..60).map(app).collect());
         let (layout, zoom) = arrange(&theme, Edge::Right, vec![120.0], 0.0, (1920.0, 1080.0), None, 1.0, Some(0));
-        assert!(layout.height() <= 1080.0 && layout.lanes()[0].h > rail_length(6), "{:?} in {}", layout.lanes()[0], layout.height());
+        assert!(layout.height() <= 1080.0 && layout.lanes()[0].h > rail_length(6, false), "{:?} in {}", layout.lanes()[0], layout.height());
         assert_eq!(zoom, 1.0);
         crate::station::apps::pretend(Vec::new());
     }

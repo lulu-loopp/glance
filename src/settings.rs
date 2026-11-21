@@ -905,6 +905,10 @@ pub struct Settings {
     /// What is kept at hand on the workbench, in its order (see `station::apps`).
     #[serde(default)]
     pub apps: Vec<crate::station::apps::App>,
+    /// Whether what is kept at hand is named under its picture wherever it shows, its tags left off (see
+    /// `station::apps::always_named`).
+    #[serde(default)]
+    pub apps_named: bool,
     /// The notes' folder, where another than `Documents\Glance 便签` was chosen (see `notes`).
     #[serde(default)]
     pub notes_folder: Option<PathBuf>,
@@ -1090,6 +1094,7 @@ impl Default for Settings {
             recent_only: false,
             recent_folders: Vec::new(),
             apps: Vec::new(),
+            apps_named: false,
             notes_folder: None,
             notes_view: NotesView::Deck,
             notes_source: false,

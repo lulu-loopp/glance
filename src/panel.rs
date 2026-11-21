@@ -952,7 +952,7 @@ impl Controller {
             // The panel whose window the message is for, where it is one's.
             let owner = panels.iter().position(|panel| panel.window.hwnd == msg.hwnd);
             if matches!(msg.message, windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_RBUTTONDOWN | windows::Win32::UI::WindowsAndMessaging::WM_MBUTTONDOWN)
-                && (owner.is_some() || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)) || crate::ui::todo::pick::owns(msg.hwnd))
+                && (owner.is_some() || menu.as_ref().is_some_and(|(open, _)| open.owns(msg.hwnd)) || crate::ui::todo::pick::owns(msg.hwnd) || crate::ui::rename::owns(msg.hwnd))
             {
                 OURS.fetch_add(1, Ordering::Relaxed);
             }
@@ -988,6 +988,31 @@ impl Controller {
                     }
                     Picked::Taken => continue,
                     Picked::Not => {}
+                }
+            }
+            // The box a thing kept at hand is renamed in, as the picker: the pointer's messages its own, its keys' end
+            // (Enter keeps what is written, Esc or another window in front leaves it), a shortcut leaving it.
+            if crate::ui::rename::is_up() {
+                use crate::ui::rename::{self, Handled as Renamed};
+                let left = if rename::owns(msg.hwnd) && msg.message == crate::ui::keys::LEFT {
+                    Some(rename::keeps(msg.wParam))
+                } else if rename::owns(msg.hwnd) {
+                    match rename::handle(&msg) {
+                        Renamed::Left => Some(false),
+                        Renamed::Taken => continue,
+                        Renamed::Not => None,
+                    }
+                } else if matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) {
+                    Some(false)
+                } else {
+                    None
+                };
+                if let Some(keep) = left {
+                    closing_press.closed_by(msg.message);
+                    end_rename(keep, &mut panels, &mut widgets);
+                    if !matches!(msg.message, WM_HOTKEY | TOGGLE | OPEN_FROM_TRAY) || (msg.hwnd.is_invalid() && msg.wParam.0 == ESCAPE_HOTKEY as usize) {
+                        continue;
+                    }
                 }
             }
             // A menu's own messages; a shortcut leaves it (Esc, the panel's while it is open, is the menu's own: the
@@ -1914,6 +1939,19 @@ fn end_pick(asked: bool, panels: &mut [Panel], widgets: &mut crate::widget::Widg
     widgets.draw_soon();
 }
 
+/// The box a thing kept at hand is renamed in put away, what is written kept where `keep` (see `ui::rename`): the
+/// panels and widgets drawn again, the pointer not yet come onto a panel (as a menu's going leaves it).
+fn end_rename(keep: bool, panels: &mut [Panel], widgets: &mut crate::widget::Widgets) {
+    crate::ui::rename::close(keep);
+    for panel in panels.iter_mut() {
+        panel.menu_closed();
+        if panel.is_shown() {
+            panel.next_frame = Instant::now();
+        }
+    }
+    widgets.draw_soon();
+}
+
 /// The overlay kept under `menu`, while one is up (see `Overlay::under_menu`).
 fn keep_menu_above(menu: &Option<(crate::ui::menu::Menu, MenuFor)>, overlay: &mut Option<Overlay>) {
     if let (Some((open, _)), Some(overlay)) = (menu.as_ref(), overlay.as_mut()) {
@@ -2052,6 +2090,7 @@ impl Controller {
         let menu_panel = menu_of.take();
         // (Where the choice was on the screen: what it opens comes out of there, but for the tray icon's menu.)
         let place = choice.and_then(|row| open.row_on_screen(row));
+        let look = open.look();
         open.close();
         if let Some(overlay) = overlay.as_mut() {
             overlay.under_menu(None);
@@ -2091,11 +2130,18 @@ impl Controller {
                 (Some(choice), _) => crate::station::chose(id, *choice),
                 (None, _) => {}
             },
-            MenuFor::App(app, choices) => {
-                if let Some(choice) = choice.and_then(|row| choices.get(row)) {
-                    crate::station::app_chose(app, *choice);
+            MenuFor::App(app, choices) => match choice.and_then(|row| choices.get(row)) {
+                // (Its box where its row was, opened by this thread: kept up for the panel it was asked on, if one.)
+                Some(crate::station::AppChoice::Rename) => {
+                    if let Some(at) = place.map(|row| POINT { x: row.left, y: row.top }).or_else(cursor_position) {
+                        let owner = menu_panel.and_then(|at| panels.get(at)).map_or(HWND::default(), |panel| panel.window.hwnd);
+                        let shown = crate::station::apps::told_apart(&crate::station::apps::shown()).into_iter().find(|(_, target)| *target == app.target).map_or_else(|| app.name.clone(), |(name, _)| name);
+                        crate::ui::rename::open(owner, app, shown, at, look, crate::update::language());
+                    }
                 }
-            }
+                Some(choice) => crate::station::app_chose(app, *choice),
+                None => {}
+            },
             MenuFor::Note(name, choices) => match choice.and_then(|row| choices.get(row)) {
                 // (Offered where it is not stuck yet: its corner where its row was chosen.)
                 Some(crate::ui::note::Choice::Stick) => {
@@ -3526,7 +3572,7 @@ impl<'a> Panel<'a> {
         // (With the page beside it up: the two are one place, left by the page's own going. With a menu of its own up,
         // as large as it may be past its edge: a press on the menu is on the panel's behalf, and one away from both
         // closes the menu first.)
-        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up || crate::ui::todo::holds(self.window.hwnd)
+        self.pinned || self.floating() || crate::ui::beside::up_for(self.window.hwnd) || crate::ui::look::up_for(self.window.hwnd) || self.menu_up || crate::ui::todo::holds(self.window.hwnd) || crate::ui::rename::up_for(self.window.hwnd)
     }
 
     /// What may be looked at larger on it, as it was just drawn (see `ui::look`): each such thing, and where its tile is

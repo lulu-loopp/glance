@@ -35,6 +35,7 @@ pub mod motion;
 pub mod overlay;
 pub mod phone_art;
 pub mod prefs;
+pub mod rename;
 pub mod seen;
 #[cfg(windows)]
 pub mod render;

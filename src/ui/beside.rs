@@ -1303,8 +1303,8 @@ impl Beside {
             Hit::Pick(target, name) => {
                 // (A file or folder by its name as it is kept: see `App::of_path`.)
                 let app = match self.kind {
-                    Kinds::Programs => App { target, name },
-                    _ => App::of_path(std::path::Path::new(&target)).unwrap_or(App { target, name }),
+                    Kinds::Programs => App { target, name, alias: None },
+                    _ => App::of_path(std::path::Path::new(&target)).unwrap_or(App { target, name, alias: None }),
                 };
                 crate::station::apps::change(move |apps| {
                     match apps.iter().position(|kept| crate::station::apps::same(&kept.target, &app.target)) {
@@ -1339,7 +1339,7 @@ impl Beside {
             // Enter: the first one listed added.
             VK_RETURN => {
                 if let Some(first) = self.rows().into_iter().next() {
-                    let app = if first.on_disk { App::of_path(std::path::Path::new(&first.target)) } else { Some(App { target: first.target, name: first.name }) };
+                    let app = if first.on_disk { App::of_path(std::path::Path::new(&first.target)) } else { Some(App { target: first.target, name: first.name, alias: None }) };
                     if let Some(app) = app {
                         // (Kept already, as it is added: not twice, Enter pressed again before the first was kept.)
                         crate::station::apps::change(move |apps| {
@@ -1950,11 +1950,11 @@ otepad.exe"),
         found::pretend(listed);
         let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
         crate::station::apps::pretend(vec![
-            App { target: r"C:\Windows\System32\cmd.exe".into(), name: "微信".into() },
-            App { target: r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(), name: "计算器".into() },
-            App { target: file("docs").display().to_string(), name: "docs".into() },
-            App { target: file("Cargo.toml").display().to_string(), name: "Cargo".into() },
-            App { target: file("gone.pdf").display().to_string(), name: "gone".into() },
+            App { target: r"C:\Windows\System32\cmd.exe".into(), name: "微信".into(), alias: None },
+            App { target: r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(), name: "计算器".into(), alias: None },
+            App { target: file("docs").display().to_string(), name: "docs".into(), alias: None },
+            App { target: file("Cargo.toml").display().to_string(), name: "Cargo".into(), alias: None },
+            App { target: file("gone.pdf").display().to_string(), name: "gone".into(), alias: None },
         ]);
         {
             use crate::station::recent::{Came, Key, Kind};

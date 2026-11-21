@@ -338,33 +338,47 @@ pub fn recent_chose(entry: recent::Entry, choice: RecentChoice) {
     }
 }
 
-/// What the menu of a thing kept at hand does: opens it, shows where it is in Explorer, takes it off.
+/// What the menu of a thing kept at hand does: opens it, shows where it is in Explorer, renames it (in quick launch
+/// alone: see `ui::rename`), gives it its own name again, takes it off.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AppChoice {
     Open,
     Show,
+    Rename,
+    Restore,
     Remove,
+}
+
+/// The rows of the menu of `app`, kept at hand: what each does, its words, its mark, whether a rule sets it off. Where
+/// it is is offered only for what is on the disk, its own name again only where it was given another.
+fn app_rows(app: &apps::App, lang: crate::ui::text::Lang) -> Vec<(AppChoice, &'static str, crate::ui::icons::Icon, bool)> {
+    use crate::ui::icons::Icon;
+    let mut rows = vec![(AppChoice::Open, lang.pick("打开", "Open"), Icon::File, false)];
+    if app.location().is_some() {
+        rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
+    }
+    rows.push((AppChoice::Rename, lang.pick("重命名", "Rename"), Icon::SquarePen, false));
+    if app.alias.is_some() {
+        rows.push((AppChoice::Restore, lang.pick("恢复原名", "Restore its name"), Icon::Restore, false));
+    }
+    rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::PinOff, true));
+    rows
 }
 
 /// The menu of the thing kept at hand at `at` among them (a right click on it), at `point` on the screen: up, with
 /// what its rows do (where it is is shown only for what is on the disk).
 pub fn app_menu(number: u64, point: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<AppChoice>, apps::App)> {
-    use crate::ui::icons::Icon;
     use crate::ui::menu::{Item, Menu};
     let app = apps::numbered(number)?;
-    let lang = crate::update::language();
-    let mut rows = vec![(AppChoice::Open, lang.pick("打开", "Open"), Icon::File, false)];
-    if app.location().is_some() {
-        rows.push((AppChoice::Show, lang.pick("打开文件所在的位置", "Open its location"), Icon::Panel, false));
-    }
-    rows.push((AppChoice::Remove, lang.pick("从快捷 App 移除", "Take off quick launch"), Icon::PinOff, true));
+    let rows = app_rows(&app, crate::update::language());
     let items = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     let menu = Menu::open_at(items, look, point, false, over_the_panel)?;
     Some((menu, rows.into_iter().map(|(choice, ..)| choice).collect(), app))
 }
 
 /// `choice` made in the menu of `app`, kept at hand (see `app_menu`: the one its menu was opened on, whatever is
-/// kept now): done.
+/// kept now): done. (Renaming it opens a box where its menu was, opened by the thread the menu was up on: see
+/// `ui::rename`.)
 pub fn app_chose(app: apps::App, choice: AppChoice) {
     match choice {
         AppChoice::Open => run::ask(run::Ask::Launch(app.target)),
@@ -373,6 +387,8 @@ pub fn app_chose(app: apps::App, choice: AppChoice) {
                 run::ask(run::Ask::Files(vec![path], run::FilesAct::Show));
             }
         }
+        AppChoice::Rename => {}
+        AppChoice::Restore => apps::rename(app, None),
         AppChoice::Remove => apps::change(move |apps| apps.retain(|kept| *kept != app)),
     }
 }
@@ -478,6 +494,17 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::ui::view::Hit;
+
+    /// The menu of a thing kept at hand offers to rename it, and to give it its own name again only where it was given
+    /// another. (It offered neither.)
+    #[test]
+    fn a_thing_kept_at_hand_is_offered_its_renaming() {
+        let mut app = apps::App { target: "https://example.com/".into(), name: "example.com".into(), alias: None };
+        let choices = |app: &apps::App| app_rows(app, crate::ui::text::Lang::Zh).into_iter().map(|(choice, label, ..)| (choice, label)).collect::<Vec<_>>();
+        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Remove, "从快捷 App 移除")]);
+        app.alias = Some("样例".into());
+        assert_eq!(choices(&app), [(AppChoice::Open, "打开"), (AppChoice::Rename, "重命名"), (AppChoice::Restore, "恢复原名"), (AppChoice::Remove, "从快捷 App 移除")]);
+    }
 
     /// The menu of things chosen together offers what may be done with all of them: put on the clipboard ever, shown
     /// in Explorer where any is a file, files come lately put on the station, things on it pinned (unpinned where all

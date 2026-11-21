@@ -8,25 +8,28 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// One thing kept at hand: what opens it, and its name as it is shown.
+/// One thing kept at hand: what opens it, its own name, and the name the user gave it to be shown by in quick launch
+/// alone (its file, folder or address left as it is: see `ui::rename`).
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct App {
     pub target: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
 }
 
 impl App {
     /// A file, folder or shortcut dropped to be kept at hand: by its name without its extension (a folder's whole).
     pub fn of_path(path: &Path) -> Option<App> {
         let name = if path.is_dir() { path.file_name()? } else { path.file_stem()? };
-        Some(App { target: path.display().to_string(), name: name.to_string_lossy().into_owned() })
+        Some(App { target: path.display().to_string(), name: name.to_string_lossy().into_owned(), alias: None })
     }
 
     /// A web address kept at hand: by its site.
     pub fn of_url(url: &str) -> Option<App> {
         let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
         let site = rest.split(['/', '?', '#']).next()?.trim_start_matches("www.");
-        (!site.is_empty()).then(|| App { target: url.to_string(), name: site.to_string() })
+        (!site.is_empty()).then(|| App { target: url.to_string(), name: site.to_string(), alias: None })
     }
 
     /// Whether it is a web address.
@@ -41,11 +44,32 @@ impl App {
 }
 
 static SHOWN: Mutex<Option<Arc<Vec<App>>>> = Mutex::new(None);
+/// Whether each is named under its picture wherever it shows (see `always_named`).
+static NAMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(any(test, feature = "studio"))]
 thread_local! {
     /// What this thread's pictures pretend (see `pretend`): each test's its own, as tests run side by side.
     static PRETENDED: std::cell::RefCell<Option<Arc<Vec<App>>>> = const { std::cell::RefCell::new(None) };
+    /// Whether this thread's pictures pretend what is kept at hand always named (see `pretend_named`).
+    static PRETENDED_NAMED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether what is kept at hand is named under its picture wherever it shows (on the rail, in a lane's row of
+/// pictures, in a widget), its tags left off (see `Settings::apps_named`); else named only where a whole lane has
+/// room for its names.
+pub fn always_named() -> bool {
+    #[cfg(any(test, feature = "studio"))]
+    if let Some(pretended) = PRETENDED_NAMED.with(std::cell::Cell::get) {
+        return pretended;
+    }
+    NAMED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// This thread's pictures drawn with what is kept at hand always named, or not (see `always_named`).
+#[cfg(any(test, feature = "studio"))]
+pub fn pretend_named(named: bool) {
+    PRETENDED_NAMED.with(|pretended| pretended.set(Some(named)));
 }
 
 /// What is kept at hand, in its order.
@@ -62,14 +86,18 @@ pub fn named() -> Vec<(String, String)> {
     told_apart(&shown())
 }
 
-/// `apps`, each by the name it is told by, with what opens it: its own, or, where another of them bears the same (two
-/// folders named Documents, their pictures and tags alike), the name of the folder it is in, or of the one above that
-/// and so on, the fewest folders up where the names of all that bear it differ (as far as any of them goes, else the
-/// folder it is in). A web address or a program by its shell name, as it is named.
+/// `apps`, each by the name it is told by, with what opens it: the name the user gave it, else its own, or, where
+/// another of them given none bears the same (two folders named Documents, their pictures and tags alike), the name of
+/// the folder it is in, or of the one above that and so on, the fewest folders up where the names of all that bear it
+/// differ (as far as any of them goes, else the folder it is in). A web address or a program by its shell name, as it
+/// is named.
 pub fn told_apart(apps: &[App]) -> Vec<(String, String)> {
     apps.iter()
         .map(|app| {
-            let same: Vec<&App> = apps.iter().filter(|other| other.name == app.name).collect();
+            if let Some(alias) = &app.alias {
+                return (alias.clone(), app.target.clone());
+            }
+            let same: Vec<&App> = apps.iter().filter(|other| other.alias.is_none() && other.name == app.name).collect();
             let name = if same.len() > 1 { by_folder(app, &same) } else { None };
             (name.unwrap_or_else(|| app.name.clone()), app.target.clone())
         })
@@ -110,7 +138,8 @@ pub fn numbered(number: u64) -> Option<App> {
 }
 
 /// The settings' list taken as what is kept at hand (as they are read, and each time they change).
-pub fn follow(apps: &[App]) {
+pub fn follow(apps: &[App], named: bool) {
+    NAMED.store(named, std::sync::atomic::Ordering::Relaxed);
     let mut shown = SHOWN.lock().unwrap();
     if shown.as_deref().map(Vec::as_slice) != Some(apps) {
         *shown = Some(Arc::new(apps.to_vec()));
@@ -286,6 +315,15 @@ pub fn put_before(apps: &mut Vec<App>, moving: &str, before: Option<&str>) {
 }
 
 /// What is kept at hand changed as `change` changes it (off the calling thread, which the settings then tell).
+/// `app`, kept at hand, shown in quick launch by `alias` from now (none: by its own name again).
+pub fn rename(app: App, alias: Option<String>) {
+    change(move |apps| {
+        for kept in apps.iter_mut().filter(|kept| **kept == app) {
+            kept.alias = alias.clone();
+        }
+    });
+}
+
 pub fn change(change: impl FnOnce(&mut Vec<App>) + Send + 'static) {
     std::thread::spawn(move || {
         // (In a COM apartment: what is kept is told apart by what it opens, a shortcut read through the shell.)
@@ -303,7 +341,7 @@ mod tests {
     /// which.)
     #[test]
     fn those_named_alike_are_told_by_their_folders() {
-        let app = |target: &str, name: &str| super::App { target: target.into(), name: name.into() };
+        let app = |target: &str, name: &str| super::App { target: target.into(), name: name.into(), alias: None };
         let apps = [
             app(r"D:\工作\Documents", "Documents"),
             app(r"D:\个人\Documents", "Documents"),
@@ -318,6 +356,20 @@ mod tests {
         // (A drive's root holds one: by the folder it is in where the other's has a name.)
         let named: Vec<String> = super::told_apart(&[app(r"D:\Documents", "Documents"), app(r"E:\x\Documents", "Documents")]).into_iter().map(|(name, _)| name).collect();
         assert_eq!(named, ["Documents", "x"]);
+    }
+
+    /// One given a name of its own (renamed in quick launch) is told by it, the one it bore the same name as by its own
+    /// again (no other given none bears it); given back its own name, both by their folders. (A name given was not
+    /// shown: there was none to give.)
+    #[test]
+    fn one_given_a_name_is_told_by_it() {
+        let app = |target: &str, name: &str, alias: Option<&str>| super::App { target: target.into(), name: name.into(), alias: alias.map(Into::into) };
+        let apps = [app(r"D:\工作\Documents", "Documents", Some("周报")), app(r"D:\个人\Documents", "Documents", None)];
+        let named: Vec<String> = super::told_apart(&apps).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(named, ["周报", "Documents"]);
+        let apps = [app(r"D:\工作\Documents", "Documents", None), app(r"D:\个人\Documents", "Documents", None)];
+        let named: Vec<String> = super::told_apart(&apps).into_iter().map(|(name, _)| name).collect();
+        assert_eq!(named, ["工作", "个人"]);
     }
 
     use super::*;
@@ -395,7 +447,7 @@ mod tests {
     /// is kept changed meanwhile (one taken off) moves neither another nor it elsewhere.
     #[test]
     fn puts_a_dragged_thing_before_the_one_it_was_dropped_before() {
-        let kept = |names: &[&str]| names.iter().map(|name| App { target: (*name).into(), name: (*name).into() }).collect::<Vec<_>>();
+        let kept = |names: &[&str]| names.iter().map(|name| App { target: (*name).into(), name: (*name).into(), alias: None }).collect::<Vec<_>>();
         let names = |apps: &[App]| apps.iter().map(|app| app.target.clone()).collect::<Vec<_>>();
         let mut apps = kept(&["a", "b", "c", "d"]);
         put_before(&mut apps, "d", Some("b"));
@@ -423,7 +475,7 @@ mod tests {
         assert_eq!((file.name.as_str(), file.location()), ("Notepad++", Some(PathBuf::from(r"C:\Tools\Notepad++.lnk"))));
         let site = App::of_url("https://www.github.com/lulu-loopp/glance").unwrap();
         assert_eq!((site.name.as_str(), site.is_url(), site.location()), ("github.com", true, None));
-        let store = App { target: r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(), name: "Calculator".into() };
+        let store = App { target: r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App".into(), name: "Calculator".into(), alias: None };
         assert_eq!(store.location(), None);
         assert!(App::of_url("ftp://x").is_none());
     }

@@ -1903,15 +1903,25 @@ const APP_SIDE: f32 = 36.0;
 const APP_GAP: f32 = 6.0;
 const RAIL_CELL: f32 = 46.0;
 const RAIL_SIDE: f32 = 32.0;
+/// A rail's cell along it where things are named under their pictures (see `apps::always_named`), and the room between a
+/// picture and its name.
+const RAIL_NAMED_CELL: f32 = 60.0;
+const RAIL_NAME_GAP: f32 = 2.0;
+
+/// A rail's cell along it, its things `named` or not.
+fn rail_cell(named: bool) -> f32 {
+    if named { RAIL_NAMED_CELL } else { RAIL_CELL }
+}
 /// The most rows of what is kept at hand a whole lane shows.
 const APP_ROWS: usize = 3;
 
 /// Quick launch's lane: whole (`full`), what is kept at hand under its name, named, in as many rows as they take (up
-/// to `APP_ROWS`, the place to add more after them); else their pictures in one row.
-fn apps_lane(full: bool, theme: &Theme, lang: Lang) -> Vec<Block> {
+/// to `APP_ROWS`, the place to add more after them); else their pictures in one row, named too where `named` (its
+/// names always shown: see `apps::always_named`).
+fn apps_lane(full: bool, named: bool, theme: &Theme, lang: Lang) -> Vec<Block> {
     let apps = crate::station::apps::named();
     let rows = if full { apps_rows(apps.len(), theme) } else { 1 };
-    vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full, over: crate::station::run::shown().apps_over }]
+    vec![head(lang.pick("快捷 App", "Quick launch"), "", "", false), Block::Apps { apps, rows, named: full || named, over: crate::station::run::shown().apps_over }]
 }
 
 /// The rows a whole quick launch lane takes for `count` things (and the place to add more) across a column's room in
@@ -2182,15 +2192,27 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     let (apps, over): (&[(String, String)], bool) = lane.blocks.iter().find_map(|block| if let Block::Apps { apps, over, .. } = block { Some((apps.as_slice(), *over)) } else { None }).unwrap_or((&[], false));
     let across = side == RailSide::Bottom;
     let foot = RAIL_FOOT;
+    // Each thing's cell: square round its picture; named (see `apps::always_named`), as wide as the rail down a side (as tall as
+    // the one under the columns) and longer along it, the name under the picture.
+    let named = crate::station::apps::always_named();
+    let along = rail_cell(named);
+    let (cell_w, cell_h) = match (named, across) {
+        (false, _) => (RAIL_CELL, RAIL_CELL),
+        (true, false) => (area.w, along),
+        (true, true) => (along, area.h),
+    };
+    let name_font = theme.small;
+    let name_tall = (name_font.size * 1.3).ceil();
+    let (picture_x, picture_y) = ((cell_w - RAIL_SIDE) / 2.0, if named { (cell_h - RAIL_SIDE - RAIL_NAME_GAP - name_tall) / 2.0 } else { (cell_h - RAIL_SIDE) / 2.0 });
     // (Along the rail: down it, or across it under the columns.)
     let (start, length) = if across { (area.x + 6.0, area.w - 12.0 - foot) } else { (area.y + 8.0, area.h - 16.0 - foot) };
     let cell = |at: usize| -> (f32, f32) {
-        let along = start + at as f32 * RAIL_CELL;
-        if across { (along, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, along) }
+        let on = start + at as f32 * along;
+        if across { (on, area.y + (area.h - cell_h) / 2.0) } else { (area.x + (area.w - cell_w) / 2.0, on) }
     };
     let lit_on = |hit: Hit| scene.hover == Some(hit);
     // Its things, and the place to add more after them, scrolled along by the wheel where they are more than fit.
-    let whole = (apps.len() + 1) as f32 * RAIL_CELL;
+    let whole = (apps.len() + 1) as f32 * along;
     let most = (whole - length).max(0.0);
     let scroll = scene.scrolls.at(List::Apps).clamp(0.0, most);
     let (view_x, view_y, view_w, view_h) = if across { (start, area.y, length, area.h) } else { (area.x, start, area.w, length) };
@@ -2201,9 +2223,8 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
         let (x, y) = cell(at);
         if across { (x - scroll, y) } else { (x, y - scroll) }
     };
-    let inset = (RAIL_CELL - RAIL_SIDE) / 2.0;
     // (The one held: along the rail as the pointer has it, in its middle across it.)
-    let held_cell = |(px, py): (f32, f32)| if across { (px - RAIL_CELL / 2.0, area.y + (area.h - RAIL_CELL) / 2.0) } else { (area.x + (area.w - RAIL_CELL) / 2.0, py - RAIL_CELL / 2.0) };
+    let held_cell = |(px, py): (f32, f32)| if across { (px - cell_w / 2.0, area.y + (area.h - cell_h) / 2.0) } else { (area.x + (area.w - cell_w) / 2.0, py - cell_h / 2.0) };
     for at in 0..=apps.len() {
         // Each in its place, or on its way to it; the one held drawn after all, where the pointer has it.
         let spot = match apps.get(at) {
@@ -2211,19 +2232,23 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
             None => Some(shown_cell(at)),
         };
         let Some((x, y)) = spot else { continue };
-        if if across { x + RAIL_CELL < view_x || x > view_x + view_w } else { y + RAIL_CELL < view_y || y > view_y + view_h } {
+        if if across { x + cell_w < view_x || x > view_x + view_w } else { y + cell_h < view_y || y > view_y + view_h } {
             continue;
         }
         let Some((name, target)) = apps.get(at) else {
-            paint_adder(frame, scene, x + inset, y + inset, RAIL_SIDE, over, &mut placed);
+            paint_adder(frame, scene, x + picture_x, y + picture_y, RAIL_SIDE, over, &mut placed);
             continue;
         };
         let hit = Hit::App(crate::station::apps::number_of(target));
         if lit_on(hit) {
-            app_plate(frame, theme, (x + 2.0, y + 2.0, RAIL_CELL - 4.0), (RAIL_CELL - 4.0 - RAIL_SIDE) / 2.0);
+            frame.fill_rounded(theme.hover, x + 2.0, y + 2.0, cell_w - 4.0, cell_h - 4.0, plate_round(theme, GLASS_ROW_ROUND, (cell_w.min(cell_h) - 4.0 - RAIL_SIDE) / 2.0));
         }
-        paint_app(frame, theme, name, target, x + inset, y + inset, RAIL_SIDE, false);
-        placed.push((x, y, RAIL_CELL, RAIL_CELL, hit));
+        paint_app(frame, theme, name, target, x + picture_x, y + picture_y, RAIL_SIDE, named);
+        if named {
+            let room = cell_w - 4.0;
+            centred(frame, &fitted(frame, name, name_font, room), name_font, theme.text2, x + 2.0, y + picture_y + RAIL_SIDE + RAIL_NAME_GAP, room);
+        }
+        placed.push((x, y, cell_w, cell_h, hit));
     }
     // The one held, lifted where the pointer has it along the rail; the places it may go to, standing still, all of
     // the rail between them (before the first, past the last).
@@ -2233,7 +2258,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     if let Some((held, point)) = scene.thumbs.app_held() {
         if let Some((name, target)) = apps.iter().find(|(_, target)| target == held) {
             let (x, y) = held_cell(point);
-            paint_held_app(frame, scene, name, target, x + inset, y + inset, RAIL_SIDE);
+            paint_held_app(frame, scene, name, target, x + picture_x, y + picture_y, RAIL_SIDE);
         }
     }
     frame.unclip();
@@ -2242,7 +2267,7 @@ fn paint_rail(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, side: 
     let places: Vec<HitBox> = (0..apps.len()).map(|at| {
         let (x, y) = shown_cell(at);
         let (lead, tail) = (if at == 0 { 1000.0 } else { 0.0 }, if at + 1 == apps.len() { 1000.0 } else { 0.0 });
-        if across { (x - lead, area.y, RAIL_CELL + lead + tail, area.h, Hit::AppSlot(at as u16)) } else { (area.x, y - lead, area.w, RAIL_CELL + lead + tail, Hit::AppSlot(at as u16)) }
+        if across { (x - lead, area.y, along + lead + tail, area.h, Hit::AppSlot(at as u16)) } else { (area.x, y - lead, area.w, along + lead + tail, Hit::AppSlot(at as u16)) }
     }).collect();
     // (Only what shows of them is pressed.)
     hits.extend(placed.into_iter().filter_map(|hit| shown_in(hit, (view_x, view_y, view_w, view_h))));
@@ -3491,7 +3516,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             blocks
         }
         "station" => station_lane(full, scene.tab, lang),
-        "apps" => apps_lane(full, scene.theme, lang),
+        "apps" => apps_lane(full, crate::station::apps::always_named(), scene.theme, lang),
         "notes" => notes_lane(full, lang),
         "todo" => todo::todo_lane(full, lang),
         "search" => vec![Block::Search { keys: crate::tray::search_keys() }],
@@ -3631,14 +3656,14 @@ pub enum RailSide {
 /// A rail's width beside the columns, and its height under them.
 pub const RAIL_W: f32 = 60.0;
 pub const RAIL_ROW: f32 = 56.0;
-/// The least a rail down a side is tall: its foot's buttons, a thing over them, and the room round them (see
-/// `paint_rail`).
-pub(crate) const RAIL_LEAST: f32 = RAIL_FOOT + RAIL_CELL + 16.0;
-
-/// How long a rail down a side is to show all of `things` and the place to add more over its foot, with the room round
+/// The least a rail down a side is tall: its foot's buttons, a thing over them (named, the longer), and the room round
 /// them (see `paint_rail`).
-pub(crate) fn rail_length(things: usize) -> f32 {
-    RAIL_FOOT + 16.0 + (things + 1) as f32 * RAIL_CELL
+pub(crate) const RAIL_LEAST: f32 = RAIL_FOOT + RAIL_NAMED_CELL + 16.0;
+
+/// How long a rail down a side is to show all of `things` (`named` under their pictures or not: see `apps::always_named`) and
+/// the place to add more over its foot, with the room round them (see `paint_rail`).
+pub(crate) fn rail_length(things: usize, named: bool) -> f32 {
+    RAIL_FOOT + 16.0 + (things + 1) as f32 * rail_cell(named)
 }
 /// The room a rail's foot takes along it: the room before its two buttons (see `paint_rail`), and them.
 const RAIL_FOOT: f32 = RAIL_FOOT_GAP + 2.0 * BUTTON + BUTTON_GAP;
@@ -6378,28 +6403,34 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             paint_grid(frame, scene, hits, room, &grid, tiles.len(), list, &draw, &small, hovered);
         }
         Bench::Apps(apps) => {
-            let grid = Grid::in_room((x, y, w, h), 52.0, false);
+            // (Named under their pictures where they always are, as the station's tiles are named: see `apps::always_named`.)
+            let named = crate::station::apps::always_named();
+            let grid = Grid::in_room((x, y, w, h), 52.0, named);
             let footed = grid.foot > 0.0;
             let draw = |hits: &mut Vec<HitBox>, at: usize, (cx, cy): (f32, f32), side: f32, current: bool| {
                 let (name, target) = &apps[at];
                 let hit = Hit::App(crate::station::apps::number_of(target));
                 if current {
                     if lit(hit) {
-                        frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0, plate_round(theme, GLASS_ROW_ROUND, 3.0));
+                        frame.fill_rounded(theme.hover, cx - 3.0, cy - 3.0, side + 6.0, side + 6.0 + if named { GRID_NAME } else { 0.0 }, plate_round(theme, GLASS_ROW_ROUND, 3.0));
                     }
                     frame.key(&format!("app.{target}"));
                 }
-                paint_app(frame, theme, name, target, cx, cy, side, false);
+                paint_app(frame, theme, name, target, cx, cy, side, named);
+                let shown = if named { fitted(frame, name, theme.small, side + GRID_GAP - 2.0).to_string() } else { String::new() };
+                if named {
+                    centred(frame, &shown, theme.small, theme.text2, cx - GRID_GAP / 2.0, cy + side + 2.0, side + GRID_GAP);
+                }
                 if current {
                     frame.key("");
-                    hits.push((cx, cy, side, side, hit));
-                    if !footed {
-                        name_shown(hits, hit, name, "");
+                    hits.push((cx, cy, side, side + if named { GRID_NAME } else { 0.0 }, hit));
+                    if named || !footed {
+                        name_shown(hits, hit, name, &shown);
                     }
                 }
             };
-            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side, false);
-            let hovered = apps.iter().find(|(_, target)| lit(Hit::App(crate::station::apps::number_of(target)))).map(|(name, _)| name.as_str());
+            let small = |at: usize, (cx, cy): (f32, f32), side: f32| paint_app(frame, theme, &apps[at].0, &apps[at].1, cx, cy, side, named);
+            let hovered = apps.iter().find(|(_, target)| lit(Hit::App(crate::station::apps::number_of(target)))).map(|(name, _)| name.as_str()).filter(|_| !named);
             paint_grid(frame, scene, hits, (x, y, w, h), &grid, apps.len(), List::Apps, &draw, &small, hovered);
             hits.push((x, y, w, h, Hit::AppsArea));
         }
@@ -6788,7 +6819,7 @@ pub(crate) mod tests {
             let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
         }
         crate::station::thumbs::start(|| {});
-        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into() };
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into(), alias: None };
         crate::station::apps::pretend(vec![
             app(r"C:\Windows\System32
 otepad.exe", "Notepad"),
@@ -6812,7 +6843,7 @@ otepad.exe", "Notepad"),
                 let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: Some(Hit::App(crate::station::apps::number_of(r"C:\Windows\explorer.exe"))), thumbs: &RESTING, pinned: true, overlay: false, buttons: true, newer: false, settings_lit: None };
                 let lanes = vec![
                     Lane { id: "station".into(), blocks: station_lane(true, Tab::Shelf, Lang::Zh), ink: theme.ink("station") },
-                    Lane { id: "apps".into(), blocks: apps_lane(true, &theme, Lang::Zh), ink: theme.ink("apps") },
+                    Lane { id: "apps".into(), blocks: apps_lane(true, false, &theme, Lang::Zh), ink: theme.ink("apps") },
                 ];
                 for (column, side) in sides.iter().enumerate() {
                     let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
@@ -9180,7 +9211,7 @@ seven".into()));
         assert_eq!(crate::notes::named(card.number).as_deref(), Some("pressed-a.md"));
         crate::notes::pretend(vec![note("pressed-b.md")]);
         assert_eq!(crate::notes::named(card.number), None, "gone: nothing opened");
-        let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into() };
+        let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into(), alias: None };
         let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["apps".to_string()]));
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
@@ -9338,7 +9369,7 @@ seven".into()));
     fn a_rail_s_places_are_found_while_one_is_dragged() {
         let _pretending = crate::pretending();
         let theme = Theme::new(Skin::Fluent, false);
-        let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into() };
+        let app = |target: &str| crate::station::apps::App { target: target.into(), name: target.into(), alias: None };
         crate::station::apps::pretend((0..5).map(|at| app(&format!("C:/{at}.exe"))).collect());
         let order: Vec<String> = (0..5).map(|at| format!("C:/{at}.exe")).collect();
         let mut moving = super::super::thumb::Dots::new();
@@ -9359,6 +9390,46 @@ seven".into()));
             let place = hits.iter().filter(|(hx, hy, hw, hh, _)| px >= *hx && px < hx + hw && py >= *hy && py < hy + hh).find_map(|hit| if let Hit::AppSlot(slot) = hit.4 { Some(slot) } else { None });
             assert_eq!(place, Some(at), "at {at}");
         }
+    }
+
+    /// Quick launch always named (its switch on, see `apps::always_named`): each thing's name under its picture, no
+    /// tag on it, on a rail down a side and on one under the columns, and in a widget. Off, tagged as before, and named
+    /// on neither. (The owner asked for names they need not hover to read.)
+    #[test]
+    fn quick_launch_always_named_names_each_and_tags_none() {
+        let theme = Theme::new(Skin::Glass, false);
+        let app = |target: &str, name: &str| crate::station::apps::App { target: target.into(), name: name.into(), alias: None };
+        crate::station::apps::pretend(vec![app(r"Q:\工作\Docs", "Docs"), app(r"Q:\个人\Notes", "Notes")]);
+        let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["time".to_string(), "apps".to_string()]));
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::En, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        for named in [false, true] {
+            crate::station::apps::pretend_named(named);
+            let lanes: Vec<Lane> = ["time", "apps"].iter().filter_map(|id| Some(Lane { id: id.to_string(), blocks: lane(&scene, id, Detail::Full)?, ink: theme.ink(id) })).collect();
+            let heights: Vec<f32> = lanes.iter().map(|lane| lane.height(&theme)).collect();
+            let mut drawn = Vec::new();
+            for side in [RailSide::Start, RailSide::Bottom] {
+                let layout = Layout::with_columns(vec![heights[0]], 1, &theme).with_rail(1, side, rail_length(2, named));
+                let said = Said::default();
+                let hits = paint(&said, &scene, &lanes, &layout, Pass::Content);
+                drawn.push((format!("{side:?}"), said.0.into_inner()));
+                // (Each found where it is drawn.)
+                assert_eq!(hits.iter().filter(|hit| matches!(hit.4, Hit::App(_))).count(), 2, "{side:?}");
+            }
+            let said = Said::default();
+            let mut hits = Vec::new();
+            paint_bench(&said, &scene, theme.ink("apps"), (0.0, 0.0, 300.0, 160.0), Rect { x: 0.0, y: 0.0, w: 300.0, h: 160.0 }, &Bench::Apps(crate::station::apps::named()), Shape::of((300.0, 160.0)), &mut hits);
+            drawn.push(("widget".into(), said.0.into_inner()));
+            for (on, texts) in drawn {
+                for name in ["Docs", "Notes"] {
+                    assert_eq!(texts.iter().any(|text| text == name), named, "{on} named {named}: {texts:?}");
+                    assert_eq!(texts.contains(&tag_of(name)), !named, "{on} tagged, named {named}: {texts:?}");
+                }
+            }
+        }
+        // A rail down a side named is as long as its longer cells take.
+        assert!(rail_length(2, true) > rail_length(2, false));
     }
 
     /// One kept at hand held and dragged: the places it may go to stand still where the things were, whatever the

@@ -5395,6 +5395,7 @@ It can be disconnected here at any time, and the status line command put back.",
             ("station", "history") => Some(self.settings.station.history),
             ("station", "recent") => Some(self.settings.station.recent),
             ("todo", "remind") => Some(self.settings.todo_remind),
+            ("apps", "names") => Some(self.settings.apps_named),
             _ => None,
         }
     }
@@ -5413,6 +5414,9 @@ It can be disconnected here at any time, and the status line command put back.",
         }
         if id == "todo" {
             return vec!["remind".into()];
+        }
+        if id == "apps" {
+            return vec!["names".into()];
         }
         // An overlay's group of one item has no card: its switch is the item's. (The drives': one for each drive
         // that has told its temperature.)
@@ -5582,6 +5586,7 @@ It can be disconnected here at any time, and the status line command put back.",
             ("overlay", "time") => (p("时间", "Time"), None),
             ("station", "history") => (p("记录最近复制", "Keep what is copied"), Some(p("关闭后不再记录，已有记录保留", "Off, nothing more is kept. What was is still there"))),
             ("station", "recent") => (p("列出最近文件", "List recent files"), None),
+            ("apps", "names") => (p("始终显示名称", "Always show names"), Some(p("图标下方显示名称，不再显示角标", "Names under the icons, in place of tags"))),
             ("todo", "remind") => (p("到时提醒", "Remind when due"), Some(p("通过 Windows 通知提醒设了日期的待办，Glance 运行时有效", "Windows notifications tell of to-dos with a day as they come due, while Glance runs"))),
             ("time", "sound") => (p("音量", "Volume"), None),
             ("time", "media") => (p("正在播放", "Now playing"), None),
@@ -5898,6 +5903,7 @@ It can be disconnected here at any time, and the status line command put back.",
                     _ if self.settings_item(&id, &name).is_some() => match name.as_str() {
                         "history" => self.settings.station.history = !on,
                         "remind" => self.settings.todo_remind = !on,
+                        "names" => self.settings.apps_named = !on,
                         _ => self.settings.station.recent = !on,
                     },
                     (Some(group), _) => super::overlay::set_item(&mut self.settings.overlay.groups, group, &name, !on),

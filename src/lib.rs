@@ -244,7 +244,7 @@ impl App {
             self.controller.apply(&held);
             // (The station reads them as it is told: see `station::run::Ask::Settings`.)
             station::run::ask(station::run::Ask::Settings);
-            station::apps::follow(&held.apps);
+            station::apps::follow(&held.apps, held.apps_named);
             notes::follow_settings(&held);
             station::recent::follow_settings(&held);
         }
@@ -598,7 +598,10 @@ pub fn run() {
     if let Some(paths) = to_send {
         ui::settings_window::open_to_send(paths);
     }
-    station::apps::follow(&app().settings.lock().unwrap().apps);
+    {
+        let settings = app().settings.lock().unwrap();
+        station::apps::follow(&settings.apps, settings.apps_named);
+    }
     notes::follow_settings(&app().settings.lock().unwrap());
     station::recent::follow_settings(&app().settings.lock().unwrap());
     notes::start(|| app().controller.wake());
