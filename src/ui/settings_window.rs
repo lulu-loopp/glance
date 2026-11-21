@@ -9306,7 +9306,7 @@ mod pictures {
     }
 
     /// The hour all-day to-dos are told at is chosen in a menu under a button saying it, in the to-do's card: each hour
-    /// from 06:00 to 22:00, the one chosen ticked, not six hours side by side. Chosen there, it is kept; one written by
+    /// of the day, from 00:00 to 23:00 (it was 06:00 to 22:00), the one chosen ticked, not six hours side by side. Chosen there, it is kept; one written by
     /// hand that is none of them is said on the button, none ticked.
     #[test]
     fn the_all_day_hour_is_chosen_from_a_menu() {
@@ -9346,14 +9346,16 @@ mod pictures {
                 assert!(ui.targets.iter().any(|(_, target)| *target == Target::ChoiceMenu(Field::TodoDayAt)), "its button drawn");
                 let items = ui.choice_menu(Field::TodoDayAt);
                 let labels: Vec<&str> = items.iter().map(|item| item.label.as_ref()).collect();
-                assert_eq!(labels, (6..=22).map(|hour| format!("{hour:02}:00")).collect::<Vec<_>>());
+                assert_eq!(labels, (0..=23).map(|hour| format!("{hour:02}:00")).collect::<Vec<_>>());
                 assert_eq!(items.iter().filter(|item| item.checked).map(|item| item.label.as_ref()).collect::<Vec<_>>(), ["09:00"]);
                 assert_eq!(ui.choice_shown(Field::TodoDayAt), "09:00");
                 // Chosen in the menu: kept.
+                ui.menu_chosen(MenuOf::Choice(Field::TodoDayAt), Some(23));
+                assert_eq!(ui.settings.todo_day_at, "23:00");
                 ui.menu_chosen(MenuOf::Choice(Field::TodoDayAt), Some(0));
-                assert_eq!(ui.settings.todo_day_at, "06:00");
+                assert_eq!(ui.settings.todo_day_at, "00:00");
                 ui.menu_chosen(MenuOf::Choice(Field::TodoDayAt), None);
-                assert_eq!(ui.settings.todo_day_at, "06:00");
+                assert_eq!(ui.settings.todo_day_at, "00:00");
                 // One written by hand, none of them: said, none ticked.
                 ui.settings.todo_day_at = "09:30".into();
                 assert_eq!(ui.choice_shown(Field::TodoDayAt), "09:30");

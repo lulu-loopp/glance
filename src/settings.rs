@@ -949,9 +949,10 @@ pub enum ShelfView {
 /// How many minutes before its time a to-do with a time of day may be told of: as it comes, or so many before.
 pub const TODO_LEADS: [u32; 5] = [0, 5, 10, 15, 30];
 
-/// The times of day a to-do of the whole day may be told of on its day: each hour from six in the morning to ten at night.
+/// The times of day a to-do of the whole day may be told of on its day: each hour of the day, from midnight to eleven at
+/// night (from six to ten, one who works at night could not be told of theirs at night).
 pub fn todo_day_times() -> Vec<String> {
-    (6..=22).map(|hour| format!("{hour:02}:00")).collect()
+    (0..=23).map(|hour| format!("{hour:02}:00")).collect()
 }
 
 /// The times of day a to-do's time is chosen from, till the user keeps others: the morning's and the evening's.
