@@ -1922,9 +1922,10 @@ fn apps_rows(count: usize, theme: &Theme) -> usize {
 }
 
 /// The picture of what is kept at hand (`target`, what opens it) in the square `side` wide at (`x`, `y`): as Explorer
-/// shows it; a web address, by its site's first letter. Where it is not `named` beside it, a folder, or a file shown by
-/// its kind's icon (as others of its kind are), carries a tag of its name's first two characters in a colour of its
-/// own (see `paint_tag`), so that those of a kind are told apart; a file with a thumbnail of its own is shown by that.
+/// shows it (a file with a thumbnail of its own by that, whole); a web address, by its site's first letter. Where it is
+/// not `named` beside it, one shown by a picture others of its kind share (a folder, a file shown by its kind's icon, a
+/// shortcut to either) carries a tag of its name's first two characters in a colour of its own (see `paint_tag`), so
+/// that those of a kind are told apart.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &str, x: f32, y: f32, side: f32, named: bool) {
     let web = target.starts_with("https://") || target.starts_with("http://");
@@ -1942,19 +1943,24 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
     };
     if on_disk && (folder || !crate::station::apps::pictured(path)) {
         let centre = Point { x: x + side / 2.0, y: y + side / 2.0 };
-        // (A file of a kind with thumbnails, by its own; till it is made, by its kind's icon.)
-        let thumbnailed = !folder && crate::station::thumbs::thumbnailed(path);
-        let thumbnail = thumbnailed.then(|| crate::station::thumbs::of(path, APP_PIXELS)).flatten().filter(|_| !gone);
-        match thumbnail.or_else(|| crate::station::thumbs::icon(path, APP_PIXELS)).filter(|_| !gone) {
-            Some(picture) => frame.picture(&picture, x, y, side, side, 0.0, 1.0),
-            None => paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 26.0, gone),
+        // (A file by its thumbnail, whole, where it has one; else, and till it is made, by its kind's icon, tagged.)
+        let thumbnail = (!folder && !gone).then(|| crate::station::thumbs::thumbnail(path, APP_PIXELS)).flatten();
+        match (&thumbnail, crate::station::thumbs::icon(path, APP_PIXELS).filter(|_| !gone)) {
+            (Some(picture), _) => {
+                let (px, py, pw, ph) = picture.fitted_in(x, y, side, side);
+                frame.picture(picture, px, py, pw, ph, 0.0, 1.0);
+            }
+            (None, Some(icon)) => frame.picture(&icon, x, y, side, side, 0.0, 1.0),
+            (None, None) => paint_file_mark(frame, theme, folder, path, centre, side * 0.8, side >= 26.0, gone),
         }
-        if !named && !thumbnailed {
+        if !named && thumbnail.is_none() {
             paint_tag(frame, theme, name, (x, y, side), gone);
         }
         return;
     }
-    // (A program by its icon alone: its thumbnail is, for some, its icon on a white square.)
+    // (A program by its icon alone: its thumbnail is, for some, its icon on a white square. A shortcut to a folder or a
+    // document is drawn by its icon too, as Explorer draws it, the icon of what it points at: tagged as that is.)
+    let shortcut_to_kind = on_disk && crate::station::apps::runs(path) && !crate::station::apps::is_program(target);
     match crate::station::thumbs::icon(path, APP_PIXELS).filter(|_| !web) {
         Some(picture) => frame.picture(&picture, x, y, side, side, side / 5.0, if gone { 0.4 } else { 1.0 }),
         None => {
@@ -1964,6 +1970,9 @@ pub(crate) fn paint_app(frame: &dyn Canvas, theme: &Theme, name: &str, target: &
             let ink = if gone { theme.text2.alpha(theme.text2.a * 0.45) } else { theme.text2 };
             centred(frame, &letter, font, ink, x, frame.line_in(font, y, side), side);
         }
+    }
+    if !named && shortcut_to_kind {
+        paint_tag(frame, theme, name, (x, y, side), gone);
     }
 }
 
@@ -6653,6 +6662,63 @@ pub(crate) fn paint_field_ground(frame: &dyn Canvas, theme: &Theme, (x, y, w): (
 #[cfg(test)]
 pub(crate) mod tests {
 
+    /// What is kept at hand shown by pictures alone, tagged, on the glass dark and light, at a lane's size and the rail's,
+    /// and named under them as a whole lane shows them: `cargo test --features studio --lib -- --ignored
+    /// kept_at_hand_tags` writes `target/kept-at-hand-tags.png`. (Pictures of real folders and files made for it under
+    /// the temp folder, as the shell pictures them.)
+    #[test]
+    #[ignore = "writes a picture to look at"]
+    #[cfg(feature = "studio")]
+    fn kept_at_hand_tags() {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let _device = crate::ui::gfx::held().unwrap();
+        use crate::ui::theme::{Skin, Theme};
+        let dir = std::env::temp_dir().join("glance-kept-at-hand-tags");
+        let _ = std::fs::remove_dir_all(&dir);
+        for folder in ["项目资料", "发票", "照片", "Downloads"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        for file in ["合同.docx", "周报.docx", "预算 2027.xlsx", "说明.txt"] {
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+        // (A picture of its own: a sky over a hill.)
+        let (pw, ph) = (64u32, 48u32);
+        let photo: Vec<u8> = (0..pw * ph).flat_map(|at| if at / pw < 22 { [240, 190, 120, 255] } else { [70, 140, 80, 255] }).collect();
+        crate::studio::save_png(&dir.join("海边.png"), pw, ph, &photo).unwrap();
+        let mut kept: Vec<(String, String)> = ["项目资料", "发票", "照片", "Downloads", "合同.docx", "周报.docx", "预算 2027.xlsx", "说明.txt", "海边.png"]
+            .iter()
+            .map(|name| (std::path::Path::new(name).file_stem().unwrap().to_string_lossy().into_owned(), dir.join(name).to_string_lossy().into_owned()))
+            .collect();
+        kept.push(("记事本".into(), r"C:\Windows\notepad.exe".into()));
+        crate::station::thumbs::start(|| {});
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let (w, h) = (20.0 + kept.len() as f32 * 64.0, 4.0 * 92.0);
+        let draw = || {
+            gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                for (row, (dark, side, named)) in [(true, APP_SIDE, false), (true, RAIL_SIDE, false), (false, APP_SIDE, false), (true, APP_SIDE, true)].into_iter().enumerate() {
+                    let theme = Theme::new(Skin::Glass, dark);
+                    let y0 = row as f32 * 92.0;
+                    frame.fill(if dark { Color::hex(0x1C2030, 1.0) } else { Color::hex(0xE4E9F2, 1.0) }, 0.0, y0, w, 92.0);
+                    for (at, (name, target)) in kept.iter().enumerate() {
+                        let x = 20.0 + at as f32 * 64.0;
+                        super::paint_app(frame, &theme, name, target, x, y0 + 20.0, side, named);
+                        if named {
+                            super::centred(frame, name, theme.small, theme.text2, x - 14.0, y0 + 20.0 + side + 4.0, 64.0);
+                        }
+                    }
+                }
+            })
+            .expect("drawn")
+        };
+        // (The shell's pictures made on threads of their own: drawn again till they are.)
+        for _ in 0..30 {
+            let _ = draw();
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        crate::studio::save_png(&std::path::PathBuf::from(format!("{}/target/kept-at-hand-tags.png", env!("CARGO_MANIFEST_DIR"))), (w * 2.0) as u32, (h * 2.0) as u32, &draw()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The frosted glass's sliders, at rest, under the pointer and held, on a light and a dark ground:
     /// `cargo test --features studio --lib -- --ignored glass_sliders` writes `target/glass-sliders.png`.
     #[test]
@@ -7524,10 +7590,11 @@ otepad.exe", "Notepad"),
         }
     }
 
-    /// What is kept at hand shown by a picture alone (no name with it) is told apart from others of its kind: a folder,
-    /// or a file of a kind shown by its kind's icon, carries a tag of its name's first two characters (the user's folders
-    /// and documents all looked the same on the edge's rail); a file of a kind with thumbnails is shown by its own, a
-    /// program by its icon, and one named beside its picture, none of them tagged.
+    /// What is kept at hand shown by a picture alone (no name with it) is told apart from others of its kind: one shown
+    /// by a picture others of its kind share (a folder, a file shown by its kind's icon, a picture saved with no thumbnail
+    /// to be had, a shortcut to a folder) carries a tag of its name's first two characters (the user's folders and
+    /// documents all looked the same on the edge's rail, and two documents of a kind with thumbnails, saved without one,
+    /// still did); a file shown by its own thumbnail, a program by its icon, and one named beside its picture, none.
     #[test]
     fn what_is_kept_at_hand_shown_alone_is_told_apart() {
         assert_eq!(tag_of("项目资料"), "项目");
@@ -7537,26 +7604,67 @@ otepad.exe", "Notepad"),
         assert_eq!(tag_of("tax returns 2026"), "TR");
         assert_eq!(tag_of("my-notes"), "MN");
         assert_eq!(tag_of("2027"), "20");
-        let theme = Theme::new(Skin::Glass, true);
-        let dir = std::env::temp_dir().join("glance-kept-at-hand");
+        use windows::core::{Interface, HSTRING};
+        use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        crate::station::thumbs::start(|| {});
+        let dir = crate::settings::local_dir().join("kept-at-hand");
+        let _ = std::fs::remove_dir_all(&dir);
         let folder = dir.join("项目资料");
-        let (kind, thumbnailed) = (dir.join("周报.glancetest"), dir.join("海边.png"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let kind = dir.join("周报.glancetest");
+        std::fs::write(&kind, b"").unwrap();
+        // (A picture with a thumbnail, and one of the same kind with none to be had.)
+        let (photo, blank) = (dir.join("海边.bmp"), dir.join("空白.bmp"));
+        // (A bitmap 64 × 48, rows bottom first: a hill under a sky.)
+        let (w, h) = (64u32, 48u32);
+        let mut bitmap = Vec::new();
+        bitmap.extend_from_slice(b"BM");
+        bitmap.extend_from_slice(&(54 + w * h * 3).to_le_bytes());
+        bitmap.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
+        bitmap.extend_from_slice(&w.to_le_bytes());
+        bitmap.extend_from_slice(&h.to_le_bytes());
+        bitmap.extend_from_slice(&[1, 0, 24, 0]);
+        bitmap.extend_from_slice(&[0; 24]);
+        for row in 0..h {
+            for _ in 0..w {
+                bitmap.extend_from_slice(if row < 26 { &[80, 140, 70] } else { &[230, 180, 120] });
+            }
+        }
+        std::fs::write(&photo, bitmap).unwrap();
+        std::fs::write(&blank, b"").unwrap();
+        let link = dir.join("项目.lnk");
+        unsafe {
+            let shortcut: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            shortcut.SetPath(&HSTRING::from(folder.as_os_str())).unwrap();
+            shortcut.cast::<IPersistFile>().unwrap().Save(&HSTRING::from(link.as_os_str()), true).unwrap();
+        }
+        let theme = Theme::new(Skin::Glass, true);
         let said = |target: &std::path::Path, name: &str, named: bool| {
             let said = Said::default();
             paint_app(&said, &theme, name, &target.to_string_lossy(), 0.0, 0.0, 36.0, named);
             said.0.into_inner()
         };
-        assert!(crate::station::thumbs::thumbnailed(&thumbnailed) && !crate::station::thumbs::thumbnailed(&kind));
-        assert_eq!(said(&folder, "项目资料", false), ["项目"]);
-        assert_eq!(said(&kind, "周报", false), ["周报"]);
-        assert!(said(&folder, "项目资料", true).is_empty() && said(&kind, "周报", true).is_empty());
-        // (Its thumbnail not made here: the mark of its kind in its place, untagged.)
-        assert!(!said(&thumbnailed, "海边", false).iter().any(|text| text == "海边"));
+        // (Looked at, and the thumbnail made, on threads of their own: asked again till they are.)
+        let began = std::time::Instant::now();
+        while crate::station::thumbs::thumbnail(&photo, APP_PIXELS).is_none() && began.elapsed() < std::time::Duration::from_secs(20) {
+            let _ = crate::station::thumbs::thumbnail(&blank, APP_PIXELS);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // (Its tag among what is drawn: the mark of its kind is drawn with words too, where its icon is not made yet.)
+        let tagged = |target: &std::path::Path, name: &str, named: bool| said(target, name, named).contains(&tag_of(name));
+        assert!(tagged(&folder, "项目资料", false) && tagged(&kind, "周报", false) && tagged(&blank, "空白", false) && tagged(&link, "项目", false));
+        assert!(!tagged(&photo, "海边", false), "shown by its thumbnail");
+        for (target, name) in [(&folder, "项目资料"), (&kind, "周报"), (&blank, "空白"), (&link, "项目")] {
+            assert!(!tagged(target, name, true), "{name}: named beside");
+        }
         assert!(said(std::path::Path::new(r"C:\Windows\notepad.exe"), "Notepad", false).iter().all(|text| text != "No"));
         // (Too small for one: none.)
         let small = Said::default();
         paint_app(&small, &theme, "项目资料", &folder.to_string_lossy(), 0.0, 0.0, TAG_LEAST - 1.0, false);
         assert!(small.0.into_inner().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw.

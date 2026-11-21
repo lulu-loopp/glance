@@ -213,6 +213,16 @@ pub fn of(path: &Path, side: u32) -> Option<Picture> {
     asked(path, side, Made::Fit)
 }
 
+/// The thumbnail of the file at `path` (what it holds, never its kind's icon), of its own shape, as large as fits `side`
+/// physical px square: as made; none yet, or none to be had (a document saved without one). Asked of a file only
+/// where its kind has a thumbnail maker (see `thumbnailed`).
+pub fn thumbnail(path: &Path, side: u32) -> Option<Picture> {
+    if !thumbnailed(path) {
+        return None;
+    }
+    asked(path, side, Made::Thumbnail)
+}
+
 /// Whether a file of `path`'s kind has a thumbnail as Explorer shows it (a picture's, a video's, a PDF's: its kind has
 /// a thumbnail maker), not its kind's icon alone. Asked of the shell once for each kind.
 pub fn thumbnailed(path: &Path) -> bool {
