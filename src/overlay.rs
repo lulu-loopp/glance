@@ -601,7 +601,7 @@ impl Overlay {
             for (place, button) in shows.iter().enumerate() {
                 let lit = (*button == Button::Pin && locked) || (*button == Button::Through && through) || (*button == Button::Game && game) || (*button == Button::Settings && settings);
                 let centre = Point { x: BAR_PAD + buttons::SIZE / 2.0 + place as f32 * (buttons::SIZE + buttons::GAP), y: BAR_PAD + buttons::SIZE / 2.0 };
-                buttons::paint(frame, centre, *button, lit, dark, rim, 1.0);
+                buttons::paint(frame, centre, *button, lit, false, dark, rim, 1.0);
             }
         });
         self.bar_surface = Some((self.gfx.clone(), surface));

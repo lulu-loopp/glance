@@ -1113,7 +1113,7 @@ mod tests {
                 gfx.draw_in_atlas((w, h), (offset, offset), scale, |frame| {
                     paint(frame, &readings, &[], shape, glass, Hand::Free, scale);
                     for (place, button) in crate::ui::buttons::ALL.iter().enumerate() {
-                        crate::ui::buttons::paint(frame, Point { x: 14.0 + place as f32 * 31.0, y: 47.0 }, *button, place == 1, true, Color::hex(0xFFFFFF, 0.3), 1.0);
+                        crate::ui::buttons::paint(frame, Point { x: 14.0 + place as f32 * 31.0, y: 47.0 }, *button, place == 1, false, true, Color::hex(0xFFFFFF, 0.3), 1.0);
                     }
                     crate::ui::thumb::draw(frame, Point { x: 200.0 + 1.0 / 3.0, y: 47.5 }, 8.0, 1.2, Color::hex(0x454545, 1.0), Color::hex(0xFFFFFF, 0.09), Color::hex(0x4CC2FF, 1.0));
                 })

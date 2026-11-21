@@ -5235,8 +5235,8 @@ impl Widget {
                 let lit = (button == Button::Pin && pinned) || (button == Button::Through && through) || (button == Button::Game && front_is_game) || (button == Button::Settings && settings_lit.is_some());
                 let grown = if button == Button::Settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
                 match button_ground {
-                    Some(ground) => buttons::paint_on(frame, centre, button, lit, ground, grown),
-                    None => buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown),
+                    Some(ground) => buttons::paint_on(frame, centre, button, lit, false, ground, grown),
+                    None => buttons::paint(frame, centre, button, lit, false, theme.dark, theme.text3.alpha(0.5), grown),
                 }
             }
             frame.origin(0.0, 0.0);
