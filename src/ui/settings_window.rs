@@ -6956,14 +6956,14 @@ It can be disconnected here at any time, and the status line command put back.",
             }
             // A row inside a card shows only within the card as far as it
             // has opened, and takes clicks once it is open.
-            let inside = match row.card() {
+            // (Its clip taken off as the row is done with, however that comes: see `gfx::Pushed`.)
+            let (inside, _clipped) = match row.card() {
                 Some((id, false)) => {
                     let glide = self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
                     let top = card_top[&id] - scroll + glide;
-                    unsafe { frame.dc.PushAxisAlignedClip(&rect(left, top, width, reach[&id]), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-                    Some(open[&id] >= 1.0)
+                    (Some(open[&id] >= 1.0), Some(frame.clipped(left, top, width, reach[&id])))
                 }
-                _ => None,
+                _ => (None, None),
             };
             let usable = inside.unwrap_or(true);
             match row {
@@ -7357,9 +7357,6 @@ It can be disconnected here at any time, and the status line command put back.",
                     let colors = if self.dimmed(&row) { (palette.text3, palette.text3) } else { (palette.text, palette.text2) };
                     field_label_in(frame, colors, &name, Some(&detail), label, hint, left + ROW_SIDE, y + row_height / 2.0, right - 8.0 - left - ROW_SIDE);
                 }
-            }
-            if inside.is_some() {
-                unsafe { frame.dc.PopAxisAlignedClip() };
             }
         }
         // The dragged row passes over the others.

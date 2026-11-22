@@ -1233,11 +1233,11 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
             None => (Matrix3x2::identity(), 1.0),
         };
         if fade < 1.0 {
-            let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
             frame.origin(0.0, 0.0);
-            unsafe { frame.dc.PushLayer(&D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity: fade, ..Default::default() }, None) };
         }
-        let placed = |at: (f32, f32), list: &mut Vec<view::HitBox>, from: Vec<view::HitBox>, k: f32| {
+        // (Taken off as this part is done with, however that comes: see `gfx::Pushed`.)
+        let _seen_through = frame.seen_through(fade);
+        let placed =|at: (f32, f32), list: &mut Vec<view::HitBox>, from: Vec<view::HitBox>, k: f32| {
             list.extend(from.into_iter().map(|(hx, hy, hw, hh, hit)| (at.0 + hx * k, at.1 + hy * k, hw * k, hh * k, hit)));
         };
         match part {
@@ -1314,7 +1314,6 @@ fn draw_merged(frame: &gfx::Frame, merged: &mut Merged, scene: &Scene, local: Ma
         }
         if fade < 1.0 {
             frame.origin(0.0, 0.0);
-            unsafe { frame.dc.PopLayer() };
         }
     }
     frame.origin(0.0, 0.0);
@@ -5081,11 +5080,8 @@ impl Widget {
         let mut pressed: Option<(Vec<view::HitBox>, (f32, f32))> = None;
         let drawn = surface.draw(&gfx, pixels, px, |frame| {
             frame.origin(0.0, 0.0);
-            if opacity < 1.0 {
-                let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
-                let layer = D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() };
-                unsafe { frame.dc.PushLayer(&layer, None) };
-            }
+            // (Taken off as the frame's drawing ends, however it ends: see `gfx::Pushed`.)
+            let _seen_through = frame.seen_through(opacity);
             let held = match carried {
                 Some((_, lift, lean, about)) if lift.abs() > 0.001 || lean.abs() > 0.001 => {
                     let grown = 1.0 + LIFTED_BY * lift.max(0.0);
@@ -5235,9 +5231,6 @@ impl Widget {
                 }
             }
             frame.origin(0.0, 0.0);
-            if opacity < 1.0 {
-                unsafe { frame.dc.PopLayer() };
-            }
         });
         self.frame_took = surface.took;
         if card_gone {

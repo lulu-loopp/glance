@@ -1903,6 +1903,27 @@ impl Frame<'_> {
     }
 }
 
+/// A layer or a clip pushed on a frame (see `Frame::seen_through`, `Frame::clipped`), taken off as this goes,
+/// whichever way what is drawn in it ends. Taken off by hand, a `return` or `continue` before that left it on: the
+/// frame then failed as it ended (a layer still pushed), and what it drew in a layer kept was not kept.
+#[must_use]
+pub struct Pushed<'f> {
+    dc: &'f ID2D1DeviceContext,
+    layer: bool,
+}
+
+impl Drop for Pushed<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            if self.layer {
+                self.dc.PopLayer();
+            } else {
+                self.dc.PopAxisAlignedClip();
+            }
+        }
+    }
+}
+
 impl<'a> Frame<'a> {
     /// A frame `size` physical pixels large, cleared, at `scale` physical pixels per DIP, drawn apart: on the device's
     /// own bitmap (see `Gfx::scratch`), from its corner, through Glance's own context. Drawn whole (see `finish`), it
@@ -2237,6 +2258,25 @@ impl<'a> Frame<'a> {
     /// Draws from here on with `(x, y)`, in DIPs from the surface's corner, as the origin.
     pub fn origin(&self, x: f32, y: f32) {
         self.place(Matrix3x2::translation(x, y));
+    }
+
+    /// What is drawn from here on, while what this gives is kept, seen through as much as `opacity` says (1: as it
+    /// is, and nothing pushed).
+    pub fn seen_through(&self, opacity: f32) -> Option<Pushed<'_>> {
+        use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
+        if opacity >= 1.0 {
+            return None;
+        }
+        let everything = D2D_RECT_F { left: -f32::MAX, top: -f32::MAX, right: f32::MAX, bottom: f32::MAX };
+        unsafe { self.dc.PushLayer(&D2D1_LAYER_PARAMETERS1 { contentBounds: everything, opacity, ..Default::default() }, None) };
+        Some(Pushed { dc: &self.dc, layer: true })
+    }
+
+    /// What is drawn from here on, while what this gives is kept, only inside `(x, y, width, height)` as the frame
+    /// is placed now (not put on whole pixels: see `Canvas::clip`).
+    pub fn clipped(&self, x: f32, y: f32, width: f32, height: f32) -> Pushed<'_> {
+        unsafe { self.dc.PushAxisAlignedClip(&rect(x, y, width, height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        Pushed { dc: &self.dc, layer: false }
     }
 
     /// Draws from here on through `transform`, from the surface's corner.
@@ -3586,8 +3626,6 @@ mod tests {
         assert_eq!(draw(2), 4);
     }
 
-    /// A layer whose painting into its bitmap failed on the graphics card is not kept: drawn where it shows from the
-    /// next frame while it shows the same, its bitmap tried again as it shows something else, with or without a halo.
     /// A frame asked for on a device while another is being drawn on it (a window drawn as a message is handed out
     /// in the middle of another's frame: a dialog the settings put up as they were drawn) is not drawn, and the one
     /// being drawn is drawn whole, what a layer of it paints after kept as it is painted. (Begun on the context and
@@ -3623,6 +3661,48 @@ mod tests {
         assert!(super::Frame::whole(&gfx, (20, 20), 1.0, |frame| frame.fill(green, 0.0, 0.0, 20.0, 20.0)).is_ok());
     }
 
+    /// A layer seen through or a clip, left early (a `return` before its end, a `continue` in a loop drawing in it), is
+    /// taken off: the frame is drawn whole, what was drawn in them as they say, what after them as it is. (Taken off by
+    /// hand after, they were left on, and the frame failed as it ended: a widget with nothing to show yet as it was
+    /// flung off its screen, a part coming into widgets merged, a row in a settings card as it opened.)
+    #[test]
+    fn a_layer_or_clip_left_early_is_taken_off() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::Canvas;
+        let gfx = super::Gfx::new().expect("graphics");
+        let white = super::Color::hex(0xFFFFFF, 1.0);
+        let pixels = gfx.draw_offscreen((40, 20), 1.0, |frame| {
+            // Half seen through, left by a `return`.
+            (|| {
+                let _seen_through = frame.seen_through(0.5);
+                frame.fill(white, 0.0, 0.0, 10.0, 10.0);
+                if std::hint::black_box(true) {
+                    return;
+                }
+                frame.fill(white, 0.0, 10.0, 10.0, 10.0);
+            })();
+            // Clipped to its left half, each round of a loop left by a `continue`.
+            for x in [10.0f32, 20.0] {
+                let _clipped = frame.clipped(10.0, 0.0, 10.0, 20.0);
+                frame.fill(white, x, 0.0, 10.0, 10.0);
+                if x > 0.0 {
+                    continue;
+                }
+                frame.fill(white, x, 10.0, 10.0, 10.0);
+            }
+            // After them: as it is, unclipped.
+            frame.fill(white, 30.0, 0.0, 10.0, 20.0);
+        });
+        let pixels = pixels.expect("the frame drawn whole");
+        let alpha = |x: usize, y: usize| pixels[(y * 40 + x) * 4 + 3];
+        assert!((120..=135).contains(&alpha(5, 5)), "half seen through: {}", alpha(5, 5));
+        assert_eq!(alpha(5, 15), 0);
+        assert_eq!((alpha(15, 5), alpha(25, 5), alpha(15, 15)), (255, 0, 0), "clipped to its left half");
+        assert_eq!((alpha(35, 5), alpha(35, 15)), (255, 255), "after them, as it is");
+    }
+
+    /// A layer whose painting into its bitmap failed on the graphics card is not kept: drawn where it shows from the
+    /// next frame while it shows the same, its bitmap tried again as it shows something else, with or without a halo.
     /// (A report: a widget blank at rest, its content shown as it was sized. The bitmap that failed was kept as though
     /// it had not and drawn, blank, frame after frame.) The failure here: a bitmap of another device drawn in it.
     #[test]
