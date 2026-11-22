@@ -2296,6 +2296,17 @@ impl<'a> Frame<'a> {
         unsafe { self.dc.SetTransform(&was) };
     }
 
+    /// Draws what `paint` draws from the corner the frame is at now: what it places (see `place`, `within`) placed from
+    /// there, whatever what it is drawn on was placed from (a layer's own bitmap, the list a layer is recorded in).
+    fn from_here<T>(&self, paint: impl FnOnce(&Frame) -> T) -> T {
+        let (base, mut here) = (self.base.get(), Matrix3x2::default());
+        unsafe { self.dc.GetTransform(&mut here) };
+        self.base.set(here);
+        let painted = paint(self);
+        self.base.set(base);
+        painted
+    }
+
     /// Draws what `paint` draws `scale` times as large about `(x, y)` (DIPs), placed as it is now otherwise.
     pub fn scaled(&self, x: f32, y: f32, scale: f32, paint: impl FnOnce(&Frame)) {
         let mut was = Matrix3x2::default();
@@ -3159,7 +3170,19 @@ fn stretch(transform: &Matrix3x2) -> f32 {
     (transform.M11 * transform.M22 - transform.M12 * transform.M21).abs().sqrt().max(1e-3)
 }
 
-/// The faint one-unit glow `halo` rings what `drawn` draws with (as CSS's `text-shadow: 0 0 1px`; see `Layer::draw`).
+/// Draws `drawn`, as it was recorded, over the faint one-unit glow `halo` rings what it draws with (as CSS's
+/// `text-shadow: 0 0 1px`; see `Layer::draw`). The glow drawn, on the card, before `drawn` is: an effect reads what it
+/// is given only as its batch is handed to the card, which a batch grown full is wherever it got to, half way through
+/// `drawn` being played back among them. Then the glow read it while its own layers (a part seen through, or the layer
+/// Direct2D itself makes of a clip that is turned) were in use, and neither was drawn (D2DERR_LAYER_ALREADY_IN_USE).
+unsafe fn over_its_glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<()> {
+    dc.DrawImage(&glow(dc, drawn, halo)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    dc.Flush(None, None)?;
+    dc.DrawImage(drawn, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    Ok(())
+}
+
+/// The glow `halo` rings what `drawn` draws with (see `over_its_glow`).
 unsafe fn glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<ID2D1Image> {
     let glow = dc.CreateEffect(&CLSID_D2D1Shadow)?;
     glow.SetInput(0, drawn, true);
@@ -3260,20 +3283,18 @@ impl Layer {
                 // Ringed by a halo, the halo is painted in with it, once (not each time the layer is drawn): what is
                 // drawn recorded, then drawn over its glow.
                 let painted = match halo {
-                    None => paint(frame),
+                    None => frame.from_here(paint),
                     Some(color) => (|| {
                         let list = dc.CreateCommandList()?;
                         dc.SetTarget(&list);
                         // (Setting a target can change the context's DPI: the layer's, as it is painted at.)
                         dc.SetDpi(96.0 * scale, 96.0 * scale);
-                        let painted = paint(frame);
+                        let painted = frame.from_here(paint);
                         list.Close()?;
                         dc.SetTarget(&bitmap);
                         // (Recorded through the layer's own place already: drawn back as it is, not moved by it again.)
                         dc.SetTransform(&Matrix3x2::identity());
-                        dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                        dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                        painted
+                        painted.and(over_its_glow(dc, &list, color))
                     })(),
                 };
                 // (Whatever failed: on its bitmap again, its clip taken off, the frame's target, DPI and place put back.)
@@ -3336,7 +3357,7 @@ impl Layer {
             None => {
                 dc.SetTransform(&placed);
                 dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
-                let painted = paint(frame);
+                let painted = frame.from_here(paint);
                 dc.PopAxisAlignedClip();
                 painted
             }
@@ -3352,16 +3373,13 @@ impl Layer {
                 // drawn back as it is.)
                 dc.SetTransform(&placed);
                 dc.PushAxisAlignedClip(&rect(left, top, width, height), D2D1_ANTIALIAS_MODE_ALIASED);
-                let painted = paint(frame);
+                let painted = frame.from_here(paint);
                 dc.PopAxisAlignedClip();
-                list.Close()?;
+                // (On the frame's target again first, whatever failed.)
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
                 dc.SetTransform(&Matrix3x2::identity());
-                dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
-                dc.SetTransform(&placed);
-                painted
+                painted.and(list.Close()).and_then(|()| over_its_glow(dc, &list, color))
             }
         };
         dc.SetTransform(&parent);
@@ -3593,6 +3611,82 @@ mod tests {
         });
         in_colour("wrapped", &|frame| frame.text_wrapped("😂", font, white, 4.0, 4.0, 40.0));
         in_colour("a note's", &|frame| frame.markdown("😂", font, Inks { words: white, faint: white, accent: white }, 4.0, 4.0, 40.0, 40.0, 0.0));
+    }
+
+    /// What a halo rings is drawn however much of it there is, kept or where it shows: played back twice (its glow, and
+    /// it over it), its layers are never asked for by one while the other uses them. (They were as the batch the second
+    /// was in grew full half way through it, the glow drawn only then: D2DERR_LAYER_ALREADY_IN_USE, which a report had in
+    /// glass alone, a widget's words, the AI card and the settings not drawn.)
+    #[test]
+    fn what_a_halo_rings_is_drawn_however_many_layers_it_has() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::super::canvas::{Align, Color, Family, Font};
+        use super::{Matrix3x2, D2D_RECT_F};
+        use windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1;
+        let (white, font) = (Color::hex(0xffffff, 1.0), Font::new(Family::Segoe, 15.0, 600.0));
+        let gfx = super::Gfx::new().expect("graphics");
+        let faded = D2D1_LAYER_PARAMETERS1 { contentBounds: D2D_RECT_F { left: -1e6, top: -1e6, right: 1e6, bottom: 1e6 }, maskTransform: Matrix3x2::identity(), opacity: 0.7, ..Default::default() };
+        for sized in [false, true] {
+            let _sizing = super::sizing(sized);
+            for layers in [1, 12, 40, 80] {
+                let mut layer = super::Layer::default();
+                let mut laid = None;
+                let drawn = gfx.draw_offscreen((200, 100), 1.0, |frame| {
+                    laid = Some(layer.draw(frame, 1, Matrix3x2::identity(), (0.0, 0.0, 200.0, 100.0), 1.0, Some(Color::hex(0, 0.5)), |frame| {
+                        for at in 0..layers {
+                            unsafe { frame.dc.PushLayer(&faded, None) };
+                            frame.text("CPU 42 % 3.92 GHz", font, white, 4.0, 4.0 + (at % 4) as f32 * 20.0, 180.0, Align::Start);
+                            unsafe { frame.dc.PopLayer() };
+                        }
+                        Ok(())
+                    }));
+                });
+                assert!(matches!(laid, Some(Ok(()))), "sized {sized}, {layers} layers: {laid:?}");
+                let lit = drawn.as_ref().map(|pixels| pixels.chunks(4).filter(|p| p[1] > 120).count());
+                assert!(lit.as_ref().is_ok_and(|lit| *lit > 0), "sized {sized}, {layers} layers: {lit:?}");
+            }
+        }
+    }
+
+    /// What a layer paints is placed from the layer's corner (see `Frame::place`, `Frame::within`), painted into its
+    /// bitmap or where it shows, ringed or not, wherever it is placed and whatever corner its area has. (It was placed
+    /// from what the frame drawn on was: an AI card's words moved up and left on its sheet.)
+    #[test]
+    fn what_a_layer_paints_is_placed_from_its_corner() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::{Canvas, Matrix3x2};
+        let red = super::Color::hex(0xFF0000, 1.0);
+        let gfx = super::Gfx::new().expect("graphics");
+        for sized in [false, true] {
+            let _sizing = super::sizing(sized);
+            for halo in [None, Some(super::Color::hex(0, 0.5))] {
+                for placed in [false, true] {
+                    let mut layer = super::Layer::default();
+                    let pixels = gfx.draw_offscreen((64, 64), 1.0, |frame| {
+                        frame.within(Matrix3x2::translation(10.0, 6.0), |frame| {
+                            let paint = |frame: &super::Frame| {
+                                let at = Matrix3x2::translation(3.0, 5.0);
+                                if placed {
+                                    frame.place(at);
+                                    frame.fill(red, 0.0, 0.0, 8.0, 8.0);
+                                } else {
+                                    frame.within(at, |frame| frame.fill(red, 0.0, 0.0, 8.0, 8.0));
+                                }
+                                Ok(())
+                            };
+                            layer.draw(frame, 1, Matrix3x2::translation(20.0, 10.0), (-4.0, -2.0, 30.0, 30.0), 1.0, halo, paint).unwrap();
+                            // (And what is drawn after is placed as before it.)
+                            frame.place(Matrix3x2::translation(2.0, 40.0));
+                            frame.fill(red, 0.0, 0.0, 4.0, 4.0);
+                        });
+                    });
+                    let pixels = pixels.unwrap();
+                    let lit = |x0: usize, y0: usize, side: usize| (0..64 * 64).filter(|at| (x0..x0 + side).contains(&(at % 64)) && (y0..y0 + side).contains(&(at / 64)) && pixels[at * 4 + 2] > 200 && pixels[at * 4 + 3] > 200).count();
+                    // (10 + 20 + 3, 6 + 10 + 5; and 10 + 2, 6 + 40.)
+                    assert_eq!((lit(33, 21, 8), lit(12, 46, 4), lit(0, 0, 64)), (64, 16, 80), "sized {sized}, halo {halo:?}, placed {placed}");
+                }
+            }
+        }
     }
 
     /// A layer drawn while a window is sized by hand is painted again only where what it shows has changed: one that

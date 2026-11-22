@@ -109,17 +109,14 @@ impl Drawn {
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, gfx: &Rc<gfx::Gfx>, size: (u32, u32), px: f32, look: Look, room: f32, (width, height): (f32, f32), radius: f32, layer: &mut gfx::Layer, key: u64, on: impl FnOnce(&gfx::Frame, bool), words: impl FnOnce(&gfx::Frame, bool)) -> windows::core::Result<()> {
         match self {
-            Drawn::Plain(surface) => surface.draw(gfx, size, px, |frame| {
-                frame.origin(room, room);
-                let _ = rounded_sheet(frame, look, (0.0, 0.0, width, height), false, radius);
+            Drawn::Plain(surface) => surface.draw(gfx, size, px, |frame| plain(frame, look, room, (width, height), radius, |frame| {
                 on(frame, false);
                 words(frame, false);
-            }),
+            })),
             Drawn::Frosted(frosted) => {
                 let pane = (room * px, room * px, width * px, height * px, radius * px);
                 let halo = (look.skin == Some(super::theme::Skin::Glass)).then(|| super::theme::Theme::new(super::theme::Skin::Glass, look.dark).legibility);
-                frosted.draw(gfx, size, px, pane, |frame| {
-                    frame.origin(room, room);
+                frosted.draw(gfx, size, px, pane, |frame| frame.within(windows_numerics::Matrix3x2::translation(room, room), |frame| {
                     if let Err(error) = rounded_sheet(frame, look, (0.0, 0.0, width, height), true, radius) {
                         gfx::failed("menu", gfx, Some(&error));
                     }
@@ -131,10 +128,18 @@ impl Drawn {
                     if let Err(error) = laid {
                         gfx::failed("menu", gfx, Some(&error));
                     }
-                })
+                }))
             }
         }
     }
+}
+
+/// A menu's sheet drawn alone (see `Drawn::draw`), `room` in from its window's corner, what is `on` it from its own.
+pub(super) fn plain(frame: &gfx::Frame, look: Look, room: f32, (width, height): (f32, f32), radius: f32, on: impl FnOnce(&gfx::Frame)) {
+    frame.within(windows_numerics::Matrix3x2::translation(room, room), |frame| {
+        let _ = rounded_sheet(frame, look, (0.0, 0.0, width, height), false, radius);
+        on(frame);
+    });
 }
 
 /// How what is drawn in `look` over the screen is frosted, where the system frosts what is behind a window: glass's
@@ -971,6 +976,26 @@ impl Colours {
 #[cfg(test)]
 mod sized {
     use super::*;
+
+    /// What is on a sheet drawn alone (chart paper's) is placed from the sheet's corner, not from its window's: an AI
+    /// card's words came out as far up and left of their sheet as the room round it for its shadow is wide.
+    #[test]
+    fn what_is_on_a_sheet_drawn_alone_is_placed_from_its_corner() {
+        use super::super::canvas::{Canvas, Color};
+        use super::super::theme::Skin;
+        let _device = gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().expect("graphics");
+        let look = Look::of(Skin::Paper, false);
+        let pixels = gfx
+            .draw_offscreen((160, 120), 1.0, |frame| {
+                plain(frame, look, SHADOW, (90.0, 50.0), 8.0, |frame| {
+                    frame.within(windows_numerics::Matrix3x2::translation(4.0, 6.0), |frame| frame.fill(Color::hex(0xFF0000, 1.0), 0.0, 0.0, 20.0, 10.0));
+                })
+            })
+            .unwrap();
+        let red: Vec<(usize, usize)> = (0..160 * 120).filter(|at| pixels[at * 4 + 2] > 240 && pixels[at * 4 + 1] < 20 && pixels[at * 4 + 3] > 240).map(|at| (at % 160, at / 160)).collect();
+        assert_eq!((red.len(), red.first().copied()), (200, Some((SHADOW as usize + 4, SHADOW as usize + 6))));
+    }
 
     /// A menu opened on a panel or a widget made smaller on its screen is as small as it: its words as large as theirs.
     #[test]

@@ -1370,8 +1370,7 @@ mod tests {
 
     /// A frame read back on the thread frames are read on, from the device a window draws with, waits while Direct2D
     /// is drawing on it (holds its lock), and is read once it is done. (Read back meanwhile, as Direct2D asks it not
-    /// to be, what it did on the device's context came between Direct2D's own calls: on a report's PC, widgets whose
-    /// desktop was taken again and again lost their words and failed frames.)
+    /// to be, what it did on the device's context came between Direct2D's own calls.)
     #[test]
     fn a_frame_read_back_waits_for_direct2d_drawing_on_its_device() {
         let _device = crate::ui::gfx::held().unwrap();

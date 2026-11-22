@@ -3958,6 +3958,13 @@ pub fn paint(frame: &dyn Canvas, scene: &Scene, lanes: &[Lane], layout: &Layout,
     hits
 }
 
+/// Draws what `lane` shows alone in `area`: none of what the panel draws round its lanes (its bar, chart paper's rules).
+pub fn paint_alone(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect) {
+    for pass in [Pass::Content, Pass::Plots] {
+        paint_lane(frame, scene, lane, area, 0.0, pass, &mut Vec::new());
+    }
+}
+
 /// Draws `text` so that its baseline sits where a CSS line box `line` DIPs
 /// tall, aligned to `bottom`, would put it.
 #[allow(clippy::too_many_arguments)]
@@ -9993,6 +10000,63 @@ seven".into()));
         assert!(scrolls.at(List::Recent) > 39.0);
         scrolls.ease(1.0, 0.1);
         assert_eq!(scrolls.at(List::Notes), 0.0);
+    }
+
+    /// All an AI card shows is on its sheet, in every skin: what is written begins where the sheet has it begin, and
+    /// nothing is drawn beyond the sheet (chart paper's card had the panel's bar under it, how long the PC has been up,
+    /// and its rule out past its sides).
+    #[test]
+    fn all_an_ai_card_shows_is_on_its_sheet() {
+        use super::super::{ai_card, gfx, menu};
+        let _device = gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().expect("graphics");
+        for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
+            for sized in [false, true] {
+                let _sizing = gfx::sizing(sized);
+                let theme = Theme::new(skin, false);
+                let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));
+                let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+                let seen = Seen::of(history);
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: false, newer: false, settings_lit: None };
+                let lane = Lane { id: "ai:today".into(), blocks: ai::today_card(Lang::Zh, None), ink: theme.ink("ai:today") };
+                let layout = Layout::with_columns(vec![lane.height(&theme)], 1, &theme);
+                let area = layout.lanes()[0];
+                let (plate, shift) = ai_card::sheet_of(&theme, area);
+                let look = menu::Look::of(skin, false);
+                let room = 30.0;
+                let size = ((plate.0 + 2.0 * room).ceil() as u32, (plate.1 + 2.0 * room).ceil() as u32);
+                // (Written on it: straight, as chart paper's is, or kept in a layer, as the others' are.)
+                let drawn = |written: bool| {
+                    let mut layer = gfx::Layer::default();
+                    gfx.draw_offscreen(size, 1.0, |frame| {
+                        menu::plain(frame, look, room, plate, ai_card::round(&theme, plate), |frame| {
+                            if !written {
+                                return;
+                            }
+                            if skin == Skin::Paper {
+                                return ai_card::write(frame, &scene, &lane, area, shift);
+                            }
+                            let halo = (skin == Skin::Glass).then_some(theme.legibility);
+                            let laid = layer.draw(frame, 1, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, plate.0, plate.1), 1.0, halo, |frame| {
+                                ai_card::write(frame, &scene, &lane, area, shift);
+                                Ok(())
+                            });
+                            laid.expect("written");
+                        });
+                    })
+                    .expect("drawn")
+                };
+                let (bare, written) = (drawn(false), drawn(true));
+                let across = size.0 as usize;
+                let lit: Vec<(usize, usize)> = (0..bare.len() / 4).filter(|at| bare[at * 4..at * 4 + 4] != written[at * 4..at * 4 + 4]).map(|at| (at % across, at / across)).collect();
+                // As far in from the sheet's left and top as its corners are round (a letter's own side let be).
+                let inset = ai_card::round(&theme, plate).max(super::super::look::INSET_LEAST) + room;
+                let (left, top) = (lit.iter().map(|at| at.0).min().unwrap() as f32, lit.iter().map(|at| at.1).min().unwrap() as f32);
+                let (right, bottom) = (lit.iter().map(|at| at.0).max().unwrap() as f32, lit.iter().map(|at| at.1).max().unwrap() as f32);
+                assert!((left - inset).abs() < 3.0 && top >= inset - 3.0, "{skin:?} sized {sized}: begins at {left}, {top}, inset {inset}");
+                assert!(right <= room + plate.0 && bottom <= room + plate.1 - 1.0, "{skin:?} sized {sized}: ends at {right}, {bottom} of {plate:?}");
+            }
+        }
     }
 
     /// The station's tabs, in English with counts, all three: none reaches its buttons (the view's, the menu's), in

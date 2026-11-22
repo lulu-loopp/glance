@@ -21,7 +21,7 @@ use super::menu::{Drawn, Look};
 use super::prefs::Prefs;
 use super::text::Lang;
 use super::theme::Theme;
-use super::view::{self, ai::Spot, Layout, Pass, Scene};
+use super::view::{self, ai::Spot, Layout, Scene};
 use super::backdrop::Capture;
 use super::window::Window;
 
@@ -229,9 +229,7 @@ pub struct Of<'a> {
 pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, clear: Option<RECT>) {
     let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.spot) else { return };
     let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.spot));
-    // (Not sized by hand, whatever the dock it is shown from is: shown from a widget settling to the size it was sized
-    // to, it was drawn as that is, its words not kept but drawn where they show, and came out moved up and left on its
-    // sheet, its head cut off.)
+    // (Not sized by hand, whatever the dock it is shown from is: what is written on it is kept, see `gfx::sizing`.)
     let _at_rest = gfx::sizing(false);
     let controller = &crate::app().controller;
     let (info, history) = (controller.info(), controller.history.samples());
@@ -262,8 +260,8 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
     };
     let Some(lane) = view::ai::card(&scene, of.spot) else { return hide() };
     let laid = |lane: &view::Lane| Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
-    let layout = laid(&lane);
-    let (plate, (shift_x, shift_y)) = sheet_of(of.theme, layout.lanes()[0]);
+    let area = laid(&lane).lanes()[0];
+    let (plate, shift) = sheet_of(of.theme, area);
     let at = middle(about);
     // Its screen, and how many pixels a DIP is there.
     let monitor = unsafe { MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST) };
@@ -333,9 +331,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         let rect = RECT { left: left - margin, top: top - margin, right: left + plate_w + margin, bottom: top + plate_h + margin };
         let size = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
         let drawn = surface.draw(&gfx, size, scale, look, room, plate, round(of.theme, plate), &mut card.words, key, |_, _| {}, |frame, _| {
-            frame.within(windows_numerics::Matrix3x2::translation(shift_x, shift_y), |frame| {
-                view::paint(frame, &scene, std::slice::from_ref(&lane), &layout, Pass::Content);
-            });
+            write(frame, &scene, &lane, area, shift);
         });
         // (The device gone, its surface is made anew on the next.)
         if let Err(error) = &drawn {
@@ -380,10 +376,15 @@ fn held_by(about: RECT, card: RECT) -> RECT {
     RECT { left: about.left.min(card.left), top: about.top.min(card.top), right: about.right.max(card.right), bottom: about.bottom.max(card.bottom) }
 }
 
+/// Writes on its sheet what `lane` shows, laid out in `area` and moved on the sheet by `shift` (see `sheet_of`).
+pub(super) fn write(frame: &gfx::Frame, scene: &Scene, lane: &view::Lane, area: view::Rect, shift: (f32, f32)) {
+    frame.within(windows_numerics::Matrix3x2::translation(shift.0, shift.1), |frame| view::paint_alone(frame, scene, lane, area));
+}
+
 /// Its sheet in `theme` for a lane laid out at `lane` (DIPs), and how far what is laid out is moved on it: what the lane
 /// shows as far in from every edge as the sheet's corners are round (their arcs' centres), the same all round, and no
 /// less than a sheet's least (see `look`).
-fn sheet_of(theme: &Theme, lane: view::Rect) -> ((f32, f32), (f32, f32)) {
+pub(super) fn sheet_of(theme: &Theme, lane: view::Rect) -> ((f32, f32), (f32, f32)) {
     let inset = theme.radius.max(super::look::INSET_LEAST);
     let plate = (lane.w - 2.0 * theme.pad_x + 2.0 * inset, lane.h - theme.pad_top - theme.pad_bottom + 2.0 * inset);
     (plate, (inset - theme.pad_x - lane.x, inset - theme.pad_top - lane.y))
@@ -391,7 +392,7 @@ fn sheet_of(theme: &Theme, lane: view::Rect) -> ((f32, f32), (f32, f32)) {
 
 /// How round its sheet `plate` large (DIPs) is in `theme`: as the dock's pieces are, and the panel's, for it shows what
 /// they do (not as a menu's, which are rounder in no skin).
-fn round(theme: &Theme, plate: (f32, f32)) -> f32 {
+pub(super) fn round(theme: &Theme, plate: (f32, f32)) -> f32 {
     theme.radius.min(plate.0.min(plate.1) / 2.0)
 }
 

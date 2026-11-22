@@ -146,10 +146,11 @@ fn picture(frame: &Frame, paint: impl FnOnce()) -> Result<ID2D1Image> {
         dc.SetDpi(dpi.0, dpi.1);
         dc.SetTransform(&Matrix3x2::identity());
         paint();
-        list.Close()?;
+        // (On the frame's target again first, whatever failed.)
         dc.SetTarget(&target);
         dc.SetDpi(dpi.0, dpi.1);
         dc.SetTransform(&transform);
+        list.Close()?;
         list.cast()
     }
 }
