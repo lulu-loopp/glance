@@ -824,6 +824,8 @@ pub struct Settings {
     /// The shortcut that previews what is under the pointer on a station, or picked in search (Ctrl+Q unless another
     /// is chosen); none, when it is cleared.
     pub preview_shortcut: Option<Shortcut>,
+    /// The order search puts the files and folders it finds in: as last chosen there.
+    pub search_order: crate::search::Order,
     /// How loud a video or a sound looked at plays (0 to 1), and whether it is muted: as it was last set there.
     pub look_volume: f32,
     pub look_muted: bool,
@@ -1066,6 +1068,7 @@ impl Default for Settings {
             shortcut: Some(Shortcut::default()),
             search_shortcut: Some(Shortcut::search()),
             preview_shortcut: Some(Shortcut::preview()),
+            search_order: Default::default(),
             look_volume: 0.7,
             look_muted: false,
             hotkey: None,
@@ -1667,6 +1670,17 @@ mod tests {
 
     /// Search's shortcut is Win+Alt+Space in settings from before it was one; cleared, it stays so; one that cannot be
     /// a shortcut is Win+Alt+Space again.
+    #[test]
+    fn search_keeps_the_order_last_chosen() {
+        use crate::search::{Order, Sort};
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.search_order, Order::default());
+        let settings: Settings = serde_json::from_str(r#"{"search_order":{"by":"name","reversed":true}}"#).unwrap();
+        assert_eq!(settings.search_order, Order { by: Sort::Name, reversed: true });
+        let kept: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(kept.search_order, settings.search_order);
+    }
+
     #[test]
     fn search_has_its_own_shortcut() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();

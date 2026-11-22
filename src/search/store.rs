@@ -17,7 +17,8 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, GetFileSizeEx, FILE_ATTRI
 use windows::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READONLY};
 
 const MAGIC: &[u8; 8] = b"GLNCSRCH";
-const VERSION: u32 = 3;
+/// (4: each entry's stat kept after the entries.)
+const VERSION: u32 = 4;
 /// How long what is kept before the index is (bytes).
 const HEADER: usize = 48;
 
@@ -290,7 +291,7 @@ mod tests {
 
     fn index(names: &[&str]) -> Index {
         let mut index = Index::new(5, true);
-        let items: Vec<Item> = names.iter().enumerate().map(|(n, name)| Item { name: name.encode_utf16().collect(), id: 10 + n as u64, attributes: 0x20, tag: 0 }).collect();
+        let items: Vec<Item> = names.iter().enumerate().map(|(n, name)| Item { name: name.encode_utf16().collect(), id: 10 + n as u64, attributes: 0x20, tag: 0, stat: Default::default() }).collect();
         let mut changes = Changes::default();
         index.list(ROOT, &items, &[], &mut changes);
         index.finish(changes);

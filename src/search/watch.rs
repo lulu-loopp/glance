@@ -1,11 +1,12 @@
 //! What changed on a drive with no change journal (a USB stick's FAT or exFAT, a ReFS drive), as Windows tells a
-//! program watching it: the folders names were made, gone or renamed in, by their paths from its root. Only while it
-//! is watched: what changed while Glance was not running is found by listing the drive whole as it starts.
+//! program watching it: the folders names were made, gone or renamed in, or files written in, by their paths from its
+//! root. Only while it is watched: what changed while Glance was not running is found by listing the drive whole as it
+//! starts.
 
 use super::drive::Drive;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use windows::Win32::Storage::FileSystem::{ReadDirectoryChangesW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_INFORMATION};
+use windows::Win32::Storage::FileSystem::{ReadDirectoryChangesW, FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_NOTIFY_INFORMATION};
 
 /// What watching found.
 pub enum Seen {
@@ -30,7 +31,8 @@ pub fn watch(drive: &Drive, tell: Sender<Seen>) {
                 buffer.as_mut_ptr() as *mut _,
                 (buffer.len() * 8) as u32,
                 true,
-                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
+                // (A file written too: when it was written and how large it is are as its folder is listed.)
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
                 Some(&mut got),
                 None,
                 None,

@@ -535,7 +535,7 @@ pub(crate) mod tests {
         /// Its index, with `folders` folders in its root to list, and their places.
         fn index(folders: usize) -> (RwLock<Index>, Vec<u32>) {
             let mut index = Index::new(1, true);
-            let items: Vec<Item> = (0..folders).map(|at| Item { name: format!("folder {at}").encode_utf16().collect(), id: 100 + at as u64, attributes: 0x10, tag: 0 }).collect();
+            let items: Vec<Item> = (0..folders).map(|at| Item { name: format!("folder {at}").encode_utf16().collect(), id: 100 + at as u64, attributes: 0x10, tag: 0, stat: Default::default() }).collect();
             let mut changes = Changes::default();
             index.list(super::super::index::ROOT, &items, &[], &mut changes);
             let places = changes.to_list.iter().map(|&(place, _)| place).collect();

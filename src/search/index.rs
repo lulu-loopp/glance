@@ -8,6 +8,9 @@
 //! what changed since is kept in memory over it: the entries added since, after its own, their names in runs of their
 //! own, and its own entries as they are now where they changed. Entries are only ever added: one gone, or renamed, is
 //! marked dead (a renamed one added again), and the dead are left out as it is kept anew (see `write`).
+//!
+//! Each entry has when it was last written and how large it is (see `Stat`) beside it, as its folder was last listed:
+//! what search is sorted by. A file written changes in it as its folder is listed again (see `journal`).
 
 use super::readings;
 use super::store::Bytes;
@@ -78,12 +81,23 @@ impl Entry {
     }
 }
 
-/// A name in a folder as listed: its file id, attributes and (for a link) what kind of link it is.
+/// When a file or folder was last written (a FILETIME: 100 ns since 1601, UTC) and how large it is (bytes: a
+/// folder's none), as its folder was listed (16 bytes, as it is kept on disk too).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct Stat {
+    pub written: i64,
+    pub size: u64,
+}
+
+/// A name in a folder as listed: its file id, attributes, (for a link) what kind of link it is, and when it was last
+/// written and how large it is.
 pub struct Item {
     pub name: Vec<u16>,
     pub id: u64,
     pub attributes: u32,
     pub tag: u32,
+    pub stat: Stat,
 }
 
 const ATTRIBUTE_HIDDEN: u32 = 0x2;
@@ -147,6 +161,8 @@ pub struct Relisting {
 struct Base {
     bytes: Bytes,
     entries: (usize, usize),
+    /// Where the entries' stats are (as many).
+    stats: usize,
     folded: (usize, usize),
     written: (usize, usize),
     /// The folders' places (in order), their ids (in the same order), and the order of those by id.
@@ -166,6 +182,10 @@ fn cast<T: Copy>(bytes: &[u8], at: usize, count: usize) -> Option<&[T]> {
 impl Base {
     fn entries(&self) -> &[Entry] {
         cast(self.bytes.slice(), self.entries.0, self.entries.1).unwrap()
+    }
+
+    fn stats(&self) -> &[Stat] {
+        cast(self.bytes.slice(), self.stats, self.entries.1).unwrap()
     }
 
     fn folded(&self) -> &[u8] {
@@ -208,10 +228,12 @@ impl Base {
 
 pub struct Index {
     base: Option<Base>,
-    /// The base's entries as they are now, where they changed (gone, moved, marked).
+    /// The base's entries as they are now, where they changed (gone, moved, marked), and their stats, where those did.
     changed: HashMap<u32, Entry>,
-    /// The entries added since, placed after the base's, and their runs of names.
+    changed_stats: HashMap<u32, Stat>,
+    /// The entries added since, placed after the base's, their stats, and their runs of names.
     entries: Vec<Entry>,
+    stats: Vec<Stat>,
     folded: Vec<u8>,
     written: Vec<u8>,
     /// The folders' places by their ids, where that changed since the base (none: no folder has the id any more);
@@ -276,14 +298,14 @@ fn folded_in<'a>(entries: &[Entry], run: &'a [u8], place: usize) -> &'a str {
 
 impl Index {
     fn empty(by_id: bool) -> Self {
-        Index { base: None, changed: HashMap::new(), entries: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), adopted: HashMap::new(), dead: 0, by_id, made: MADE }
+        Index { base: None, changed: HashMap::new(), changed_stats: HashMap::new(), entries: Vec::new(), stats: Vec::new(), folded: Vec::new(), written: Vec::new(), folders: HashMap::new(), ids: Vec::new(), chinese: Vec::new(), adopted: HashMap::new(), dead: 0, by_id, made: MADE }
     }
 
     /// An index of a drive whose root folder has `root_id` (a drive whose folders are known `by_id`, else by their
     /// names), with nothing in it yet: its root to be listed.
     pub fn new(root_id: u64, by_id: bool) -> Self {
         let mut index = Index::empty(by_id);
-        index.add(NONE, &[], flag::FOLDER | flag::STALE);
+        index.add(NONE, &[], flag::FOLDER | flag::STALE, Stat::default());
         index.set_id(ROOT, root_id);
         index
     }
@@ -310,6 +332,27 @@ impl Index {
         }
     }
 
+    /// When the entry at `place` was last written and how large it is, as its folder was last listed.
+    pub fn stat(&self, place: u32) -> Stat {
+        let base_len = self.base_len();
+        match &self.base {
+            Some(base) if place < base_len => match self.changed_stats.is_empty() {
+                true => base.stats()[place as usize],
+                false => self.changed_stats.get(&place).copied().unwrap_or_else(|| base.stats()[place as usize]),
+            },
+            _ => self.stats[(place - base_len) as usize],
+        }
+    }
+
+    fn set_stat(&mut self, place: u32, stat: Stat) {
+        let base_len = self.base_len();
+        if place < base_len {
+            self.changed_stats.insert(place, stat);
+        } else {
+            self.stats[(place - base_len) as usize] = stat;
+        }
+    }
+
     fn set_entry(&mut self, place: u32, entry: Entry) {
         if self.entry(place).parent != entry.parent {
             self.adopted.entry(entry.parent).or_default().push(place);
@@ -327,7 +370,7 @@ impl Index {
         self.len() as usize - self.dead - 1
     }
 
-    fn add(&mut self, parent: u32, name: &[u16], flags: u16) -> u32 {
+    fn add(&mut self, parent: u32, name: &[u16], flags: u16, stat: Stat) -> u32 {
         let place = self.len();
         let name = OsString::from_wide(name);
         let lossy = name.to_string_lossy();
@@ -349,6 +392,7 @@ impl Index {
             self.chinese.push(place);
         }
         self.entries.push(Entry { parent, at: at as u32, written, written_len, flags });
+        self.stats.push(stat);
         self.adopted.entry(parent).or_default().push(place);
         place
     }
@@ -556,6 +600,9 @@ impl Index {
                     if kept | flags != was.flags {
                         self.set_entry(child, Entry { flags: kept | flags, ..was });
                     }
+                    if self.stat(child) != item.stat {
+                        self.set_stat(child, item.stat);
+                    }
                     // (A link before, its names are listed now.)
                     if was.flags & flag::LINK != 0 && item.followed() {
                         self.set_flag(child, flag::STALE, true);
@@ -572,14 +619,14 @@ impl Index {
             if item.folder() && self.by_id {
                 if let Some(old) = self.folder(id) {
                     // Moved here, or renamed: its entries go with it.
-                    let place = self.add(folder, &item.name, flags | (self.entry(old).flags & (flag::UNREAD | flag::STALE)));
+                    let place = self.add(folder, &item.name, flags | (self.entry(old).flags & (flag::UNREAD | flag::STALE)), item.stat);
                     self.set_id(place, id);
                     self.kill(old);
                     changes.moved.insert(old, place);
                     continue;
                 }
             }
-            let place = self.add(folder, &item.name, if item.followed() { flags | flag::STALE } else { flags });
+            let place = self.add(folder, &item.name, if item.followed() { flags | flag::STALE } else { flags }, item.stat);
             if item.folder() {
                 self.set_id(place, id);
                 if item.followed() {
@@ -687,6 +734,8 @@ impl Index {
     /// About how much memory it holds of its own (what is mapped in of the base is not its own: see the top).
     pub fn held(&self) -> usize {
         self.entries.capacity() * size_of::<Entry>()
+            + self.stats.capacity() * size_of::<Stat>()
+            + self.changed_stats.capacity() * (size_of::<(u32, Stat)>() + 1)
             + self.folded.capacity()
             + self.written.capacity()
             + self.changed.capacity() * (size_of::<(u32, Entry)>() + 1)
@@ -736,7 +785,7 @@ impl Index {
     /// It as kept on disk (see `read`): the dead left out, and the rest placed anew, each after its folder (by how
     /// deep it is, then by its folder's new place, then as it was: the entries of a folder together, and all but the
     /// root in order of their folders' places). How many entries, bytes of names folded, bytes of names as written, folders with
-    /// ids and names holding Chinese there are, then the entries, the names folded, the names as written, the
+    /// ids and names holding Chinese there are, then the entries, their stats, the names folded, the names as written, the
     /// folders' places, their ids, their order by id, and the places of those holding Chinese: each part from a
     /// multiple of 8 bytes, all little-endian, written as it is made (never all of it at once in memory).
     pub fn write(&self, out: &mut impl Write) -> io::Result<()> {
@@ -823,6 +872,12 @@ impl Index {
             out.write_all(&(entry.flags & !flag::DEAD).to_le_bytes())?;
             name_at += self.folded_name(old).len() as u32 + 1;
         }
+        // Their stats.
+        for &old in &order {
+            let stat = self.stat(old);
+            out.write_all(&stat.written.to_le_bytes())?;
+            out.write_all(&stat.size.to_le_bytes())?;
+        }
         // The names, folded, then as written.
         for &old in &order {
             out.write_all(self.folded_name(old).as_bytes())?;
@@ -883,6 +938,7 @@ impl Index {
         };
         let base = Base {
             entries: (part(entries.checked_mul(16)?)?, entries),
+            stats: part(entries.checked_mul(16)?)?,
             folded: (part(folded)?, folded),
             written: (part(written)?, written),
             places: (part(folders * 4)?, folders),
@@ -895,6 +951,7 @@ impl Index {
             return None;
         }
         let (all, names, run) = (cast::<Entry>(base.bytes.slice(), base.entries.0, entries)?, base.folded(), base.written());
+        cast::<Stat>(base.bytes.slice(), base.stats, entries)?;
         let (places, ids, order, held) = (cast::<u32>(base.bytes.slice(), base.places.0, folders)?, cast::<u64>(base.bytes.slice(), base.ids, folders)?, cast::<u32>(base.bytes.slice(), base.by_id, folders)?, cast::<u32>(base.bytes.slice(), base.chinese.0, chinese)?);
         // Names: each where the one before ended, ended by a 0 and nowhere else, as UTF-8; as written within what is
         // kept, whole UTF-16 units. Each entry after its folder, which is a folder; none dead, the root first.
@@ -993,7 +1050,7 @@ mod tests {
     const FOLDER: u32 = ATTRIBUTE_DIRECTORY;
 
     fn item(name: &str, id: u64, attributes: u32) -> Item {
-        Item { name: name.encode_utf16().collect(), id, attributes, tag: 0 }
+        Item { name: name.encode_utf16().collect(), id, attributes, tag: 0, stat: Stat::default() }
     }
 
     /// One round of listing `folders` again, each as `listed` says it is now (as `walk::round` does it).
@@ -1234,11 +1291,43 @@ mod tests {
         assert!(Index::read(Bytes::owned(&before), 0, end, true, 0).is_none());
     }
 
+    /// Each name has when it was written and how large it is as its folder was listed: changed as it is listed again
+    /// (written since), kept and read again with it, and changed again over what was read (as a file is written after
+    /// Glance starts).
+    #[test]
+    fn when_each_name_was_written_and_its_size_are_as_last_listed() {
+        let with = |name: &str, id: u64, attributes: u32, written: i64, size: u64| Item { stat: Stat { written, size }, ..item(name, id, attributes) };
+        let mut index = Index::new(5, true);
+        round(&mut index, &[(ROOT, vec![with("Docs", 10, FOLDER, 50, 0), with("a.txt", 11, FILE, 100, 4096)])]);
+        let docs = place_of(&index, "C:\\Docs");
+        round(&mut index, &[(docs, vec![with("b.txt", 20, FILE, 200, 9)])]);
+        let stat = |index: &Index, path: &str| index.stat(place_of(index, path));
+        assert_eq!(stat(&index, "C:\\a.txt"), Stat { written: 100, size: 4096 });
+        assert_eq!(stat(&index, "C:\\Docs"), Stat { written: 50, size: 0 });
+        assert_eq!(stat(&index, "C:\\Docs\\b.txt"), Stat { written: 200, size: 9 });
+        // a.txt written since: listed again, it is as it is now (the others as they were).
+        round(&mut index, &[(ROOT, vec![with("Docs", 10, FOLDER, 60, 0), with("a.txt", 11, FILE, 300, 5000)])]);
+        assert_eq!(stat(&index, "C:\\a.txt"), Stat { written: 300, size: 5000 });
+        assert_eq!(stat(&index, "C:\\Docs"), Stat { written: 60, size: 0 });
+        // Kept and read: the same; written again after, listed again over what was read.
+        let mut read = kept(&index);
+        assert_eq!((stat(&read, "C:\\a.txt"), stat(&read, "C:\\Docs\\b.txt")), (Stat { written: 300, size: 5000 }, Stat { written: 200, size: 9 }));
+        let docs = place_of(&read, "C:\\Docs");
+        round(&mut read, &[(docs, vec![with("b.txt", 20, FILE, 400, 12), with("c.txt", 21, FILE, 410, 1)])]);
+        assert_eq!(stat(&read, "C:\\Docs\\b.txt"), Stat { written: 400, size: 12 });
+        assert_eq!(stat(&read, "C:\\Docs\\c.txt"), Stat { written: 410, size: 1 });
+        assert_eq!(stat(&read, "C:\\a.txt"), Stat { written: 300, size: 5000 });
+        // And kept again (those changed over what was read among what is kept).
+        let again = kept(&read);
+        assert_eq!(stat(&again, "C:\\Docs\\b.txt"), Stat { written: 400, size: 12 });
+        assert_eq!(stat(&again, "C:\\Docs\\c.txt"), Stat { written: 410, size: 1 });
+    }
+
     /// A name that is not whole Unicode (an unpaired surrogate, as NTFS allows) is kept as it is written.
     #[test]
     fn names_are_kept_as_written() {
         let mut index = Index::new(5, true);
-        let odd = Item { name: vec![0x41, 0xD800, 0x62], id: 9, attributes: FILE, tag: 0 };
+        let odd = Item { name: vec![0x41, 0xD800, 0x62], id: 9, attributes: FILE, tag: 0, stat: Stat::default() };
         let mut changes = Changes::default();
         index.list(ROOT, &[odd, item("ÄBC.txt", 10, FILE)], &[], &mut changes);
         index.finish(changes);

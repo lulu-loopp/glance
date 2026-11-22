@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use super::pages::{Page, PAGES};
 use crate::notes::Note;
-use crate::search::{Only, Query};
+use crate::search::{Only, Order, Query};
 use crate::station::found::Found as Program;
 use crate::station::recent::{self, Came, Kind as FileKind};
 use crate::station::shelf::{Item, What as Held};
@@ -42,6 +42,12 @@ impl View {
             View::Media => lang.pick("音乐和视频", "Music & videos"),
             View::Glance => "Glance",
         }
+    }
+
+    /// Whether what it shows can be put in another order than how well it meets what was typed: files and folders
+    /// (a view of apps and settings, or of Glance's own, has none of them).
+    pub fn sorts(self) -> bool {
+        !matches!(self, View::Programs | View::Glance)
     }
 
     /// The query for the files and folders it shows (none for a view of other things).
@@ -125,6 +131,8 @@ pub enum Group {
     Pages,
     Folders,
     Files,
+    /// Files and folders together, in the order asked for (see `search::Order`).
+    Found,
     Glance,
     /// What came lately (nothing typed).
     Lately,
@@ -137,6 +145,7 @@ impl Group {
             Group::Pages => lang.pick("设置", "Settings"),
             Group::Folders => lang.pick("文件夹", "Folders"),
             Group::Files => lang.pick("文件", "Files"),
+            Group::Found => lang.pick("文件和文件夹", "Files and folders"),
             Group::Glance => "Glance",
             Group::Lately => lang.pick("最近的文件", "Recent files"),
         }
@@ -227,9 +236,9 @@ const LATELY: usize = 8;
 const PROGRAM_FIRST: f32 = 1.0;
 const PAGE_FIRST: f32 = 0.5;
 
-/// What is shown for `typed` in `view` (the files all, `expanded`), from `sources`.
-pub fn gather(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
-    let mut shown = found(typed, view, expanded, sources);
+/// What is shown for `typed` in `view` (the files all, `expanded`), its files and folders in `order`, from `sources`.
+pub fn gather(typed: &str, view: View, expanded: bool, order: Order, sources: &Sources) -> Shown {
+    let mut shown = found(typed, view, expanded, order, sources);
     // Typed after "待办 ": first of all, larger, what adds it as a to-do.
     if let Some(row) = todo_row(typed, sources.lang) {
         for line in shown.lines.iter_mut() {
@@ -261,9 +270,12 @@ pub fn todo_row(typed: &str, lang: Lang) -> Option<Row> {
     Some(Row { kind: Kind::Todo, name, marks: Vec::new(), detail, what: What::Todo(rest.to_string()), rank: f32::MAX, bytes: None, changed: None })
 }
 
-/// What was found of what was typed (see `gather`).
-fn found(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
-    let query = Query::read(typed);
+/// What was found of what was typed (see `gather`). In another order than how well they meet it, the files and folders
+/// are the first of all of them in it, together (the view of all shows them under one heading, and none first larger);
+/// what else is found keeps its place and its order.
+fn found(typed: &str, view: View, expanded: bool, order: Order, sources: &Sources) -> Shown {
+    let query = Query::read(typed).ordered(order);
+    let ordered = order.other() && view.sorts();
     if query.is_empty() {
         return lately(view, sources);
     }
@@ -281,19 +293,29 @@ fn found(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
     }
     let most = match view {
         View::All if expanded => FILES_ALL,
+        View::All if ordered => FILES,
         View::All => FILES.max(FOLDERS),
         _ => LISTED,
     };
     let found = view.files(query).map(|query| (sources.files)(&query, most)).unwrap_or_default();
-    let (mut folders, mut files): (Vec<Row>, Vec<Row>) = found.hits.into_iter().map(file_row).partition(|row| row.kind == Kind::Folder);
-    for rows in [&mut programs, &mut pages, &mut glance, &mut folders, &mut files] {
+    let in_order: Vec<Row> = found.hits.into_iter().map(file_row).collect();
+    let (mut folders, mut files): (Vec<Row>, Vec<Row>) = if ordered { (Vec::new(), in_order) } else { in_order.into_iter().partition(|row| row.kind == Kind::Folder) };
+    for rows in [&mut programs, &mut pages, &mut glance] {
         rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
+    }
+    if !ordered {
+        for rows in [&mut folders, &mut files] {
+            rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
+        }
     }
     let total = programs.len() + pages.len() + glance.len() + found.total;
     if view != View::All {
-        // One kind: as many as fit, a program or page first shown larger.
+        // One kind: as many as fit, a program or page first shown larger. (In another order, files and folders are
+        // all it shows: see `View::sorts`.)
         let mut rows: Vec<Row> = programs.into_iter().chain(pages).chain(glance).chain(folders).chain(files).collect();
-        rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
+        if !ordered {
+            rows.sort_by(|a, b| b.rank.total_cmp(&a.rank));
+        }
         let others = total.saturating_sub(LISTED.min(rows.len()));
         rows.truncate(LISTED);
         let mut lines: Vec<Line> = rows.into_iter().enumerate().map(|(at, row)| { let best = at == 0 && matches!(row.kind, Kind::Program | Kind::Page | Kind::Tool); Line::Row(row, best) }).collect();
@@ -302,30 +324,46 @@ fn found(typed: &str, view: View, expanded: bool, sources: &Sources) -> Shown {
         }
         return Shown { lines, total };
     }
+    let files_most = if expanded { FILES_ALL } else { FILES };
+    let mut lines = Vec::new();
+    if ordered {
+        // Each kind under its heading, the files and folders together under theirs: none first, larger (the best of
+        // what is in another order is not first).
+        let files_total = found.total;
+        let heads = [(Group::Programs, PROGRAMS, programs.len(), programs), (Group::Pages, PAGES_SHOWN, pages.len(), pages), (Group::Found, files_most, files_total, files), (Group::Glance, GLANCE, glance.len(), glance)];
+        for (group, most, size, rows) in heads {
+            headed(&mut lines, group, rows, most, (size, size), expanded);
+        }
+        return Shown { lines, total };
+    }
     // The best of all first, larger, then each kind under its heading (how many of each were found, the best one too).
     let sizes = [programs.len(), pages.len(), found.folders, found.total - found.folders, glance.len()];
     let mut groups = [programs, pages, folders, files, glance];
     let best = groups.iter().enumerate().filter_map(|(at, rows)| rows.first().map(|row| (at, row.rank))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(at, _)| at);
-    let mut lines = Vec::new();
     if let Some(at) = best {
         lines.push(Line::Row(groups[at].remove(0), true));
     }
-    let heads = [(Group::Programs, PROGRAMS), (Group::Pages, PAGES_SHOWN), (Group::Folders, FOLDERS), (Group::Files, if expanded { FILES_ALL } else { FILES }), (Group::Glance, GLANCE)];
+    let heads = [(Group::Programs, PROGRAMS), (Group::Pages, PAGES_SHOWN), (Group::Folders, FOLDERS), (Group::Files, files_most), (Group::Glance, GLANCE)];
     for (at, ((group, most), rows)) in heads.into_iter().zip(groups).enumerate() {
-        if rows.is_empty() {
-            continue;
-        }
-        let left = sizes[at] - usize::from(best == Some(at));
-        let shown = most.min(rows.len());
-        let more = match left - shown {
-            0 => More::No,
-            _ if group == Group::Files && !expanded => More::ShowAll(sizes[at]),
-            more => More::Others(more),
-        };
-        lines.push(Line::Head(group, more));
-        lines.extend(rows.into_iter().take(shown).map(|row| Line::Row(row, false)));
+        headed(&mut lines, group, rows, most, (sizes[at] - usize::from(best == Some(at)), sizes[at]), expanded);
     }
     Shown { lines, total }
+}
+
+/// `rows` of a kind under its heading, `most` of them, and how many more there are of the `left` found (not counting
+/// one shown first, of `all`): the files, not all shown (`expanded` not), to be shown all.
+fn headed(lines: &mut Vec<Line>, group: Group, rows: Vec<Row>, most: usize, (left, all): (usize, usize), expanded: bool) {
+    if rows.is_empty() {
+        return;
+    }
+    let shown = most.min(rows.len());
+    let more = match left.saturating_sub(shown) {
+        0 => More::No,
+        _ if matches!(group, Group::Files | Group::Found) && !expanded => More::ShowAll(all),
+        more => More::Others(more),
+    };
+    lines.push(Line::Head(group, more));
+    lines.extend(rows.into_iter().take(shown).map(|row| Line::Row(row, false)));
 }
 
 /// What is shown with nothing typed: the files that came lately (of the kinds the view shows), newest first; the
@@ -520,7 +558,7 @@ mod tests {
                 .map(|(name, folder)| {
                     next += 1;
                     paths_of.insert(next, if path.is_empty() { name.clone() } else { format!("{path}\\{name}") });
-                    Listed { name: name.encode_utf16().collect(), id: next, attributes: if *folder { 0x10 } else { 0x20 }, tag: 0 }
+                    Listed { name: name.encode_utf16().collect(), id: next, attributes: if *folder { 0x10 } else { 0x20 }, tag: 0, stat: Default::default() }
                 })
                 .collect();
             let mut changes = Changes::default();
@@ -548,6 +586,11 @@ mod tests {
     /// What is shown for `typed` in `view`, a line each: `#` a heading (and how many more there are, or `all`, how
     /// many files all are), `*` the best.
     fn shown(typed: &str, view: View, expanded: bool, notes: &[Note], held: &[Item], lately: &[Came]) -> Vec<String> {
+        shown_in(typed, view, expanded, Order::default(), notes, held, lately)
+    }
+
+    /// As `shown`, the files and folders in `order`.
+    fn shown_in(typed: &str, view: View, expanded: bool, order: Order, notes: &[Note], held: &[Item], lately: &[Came]) -> Vec<String> {
         let programs = [program("Steam"), program("网易云音乐"), program("QQ音乐"), program("Visual Studio Code")];
         let index = drive(PATHS);
         let files = |query: &Query, most: usize| {
@@ -555,7 +598,7 @@ mod tests {
             crate::search::Found { total, folders, hits }
         };
         let sources = Sources { programs: &programs, notes, held, lately, files: &files, lang: Lang::Zh };
-        gather(typed, view, expanded, &sources)
+        gather(typed, view, expanded, order, &sources)
             .lines
             .iter()
             .map(|line| match line {
@@ -601,6 +644,25 @@ mod tests {
         assert_eq!(found("ext:pdf", View::All), ["* 音乐会.pdf"]);
     }
 
+    /// In another order, the view of all shows the files and folders together under one heading (none first, larger),
+    /// the first of all of them in it, as many as files are shown, all to be shown; what else is found keeps its
+    /// heading and its order. A view of files and folders shows them in it; a view of other things, as it did.
+    #[test]
+    fn in_another_order_files_and_folders_are_shown_together_in_it() {
+        use crate::search::Sort;
+        let by_name = Order { by: Sort::Name, reversed: false };
+        let in_order = |typed: &str, view: View, order: Order| shown_in(typed, view, false, order, &[], &[], &[]);
+        assert_eq!(in_order("music", View::All, by_name), ["# 文件和文件夹 all 9", "Music", "music 1.txt", "music 2.txt", "music 3.txt", "music 4.txt", "music 5.txt"]);
+        assert_eq!(in_order("music", View::All, Order { reversed: true, ..by_name }), ["# 文件和文件夹 all 9", "Music", "music cover.png", "music 7.txt", "music 6.txt", "music 5.txt", "music 4.txt"]);
+        assert_eq!(shown_in("music", View::All, true, by_name, &[], &[], &[]).len(), 1 + 9);
+        assert_eq!(in_order("steam", View::All, by_name), ["# 应用", "Steam", "# 文件和文件夹", "Steam"]);
+        let notes = [Note { name: "a.md".into(), text: "music to buy".into(), colour: Default::default(), stamp: Default::default() }];
+        assert_eq!(shown_in("cover", View::All, false, by_name, &notes, &[], &[]), ["# 设置", "恢复", "# 文件和文件夹", "music cover.png"]);
+        assert_eq!(shown_in("music", View::All, false, by_name, &notes, &[], &[]).last().map(String::as_str), Some("music to buy"));
+        assert_eq!(in_order("music", View::Files, Order { reversed: true, ..by_name })[..3], ["music cover.png", "music 7.txt", "music 6.txt"]);
+        assert_eq!(in_order("yinyue", View::Programs, by_name), ["* 网易云音乐", "QQ音乐"]);
+    }
+
     #[test]
     fn glance_s_own_are_found_by_name_and_by_what_they_say() {
         let notes = [Note { name: "a.md".into(), text: "下周要做的事\n回复 Steam 的邮件".into(), colour: Default::default(), stamp: Default::default() }];
@@ -636,7 +698,7 @@ mod tests {
             crate::search::Found { total, folders, hits }
         };
         let sources = Sources { programs: &programs, notes: &[], held: &[], lately: &[], files: &files, lang: Lang::Zh };
-        let mut shown = gather("music", View::All, false, &sources);
+        let mut shown = gather("music", View::All, false, Order::default(), &sources);
         assert!(shown.rows().all(|row| row.bytes.is_none() && row.changed.is_none()));
         let paths = shown.paths();
         assert_eq!(paths[0], (PathBuf::from("D:\\Music"), true));
@@ -648,7 +710,7 @@ mod tests {
         assert_eq!(told(&shown, "Music"), Some((None, Some(when))));
         assert_eq!(told(&shown, "music 1.txt"), Some((Some(12), Some(when))));
         assert_eq!(told(&shown, "music 2.txt"), Some((None, None)));
-        let mut again = gather("music", View::All, false, &sources);
+        let mut again = gather("music", View::All, false, Order::default(), &sources);
         again.told_as(&shown);
         assert_eq!(told(&again, "Music"), Some((None, Some(when))));
         assert_eq!(told(&again, "music 1.txt"), Some((Some(12), Some(when))));

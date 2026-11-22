@@ -1,6 +1,7 @@
 //! What changed on an NTFS drive, as its change journal says to the user: which files and folders were made, gone,
-//! renamed or moved, by their ids and their folders' (the user is not told their names). Only a hint of which
-//! folders to list again: what a folder holds is always as it is listed.
+//! renamed or moved, and which were written (once the program writing one let it go), by their ids and their folders'
+//! (the user is not told their names). Only a hint of which folders to list again: what a folder holds, and when each
+//! of its files was written and how large it is, is always as it is listed.
 
 use super::drive::Drive;
 use windows::core::{Error, Result};
@@ -11,6 +12,19 @@ use windows::Win32::System::IO::DeviceIoControl;
 /// The changes that move a name: made, gone, renamed or moved (its old name and its new), a hard link made or gone,
 /// a link made or changed.
 const NAMED: u32 = 0x0000_0100 | 0x0000_0200 | 0x0000_1000 | 0x0000_2000 | 0x0001_0000 | 0x0010_0000;
+
+/// The changes to what a file holds, or to when it says it was written: written over, made longer, cut short, its
+/// times set.
+const WRITTEN: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004 | 0x0000_8000;
+
+/// The record told as the program that changed a file lets it go, with all it changed meanwhile.
+const CLOSED: u32 = 0x8000_0000;
+
+/// Whether a record's changes ask for its folder to be listed again: a name moved, at once, and a file written, once
+/// it is let go (a file written on and on, a log held open, not each time).
+fn relists(reason: u32) -> bool {
+    reason & NAMED != 0 || (reason & CLOSED != 0 && reason & WRITTEN != 0)
+}
 
 /// ERROR_JOURNAL_ENTRY_DELETED: what was asked from is no longer kept.
 const ENTRY_DELETED: u32 = 1181;
@@ -56,7 +70,7 @@ pub fn read(drive: &Drive, id: u64, from: i64, most: usize) -> Result<Read> {
         Err(error) => return Err(error),
     }
     gather(from, most, |at, buffer| {
-        let asked = READ_USN_JOURNAL_DATA_V0 { StartUsn: at, ReasonMask: NAMED, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: id };
+        let asked = READ_USN_JOURNAL_DATA_V0 { StartUsn: at, ReasonMask: NAMED | WRITTEN, ReturnOnlyOnClose: 0, Timeout: 0, BytesToWaitFor: 0, UsnJournalID: id };
         let mut got = 0u32;
         drive
             .with_root(|root| unsafe {
@@ -112,8 +126,9 @@ fn gather(from: i64, most: usize, mut chunk: impl FnMut(i64, &mut [u64]) -> Resu
     Ok(Read::Changed { folders, next: at_usn, more })
 }
 
-/// The folders the records in `bytes` were in: version 2's and 3's (its ids 128 bits, of which an NTFS drive's are
-/// the low 64), each record's length and fields checked to lie within them.
+/// The folders the records in `bytes` were in, of those whose changes ask for it to be listed again (see `relists`):
+/// version 2's and 3's (its ids 128 bits, of which an NTFS drive's are the low 64), each record's length and fields
+/// checked to lie within them.
 fn parents(bytes: &[u8]) -> Vec<u64> {
     let mut folders = Vec::new();
     let mut at = 0usize;
@@ -124,10 +139,12 @@ fn parents(bytes: &[u8]) -> Vec<u64> {
             break;
         }
         let record = &bytes[at..at + length];
-        // Version 2: the file's id at 8, its folder's at 16. Version 3: 128-bit ids, the folder's at 24.
+        // Version 2: the file's id at 8, its folder's at 16, what changed at 40. Version 3: 128-bit ids, the folder's at
+        // 24, what changed at 56.
+        let field = |from: usize| u32::from_le_bytes(record[from..from + 4].try_into().unwrap());
         let parent = match major {
-            2 if length >= 24 => Some(u64::from_le_bytes(record[16..24].try_into().unwrap())),
-            3 if length >= 40 => Some(u64::from_le_bytes(record[24..32].try_into().unwrap())),
+            2 if length >= 44 => relists(field(40)).then(|| u64::from_le_bytes(record[16..24].try_into().unwrap())),
+            3 if length >= 60 => relists(field(56)).then(|| u64::from_le_bytes(record[24..32].try_into().unwrap())),
             _ => None,
         };
         folders.extend(parent);
@@ -140,24 +157,45 @@ fn parents(bytes: &[u8]) -> Vec<u64> {
 mod tests {
     use super::*;
 
+    /// A record of version 2 (`major` 2) or 3, in folder `parent`, of the changes `reason`.
+    fn record(major: u16, parent: u64, reason: u32) -> Vec<u8> {
+        let (length, parent_at, reason_at) = if major == 2 { (64usize, 16, 40) } else { (80, 24, 56) };
+        let mut record = vec![0u8; length];
+        record[..4].copy_from_slice(&(length as u32).to_le_bytes());
+        record[4..6].copy_from_slice(&major.to_le_bytes());
+        record[parent_at..parent_at + 8].copy_from_slice(&parent.to_le_bytes());
+        record[reason_at..reason_at + 4].copy_from_slice(&reason.to_le_bytes());
+        record
+    }
+
     /// Records of both versions are read for their folders; one claiming more than there is ends the reading.
     #[test]
     fn records_are_read_within_what_was_given() {
         let mut bytes = Vec::new();
-        let mut v2 = vec![0u8; 64];
-        v2[..4].copy_from_slice(&64u32.to_le_bytes());
-        v2[4..6].copy_from_slice(&2u16.to_le_bytes());
-        v2[16..24].copy_from_slice(&7u64.to_le_bytes());
-        bytes.extend(&v2);
-        let mut v3 = vec![0u8; 80];
-        v3[..4].copy_from_slice(&80u32.to_le_bytes());
-        v3[4..6].copy_from_slice(&3u16.to_le_bytes());
-        v3[24..32].copy_from_slice(&9u64.to_le_bytes());
-        bytes.extend(&v3);
+        bytes.extend(record(2, 7, 0x100));
+        bytes.extend(record(3, 9, 0x200));
         let mut long = vec![0u8; 16];
         long[..4].copy_from_slice(&4096u32.to_le_bytes());
         bytes.extend(&long);
         assert_eq!(parents(&bytes), [7, 9]);
+    }
+
+    /// A name made, gone or moved has its folder listed again at once; a file written, once the program writing it lets
+    /// it go (each time it is written on, not); what else changes (its security, a stream), never.
+    #[test]
+    fn a_file_written_has_its_folder_listed_again_once_it_is_let_go() {
+        for major in [2, 3] {
+            let of = |reason: u32| parents(&record(major, 5, reason));
+            assert_eq!(of(0x100), [5], "made");
+            assert_eq!(of(0x200 | CLOSED), [5], "gone");
+            assert_eq!(of(0x2000), [5], "renamed");
+            assert_eq!(of(0x2), Vec::<u64>::new(), "written on, still held");
+            assert_eq!(of(0x2 | 0x1 | CLOSED), [5], "written, let go");
+            assert_eq!(of(0x8000 | CLOSED), [5], "its times set, let go");
+            assert_eq!(of(0x4 | CLOSED), [5], "cut short, let go");
+            assert_eq!(of(0x800 | CLOSED), Vec::<u64>::new(), "its security changed");
+            assert_eq!(of(CLOSED), Vec::<u64>::new(), "let go, nothing changed");
+        }
     }
 
     /// A journal gone far on is read a part at a time (as much as is asked at most), each read going on where the one
@@ -173,9 +211,7 @@ mod tests {
             }
             bytes[..8].copy_from_slice(&(at + 1).to_le_bytes());
             bytes[8..72].fill(0);
-            bytes[8..12].copy_from_slice(&64u32.to_le_bytes());
-            bytes[12..14].copy_from_slice(&2u16.to_le_bytes());
-            bytes[24..32].copy_from_slice(&(1000 + at as u64).to_le_bytes());
+            bytes[8..72].copy_from_slice(&record(2, 1000 + at as u64, 0x100));
             Ok(72)
         };
         let mut from = 0;

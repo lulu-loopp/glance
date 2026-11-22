@@ -5,7 +5,7 @@
 //! What is held open of a drive is let go of as Windows asks to take the drive out (see `Drive::hear_removal`), as
 //! Everything does: held, a USB drive could not be taken out safely.
 
-use super::index::Item;
+use super::index::{Item, Stat};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -221,7 +221,11 @@ impl<'a> Names<'a> {
     pub fn items(&self) -> Vec<Item> {
         let mut items = Vec::with_capacity(self.entries().count());
         // (For a link, EaSize holds what kind of link it is.)
-        items.extend(self.entries().map(|(name, info)| Item { name: name.to_vec(), id: info.FileId as u64, attributes: info.FileAttributes, tag: info.EaSize }));
+        items.extend(self.entries().map(|(name, info)| {
+            // (A folder's size is none of its own.)
+            let size = if info.FileAttributes & 0x10 != 0 { 0 } else { info.EndOfFile.max(0) as u64 };
+            Item { name: name.to_vec(), id: info.FileId as u64, attributes: info.FileAttributes, tag: info.EaSize, stat: Stat { written: info.LastWriteTime, size } }
+        }));
         items
     }
 }

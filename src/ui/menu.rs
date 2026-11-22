@@ -344,10 +344,22 @@ impl Menu {
         Menu::open_showing(items, look, at, false, with_the_panel, Some(LIST_ROWS))
     }
 
+    /// Shows `items` under a button at `button` (physical px), its right edge with the button's, `gap` (physical px)
+    /// below it; over it where there is no room under it.
+    pub fn open_under(items: Vec<Item<'static>>, look: Look, button: RECT, gap: i32, with_the_panel: bool) -> Option<Menu> {
+        let at = POINT { x: button.right, y: button.bottom + gap };
+        let menu = Menu::made(items, look, at, Window::activating(), with_the_panel, None, |(w, h), margin, _, work| {
+            let left = button.right - w + margin;
+            let top = if button.bottom + gap + h - 2 * margin > work.bottom { button.top - gap - h + margin } else { button.bottom + gap - margin };
+            (left, top)
+        })?;
+        Menu::brought_forward(menu)
+    }
+
     /// As `open_at`, no more than `most` of its choices shown at once, where it is given.
     fn open_showing(items: Vec<Item<'static>>, look: Look, at: POINT, above: bool, with_the_panel: bool, most: Option<usize>) -> Option<Menu> {
         // At the pointer, turned back where it would leave its screen.
-        let mut menu = Menu::made(items, look, at, Window::activating(), with_the_panel, most, |(w, h), margin, _, work| {
+        let menu = Menu::made(items, look, at, Window::activating(), with_the_panel, most, |(w, h), margin, _, work| {
             let mut left = at.x - margin;
             if left + w - margin > work.right {
                 left = at.x - w + margin;
@@ -358,6 +370,11 @@ impl Menu {
             }
             (left, top)
         })?;
+        Menu::brought_forward(menu)
+    }
+
+    /// `menu`, made and shown, brought to the front (see `open_at`): none where it was not let there.
+    fn brought_forward(mut menu: Menu) -> Option<Menu> {
         // In front, with the keyboard and the mouse, as a system menu is: its keys come to it, not to the program
         // behind; a click anywhere comes to it too; and it is left as anything else comes to the front.
         menu.before = unsafe { GetForegroundWindow() };

@@ -32,7 +32,7 @@ mod watch;
 
 use drive::Drive;
 use index::{flag, Index};
-pub use query::{Hit, Only, Query};
+pub use query::{Hit, Only, Order, Query, Sort};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Once, RwLock};
@@ -602,6 +602,12 @@ pub fn find(query: &Query, most: usize) -> Found {
         found.folders += folders;
         found.hits.extend(hits);
     }
+    // In another order: the first `most` of all, folders and files together.
+    if query.order().other() {
+        query::in_order(&mut found.hits, query.order());
+        found.hits.truncate(most);
+        return found;
+    }
     query::sort(&mut found.hits);
     let (mut folders, mut files) = (0, 0);
     found.hits.retain(|hit| {
@@ -744,5 +750,33 @@ mod tests {
         assert_eq!(keeping.retry.map(|(_, wait)| wait), Some(KEEP_EVERY));
         keeping.kept(at(200));
         assert!(keeping.due(at(201), false, false, much, false), "kept, as before");
+    }
+
+    /// How long finding takes in each order over a whole drive as it was kept (its folder `GLANCE_INDEX`, its serial
+    /// `GLANCE_SERIAL` in hex): each order puts all that meet in it, not a few, so a word met by most names is the
+    /// slowest. Said, not judged: a measure taken on a machine with a drive indexed.
+    #[test]
+    #[ignore = "reads a drive's kept index: GLANCE_INDEX, GLANCE_SERIAL"]
+    fn each_order_over_a_whole_drive_is_timed() {
+        let folder = std::env::var("GLANCE_INDEX").expect("GLANCE_INDEX: the folder indexes are kept in");
+        let serial = u32::from_str_radix(&std::env::var("GLANCE_SERIAL").expect("GLANCE_SERIAL: the drive's serial, in hex"), 16).unwrap();
+        let (index, _) = store::kept_in(std::path::Path::new(&folder), serial).expect("kept");
+        println!("{} names", index.names());
+        let orders = [(Sort::Match, false), (Sort::Written, false), (Sort::Name, false), (Sort::Name, true), (Sort::Size, false)];
+        for typed in ["e", "a", "dll", "png", "报告", "glance"] {
+            for (by, reversed) in orders {
+                let query = Query::read(typed).ordered(Order { by, reversed });
+                let started = std::time::Instant::now();
+                let mut most = Duration::ZERO;
+                let mut found = (0, 0, Vec::new());
+                for _ in 0..3 {
+                    let once = std::time::Instant::now();
+                    found = query.find(&index, "C:\\", 40);
+                    most = most.max(once.elapsed());
+                }
+                let first: Vec<String> = found.2.iter().take(3).map(|hit| hit.name.clone()).collect();
+                println!("{typed:>8} {by:?}{} {:>9} met  {:>6.1} ms each, {:>6.1} at most  {first:?}", if reversed { " reversed" } else { "" }, found.0, started.elapsed().as_secs_f64() * 1000.0 / 3.0, most.as_secs_f64() * 1000.0);
+            }
+        }
     }
 }

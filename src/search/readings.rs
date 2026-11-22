@@ -50,6 +50,11 @@ fn readings(c: char) -> impl Iterator<Item = &'static [u8]> {
     table.readings[range].iter().map(|&syllable| table.syllables[syllable as usize])
 }
 
+/// A character's first reading (its most common), none for one the table does not have.
+pub fn first(c: char) -> Option<&'static [u8]> {
+    readings(c).next()
+}
+
 /// Whether `c` has readings (a Chinese character the table knows).
 pub fn read(c: char) -> bool {
     readings(c).next().is_some()

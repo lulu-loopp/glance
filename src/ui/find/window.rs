@@ -32,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use super::pages::{Opens, PAGES};
 use super::results::{self, Group, Kind, Line, More, Row, Shown, Sources, View, What};
+use crate::search::{Order, Sort};
+use std::collections::HashMap;
 use crate::station::recent::Kind as FileKind;
 use crate::station::run::{self, Ask, FilesAct};
 use crate::ui::canvas::{Align, Canvas, Color, Family, Font, Point};
@@ -95,6 +97,18 @@ const META: f32 = 150.0;
 const DOWN: f32 = 0.16;
 /// The most that may be typed (UTF-16 units).
 const TYPED_MOST: usize = 260;
+/// How long a name moves from where it was to where it is as the order changes, and how long one not shown before takes
+/// to come up.
+const SLIDE_FOR: Duration = Duration::from_millis(260);
+const COME_UP_FOR: Duration = Duration::from_millis(180);
+
+/// The orders the files and folders can be put in, as the menu offers them.
+const SORTS: [Sort; 4] = [Sort::Match, Sort::Written, Sort::Name, Sort::Size];
+
+/// How far the order's button is from the sheet's right edge, and at the least from the kinds before it (DIPs).
+const SORT_RIGHT: f32 = 14.0;
+const SORT_GAP: f32 = 8.0;
+
 /// How long a word that something was done (copied) stays in the foot.
 const TOLD_FOR: std::time::Duration = std::time::Duration::from_millis(1600);
 
@@ -136,6 +150,7 @@ struct Asked {
     typed: String,
     view: View,
     expanded: bool,
+    order: crate::search::Order,
     lang: Lang,
     fresh: bool,
 }
@@ -206,7 +221,7 @@ fn work(asks: Receiver<Asked>, hwnd: isize, tells: Sender<(u64, Vec<(PathBuf, bo
         let lately = crate::station::recent::shown();
         let files = |query: &crate::search::Query, most: usize| crate::search::find(query, most);
         let sources = Sources { programs: &programs, notes: &notes, held: &held.items, lately: &lately, files: &files, lang: asked.lang };
-        let shown = results::gather(&asked.typed, asked.view, asked.expanded, &sources);
+        let shown = results::gather(&asked.typed, asked.view, asked.expanded, asked.order, &sources);
         let paths = shown.paths();
         *ANSWER.lock().unwrap() = Some((asked.number, asked.fresh, shown));
         let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), FOUND, WPARAM(0), LPARAM(0)) };
@@ -318,6 +333,8 @@ enum Hit {
     Field,
     Clear,
     Chip(View),
+    /// The button that offers the orders the files and folders can be put in.
+    Sort,
     /// A name, by its place among the names shown.
     Row(usize),
     ShowAll,
@@ -332,6 +349,21 @@ enum Act {
     Show,
     Copy,
     CopyPath,
+}
+
+/// What a menu up is for: a name's (what can be done with it, and its place among those shown), or the order.
+enum MenuOf {
+    Row(Vec<Act>, usize),
+    Sort,
+}
+
+/// The names moving to their places as the order changed: where each was (sheet DIPs, see `row_places`), kept till what
+/// is found in the new order comes (for that asking); then, as it is drawn, how far each is from where it now is, none
+/// for one not shown before (it comes up there), and since when.
+#[derive(Default)]
+struct Slide {
+    owed: Option<(u64, HashMap<What, f32>)>,
+    moving: Option<(Instant, Vec<Option<f32>>)>,
 }
 
 struct Finder {
@@ -363,6 +395,8 @@ struct Finder {
     shifted: f32,
     view: View,
     expanded: bool,
+    /// The order its files and folders are put in (see `search::Order`): as last chosen, kept in the settings.
+    order: crate::search::Order,
     shown: Shown,
     asked: u64,
     /// The asking what is shown was found for.
@@ -388,7 +422,8 @@ struct Finder {
     pointer: POINT,
     /// The mark of the kind chosen, sliding to it from the one chosen before, as the panel's tabs' do.
     marks: crate::ui::thumb::Dots<View>,
-    menu: Option<(Menu, Vec<Act>, usize)>,
+    menu: Option<(Menu, MenuOf)>,
+    slide: Slide,
     /// What was in front before it was shown, given the front back as it is closed by its key.
     before: HWND,
     /// How many pictures had been made as it last drew, and whether a row waited for one.
@@ -426,6 +461,7 @@ impl Finder {
             shifted: 0.0,
             view: View::All,
             expanded: false,
+            order: crate::search::Order::default(),
             shown: Shown::default(),
             asked: 0,
             shown_for: 0,
@@ -442,6 +478,7 @@ impl Finder {
             pointer: POINT::default(),
             marks: crate::ui::thumb::Dots::new(),
             menu: None,
+            slide: Slide::default(),
             before: HWND::default(),
             pictures: 0,
             waiting: false,
@@ -495,6 +532,7 @@ impl Finder {
             self.drawn = None;
         }
         (self.skin, self.lang) = (skin, lang);
+        self.order = crate::app().settings.lock().unwrap().search_order;
         // The drives indexed (once, from now, the machine settled or not), and the Start menu read again (as programs
         // come and go).
         crate::search::asked();
@@ -615,7 +653,7 @@ impl Finder {
     fn ask(&mut self, fresh: bool) {
         self.asked += 1;
         ASKED.store(self.asked, Ordering::Release);
-        let _ = self.asks.send(Asked { number: self.asked, typed: self.typing.string(), view: self.view, expanded: self.expanded, lang: self.lang, fresh });
+        let _ = self.asks.send(Asked { number: self.asked, typed: self.typing.string(), view: self.view, expanded: self.expanded, order: self.order, lang: self.lang, fresh });
     }
 
     /// What was found, if it is for what was last asked.
@@ -625,6 +663,12 @@ impl Finder {
             return;
         }
         let picked = self.picked().map(|row| row.what.clone());
+        // (Found in another order: each name moves from where it was. Found again otherwise, none does.)
+        let slide_from = match self.slide.owed.take() {
+            Some((asked, from)) if asked == number => Some(from),
+            _ => None,
+        };
+        self.slide.moving = None;
         // (What is looked at larger is of the list as it was: a list found afresh, it goes.)
         if fresh && self.looking() {
             look::close();
@@ -642,6 +686,11 @@ impl Finder {
             self.scroll = 0.0;
         }
         self.follow = true;
+        if let Some(from) = slide_from {
+            let now = self.row_places();
+            let moved = self.shown.rows().zip(now).map(|(row, (_, at))| from.get(&row.what).map(|was| was - at)).collect();
+            self.slide.moving = Some((Instant::now(), moved));
+        }
         // (Asked to be looked at larger before it came: what it found picked is.)
         if std::mem::take(&mut self.look_found) {
             self.preview();
@@ -670,6 +719,78 @@ impl Finder {
 
     fn picked(&self) -> Option<&Row> {
         self.shown.rows().nth(self.pick)
+    }
+
+    /// The files and folders put in `order`, kept for next time, and looked for again in it: each name shown moves from
+    /// where it is to where it comes (see `Slide`).
+    fn put_in(&mut self, order: Order) {
+        if order == self.order {
+            return;
+        }
+        self.order = order;
+        crate::app().change(|settings| settings.search_order = order);
+        let from = self.row_places().into_iter().collect();
+        self.ask(true);
+        self.slide.owed = Some((self.asked, from));
+    }
+
+    /// Whether what it shows is put in the order chosen: files and folders found for what is typed (not those that came
+    /// lately, shown newest first with nothing typed, nor a kind of other things).
+    fn ordering(&self) -> bool {
+        self.view.sorts() && !self.typing.string().trim().is_empty()
+    }
+
+    /// Where each name shown is on the sheet (DIPs, its top), as the list is scrolled now: by what it opens.
+    fn row_places(&self) -> Vec<(What, f32)> {
+        let mut y = FIELD + 1.0 + CHIPS + 1.0 + LIST_PAD - self.scroll;
+        let mut places = Vec::new();
+        for line in &self.shown.lines {
+            if let Line::Row(row, _) = line {
+                places.push((row.what.clone(), y));
+            }
+            y += Finder::line_height(line);
+        }
+        places
+    }
+
+    /// How far each name still is from its place (DIPs), and how far one not shown before has come up (0 to 1), as
+    /// they move (see `Slide`); none, once all are there.
+    fn sliding(&mut self) -> Option<(Vec<Option<f32>>, f32)> {
+        let (began, moved) = self.slide.moving.as_ref()?;
+        let gone = began.elapsed();
+        if gone >= SLIDE_FOR.max(COME_UP_FOR) {
+            self.slide.moving = None;
+            return None;
+        }
+        let left = 1.0 - crate::ui::morph::ease(gone.as_secs_f32() / SLIDE_FOR.as_secs_f32());
+        let up = crate::ui::morph::ease(gone.as_secs_f32() / COME_UP_FOR.as_secs_f32());
+        Some((moved.iter().map(|by| by.map(|by| by * left)).collect(), up))
+    }
+
+    /// The menu of the orders, under its button: each, the one chosen ticked and the way it goes said, the way each
+    /// other goes first said under it.
+    fn sort_menu(&mut self) {
+        let Some(r) = self.hits.iter().find(|(_, hit)| *hit == Hit::Sort).map(|(r, _)| *r) else { return };
+        let lang = self.lang;
+        let items = SORTS
+            .iter()
+            .map(|&by| {
+                let on = by == self.order.by;
+                let mut item = Item::new(sort_said(by, lang), None, on, false);
+                item.detail = way_said(by, on && self.order.reversed, lang).map(|way| match on {
+                    true => format!("{way}{}", lang.pick("，再选反转", ", choose again to reverse")).into(),
+                    false => way.into(),
+                });
+                item
+            })
+            .collect();
+        let (room, scale) = (self.room, self.scale);
+        let px = |dips: f32| (dips * scale).round() as i32;
+        let button = RECT { left: self.rect.left + px(room + r.x), top: self.rect.top + px(room + r.y), right: self.rect.left + px(room + r.x + r.w), bottom: self.rect.top + px(room + r.y + r.h) };
+        if let Some(menu) = Menu::open_under(items, Look::of(self.skin, self.dark), button, px(4.0), false) {
+            self.menu = Some((menu, MenuOf::Sort));
+            self.draw();
+        }
     }
 
     /// The view `view` chosen, looked for again.
@@ -821,7 +942,7 @@ impl Finder {
         let ink = Inks::of(self, &c);
         self.paint_field(frame, &ink);
         frame.fill(c.rule, 0.0, FIELD, WIDTH, 1.0);
-        self.paint_chips(frame, &ink, FIELD + 1.0);
+        let chips_slide = self.paint_chips(frame, &ink, FIELD + 1.0);
         let mut y = FIELD + 1.0 + CHIPS;
         let (_, list) = self.list_height();
         if list > 0.0 {
@@ -832,6 +953,14 @@ impl Finder {
         }
         frame.fill(c.rule, 0.0, y, WIDTH, 1.0);
         self.paint_foot(frame, &ink, y + 1.0);
+        // (Its frames drawn as the chosen kind's mark slides, or the names move, till they are there.)
+        unsafe {
+            if chips_slide || self.slide.moving.is_some() {
+                SetTimer(Some(self.hwnd), SLIDING, SLIDING_EVERY, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), SLIDING);
+            }
+        }
     }
 
     fn paint_field(&mut self, frame: &Frame, ink: &Inks) {
@@ -887,7 +1016,9 @@ impl Finder {
         }
     }
 
-    fn paint_chips(&mut self, frame: &Frame, ink: &Inks, top: f32) {
+    /// The kinds to choose, and (for a kind of files and folders) the button offering the orders they can be put in at
+    /// the right: whether the chosen kind's mark is still sliding to it.
+    fn paint_chips(&mut self, frame: &Frame, ink: &Inks, top: f32) -> bool {
         // Marked as the panel's tabs are in each skin (see `view::paint_tabs`): glass's chosen on a pill of its glass,
         // Windows 11's with a short bar of its accent under it, chart paper's underlined in its ink, its name no further
         // out than its line (no room round it).
@@ -898,24 +1029,23 @@ impl Finder {
         let y = top + (CHIPS - tall) / 2.0;
         let (ascent, descent) = frame.gfx.baseline(font);
         let hovered = self.hovered();
-        let mut boxes = Vec::new();
-        let mut x = 26.0 - pad;
-        for view in View::EVERY {
-            let w = frame.gfx.measure(view.name(self.lang), font) + 2.0 * pad;
-            boxes.push((x, w));
-            x += w + gap;
+        // Room kept at the right for the order's button (in every kind, and whatever the order, that they stay where
+        // they are as it shows, goes and changes): see `kept_for_button`.
+        let names: Vec<f32> = View::EVERY.iter().map(|view| frame.gfx.measure(view.name(self.lang), font)).collect();
+        let buttons: Vec<SortButton> = SORTS.iter().flat_map(|&by| [false, true].map(|reversed| SortButton::of(frame, self, Order { by, reversed }))).collect();
+        let by = kept_for_button(&names, (pad, gap), &buttons);
+        let (pad, gap) = (pad * by, gap * by);
+        let button = SortButton::of(frame, self, self.order);
+        let (boxes, end) = chip_boxes(&names, (pad, gap));
+        if self.ordering() {
+            let form = button.widest_within(WIDTH - SORT_RIGHT - SORT_GAP - end);
+            let menu_up = matches!(self.menu, Some((_, MenuOf::Sort)));
+            let r = button.paint(frame, ink, &theme, (WIDTH - SORT_RIGHT, y, tall), form, hovered == Some(Hit::Sort) || menu_up);
+            self.hits.push((r, Hit::Sort));
         }
         let chosen = View::EVERY.iter().position(|&view| view == self.view).unwrap_or(0);
         let hovered_at = View::EVERY.iter().position(|&view| hovered == Some(Hit::Chip(view)));
-        // (Its frames drawn as it slides, till it is there.)
         let sliding = self.marks.choose(std::time::Instant::now(), &[(0, self.view)]);
-        unsafe {
-            if sliding {
-                SetTimer(Some(self.hwnd), SLIDING, SLIDING_EVERY, None);
-            } else {
-                let _ = KillTimer(Some(self.hwnd), SLIDING);
-            }
-        }
         let slid = crate::ui::view::slid_at(self.marks.slid(0, self.view), |from| View::EVERY.iter().position(|&view| view == from));
         if self.skin == Skin::Glass {
             crate::ui::view::glass_choice(frame, &theme, (y, tall), &boxes, chosen, slid, hovered_at);
@@ -931,6 +1061,7 @@ impl Finder {
             frame.text(view.name(self.lang), font, colour, x + pad, y + (tall - ascent - descent) / 2.0, w, Align::Start);
             self.hits.push((Rect { x, y, w, h: tall }, Hit::Chip(view)));
         }
+        sliding
     }
 
     fn paint_list(&mut self, frame: &Frame, ink: &Inks, top: f32, height: f32) {
@@ -973,12 +1104,22 @@ impl Finder {
         let mut at = 0;
         let lines = std::mem::take(&mut self.shown.lines);
         self.waiting = false;
+        let sliding = self.sliding();
         for line in &lines {
             let tall = Finder::line_height(line);
-            if y + tall >= top && y <= top + height {
+            // (A name moving to its place drawn where it is on its way, one not shown before coming up where it is.)
+            let (drawn_y, shown) = match (&sliding, line) {
+                (Some((moved, up)), Line::Row(..)) => match moved.get(at).copied().flatten() {
+                    Some(by) => (y + by, 1.0),
+                    None => (y, *up),
+                },
+                _ => (y, 1.0),
+            };
+            if (drawn_y + tall >= top && drawn_y <= top + height) || (y + tall >= top && y <= top + height) {
+                let ink = &ink.faded(shown);
                 match line {
                     Line::Head(group, more) => self.paint_head(frame, ink, y, *group, *more),
-                    Line::Row(row, best) => self.paint_row(frame, ink, y, row, *best, at, Rect { x: 0.0, y: top, w: WIDTH, h: height }),
+                    Line::Row(row, best) => self.paint_row(frame, ink, drawn_y, row, *best, at, Rect { x: 0.0, y: top, w: WIDTH, h: height }, shown),
                     Line::Others(count) => {
                         let said = match self.lang {
                             Lang::Zh => format!("另有 {} 项未列出，输入更多文字可缩小范围", count_said(*count)),
@@ -1037,7 +1178,7 @@ impl Finder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn paint_row(&mut self, frame: &Frame, ink: &Inks, y: f32, row: &Row, best: bool, at: usize, list: Rect) {
+    fn paint_row(&mut self, frame: &Frame, ink: &Inks, y: f32, row: &Row, best: bool, at: usize, list: Rect, shown: f32) {
         let tall = if best { BEST } else { ROW };
         let r = Rect { x: INSET, y, w: WIDTH - 2.0 * INSET, h: tall };
         let radius = if self.skin == Skin::Paper { Theme::new(Skin::Paper, self.dark).control_radius } else { 6.0 };
@@ -1053,7 +1194,7 @@ impl Finder {
         }
         let side = if best { BEST_ICON } else { ICON };
         let centre = Point { x: INSET + if best { 10.0 } else { 12.0 } + side / 2.0, y: y + tall / 2.0 };
-        self.paint_icon(frame, ink, row, centre, side);
+        self.paint_icon(frame, ink, row, centre, side, shown);
         let left = if best { BEST_TEXT_LEFT } else { TEXT_LEFT };
         let meta = self.meta(row);
         let room = WIDTH - INSET - 12.0 - left - if meta.is_some() { META + 12.0 } else { 0.0 };
@@ -1082,11 +1223,13 @@ impl Finder {
         }
         frame.text(&shown_name, name_font, ink.text, left, name_top, room + 2.0, Align::Start);
         frame.text(&row.detail, detail_font, ink.text3, left, detail_top, room, Align::Start);
+        // (What they are put in order by, lit: when it changed, or its size.)
         if let Some((size, when)) = meta {
             let right = WIDTH - INSET - 12.0 - META;
-            frame.text(&when, detail_font, ink.text3, right, name_top + 1.0, META, Align::End);
+            let lit = |by: Sort| if self.ordering() && self.order.by == by { ink.text } else { ink.text3 };
+            frame.text(&when, detail_font, lit(Sort::Written), right, name_top + 1.0, META, Align::End);
             if let Some(size) = size {
-                frame.text(&size, detail_font, ink.text3, right, detail_top, META, Align::End);
+                frame.text(&size, detail_font, lit(Sort::Size), right, detail_top, META, Align::End);
             }
         }
     }
@@ -1099,7 +1242,7 @@ impl Finder {
 
     /// A row's picture: the program's icon, the file's (a picture's own likeness), the folder's, as Explorer shows
     /// them; Glance's own drawn; till one is made, its kind's drawn.
-    fn paint_icon(&mut self, frame: &Frame, ink: &Inks, row: &Row, centre: Point, side: f32) {
+    fn paint_icon(&mut self, frame: &Frame, ink: &Inks, row: &Row, centre: Point, side: f32, shown: f32) {
         let pixels = (side * self.scale).round() as u32;
         let picture = match &row.what {
             What::Program(target) => crate::station::thumbs::icon(Path::new(target), pixels),
@@ -1110,7 +1253,7 @@ impl Finder {
             _ => None,
         };
         if let Some(picture) = picture {
-            frame.picture(&picture, centre.x - side / 2.0, centre.y - side / 2.0, side, side, 0.0, 1.0);
+            frame.picture(&picture, centre.x - side / 2.0, centre.y - side / 2.0, side, side, 0.0, shown);
             return;
         }
         let drawn = matches!(row.what, What::Program(_) | What::Path(_));
@@ -1282,6 +1425,7 @@ impl Finder {
                 self.draw();
             }
             Hit::Chip(view) => self.choose(view),
+            Hit::Sort => self.sort_menu(),
             Hit::ShowAll => {
                 self.expanded = true;
                 self.ask(false);
@@ -1324,7 +1468,7 @@ impl Finder {
         }
         let items = choices.iter().map(|(_, label, icon)| Item::new(*label, Some(Mark::Icon(*icon)), false, false)).collect();
         if let Some(menu) = Menu::open_at(items, Look::of(self.skin, self.dark), at, false, false) {
-            self.menu = Some((menu, choices.into_iter().map(|(act, ..)| act).collect(), row));
+            self.menu = Some((menu, MenuOf::Row(choices.into_iter().map(|(act, ..)| act).collect(), row)));
         }
     }
 
@@ -1352,15 +1496,21 @@ impl Finder {
     }
 
     fn end_menu(&mut self, choice: Option<usize>) {
-        let Some((menu, acts, row)) = self.menu.take() else { return };
+        let Some((menu, of)) = self.menu.take() else { return };
         menu.close();
-        match choice {
-            Some(at) => {
+        match (choice, of) {
+            (Some(at), MenuOf::Row(acts, row)) => {
                 self.pick = row;
                 self.act(acts[at]);
             }
-            None if unsafe { GetForegroundWindow() } != self.hwnd => self.close(false),
-            None => {}
+            // The order chosen; the one it is in chosen again, the other way (how well they meet goes one way only).
+            (Some(at), MenuOf::Sort) => {
+                self.put_in(chosen(self.order, SORTS[at]));
+                self.draw();
+            }
+            (None, _) if unsafe { GetForegroundWindow() } != self.hwnd => self.close(false),
+            (None, MenuOf::Sort) => self.draw(),
+            (None, MenuOf::Row(..)) => {}
         }
     }
 
@@ -1689,6 +1839,22 @@ struct Inks {
 }
 
 impl Inks {
+    /// The same, `shown` as clear (0 to 1): what comes up drawn in them.
+    fn faded(&self, shown: f32) -> Inks {
+        let by = |c: Color| c.alpha(c.a * shown);
+        Inks {
+            text: by(self.text),
+            text2: by(self.text2),
+            text3: by(self.text3),
+            hover: by(self.hover),
+            pick: by(self.pick),
+            mark: by(self.mark),
+            accent: by(self.accent),
+            link: by(self.link),
+            selection: by(self.selection),
+        }
+    }
+
     fn of(finder: &Finder, c: &Colours) -> Inks {
         let theme = Theme::new(finder.skin, finder.dark);
         let dark = finder.dark;
@@ -1766,6 +1932,148 @@ fn ready_said(lang: Lang, roots: &[&str], names: usize) -> String {
         Lang::Zh => format!("{drives} 已索引 {} 项 · 实时更新", count_said(names)),
         Lang::En => format!("{} indexed on {drives}, kept current", count_said(names)),
     }
+}
+
+/// The button offering the orders (see `Finder::sort_menu`): an arrow up and one down, what they are put in order by,
+/// which way, and a chevron, as much of it as there is room for (see `Form`).
+struct SortButton {
+    label: &'static str,
+    way: Option<&'static str>,
+    widths: (f32, f32),
+    fonts: (Font, Font),
+}
+
+/// How much of the order's button shows: all of it; what they are put in order by, not which way; the arrows alone.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Form {
+    Whole,
+    Named,
+    Bare,
+}
+
+/// The order's button's measures (DIPs): the room before its arrows and after its chevron, between what it shows, and
+/// how large its icons are.
+const SORT_PAD: (f32, f32) = (10.0, 8.0);
+const SORT_SPACE: f32 = 6.0;
+const SORT_ICON: f32 = 15.0;
+const SORT_CHEVRON: f32 = 14.0;
+
+impl SortButton {
+    fn of(frame: &Frame, finder: &Finder, order: Order) -> SortButton {
+        let fonts = (finder.font(12.0, 400.0), finder.font(11.5, 400.0));
+        let label = sort_said(order.by, finder.lang);
+        let way = way_said(order.by, order.reversed, finder.lang);
+        let widths = (frame.gfx.measure(label, fonts.0), way.map_or(0.0, |way| frame.gfx.measure(way, fonts.1)));
+        SortButton { label, way, widths, fonts }
+    }
+
+    /// How wide it is, as much of it shown as `form` says.
+    fn width(&self, form: Form) -> f32 {
+        let named = if form == Form::Bare { 0.0 } else { SORT_SPACE + self.widths.0 };
+        let way = if form == Form::Whole && self.way.is_some() { SORT_SPACE + self.widths.1 } else { 0.0 };
+        SORT_PAD.0 + SORT_ICON + named + way + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1
+    }
+
+    fn least(&self) -> f32 {
+        self.width(Form::Bare)
+    }
+
+    /// The most of it that fits in `room` (DIPs): the arrows alone where nothing more does. (Within a thousandth of a
+    /// DIP: room kept for it exactly, the kinds' widths added up one by one ended a rounding past it, and it was shown
+    /// with less than there was room for.)
+    fn widest_within(&self, room: f32) -> Form {
+        [Form::Whole, Form::Named].into_iter().find(|&form| self.width(form) <= room + 0.001).unwrap_or(Form::Bare)
+    }
+
+    /// Drawn as `form` says, its right edge at `right`, at `y` and `tall` (DIPs), `lit` (under the pointer, or its menu
+    /// up): where it is.
+    fn paint(&self, frame: &Frame, ink: &Inks, theme: &Theme, (right, y, tall): (f32, f32, f32), form: Form, lit: bool) -> Rect {
+        let w = self.width(form);
+        let r = Rect { x: right - w, y, w, h: tall };
+        if lit {
+            frame.fill_rounded(theme.hover, r.x, r.y, r.w, r.h, theme.control_radius.min(tall / 2.0));
+        }
+        let (text, quiet) = if lit { (ink.text, ink.text2) } else { (ink.text2, ink.text3) };
+        let middle = y + tall / 2.0;
+        let mut x = r.x + SORT_PAD.0;
+        frame.icon(Icon::ArrowUpDown, Point { x: x + SORT_ICON / 2.0, y: middle }, SORT_ICON, text);
+        x += SORT_ICON;
+        let mut words = |said: &str, font: Font, w: f32, colour: Color| {
+            let (ascent, descent) = frame.gfx.baseline(font);
+            frame.text(said, font, colour, x + SORT_SPACE, middle - (ascent + descent) / 2.0, w + 1.0, Align::Start);
+            x += SORT_SPACE + w;
+        };
+        if form != Form::Bare {
+            words(self.label, self.fonts.0, self.widths.0, text);
+        }
+        if let (Form::Whole, Some(way)) = (form, self.way) {
+            words(way, self.fonts.1, self.widths.1, quiet);
+        }
+        frame.icon(Icon::ChevronDown, Point { x: x + SORT_SPACE + SORT_CHEVRON / 2.0, y: middle }, SORT_CHEVRON, quiet);
+        r
+    }
+}
+
+/// The order `by` chosen in its menu, the files and folders in `now`: the one they are in chosen again, the other way
+/// (how well they meet goes one way only); another, its first way.
+fn chosen(now: Order, by: Sort) -> Order {
+    Order { by, reversed: by == now.by && by != Sort::Match && !now.reversed }
+}
+
+/// Where the kinds' names (each so wide) are chosen, `pad` round each and `gap` between them, the first's words 26 DIPs
+/// in: each one's (x, width), and where the last ends.
+fn chip_boxes(names: &[f32], (pad, gap): (f32, f32)) -> (Vec<(f32, f32)>, f32) {
+    let mut boxes = Vec::with_capacity(names.len());
+    let mut x = 26.0 - pad;
+    for &w in names {
+        boxes.push((x, w + 2.0 * pad));
+        x += w + 2.0 * pad + gap;
+    }
+    (boxes, x - gap)
+}
+
+/// How little of the room round the kinds' names (see `chips_spaced`) is kept to give the order's button more room.
+const CHIPS_LEAST: f32 = 0.5;
+
+/// How much of the room round the kinds' names (`pad` round each, `gap` between them) is kept (see `chips_spaced`), for
+/// the order's `buttons` (each order's, each way): room for the most of them that the kinds can give it keeping at
+/// least `CHIPS_LEAST` of theirs (all they say, else what they are in order by, else the arrows), the widest of each.
+fn kept_for_button(names: &[f32], spacing: (f32, f32), buttons: &[SortButton]) -> f32 {
+    let room_for = |form: Form| WIDTH - SORT_RIGHT - SORT_GAP - buttons.iter().map(|button| button.width(form)).fold(0.0, f32::max);
+    [Form::Whole, Form::Named].into_iter().map(|form| chips_spaced(names, spacing, room_for(form))).find(|&by| by >= CHIPS_LEAST).unwrap_or_else(|| chips_spaced(names, spacing, room_for(Form::Bare)))
+}
+
+/// How much of the room round the kinds' names (`pad` round each, `gap` between them) is kept (0 to 1): all of it where
+/// they end (from 26 DIPs in) by `ends` at the most, else as much as lets them.
+fn chips_spaced(names: &[f32], (pad, gap): (f32, f32), ends: f32) -> f32 {
+    let room = pad * (2 * names.len() - 1) as f32 + gap * (names.len() - 1) as f32;
+    let bare = 26.0 + names.iter().sum::<f32>();
+    if bare + room <= ends {
+        1.0
+    } else {
+        ((ends - bare) / room).max(0.0)
+    }
+}
+
+/// What the files and folders are put in order by, as the button and its menu say it.
+fn sort_said(by: Sort, lang: Lang) -> &'static str {
+    match by {
+        Sort::Match => lang.pick("匹配度", "Best match"),
+        Sort::Written => lang.pick("修改时间", "Date modified"),
+        Sort::Name => lang.pick("名称", "Name"),
+        Sort::Size => lang.pick("大小", "Size"),
+    }
+}
+
+/// Which way they go in it (`reversed`, the other): none, by how well they meet (it goes one way).
+fn way_said(by: Sort, reversed: bool, lang: Lang) -> Option<&'static str> {
+    let (first, other) = match by {
+        Sort::Match => return None,
+        Sort::Written => (lang.pick("新的在前", "Newest first"), lang.pick("旧的在前", "Oldest first")),
+        Sort::Name => (lang.pick("A 到 Z", "A to Z"), lang.pick("Z 到 A", "Z to A")),
+        Sort::Size => (lang.pick("大的在前", "Largest first"), lang.pick("小的在前", "Smallest first")),
+    };
+    Some(if reversed { other } else { first })
 }
 
 /// A count with its thousands set apart: 2,914,305.
@@ -2054,6 +2362,76 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
 
 #[cfg(test)]
 mod tests {
+    /// The order chosen in its menu: another, its first way; the one they are in, the other way, and back; how well
+    /// they meet, one way however often it is chosen.
+    #[test]
+    fn the_order_they_are_in_chosen_again_goes_the_other_way() {
+        let order = |by: Sort, reversed: bool| Order { by, reversed };
+        assert_eq!(chosen(Order::default(), Sort::Written), order(Sort::Written, false));
+        assert_eq!(chosen(order(Sort::Written, false), Sort::Written), order(Sort::Written, true));
+        assert_eq!(chosen(order(Sort::Written, true), Sort::Written), order(Sort::Written, false));
+        assert_eq!(chosen(order(Sort::Written, true), Sort::Name), order(Sort::Name, false));
+        assert_eq!(chosen(order(Sort::Size, true), Sort::Match), Order::default());
+        assert_eq!(chosen(Order::default(), Sort::Match), Order::default());
+    }
+
+    /// The order's button shows as much as there is room for: what they are in order by and which way, else what
+    /// alone, else its arrows; the kinds before it are drawn together only where its arrows alone do not fit.
+    #[test]
+    fn the_order_s_button_shows_as_much_as_there_is_room_for() {
+        let font = Font::new(Family::Segoe, 12.0, 400.0);
+        let button = SortButton { label: "修改时间", way: Some("新的在前"), widths: (50.0, 46.0), fonts: (font, font) };
+        let bare = SORT_PAD.0 + SORT_ICON + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1;
+        assert_eq!(button.least(), bare);
+        assert_eq!(button.width(Form::Whole), bare + 2.0 * SORT_SPACE + 96.0);
+        assert_eq!(button.widest_within(bare + 200.0), Form::Whole);
+        assert_eq!(button.widest_within(bare + 60.0), Form::Named);
+        assert_eq!(button.widest_within(bare + 10.0), Form::Bare);
+        assert_eq!(button.widest_within(0.0), Form::Bare);
+        // (By how well they meet: no way to say.)
+        let matched = SortButton { label: "匹配度", way: None, widths: (38.0, 0.0), fonts: (font, font) };
+        assert_eq!(matched.width(Form::Whole), matched.width(Form::Named));
+
+        // Two names 100 wide, 12 round each and 4 between, the first one's room before it within the 26: 26 + 200 + 40 = 266
+        // at the most.
+        assert_eq!(chips_spaced(&[100.0, 100.0], (12.0, 4.0), 300.0), 1.0);
+        assert_eq!(chips_spaced(&[100.0, 100.0], (12.0, 4.0), 266.0), 1.0);
+        assert_eq!(chips_spaced(&[100.0, 100.0], (12.0, 4.0), 246.0), 0.5);
+        assert_eq!(chips_spaced(&[100.0, 100.0], (12.0, 4.0), 200.0), 0.0);
+
+        // Room for the widest button of all orders where the kinds keep half their room at least, else for less of it.
+        let way = |w: f32| SortButton { label: "", way: Some(""), widths: (40.0, w), fonts: (font, font) };
+        let names = [100.0, 100.0, 100.0, 100.0];
+        let spacing = (12.0, 4.0);
+        let whole = |w: f32| WIDTH - SORT_RIGHT - SORT_GAP - way(w).width(Form::Whole);
+        let narrow = [way(20.0), way(60.0)];
+        assert_eq!(kept_for_button(&names, spacing, &narrow), chips_spaced(&names, spacing, whole(60.0)));
+        assert!(chips_spaced(&names, spacing, whole(60.0)) < 1.0);
+        assert!(kept_for_button(&names, spacing, &narrow) >= CHIPS_LEAST);
+        // (A way too wide for that: room for the names alone.)
+        // (Room kept for the widest exactly: it shows whole there, as the kinds end where they are laid out, a rounding
+        // off what was kept for it.)
+        // Over names and ways of many widths, each where room is kept for its whole button.
+        let mut kept_whole = 0;
+        for n in 0..4000u32 {
+            let width = |salt: u32| 20.0 + ((n.wrapping_mul(2_654_435_761).wrapping_add(salt.wrapping_mul(40_503)) >> 8) % 6000) as f32 / 100.0;
+            let names: Vec<f32> = (0..8).map(width).collect();
+            let ways = [way(width(8) - 10.0), way(width(9) - 10.0)];
+            let by = kept_for_button(&names, spacing, &ways);
+            let widest = if ways[0].width(Form::Whole) >= ways[1].width(Form::Whole) { &ways[0] } else { &ways[1] };
+            if by >= CHIPS_LEAST && chips_spaced(&names, spacing, WIDTH - SORT_RIGHT - SORT_GAP - widest.width(Form::Whole)) == by {
+                let (_, end) = chip_boxes(&names, (spacing.0 * by, spacing.1 * by));
+                assert_eq!(widest.widest_within(WIDTH - SORT_RIGHT - SORT_GAP - end), Form::Whole, "{names:?}");
+                kept_whole += 1;
+            }
+        }
+        assert!(kept_whole > 100, "{kept_whole}");
+        let names = [100.0, 100.0, 100.0, 100.0];
+        let wide = [way(20.0), way(140.0)];
+        assert!(chips_spaced(&names, spacing, whole(140.0)) < CHIPS_LEAST);
+        assert_eq!(kept_for_button(&names, spacing, &wide), chips_spaced(&names, spacing, WIDTH - SORT_RIGHT - SORT_GAP - way(140.0).width(Form::Named)).min(1.0));
+    }
+
     use super::*;
 
     /// `finder` up as `show` puts it up, its window shown by hand off every screen: `show` brings it to the front, which
