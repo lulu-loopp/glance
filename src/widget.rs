@@ -813,8 +813,9 @@ struct Widget {
     /// What is under the pointer said under it (see `hover`): taken away as the pointer leaves it, the widget goes, or
     /// what is under the pointer changes without it (pages turned).
     saying: bool,
-    /// The card beside the AI component's dock shown, of the source the pointer is on (see `follow_card`).
+    /// The card beside it shown, of what the pointer rests on (see `follow_card`), and what that is.
     carding: bool,
+    resting: crate::ui::hover_card::Resting,
     /// Its sliders' knobs' dots, easing (see `thumb::Dots`).
     thumbs: crate::ui::thumb::Dots<view::Hit>,
     /// Letting clicks through: since when the pointer has been over it, and
@@ -2121,7 +2122,7 @@ impl Widgets {
         // (On its way from a ring of the AI component's dock to the card beside it, over the rest of the dock: that
         // ring stays lit, its card up. Not on one of its buttons, which may lie on that way: the card goes.)
         let hit = match (hit, widget.hit_hover) {
-            (hit, Some(view::Hit::AiSlot(spot))) if !matches!(hit, Some(view::Hit::AiSlot(_))) && over.is_none() && widget.carding && cursor_position().is_some_and(crate::ui::ai_card::holds) => Some(view::Hit::AiSlot(spot)),
+            (hit, Some(kept)) if kept.carded() && !hit.is_some_and(|hit| hit.carded()) && over.is_none() && widget.carding && cursor_position().is_some_and(crate::ui::hover_card::holds) => Some(kept),
             (hit, _) => hit,
         };
         if hit != widget.hit_hover {
@@ -2723,6 +2724,8 @@ impl Widgets {
                     let rest = if widget.lingered.is_some() || widget.shadowed { WATCHED } else if widget.hover { HOVERED_FRAME } else { REST_FRAME };
                     // (Sooner, a note written in where it is due: its caret's blink, its keeping.)
                     let rest = widget.in_place.as_ref().and_then(|in_place| in_place.due(now)).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
+                    // (And the card of what the pointer rests on, due: see `follow_card`.)
+                    let rest = widget.resting.due().filter(|_| !widget.carding).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     // (And the preview's shortcut due to be said, or coming in.)
                     let rest = widget.preview_hint.due(now).map_or(rest, |at| rest.min(at.saturating_duration_since(now)));
                     widget.next_frame = now + rest;
@@ -3313,6 +3316,7 @@ impl Widget {
             preview_hint: view::Hint::default(),
             saying: false,
             carding: false,
+            resting: Default::default(),
             thumbs: crate::ui::thumb::Dots::new(),
             lingered: None,
             shadowed: false,
@@ -3797,25 +3801,27 @@ impl Widget {
         });
     }
 
-    /// The card beside the AI component's dock, as it was just drawn in `theme` from `prefs`: of the spot the pointer
-    /// is on (what every source spent today, a source's ring, the sessions at work), beside it on the side of the screen
-    /// with more room (under or over it, laid across); else none.
+    /// The card beside it, as it was just drawn in `theme` from `prefs`: of the spot of the AI component's dock the
+    /// pointer is on (what every source spent today, a source's ring, the sessions at work), or of the folder in the
+    /// storage lane it rests on, on the side of the screen with more room (under or over it, laid across); else none.
     fn follow_card(&mut self, theme: &Theme, prefs: &crate::ui::prefs::Prefs, lang: crate::ui::text::Lang) {
-        let spot = match self.hit_hover {
-            Some(view::Hit::AiSlot(spot)) => spot,
+        let hit = match self.hit_hover {
+            Some(hit) if hit.carded() => hit,
             _ => {
+                self.resting.off();
                 if std::mem::take(&mut self.carding) {
-                    crate::ui::ai_card::hide();
+                    crate::ui::hover_card::hide();
                 }
                 return;
             }
         };
-        // (Every spot on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
-        let spots: Vec<_> = self.hits_on_screen().into_iter().filter_map(|(rect, hit)| match hit {
-            view::Hit::AiSlot(spot) => Some((spot, rect)),
-            _ => None,
-        }).collect();
-        use crate::ui::ai_card::Side;
+        let now = Instant::now();
+        if self.resting.on(hit, self.carding, now) > now {
+            return;
+        }
+        // (Every spot that has one: what is behind each one's card is taken with this one's, see `hover_card::show`.)
+        let spots: Vec<_> = self.hits_on_screen().into_iter().filter(|(_, hit)| hit.carded()).map(|(rect, hit)| (hit, rect)).collect();
+        use crate::ui::hover_card::Side;
         let (by, screen) = (self.rect(), self.contact.monitor);
         let side = if by.right - by.left > by.bottom - by.top {
             if (by.top + by.bottom) / 2 < (screen.top + screen.bottom) / 2 { Side::Below } else { Side::Above }
@@ -3832,7 +3838,7 @@ impl Widget {
             right: all.right.max(button.right),
             bottom: all.bottom.max(button.bottom),
         });
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme, prefs, lang, look }, by, &spots, side, clear);
+        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme, prefs, lang, look }, by, &spots, side, clear);
         self.carding = true;
     }
 
@@ -4131,6 +4137,7 @@ impl Widget {
                                 Some(view::Hit::Ai(source)) => view::ai::toggle(source),
                                 Some(view::Hit::Media(key, follow)) => crate::playing::act_on(follow, crate::playing::Act::Key(key)),
                                 Some(view::Hit::Drive(letter)) => crate::panel::open_drive(letter),
+                                Some(view::Hit::Folder(number)) => crate::panel::open_folder(number),
                                 // Its process list sorted by the header clicked, as a panel's is (the sort is one for
                                 // all: kept, every one shows it as it restyles).
                                 Some(view::Hit::Sort(sort)) => {
@@ -4800,8 +4807,8 @@ impl Widget {
         if !hovered && (self.tip.take().is_some() | std::mem::take(&mut self.saying)) {
             crate::ui::tip::hide();
         }
-        // (Not while it is on the card beside the AI component's dock, or on its way there: see `ai_card::holds`.)
-        let carded = self.carding && cursor.is_some_and(crate::ui::ai_card::holds);
+        // (Not while it is on the card beside the AI component's dock, or on its way there: see `hover_card::holds`.)
+        let carded = self.carding && cursor.is_some_and(crate::ui::hover_card::holds);
         if !hovered && !carded && self.hit_hover.take().is_some() {
             self.next_frame = now;
         }
@@ -5284,7 +5291,7 @@ impl Widget {
             crate::ui::tip::above();
         }
         if self.carding {
-            crate::ui::ai_card::above();
+            crate::ui::hover_card::above();
         }
         // (A note stuck from its page shown: the page goes, now that it is here.)
         if !self.shown_once && whole {

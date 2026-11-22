@@ -1540,6 +1540,14 @@ fn sensor_of(name: &str) -> Option<(&str, &str)> {
     name.split_once(':').filter(|(group, _)| matches!(*group, "temps" | "fans"))
 }
 
+/// What folders are being chosen for in Windows' chooser: those Recent files lists only, or those the storage component
+/// tells the sizes of.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ChoosingFor {
+    Recent,
+    Storage,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 enum Target {
     Skin(Skin),
@@ -1587,6 +1595,11 @@ enum Target {
     /// A folder taken off those Recent files lists only, and Windows' chooser opened, to add more.
     RecentFolder(std::path::PathBuf),
     AddRecentFolder,
+    /// A folder whose size the storage component tells (by its path) moved up, or taken off; Windows' chooser opened, to
+    /// add more.
+    RaiseFolder(String),
+    DropFolder(String),
+    AddFolder,
     /// Opens or closes the fold of the modules few want.
     More,
     /// Asks for a newer release now.
@@ -1739,6 +1752,10 @@ enum Row {
     /// In an AI provider's module's card (module `0`): one of the keys its account is read by (its field `1`), where it
     /// is taken from, and writing it.
     AiKey(String, usize),
+    /// In the storage component's card: the button that adds folders it tells the sizes of (see `folders`), and a row
+    /// for each, by its path.
+    AddFolder,
+    Folder(String),
 }
 
 impl Row {
@@ -1749,11 +1766,19 @@ impl Row {
             Row::Module(id) => Some((id.clone(), true)),
             Row::Device(Known::Phone(id)) => Some((phone_card(id), true)),
             Row::Item(id, _) | Row::ModuleChoice(id, _) | Row::AiKey(id, _) => Some((id.clone(), false)),
+            Row::AddFolder | Row::Folder(_) => Some((STORAGE.into(), false)),
             Row::PhoneMay(id, _) | Row::Unpair(id) => Some((phone_card(id), false)),
             _ => None,
         }
     }
 }
+
+/// The storage component, as a module.
+const STORAGE: &str = "storage";
+/// The buttons at the end of a folder's row in its card (see `Row::Folder`): how large each is, and the room before the
+/// folder's name.
+const FOLDER_BUTTON: f32 = 30.0;
+const FOLDER_PICTURE: f32 = 28.0;
 
 /// How tall a group's name is, above its rows.
 const GROUP: f32 = 28.0;
@@ -2167,7 +2192,7 @@ struct Ui {
     drives_at: Option<Instant>,
     /// Windows' chooser of folders up (on a thread of its own, a single-threaded apartment as the shell wants: this
     /// one is not), with what is chosen in it once it is closed.
-    choosing_folders: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
+    choosing_folders: Option<(ChoosingFor, std::thread::JoinHandle<Vec<std::path::PathBuf>>)>,
     /// The same, for the folder what devices nearby send goes to.
     choosing_kept: Option<std::thread::JoinHandle<Vec<std::path::PathBuf>>>,
     /// A menu up (where what devices nearby send goes, or a module's choices: see `in_menu`), run by this window's thread
@@ -3146,6 +3171,10 @@ impl Ui {
                     if self.opened(id) > 0.0 {
                         rows.extend(self.items_here(id).into_iter().map(|name| Row::Item(id.to_string(), name)));
                         rows.extend(self.fields_here(id).map(|field| Row::ModuleChoice(id.to_string(), field)));
+                        if id == STORAGE {
+                            rows.push(Row::AddFolder);
+                            rows.extend(self.settings.storage_folders.iter().cloned().map(Row::Folder));
+                        }
                     }
                 };
                 let (folded, listed): (Vec<&prefs::ModuleEntry>, Vec<&prefs::ModuleEntry>) =
@@ -3214,6 +3243,33 @@ impl Ui {
         let away = !self.drives.iter().any(|drive| drive.volume == volume);
         let listed = !self.settings.recent_hidden_drives.iter().any(|hidden| hidden.volume == volume);
         (format!("{label} ({letter}:)"), away.then(|| pick(self.lang, "未连接", "Not connected")), listed)
+    }
+
+    /// Windows' chooser opened, for folders, what is chosen there taken as it closes (see `tick`).
+    fn choose_folders(&mut self, of: ChoosingFor) {
+        let (hwnd, lang) = (self.hwnd.0 as isize, self.lang);
+        let choosing = std::thread::spawn(move || unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
+            super::beside::choose(HWND(hwnd as *mut _), super::beside::Kinds::Folders, lang)
+        });
+        self.choosing_folders = Some((of, choosing));
+    }
+
+    /// Whether a folder may be added to those the storage component tells the sizes of: it on, room left, none being
+    /// chosen.
+    fn may_add_folder(&self) -> bool {
+        self.module_on(STORAGE) && self.choosing_folders.is_none() && self.settings.storage_folders.len() < crate::folders::MOST
+    }
+
+    /// `chosen` (in Windows' chooser) added to the folders the storage component tells the sizes of.
+    fn add_folders(&mut self, chosen: Vec<std::path::PathBuf>) {
+        if chosen.is_empty() {
+            return;
+        }
+        // (Their sizes come from search's index: made now, where it is not yet.)
+        crate::search::asked();
+        crate::folders::put(&mut self.settings.storage_folders, chosen.into_iter().map(|path| path.display().to_string()).collect());
+        self.save();
     }
 
     /// `chosen` (in Windows' chooser) added to the folders Recent files lists only, those not among them already.
@@ -3460,7 +3516,7 @@ impl Ui {
                 }
                 Row::Group(_) => (20.0, GROUP),
                 // (Inside the card of the phone above them, right under its row, as a module's items are.)
-                Row::PhoneMay(..) | Row::Unpair(_) => (0.0, self.words_height(&row).max(ROW)),
+                Row::PhoneMay(..) | Row::Unpair(_) | Row::AddFolder | Row::Folder(_) => (0.0, self.words_height(&row).max(ROW)),
                 _ => (if after_heading { 8.0 } else { ROW_GAP }, self.words_height(&row).max(ROW)),
             };
             y += before;
@@ -3833,6 +3889,8 @@ impl Ui {
             },
             // (Its words where a module's item's are, left of its switch: see `paint_list`.)
             Row::PhoneMay(_, may) => (Cow::Borrowed(self.phone_may_words(*may).1), width - ROW_SIDE - 40.0 - 16.0 - ITEM_INSET),
+            // (Where it is, under its name, between its picture and its buttons: see `paint_list`.)
+            Row::Folder(path) => (Cow::Owned(path.clone()), width - ITEM_INSET - FOLDER_PICTURE - 2.0 * FOLDER_BUTTON - 12.0 - ROW_SIDE - CHEVRON_ROOM),
             // (Its words beside its icon, left of its chevron, as a module's: see `paint_list`.)
             Row::Device(Known::Phone(_)) => match self.button_row(row, Instant::now()) {
                 Some((_, word, _)) => (Cow::Owned(word), width - ROW_SIDE - CHEVRON_ROOM - 12.0 - ITEM_INSET),
@@ -3845,6 +3903,7 @@ impl Ui {
                     let icon = match row {
                         Row::Notice => NOTICE_ICON_ROOM,
                         Row::Found(_) | Row::Device(_) | Row::Unpair(_) => ITEM_INSET - ROW_SIDE,
+                        Row::AddFolder => ITEM_INSET - ROW_SIDE + CHEVRON_ROOM,
                         _ => 0.0,
                     };
                     (Cow::Owned(word), width - 2.0 * ROW_SIDE - taken - 8.0 - icon)
@@ -4178,6 +4237,14 @@ impl Ui {
                 p("添加文件夹", "Add a folder"),
                 p("所选文件夹的子文件夹一并列出，不列出的文件夹除外", "Their subfolders are listed too, but for folders not listed"),
                 vec![(if self.choosing_folders.is_some() { (p("选择中", "Choosing"), Target::AddRecentFolder, Button::Quiet) } else { (p("选择", "Choose"), Target::AddRecentFolder, Button::Plain) })],
+            ),
+            Row::AddFolder => (
+                p("文件夹", "Folders"),
+                match lang {
+                    Lang::Zh => format!("在“存储”中显示文件夹的大小，最多 {} 个，也可将文件夹拖到“存储”上", crate::folders::MOST),
+                    Lang::En => format!("The sizes of folders, shown under Storage, {} at most. Folders can be dragged onto it too", crate::folders::MOST),
+                },
+                vec![(if self.choosing_folders.is_some() { p("选择中", "Choosing") } else { p("添加文件夹", "Add folders") }, Target::AddFolder, if self.may_add_folder() { Button::Plain } else { Button::Quiet })],
             ),
             Row::Guide => (
                 p("使用引导", "Guide"),
@@ -5301,7 +5368,7 @@ It can be disconnected here at any time, and the status line command put back.",
             "network" => (p("网络", "Network"), Some(info.network_adapter.clone().unwrap_or_else(|| p("所有物理网卡的上传与下载速度", "Upload and download over every physical adapter")))),
             "disk" => (p("磁盘", "Disk"), (!info.drives.is_empty()).then(|| info.drives.join(", "))),
             "processes" => (p("进程", "Processes"), Some(p("占用最多的程序，在面板上点击表头即可排序", "The busiest programs. Click a heading on the panel to sort them"))),
-            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间", "Space left on each drive"))),
+            "storage" => (p("存储", "Storage"), Some(p("各分区的剩余空间，以及所选文件夹的大小", "Space left on each drive, and how large the folders you choose are"))),
             // A board whose sensors are not read says so, rather than
             // looking like a switch that does nothing.
             "board" if crate::app().controller.seen.lock().unwrap().board.is_none() => (
@@ -5498,7 +5565,7 @@ It can be disconnected here at any time, and the status line command put back.",
 
     /// Whether module `id` has a card to open: items, or choices of its own.
     fn opens(&self, id: &str) -> bool {
-        !module_fields(id.trim_start_matches(WORKBENCH)).is_empty() || !self.items_here(id).is_empty() || super::view::ai::provider_of(id).is_some()
+        id == STORAGE || !module_fields(id.trim_start_matches(WORKBENCH)).is_empty() || !self.items_here(id).is_empty() || super::view::ai::provider_of(id).is_some()
     }
 
     /// The key of the AI provider whose lane is module `id`, its field `field`, and where it is taken from.
@@ -5868,14 +5935,18 @@ It can be disconnected here at any time, and the status line command put back.",
                 self.save();
             }
             // (One at a time: pressed again while it is up, nothing more.)
-            Target::AddRecentFolder if self.choosing_folders.is_none() => {
-                let (hwnd, lang) = (self.hwnd.0 as isize, self.lang);
-                self.choosing_folders = Some(std::thread::spawn(move || unsafe {
-                    let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED);
-                    super::beside::choose(HWND(hwnd as *mut _), super::beside::Kinds::Folders, lang)
-                }));
-            }
+            Target::AddRecentFolder if self.choosing_folders.is_none() => self.choose_folders(ChoosingFor::Recent),
             Target::AddRecentFolder => {}
+            Target::AddFolder if self.may_add_folder() => self.choose_folders(ChoosingFor::Storage),
+            Target::AddFolder => {}
+            Target::RaiseFolder(path) => {
+                crate::folders::raise(&mut self.settings.storage_folders, &path);
+                self.save();
+            }
+            Target::DropFolder(path) => {
+                self.settings.storage_folders.retain(|had| *had != path);
+                self.save();
+            }
             Target::CheckNow => update::check_now(update::Asker::Settings),
             Target::Module(id) => {
                 let (list, bare) = self.list(&id);
@@ -6106,6 +6177,12 @@ It can be disconnected here at any time, and the status line command put back.",
                     _ => vec![],
                 },
                 Row::AiKey(..) => vec![],
+                Row::AddFolder if self.may_add_folder() && self.expanded.contains(STORAGE) => vec![Target::AddFolder],
+                Row::Folder(path) if self.module_on(STORAGE) && self.expanded.contains(STORAGE) => {
+                    let first = self.settings.storage_folders.first() == Some(&path);
+                    (!first).then(|| Target::RaiseFolder(path.clone())).into_iter().chain([Target::DropFolder(path)]).collect()
+                }
+                Row::AddFolder | Row::Folder(_) => vec![],
                 Row::Update if update::available().is_some_and(|(_, state)| state == update::State::Downloading) => vec![],
                 Row::Update => update::available().map_or(Vec::new(), |(_, state)| update_offer(state, self.lang).1.into_iter().map(|(_, target, _)| target).collect()),
                 Row::Notice => self.button_row(&Row::Notice, Instant::now()).map_or(Vec::new(), |(_, _, buttons)| buttons.into_iter().map(|(_, target, _)| target).collect()),
@@ -6295,7 +6372,8 @@ It can be disconnected here at any time, and the status line command put back.",
             (Row::Report(a), Target::Thread(b)) => a == b,
             (Row::Drive(a), Target::Drive(b)) => a == b,
             (Row::RecentFolder(a), Target::RecentFolder(b)) => a == b,
-            (Row::AddRecentFolder, Target::AddRecentFolder) => true,
+            (Row::AddRecentFolder, Target::AddRecentFolder) | (Row::AddFolder, Target::AddFolder) => true,
+            (Row::Folder(a), Target::RaiseFolder(b) | Target::DropFolder(b)) => a == b,
             (Row::Choice(f), Target::Choice(g, _)) => f == g,
             (Row::Switch(s), Target::Switch(t)) => s == t,
             (Row::Element(a), Target::Element(b)) => a == b,
@@ -6765,9 +6843,13 @@ It can be disconnected here at any time, and the status line command put back.",
             self.next_frame = now;
         }
         // The folders chosen in Windows' chooser, once it is closed.
-        if self.choosing_folders.as_ref().is_some_and(|choosing| choosing.is_finished()) {
-            let chosen = self.choosing_folders.take().unwrap().join().unwrap_or_default();
-            self.add_recent_folders(chosen);
+        if self.choosing_folders.as_ref().is_some_and(|(_, choosing)| choosing.is_finished()) {
+            let (of, choosing) = self.choosing_folders.take().unwrap();
+            let chosen = choosing.join().unwrap_or_default();
+            match of {
+                ChoosingFor::Recent => self.add_recent_folders(chosen),
+                ChoosingFor::Storage => self.add_folders(chosen),
+            }
             self.next_frame = now;
         }
         // The phones paired, read again now and then while they are shown: one that has just taken the pairing offered
@@ -7262,6 +7344,51 @@ It can be disconnected here at any time, and the status line command put back.",
                     if active && usable {
                         self.targets.push((Rect { x: left, y, w: width, h: row_height }, target));
                     }
+                }
+                // The folders the storage component tells the sizes of: the button that adds them, and a row for each,
+                // its place among them and its removal at its end. In its card, as its items are.
+                Row::AddFolder => {
+                    let Some((name, detail, buttons)) = self.button_row(&row, now) else { continue };
+                    let y = y + self.motion.get(&format!("row:{STORAGE}")).map_or(0.0, |t| t.value(now));
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let cy = y + row_height / 2.0;
+                    let mut right = left + width - ROW_SIDE - CHEVRON_ROOM;
+                    let targets = self.targets.len();
+                    for (text, target, kind) in buttons {
+                        right = self.button(frame, palette, &text, right, cy, target, kind, &hovered) - 8.0;
+                    }
+                    if !usable {
+                        self.targets.truncate(targets);
+                    }
+                    let colors = if self.module_on(STORAGE) { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+                    field_label_in(frame, colors, &name, Some(&detail), label, hint, left + ITEM_INSET, cy, right - 8.0 - left - ITEM_INSET);
+                }
+                Row::Folder(path) => {
+                    let y = y + self.motion.get(&format!("row:{STORAGE}")).map_or(0.0, |t| t.value(now));
+                    fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
+                    let cy = y + row_height / 2.0;
+                    let active = self.module_on(STORAGE);
+                    let colors = if active { (palette.text, palette.text2) } else { (palette.text3, palette.text3) };
+                    frame.icon(Icon::Folder, Point { x: left + ITEM_INSET + 8.0, y: cy }, 16.0, colors.1);
+                    let right = left + width - ROW_SIDE - CHEVRON_ROOM;
+                    let first = self.settings.storage_folders.first() == Some(&path);
+                    let buttons = [(Icon::Close, Target::DropFolder(path.clone()), true), (Icon::ChevronUp, Target::RaiseFolder(path.clone()), !first)];
+                    for (at, (icon, target, there)) in buttons.into_iter().enumerate() {
+                        if !there {
+                            continue;
+                        }
+                        let boxed = Rect { x: right - (at + 1) as f32 * FOLDER_BUTTON, y: cy - FOLDER_BUTTON / 2.0, w: FOLDER_BUTTON, h: FOLDER_BUTTON };
+                        let lit = active && hovered.as_ref() == Some(&target);
+                        if lit {
+                            fill(frame, palette.hover, boxed.x, boxed.y, boxed.w, boxed.h, 6.0);
+                        }
+                        frame.icon(icon, Point { x: boxed.x + boxed.w / 2.0, y: cy }, 14.0, if lit { palette.text } else { colors.1 });
+                        if active && usable {
+                            self.targets.push((boxed, target));
+                        }
+                    }
+                    let words_left = left + ITEM_INSET + FOLDER_PICTURE;
+                    field_label_in(frame, colors, &crate::folders::called(&path), Some(&path), label, hint, words_left, cy, right - 2.0 * FOLDER_BUTTON - 12.0 - words_left);
                 }
                 // One of an AI provider's keys: what it is and where it is taken from, its box (pressed, it is written
                 // there, unseen), and the removal of one given.

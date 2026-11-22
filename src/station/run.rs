@@ -51,6 +51,7 @@ pub enum Ask {
     /// Something dragged is over a station now, or no longer.
     Over(bool),
     AppsOver(bool),
+    FoldersOver(bool),
     /// What is given dragged off it as one (pressed on it and moved: see `drag_begins`), pressed on a window of the
     /// thread numbered so.
     DragOut(Vec<Given>, u32),
@@ -143,6 +144,8 @@ pub struct Shown {
     /// Something is dragged over a station, to be dropped; over what is kept at hand, to be kept there.
     pub over: bool,
     pub apps_over: bool,
+    /// A folder dragged over the storage component.
+    pub folders_over: bool,
     /// What was last put on the clipboard from where it shows (several, put there together), and when (the clipboard
     /// took it): marked copied there for `COPIED_FOR`.
     pub copied: Option<(Vec<Copied>, std::time::Instant)>,
@@ -226,6 +229,8 @@ pub enum Lands {
     Pages(crate::ui::view::Tab),
     Device(u64),
     Send,
+    /// On the storage component: a folder's size told of there from then on (see `folders`).
+    Folders,
 }
 
 /// Posted to a window (the panel's, a widget's) as something dragged comes over where a page of its workbench is
@@ -239,6 +244,17 @@ pub fn caught(dragged: Dragged, edge: Option<crate::settings::Edge>, lands: Land
     if lands == Lands::Send {
         if let Some(window) = window {
             crate::ui::settings_window::dragged_in(window, dragged);
+        }
+        return;
+    }
+    if lands == Lands::Folders {
+        // Over it: it says it takes what is let go (see `Shown::folders_over`); gone, no more.
+        ask(Ask::FoldersOver(matches!(dragged, Dragged::Over(_))));
+        if let Dragged::Dropped(given) = dragged {
+            let paths: Vec<std::path::PathBuf> = given.into_iter().flat_map(|content| if let Content::Files(paths) = content { paths } else { Vec::new() }).collect();
+            // (Told apart from files on a thread of their own: a path on a drive slow to answer would else hold the
+            // station's thread.)
+            std::thread::spawn(move || crate::folders::add(paths));
         }
         return;
     }
@@ -347,7 +363,7 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, pins_folded: false, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None, receiving: None, arrived: None })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, pins_folded: false, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, folders_over: false, copied: None, receiving: None, arrived: None })));
 }
 
 /// For pictures: what is pretended (see `pretend`) with these tags, and what is pinned `folded` away.
@@ -359,6 +375,13 @@ pub fn pretend_tags(tags: Vec<super::shelf::Tag>, folded: bool) {
             (shown.tags, shown.pins_folded) = (tags, folded);
         }
     });
+}
+
+/// For pictures and tests: as if a folder were dragged over the storage component, or not.
+#[cfg(any(test, feature = "studio"))]
+#[allow(dead_code)]
+pub fn pretend_folders_over(over: bool) {
+    PRETENDED.with(|pretended| Arc::make_mut(pretended.borrow_mut().get_or_insert_with(Default::default)).folders_over = over);
 }
 
 /// For tests: what is pretended (see `pretend`) just put on the clipboard as `copied` (see `Shown::copied`).
@@ -517,6 +540,7 @@ struct Station {
     /// Something dragged over a station, to be dropped (see `drop`).
     over: bool,
     apps_over: bool,
+    folders_over: bool,
     /// What was last put on the clipboard from where it shows, and when (see `Shown::copied`).
     copied: Option<(Vec<Copied>, std::time::Instant)>,
     /// Where drops are caught while something is dragged (see `catch`).
@@ -553,7 +577,7 @@ fn run(asks: Receiver<Ask>) {
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -712,6 +736,7 @@ impl Station {
                 Ask::Settings => self.follow_settings(),
                 Ask::Over(over) => self.over = over,
                 Ask::AppsOver(over) => self.apps_over = over,
+                Ask::FoldersOver(over) => self.folders_over = over,
                 Ask::DragOut(given, thread) => self.dragging = Some((given, thread)),
                 Ask::SendTo(given, key) => self.send_to(given, key),
                 Ask::Files(paths, act) => match act {
@@ -969,7 +994,7 @@ impl Station {
         // (What a device nearby may send it, as it has room now.)
         crate::nearby::room(self.keep.room_offered());
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, pins_folded: settings.pins_folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
+        let shown = Shown { items: self.keep.shelf.items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, pins_folded: settings.pins_folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, folders_over: self.folders_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();

@@ -1,10 +1,11 @@
-//! The card beside the AI component's dock: of the spot of the dock the pointer rests on, a source's ring (the source's
-//! lane, all it tells: its limit's windows, what it spent today by model and by kind, its sessions), what every source
-//! spent today, or the sessions at work (see `view::ai::card`), on a sheet of the dock's skin as a menu opened on the
-//! dock is (glass's a piece of the glass, frosted as the dock is), beside the dock, its middle by that spot's, on its
-//! screen. A window of its own, one for this thread, that takes the pointer on its sheet alone: it stays while the
-//! pointer is on the spot, on the card or on its way between them (see `holds`), and goes as the window the dock is
-//! drawn in is hidden or destroyed.
+//! The card beside a panel or a widget, of what on it the pointer rests on that has one (see `Hit::carded`): of a spot
+//! of the AI component's dock, a source's ring (the source's lane, all it tells: its limit's windows, what it spent
+//! today by model and by kind, its sessions), what every source spent today, or the sessions at work (see
+//! `view::ai::card`); of a folder in the storage lane, what it holds (see `view::folders::card`). On a sheet of its skin
+//! as a menu opened there is (glass's a piece of the glass, frosted as what it is of is), beside it, its middle by that
+//! spot's, on its screen. A window of its own, one for this thread, that goes as the window it is beside is hidden or
+//! destroyed. A dock's takes the pointer on its sheet alone, and stays while the pointer is on the spot, on the card or
+//! on its way between them (see `holds`); a folder's lets the pointer through, and goes as it leaves the folder's row.
 
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
@@ -21,11 +22,11 @@ use super::menu::{Drawn, Look};
 use super::prefs::Prefs;
 use super::text::Lang;
 use super::theme::Theme;
-use super::view::{self, ai::Spot, Layout, Scene};
+use super::view::{self, Hit, Layout, Scene};
 use super::backdrop::Capture;
 use super::window::Window;
 
-/// Which side of the dock the card is on: away from the screen's edge the dock is at.
+/// Which side of what it is of the card is on: away from the screen's edge that is at.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Side {
     Left,
@@ -203,6 +204,25 @@ fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: 
     }
 }
 
+/// Where the card of the spot at `about` in `by` stands: beside `by` on `side` (see `placed`), or, where the screen has no
+/// room for it there, by the spot itself, under it, else over it, all of it in `work`.
+fn stood(by: RECT, about: RECT, side: Side, plate: (i32, i32), gap: i32, work: RECT, clear: Option<RECT>) -> RECT {
+    let sheet = placed(by, middle(about), side, plate, gap, work, clear);
+    let room = match side {
+        Side::Left => sheet.left >= work.left,
+        Side::Right => sheet.right <= work.right,
+        Side::Below => sheet.bottom <= work.bottom,
+        Side::Above => sheet.top >= work.top,
+    };
+    if room {
+        return sheet;
+    }
+    let left = (middle(about).x - plate.0 / 2).min(work.right - gap - plate.0).max(work.left + gap);
+    let under = about.bottom + gap;
+    let top = if under + plate.1 <= work.bottom { under } else { (about.top - gap - plate.1).max(work.top) };
+    RECT { left, top, right: left + plate.0, bottom: top + plate.1 }
+}
+
 /// Whether `a` and `b` lie nearer than `gap` to each other, or over each other.
 fn overlap(a: RECT, b: RECT, gap: i32) -> bool {
     a.left < b.right + gap && b.left < a.right + gap && a.top < b.bottom + gap && b.top < a.bottom + gap
@@ -213,22 +233,67 @@ fn within_area(inner: RECT, outer: RECT) -> bool {
     inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom
 }
 
-/// What the card shows of: `spot` of the dock, in `theme`, as `prefs` show the AI component (its modules held: see
-/// `Prefs::holding`), in `lang`, on a sheet that looks as a menu opened on the dock does (`look`).
+/// What the card of `hit` tells, laid out as a lane: none where it has none now (a folder not counted yet).
+fn told(scene: &Scene, hit: Hit) -> Option<view::Lane> {
+    match hit {
+        Hit::AiSlot(spot) => view::ai::card(scene, spot),
+        Hit::Folder(number) => view::folders::card(scene, number),
+        _ => None,
+    }
+}
+
+/// Whether the pointer may go from `hit` onto its card (a dock's: see `holds`).
+fn reached(hit: Hit) -> bool {
+    matches!(hit, Hit::AiSlot(_))
+}
+
+/// How long the pointer rests on a folder before its card shows, with none up.
+const REST: Duration = Duration::from_millis(260);
+
+/// What the pointer rests on that has a card, and since when.
+#[derive(Default)]
+pub struct Resting(Option<(Hit, Instant)>);
+
+impl Resting {
+    /// The pointer is on `hit`, a card `up` already or not: when its card shows (a dock's, and any while one is up, at
+    /// once).
+    pub fn on(&mut self, hit: Hit, up: bool, now: Instant) -> Instant {
+        let since = match self.0 {
+            Some((on, since)) if on == hit => since,
+            _ => now,
+        };
+        self.0 = Some((hit, since));
+        if up || reached(hit) { now } else { since + REST }
+    }
+
+    /// The pointer is on nothing that has one.
+    pub fn off(&mut self) {
+        self.0 = None;
+    }
+
+    /// When the card of what it rests on shows.
+    pub fn due(&self) -> Option<Instant> {
+        self.0.map(|(_, since)| since + REST)
+    }
+}
+
+/// What the card shows of: `hit`, in `theme`, as `prefs` show the components (their modules held: see
+/// `Prefs::holding`), in `lang`, on a sheet that looks as a menu opened there does (`look`).
 pub struct Of<'a> {
-    pub spot: Spot,
+    pub hit: Hit,
     pub theme: &'a Theme,
     pub prefs: &'a Prefs,
     pub lang: Lang,
     pub look: Look,
 }
 
-/// Shows `of`'s card beside `by` (the dock, on the screen) on `side`, its middle by its spot's (among `spots`, every
-/// spot on the dock and where it is), all of it on that screen, clear of `clear` (the dock's buttons outside it), till `hide` or till `owner` (the window the dock is
-/// drawn in) is hidden or destroyed. Shown again as it is, nothing is drawn.
-pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, clear: Option<RECT>) {
-    let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.spot) else { return };
-    let _timed = crate::perf::Timed::start("ai card", || format!("{:?}", of.spot));
+/// Shows `of`'s card beside `by` (what it is drawn in, on the screen) on `side`, its middle by its spot's (among `spots`,
+/// every spot there that has a card and where it is), all of it on that screen (see `stood`), clear of `clear` (the
+/// buttons outside `by`), till `hide` or till `owner` (the window it is drawn in) is hidden or destroyed. Shown again as
+/// it is, nothing is drawn.
+pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, clear: Option<RECT>) {
+    let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.hit) else { return };
+    let _timed = crate::perf::Timed::start("card", || format!("{:?}", of.hit));
     // (Not sized by hand, whatever the dock it is shown from is: what is written on it is kept, see `gfx::sizing`.)
     let _at_rest = gfx::sizing(false);
     let controller = &crate::app().controller;
@@ -258,7 +323,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         settings_lit: None,
         music_apart: false,
     };
-    let Some(lane) = view::ai::card(&scene, of.spot) else { return hide() };
+    let Some(lane) = told(&scene, of.hit) else { return hide() };
     let laid = |lane: &view::Lane| Layout::with_columns(vec![lane.height(of.theme)], 1, of.theme);
     let area = laid(&lane).lanes()[0];
     let (plate, shift) = sheet_of(of.theme, area);
@@ -275,10 +340,10 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
     let (scale, work) = (of.look.px(dpi as f32 / 96.0), info.rcWork);
     let px = |dips: f32| (dips * scale).round() as i32;
     let (plate_w, plate_h, gap) = (px(plate.0), px(plate.1), px(GAP));
-    // Beside the dock; along it, its middle by the ring's, all of it in the work area.
-    let sheet = placed(by, at, side, (plate_w, plate_h), gap, work, clear);
+    // Beside it; along it, its middle by the spot's, all of it in the work area.
+    let sheet = stood(by, about, side, (plate_w, plate_h), gap, work, clear);
     let (left, top) = (sheet.left, sheet.top);
-    let holds = held_by(about, sheet);
+    let holds = reached(of.hit).then(|| held_by(about, sheet));
     // (On the device for the screen it shows on: see `gfx::on_screen`.)
     let Ok(gfx) = gfx::for_area(sheet) else { return };
     CARD.with(|kept| {
@@ -290,17 +355,19 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         let card = kept.as_mut().unwrap();
         OWNER.set(owner);
         card.moved_to(&gfx);
-        card.holds = Some(holds);
-        // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's.)
+        card.holds = holds;
+        // (The room round the sheet for its shadows is over the dock: the pointer there is the dock's. A card not
+        // reached lets the pointer through, all of it.)
+        card.window.set_click_through(!reached(of.hit));
         card.window.take_pointer_within(Some(sheet));
         // Glass frosted as what is behind the card asks (see `Card::frost`), what is behind every spot's card taken
         // (where they show found again as the dock or what a card tells moves this one out of it).
         let look = match of.theme.skin {
             super::theme::Skin::Glass => {
                 if card.reach.is_none_or(|reach| !within_area(sheet, reach)) {
-                    let sheets = spots.iter().filter_map(|&(spot, at)| {
-                        let (plate, _) = sheet_of(of.theme, laid(&view::ai::card(&scene, spot)?).lanes()[0]);
-                        Some(placed(by, middle(at), side, (px(plate.0), px(plate.1)), gap, work, clear))
+                    let sheets = spots.iter().filter(|(spot, _)| reached(*spot) == reached(of.hit)).filter_map(|&(spot, about)| {
+                        let (plate, _) = sheet_of(of.theme, laid(&told(&scene, spot)?).lanes()[0]);
+                        Some(stood(by, about, side, (px(plate.0), px(plate.1)), gap, work, clear))
                     });
                     card.reach = reach(sheets.chain([sheet]));
                 }
@@ -335,7 +402,7 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Spot, RECT)], side: Side, c
         });
         // (The device gone, its surface is made anew on the next.)
         if let Err(error) = &drawn {
-            if !gfx::failed("ai card", &card.gfx, Some(error)) {
+            if !gfx::failed("card", &card.gfx, Some(error)) {
                 card.surface = Some((surface, look));
             }
             return;
@@ -539,6 +606,41 @@ mod tests {
             assert_eq!(round(&theme, (420.0, 460.0)), theme.radius, "{skin:?}");
         }
         assert_eq!(round(&Theme::new(Skin::Glass, true), (420.0, 30.0)), 15.0);
+    }
+
+    /// A card whose side of what it is beside has no room for it on the screen (a widget nearly as wide as that) stands
+    /// by its spot: under it, or over it where there is no room under it, all of it on the screen.
+    #[test]
+    fn a_card_with_no_room_beside_stands_by_its_spot() {
+        let (work, gap, plate) = (RECT { left: 0, top: 0, right: 1920, bottom: 1040 }, 12, (500, 400));
+        let wide = RECT { left: 100, top: 40, right: 1800, bottom: 1000 };
+        let row = |top: i32| RECT { left: 120, top, right: 600, bottom: top + 40 };
+        let inside = |sheet: RECT| within_area(sheet, work);
+        for side in [Side::Left, Side::Right, Side::Below, Side::Above] {
+            let under = stood(wide, row(100), side, plate, gap, work, None);
+            assert!(inside(under) && under.top == 140 + gap, "{side:?} {under:?}");
+            let over = stood(wide, row(900), side, plate, gap, work, None);
+            assert!(inside(over) && over.bottom == 900 - gap, "{side:?} {over:?}");
+        }
+        // With room there, beside it as ever.
+        let narrow = RECT { left: 100, top: 40, right: 800, bottom: 1000 };
+        assert_eq!(stood(narrow, row(100), Side::Right, plate, gap, work, None), placed(narrow, middle(row(100)), Side::Right, plate, gap, work, None));
+    }
+
+    /// A folder's card shows once the pointer has rested on it, at once while another's is up; a dock's at once.
+    #[test]
+    fn a_folder_s_card_waits_for_the_pointer_to_rest() {
+        let now = Instant::now();
+        let mut resting = Resting::default();
+        assert_eq!(resting.on(Hit::Folder(1), false, now), now + REST);
+        assert_eq!(resting.due(), Some(now + REST));
+        let later = now + Duration::from_millis(100);
+        assert_eq!(resting.on(Hit::Folder(1), false, later), now + REST);
+        assert_eq!(resting.on(Hit::Folder(2), false, later), later + REST);
+        assert_eq!(resting.on(Hit::Folder(3), true, later), later);
+        resting.off();
+        assert_eq!(resting.due(), None);
+        assert_eq!(resting.on(Hit::AiSlot(view::ai::Spot::Today), false, now), now);
     }
 
     /// A card that would lie over the dock's buttons outside it slides along the dock past them, as near the dock as

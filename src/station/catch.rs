@@ -255,6 +255,7 @@ fn make(rect: RECT, parts: Vec<RECT>, edge: Option<Edge>, lands: Lands, over: Op
         // than the station's, nothing, only told it comes; a device nearby, what is dragged off the station, sent.)
         let target = match lands {
             Lands::Apps | Lands::Send => Target::new(told),
+            Lands::Folders => Target::folders(told),
             Lands::Pages(page) if page != crate::ui::view::Tab::Shelf => Target::refusing(told),
             Lands::Device(key) => super::send::ToDevice::over(key, rect),
             _ => Target::not_own(told),

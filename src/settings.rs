@@ -904,6 +904,9 @@ pub struct Settings {
     pub recent_only: bool,
     #[serde(default)]
     pub recent_folders: Vec<PathBuf>,
+    /// The folders whose sizes the storage component tells, in their order (see `folders`).
+    #[serde(default)]
+    pub storage_folders: Vec<String>,
     /// What is kept at hand on the workbench, in its order (see `station::apps`).
     #[serde(default)]
     pub apps: Vec<crate::station::apps::App>,
@@ -1098,6 +1101,7 @@ impl Default for Settings {
             recent_hidden_drives: Vec::new(),
             recent_only: false,
             recent_folders: Vec::new(),
+            storage_folders: Vec::new(),
             apps: Vec::new(),
             apps_named: false,
             notes_folder: None,

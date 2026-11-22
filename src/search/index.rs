@@ -52,8 +52,10 @@ pub mod flag {
     /// index, so that it is listed as Glance starts again, if not before (a drive's first listing, cut short, goes on
     /// from there: see `super::super::sweep`).
     pub const STALE: u16 = 128;
+    /// A file kept in the cloud alone (its drive's program brings it here as it is opened).
+    pub const CLOUD: u16 = 256;
     /// All there are.
-    pub const ALL: u16 = 255;
+    pub const ALL: u16 = 511;
 }
 
 /// A file or folder (16 bytes, as it is kept on disk too).
@@ -90,6 +92,16 @@ pub struct Stat {
     pub size: u64,
 }
 
+/// What a folder holds, all that is in it at any depth (see `Index::within`): how large its files are together and how
+/// many there are, and what lies in it directly (a file, or a folder with all that is in it) that is largest, the
+/// largest first: the place of each, and how large it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Within {
+    pub bytes: u64,
+    pub files: u64,
+    pub largest: Vec<(u32, u64)>,
+}
+
 /// A name in a folder as listed: its file id, attributes, (for a link) what kind of link it is, and when it was last
 /// written and how large it is.
 pub struct Item {
@@ -104,6 +116,9 @@ const ATTRIBUTE_HIDDEN: u32 = 0x2;
 const ATTRIBUTE_SYSTEM: u32 = 0x4;
 const ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+/// What it holds is elsewhere, brought here as it is opened, or read (FILE_ATTRIBUTE_OFFLINE, RECALL_ON_OPEN,
+/// RECALL_ON_DATA_ACCESS).
+const ATTRIBUTE_AWAY: u32 = 0x1000 | 0x4_0000 | 0x40_0000;
 
 impl Item {
     pub fn folder(&self) -> bool {
@@ -129,6 +144,9 @@ impl Item {
         }
         if self.attributes & ATTRIBUTE_SYSTEM != 0 {
             flags |= flag::SYSTEM;
+        }
+        if !self.folder() && self.attributes & ATTRIBUTE_AWAY != 0 {
+            flags |= flag::CLOUD;
         }
         flags
     }
@@ -548,6 +566,83 @@ impl Index {
         held.sort_unstable();
         held.dedup();
         held
+    }
+
+    /// Each live entry in `folder` given to `each` once, in no order: as `held_by`, with nothing made where nothing came
+    /// to the folder since it was kept.
+    fn each_in(&self, folder: u32, mut each: impl FnMut(u32, Entry)) {
+        let kept = self.kept_in(folder);
+        let mut came: Vec<u32> = self.adopted.get(&folder).into_iter().flatten().copied().filter(|place| !kept.contains(place)).collect();
+        came.sort_unstable();
+        came.dedup();
+        for place in kept.chain(came) {
+            let entry = self.entry(place);
+            if entry.alive() && entry.parent == folder {
+                each(place, entry);
+            }
+        }
+    }
+
+    /// What `folder` holds at any depth, with its `most` largest (see `Within`): its files as large as listed (as
+    /// Explorer tells a folder's size), but those kept in the cloud alone, and nothing through links.
+    pub fn within(&self, folder: u32, most: usize) -> Within {
+        let (mut all, mut direct, mut inner) = (Within::default(), Vec::new(), Vec::new());
+        self.each_in(folder, |place, entry| direct.push((place, entry)));
+        for (place, entry) in direct {
+            let (mut bytes, mut files) = (0, 0);
+            let mut count = |place: u32, entry: Entry| match entry.flags & (flag::FOLDER | flag::LINK | flag::CLOUD) {
+                0 => {
+                    files += 1;
+                    bytes += self.stat(place).size;
+                    None
+                }
+                flag::FOLDER => Some(place),
+                _ => None,
+            };
+            inner.extend(count(place, entry));
+            while let Some(folder) = inner.pop() {
+                self.each_in(folder, |place, entry| inner.extend(count(place, entry)));
+            }
+            all.bytes += bytes;
+            all.files += files;
+            let at = all.largest.partition_point(|&(_, larger)| larger >= bytes);
+            if bytes > 0 && at < most {
+                all.largest.truncate(most - 1);
+                all.largest.insert(at, (place, bytes));
+            }
+        }
+        all
+    }
+
+    /// The place of the folder at `path` (from the root, by its names, their case let be): none where a name on the way
+    /// is not known, or no folder's, or a link's.
+    pub fn place_of(&self, path: &std::path::Path) -> Option<u32> {
+        let mut folder = ROOT;
+        for part in path.components() {
+            let name = part.as_os_str().to_string_lossy().to_lowercase();
+            let mut found = None;
+            self.each_in(folder, |place, entry| {
+                if entry.flags & (flag::FOLDER | flag::LINK) == flag::FOLDER && found.is_none() && self.name(place).to_string_lossy().to_lowercase() == name {
+                    found = Some(place);
+                }
+            });
+            folder = found?;
+        }
+        Some(folder)
+    }
+
+    /// Whether what changes in `folder` may change what `other` holds: it is it, or in it, or it is on the way to it.
+    pub fn concerns(&self, folder: u32, other: u32) -> bool {
+        let within = |mut at: u32, of: u32| loop {
+            if at == of {
+                return true;
+            }
+            if at == ROOT || at >= self.len() {
+                return false;
+            }
+            at = self.entry(at).parent;
+        };
+        within(folder, other) || within(other, folder)
     }
 
     /// The base's entries that were in `folder` as it was kept: together, as the base's entries (but the root, the
@@ -1321,6 +1416,66 @@ mod tests {
         let again = kept(&read);
         assert_eq!(stat(&again, "C:\\Docs\\b.txt"), Stat { written: 400, size: 12 });
         assert_eq!(stat(&again, "C:\\Docs\\c.txt"), Stat { written: 410, size: 1 });
+    }
+
+    /// What a folder holds at any depth is told: how large its files are together, how many there are, and what lies in
+    /// it directly that is largest. Files kept in the cloud alone, and what is through links, are not counted; what
+    /// changed since it was kept is (a file written, come, gone, a folder moved in), each once.
+    #[test]
+    fn what_a_folder_holds_is_told_whole() {
+        let with = |name: &str, id: u64, attributes: u32, size: u64| Item { stat: Stat { written: 1, size }, ..item(name, id, attributes) };
+        let mut index = Index::new(5, true);
+        round(&mut index, &[(ROOT, vec![with("Docs", 10, FOLDER, 0), with("Away", 11, FOLDER, 0), with("a.txt", 12, FILE, 1000)])]);
+        let (docs, away) = (place_of(&index, "C:\\Docs"), place_of(&index, "C:\\Away"));
+        round(&mut index, &[(docs, vec![with("Old", 20, FOLDER, 0), with("b.txt", 21, FILE, 30), with("c.txt", 22, FILE, 70), with("cloud.txt", 23, FILE | 0x40_0000, 5000), with("Link", 24, FOLDER | 0x400, 0)]), (away, vec![with("Moves", 30, FOLDER, 0)])]);
+        let old = place_of(&index, "C:\\Docs\\Old");
+        let moves = place_of(&index, "C:\\Away\\Moves");
+        round(&mut index, &[(old, vec![with("Older", 40, FOLDER, 0), with("d.txt", 41, FILE, 5)]), (moves, vec![with("m.txt", 50, FILE, 400)])]);
+        let older = place_of(&index, "C:\\Docs\\Old\\Older");
+        round(&mut index, &[(older, vec![with("e.txt", 60, FILE, 60)])]);
+        let told = |index: &Index| {
+            let within = index.within(index.place_of(std::path::Path::new("docs")).unwrap(), 2);
+            let names: Vec<(String, u64)> = within.largest.iter().map(|&(place, bytes)| (index.name(place).to_string_lossy().into_owned(), bytes)).collect();
+            (within.bytes, within.files, names)
+        };
+        let named = |names: &[(&str, u64)]| names.iter().map(|&(name, bytes)| (name.to_string(), bytes)).collect::<Vec<_>>();
+        let first = (165, 4, named(&[("c.txt", 70), ("Old", 65)]));
+        assert_eq!(told(&index), first);
+        // Kept and read, the same; then one written, one come, one gone, and a folder moved in.
+        let mut read = kept(&index);
+        assert_eq!(told(&read), first);
+        let docs = place_of(&read, "C:\\Docs");
+        let away = place_of(&read, "C:\\Away");
+        round(&mut read, &[(away, vec![]), (docs, vec![with("Old", 20, FOLDER, 0), with("b.txt", 21, FILE, 500), with("new.txt", 25, FILE, 1), with("cloud.txt", 23, FILE | 0x40_0000, 5000), with("Moves", 30, FOLDER, 0)])]);
+        assert_eq!(told(&read), (966, 5, named(&[("b.txt", 500), ("Moves", 400)])));
+        // And it brought here from the cloud.
+        round(&mut read, &[(docs, vec![with("Old", 20, FOLDER, 0), with("b.txt", 21, FILE, 500), with("new.txt", 25, FILE, 1), with("cloud.txt", 23, FILE, 5000), with("Moves", 30, FOLDER, 0)])]);
+        assert_eq!(told(&read), (5966, 6, named(&[("cloud.txt", 5000), ("b.txt", 500)])));
+        assert_eq!(read.place_of(std::path::Path::new("Docs\\None")), None);
+        // What changes in it, in what is in it or on the way to it may change what it holds.
+        let (docs, old, away) = (place_of(&read, "C:\\Docs"), place_of(&read, "C:\\Docs\\Old"), place_of(&read, "C:\\Away"));
+        assert!(read.concerns(docs, docs) && read.concerns(old, docs) && read.concerns(ROOT, docs));
+        assert!(!read.concerns(away, docs) && !read.concerns(docs, away));
+    }
+
+    /// How long telling what a folder holds takes, of a drive as it was kept (its folder `GLANCE_INDEX`, its serial
+    /// `GLANCE_SERIAL` in hex): its root, and each folder in it. Said, not judged.
+    #[test]
+    #[ignore = "reads a drive's kept index: GLANCE_INDEX, GLANCE_SERIAL"]
+    fn telling_what_a_folder_holds_is_timed() {
+        let folder = std::env::var("GLANCE_INDEX").expect("GLANCE_INDEX: the folder indexes are kept in");
+        let serial = u32::from_str_radix(&std::env::var("GLANCE_SERIAL").expect("GLANCE_SERIAL: the drive's serial, in hex"), 16).unwrap();
+        let (index, _) = super::super::store::kept_in(std::path::Path::new(&folder), serial).expect("kept");
+        println!("{} names", index.names());
+        let mut within = vec![ROOT];
+        index.each_in(ROOT, |place, entry| if entry.folder() { within.push(place) });
+        for folder in within {
+            for _ in 0..2 {
+                let begun = std::time::Instant::now();
+                let held = index.within(folder, 3);
+                println!("{:>9.1} ms  {:>8} files  {:>14} bytes  place {folder}", begun.elapsed().as_secs_f64() * 1000.0, held.files, held.bytes);
+            }
+        }
     }
 
     /// A name that is not whole Unicode (an unpaired surrogate, as NTFS allows) is kept as it is written.

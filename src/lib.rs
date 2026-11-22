@@ -34,6 +34,8 @@ mod gpu_libraries;
 #[cfg(windows)]
 mod gpu_power;
 #[cfg(windows)]
+mod folders;
+#[cfg(windows)]
 mod hang;
 #[cfg(windows)]
 mod journal;
@@ -247,6 +249,7 @@ impl App {
             station::apps::follow(&held.apps, held.apps_named);
             notes::follow_settings(&held);
             station::recent::follow_settings(&held);
+            folders::follow(&held.storage_folders);
         }
         // The tray reads the shortcut's setting from here: told once it is in.
         tray::follow_settings();
@@ -592,6 +595,8 @@ pub fn run() {
     station::run::start(|| app().controller.wake());
     station::thumbs::start(|| app().controller.wake());
     station::recent::start(|| app().controller.wake());
+    // The folders whose sizes the storage component tells, counted as it is looked at (see `folders`).
+    folders::start(&app().settings.lock().unwrap().storage_folders.clone(), || app().controller.folders_changed());
     // Files sent from devices nearby, by the phone remote's helper (see `nearby`).
     nearby::start(|| app().controller.wake());
     // Started to send what Explorer gave: the settings at nearby transfer's page, that chosen there.

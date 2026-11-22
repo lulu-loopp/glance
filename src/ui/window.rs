@@ -52,7 +52,7 @@ impl Drop for Window {
         // (At its thread's end, what this thread kept may be gone before it.)
         let _ = TAKES.try_with(|takes| takes.borrow_mut().retain(|(of, _)| *of != self.hwnd.0 as isize));
         super::tip::went(self.hwnd);
-        super::ai_card::went(self.hwnd);
+        super::hover_card::went(self.hwnd);
     }
 }
 
@@ -516,7 +516,7 @@ impl Window {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
         super::tip::went(self.hwnd);
-        super::ai_card::went(self.hwnd);
+        super::hover_card::went(self.hwnd);
     }
 
     /// Whether it lets clicks through now (see `set_click_through`).

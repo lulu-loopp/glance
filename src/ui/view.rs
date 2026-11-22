@@ -14,6 +14,7 @@ use crate::settings::ShelfView;
 use crate::reading::{GpuLimit, ProcessSample, Sample, StaticInfo};
 
 pub mod ai;
+pub mod folders;
 pub mod todo;
 pub use todo::TodoHit;
 
@@ -226,6 +227,11 @@ pub enum Hit {
     /// A drive's row in the storage lane: the drive opened, by its letter (not its place among the drives seen: a
     /// drive put in or taken out between the drawing and the press would move another into it).
     Drive(char),
+    /// A folder's row under the drives, by its number (see `folders::number_of`): pressed, opened; its card shown beside
+    /// the lane's window as the pointer rests there. Where a folder dragged may be dropped to be told of there: all the
+    /// lane.
+    Folder(u64),
+    FoldersArea,
     /// A line of the lyrics turned to by the wheel (by its place among them): played from its start.
     Line(u16),
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
@@ -287,13 +293,18 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_))
     }
 
     /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
     /// beside the dock as the pointer rests there).
     pub fn lights(self) -> bool {
         self.takes_press() || matches!(self, Hit::AiSlot(_))
+    }
+
+    /// Whether a card tells of it beside the window it is drawn in as the pointer rests on it (see `ui::hover_card`).
+    pub fn carded(self) -> bool {
+        matches!(self, Hit::AiSlot(_) | Hit::Folder(_))
     }
 
     /// The track it is, where it is one dragged along.
@@ -317,6 +328,7 @@ impl Hit {
         match self {
             Hit::Station => Some(crate::station::run::Lands::Station),
             Hit::AppsArea => Some(crate::station::run::Lands::Apps),
+            Hit::FoldersArea => Some(crate::station::run::Lands::Folders),
             Hit::Tab(page) => Some(crate::station::run::Lands::Pages(page.page())),
             Hit::StationPages => Some(crate::station::run::Lands::Pages(Tab::Shelf)),
             Hit::SendTo(key) => Some(crate::station::run::Lands::Device(key)),
@@ -795,6 +807,10 @@ enum Block {
     Todo { lane: todo::TodoLane, tall: f32 },
     /// What the AI component shows (see `ai`).
     Ai(ai::AiBlock),
+    /// The folders' rows in the storage lane (see `folders`), `divided` from its drives over them; `over`, a folder
+    /// dragged over the lane, to be let go there. And what the card of one of them tells.
+    Folders { rows: Vec<folders::Row>, divided: bool, over: bool },
+    Folder(folders::Card),
     /// Parts of a lane side by side, in rows, each drawn as a lane is (its padding outside the room it is given), as
     /// wide as the lane's width shares out among the most a row holds, its row as tall as its tallest part (see
     /// `paint_across`): the AI component laid out across a top edge.
@@ -2536,6 +2552,8 @@ impl Block {
             Block::Search { .. } => SEARCH_BOX,
             Block::Todo { lane, tall } => todo::height(lane, *tall),
             Block::Ai(block) => block.height(),
+            Block::Folders { rows, divided, .. } => folders::height(rows, *divided),
+            Block::Folder(card) => card.height(),
             Block::Across(rows) => rows.iter().map(|row| across_tall(row)).sum::<f32>() + rows.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP,
             Block::Shelf { tall, .. } | Block::Copies { tall, .. } | Block::Recent { tall, .. } | Block::Notes { tall, .. } => SHELF_GAP + tall,
             Block::Apps { rows, named, .. } => SHELF_GAP + apps_tall(*rows, *named),
@@ -2571,6 +2589,8 @@ impl Hash for Block {
             Block::Notes { notes, view, tall } => (notes, view, tall.to_bits()).hash(state),
             Block::Todo { lane, tall } => (lane, tall.to_bits()).hash(state),
             Block::Ai(block) => block.hash(state),
+            Block::Folders { rows, divided, over } => (rows, divided, over).hash(state),
+            Block::Folder(card) => card.hash(state),
             Block::Across(rows) => rows.iter().for_each(|row| row.iter().for_each(|lane| (&lane.id, lane).hash(state))),
             Block::StuckNote(note) => note.hash(state),
             Block::Apps { apps, rows, named, over } => {
@@ -3235,12 +3255,16 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
             }]
         }
         "storage" => {
-            let mut blocks = vec![head(lang.pick("存储", "Storage"), "", "", false)];
-            // The drives switched on (see `Prefs::shows`); none, no lane.
+            // The drives switched on (see `Prefs::shows`), and the folders told of; neither, no lane.
             let drives: Vec<&String> = scene.seen.volumes.iter().filter(|name| on(&format!("volumes:{name}"))).collect();
-            if drives.is_empty() {
+            let rows = folders::rows(lang);
+            if drives.is_empty() && rows.is_empty() {
                 return None;
             }
+            let over = crate::station::run::shown().folders_over;
+            let aside = if over { folders::dropping(lang) } else { String::new() };
+            let mut blocks = vec![head(lang.pick("存储", "Storage"), "", aside, false)];
+            let divided = !drives.is_empty();
             for (i, name) in drives.into_iter().enumerate() {
                 let volume = s.volumes.iter().find(|v| v.name == *name);
                 let fraction = volume.map_or(0.0, |v| v.used as f32 / v.total.max(1) as f32);
@@ -3253,6 +3277,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
                     opens: scene.seen.volumes.iter().any(|seen| seen == name).then(|| name.chars().next()).flatten(),
                 });
             }
+            blocks.push(Block::Folders { rows, divided, over });
             blocks
         }
         "board" => {
@@ -4093,6 +4118,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             Block::Search { .. } => "search",
             Block::Todo { .. } => "todo",
             Block::Ai(_) => "ai",
+            Block::Folders { .. } => "folders",
+            Block::Folder(_) => "folder",
             Block::Across(_) => "across",
         };
         if let Block::Ai(ai::AiBlock::Head { source: of, .. }) = block {
@@ -4127,6 +4154,8 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
             (Block::Todo { lane, tall }, Pass::Content) => todo::paint(frame, scene, (left, y, width), pad_x, lane, *tall + spare, hits),
             (Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. }), Pass::Content) => ai::paint_shaped(frame, scene, ink, (dock, mounted, rich), (area.x, area.y, area.w, area.h), hits),
             (Block::Ai(block), Pass::Content) => ai::paint(frame, scene, ink, block, (left, y, width), &part, hits),
+            (Block::Folders { rows, divided, over }, Pass::Content) => folders::paint(frame, scene, (left, y, width), area, rows, (*divided, *over), hits),
+            (Block::Folder(card), Pass::Content) => card.paint(frame, scene, ink, (left, y, width)),
             (Block::Head { title, device, .. }, Pass::Content) if lane.id == "notes" => {
                 let title_width = frame.measure(title, theme.title);
                 let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
@@ -8285,6 +8314,147 @@ otepad.exe", "Notepad"),
         }
     }
 
+    /// The storage lane tells each folder in its order under its drives, with its size (said, where that is not known),
+    /// those of one name with the folder or drive each is in, and takes a folder dragged anywhere on it; with no drives
+    /// switched on it tells the folders alone, and with neither there is none.
+    #[test]
+    fn the_storage_lane_tells_its_folders() {
+        use super::*;
+        use crate::folders::{Folder, Held};
+        let _device = crate::ui::gfx::held().unwrap();
+        let _pretending = crate::pretending();
+        let folder = |path: &str, bytes: Option<u64>, away: bool| Folder { path: path.into(), name: path.rsplit('\\').next().unwrap().into(), held: bytes.map(|bytes| Held { bytes, files: 1, largest: Vec::new() }), away, days: Vec::new() };
+        let told = [folder(r"D:\项目", Some(3 << 30), false), folder(r"C:\备份\项目", None, false), folder(r"C:\下载", Some(5 << 20), true)];
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample { volumes: vec![crate::reading::VolumeSample { name: "C:".into(), used: 1 << 30, total: 2 << 30 }], ..sample(None, None, None) })]));
+        let bare: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let theme = Theme::new(Skin::Glass, true);
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        let drawn = |history: &'static [Arc<Sample>], folders: &[Folder]| {
+            crate::folders::pretend(folders.to_vec());
+            let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["storage".to_string()]));
+            let seen = Seen::of(history);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let lane = Lane { id: "storage".into(), blocks: lane(&scene, "storage", Detail::Full)?, ink: theme.ink("storage") };
+            let (width, tall) = (COLUMN_WIDTH, lane.height(&theme));
+            let mut hits = Vec::new();
+            gfx.draw_offscreen((width as u32, tall.ceil() as u32), 1.0, |frame| paint_lane(frame, &scene, &lane, Rect { x: 0.0, y: 0.0, w: width, h: tall }, 0.0, Pass::Content, &mut hits)).expect("drawn");
+            let rows = lane.blocks.iter().find_map(|block| if let Block::Folders { rows, .. } = block { Some(format!("{rows:?}")) } else { None }).unwrap();
+            Some((rows, hits, (width, tall)))
+        };
+        let number = |path: &str| Hit::Folder(crate::folders::number_of(path));
+        let (rows, hits, (width, tall)) = drawn(history, &told).unwrap();
+        let of = |hits: &[HitBox]| hits.iter().map(|hit| hit.4).filter(|hit| matches!(hit, Hit::Drive(_) | Hit::Folder(_))).collect::<Vec<_>>();
+        assert_eq!(of(&hits), [Hit::Drive('C'), number(r"D:\项目"), number(r"C:\备份\项目"), number(r"C:\下载")]);
+        for said in ["3.0 GB", "正在统计", "不可用", r#"within: Some("D:")"#, r#"within: Some("备份")"#] {
+            assert!(rows.contains(said), "{said}: {rows}");
+        }
+        // Each in the lane, none over another, under the drives; all the lane where a folder may be let go, under them.
+        let boxes: Vec<&HitBox> = hits.iter().filter(|hit| matches!(hit.4, Hit::Drive(_) | Hit::Folder(_))).collect();
+        assert!(boxes.windows(2).all(|two| two[0].1 + two[0].3 <= two[1].1 + 0.01), "{boxes:?}");
+        assert!(boxes.iter().all(|hit| hit.0 >= 0.0 && hit.0 + hit.2 <= width && hit.1 + hit.3 <= tall));
+        let last = hits.last().unwrap();
+        assert_eq!((last.4, (last.2, last.3)), (Hit::FoldersArea, (width, tall)));
+        assert_eq!(Hit::FoldersArea.lands(), Some(crate::station::run::Lands::Folders));
+        assert!(!Hit::FoldersArea.takes_press() && Hit::Folder(1).takes_press());
+        // The folders alone; neither; the drives alone, as ever, and a folder taken all the same.
+        assert_eq!(of(&drawn(bare, &told[..1]).unwrap().1), [number(r"D:\项目")]);
+        assert!(drawn(bare, &[]).is_none());
+        let (_, hits, _) = drawn(history, &[]).unwrap();
+        assert_eq!(of(&hits), [Hit::Drive('C')]);
+        assert!(hits.iter().any(|hit| hit.4 == Hit::FoldersArea));
+    }
+
+    /// Folders as the storage lane tells them, and the card of one: under the drives (two of one name, one being counted,
+    /// one not there), a folder dragged over, with no drives, and a lane with none, in each skin:
+    /// `cargo test --features studio --lib -- --ignored folders_in_storage`.
+    #[test]
+    #[ignore = "writes pictures to look at"]
+    #[cfg(feature = "studio")]
+    fn folders_in_storage() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::*;
+        use super::super::{hover_card, menu};
+        use crate::folders::{Folder, Held};
+        let _pretending = crate::pretending();
+        let gb = |gb: f64| (gb * (1u64 << 30) as f64) as u64;
+        let today = crate::folders::today();
+        let folder = |path: &str, size: Option<f64>, days: &[f64]| Folder {
+            path: path.into(),
+            name: path.rsplit('\\').next().unwrap().into(),
+            held: size.map(|size| Held { bytes: gb(size), files: 412_880, largest: vec![("target".into(), gb(size * 0.6)), ("素材".into(), gb(size * 0.2)), ("一个名称很长的归档文件夹，包含以前各年的项目文件.zip".into(), gb(size * 0.1))] }),
+            away: false,
+            days: days.iter().enumerate().map(|(at, size)| (today - (days.len() - 1 - at) as i64, gb(*size))).collect(),
+        };
+        let folders = || vec![
+            folder(r"C:\Users\示例\Downloads", Some(38.2), &[36.6, 36.6, 37.1, 37.1, 36.2, 37.8, 38.2, 38.2]),
+            folder(r"D:\游戏", Some(412.6), &[388.3, 388.3, 401.0, 412.2]),
+            folder(r"D:\项目", Some(96.4), &[99.5, 99.7, 99.9, 98.2, 97.6, 96.9, 96.4, 96.4]),
+            folder(r"C:\备份\项目", None, &[]),
+            folder(r"D:\素材\2024 至 2026 年拍摄的全部照片与视频", Some(1260.0), &[1260.0]),
+            Folder { away: true, ..folder(r"F:\影片", Some(12.0), &[12.0]) },
+        ];
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(Sample { volumes: vec![crate::reading::VolumeSample { name: "C:".into(), used: 612 << 30, total: 930 << 30 }, crate::reading::VolumeSample { name: "D:".into(), used: 1270 << 30, total: 1863 << 30 }], ..sample(None, None, None) })]));
+        let bare: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let columns: [(&'static [Arc<Sample>], Vec<Folder>, Option<usize>, bool); 4] = [(history, folders(), Some(2), false), (history, folders()[..2].to_vec(), None, true), (bare, folders()[..3].to_vec(), Some(0), false), (history, Vec::new(), None, true)];
+        let out = std::env::var("GLANCE_SHOTS").map_or_else(|_| std::path::PathBuf::from(format!("{}/target", env!("CARGO_MANIFEST_DIR"))), std::path::PathBuf::from);
+        let _ = std::fs::create_dir_all(&out);
+        let (lane_w, lane_h) = (COLUMN_WIDTH, 320.0);
+        for (skin, name) in [(Skin::Glass, "folders-glass.png"), (Skin::Fluent, "folders-windows11.png"), (Skin::Paper, "folders-paper.png")] {
+            let (w, h) = (6.0 * (lane_w + 36.0), 2.0 * (lane_h + 36.0) + 12.0);
+            let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+            let pixels = gfx.draw_offscreen(((w * 2.0) as u32, (h * 2.0) as u32), 2.0, |frame| {
+                frame.fill(Color::hex(0x7A8CA6, 1.0), 0.0, 0.0, w, h);
+                for (row, dark) in [false, true].into_iter().enumerate() {
+                    let theme = Theme::new(skin, dark);
+                    let ground = match skin {
+                        Skin::Paper => theme.paper,
+                        Skin::Fluent => if dark { Color::hex(0x24262A, 1.0) } else { Color::hex(0xF3F5F8, 1.0) },
+                        Skin::Glass => if dark { Color::hex(0x2A3550, 0.92) } else { Color::hex(0xE4EAF2, 0.9) },
+                    };
+                    let (info, prefs) = (info(), Prefs::resolve(&serde_json::Value::Null, &["storage".to_string()]));
+                    let y = row as f32 * (lane_h + 36.0) + 24.0;
+                    for (column, (history, told, hover, over)) in columns.iter().enumerate() {
+                        let x = column as f32 * (lane_w + 36.0) + 24.0;
+                        crate::folders::pretend(told.clone());
+                        crate::station::run::pretend_folders_over(*over);
+                        let seen = Seen::of(history);
+                        let hover = hover.map(|at| Hit::Folder(crate::folders::number_of(&told[at].path)));
+                        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                        let Some(blocks) = lane(&scene, "storage", Detail::Full) else { continue };
+                        let lane = Lane { id: "storage".into(), blocks, ink: theme.ink("storage") };
+                        let tall = lane.height(&theme);
+                        frame.fill_rounded(ground, x, y, lane_w, tall, theme.radius);
+                        paint_lane(frame, &scene, &lane, Rect { x, y, w: lane_w, h: tall }, 0.0, Pass::Content, &mut Vec::new());
+                    }
+                    // Its cards: over a week, and since less; not there.
+                    crate::folders::pretend(folders());
+                    let seen = Seen::of(history);
+                    let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                    let mut top = y;
+                    for (at, x) in [(2, 4.0), (5, 4.0), (1, 5.0)] {
+                        let x = x * (lane_w + 36.0) + 24.0;
+                        if x > 5.0 * lane_w {
+                            top = y;
+                        }
+                        let card = folders::card(&scene, crate::folders::number_of(&folders()[at].path)).unwrap();
+                        let area = Layout::with_columns(vec![card.height(&theme)], 1, &theme).lanes()[0];
+                        let (plate, shift) = hover_card::sheet_of(&theme, area);
+                        frame.within(windows_numerics::Matrix3x2::translation(x, top), |frame| {
+                            menu::plain(frame, menu::Look::of(skin, dark), 0.0, plate, hover_card::round(&theme, plate), |frame| {
+                                if skin == Skin::Glass {
+                                    frame.fill_rounded(ground, 0.0, 0.0, plate.0, plate.1, theme.radius);
+                                }
+                                hover_card::write(frame, &scene, &card, area, shift);
+                            });
+                        });
+                        top += plate.1 + 14.0;
+                    }
+                }
+            }).expect("drawn");
+            crate::studio::save_png(&out.join(name), (w * 2.0) as u32, (h * 2.0) as u32, &pixels).unwrap();
+        }
+    }
+
     /// Recently copied with some of it pinned and tagged, in each skin, light and dark (a row each): all of it, what is
     /// pinned first (shown, folded away, as cards), what is pinned alone (by a tag, its pin under the pointer, more tags
     /// than fit, nothing of a tag). Written to the folder `GLANCE_SHOTS` names (else `target`), a picture for each
@@ -10368,7 +10538,7 @@ seven".into()));
     /// and its rule out past its sides).
     #[test]
     fn all_an_ai_card_shows_is_on_its_sheet() {
-        use super::super::{ai_card, gfx, menu};
+        use super::super::{gfx, hover_card, menu};
         let _device = gfx::held().unwrap();
         let gfx = gfx::Gfx::new().expect("graphics");
         for skin in [Skin::Fluent, Skin::Glass, Skin::Paper] {
@@ -10382,7 +10552,7 @@ seven".into()));
                 let lane = Lane { id: "ai:today".into(), blocks: ai::today_card(Lang::Zh, None), ink: theme.ink("ai:today") };
                 let layout = Layout::with_columns(vec![lane.height(&theme)], 1, &theme);
                 let area = layout.lanes()[0];
-                let (plate, shift) = ai_card::sheet_of(&theme, area);
+                let (plate, shift) = hover_card::sheet_of(&theme, area);
                 let look = menu::Look::of(skin, false);
                 let room = 30.0;
                 let size = ((plate.0 + 2.0 * room).ceil() as u32, (plate.1 + 2.0 * room).ceil() as u32);
@@ -10390,16 +10560,16 @@ seven".into()));
                 let drawn = |written: bool| {
                     let mut layer = gfx::Layer::default();
                     gfx.draw_offscreen(size, 1.0, |frame| {
-                        menu::plain(frame, look, room, plate, ai_card::round(&theme, plate), |frame| {
+                        menu::plain(frame, look, room, plate, hover_card::round(&theme, plate), |frame| {
                             if !written {
                                 return;
                             }
                             if skin == Skin::Paper {
-                                return ai_card::write(frame, &scene, &lane, area, shift);
+                                return hover_card::write(frame, &scene, &lane, area, shift);
                             }
                             let halo = (skin == Skin::Glass).then_some(theme.legibility);
                             let laid = layer.draw(frame, 1, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, plate.0, plate.1), 1.0, halo, |frame| {
-                                ai_card::write(frame, &scene, &lane, area, shift);
+                                hover_card::write(frame, &scene, &lane, area, shift);
                                 Ok(())
                             });
                             laid.expect("written");
@@ -10411,7 +10581,7 @@ seven".into()));
                 let across = size.0 as usize;
                 let lit: Vec<(usize, usize)> = (0..bare.len() / 4).filter(|at| bare[at * 4..at * 4 + 4] != written[at * 4..at * 4 + 4]).map(|at| (at % across, at / across)).collect();
                 // As far in from the sheet's left and top as its corners are round (a letter's own side let be).
-                let inset = ai_card::round(&theme, plate).max(super::super::look::INSET_LEAST) + room;
+                let inset = hover_card::round(&theme, plate).max(super::super::look::INSET_LEAST) + room;
                 let (left, top) = (lit.iter().map(|at| at.0).min().unwrap() as f32, lit.iter().map(|at| at.1).min().unwrap() as f32);
                 let (right, bottom) = (lit.iter().map(|at| at.0).max().unwrap() as f32, lit.iter().map(|at| at.1).max().unwrap() as f32);
                 assert!((left - inset).abs() < 3.0 && top >= inset - 3.0, "{skin:?} sized {sized}: begins at {left}, {top}, inset {inset}");

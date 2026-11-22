@@ -2,7 +2,7 @@
 //! each platform draws it (on Windows, Direct2D and DirectWrite on a
 //! DirectComposition surface of the panel's own window).
 
-pub mod ai_card;
+pub mod hover_card;
 pub mod arrange;
 #[cfg(windows)]
 pub mod backdrop;

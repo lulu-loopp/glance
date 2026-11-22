@@ -35,35 +35,42 @@ const NAMELESS_MOST: u64 = 256 << 20;
 
 /// A station window's drop target: tells `told` what happens to a drag over it. One the station's own drags are
 /// dragged over (`own` false: the station's) takes none of them back: one put back where it was came on it twice. One
-/// that `refuses` takes nothing, and is told all the same as something comes over it.
+/// that `refuses` takes nothing, and is told all the same as something comes over it. One for `folders` takes folders
+/// alone (what is dragged that has one among its files).
 #[implement(IDropTarget)]
 pub struct Target {
     told: Box<dyn Fn(Dragged)>,
     own: bool,
     refuses: bool,
+    folders: bool,
     /// What came over it is something it takes.
     takes: std::cell::Cell<bool>,
 }
 
 impl Target {
     pub fn new(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), own: true, refuses: false, takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: true, refuses: false, folders: false, takes: std::cell::Cell::new(false) }.into()
     }
 
     /// One that takes nothing dragged off the station (see `Target`).
     pub fn not_own(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), own: false, refuses: false, takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: false, refuses: false, folders: false, takes: std::cell::Cell::new(false) }.into()
+    }
+
+    /// One that takes folders alone (see `Target`).
+    pub fn folders(told: impl Fn(Dragged) + 'static) -> IDropTarget {
+        Target { told: Box::new(told), own: true, refuses: false, folders: true, takes: std::cell::Cell::new(false) }.into()
     }
 
     /// One that takes nothing, only told what comes over it (see `Target`).
     pub fn refusing(told: impl Fn(Dragged) + 'static) -> IDropTarget {
-        Target { told: Box::new(told), own: true, refuses: true, takes: std::cell::Cell::new(false) }.into()
+        Target { told: Box::new(told), own: true, refuses: true, folders: false, takes: std::cell::Cell::new(false) }.into()
     }
 }
 
 impl IDropTarget_Impl for Target_Impl {
     fn DragEnter(&self, data: Ref<IDataObject>, _: MODIFIERKEYS_FLAGS, at: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
-        let takes = !self.refuses && data.as_ref().is_some_and(takes) && (self.own || !super::drag::under_way());
+        let takes = !self.refuses && data.as_ref().is_some_and(if self.folders { holds_folder } else { takes }) && (self.own || !super::drag::under_way());
         self.takes.set(takes);
         self.answer(at, effect);
         Ok(())
@@ -135,6 +142,11 @@ pub(super) fn takes(data: &IDataObject) -> bool {
     [formats.files, formats.nameless, formats.png, formats.link, formats.text]
         .into_iter()
         .any(|format| unsafe { data.QueryGetData(&asked(format, -1, TYMED_HGLOBAL.0)) }.is_ok())
+}
+
+/// Whether `data` holds a folder, with its path.
+fn holds_folder(data: &IDataObject) -> bool {
+    memory(data, formats().files, -1).is_some_and(|bytes| paths_of(&bytes).iter().any(|path| path.is_dir()))
 }
 
 /// What `data` gives: its files where it has paths; else its files with none (read now); else its picture, its web

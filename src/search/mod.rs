@@ -34,6 +34,7 @@ use drive::Drive;
 use index::{flag, Index};
 pub use query::{Hit, Only, Order, Query, Sort};
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, Once, RwLock};
 use std::time::{Duration, Instant};
@@ -74,17 +75,110 @@ pub struct Volume {
     /// Asked to be kept (Glance quitting), and how many times it was kept or found to have nothing to keep since.
     keep_asked: AtomicBool,
     kept_times: AtomicU64,
+    /// The folders whose sizes were told (see `within`), by their ids, and whether anything in each may have changed
+    /// since.
+    told: Mutex<HashMap<u64, bool>>,
 }
 
 impl Volume {
     fn new(drive: Arc<Drive>, index: Index) -> Volume {
-        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0) }
+        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), told: Mutex::new(HashMap::new()) }
     }
 
     /// Whether it is no longer followed: gone, or let go of as Windows asked to take it out.
     fn away(&self) -> bool {
         self.gone.load(Ordering::Relaxed) || self.drive.left()
     }
+
+    /// The folders at `listed` (by their places) listed again: those told that they are, are in, or are on the way to
+    /// may have changed.
+    fn relisted(&self, listed: &[u32]) {
+        let mut told = self.told.lock().unwrap();
+        if told.values().all(|changed| *changed) {
+            return;
+        }
+        let index = self.index.read().unwrap();
+        for (id, changed) in told.iter_mut().filter(|(_, changed)| !**changed) {
+            *changed = index.folder(*id).is_none_or(|place| listed.iter().any(|&folder| index.concerns(folder, place)));
+        }
+    }
+}
+
+/// What tells whether anything in a folder whose size was told may have changed since (see `changed`): its drive, and
+/// its id there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Watch {
+    root: String,
+    id: u64,
+}
+
+/// What a folder holds, as far as it is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Holds {
+    /// Its drive is not listed whole yet.
+    Listing,
+    /// It is not there, or on a drive search finds no names on (a network drive).
+    Nowhere,
+    /// How large the files in it at any depth are together and how many there are (see `index::Within`), and what lies
+    /// in it directly that is largest, by name; and what tells whether that may have changed since.
+    Told { bytes: u64, files: u64, largest: Vec<(String, u64)>, watch: Watch },
+}
+
+/// What the folder at `path` holds, with its `most` largest (a folder by its path, or by where that leads through
+/// links).
+pub fn within(path: &Path, most: usize) -> Holds {
+    match held_at(path, most) {
+        Holds::Nowhere => match std::fs::canonicalize(path) {
+            Ok(real) if rooted(&real) != rooted(path) => held_at(&real, most),
+            _ => Holds::Nowhere,
+        },
+        holds => holds,
+    }
+}
+
+/// `path` as its drive's root ("C:\\") and what follows it: none where it is not on a drive by its letter.
+fn rooted(path: &Path) -> Option<(String, PathBuf)> {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else { return None };
+    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else { return None };
+    (parts.next() == Some(Component::RootDir)).then(|| (format!("{}:\\", letter.to_ascii_uppercase() as char), parts.as_path().to_path_buf()))
+}
+
+fn held_at(path: &Path, most: usize) -> Holds {
+    let Some((root, rest)) = rooted(path) else { return Holds::Nowhere };
+    let volume = {
+        let volumes = VOLUMES.lock().unwrap();
+        if volumes.is_empty() {
+            return Holds::Listing;
+        }
+        volumes.iter().find(|volume| volume.drive.path == root).cloned()
+    };
+    let Some(volume) = volume else { return Holds::Nowhere };
+    if !volume.ready.load(Ordering::Relaxed) {
+        return Holds::Listing;
+    }
+    held_on(&volume, &rest, most)
+}
+
+/// What the folder at `rest` of `volume` holds, and told from then on whether it changed.
+fn held_on(volume: &Volume, rest: &Path, most: usize) -> Holds {
+    let index = volume.index.read().unwrap();
+    let Some((place, id)) = index.place_of(rest).and_then(|place| Some((place, index.id(place)?))) else { return Holds::Nowhere };
+    // (Before it is counted, the index as it is meanwhile: what changes it after is told.)
+    volume.told.lock().unwrap().insert(id, false);
+    let held = index.within(place, most);
+    let largest = held.largest.iter().map(|&(place, bytes)| (index.name(place).to_string_lossy().into_owned(), bytes)).collect();
+    Holds::Told { bytes: held.bytes, files: held.files, largest, watch: Watch { root: volume.drive.path.clone(), id } }
+}
+
+/// Whether anything in the folder `watch` is of may have changed since its size was told (its drive gone, or come again
+/// since, too).
+pub fn changed(watch: &Watch) -> bool {
+    let volumes = VOLUMES.lock().unwrap();
+    let Some(volume) = volumes.iter().find(|volume| volume.drive.path == watch.root) else { return true };
+    let told = volume.told.lock().unwrap();
+    told.get(&watch.id).copied().unwrap_or(true)
 }
 
 /// How a drive's search stands.
@@ -295,6 +389,7 @@ fn sweep(volume: &Volume, pool: &Arc<walk::Pool>, keeping: &mut Keeping, whole: 
         }
         let begun = Instant::now();
         let round = walk::round(&volume.index, &volume.drive, &folders, pool, Some(begun + spent.clamp(ROUND_LEAST, KEEP_EVERY)));
+        volume.relisted(&folders);
         spent += begun.elapsed();
         listed += round.folders;
         failed.extend(round.failed);
@@ -548,6 +643,7 @@ impl Pacing {
             due.iter().filter_map(|&id| index.folder(id)).collect()
         };
         let listed = walk::round(&volume.index, &volume.drive, &places, pool, None);
+        volume.relisted(&places);
         self.listed(now, listed);
         true
     }
@@ -750,6 +846,60 @@ mod tests {
         assert_eq!(keeping.retry.map(|(_, wait)| wait), Some(KEEP_EVERY));
         keeping.kept(at(200));
         assert!(keeping.due(at(201), false, false, much, false), "kept, as before");
+    }
+
+    /// A folder's size is told by its path, and told to have changed as anything in it is listed again: a file come in a
+    /// folder in it, not one come elsewhere. Told again, it has not.
+    #[test]
+    fn a_folder_s_size_is_told_till_it_changes() {
+        let root = tree("held", 2, 2, 3);
+        let drive = Arc::new(Drive::open(&format!("{}\\", root.display())).unwrap());
+        let pool = Arc::new(walk::Pool::new(2, 1 << 20));
+        let volume = Volume::new(drive, Index::new(0, true));
+        *volume.index.write().unwrap() = Index::new(volume.drive.root_id, true);
+        sweep(&volume, &pool, &mut Keeping::new(), false);
+        let folder = Path::new("folder 0");
+        let told = |volume: &Volume| match held_on(volume, folder, 3) {
+            Holds::Told { bytes, files, watch, .. } => (bytes, files, watch.id),
+            holds => panic!("{holds:?}"),
+        };
+        let files = std::fs::read_dir(root.join(folder)).unwrap().flatten().filter(|entry| entry.path().is_file()).count();
+        assert!(files > 0);
+        let (bytes, counted, id) = told(&volume);
+        let changed = |volume: &Volume| volume.told.lock().unwrap()[&id];
+        assert!(!changed(&volume));
+        let list = |place: u32| {
+            walk::round(&volume.index, &volume.drive, &[place], &pool, None);
+            volume.relisted(&[place]);
+        };
+        // Elsewhere: not changed.
+        let elsewhere = volume.index.read().unwrap().place_of(Path::new("folder 1")).unwrap();
+        std::fs::write(root.join("folder 1").join("new.txt"), [0u8; 100]).unwrap();
+        list(elsewhere);
+        assert!(!changed(&volume));
+        // In a folder in it: changed, and counted again, as it is now.
+        let within = volume.index.read().unwrap().place_of(Path::new("folder 0/folder 1")).unwrap();
+        std::fs::write(root.join("folder 0").join("folder 1").join("new.txt"), [0u8; 100]).unwrap();
+        list(within);
+        assert!(changed(&volume));
+        assert_eq!(told(&volume), (bytes + 100, counted + 1, id));
+        assert!(!changed(&volume));
+        // On the way to it (it may be gone): changed.
+        list(ROOT);
+        assert!(changed(&volume));
+        assert_eq!(held_on(&volume, Path::new("folder 9"), 3), Holds::Nowhere);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Where a path is on its drive: by its letter, through `\\\\?\\` too, and nowhere else.
+    #[test]
+    fn a_path_is_found_on_its_drive() {
+        let at = |path: &str| rooted(Path::new(path));
+        assert_eq!(at(r"d:\A\b"), Some((r"D:\".into(), PathBuf::from(r"A\b"))));
+        assert_eq!(at(r"\\?\D:\A"), Some((r"D:\".into(), PathBuf::from("A"))));
+        assert_eq!(at(r"D:\"), Some((r"D:\".into(), PathBuf::new())));
+        assert_eq!(at(r"\\server\share\a"), None);
+        assert_eq!(at(r"A\b"), None);
     }
 
     /// How long finding takes in each order over a whole drive as it was kept (its folder `GLANCE_INDEX`, its serial

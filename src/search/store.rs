@@ -17,8 +17,11 @@ use windows::Win32::Storage::FileSystem::{CreateFileW, GetFileSizeEx, FILE_ATTRI
 use windows::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READONLY};
 
 const MAGIC: &[u8; 8] = b"GLNCSRCH";
-/// (4: each entry's stat kept after the entries.)
-const VERSION: u32 = 4;
+/// (4: each entry's stat kept after the entries. 5: whether each file is kept in the cloud alone.)
+const VERSION: u32 = 5;
+/// One kept with no more than that missing: searched as it was, and listed again whole behind it, as one whose
+/// journal went past where it was kept is (see `super::begun`).
+const BEFORE: u32 = 4;
 /// How long what is kept before the index is (bytes).
 const HEADER: usize = 48;
 
@@ -275,10 +278,11 @@ fn read(path: &std::path::Path, serial: u32) -> Option<(Index, Kept)> {
         let u32_at = |at: usize| Some(u32::from_le_bytes(body.get(at..at + 4)?.try_into().ok()?));
         let u64_at = |at: usize| Some(u64::from_le_bytes(body.get(at..at + 8)?.try_into().ok()?));
         let flags = u32_at(12)?;
-        if u32_at(8)? != VERSION || u32_at(16)? != serial || flags & !7 != 0 {
+        let version = u32_at(8)?;
+        if !matches!(version, VERSION | BEFORE) || u32_at(16)? != serial || flags & !7 != 0 {
             return None;
         }
-        let journal = (flags & 2 != 0).then(|| Some(Cursor { journal: u64_at(24)?, next: u64_at(32)? as i64 })).flatten();
+        let journal = (flags & 2 != 0 && version == VERSION).then(|| Some(Cursor { journal: u64_at(24)?, next: u64_at(32)? as i64 })).flatten();
         (flags & 1 != 0, Kept { serial, journal, whole: flags & 4 == 0 }, u64_at(40)?, body.len())
     };
     Some((Index::read(bytes, HEADER, end, by_id, made)?, kept))
@@ -300,6 +304,33 @@ mod tests {
 
     fn names(index: &Index) -> Vec<String> {
         (1..index.len()).map(|place| index.name(place).to_string_lossy().into_owned()).collect()
+    }
+
+    /// An index kept before its files' being in the cloud alone was is read and searched as it was, with no place in its
+    /// journal to read on from: listed again whole behind it. One kept before that is not read.
+    #[test]
+    fn an_index_kept_before_is_searched_and_listed_again() {
+        let folder = std::env::temp_dir().join(format!("glance-search-before-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        let kept = Kept { serial: 0xABCE, journal: Some(Cursor { journal: 7, next: 99 }), whole: true };
+        drop(keep_in(&folder, &index(&["a.txt"]), kept).unwrap());
+        let path = file(&folder, 0xABCE, 1);
+        let as_version = |version: u32| {
+            let mut bytes = std::fs::read(&path).unwrap();
+            let end = bytes.len() - 8;
+            bytes[8..12].copy_from_slice(&version.to_le_bytes());
+            let mut sum = Sum::new();
+            sum.add(&bytes[..end]);
+            bytes[end..].copy_from_slice(&sum.0.to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+        };
+        as_version(4);
+        let (read, read_kept) = kept_in(&folder, 0xABCE).unwrap();
+        assert_eq!((names(&read), read_kept), (vec!["a.txt".to_string()], Kept { journal: None, ..kept }));
+        drop(read);
+        as_version(3);
+        assert!(kept_in(&folder, 0xABCE).is_none());
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// Kept, it is read where it lies, with what it was kept with; kept again, it is the next file, the one before it

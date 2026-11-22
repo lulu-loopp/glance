@@ -3,7 +3,7 @@
 //! limit as a bar (how much of it is used, how much of the window has gone by, when it starts again), and, opened by
 //! its head, what it spent today by model and by kind, and its sessions; and the sessions at work. Small, the dock
 //! (see `paint_dock`): each source as a ring round its mark, down the screen's side or across its top, its lane beside
-//! it as the pointer rests on it (see `ui::ai_card`). A widget too small for all of it shows the dock's strip across or
+//! it as the pointer rests on it (see `ui::hover_card`). A widget too small for all of it shows the dock's strip across or
 //! down, else as near a square as it is, today's figure over each source's ring (see `paint_shaped`).
 
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -387,7 +387,7 @@ fn figure(value: f64) -> String {
     if value < 10.0 { format!("{value:.1}") } else { grouped(value.round() as u64) }
 }
 
-fn grouped(value: u64) -> String {
+pub(super) fn grouped(value: u64) -> String {
     let digits = value.to_string();
     let mut out = String::new();
     for (at, digit) in digits.chars().enumerate() {

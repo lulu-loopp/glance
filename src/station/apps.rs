@@ -97,8 +97,8 @@ pub fn told_apart(apps: &[App]) -> Vec<(String, String)> {
             if let Some(alias) = &app.alias {
                 return (alias.clone(), app.target.clone());
             }
-            let same: Vec<&App> = apps.iter().filter(|other| other.alias.is_none() && other.name == app.name).collect();
-            let name = if same.len() > 1 { by_folder(app, &same) } else { None };
+            let same: Vec<&str> = apps.iter().filter(|other| other.alias.is_none() && other.name == app.name).map(|other| other.target.as_str()).collect();
+            let name = if same.len() > 1 { apart_by_folder(&app.target, &same) } else { None };
             (name.unwrap_or_else(|| app.name.clone()), app.target.clone())
         })
         .collect()
@@ -110,19 +110,20 @@ fn folder_up(target: &str, up: usize) -> Option<String> {
     on_disk.then(|| Path::new(target).ancestors().nth(up)?.file_name().map(|name| name.to_string_lossy().into_owned())).flatten()
 }
 
-/// `app`'s name among `same` (those that bear its name, itself among them) by a folder it is in: see `told_apart`.
-fn by_folder(app: &App, same: &[&App]) -> Option<String> {
+/// What is at `target` told apart from the others of its name (`same`: where each of those that bear it is, itself among
+/// them) by a folder it is in: see `told_apart`.
+pub fn apart_by_folder(target: &str, same: &[&str]) -> Option<String> {
     for up in 1.. {
-        let names: Vec<Option<String>> = same.iter().map(|other| folder_up(&other.target, up)).collect();
+        let names: Vec<Option<String>> = same.iter().map(|other| folder_up(other, up)).collect();
         if names.iter().all(Option::is_none) {
             break;
         }
         let apart = names.iter().enumerate().all(|(at, name)| name.is_some() && !names[..at].contains(name));
         if apart {
-            return folder_up(&app.target, up);
+            return folder_up(target, up);
         }
     }
-    folder_up(&app.target, 1)
+    folder_up(target, 1)
 }
 
 static NUMBERS: crate::numbered::Numbered = crate::numbered::Numbered::new();

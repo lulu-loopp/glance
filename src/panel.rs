@@ -391,6 +391,12 @@ impl Controller {
         self.post(LYRIC);
     }
 
+    /// What the folders told of hold has changed (from any thread): drawn again soon where it shows, as a line of the
+    /// lyrics is.
+    pub fn folders_changed(&self) {
+        self.post(LYRIC);
+    }
+
     /// What AI tools have spent has changed (from any thread): drawn again soon where it shows, as a line of the
     /// lyrics is.
     pub fn ai_changed(&self) {
@@ -1233,7 +1239,7 @@ impl Controller {
                                 overlay = None;
                             }
                             crate::ui::tip::screens_changed();
-                            crate::ui::ai_card::screens_changed();
+                            crate::ui::hover_card::screens_changed();
                             crate::ui::beside::screens_changed();
                         }
                         widgets.screens_changed();
@@ -2672,8 +2678,9 @@ struct Panel<'a> {
     /// What is under the pointer said under it (see `hover_at`): taken away as the pointer leaves it, the panel goes,
     /// or what is under the pointer changes without it moving (see `hover_again`).
     saying: bool,
-    /// The card beside the AI component's dock shown, of the source the pointer is on (see `follow_card`).
+    /// The card beside it shown, of what the pointer rests on (see `follow_card`), and what that is.
     carding: bool,
+    resting: crate::ui::hover_card::Resting,
     /// Pinned open: the pointer leaving, or a press elsewhere, does not
     /// close it; unpinning, the shortcut or the tray's settings do.
     pinned: bool,
@@ -2856,6 +2863,7 @@ impl<'a> Panel<'a> {
             hint: view::Hint::default(),
             saying: false,
             carding: false,
+            resting: Default::default(),
             pinned: false,
             full_asked: None,
             game: None,
@@ -3364,7 +3372,7 @@ impl<'a> Panel<'a> {
         // (Where it is in the window, physical px.)
         let client = POINT { x: cursor.x - placement.window.left, y: cursor.y - placement.window.top };
         // (The card beside the AI component's dock, and the way to it from its ring, are the panel's while it is up.)
-        let carded = self.carding && crate::ui::ai_card::holds(cursor);
+        let carded = self.carding && crate::ui::hover_card::holds(cursor);
         let in_reach = contains(&placement.reach, cursor) || carded;
         let close_delay = self.controller.config.lock().unwrap().close_delay;
         // Down now, or pressed (and perhaps let go) since it last looked; and of those presses, any not on it nor its
@@ -4743,6 +4751,10 @@ impl<'a> Panel<'a> {
         if let Some(due) = self.hint.due(now) {
             self.next_frame = self.next_frame.min(due);
         }
+        // The card of what the pointer rests on, due; or due sooner.
+        if !self.carding && self.resting.due().is_some() {
+            self.follow_card();
+        }
         // A to-do written on it: its caret blinking, the input method's words put at it.
         let hwnd = self.window.hwnd;
         if let (_, Some(due)) = crate::ui::todo::field(hwnd, now) {
@@ -5001,25 +5013,30 @@ impl<'a> Panel<'a> {
         self.follow_card();
     }
 
-    /// The card beside the AI component's dock: of the spot the pointer is on (what every source spent today, a source's
-    /// ring, the sessions at work), beside the panel away from its edge (kept as what it tells changes); else none.
+    /// The card beside it: of the spot of the AI component's dock the pointer is on (what every source spent today, a
+    /// source's ring, the sessions at work), or of the folder in the storage lane it rests on, beside the panel away
+    /// from its edge (kept as what it tells changes); else none.
     fn follow_card(&mut self) {
-        let spot = match self.hover {
-            Some(Hit::AiSlot(spot)) => spot,
+        let hit = match self.hover {
+            Some(hit) if hit.carded() => hit,
             _ => {
+                self.resting.off();
                 if std::mem::take(&mut self.carding) {
-                    crate::ui::ai_card::hide();
+                    crate::ui::hover_card::hide();
                 }
                 return;
             }
         };
+        let now = Instant::now();
+        let shows = self.resting.on(hit, self.carding, now);
+        if shows > now {
+            self.next_frame = self.next_frame.min(shows);
+            return;
+        }
         let Some(placement) = self.placement.as_ref() else { return };
-        // (Every spot on the dock: what is behind each one's card is taken with this one's, see `ai_card::show`.)
-        let spots: Vec<_> = self.hits.iter().filter_map(|&(x, y, w, h, hit)| match hit {
-            Hit::AiSlot(spot) => Some((spot, self.box_on_screen((x, y, w, h))?)),
-            _ => None,
-        }).collect();
-        use crate::ui::ai_card::Side;
+        // (Every spot that has one: what is behind each one's card is taken with this one's, see `hover_card::show`.)
+        let spots: Vec<_> = self.hits.iter().filter(|hit| hit.4.carded()).filter_map(|&(x, y, w, h, hit)| Some((hit, self.box_on_screen((x, y, w, h))?))).collect();
+        use crate::ui::hover_card::Side;
         let side = match self.edge {
             Edge::Left => Side::Right,
             Edge::Right => Side::Left,
@@ -5028,7 +5045,7 @@ impl<'a> Panel<'a> {
         let look = self.menu_look();
         // (Clear of its buttons' row, where it has one outside it: the card lay over them.)
         let clear = placement.rack.map(|(rack, _)| rack);
-        crate::ui::ai_card::show(self.window.hwnd, crate::ui::ai_card::Of { spot, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side, clear);
+        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side, clear);
         self.carding = true;
     }
 
@@ -5060,7 +5077,7 @@ impl<'a> Panel<'a> {
         let hover = self.hit_at(client).filter(|hit| hit.list().is_none());
         match (hover, self.hover) {
             // (Not on its buttons, which may lie on that way: see `DOCK_RACK`.)
-            (hover, Some(Hit::AiSlot(spot))) if !matches!(hover, Some(Hit::AiSlot(_) | Hit::Pin | Hit::Settings)) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::ai_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(Hit::AiSlot(spot)),
+            (hover, Some(kept)) if kept.carded() && !hover.is_some_and(|hover| hover.carded() || matches!(hover, Hit::Pin | Hit::Settings)) && self.carding && self.placement.as_ref().is_some_and(|placement| crate::ui::hover_card::holds(POINT { x: client.x + placement.window.left, y: client.y + placement.window.top })) => Some(kept),
             (hover, _) => hover,
         }
     }
@@ -5180,6 +5197,7 @@ impl<'a> Panel<'a> {
                 self.music.back_to_now();
             }
             Some(Hit::Drive(letter)) => open_drive(letter),
+            Some(Hit::Folder(number)) => open_folder(number),
             Some(hit) if crate::station::pressed(hit) => {}
             Some(Hit::Tab(tab)) => {
                 self.tab = tab;
@@ -5622,6 +5640,13 @@ pub(crate) fn open_drive(letter: char) {
             windows::Win32::UI::Shell::ShellExecuteW(None, windows::core::w!("open"), &root, windows::core::PCWSTR::null(), windows::core::PCWSTR::null(), windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL);
         }
     });
+}
+
+/// The folder told of that `number` stands for opened in Explorer (see `folders`).
+pub(crate) fn open_folder(number: u64) {
+    if let Some(folder) = crate::folders::numbered(number) {
+        crate::folders::open(folder.path);
+    }
 }
 
 /// Whether a mouse button is down: as the sensors' process says while there is one (it reads them truly whatever
