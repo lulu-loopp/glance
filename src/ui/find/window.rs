@@ -33,6 +33,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::pages::{Opens, PAGES};
 use super::results::{self, Group, Kind, Line, More, Row, Shown, Sources, View, What};
 use crate::search::{Order, Sort};
+use crate::settings::WebSearch;
 use std::collections::HashMap;
 use crate::station::recent::Kind as FileKind;
 use crate::station::run::{self, Ask, FilesAct};
@@ -93,6 +94,8 @@ const TEXT_LEFT: f32 = 52.0;
 const BEST_TEXT_LEFT: f32 = 62.0;
 /// Room on the right of a file's row for its size and when it changed.
 const META: f32 = 150.0;
+/// The key that looks for what is typed on the web, said on its row (see `procedure`).
+const WEB_KEY: &str = "Alt+Enter";
 /// How far down its screen's room the sheet's top is.
 const DOWN: f32 = 0.16;
 /// The most that may be typed (UTF-16 units).
@@ -143,7 +146,8 @@ pub fn in_front() -> bool {
     WINDOW.get().copied().flatten().is_some_and(|hwnd| unsafe { GetForegroundWindow() }.0 as isize == hwnd)
 }
 
-/// What is asked of the finding thread: what is typed, in which view, the files all or not, in which language; its
+/// What is asked of the finding thread: what is typed, in which view, the files all or not, in which language, and what
+/// a web search of it is made with; its
 /// number (an answer to an older one is not shown), and whether what is picked goes back to the first.
 struct Asked {
     number: u64,
@@ -152,6 +156,7 @@ struct Asked {
     expanded: bool,
     order: crate::search::Order,
     lang: Lang,
+    web: WebSearch,
     fresh: bool,
 }
 
@@ -220,7 +225,7 @@ fn work(asks: Receiver<Asked>, hwnd: isize, tells: Sender<(u64, Vec<(PathBuf, bo
         let held = run::shown();
         let lately = crate::station::recent::shown();
         let files = |query: &crate::search::Query, most: usize| crate::search::find(query, most);
-        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, tags: &held.tags, lately: &lately, files: &files, lang: asked.lang };
+        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, tags: &held.tags, lately: &lately, files: &files, lang: asked.lang, web: asked.web };
         let shown = results::gather(&asked.typed, asked.view, asked.expanded, asked.order, &sources);
         let paths = shown.paths();
         *ANSWER.lock().unwrap() = Some((asked.number, asked.fresh, shown));
@@ -399,6 +404,8 @@ struct Finder {
     expanded: bool,
     /// The order its files and folders are put in (see `search::Order`): as last chosen, kept in the settings.
     order: crate::search::Order,
+    /// What a web search is made with, as the settings have it.
+    web: WebSearch,
     shown: Shown,
     asked: u64,
     /// The asking what is shown was found for.
@@ -406,6 +413,10 @@ struct Finder {
     /// The preview's shortcut pressed before what was last asked was found: what it finds picked is looked at larger
     /// as it comes (see `previewing`).
     look_found: bool,
+    /// What a key does with the name picked, pressed before what was last asked was found: done as it comes (see
+    /// `act_by_key`); and the asking last made as a name was picked by its keys, of those shown.
+    act_found: Option<Act>,
+    picked_for: u64,
     asks: Sender<Asked>,
     /// The name picked (by its place among those shown), and how far the list is scrolled; whether it is to scroll to
     /// show the one picked when next drawn.
@@ -464,10 +475,13 @@ impl Finder {
             view: View::All,
             expanded: false,
             order: crate::search::Order::default(),
+            web: WebSearch::default(),
             shown: Shown::default(),
             asked: 0,
             shown_for: 0,
             look_found: false,
+            act_found: None,
+            picked_for: 0,
             asks,
             pick: 0,
             scroll: 0.0,
@@ -534,7 +548,10 @@ impl Finder {
             self.drawn = None;
         }
         (self.skin, self.lang) = (skin, lang);
-        self.order = crate::app().settings.lock().unwrap().search_order;
+        {
+            let settings = crate::app().settings.lock().unwrap();
+            (self.order, self.web) = (settings.search_order, settings.web_search);
+        }
         // The drives indexed (once, from now, the machine settled or not), and the Start menu read again (as programs
         // come and go).
         crate::search::asked();
@@ -621,6 +638,7 @@ impl Finder {
             look::close();
         }
         self.look_found = false;
+        self.act_found = None;
         let held = unsafe { GetForegroundWindow() } == self.hwnd;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), CARET);
@@ -654,8 +672,12 @@ impl Finder {
     /// What is typed looked for (again), in the view chosen: `fresh`, the first name picked once it is found.
     fn ask(&mut self, fresh: bool) {
         self.asked += 1;
+        // (Something else asked: what was to be done with what it was before finds is not.)
+        if fresh {
+            self.act_found = None;
+        }
         ASKED.store(self.asked, Ordering::Release);
-        let _ = self.asks.send(Asked { number: self.asked, typed: self.typing.string(), view: self.view, expanded: self.expanded, order: self.order, lang: self.lang, fresh });
+        let _ = self.asks.send(Asked { number: self.asked, typed: self.typing.string(), view: self.view, expanded: self.expanded, order: self.order, lang: self.lang, web: self.web, fresh });
     }
 
     /// What was found, if it is for what was last asked.
@@ -696,6 +718,9 @@ impl Finder {
         // (Asked to be looked at larger before it came: what it found picked is.)
         if std::mem::take(&mut self.look_found) {
             self.preview();
+        }
+        if let Some(act) = self.act_found.take() {
+            return self.act(act);
         }
         self.draw();
         if self.preview_owed {
@@ -1203,7 +1228,9 @@ impl Finder {
         self.paint_icon(frame, ink, row, centre, side, shown);
         let left = if best { BEST_TEXT_LEFT } else { TEXT_LEFT };
         let meta = self.meta(row);
-        let room = WIDTH - INSET - 12.0 - left - if meta.is_some() { META + 12.0 } else { 0.0 };
+        let key_font = self.font(11.5, 400.0);
+        let key = (row.kind == Kind::Web).then(|| (WEB_KEY, frame.gfx.measure(WEB_KEY, key_font)));
+        let room = WIDTH - INSET - 12.0 - left - if meta.is_some() { META + 12.0 } else { key.map_or(0.0, |(_, wide)| wide + 12.0) };
         let name_font = if best { self.font(15.0, 600.0) } else { self.font(13.5, 400.0) };
         let detail_font = self.font(11.5, 400.0);
         let (name_top, detail_top) = if best { (y + 10.0, y + 33.0) } else { (y + 5.0, y + 24.0) };
@@ -1229,6 +1256,11 @@ impl Finder {
         }
         frame.text(&shown_name, name_font, ink.text, left, name_top, room + 2.0, Align::Start);
         frame.text(&row.detail, detail_font, ink.text3, left, detail_top, room, Align::Start);
+        // The key that does what it does, whatever is picked.
+        if let Some((key, wide)) = key {
+            let (ascent, descent) = frame.gfx.baseline(key_font);
+            frame.text(key, key_font, ink.text3, WIDTH - INSET - 12.0 - wide, y + (tall - ascent - descent) / 2.0, wide + 1.0, Align::Start);
+        }
         // (What they are put in order by, lit: when it changed, or its size.)
         if let Some((size, when)) = meta {
             let right = WIDTH - INSET - 12.0 - META;
@@ -1276,6 +1308,9 @@ impl Finder {
             Kind::Held => Icon::Inbox,
             Kind::Copied => Icon::Clipboard,
             Kind::Todo => Icon::SquareCheck,
+            Kind::Sum => Icon::Calculator,
+            Kind::Address => Icon::Globe,
+            Kind::Web => Icon::Search,
         };
         frame.icon(icon, centre, side * if drawn { 0.9 } else { 0.85 }, ink.text2);
     }
@@ -1288,6 +1323,8 @@ impl Finder {
         let left = match &self.told {
             Some((said, at)) if at.elapsed() < TOLD_FOR => said.clone(),
             _ if self.typing.string().trim().is_empty() => lang.pick("Enter 打开 · Ctrl+Enter 打开所在位置 · Tab 切换类别", "Enter to open · Ctrl+Enter to show in folder · Tab for kinds").into(),
+            // (What is shown is what was typed itself: see `results::gather`.)
+            _ if self.shown.total == 0 && !self.shown.lines.is_empty() => lang.pick("本机未找到相符的项目", "Nothing found on this PC").into(),
             _ => match lang {
                 Lang::Zh => format!("共 {} 项", count_said(self.shown.total)),
                 Lang::En => format!("{} found", count_said(self.shown.total)),
@@ -1461,7 +1498,10 @@ impl Finder {
         self.draw();
         let Some(picked) = self.picked() else { return };
         let lang = self.lang;
-        let mut choices: Vec<(Act, &'static str, Icon)> = vec![(Act::Open, lang.pick("打开", "Open"), Icon::Maximize)];
+        let mut choices: Vec<(Act, &'static str, Icon)> = match picked.what {
+            What::Answer(_) => vec![(Act::Copy, lang.pick("复制结果", "Copy the result"), Icon::Copy)],
+            _ => vec![(Act::Open, lang.pick("打开", "Open"), Icon::Maximize)],
+        };
         if runs_as_admin(picked) {
             choices.push((Act::Admin, lang.pick("以管理员身份运行", "Run as administrator"), Icon::AppWindow));
         }
@@ -1474,6 +1514,7 @@ impl Finder {
                 choices.push((Act::CopyPath, lang.pick("复制路径", "Copy path"), Icon::Clipboard));
             }
             What::Item(_) => choices.push((Act::Copy, lang.pick("复制", "Copy"), Icon::Copy)),
+            What::Url(_) => choices.push((Act::Copy, lang.pick("复制网址", "Copy the address"), Icon::Copy)),
             _ => {}
         }
         let items = choices.iter().map(|(_, label, icon)| Item::new(*label, Some(Mark::Icon(*icon)), false, false)).collect();
@@ -1566,6 +1607,7 @@ impl Finder {
                     VK_PRIOR => self.pick.saturating_sub(page),
                     _ => (self.pick + page).min(rows - 1),
                 };
+                self.picked_for = self.asked;
                 self.follow = true;
             }
             VK_TAB => {
@@ -1574,15 +1616,15 @@ impl Finder {
                 return self.choose(View::EVERY[if shift { (at + n - 1) % n } else { (at + 1) % n }]);
             }
             VK_RETURN => {
-                return self.act(match (ctrl, shift) {
+                return self.act_by_key(match (ctrl, shift) {
                     (true, true) => Act::Admin,
                     (true, false) => Act::Show,
                     _ => Act::Open,
                 });
             }
-            VK_C if ctrl && shift => return self.act(Act::CopyPath),
+            VK_C if ctrl && shift => return self.act_by_key(Act::CopyPath),
             // (Copied with nothing of the field selected: the name picked.)
-            VK_C if ctrl && self.typing.selection().is_empty() => return self.act(Act::Copy),
+            VK_C if ctrl && self.typing.selection().is_empty() => return self.act_by_key(Act::Copy),
             _ => return self.type_key(key, shift, ctrl),
         }
         self.draw();
@@ -1754,6 +1796,25 @@ impl Finder {
 
     // ----- What is done -----
 
+    /// `act` done with the name picked, asked for by a key: with what is typed now, once it is found, not with what is
+    /// still shown of what was typed before (a sum's last figure typed and Enter at once copied what it came to without
+    /// it); with the one picked of those still shown, where it was picked among them since.
+    fn act_by_key(&mut self, act: Act) {
+        if acts_now(self.asked, self.shown_for, self.picked_for) {
+            self.act(act);
+        } else {
+            self.act_found = Some(act);
+        }
+    }
+
+    /// What is typed looked for on the web, whatever is picked.
+    fn search_web(&mut self) {
+        let Some(Row { what: What::Url(url), .. }) = results::web_row(&self.typing.string(), self.web, self.lang) else { return };
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+        shell("open", &url, "");
+        self.close(false);
+    }
+
     /// `act` done with the name picked; the window gone after it opened something, or showed it.
     fn act(&mut self, act: Act) {
         let Some(row) = self.picked().cloned() else { return };
@@ -1792,6 +1853,21 @@ impl Finder {
                 crate::todo::add(text, None);
                 self.close(false);
                 return;
+            }
+            // (Copied: the front is given back to what it is pasted into.)
+            (What::Answer(figures), Act::Open) => {
+                run::ask(Ask::CopyText(figures.clone(), None));
+                self.close(true);
+                return;
+            }
+            (What::Answer(figures), Act::Copy) => {
+                run::ask(Ask::CopyText(figures.clone(), None));
+                self.tell(&format!("{}{figures}", lang.pick("已复制 ", "Copied ")));
+            }
+            (What::Url(url), Act::Open) => shell("open", url, ""),
+            (What::Url(url), Act::Copy) => {
+                run::ask(Ask::CopyText(url.clone(), None));
+                self.tell(lang.pick("已复制网址", "Address copied"));
             }
             (What::Item(id), Act::Open) => run::ask(Ask::Open(*id)),
             (What::Item(id), Act::Show) => run::ask(Ask::Show(*id)),
@@ -1833,6 +1909,12 @@ impl Finder {
             self.draw();
         }
     }
+}
+
+/// Whether what a key does is done at once: what shows is found for what was last asked (`asked`, what shows found for
+/// `shown_for`), or a name of it was picked since (`picked_for`).
+fn acts_now(asked: u64, shown_for: u64, picked_for: u64) -> bool {
+    shown_for == asked || picked_for == asked
 }
 
 /// The colours what is on the sheet is drawn in, besides the sheet's own.
@@ -2186,7 +2268,7 @@ fn key_of(what: &What) -> u64 {
 }
 
 /// What `row` is looked at larger as (see `ui::look`): a file or folder, a thing on the station or copied lately, a note.
-/// None: a program, a page of Settings (nothing more to show of them).
+/// None: a program, a page of Settings, what was typed itself (nothing more to show of them).
 fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
     let key = key_of(&row.what);
     match &row.what {
@@ -2218,7 +2300,7 @@ fn looked_at(row: &Row, lang: Lang) -> Option<look::Item> {
                 pastes: false,
             })
         }
-        What::Program(_) | What::Page(_) | What::Todo(_) => None,
+        What::Program(_) | What::Page(_) | What::Todo(_) | What::Answer(_) | What::Url(_) => None,
     }
 }
 
@@ -2278,6 +2360,16 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             let mut typed = MSG::default();
             let _ = unsafe { PeekMessageW(&mut typed, Some(hwnd), WM_CHAR, WM_SYSCHAR, PM_REMOVE) };
             with(Finder::preview);
+            LRESULT(0)
+        }
+        // Alt+Enter: what is typed looked for on the web (once as it goes down; the beep of what it would type taken
+        // with it).
+        WM_SYSKEYDOWN if VIRTUAL_KEY(wparam.0 as u16) == VK_RETURN && !held(VK_CONTROL) => {
+            let mut typed = MSG::default();
+            let _ = unsafe { PeekMessageW(&mut typed, Some(hwnd), WM_SYSCHAR, WM_SYSCHAR, PM_REMOVE) };
+            if lparam.0 & (1 << 30) == 0 {
+                with(Finder::search_web);
+            }
             LRESULT(0)
         }
         // Space while its look shows what plays: played or paused (the space it would type taken with it).
@@ -2636,6 +2728,23 @@ mod tests {
         assert_eq!(previewing(true, true, false), Previewing::Close);
     }
 
+    /// What Enter does is done with what is typed now: not found yet (what shows is of what was typed before), once it
+    /// is; at once, where a name shown was picked since by the arrows.
+    #[test]
+    fn what_a_key_does_waits_for_what_is_typed_to_be_found() {
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let mut finder = Finder::new(HWND::default(), asks);
+        finder.ask(true);
+        finder.act_by_key(Act::Open);
+        assert_eq!(finder.act_found, Some(Act::Open));
+        // Asked again for what is typed all the same (the programs listed): still to be done. Something else typed: not.
+        finder.ask(false);
+        assert_eq!(finder.act_found, Some(Act::Open));
+        finder.ask(true);
+        assert_eq!(finder.act_found, None);
+        assert!(!acts_now(2, 1, 1) && acts_now(2, 2, 1) && acts_now(2, 1, 2));
+    }
+
     #[test]
     fn counts_are_said_with_their_thousands_apart() {
         assert_eq!(count_said(0), "0");
@@ -2691,26 +2800,40 @@ mod tests {
             Line::Head(Group::Glance, More::No),
             Line::Row(row(Kind::Note, "周会纪要 微调方案", vec![(5, 6)], "便签", What::Note("a.md".into()), None, None), false),
         ];
+        // What is typed itself: a sum's answer, what else is found, and the web search.
+        let sum = vec![
+            Line::Row(row(Kind::Sum, "= 2,026.11", vec![], "2000 + 26.11 · 按 Enter 复制结果", What::Answer("2026.11".into()), None, None), true),
+            Line::Head(Group::Files, More::No),
+            Line::Row(row(Kind::File(FileKind::Document), "2000+26.11.csv", vec![(0, 10)], r"D:\Documents\Exports", path(r"D:\Documents\Exports\2000+26.11.csv"), Some(48_213), Some(3_600)), false),
+            Line::Head(Group::Web, More::No),
+            Line::Row(row(Kind::Address, "打开 main.rs", vec![], "在默认浏览器中打开", What::Url("https://main.rs".into()), None, None), false),
+            Line::Row(row(Kind::Web, "在必应中搜索“2000+26.11”", vec![], "在默认浏览器中打开", What::Url("https://www.bing.com/search?q=".into()), None, None), false),
+        ];
         let looks = [(Skin::Fluent, false), (Skin::Glass, false), (Skin::Paper, false), (Skin::Fluent, true), (Skin::Glass, true), (Skin::Paper, true)];
         let room = theme::room(&Theme::new(Skin::Glass, false).shadows).max(SHADOW);
         let mut finders: Vec<Finder> = looks
             .iter()
-            .map(|&(skin, dark)| {
+            .chain(&looks)
+            .enumerate()
+            .map(|(at, &(skin, dark))| {
+                let typed_itself = at >= looks.len();
                 let mut finder = Finder::new(HWND::default(), asks.clone());
                 (finder.skin, finder.dark, finder.lang, finder.room) = (skin, dark, Lang::Zh, room);
-                finder.typing.put(&"wei".encode_utf16().collect::<Vec<_>>());
-                finder.shown = Shown { lines: lines.clone(), total: 312 };
+                finder.typing.put(&if typed_itself { "2000+26.11" } else { "wei" }.encode_utf16().collect::<Vec<_>>());
+                finder.shown = if typed_itself { Shown { lines: sum.clone(), total: 1 } } else { Shown { lines: lines.clone(), total: 312 } };
                 finder.pick = 0;
                 finder.height = finder.sheet_height();
                 finder
             })
             .collect();
         let (cell_w, cell_h, px) = (WIDTH + 2.0 * room, finders[0].height + 2.0 * room, 1.5f32);
-        let (w, h) = ((3.0 * cell_w * px) as u32, (2.0 * cell_h * px) as u32);
+        let (w, h) = ((3.0 * cell_w * px) as u32, (4.0 * cell_h * px) as u32);
         let pixels = gfx
             .draw_offscreen((w, h), px, |frame| {
                 frame.fill(Color::hex(0x7C93B4, 1.0), 0.0, 0.0, 3.0 * cell_w, cell_h);
                 frame.fill(Color::hex(0x1B2433, 1.0), 0.0, cell_h, 3.0 * cell_w, cell_h);
+                frame.fill(Color::hex(0x7C93B4, 1.0), 0.0, 2.0 * cell_h, 3.0 * cell_w, cell_h);
+                frame.fill(Color::hex(0x1B2433, 1.0), 0.0, 3.0 * cell_h, 3.0 * cell_w, cell_h);
                 for (at, finder) in finders.iter_mut().enumerate() {
                     let frosted = finder.skin != Skin::Paper;
                     finder.paint(frame, frosted, ((at % 3) as f32 * cell_w + room, (at / 3) as f32 * cell_h + room));

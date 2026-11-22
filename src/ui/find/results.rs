@@ -2,13 +2,17 @@
 //! folders and files, and Glance's own (notes, what is on the station, what was copied lately) whose names meet it,
 //! the best of all first, then each kind under its heading, a few of each. A view shows one kind alone, as many as
 //! fit. Nothing typed, it shows what came lately (the files, Recent files'), the programs (A to Z), or Glance's own.
+//! The view of all shows what is typed itself too: a sum's answer, the address it is, or a web search of it.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::address::{self, Address};
 use super::pages::{Page, PAGES};
+use super::sum;
 use crate::notes::Note;
 use crate::search::{Only, Order, Query};
+use crate::settings::WebSearch;
 use crate::station::found::Found as Program;
 use crate::station::recent::{self, Came, Kind as FileKind};
 use crate::station::shelf::{Item, Tag, What as Held};
@@ -91,6 +95,12 @@ pub enum Kind {
     Copied,
     /// What was typed after "待办 ", to be added as a to-do.
     Todo,
+    /// A sum typed, worked out.
+    Sum,
+    /// A web address typed.
+    Address,
+    /// A web search of what was typed.
+    Web,
 }
 
 /// What opens it.
@@ -107,6 +117,10 @@ pub enum What {
     Item(u64),
     /// A to-do to add, its words as typed (see `todo_row`).
     Todo(String),
+    /// A sum's answer, its figures as they are copied.
+    Answer(String),
+    /// A web address, opened in the browser.
+    Url(String),
 }
 
 /// A name found: what it is, its name and where its words met it (characters of the name), what is said under it
@@ -136,6 +150,8 @@ pub enum Group {
     Glance,
     /// What came lately (nothing typed).
     Lately,
+    /// What opens in the browser: the address typed, a web search.
+    Web,
 }
 
 impl Group {
@@ -148,6 +164,7 @@ impl Group {
             Group::Found => lang.pick("文件和文件夹", "Files and folders"),
             Group::Glance => "Glance",
             Group::Lately => lang.pick("最近的文件", "Recent files"),
+            Group::Web => lang.pick("网页", "Web"),
         }
     }
 }
@@ -169,7 +186,8 @@ pub enum Line {
     Others(usize),
 }
 
-/// What is shown, and how many names were found in all.
+/// What is shown, and how many names were found in all (a to-do to add counted; a sum, an address and a web search
+/// not: they were not found).
 #[derive(Clone, Debug, Default)]
 pub struct Shown {
     pub lines: Vec<Line>,
@@ -210,7 +228,8 @@ impl Shown {
 }
 
 /// Where names are found: the Start menu's programs, the notes, what the station holds, the files that came lately,
-/// the drives' files and folders (as `search::find` finds them), in the language the user reads.
+/// the drives' files and folders (as `search::find` finds them), in the language the user reads; and what a web search
+/// is made with.
 pub struct Sources<'a> {
     pub programs: &'a [Program],
     pub notes: &'a [Note],
@@ -220,6 +239,7 @@ pub struct Sources<'a> {
     pub lately: &'a [Came],
     pub files: &'a dyn Fn(&Query, usize) -> crate::search::Found,
     pub lang: Lang,
+    pub web: WebSearch,
 }
 
 /// How many of each kind the view of all shows under its heading; how many files once all are asked for; how many a
@@ -239,19 +259,85 @@ const PROGRAM_FIRST: f32 = 1.0;
 const PAGE_FIRST: f32 = 0.5;
 
 /// What is shown for `typed` in `view` (the files all, `expanded`), its files and folders in `order`, from `sources`.
+/// First of all, larger, what is typed itself, where it is something: what adds it as a to-do (in every view), else (in
+/// the view of all) its sum's answer, or what opens the address it is. Last of all, in the view of all, a web search
+/// of it (nothing else shown: it alone, larger), after the address, where that is not first.
 pub fn gather(typed: &str, view: View, expanded: bool, order: Order, sources: &Sources) -> Shown {
-    let mut shown = found(typed, view, expanded, order, sources);
-    // Typed after "待办 ": first of all, larger, what adds it as a to-do.
-    if let Some(row) = todo_row(typed, sources.lang) {
-        for line in shown.lines.iter_mut() {
-            if let Line::Row(_, best) = line {
-                *best = false;
-            }
-        }
+    let lang = sources.lang;
+    let of_all = view == View::All && !Query::read(typed).is_empty();
+    let todo = todo_row(typed, lang);
+    let sum = if of_all && todo.is_none() { sum_row(typed, lang) } else { None };
+    let address = if of_all && todo.is_none() && sum.is_none() { address::typed(typed) } else { None };
+    // (What may be a file's name as well gives way to a file there is.)
+    let (opens_first, opens_last) = match address {
+        Some(address) if address.sure || !named(typed, sources) => (Some(address_row(typed, address, lang)), None),
+        Some(address) => (None, Some(address_row(typed, address, lang))),
+        None => (None, None),
+    };
+    let todos = usize::from(todo.is_some());
+    let first = todo.or(sum).or(opens_first);
+    let mut shown = found(typed, view, expanded, order, first.is_none(), sources);
+    shown.total += todos;
+    if let Some(row) = first {
         shown.lines.insert(0, Line::Row(row, true));
-        shown.total += 1;
+    }
+    if of_all {
+        let last: Vec<Row> = opens_last.into_iter().chain(web_row(typed, sources.web, lang)).collect();
+        if shown.lines.is_empty() {
+            shown.lines.extend(last.into_iter().map(|row| Line::Row(row, true)));
+        } else if !last.is_empty() {
+            shown.lines.push(Line::Head(Group::Web, More::No));
+            shown.lines.extend(last.into_iter().map(|row| Line::Row(row, false)));
+        }
     }
     shown
+}
+
+/// Whether a file, a folder or a program there is has a name ending in what was typed (`main.rs`, a file of that name
+/// or `domain.rs`).
+fn named(typed: &str, sources: &Sources) -> bool {
+    let typed = typed.trim();
+    let end = typed.to_lowercase();
+    sources.programs.iter().any(|program| program.name.to_lowercase().ends_with(&end)) || (sources.files)(&Query::read(&format!("*{typed}")), 1).total > 0
+}
+
+/// A row for what is typed itself, shown as `name`, `detail` under it.
+fn own_row(kind: Kind, name: String, detail: String, what: What) -> Row {
+    Row { kind, name, marks: Vec::new(), detail, what, rank: f32::MAX, bytes: None, changed: None }
+}
+
+/// What was typed, worked out, where it is a sum.
+fn sum_row(typed: &str, lang: Lang) -> Option<Row> {
+    let answer = sum::worked_out(typed)?;
+    let detail = format!("{} · {}", answer.said, lang.pick("按 Enter 复制结果", "Enter copies the result"));
+    Some(own_row(Kind::Sum, answer.shown, detail, What::Answer(answer.plain)))
+}
+
+fn address_row(typed: &str, address: Address, lang: Lang) -> Row {
+    let typed = typed.trim();
+    let name = match lang {
+        Lang::Zh => format!("打开 {typed}"),
+        Lang::En => format!("Open {typed}"),
+    };
+    own_row(Kind::Address, name, in_browser(lang).into(), What::Url(address.url))
+}
+
+fn in_browser(lang: Lang) -> &'static str {
+    lang.pick("在默认浏览器中打开", "In the default browser")
+}
+
+/// A web search of what was typed, where one is made with anything.
+pub fn web_row(typed: &str, web: WebSearch, lang: Lang) -> Option<Row> {
+    let typed = typed.trim();
+    let url = web.url(typed).filter(|_| !typed.is_empty())?;
+    let engine = web.name(lang);
+    let name = match lang {
+        // (A space between a name in letters and the words round it.)
+        Lang::Zh if engine.is_ascii() => format!("在 {engine} 中搜索“{typed}”"),
+        Lang::Zh => format!("在{engine}中搜索“{typed}”"),
+        Lang::En => format!("Search {engine} for \u{201C}{typed}\u{201D}"),
+    };
+    Some(own_row(Kind::Web, name, in_browser(lang).into(), What::Url(url)))
 }
 
 /// The words typed after what says they are a to-do ("待办 ", "todo "), where they are: as a row that adds them, what
@@ -269,13 +355,14 @@ pub fn todo_row(typed: &str, lang: Lang) -> Option<Row> {
     }
     let name = format!("{}{words}", lang.pick("添加为待办：", "Add as to-do: "));
     let detail = due.map_or_else(|| lang.pick("待办", "To-do").to_string(), |due| due.label(crate::todo::Day::today(), lang == Lang::Zh));
-    Some(Row { kind: Kind::Todo, name, marks: Vec::new(), detail, what: What::Todo(rest.to_string()), rank: f32::MAX, bytes: None, changed: None })
+    Some(own_row(Kind::Todo, name, detail, What::Todo(rest.to_string())))
 }
 
 /// What was found of what was typed (see `gather`). In another order than how well they meet it, the files and folders
 /// are the first of all of them in it, together (the view of all shows them under one heading, and none first larger);
-/// what else is found keeps its place and its order.
-fn found(typed: &str, view: View, expanded: bool, order: Order, sources: &Sources) -> Shown {
+/// what else is found keeps its place and its order. The best of all is shown first, larger, unless something else is
+/// (`best_first` not): it is under its heading then, the first there.
+fn found(typed: &str, view: View, expanded: bool, order: Order, best_first: bool, sources: &Sources) -> Shown {
     let query = Query::read(typed).ordered(order);
     let ordered = order.other() && view.sorts();
     if query.is_empty() {
@@ -320,7 +407,7 @@ fn found(typed: &str, view: View, expanded: bool, order: Order, sources: &Source
         }
         let others = total.saturating_sub(LISTED.min(rows.len()));
         rows.truncate(LISTED);
-        let mut lines: Vec<Line> = rows.into_iter().enumerate().map(|(at, row)| { let best = at == 0 && matches!(row.kind, Kind::Program | Kind::Page | Kind::Tool); Line::Row(row, best) }).collect();
+        let mut lines: Vec<Line> = rows.into_iter().enumerate().map(|(at, row)| { let best = best_first && at == 0 && matches!(row.kind, Kind::Program | Kind::Page | Kind::Tool); Line::Row(row, best) }).collect();
         if others > 0 {
             lines.push(Line::Others(others));
         }
@@ -341,7 +428,7 @@ fn found(typed: &str, view: View, expanded: bool, order: Order, sources: &Source
     // The best of all first, larger, then each kind under its heading (how many of each were found, the best one too).
     let sizes = [programs.len(), pages.len(), found.folders, found.total - found.folders, glance.len()];
     let mut groups = [programs, pages, folders, files, glance];
-    let best = groups.iter().enumerate().filter_map(|(at, rows)| rows.first().map(|row| (at, row.rank))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(at, _)| at);
+    let best = groups.iter().enumerate().filter_map(|(at, rows)| rows.first().map(|row| (at, row.rank))).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(at, _)| at).filter(|_| best_first);
     if let Some(at) = best {
         lines.push(Line::Row(groups[at].remove(0), true));
     }
@@ -589,6 +676,8 @@ mod tests {
         "a\\music 5.txt",
         "a\\music 6.txt",
         "a\\music 7.txt",
+        "Code\\main.rs",
+        "Code\\main.rs.bak",
     ];
 
     /// What is shown for `typed` in `view`, a line each: `#` a heading (and how many more there are, or `all`, how
@@ -599,13 +688,19 @@ mod tests {
 
     /// As `shown`, the files and folders in `order`.
     fn shown_in(typed: &str, view: View, expanded: bool, order: Order, notes: &[Note], held: &[Item], lately: &[Came]) -> Vec<String> {
+        shown_with(typed, view, expanded, order, notes, held, lately, WebSearch::Off)
+    }
+
+    /// As `shown_in`, a web search made with `web`.
+    #[allow(clippy::too_many_arguments)]
+    fn shown_with(typed: &str, view: View, expanded: bool, order: Order, notes: &[Note], held: &[Item], lately: &[Came], web: WebSearch) -> Vec<String> {
         let programs = [program("Steam"), program("网易云音乐"), program("QQ音乐"), program("Visual Studio Code")];
         let index = drive(PATHS);
         let files = |query: &Query, most: usize| {
             let (total, folders, hits) = query.find(&index, "D:\\", most);
             crate::search::Found { total, folders, hits }
         };
-        let sources = Sources { programs: &programs, notes, held, tags: &[], lately, files: &files, lang: Lang::Zh };
+        let sources = Sources { programs: &programs, notes, held, tags: &[], lately, files: &files, lang: Lang::Zh, web };
         gather(typed, view, expanded, order, &sources)
             .lines
             .iter()
@@ -705,6 +800,71 @@ mod tests {
         assert!(held_row(&item, &tags, &Query::read("常用"), Lang::Zh).is_none());
     }
 
+    /// In the view of all, a sum's answer comes first, larger, what else is found under its headings (the best too), and
+    /// a web search last; nothing found, the search comes first, larger. No other view shows them.
+    #[test]
+    fn what_is_typed_itself_is_shown_with_what_is_found() {
+        let web = |typed: &str, view: View| shown_with(typed, view, false, Order::default(), &[], &[], &[], WebSearch::Bing);
+        assert_eq!(web("128*6.5+40", View::All), ["* = 872", "# 网页", "在必应中搜索“128*6.5+40”"]);
+        assert_eq!(web("steam", View::All), ["* Steam", "# 文件夹", "Steam", "# 网页", "在必应中搜索“steam”"]);
+        assert_eq!(web("zzqq", View::All), ["* 在必应中搜索“zzqq”"]);
+        assert_eq!(web(" ", View::All), Vec::<String>::new());
+        for typed in ["128*6.5+40", "github.com", "zzqq"] {
+            assert!(web(typed, View::Files).is_empty() && web(typed, View::Programs).is_empty(), "{typed}");
+        }
+        // (A search engine not used: none of it.)
+        assert_eq!(found("128*6.5+40", View::All), ["* = 872"]);
+        assert_eq!(found("zzqq", View::All), Vec::<String>::new());
+        // In another order too.
+        let by_name = Order { by: crate::search::Sort::Name, reversed: false };
+        assert_eq!(shown_with("music 1", View::All, false, by_name, &[], &[], &[], WebSearch::Google), ["# 文件和文件夹", "music 1.txt", "# 网页", "在 Google 中搜索“music 1”"]);
+        // A to-do to add comes before them, the web search last all the same.
+        assert_eq!(web("待办 steam", View::All), ["* 添加为待办：steam", "# 网页", "在必应中搜索“待办 steam”"]);
+    }
+
+    /// An address typed comes first, what else is found after it; where it may be the name of a file there is, the file
+    /// first, the address before the web search.
+    #[test]
+    fn an_address_gives_way_to_a_file_of_that_name() {
+        let web = |typed: &str| shown_with(typed, View::All, false, Order::default(), &[], &[], &[], WebSearch::Baidu);
+        assert_eq!(web("github.com"), ["* 打开 github.com", "# 网页", "在百度中搜索“github.com”"]);
+        assert_eq!(web("main.rs"), ["* main.rs", "# 文件", "main.rs.bak", "# 网页", "打开 main.rs", "在百度中搜索“main.rs”"]);
+        // (Only to a name ending in it: this one goes on.)
+        assert_eq!(web("in.rs.ba"), ["* 打开 in.rs.ba", "# 文件", "main.rs.bak", "# 网页", "在百度中搜索“in.rs.ba”"]);
+        assert_eq!(web("https://main.rs")[0], "* 打开 https://main.rs");
+        // Found in whatever order the files are put in.
+        let by_size = Order { by: crate::search::Sort::Size, reversed: false };
+        assert_eq!(shown_with("main.rs", View::All, false, by_size, &[], &[], &[], WebSearch::Off).last().map(String::as_str), Some("打开 main.rs"));
+        // What is copied already of it does not hold it back.
+        let held = [Item { id: 7, what: Held::Link { url: "https://github.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() }];
+        assert_eq!(shown_with("github.com", View::All, false, Order::default(), &[], &held, &[], WebSearch::Off), ["* 打开 github.com", "# Glance", "https://github.com"]);
+    }
+
+    /// What was found is counted, not the sum, the address or the web search beside it.
+    #[test]
+    fn only_what_is_found_is_counted() {
+        let index = drive(PATHS);
+        let files = |query: &Query, most: usize| {
+            let (total, folders, hits) = query.find(&index, "D:\\", most);
+            crate::search::Found { total, folders, hits }
+        };
+        let sources = Sources { programs: &[], notes: &[], held: &[], tags: &[], lately: &[], files: &files, lang: Lang::Zh, web: WebSearch::Bing };
+        let total = |typed: &str| gather(typed, View::All, false, Order::default(), &sources).total;
+        assert_eq!((total("1+1"), total("github.com"), total("main.rs"), total("zzqq")), (0, 0, 2, 0));
+    }
+
+    /// Each is what it does: the sum's answer copied in figures alone, the address opened, the words looked for in the
+    /// browser by the engine chosen.
+    #[test]
+    fn what_is_typed_itself_does_what_it_says() {
+        assert_eq!(sum_row("1000*2", Lang::Zh).map(|row| (row.name, row.detail, row.what)), Some(("= 2,000".into(), "1000 × 2 · 按 Enter 复制结果".into(), What::Answer("2000".into()))));
+        let row = address_row(" github.com ", address::typed(" github.com ").unwrap(), Lang::En);
+        assert_eq!((row.name.as_str(), row.what), ("Open github.com", What::Url("https://github.com".into())));
+        let row = web_row(" a&b ", WebSearch::DuckDuckGo, Lang::En).unwrap();
+        assert_eq!((row.name.as_str(), row.what), ("Search DuckDuckGo for \u{201C}a&b\u{201D}", What::Url("https://duckduckgo.com/?q=a%26b".into())));
+        assert!(web_row("a", WebSearch::Off, Lang::En).is_none() && web_row(" ", WebSearch::Bing, Lang::En).is_none());
+    }
+
     /// Files and folders found are shown before anything of them is asked of their drives (a USB drive busy held the
     /// list till each was), told of after (a folder's size never), and found again, told of as before till told anew.
     #[test]
@@ -715,7 +875,7 @@ mod tests {
             let (total, folders, hits) = query.find(&index, "D:\\", most);
             crate::search::Found { total, folders, hits }
         };
-        let sources = Sources { programs: &programs, notes: &[], held: &[], tags: &[], lately: &[], files: &files, lang: Lang::Zh };
+        let sources = Sources { programs: &programs, notes: &[], held: &[], tags: &[], lately: &[], files: &files, lang: Lang::Zh, web: WebSearch::Off };
         let mut shown = gather("music", View::All, false, Order::default(), &sources);
         assert!(shown.rows().all(|row| row.bytes.is_none() && row.changed.is_none()));
         let paths = shown.paths();

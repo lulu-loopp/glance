@@ -68,7 +68,7 @@ use super::view::{self, Rect, Scene};
 use super::wallpaper;
 use crate::elevation;
 use crate::metrics;
-use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitivity, Settings, Shortcut, EDGES};
+use crate::settings::{Anchor, Edge, OverFullscreen, OverlayShown, Part, Sensitivity, Settings, Shortcut, WebSearch, EDGES};
 
 pub(crate) mod guide;
 mod layout_page;
@@ -1208,6 +1208,8 @@ enum Field {
     Anchor,
     Columns,
     OverFullscreen,
+    /// What search looks for words on the web with (see `settings::WebSearch`).
+    WebSearch,
     Push,
     CloseDelay,
     RateUnit,
@@ -3089,6 +3091,8 @@ impl Ui {
                 Row::Shortcut(Keys::Panel),
                 Row::Shortcut(Keys::Search),
                 Row::Shortcut(Keys::Preview),
+                Row::Group(pick(self.lang, "搜索", "Search")),
+                Row::Choice(Field::WebSearch),
             ]),
             (Page::Look, _) => {
                 rows.extend([Row::Skins, Row::Choice(Field::Theme)]);
@@ -4374,6 +4378,11 @@ impl Ui {
                 vec![s("不呼出", "Never"), s("仅快捷键", "Shortcut"), s("快捷键与边缘", "Shortcut and edge")],
                 [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both].iter().position(|&o| o == settings.over_fullscreen),
             ),
+            Field::WebSearch => (
+                pick(lang, "网页搜索", "Web search"),
+                WebSearch::ALL.iter().map(|engine| engine.name(lang).to_string()).collect(),
+                WebSearch::ALL.iter().position(|&engine| engine == settings.web_search),
+            ),
             Field::Columns => (
                 pick(lang, "面板列数", "Columns"),
                 vec![s("自动", "Auto"), "1".into(), "2".into(), "3".into(), "4".into()],
@@ -4463,6 +4472,7 @@ impl Ui {
             }
             Field::Columns => settings.set_columns(part, [None, Some(1), Some(2), Some(3), Some(4)][index]),
             Field::OverFullscreen => settings.over_fullscreen = [OverFullscreen::Never, OverFullscreen::Shortcut, OverFullscreen::Both][index],
+            Field::WebSearch => settings.web_search = WebSearch::ALL[index],
             Field::Push => settings.sensitivity = [Sensitivity::Light, Sensitivity::Medium, Sensitivity::Firm][index],
             Field::CloseDelay => settings.close_delay_ms = [200, 500, 1000][index],
             Field::RateUnit => prefs.network.bits = index == 1,
@@ -4885,6 +4895,11 @@ impl Ui {
                 "Chosen folders lists only the files in the folders below and their subfolders",
             )),
             Field::Push => Some(pick(self.lang, "鼠标抵住屏幕边缘后再向外推，即可呼出面板。力度越重，越不易误触", "Push the pointer on past the screen's edge to open the panel. Firmer is harder to set off by accident")),
+            Field::WebSearch => Some(pick(
+                self.lang,
+                "在浏览器中搜索所输入的文字时使用的搜索引擎。选择结果之前不会发送任何内容",
+                "Where the words typed are searched for in the browser. Nothing is sent until that result is chosen",
+            )),
             Field::OverFullscreen => Some(pick(
                 self.lang,
                 "包括独占全屏与无边框全屏的游戏。独占全屏的游戏会暂时切出，收起面板后自动恢复",

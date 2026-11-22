@@ -2,8 +2,11 @@
 //! workbench, that finds programs, Settings' pages, files and folders on every drive, and Glance's own notes and
 //! what its station holds, by any part of their names (or their pinyin) as it is typed.
 
+mod address;
 pub mod pages;
 pub mod results;
+mod sum;
 mod window;
 
+pub use address::quoted;
 pub use window::{in_front, preview, toggle};

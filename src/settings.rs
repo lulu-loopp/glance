@@ -670,6 +670,45 @@ impl Default for OverlaySettings {
     }
 }
 
+/// What search looks for words on the web with, in the browser.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearch {
+    #[default]
+    Bing,
+    Baidu,
+    Google,
+    DuckDuckGo,
+    /// Nothing: no web search is shown.
+    Off,
+}
+
+impl WebSearch {
+    pub const ALL: [WebSearch; 5] = [WebSearch::Bing, WebSearch::Baidu, WebSearch::Google, WebSearch::DuckDuckGo, WebSearch::Off];
+
+    pub fn name(self, lang: crate::ui::text::Lang) -> &'static str {
+        match self {
+            WebSearch::Bing => lang.pick("必应", "Bing"),
+            WebSearch::Baidu => lang.pick("百度", "Baidu"),
+            WebSearch::Google => "Google",
+            WebSearch::DuckDuckGo => "DuckDuckGo",
+            WebSearch::Off => lang.pick("不使用", "None"),
+        }
+    }
+
+    /// Where `words` are looked for.
+    pub fn url(self, words: &str) -> Option<String> {
+        let at = match self {
+            WebSearch::Bing => "https://www.bing.com/search?q=",
+            WebSearch::Baidu => "https://www.baidu.com/s?wd=",
+            WebSearch::Google => "https://www.google.com/search?q=",
+            WebSearch::DuckDuckGo => "https://duckduckgo.com/?q=",
+            WebSearch::Off => return None,
+        };
+        Some(format!("{at}{}", crate::ui::find::quoted(words)))
+    }
+}
+
 /// What opens the panel over a fullscreen game, borderless or exclusive.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -826,6 +865,8 @@ pub struct Settings {
     pub preview_shortcut: Option<Shortcut>,
     /// The order search puts the files and folders it finds in: as last chosen there.
     pub search_order: crate::search::Order,
+    /// What search looks for words on the web with.
+    pub web_search: WebSearch,
     /// How loud a video or a sound looked at plays (0 to 1), and whether it is muted: as it was last set there.
     pub look_volume: f32,
     pub look_muted: bool,
@@ -1074,6 +1115,7 @@ impl Default for Settings {
             search_shortcut: Some(Shortcut::search()),
             preview_shortcut: Some(Shortcut::preview()),
             search_order: Default::default(),
+            web_search: WebSearch::default(),
             look_volume: 0.7,
             look_muted: false,
             hotkey: None,
@@ -1685,6 +1727,16 @@ mod tests {
         assert_eq!(settings.search_order, Order { by: Sort::Name, reversed: true });
         let kept: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
         assert_eq!(kept.search_order, settings.search_order);
+    }
+
+    #[test]
+    fn search_keeps_the_engine_chosen() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.web_search, WebSearch::Bing);
+        let settings: Settings = serde_json::from_str(r#"{"web_search":"duckduckgo"}"#).unwrap();
+        assert_eq!(settings.web_search, WebSearch::DuckDuckGo);
+        let kept: Settings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(kept.web_search, settings.web_search);
     }
 
     #[test]
