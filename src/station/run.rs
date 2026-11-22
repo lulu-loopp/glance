@@ -184,10 +184,12 @@ pub fn as_was<T>(was: Arc<Shown>, draw: impl FnOnce() -> T) -> T {
 
 /// Its window's message: asked something (see `ask`).
 const ASKED: u32 = WM_APP + 1;
-/// Its timers: the clipboard read again (held by another program as it changed), what has stayed its days taken off.
+/// Its timers: the clipboard read again (held by another program as it changed), what has stayed its days taken off,
+/// what is dragged looked for, what was used listed so (see `Station::used`).
 const AGAIN: usize = 1;
 const EXPIRE: usize = 2;
 const WATCH: usize = 3;
+const USED: usize = 4;
 /// How often it looks whether something is dragged (see `catch`, ms).
 const WATCH_EVERY_MS: u32 = 100;
 /// How soon the clipboard is read again, and how many times at most.
@@ -553,6 +555,8 @@ struct Station {
     arrived: Option<(Vec<u64>, std::time::Instant)>,
     /// Its own files each sending to a device nearby holds till it is over (see `send`), by the sending's number.
     sending: std::collections::HashMap<u64, Vec<String>>,
+    /// What was put on the clipboard from it, and when (ms since 1970), not listed so yet (see `used`).
+    used: Vec<(u64, u64)>,
 }
 
 thread_local! {
@@ -577,7 +581,7 @@ fn run(asks: Receiver<Ask>) {
         let mut keep = Keep::open(Folder::own(), settings.rules(), settings.always_copy);
         keep.nearby_folder = crate::app().settings.lock().unwrap().nearby_folder.clone();
         keep.expire(super::now_ms());
-        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default() }));
+        STATION.with_borrow_mut(|station| *station = Some(Station { keep, window, asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new() }));
         WINDOW.store(window.0 as isize, Ordering::Release);
         let _ = SetTimer(Some(window), EXPIRE, EXPIRE_EVERY_MS, None);
         let _ = SetTimer(Some(window), WATCH, WATCH_EVERY_MS, None);
@@ -671,6 +675,11 @@ unsafe extern "system" fn procedure(window: HWND, message: u32, wparam: WPARAM, 
                     station.copied();
                 }
                 _ if wparam.0 == WATCH => station.catchers.follow(),
+                _ if wparam.0 == USED => {
+                    let _ = unsafe { KillTimer(Some(window), USED) };
+                    station.list_used();
+                    station.show();
+                }
                 _ => {
                     station.keep.expire(super::now_ms());
                     station.show();
@@ -716,7 +725,7 @@ impl Station {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
                         if self.copy(&content, stays_here, vec![Copied::Item(id)]) {
-                            self.keep.used(id, super::now_ms());
+                            self.used(id);
                             if matches!(ask, Ask::PasteOut(_)) {
                                 paste_in_front();
                             }
@@ -978,11 +987,23 @@ impl Station {
         }
     }
 
-    /// What it shows now, for the other threads, who are told.
-    /// `content` put on the clipboard (not to leave this PC where `stays_here`): once it took it, what it was copied
-    /// from marked copied.
-    /// `content` put on the clipboard (`from` what was copied, marked so): whether it was (another program may hold the
-    /// clipboard).
+    /// The thing `id` used now. Pinned, it is listed first for it, but only once the time for a double click on it is
+    /// past: moved at once, the second press of that double click was on the thing that had come to its place.
+    fn used(&mut self, id: u64) {
+        self.used.push((id, super::now_ms()));
+        let double = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() };
+        let _ = unsafe { SetTimer(Some(self.window), USED, double, None) };
+    }
+
+    /// What was used since, listed so.
+    fn list_used(&mut self) {
+        for (id, at) in std::mem::take(&mut self.used) {
+            self.keep.used(id, at);
+        }
+    }
+
+    /// `content` put on the clipboard (not to leave this PC where `stays_here`), `from` what was copied, marked so:
+    /// whether it was (another program may hold the clipboard).
     fn copy(&mut self, content: &Content, stays_here: bool, from: Vec<Copied>) -> bool {
         let Some(sequence) = clipboard::put(self.window, content, stays_here) else { return false };
         self.ours = sequence;
@@ -990,6 +1011,7 @@ impl Station {
         true
     }
 
+    /// What it shows now, for the other threads, who are told.
     fn show(&self) {
         // (What a device nearby may send it, as it has room now.)
         crate::nearby::room(self.keep.room_offered());
@@ -1004,6 +1026,30 @@ impl Station {
 
 #[cfg(test)]
 mod tests {
+    /// What is pinned, put on the clipboard from the station, stands where it is till the time for a double click on it
+    /// is past (its second press is on it still), and is the first then.
+    #[test]
+    fn what_is_used_stays_under_the_pointer_for_a_double_click() {
+        use crate::station::{clipboard::Content, folder::Folder, keep::Keep, shelf};
+        let dir = crate::settings::local_dir().join("station-used");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut keep = Keep::open(Folder::at(dir), shelf::Rules::default(), false);
+        let [a, b] = ["a", "b"].map(|text| {
+            let id = keep.take(Content::Text(text.into()), true, false, 1).unwrap();
+            keep.pin(id, true);
+            id
+        });
+        let (_, asks) = std::sync::mpsc::channel();
+        let mut station = super::Station { keep, window: Default::default(), asks, listening: false, taken: 0, ours: 0, tries: 0, over: false, apps_over: false, folders_over: false, copied: None, catchers: Default::default(), dragging: None, receiving: None, arrived: None, sending: Default::default(), used: Vec::new() };
+        let order = |station: &super::Station| shelf::copies(&station.keep.shelf.items, shelf::Filter::Pinned(None), false).rest.iter().map(|item| item.id).collect::<Vec<_>>();
+        let was = order(&station);
+        assert_eq!(was, [b, a]);
+        station.used(a);
+        assert_eq!(order(&station), was);
+        station.list_used();
+        assert_eq!(order(&station), [a, b]);
+    }
+
     /// The station drawn turns from how it was when what is kept at hand is in another order, or something else
     /// begins to come from a device nearby (or it has come); what is copied meanwhile, and how much has come, are not
     /// turned for.

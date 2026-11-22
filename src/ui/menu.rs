@@ -459,11 +459,12 @@ impl Menu {
         if self.sub.as_ref().is_none_or(|(at, _)| *at != row) {
             return;
         }
-        let (in_sub, lit) = (self.in_sub, self.sub.as_ref().and_then(|(_, sub)| sub.lit));
+        let (in_sub, lit, scroll) = (self.in_sub, self.sub.as_ref().and_then(|(_, sub)| sub.lit), self.sub.as_ref().map_or(0.0, |(_, sub)| sub.sheet.scroll));
         if let Some((_, sub)) = self.sub.take() {
             sub.close();
         }
         self.follow_sub(Some(row));
+        self.sub_act(|sub| sub.turn(scroll));
         if in_sub && self.sub.is_some() {
             self.in_sub = true;
             self.sub_light(|sub| lit.filter(|at| *at < sub.items.len()));
@@ -527,17 +528,18 @@ impl Menu {
             WM_KEYDOWN => self.key(VIRTUAL_KEY(msg.wParam.0 as u16)),
             // The wheel turns through choices more than fit (told where the pointer is on the screen).
             WM_MOUSEWHEEL => {
-                let notches = (msg.wParam.0 >> 16) as u16 as i16 as f32 / WHEEL_DELTA as f32;
-                let turned = self.sheet.turned(self.sheet.scroll - notches * 3.0 * ROW);
-                if turned != self.sheet.scroll {
-                    self.sheet.scroll = turned;
-                    let under = self.row_at(x - self.rect.left, y - self.rect.top);
-                    self.lit = under.filter(|row| self.items[*row].open());
-                    if !self.draw() {
-                        return Handled::Done(None);
-                    }
+                let by = (msg.wParam.0 >> 16) as u16 as i16 as f32 / WHEEL_DELTA as f32 * 3.0 * ROW;
+                if self.sub.as_ref().is_some_and(|(_, sub)| sub.inside(x - sub.rect.left, y - sub.rect.top)) {
+                    self.in_sub = true;
+                    return self.sub_act(|sub| sub.wheel(by, x, y));
                 }
-                Handled::Taken
+                let was = self.sheet.scroll;
+                let handled = self.wheel(by, x, y);
+                // (The choices up beside it are those of the choice under the pointer now.)
+                if self.sheet.scroll != was {
+                    self.follow_sub(self.lit);
+                }
+                handled
             }
             // Alt, as with a system menu, or the mouse taken from it.
             WM_SYSKEYDOWN | CAPTURE_LOST => Handled::Done(None),
@@ -558,7 +560,7 @@ impl Menu {
                     }
                     Handled::Taken
                 }
-                VK_UP | VK_DOWN => self.sub_light(|sub| sub.step(sub.lit, key == VK_UP)),
+                VK_UP | VK_DOWN => self.sub_act(|sub| sub.light_in_view(sub.step(sub.lit, key == VK_UP))),
                 VK_RETURN => match self.sub.as_ref().and_then(|(row, sub)| Some((*row, sub.lit?))) {
                     Some((row, at)) => Handled::Done(Some(Menu::sub_choice(&self.items, row, at))),
                     None => Handled::Taken,
@@ -571,11 +573,9 @@ impl Menu {
             VK_ESCAPE | VK_TAB => Handled::Done(None),
             VK_UP | VK_DOWN => {
                 let row = self.step(self.lit, key == VK_UP);
+                let handled = self.light_in_view(row);
                 self.follow_sub(row);
-                if let Some(row) = row {
-                    self.sheet.scroll = self.sheet.turned_to_show(row);
-                }
-                self.light(row)
+                handled
             }
             VK_RIGHT | VK_RETURN if self.lit.is_some_and(|row| !self.items[row].more.is_empty()) => {
                 self.follow_sub(self.lit);
@@ -583,7 +583,7 @@ impl Menu {
                     return Handled::Taken;
                 }
                 self.in_sub = true;
-                self.sub_light(|sub| sub.step(None, false))
+                self.sub_act(|sub| sub.light_in_view(sub.step(None, false)))
             }
             VK_RETURN if self.lit.is_some() => Handled::Done(self.lit),
             _ => Handled::Taken,
@@ -634,12 +634,18 @@ impl Menu {
         }
     }
 
-    /// The choice that `which` says, in the choices up beside it, lit (the keys there): those closed where they could
-    /// not be drawn so.
+    /// The choice that `which` says, in the choices up beside it, lit (the keys there).
     fn sub_light(&mut self, which: impl FnOnce(&Menu) -> Option<usize>) -> Handled {
+        self.sub_act(|sub| {
+            let row = which(sub);
+            sub.light(row)
+        })
+    }
+
+    /// `act` done with the choices up beside it: those closed where they could not be drawn as it leaves them.
+    fn sub_act(&mut self, act: impl FnOnce(&mut Menu) -> Handled) -> Handled {
         let Some((_, sub)) = self.sub.as_mut() else { return Handled::Taken };
-        let row = which(sub);
-        if let Handled::Done(_) = sub.light(row) {
+        if let Handled::Done(_) = act(sub) {
             if let Some((_, sub)) = self.sub.take() {
                 sub.close();
             }
@@ -703,6 +709,36 @@ impl Menu {
         Handled::Taken
     }
 
+    /// The choice `row` lit, as `light`, turned as little as it takes to be shown whole.
+    fn light_in_view(&mut self, row: Option<usize>) -> Handled {
+        let turned = row.map_or(self.sheet.scroll, |row| self.sheet.turned_to_show(row));
+        match self.turn(turned) {
+            Handled::Taken => self.light(row),
+            left => left,
+        }
+    }
+
+    /// Turned to `scroll`, as far as it can be (left, where it could not be drawn so).
+    fn turn(&mut self, scroll: f32) -> Handled {
+        let turned = self.sheet.turned(scroll);
+        if turned != self.sheet.scroll {
+            self.sheet.scroll = turned;
+            if !self.draw() {
+                return Handled::Done(None);
+            }
+        }
+        Handled::Taken
+    }
+
+    /// Turned by the wheel, `by` (DIPs) up, the choice then under the pointer (`x`, `y` on the screen) lit.
+    fn wheel(&mut self, by: f32, x: i32, y: i32) -> Handled {
+        let was = self.sheet.scroll;
+        match self.turn(was - by) {
+            Handled::Taken if self.sheet.scroll != was => self.light(self.row_at(x - self.rect.left, y - self.rect.top)),
+            handled => handled,
+        }
+    }
+
     fn draw(&mut self) -> bool {
         let (sheet, items, look, lit) = (&self.sheet, &self.items, self.look, self.lit);
         let size = (self.size.0 as u32, self.size.1 as u32);
@@ -745,6 +781,8 @@ pub struct Sheet {
     pub height: f32,
     text_left: f32,
     tops: Vec<f32>,
+    /// Where each row ends.
+    bottoms: Vec<f32>,
     pub shown: f32,
     scroll: f32,
 }
@@ -765,8 +803,9 @@ impl Sheet {
                 Some(top)
             })
             .collect();
-        let height = tops.last().zip(items.last()).map_or(INSET, |(top, item)| top + item.tall()) + INSET;
-        Sheet { width, height, text_left, tops, shown: height, scroll: 0.0 }
+        let bottoms: Vec<f32> = tops.iter().zip(items).map(|(top, item)| top + item.tall()).collect();
+        let height = bottoms.last().copied().unwrap_or(INSET) + INSET;
+        Sheet { width, height, text_left, tops, bottoms, shown: height, scroll: 0.0 }
     }
 
     /// No more than `most` of its rows shown at once (as many as there are, where there are no more), the next row's
@@ -789,12 +828,12 @@ impl Sheet {
 
     /// How far it is turned for the choice `row` to be in its middle (as near as it can be).
     fn turned_to_middle(&self, row: usize) -> f32 {
-        self.turned(self.tops[row] + ROW / 2.0 - self.shown / 2.0)
+        self.turned((self.tops[row] + self.bottoms[row]) / 2.0 - self.shown / 2.0)
     }
 
     /// How far it is turned for the choice `row` to be shown whole, turned as little as that takes.
     fn turned_to_show(&self, row: usize) -> f32 {
-        let (top, bottom) = (self.tops[row] - INSET, self.tops[row] + ROW + INSET);
+        let (top, bottom) = (self.tops[row] - INSET, self.bottoms[row] + INSET);
         let scroll = if top < self.scroll { top } else if bottom > self.scroll + self.shown { bottom - self.shown } else { self.scroll };
         self.turned(scroll)
     }
@@ -1125,6 +1164,51 @@ mod tests {
         let all = short.shown;
         short.show_at_most(LIST_ROWS);
         assert_eq!(short.shown, all);
+    }
+
+    /// A menu of `rows` choices, `tall` DIPs of it shown, at `left` on the screen, its window not shown.
+    fn unshown(rows: usize, tall: f32, left: i32) -> Menu {
+        let gfx = gfx::for_area(crate::mouse::monitor_at(POINT::default()).unwrap().monitor).unwrap();
+        let look = Look::system();
+        let items: Vec<Item<'static>> = (0..rows).map(|row| Item::new(format!("{row}"), None, false, false)).collect();
+        let window = Window::new().unwrap();
+        let surface = Drawn::new(&gfx, window.hwnd, look).unwrap();
+        let mut sheet = Sheet::new(&gfx, &items, look);
+        sheet.shown = sheet.height.min(tall);
+        let room = surface.room(look);
+        let size = ((sheet.width + 2.0 * room) as i32, (sheet.shown + 2.0 * room) as i32);
+        let rect = RECT { left, top: 0, right: left + size.0, bottom: size.1 };
+        let showing = super::super::life::Showing::of(&gfx);
+        Menu { gfx, window, surface, items, sheet, look, scale: 1.0, room, size, rect, lit: None, before: HWND::default(), with_the_panel: false, choices: gfx::Layer::default(), sub: None, in_sub: false, pointer: None, _showing: showing }
+    }
+
+    /// The choices one opens, more than fit, are turned through as a menu's own are: by the wheel over them (the menu's
+    /// own left as they are, and the other way round), and by the keys there, the choice lit shown whole.
+    #[test]
+    fn choices_beside_one_are_turned_through() {
+        let _device = super::super::gfx::held().unwrap();
+        let mut menu = unshown(20, 200.0, 0);
+        menu.items[0].more = vec![Item::new("a", None, false, false)];
+        let left = menu.rect.right;
+        menu.sub = Some((0, Box::new(unshown(20, 200.0, left))));
+        let wheel = |menu: &mut Menu, x: i32| {
+            let notch = (-(WHEEL_DELTA as i32) as u16 as usize) << 16;
+            menu.handle(&MSG { message: WM_MOUSEWHEEL, wParam: WPARAM(notch), lParam: LPARAM(((100 << 16) | x) as isize), ..Default::default() });
+        };
+        let turned = |menu: &Menu| (menu.sheet.scroll, menu.sub.as_ref().map(|(_, sub)| sub.sheet.scroll));
+        wheel(&mut menu, left + 60);
+        assert_eq!(turned(&menu), (0.0, Some(3.0 * ROW)));
+        assert!(menu.sub.as_ref().unwrap().1.lit.is_some());
+        // (By the keys: round from the first to the last, and on from it.)
+        menu.sub_light(|_| Some(0));
+        menu.key(VK_UP);
+        let (_, sub) = menu.sub.as_ref().unwrap();
+        assert_eq!((sub.lit, sub.sheet.scroll), (Some(19), sub.sheet.height - sub.sheet.shown));
+        menu.key(VK_DOWN);
+        assert_eq!(turned(&menu), (0.0, Some(0.0)));
+        // The menu's own turned: the choices beside it are those of the choice under the pointer now (none here).
+        wheel(&mut menu, 60);
+        assert_eq!(turned(&menu), (3.0 * ROW, None));
     }
 
     /// A choice made among those one opens is told after all the menu's own, after those of the choices before it that
