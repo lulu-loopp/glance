@@ -5236,7 +5236,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
         }
     }
     // Pinned: a pin in its corner; from a device nearby, its mark over the corner (the pin then beside it).
-    if small >= 40.0 {
+    if corner_marked(tile, small) {
         if let Some(badge) = tile.badge {
             let corner = Point { x: x + w - 4.0, y: y + 4.0 };
             frame.fill_circle(ink.trace, corner, 9.0);
@@ -5459,7 +5459,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + place.w / 2.0, y + plate / 2.0, place.w - 8.0));
                 if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, fy, fw));
+                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, hint_top(tile, (fy, fw, fh)), fw));
                 }
                 shown
             }
@@ -5473,7 +5473,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
                 if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, y, TILE_W));
+                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, hint_top(tile, (y, TILE_PICTURE, TILE_PICTURE)), TILE_W));
                 }
                 shown
             }
@@ -5501,6 +5501,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                     }
                 } else if tile.pinned {
                     frame.icon(Icon::Pin, Point { x: x + width - 7.0, y: y + LIST_ROW / 2.0 }, 12.0, ink.trace);
+                    right -= 18.0;
                 }
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Right(right, y + LIST_ROW / 2.0));
                 if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0 && pins.is_none()) {
@@ -5723,13 +5724,27 @@ impl Hint {
     }
 }
 
+/// Whether a thing's picture, `small` its lesser side, has a mark in its top right corner: its pin, or its device's.
+fn corner_marked(tile: &Tile, small: f32) -> bool {
+    small >= 40.0 && (tile.pinned || tile.badge.is_some())
+}
+
+/// Where the preview's shortcut is said from, on a thing's picture from `y` down, `w` by `h` (see `hint_mark`): its
+/// top, or, its top corner marked, so far down that it is said at its foot.
+fn hint_top(tile: &Tile, (y, w, h): (f32, f32, f32)) -> f32 {
+    if corner_marked(tile, w.min(h)) { y + h - HINT_TALL - 2.0 * HINT_INSET } else { y }
+}
+
+const HINT_TALL: f32 = 20.0;
+const HINT_INSET: f32 = 6.0;
+
 /// The preview's shortcut said on a thing (`says`), as shown as `shown`: a small plate in the skin's sheet, as its
 /// menus' are, at the top right corner of its picture (`Mark::Centre`'s x and y taken as that corner, its room as the
 /// picture's width) or at the end of its row; settling down into place as it comes in.
 fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark) {
-    const TALL: f32 = 20.0;
+    const TALL: f32 = HINT_TALL;
     const PAD: f32 = 7.0;
-    const INSET: f32 = 6.0;
+    const INSET: f32 = HINT_INSET;
     let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
     let font = Font { weight: 600.0, ..theme.small };
     let wide = PAD + frame.measure(says, font) + PAD;

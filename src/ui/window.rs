@@ -91,6 +91,11 @@ thread_local! {
     static TAKES: RefCell<Vec<(isize, RECT)>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Whether `window` is among the windows above all (topmost).
+fn above_all(window: HWND) -> bool {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(window, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0 != 0 }
+}
+
 /// How many times a window kept under the panel has come to the top (see `ON_TOP`).
 pub fn on_top() -> u64 {
     ON_TOP.load(std::sync::atomic::Ordering::Relaxed)
@@ -340,8 +345,6 @@ impl Window {
     /// screen in front, Windows lets no other window become one of them again, and it stayed under that window, its
     /// edge opening it unseen.
     fn stand(&self, otherwise: HWND) {
-        use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
-        let above_all = |window: HWND| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
         let after = self.under.get().filter(|under| above_all(*under)).unwrap_or(otherwise);
         unsafe {
             let _ = SetWindowPos(self.hwnd, Some(after), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
@@ -362,17 +365,21 @@ impl Window {
     /// Where it is among the windows, said for the journal: whether it is above all (topmost), and the window it
     /// gives way to, if it does.
     pub fn standing(&self) -> String {
-        use windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW;
-        let topmost = unsafe { GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
-        format!("{}{}", if topmost { "above all" } else { "not above all" }, self.under.get().map_or(String::new(), |under| format!(", giving way to {:?}", under.0)))
+        format!("{}{}", if above_all(self.hwnd) { "above all" } else { "not above all" }, self.under.get().map_or(String::new(), |under| format!(", giving way to {:?}", under.0)))
     }
 
     /// Gives way to `window` (the settings, above all while they are in front), just below it, until it is given
-    /// way to no more (`None`): at the top of the windows above all again. (Above all throughout: see `stand`.)
+    /// way to no more (`None`): at the top of the windows above all again, where that one is over it still; else (it
+    /// went, or is above all no more) where it is, what came over it since still over it (what a menu's choice opened
+    /// over it, the menu gone). (Above all throughout: see `stand`.)
     pub fn yield_to(&self, window: Option<HWND>) {
-        self.under.set(window);
+        let was = self.under.replace(window);
         // On the desktop, it is under that window already.
         if self.low() {
+            return;
+        }
+        let over = |was: HWND| unsafe { IsWindowVisible(was) }.as_bool() && above_all(was);
+        if window.is_none() && was.is_some_and(|was| !over(was)) {
             return;
         }
         self.stand(HWND_TOPMOST);
@@ -429,15 +436,14 @@ impl Window {
     /// that is among the others (shown with Win+D, it comes in front of
     /// them; see `widget::window_changed`). Nothing done where it is there.
     pub fn sink(&self) {
-        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GetWindowLongPtrW, GW_HWNDPREV, HWND_BOTTOM};
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDPREV, HWND_BOTTOM};
         if !self.low() {
             return;
         }
-        let topmost = |window: HWND| unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0 != 0;
         let flags = SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE;
         unsafe {
             // Out of the topmost windows first.
-            if topmost(self.hwnd) {
+            if above_all(self.hwnd) {
                 let _ = SetWindowPos(self.hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
             }
             let after = match desktop_window() {
@@ -445,7 +451,7 @@ impl Window {
                     // There already.
                     Ok(above) if above == self.hwnd => return,
                     // Below the window just above the desktop's: between them.
-                    Ok(above) if !topmost(above) => above,
+                    Ok(above) if !above_all(above) => above,
                     // The desktop in front of every ordinary window: in
                     // front of them too.
                     _ => HWND_TOP,
@@ -682,5 +688,45 @@ mod tests {
         assert!(held);
         assert_eq!(let_go, before + 1);
         assert!(under);
+    }
+
+    /// Giving way no more, the window it gave way to gone, it stays under what came over it since (a name being written
+    /// in, asked for by a menu's choice, came over the panel, and the panel over it as the menu went); that one still
+    /// over it (pressed, to be used over the settings in front), it comes over.
+    #[test]
+    fn given_way_to_no_more_it_stays_under_what_came_over_it() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
+        let under = |lower: HWND, upper: HWND| {
+            let mut at = upper;
+            while let Ok(next) = unsafe { GetWindow(at, GW_HWNDNEXT) } {
+                if next.is_invalid() {
+                    break;
+                }
+                if next == lower {
+                    return true;
+                }
+                at = next;
+            }
+            false
+        };
+        let (panel, menu, naming) = (Window::new().unwrap(), Window::new().unwrap(), Window::new().unwrap());
+        panel.stand_again();
+        menu.show();
+        panel.yield_to(Some(menu.hwnd));
+        let below = under(panel.hwnd, menu.hwnd);
+        naming.show();
+        menu.hide();
+        panel.yield_to(None);
+        let stays = under(panel.hwnd, naming.hwnd);
+        menu.show();
+        panel.yield_to(Some(menu.hwnd));
+        panel.yield_to(None);
+        let over = under(menu.hwnd, panel.hwnd);
+        for window in [panel, menu, naming] {
+            window.destroy();
+        }
+        assert!(below);
+        assert!(stays);
+        assert!(over);
     }
 }

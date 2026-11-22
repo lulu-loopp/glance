@@ -439,6 +439,8 @@ impl Menu {
         }
         menu.window.place(rect);
         menu.window.show();
+        // What was said under the pointer is said no more (else it stays, under the panel, which the menu raises).
+        super::tip::hide();
         // Up, and gone: a widget that took the desktop with it there takes it again.
         crate::widget::own_window_changed(rect);
         SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
