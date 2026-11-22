@@ -11,7 +11,7 @@ use crate::notes::Note;
 use crate::search::{Only, Order, Query};
 use crate::station::found::Found as Program;
 use crate::station::recent::{self, Came, Kind as FileKind};
-use crate::station::shelf::{Item, What as Held};
+use crate::station::shelf::{Item, Tag, What as Held};
 use crate::ui::text::Lang;
 
 /// Which names a view shows.
@@ -215,6 +215,8 @@ pub struct Sources<'a> {
     pub programs: &'a [Program],
     pub notes: &'a [Note],
     pub held: &'a [Item],
+    /// The tags what is pinned of what was copied is sorted by.
+    pub tags: &'a [Tag],
     pub lately: &'a [Came],
     pub files: &'a dyn Fn(&Query, usize) -> crate::search::Found,
     pub lang: Lang,
@@ -289,7 +291,7 @@ fn found(typed: &str, view: View, expanded: bool, order: Order, sources: &Source
     }
     if matches!(view, View::All | View::Glance) {
         glance.extend(sources.notes.iter().filter_map(|note| note_row(note, &query, lang)));
-        glance.extend(sources.held.iter().filter_map(|item| held_row(item, &query, lang)));
+        glance.extend(sources.held.iter().filter_map(|item| held_row(item, sources.tags, &query, lang)));
     }
     let most = match view {
         View::All if expanded => FILES_ALL,
@@ -381,7 +383,7 @@ fn lately(view: View, sources: &Sources) -> Shown {
             notes.sort_by(|a, b| b.stamp.written_ms.cmp(&a.stamp.written_ms));
             let mut held: Vec<&Item> = sources.held.iter().collect();
             held.sort_by(|a, b| b.added_ms.cmp(&a.added_ms));
-            let rows = notes.into_iter().map(|note| note_shown(note, 0.0, Vec::new(), lang)).chain(held.into_iter().map(|item| held_shown(item, 0.0, Vec::new(), lang))).collect();
+            let rows = notes.into_iter().map(|note| note_shown(note, 0.0, Vec::new(), lang)).chain(held.into_iter().map(|item| held_shown(item, sources.tags, 0.0, Vec::new(), lang))).collect();
             (Group::Glance, rows)
         }
         View::Folders => (Group::Lately, Vec::new()),
@@ -443,18 +445,22 @@ fn note_shown(note: &Note, rank: f32, marks: Vec<(usize, usize)>, lang: Lang) ->
     Row { kind: Kind::Note, name, marks, detail: lang.pick("便签", "Note").into(), what: What::Note(note.name.clone()), rank, bytes: None, changed: None }
 }
 
-/// What the station holds, or what was copied lately, meeting `query` by its name, or (text) by what it says.
-fn held_row(item: &Item, query: &Query, lang: Lang) -> Option<Row> {
+/// What the station holds, or what was copied lately, meeting `query` by its name, by a tag of its (of `tags`), or (text)
+/// by what it says.
+fn held_row(item: &Item, tags: &[Tag], query: &Query, lang: Lang) -> Option<Row> {
     let name = held_name(&item.what, lang);
     if let Some((score, marks)) = query.meets_name(&name) {
-        return Some(held_shown(item, score, marks, lang));
+        return Some(held_shown(item, tags, score, marks, lang));
+    }
+    if let Some(score) = tags.iter().filter(|tag| item.tags.contains(&tag.id)).filter_map(|tag| query.meets_name(&tag.name)).map(|(score, _)| score).max_by(f32::total_cmp) {
+        return Some(held_shown(item, tags, score, Vec::new(), lang));
     }
     let text = match &item.what {
         Held::Text { text } => text.as_str(),
         Held::Link { url } => url.as_str(),
         _ => return None,
     };
-    query.in_text(text).then(|| held_shown(item, IN_TEXT, Vec::new(), lang))
+    query.in_text(text).then(|| held_shown(item, tags, IN_TEXT, Vec::new(), lang))
 }
 
 /// What a thing on the station is called in a line: its file's name (and how many more were put there with it), the
@@ -485,9 +491,11 @@ fn held_name(what: &Held, lang: Lang) -> String {
     }
 }
 
-fn held_shown(item: &Item, rank: f32, marks: Vec<(usize, usize)>, lang: Lang) -> Row {
+fn held_shown(item: &Item, tags: &[Tag], rank: f32, marks: Vec<(usize, usize)>, lang: Lang) -> Row {
     let (kind, detail) = if item.copied { (Kind::Copied, lang.pick("最近复制", "Recently copied")) } else { (Kind::Held, lang.pick("中转站", "Station")) };
-    Row { kind, name: held_name(&item.what, lang), marks, detail: detail.into(), what: What::Item(item.id), rank, bytes: None, changed: None }
+    // (Where it is, and its tags.)
+    let detail = std::iter::once(detail).chain(tags.iter().filter(|tag| item.tags.contains(&tag.id)).map(|tag| tag.name.as_str())).collect::<Vec<_>>().join(" · ");
+    Row { kind, name: held_name(&item.what, lang), marks, detail, what: What::Item(item.id), rank, bytes: None, changed: None }
 }
 
 fn file_row(hit: crate::search::Hit) -> Row {
@@ -597,7 +605,7 @@ mod tests {
             let (total, folders, hits) = query.find(&index, "D:\\", most);
             crate::search::Found { total, folders, hits }
         };
-        let sources = Sources { programs: &programs, notes, held, lately, files: &files, lang: Lang::Zh };
+        let sources = Sources { programs: &programs, notes, held, tags: &[], lately, files: &files, lang: Lang::Zh };
         gather(typed, view, expanded, order, &sources)
             .lines
             .iter()
@@ -667,8 +675,8 @@ mod tests {
     fn glance_s_own_are_found_by_name_and_by_what_they_say() {
         let notes = [Note { name: "a.md".into(), text: "下周要做的事\n回复 Steam 的邮件".into(), colour: Default::default(), stamp: Default::default() }];
         let held = [
-            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None },
-            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None },
+            Item { id: 7, what: Held::Text { text: "https://store.steampowered.com".into() }, added_ms: 1, pinned: false, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() },
+            Item { id: 8, what: Held::Files { paths: vec!["D:\\a\\季度计划.docx".into(), "D:\\a\\b.txt".into()], kept: Vec::new() }, added_ms: 2, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() },
         ];
         assert_eq!(shown("steam", View::Glance, false, &notes, &held, &[]), ["https://store.steampowered.com", "下周要做的事"]);
         assert_eq!(shown("xiazhou", View::Glance, false, &notes, &held, &[]), ["下周要做的事"]);
@@ -687,6 +695,16 @@ mod tests {
         assert_eq!(shown(" ", View::Programs, false, &[], &[], &lately), ["# 应用", "QQ音乐", "Steam", "Visual Studio Code", "网易云音乐"]);
     }
 
+    /// What is pinned of what was copied is found by its tag, which its line says.
+    #[test]
+    fn what_was_copied_is_found_by_its_tag() {
+        let tags = [Tag { id: 3, name: "常用回复".into() }, Tag { id: 4, name: "命令".into() }];
+        let item = Item { id: 7, what: Held::Text { text: "您好".into() }, added_ms: 1, pinned: true, copied: true, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: vec![4] };
+        let row = held_row(&item, &tags, &Query::read("命令"), Lang::Zh).unwrap();
+        assert_eq!((row.name.as_str(), row.detail.as_str(), row.marks), ("您好", "最近复制 · 命令", Vec::new()));
+        assert!(held_row(&item, &tags, &Query::read("常用"), Lang::Zh).is_none());
+    }
+
     /// Files and folders found are shown before anything of them is asked of their drives (a USB drive busy held the
     /// list till each was), told of after (a folder's size never), and found again, told of as before till told anew.
     #[test]
@@ -697,7 +715,7 @@ mod tests {
             let (total, folders, hits) = query.find(&index, "D:\\", most);
             crate::search::Found { total, folders, hits }
         };
-        let sources = Sources { programs: &programs, notes: &[], held: &[], lately: &[], files: &files, lang: Lang::Zh };
+        let sources = Sources { programs: &programs, notes: &[], held: &[], tags: &[], lately: &[], files: &files, lang: Lang::Zh };
         let mut shown = gather("music", View::All, false, Order::default(), &sources);
         assert!(shown.rows().all(|row| row.bytes.is_none() && row.changed.is_none()));
         let paths = shown.paths();

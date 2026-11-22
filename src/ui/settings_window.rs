@@ -8848,7 +8848,7 @@ mod pictures {
         {
             use crate::station::shelf::{Item, What};
             let file = |name: &str| std::path::PathBuf::from(format!("{}/{name}", env!("CARGO_MANIFEST_DIR"))).components().collect::<std::path::PathBuf>();
-            let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: 0, pinned: id == 2, copied, stays_here: false, own_bytes: 0, from: None };
+            let item = |id: u64, what: What, copied: bool| Item { id, what, added_ms: 0, pinned: id == 2, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
             crate::station::thumbs::start(|| {});
             crate::station::run::pretend(vec![
                 item(1, What::Files { paths: vec![file("icons/128x128@2x.png")], kept: Vec::new() }, false),

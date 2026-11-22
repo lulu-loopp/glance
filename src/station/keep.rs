@@ -61,8 +61,13 @@ impl Keep {
             }
         };
         self.refused = None;
-        // Copied again as it was before: the one before goes (the latest stands for both).
+        // Copied again as it was before: the one before goes (the latest stands for both), but one pinned, which stays,
+        // its tags with it.
         if copied {
+            if let Some(id) = self.shelf.copied_again(&what, now_ms) {
+                self.save();
+                return Ok(id);
+            }
             let again: Vec<u64> = self.shelf.items.iter().filter(|item| item.copied && !item.pinned && item.what == what).map(|item| item.id).collect();
             for id in again {
                 self.remove(id);
@@ -344,6 +349,20 @@ impl Keep {
         self.save();
     }
 
+    /// The thing `id` used at `now_ms`, where it is pinned (they are listed by it: see `shelf::copies`).
+    pub fn used(&mut self, id: u64, now_ms: u64) {
+        if self.shelf.get(id).is_some_and(|item| item.pinned) {
+            self.shelf.used(id, now_ms);
+            self.save();
+        }
+    }
+
+    /// `change` made to its tags, or what is of them.
+    pub fn tags(&mut self, change: impl FnOnce(&mut Shelf)) {
+        change(&mut self.shelf);
+        self.save();
+    }
+
     /// Takes off what has stayed its days (see `Rules::keep_days`).
     pub fn expire(&mut self, now_ms: u64) {
         let gone = self.shelf.expire(self.rules, now_ms);
@@ -437,6 +456,27 @@ mod tests {
         }
         assert_eq!(keep.shelf.items.iter().filter(|item| item.copied).count(), COPIED_MOST);
         assert!(keep.shelf.items.iter().any(|item| !item.copied));
+    }
+
+    /// What is pinned, copied again, is not listed twice: it stays, its tags with it, the newest now. Used from here, it
+    /// is the last used, where it was before.
+    #[test]
+    fn what_is_pinned_copied_again_stands_once() {
+        let mut keep = keep("again-pinned", Rules::default());
+        let a = keep.take(Content::Text("a".into()), true, false, 0).unwrap();
+        let b = keep.take(Content::Text("b".into()), true, false, 1).unwrap();
+        keep.tags(|shelf| {
+            let tag = shelf.new_tag("t").unwrap();
+            shelf.tag(&[a], tag, true);
+        });
+        assert_eq!(keep.take(Content::Text("a".into()), true, false, 2), Ok(a));
+        let order = |keep: &Keep| keep.shelf.items.iter().map(|item| item.id).collect::<Vec<_>>();
+        assert_eq!(order(&keep), [b, a]);
+        let item = keep.shelf.get(a).unwrap();
+        assert_eq!((item.pinned, item.tags.len(), item.added_ms, item.last_ms()), (true, 1, 2, 2));
+        keep.pin(b, true);
+        keep.used(b, 9);
+        assert_eq!((order(&keep), keep.shelf.get(b).unwrap().last_ms()), (vec![b, a], 9));
     }
 
     #[test]

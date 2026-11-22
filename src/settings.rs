@@ -1016,6 +1016,8 @@ pub struct StationSettings {
     pub view: ShelfView,
     pub copies_view: ShelfView,
     pub recent_view: ShelfView,
+    /// What is pinned of what was copied folded away where it is listed first (see `station::shelf::copies`).
+    pub pins_folded: bool,
     /// How many days what is not pinned stays.
     pub keep_days: u32,
     /// Files put on it kept as a copy too (else only where they are).
@@ -1026,7 +1028,7 @@ pub struct StationSettings {
 
 impl Default for StationSettings {
     fn default() -> Self {
-        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, keep_days: 7, always_copy: false, remove_after_drag: false }
+        StationSettings { history: true, recent: true, view: ShelfView::Cards, copies_view: ShelfView::List, recent_view: ShelfView::List, pins_folded: false, keep_days: 7, always_copy: false, remove_after_drag: false }
     }
 }
 

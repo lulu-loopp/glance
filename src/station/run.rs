@@ -30,6 +30,12 @@ pub enum Ask {
     /// What was dropped on it (see `drop`).
     Take(Content),
     Pin(u64, bool),
+    /// These things copied, of a tag (pinned with it) or not of it any more. A tag of this name, and these of it. A tag
+    /// named so. A tag gone.
+    Tag(Vec<u64>, u32, bool),
+    NewTag(String, Vec<u64>),
+    RenameTag(u32, String),
+    RemoveTag(u32),
     Remove(u64),
     /// All that is not pinned taken off: of what was put on it, or (with `true`) of what was copied lately.
     Clear(bool),
@@ -122,8 +128,12 @@ struct Leaving {
 #[derive(Clone, Debug, Default)]
 pub struct Shown {
     pub items: Vec<Item>,
+    /// The tags what is pinned of what was copied is sorted by.
+    pub tags: Vec<super::shelf::Tag>,
     /// Recently copied on.
     pub history: bool,
+    /// What is pinned of what was copied folded away where it is listed first (see `shelf::copies`).
+    pub pins_folded: bool,
     /// How what is on it shows, what was copied, and the files come lately.
     pub view: crate::settings::ShelfView,
     pub copies_view: crate::settings::ShelfView,
@@ -144,12 +154,14 @@ pub struct Shown {
 
 impl Shown {
     /// Whether what is on it, in its order, is other than what `before` showed: a thing put on it, taken off, moved, or
-    /// something coming from a device nearby, or come. (What was copied lately is not: it comes as anything is copied,
-    /// and on a page of its own.)
+    /// something coming from a device nearby, or come. What was copied lately is other as far as what is pinned of it
+    /// is (pinned or not, in another order, folded away), not as it comes: it comes as anything is copied, on a page of
+    /// its own.
     pub fn moved_from(&self, before: &Shown) -> bool {
         let order = |shown: &Shown| shown.items.iter().filter(|item| !item.copied).map(|item| item.id).collect::<Vec<u64>>();
         let coming = |shown: &Shown| shown.receiving.as_ref().map(|receiving| receiving.session.clone());
-        order(self) != order(before) || coming(self) != coming(before)
+        let pinned = |shown: &Shown| super::shelf::copies(&shown.items, super::shelf::Filter::Pinned(None), false).rest.iter().map(|item| item.id).collect::<Vec<u64>>();
+        order(self) != order(before) || coming(self) != coming(before) || self.pins_folded != before.pins_folded || pinned(self) != pinned(before)
     }
 }
 
@@ -335,7 +347,18 @@ pub fn shown() -> Arc<Shown> {
 /// For pictures: as if the station held `items`, shown as `view` (its thread not started).
 #[cfg(any(test, feature = "studio"))]
 pub fn pretend(items: Vec<Item>, view: crate::settings::ShelfView) {
-    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, history: true, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None, receiving: None, arrived: None })));
+    PRETENDED.with(|pretended| *pretended.borrow_mut() = Some(Arc::new(Shown { items, tags: Vec::new(), history: true, pins_folded: false, view, copies_view: view, recent_view: view, refused: None, over: false, apps_over: false, copied: None, receiving: None, arrived: None })));
+}
+
+/// For pictures: what is pretended (see `pretend`) with these tags, and what is pinned `folded` away.
+#[cfg(feature = "studio")]
+pub fn pretend_tags(tags: Vec<super::shelf::Tag>, folded: bool) {
+    PRETENDED.with(|pretended| {
+        if let Some(shown) = pretended.borrow_mut().as_mut() {
+            let shown = Arc::make_mut(shown);
+            (shown.tags, shown.pins_folded) = (tags, folded);
+        }
+    });
 }
 
 /// For tests: what is pretended (see `pretend`) just put on the clipboard as `copied` (see `Shown::copied`).
@@ -655,13 +678,24 @@ impl Station {
                     let _ = self.keep.take(content, false, false, super::now_ms());
                 }
                 Ask::Pin(id, pinned) => self.keep.pin(id, pinned),
+                Ask::Tag(ids, tag, on) => self.keep.tags(|shelf| shelf.tag(&ids, tag, on)),
+                Ask::NewTag(name, ids) => self.keep.tags(|shelf| {
+                    if let Some(tag) = shelf.new_tag(&name) {
+                        shelf.tag(&ids, tag, true);
+                    }
+                }),
+                Ask::RenameTag(tag, name) => self.keep.tags(|shelf| shelf.rename_tag(tag, &name)),
+                Ask::RemoveTag(tag) => self.keep.tags(|shelf| shelf.remove_tag(tag)),
                 Ask::Remove(id) => self.keep.remove(id),
                 Ask::Clear(copied) => self.keep.clear(copied),
                 Ask::Copy(id) | Ask::PasteOut(id) => {
                     let given = self.keep.shelf.get(id).and_then(|item| Some((self.keep.content_of(item)?, item.stays_here)));
                     if let Some((content, stays_here)) = given {
-                        if self.copy(&content, stays_here, vec![Copied::Item(id)]) && matches!(ask, Ask::PasteOut(_)) {
-                            paste_in_front();
+                        if self.copy(&content, stays_here, vec![Copied::Item(id)]) {
+                            self.keep.used(id, super::now_ms());
+                            if matches!(ask, Ask::PasteOut(_)) {
+                                paste_in_front();
+                            }
                         }
                     }
                 }
@@ -935,7 +969,7 @@ impl Station {
         // (What a device nearby may send it, as it has room now.)
         crate::nearby::room(self.keep.room_offered());
         let settings = crate::app().settings.lock().unwrap().station;
-        let shown = Shown { items: self.keep.shelf.items.clone(), history: settings.history, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
+        let shown = Shown { items: self.keep.shelf.items.clone(), tags: self.keep.shelf.tags.clone(), history: settings.history, pins_folded: settings.pins_folded, view: settings.view, copies_view: settings.copies_view, recent_view: settings.recent_view, refused: self.keep.refused, over: self.over, apps_over: self.apps_over, copied: self.copied.clone(), receiving: self.receiving.clone(), arrived: self.arrived.clone() };
         *SHOWN.lock().unwrap() = Some(Arc::new(shown));
         if let Some(told) = TOLD.get() {
             told();
@@ -952,7 +986,7 @@ mod tests {
     fn the_station_turns_as_what_it_keeps_moves() {
         use super::Shown;
         use crate::station::shelf::{Item, What};
-        let item = |id: u64, copied: bool| Item { id, what: What::Text { text: id.to_string() }, added_ms: 0, pinned: false, copied, stays_here: false, own_bytes: 0, from: None };
+        let item = |id: u64, copied: bool| Item { id, what: What::Text { text: id.to_string() }, added_ms: 0, pinned: false, copied, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
         let sender = crate::nearby::Sender { alias: "Z Fold".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
         let receiving = |session: &str, done: u64| crate::nearby::Receiving { session: session.into(), from: sender.clone(), files: Vec::new(), done, of: 100 };
         let shown = |items: Vec<Item>, coming: Option<crate::nearby::Receiving>| Shown { items, receiving: coming, ..Default::default() };

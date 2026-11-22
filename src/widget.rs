@@ -4146,6 +4146,12 @@ impl Widget {
                                     }
                                     crate::station::select::turned(self.window.hwnd.0 as isize, tab);
                                 }
+                                // A new tag: named in its box, over its button (see `ui::rename`).
+                                Some(view::Hit::NewTag) => {
+                                    if let Some(at) = self.hits_on_screen().into_iter().find(|(_, on)| *on == view::Hit::NewTag).map(|(rect, _)| rect) {
+                                        crate::ui::rename::open(self.window.hwnd, crate::station::naming_tag(Vec::new()), POINT { x: at.left, y: at.top }, self.menu_look(), crate::update::language());
+                                    }
+                                }
                                 // A grid's way to its next page: turned to it.
                                 Some(view::Hit::NextPage(list, most)) => {
                                     if let Some(readings) = self.content.readings_mut() {
@@ -5758,7 +5764,7 @@ mod tests {
     fn readings_merged_with_what_plays_are_found_as_it_plays() {
         let _device = gfx::held().unwrap();
         let _pretending = crate::pretending();
-        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None };
+        let item = |id: u64| crate::station::shelf::Item { id, what: crate::station::shelf::What::Text { text: format!("{id}") }, added_ms: 0, pinned: false, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
         crate::station::run::pretend((1..=40).map(item).collect(), crate::settings::ShelfView::List);
         let theme = workbench_dressed(Theme::new(Skin::Fluent, false));
         let (info, prefs) = (view::tests::info(), Prefs::resolve(&serde_json::Value::Null, &["station".to_string()]));

@@ -1,8 +1,9 @@
-//! The box a thing kept at hand is renamed in (its menu's "重命名"): a plate in the look of what its menu was opened
-//! from, where that menu's row was, holding one line to write the name in (the name it is shown by now, all of it
-//! chosen) and what the keys do. Enter keeps what is written as the name it is shown by in quick launch alone, its
-//! file, folder or address left as it is (written empty, its own name again). Esc, a press away from it or another
-//! window in front leaves it as it was. Its keys are taken as a note's are (see `ui::keys`), the input method's words
+//! The box a name is written in: a thing kept at hand renamed (its menu's "重命名"), a tag of what was copied made or
+//! renamed. A plate in the look of what it was opened from, where that menu's row (or button) was, holding one line to
+//! write the name in (the name it has now, all of it chosen) and what the keys do. Enter keeps what is written (see
+//! `Kept`): for a thing kept at hand, as the name it is shown by in quick launch alone, its file, folder or address left
+//! as it is (written empty, its own name again). Esc, a press away from it or another window in front leaves it as it
+//! was. Its keys are taken as a note's are (see `ui::keys`), the input method's words
 //! put at its caret. Run by the loop of the thread that opened it, as a menu is (see `menu::Menu`).
 
 use std::cell::RefCell;
@@ -28,8 +29,39 @@ const FIELD_H: f32 = 28.0;
 const GAP: f32 = 8.0;
 /// The words' inset in the field.
 const INSET: f32 = 8.0;
-/// The most a name holds (UTF-16 units).
+/// The most a name holds (UTF-16 units), and a tag's.
 const MOST: usize = 64;
+const TAG_MOST: usize = 24;
+
+/// What is done with what is written, as it is kept.
+pub type Kept = Box<dyn FnOnce(&str)>;
+
+/// What a name is written for: the name it has now, what is said where nothing is written, the most it holds (UTF-16
+/// units), and what is done with what is written.
+pub struct Naming {
+    shown: String,
+    empty: &'static str,
+    most: usize,
+    keep: Kept,
+}
+
+impl Naming {
+    /// `app`, kept at hand, shown by `shown` now: renamed in quick launch alone (see `kept`).
+    pub fn app(app: App, shown: String) -> Naming {
+        let was = shown.clone();
+        let keep = move |written: &str| {
+            if let Some(alias) = kept(&app, &was, written) {
+                crate::station::apps::rename(app, alias);
+            }
+        };
+        Naming { shown, empty: "", most: MOST, keep: Box::new(keep) }
+    }
+
+    /// A tag of what was copied, named `shown` now (nothing: a new one): what is written given to `keep`.
+    pub fn tag(shown: String, lang: Lang, keep: impl FnOnce(&str) + 'static) -> Naming {
+        Naming { shown, empty: lang.pick("标签名称", "Tag name"), most: TAG_MOST, keep: Box::new(keep) }
+    }
+}
 
 /// What `keys::LEFT` posted to its window says where Enter was pressed: what is written kept. (Esc posts 1, another
 /// window in front 0: left as it was.)
@@ -61,9 +93,9 @@ struct Renaming {
     rect: RECT,
     /// The window its menu was opened from (the panel's, a widget's).
     owner: isize,
-    app: App,
-    /// The name it opened with (the one it is shown by), and what is written.
-    was: String,
+    /// What is said where nothing is written, and what is done with what is.
+    empty: &'static str,
+    keep: Kept,
     typing: Typing,
     /// How far the words are turned left in the field, their caret kept in it (DIPs).
     scroll: f32,
@@ -75,11 +107,11 @@ thread_local! {
     static RENAME: RefCell<Option<Renaming>> = const { RefCell::new(None) };
 }
 
-/// The box opened for `app`, shown by `shown` now, from the menu of the window `owner`, its corner at `at` (on the
-/// screen: where the menu's row was), in `look`: any up before left first. Whether it is up.
-pub fn open(owner: HWND, app: App, shown: String, at: POINT, look: Look, lang: Lang) -> bool {
+/// The box opened for `naming`, from the window `owner` (its menu, a button of it), its corner at `at` (on the screen:
+/// where the menu's row, or the button, was), in `look`: any up before left first. Whether it is up.
+pub fn open(owner: HWND, naming: Naming, at: POINT, look: Look, lang: Lang) -> bool {
     close(false);
-    let Some(renaming) = Renaming::new(owner, app, shown, at, look, lang) else { return false };
+    let Some(renaming) = Renaming::new(owner, naming, at, look, lang) else { return false };
     let hwnd = renaming.window.hwnd;
     RENAME.with_borrow_mut(|rename| *rename = Some(renaming));
     // In front, with the keyboard and the mouse, as a menu is: its keys its own (see `answer`).
@@ -136,13 +168,11 @@ pub fn close(keep: bool) {
     crate::ui::keys::give_back(hwnd);
     crate::ui::window::let_go_of_capture(hwnd);
     let rect = renaming.rect;
-    if keep {
-        if let Some(alias) = kept(&renaming.app, &renaming.was, &renaming.typing.string()) {
-            crate::station::apps::rename(renaming.app.clone(), alias);
-        }
-    }
     let before = renaming.before;
     renaming.window.destroy();
+    if keep {
+        (renaming.keep)(&renaming.typing.string());
+    }
     crate::widget::own_window_changed(rect);
     if held && !before.is_invalid() {
         let _ = unsafe { SetForegroundWindow(before) };
@@ -229,7 +259,7 @@ fn written(change: impl FnOnce(&mut Typing)) {
 }
 
 impl Renaming {
-    fn new(owner: HWND, app: App, shown: String, at: POINT, look: Look, lang: Lang) -> Option<Renaming> {
+    fn new(owner: HWND, naming: Naming, at: POINT, look: Look, lang: Lang) -> Option<Renaming> {
         let contact = crate::mouse::monitor_at(at)?;
         // (On the device for its screen: see `gfx::on_screen`.)
         let gfx = gfx::for_area(contact.monitor).ok()?;
@@ -246,8 +276,8 @@ impl Renaming {
             }
         };
         let theme = Theme::new(look.skin.unwrap_or(Skin::Fluent), look.dark);
-        let mut typing = Typing::most(MOST);
-        typing.put(&shown.encode_utf16().collect::<Vec<_>>());
+        let mut typing = Typing::most(naming.most);
+        typing.put(&naming.shown.encode_utf16().collect::<Vec<_>>());
         typing.go(0, false);
         typing.go(typing.text.len(), true);
         let mut renaming = Renaming {
@@ -263,8 +293,8 @@ impl Renaming {
             scale: look.px(contact.scale),
             rect: RECT::default(),
             owner: owner.0 as isize,
-            app,
-            was: shown,
+            empty: naming.empty,
+            keep: naming.keep,
             typing,
             scroll: 0.0,
             before: HWND::default(),
@@ -400,6 +430,9 @@ impl Renaming {
             frame.fill(accent.alpha(0.32), left + from, y + 5.0, to - from, h - 10.0);
         }
         let text = self.typing.string();
+        if text.is_empty() {
+            frame.text(self.empty, font, theme.text3, left, line, w, Align::Start);
+        }
         frame.text(&text, font, theme.text, left, line, self.into_words(self.typing.text.len()) + 2.0, Align::Start);
         frame.fill(theme.text, left + self.into_words(self.typing.caret), y + 6.0, 1.2, h - 12.0);
         frame.unclip();

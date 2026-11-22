@@ -1633,7 +1633,7 @@ mod pictures {
         use crate::station::shelf::{Device, Item, What};
         let photo = std::path::PathBuf::from(r"C:\Windows\Web\Screen\img100.jpg");
         let from = Device { alias: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), fingerprint: "AB".into() };
-        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from.clone()) };
+        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from.clone()), used_ms: 0, tags: Vec::new() };
         let link = Item { id: 8, what: What::Link { url: "https://glancepc.com/app".into() }, from: Some(from), ..item.clone() };
         crate::station::run::pretend(vec![item, link], crate::settings::ShelfView::Cards);
         let sender = |verified: bool| crate::nearby::Sender { alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified, address: "10.0.0.5".parse().unwrap() };
@@ -1716,7 +1716,7 @@ mod pictures {
         use crate::station::shelf::{Device, Item, What};
         let photo = std::path::PathBuf::from(r"C:\Windows\Web\Screen\img100.jpg");
         let from = Device { alias: "Galaxy Z Fold6".into(), kind: Some("mobile".into()), fingerprint: "AB".into() };
-        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from) };
+        let item = Item { id: 7, what: What::Files { paths: vec![photo], kept: Vec::new() }, added_ms: crate::station::now_ms(), pinned: false, copied: false, stays_here: false, own_bytes: 0, from: Some(from), used_ms: 0, tags: Vec::new() };
         crate::station::run::pretend(vec![item], crate::settings::ShelfView::Cards);
         let sender = crate::nearby::Sender { alias: "Galaxy Z Fold6".into(), model: None, kind: Some("mobile".into()), fingerprint: "AB".into(), verified: true, address: "10.0.0.5".parse().unwrap() };
         let photo = Offered { name: "IMG_20261120_193012.jpg".into(), size: 3_500_000, kind: "image/jpeg".into(), words: None };

@@ -450,11 +450,6 @@ impl Menu {
         self.window.hwnd == hwnd || self.sub.as_ref().is_some_and(|(_, sub)| sub.owns(hwnd))
     }
 
-    /// How many choices are its own (those opened beside them not counted).
-    pub fn rows(&self) -> usize {
-        self.items.len()
-    }
-
     /// The choices its choice `row` opens now `more` (as what they list changed while it is up): drawn so beside it at
     /// once, where they are up, the same one lit (as far as there is one).
     pub fn set_more(&mut self, row: usize, more: Vec<Item<'static>>) {

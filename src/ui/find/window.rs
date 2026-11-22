@@ -220,7 +220,7 @@ fn work(asks: Receiver<Asked>, hwnd: isize, tells: Sender<(u64, Vec<(PathBuf, bo
         let held = run::shown();
         let lately = crate::station::recent::shown();
         let files = |query: &crate::search::Query, most: usize| crate::search::find(query, most);
-        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, lately: &lately, files: &files, lang: asked.lang };
+        let sources = Sources { programs: &programs, notes: &notes, held: &held.items, tags: &held.tags, lately: &lately, files: &files, lang: asked.lang };
         let shown = results::gather(&asked.typed, asked.view, asked.expanded, asked.order, &sources);
         let paths = shown.paths();
         *ANSWER.lock().unwrap() = Some((asked.number, asked.fresh, shown));

@@ -34,6 +34,14 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
             *last = (!again).then(|| (id, std::time::Instant::now()));
             run::ask(if again { run::Ask::Open(id) } else { run::Ask::Copy(id) });
         }
+        // Its pin: pinned, or not any more. What is pinned, where it is listed first: folded away, or shown.
+        Hit::PinCopy(id) => {
+            let pinned = run::shown().items.iter().any(|item| item.id == id && item.pinned);
+            run::ask(run::Ask::Pin(id, !pinned));
+        }
+        Hit::PinsHead => {
+            std::thread::spawn(|| crate::app().change(|settings| settings.station.pins_folded ^= true));
+        }
         // A device on the strip a sending to goes on: that sending cancelled.
         Hit::SendTo(key) => {
             send::cancel(key);
@@ -67,8 +75,9 @@ pub fn pressed(hit: crate::ui::view::Hit) -> bool {
     true
 }
 
-/// What a thing on the station's menu does: put it on the clipboard, open it, show it in Explorer, pin it (or not),
-/// send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key: see
+/// What a thing on the station's menu does: put it on the clipboard, open it, show it in Explorer, pin it (or not), tag
+/// it (one copied lately: `Tags`, the row opening the tags, `Tag` one of them by its number, `NewTag` one made: see
+/// `tags_row`), send it to a device nearby (`Send`, the row opening the devices, `SendTo` one of them by its key: see
 /// `send::menu_row`), take it off.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Choice {
@@ -77,9 +86,52 @@ pub enum Choice {
     Preview,
     Show,
     Pin,
+    Tags,
+    Tag(u32),
+    NewTag,
     Send,
     SendTo(u64),
     Remove,
+}
+
+/// A menu's "标签" of `items`, copied lately: the row, opening the tags there are (`tags`: those all of them have
+/// ticked, taken off them as they are chosen again) and a new one made, and what each of those is chosen as.
+fn tags_row<C>(items: &[&shelf::Item], tags: &[shelf::Tag], tag: fn(u32) -> C, new: C) -> (crate::ui::menu::Item<'static>, Vec<C>) {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Mark};
+    let lang = crate::update::language();
+    let mut row = Item::new(lang.pick("标签", "Tags"), Some(Mark::Icon(Icon::Tag)), false, false);
+    row.more = tags.iter().map(|tag| Item::new(tag.name.clone(), Some(Mark::Icon(Icon::Tag)), items.iter().all(|item| item.tags.contains(&tag.id)), false)).collect();
+    row.more.push(Item::new(lang.pick("新建标签", "New tag"), Some(Mark::Icon(Icon::Add)), false, !tags.is_empty()));
+    (row, tags.iter().map(|one| tag(one.id)).chain([new]).collect())
+}
+
+/// The box a new tag is named in (see `ui::rename`), `ids` of it as it is made.
+pub fn naming_tag(ids: Vec<u64>) -> crate::ui::rename::Naming {
+    crate::ui::rename::Naming::tag(String::new(), crate::update::language(), move |written| run::ask(run::Ask::NewTag(written.to_string(), ids)))
+}
+
+/// What a tag's menu does (see `tag_menu`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TagChoice {
+    Rename,
+    Remove,
+}
+
+/// The menu of the tag `id` of what is pinned of what was copied (a right click on it), at `at` on the screen: up, with
+/// what its rows do, and its name.
+pub fn tag_menu(id: u32, at: windows::Win32::Foundation::POINT, over_the_panel: bool, look: crate::ui::menu::Look) -> Option<(crate::ui::menu::Menu, Vec<TagChoice>, String)> {
+    use crate::ui::icons::Icon;
+    use crate::ui::menu::{Item, Mark, Menu};
+    let name = run::shown().tags.iter().find(|tag| tag.id == id)?.name.clone();
+    let lang = crate::update::language();
+    let items = vec![Item::new(lang.pick("重命名", "Rename"), Some(Mark::Icon(Icon::SquarePen)), false, false), Item::new(lang.pick("删除标签", "Delete the tag"), Some(Mark::Icon(Icon::Trash)), false, true)];
+    Some((Menu::open_at(items, look, at, false, over_the_panel)?, vec![TagChoice::Rename, TagChoice::Remove], name))
+}
+
+/// The box the tag `id`, named `name` now, is renamed in (see `ui::rename`).
+pub fn renaming_tag(id: u32, name: String) -> crate::ui::rename::Naming {
+    crate::ui::rename::Naming::tag(name, crate::update::language(), move |written| run::ask(run::Ask::RenameTag(id, written.to_string())))
 }
 
 /// The menu of the thing `id` on the station (a right click on it), at `at` on the screen (`over_the_panel`: as
@@ -108,18 +160,28 @@ pub fn menu(id: u64, at: windows::Win32::Foundation::POINT, over_the_panel: bool
     let stays_here = item.stays_here;
     let mut items: Vec<Item<'static>> = rows.iter().map(|(_, label, icon, rule_before)| Item::new(*label, Some(crate::ui::menu::Mark::Icon(*icon)), false, *rule_before)).collect();
     let mut choices: Vec<Choice> = rows.into_iter().map(|(choice, ..)| choice).collect();
-    // "发送到" before the rule, its devices chosen after all its rows (see `Menu::sub_choice`).
+    // "标签" (of what was copied) and "发送到" before the rule, their tags and devices chosen after all its rows (see
+    // `Menu::sub_choice`).
+    let mut tagged = Vec::new();
+    if item.copied {
+        let (tags, chosen) = tags_row(&[item], &shown.tags, Choice::Tag, Choice::NewTag);
+        items.insert(items.len() - 1, tags);
+        choices.insert(choices.len() - 1, Choice::Tags);
+        tagged = chosen;
+    }
     let (send, keys) = send::menu_row(stays_here);
     items.insert(items.len() - 1, send);
     choices.insert(choices.len() - 1, Choice::Send);
-    choices.extend(keys.into_iter().map(Choice::SendTo));
+    choices.extend(tagged.into_iter().chain(keys.into_iter().map(Choice::SendTo)));
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, choices))
 }
 
 /// `choice` made in the menu of the thing `id` on the station (see `menu`): done, on the station's thread.
 pub fn chose(id: u64, choice: Choice) {
-    let pinned = run::shown().items.iter().find(|item| item.id == id).is_some_and(|item| item.pinned);
+    let shown = run::shown();
+    let item = shown.items.iter().find(|item| item.id == id);
+    let pinned = item.is_some_and(|item| item.pinned);
     run::ask(match choice {
         Choice::Copy => run::Ask::Copy(id),
         Choice::Open => run::Ask::Open(id),
@@ -127,6 +189,9 @@ pub fn chose(id: u64, choice: Choice) {
         Choice::Preview => return,
         Choice::Show => run::Ask::Show(id),
         Choice::Pin => run::Ask::Pin(id, !pinned),
+        // (A new one named in its box first, opened by the thread the menu was up on: see `ui::rename`.)
+        Choice::Tags | Choice::NewTag => return,
+        Choice::Tag(tag) => run::Ask::Tag(vec![id], tag, !item.is_some_and(|item| item.tags.contains(&tag))),
         Choice::Send => return,
         Choice::SendTo(key) => run::Ask::SendTo(vec![run::Given::Item(id)], key),
         Choice::Remove => run::Ask::Remove(id),
@@ -174,6 +239,9 @@ pub enum ManyChoice {
     Show,
     Station,
     Pin(bool),
+    Tags,
+    Tag(u32),
+    NewTag,
     Send,
     SendTo(u64),
     Remove,
@@ -181,7 +249,7 @@ pub enum ManyChoice {
 
 /// What the menu of `hits`, chosen together, offers, as the station holds `items`: putting them on the clipboard,
 /// showing them in Explorer, where any is a file (files come lately are), files come lately put on the station, things
-/// on it, or copied lately, pinned (unpinned, where all are), all sent to a device nearby (the devices: see
+/// on it, or copied lately, pinned (unpinned, where all are), all of them copied lately tagged, all sent to a device nearby (the devices: see
 /// `many_menu`), and taken off.
 pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec<ManyChoice> {
     use crate::ui::view::Hit;
@@ -199,6 +267,9 @@ pub fn many_choices(hits: &[crate::ui::view::Hit], items: &[shelf::Item]) -> Vec
     if !ids.is_empty() {
         let pinned = ids.iter().all(|id| item(*id).is_some_and(|item| item.pinned));
         choices.push(ManyChoice::Pin(!pinned));
+    }
+    if hits.iter().all(|hit| matches!(hit, Hit::Copied(_))) {
+        choices.push(ManyChoice::Tags);
     }
     choices.push(ManyChoice::Send);
     if !ids.is_empty() {
@@ -219,6 +290,8 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
     let mut choices = many_choices(hits, items_held);
     // (Sent all together: none where one of them may not leave this PC.)
     let stays_here = hits.iter().any(|hit| matches!(hit, Hit::Shelf(id) | Hit::Copied(id) if items_held.iter().any(|item| item.id == *id && item.stays_here)));
+    let copied: Vec<&shelf::Item> = hits.iter().filter_map(|hit| if let Hit::Copied(id) = hit { items_held.iter().find(|item| item.id == *id) } else { None }).collect();
+    let (tags, tagged) = tags_row(&copied, &shown.tags, ManyChoice::Tag, ManyChoice::NewTag);
     let (send, keys) = send::menu_row(stays_here);
     let row = |label: &'static str, icon: Icon, rule_before: bool| Item::new(label, Some(crate::ui::menu::Mark::Icon(icon)), false, rule_before);
     let items: Vec<Item<'static>> = choices
@@ -229,11 +302,15 @@ pub fn many_menu(hits: &[crate::ui::view::Hit], at: windows::Win32::Foundation::
             ManyChoice::Station => row(lang.pick("全部放入中转站", "Put them all on the station"), Icon::Inbox, false),
             ManyChoice::Pin(true) => row(lang.pick("全部固定", "Pin all"), Icon::Pin, false),
             ManyChoice::Pin(false) => row(lang.pick("全部取消固定", "Unpin all"), Icon::Pin, false),
+            ManyChoice::Tags | ManyChoice::Tag(_) | ManyChoice::NewTag => tags.clone(),
             ManyChoice::Send | ManyChoice::SendTo(_) => send.clone(),
             ManyChoice::Remove => row(lang.pick("全部移除", "Remove all"), Icon::Trash, true),
         })
         .collect();
-    // (Its devices chosen after all its rows: see `Menu::sub_choice`.)
+    // (Its tags and its devices chosen after all its rows: see `Menu::sub_choice`.)
+    if choices.contains(&ManyChoice::Tags) {
+        choices.extend(tagged);
+    }
     choices.extend(keys.into_iter().map(ManyChoice::SendTo));
     let menu = Menu::open_at(items, look, at, false, over_the_panel)?;
     Some((menu, choices))
@@ -254,6 +331,12 @@ pub fn many_chose(hits: &[crate::ui::view::Hit], choice: ManyChoice) {
             }
         }
         ManyChoice::Pin(pinned) => ids().for_each(|id| run::ask(run::Ask::Pin(id, pinned))),
+        ManyChoice::Tags | ManyChoice::NewTag => {}
+        ManyChoice::Tag(tag) => {
+            let shown = run::shown();
+            let all = ids().all(|id| shown.items.iter().any(|item| item.id == id && item.tags.contains(&tag)));
+            run::ask(run::Ask::Tag(ids().collect(), tag, !all));
+        }
         ManyChoice::Send => {}
         ManyChoice::SendTo(key) => run::ask(run::Ask::SendTo(given(hits), key)),
         ManyChoice::Remove => {
@@ -512,7 +595,7 @@ mod tests {
     #[test]
     fn the_menu_of_things_chosen_together_offers_what_all_may_do() {
         use shelf::{Item, What};
-        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None };
+        let item = |id: u64, what: What, pinned: bool| Item { id, what, added_ms: id, pinned, copied: false, stays_here: false, own_bytes: 0, from: None, used_ms: 0, tags: Vec::new() };
         let items = vec![
             item(1, What::Text { text: "a".into() }, true),
             item(2, What::Link { url: "https://a.b".into() }, false),
@@ -521,6 +604,8 @@ mod tests {
         ];
         assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(2)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Send, ManyChoice::Remove]);
         assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Copied(4)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Send, ManyChoice::Remove]);
+        // (All copied lately: tagged together.)
+        assert_eq!(many_choices(&[Hit::Copied(4), Hit::Copied(5)], &items), [ManyChoice::Copy, ManyChoice::Pin(true), ManyChoice::Tags, ManyChoice::Send, ManyChoice::Remove]);
         assert_eq!(many_choices(&[Hit::Shelf(1), Hit::Shelf(3)], &items), [ManyChoice::Copy, ManyChoice::Show, ManyChoice::Pin(false), ManyChoice::Send, ManyChoice::Remove]);
         let entry = recent::Entry::File(recent::Key { drive: 'C', file: 1 });
         let other = recent::Entry::File(recent::Key { drive: 'C', file: 2 });
