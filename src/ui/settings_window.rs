@@ -7,7 +7,7 @@
 //! kept from frame to frame as transitions.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::f32::consts::E;
@@ -28,6 +28,7 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Shell::ShellExecuteW;
@@ -39,7 +40,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics, LoadCursorW, LoadImageW,
-    IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
+    EVENT_SYSTEM_FOREGROUND, OBJID_WINDOW, WINEVENT_OUTOFCONTEXT, IsWindowVisible, MessageBoxW, PostMessageW, RegisterClassExW, SetCursor, SetForegroundWindow, MB_ICONINFORMATION, MB_OK, WM_CLOSE,
     WM_KEYDOWN, WM_SYSKEYDOWN, WM_CHAR, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_ACTIVATE, WA_INACTIVE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, WM_APP, WM_DISPLAYCHANGE, WM_QUIT, MSG, PM_REMOVE, QS_ALLINPUT,
     DispatchMessageW, MsgWaitForMultipleObjects, PeekMessageW, TranslateMessage,
     SetWindowPos, SetWindowTextW, ShowWindow, HICON, IDC_ARROW, IDC_HAND, IMAGE_ICON, LR_SHARED, MINMAXINFO,
@@ -644,6 +645,7 @@ fn up(asked: Asked) -> Option<Option<Asked>> {
     OPENING.store(false, Ordering::Release);
     // (Not made: the thread ends, and what it made of it with it.)
     made?;
+    let _fronts = Fronts::heard();
     let mut msg = MSG::default();
     let mut again = None;
     // What the next frame is waited on with, to the moment it is due: a wait of whole milliseconds rounds to the
@@ -2635,8 +2637,53 @@ fn owned_by(window: HWND, owner: HWND) -> bool {
     false
 }
 
-/// The settings `hwnd` no longer above all, gone from the front (see `WM_ACTIVATE`).
+/// `window` come to the front: the settings, or one of their own (a question they ask, Windows' chooser, which has a
+/// thread of its own), and they are in front, above all with it (else the widgets above all come over it); else another
+/// program's or another of Glance's, and they are gone from it. Heard of as Windows tells of it: their own messages
+/// tell of neither where one of their own on another thread comes to the front, or goes from it.
+unsafe extern "system" fn fronted(_hook: HWINEVENTHOOK, _event: u32, window: HWND, object: i32, _child: i32, _thread: u32, _time: u32) {
+    let Some(settings) = hwnd().filter(|_| object == OBJID_WINDOW.0) else { return };
+    if window == settings || owned_by(window, settings) {
+        come_to_the_front(settings);
+    } else {
+        leave_the_front(settings);
+    }
+}
+
+/// What tells `fronted`, till it is dropped.
+struct Fronts(HWINEVENTHOOK);
+
+impl Fronts {
+    fn heard() -> Fronts {
+        Fronts(unsafe { SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(fronted), 0, 0, WINEVENT_OUTOFCONTEXT) })
+    }
+}
+
+impl Drop for Fronts {
+    fn drop(&mut self) {
+        let _ = unsafe { UnhookWinEvent(self.0) };
+    }
+}
+
+thread_local! {
+    /// Whether the settings are in front (see `fronted`).
+    static IN_FRONT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The settings `hwnd` above all, in front, the panel and the widgets giving way to them.
+fn come_to_the_front(hwnd: HWND) {
+    IN_FRONT.set(true);
+    unsafe {
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+    }
+    crate::app().controller.settings_front(Some(hwnd));
+}
+
+/// The settings `hwnd` no longer above all, gone from the front (see `fronted`).
 fn leave_the_front(hwnd: HWND) {
+    if !IN_FRONT.replace(false) {
+        return;
+    }
     unsafe {
         let _ = SetWindowPos(hwnd, Some(HWND_NOTOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
     }
@@ -2869,11 +2916,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
-        // Closed: everything it drew with is let go; the device stays with
-        // the panel.
-        // Gone to another window: a new shortcut is no longer being taken. Another program's, or another of Glance's:
-        // no longer above all, gone from the front (see `WM_ACTIVATE`, below). One of its own (a question it asks):
-        // in front still, above all with it, which stays over it (else the widgets above all come over the question).
+        // Gone to another window: a new shortcut is no longer being taken (see `fronted` for what else that takes).
         WM_ACTIVATE if wparam.0 & 0xFFFF == WA_INACTIVE as usize => {
             with_ui(|ui| {
                 ui.record(None);
@@ -2881,25 +2924,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
                     ui.end_rename(true);
                 }
             });
-            if !owned_by(HWND(lparam.0 as *mut _), hwnd) {
-                leave_the_front(hwnd);
-            }
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
-        // Another program come to the front while a question of its own was (the question no longer in front, it was
-        // not told above): gone from the front.
-        windows::Win32::UI::WindowsAndMessaging::WM_ACTIVATEAPP if wparam.0 == 0 => {
-            leave_the_front(hwnd);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         // In front: the panel, staying up, gives way to it.
         // (Above all while in front, the panel and the widgets below it: they never leave the windows above all to
         // give way to it, as one in front of a window held over a whole screen could not come back among them.)
         WM_ACTIVATE => {
-            unsafe {
-                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
-            }
-            crate::app().controller.settings_front(Some(hwnd));
+            come_to_the_front(hwnd);
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         // Closed: poured into the place it was asked from first, if it was, and closed once it has (see `tick`).
@@ -2907,6 +2938,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wparam: WPARAM, lp
         WM_DESTROY => {
             POURING.store(0, Ordering::Release);
             *ASKED_FROM.lock().unwrap() = None;
+            IN_FRONT.set(false);
             crate::app().controller.settings_front(None);
             // The shortcut, if let go while a new one was taken, is taken up again.
             crate::tray::hold_hotkey(false);
