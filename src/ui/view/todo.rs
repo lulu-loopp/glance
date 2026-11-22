@@ -5,6 +5,9 @@
 //! it sinks to the top of those done. Each item moves from where it was drawn to where it now goes (a new one drops
 //! from the field to the top), as what it says changes: they move at the frame they are drawn in, in the lane of every
 //! window that shows them alike (see `PLACES`).
+//!
+//! An item written in where it shows (see `ui::todo::edit`) is drawn as it was, its words those written, the caret in
+//! them in the accent, what is chosen marked, its buttons put away (its time shown as it was).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,11 +37,13 @@ const TICK: Duration = Duration::from_millis(260);
 const MOVE: Duration = Duration::from_millis(340);
 
 /// What a press on the lane lands on: an item (by its place among the note's and what it is: see `key_of`), its box,
-/// its time (or the button that sets one), the button that takes it out; the field, the button that sets the time of
-/// the one being written, the head's plus; the line of those done (folded or opened by it) and what clears them.
+/// its words (written in where they show, one not done), its time (or the button that sets one), the button that takes
+/// it out; the field, the button that sets the time of the one being written, the head's plus; the line of those done
+/// (folded or opened by it) and what clears them.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum TodoHit {
     Row(u32, u64),
+    Words(u32, u64),
     Tick(u32, u64),
     Due(u32, u64),
     Remove(u32, u64),
@@ -53,7 +58,7 @@ impl TodoHit {
     /// The item it is on, where it is on one: its place among the note's, and what it is.
     pub fn item(self) -> Option<(usize, u64)> {
         match self {
-            TodoHit::Row(n, key) | TodoHit::Tick(n, key) | TodoHit::Due(n, key) | TodoHit::Remove(n, key) => Some((n as usize, key)),
+            TodoHit::Row(n, key) | TodoHit::Words(n, key) | TodoHit::Tick(n, key) | TodoHit::Due(n, key) | TodoHit::Remove(n, key) => Some((n as usize, key)),
             _ => None,
         }
     }
@@ -69,7 +74,8 @@ pub fn key_of(items: &[&Item], n: usize) -> u64 {
 }
 
 /// The field to add an item in, as it is being written in its window (see `ui::todo`): whether it is, its words
-/// (UTF-16), the caret and where the selection began, whether the caret shows now, and the time set for it (its label).
+/// (UTF-16), the caret and where the selection began, whether the caret shows now, and the time set for it (its label);
+/// and the item written in where it shows in its stead, where one is.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct Field {
     pub writing: bool,
@@ -78,6 +84,19 @@ pub struct Field {
     pub anchor: usize,
     pub caret_on: bool,
     pub due: Option<String>,
+    pub edit: Option<Editing>,
+}
+
+/// An item written in where it shows (see `ui::todo::edit`): the `n`th, keyed `key`, its words as written (UTF-16), the
+/// caret and where the selection began, and whether the caret shows now.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Editing {
+    pub n: u32,
+    pub key: u64,
+    pub text: Vec<u16>,
+    pub caret: usize,
+    pub anchor: usize,
+    pub caret_on: bool,
 }
 
 /// An item as its row shows it.
@@ -105,6 +124,7 @@ impl Hash for Row {
 /// The lane's items as it shows them: those not done (and those just ticked, still where they were), in their order;
 /// those done, the last done first; whether those are shown (opened) or folded into their line; the field (none in a
 /// small lane), as its window has it; and, while anything moves, the time (for the lane to be drawn anew each frame).
+/// The item written in where it shows, where one is (see `Editing`).
 #[derive(Clone, PartialEq, Debug)]
 pub struct TodoLane {
     undone: Vec<Row>,
@@ -112,11 +132,12 @@ pub struct TodoLane {
     open: bool,
     field: Option<Field>,
     moving: u64,
+    edit: Option<Editing>,
 }
 
 impl Hash for TodoLane {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        (&self.undone, &self.done, self.open, &self.field, self.moving).hash(state);
+        (&self.undone, &self.done, self.open, &self.field, self.moving, &self.edit).hash(state);
     }
 }
 
@@ -131,9 +152,12 @@ thread_local! {
     static MOVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Whether those done are shown, not folded into their line.
     static OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    /// Where the caret was drawn in the field, from the field's corner (DIPs: across, down, how tall), and how large its
-    /// words are, for the input method's words to be put there as they are.
+    /// Where the caret was drawn in the field (or the words of the item written in where it shows), from their corner
+    /// (DIPs: across, down, how tall), and how large its words are, for the input method's words to be put there as
+    /// they are.
     static CARET: std::cell::Cell<(f32, f32, f32, f32)> = const { std::cell::Cell::new((0.0, 0.0, 0.0, 0.0)) };
+    /// How far the words of the item written in where it shows were last drawn scrolled (DIPs), for its caret to show.
+    static EDIT_SHIFT: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
 /// The item `key` ticked here, `slot`th among those not done: drawn there a moment (see `SINK`).
@@ -157,6 +181,11 @@ pub fn toggle_open() {
 /// Where the caret was last drawn in the field (see `CARET`).
 pub fn caret() -> (f32, f32, f32, f32) {
     CARET.with(std::cell::Cell::get)
+}
+
+/// How far the words of the item written in where it shows were last drawn scrolled (see `EDIT_SHIFT`).
+pub fn edit_shift() -> f32 {
+    EDIT_SHIFT.with(std::cell::Cell::get)
 }
 
 /// The colours a box ticked is filled with and its tick drawn in (and a choice marked, in the time's picker): glass's
@@ -221,12 +250,12 @@ pub(super) fn todo_lane(full: bool, lang: Lang) -> Vec<Block> {
     };
     let head = head(lang.pick("待办", "To-do"), count, "", false);
     if full {
-        return vec![head, Block::Todo { lane: TodoLane { undone, done, open: OPEN.with(std::cell::Cell::get), field: Some(Field::default()), moving }, tall: TODO_TALL }];
+        return vec![head, Block::Todo { lane: TodoLane { undone, done, open: OPEN.with(std::cell::Cell::get), field: Some(Field::default()), moving, edit: None }, tall: TODO_TALL }];
     }
     // Small: the one shown first, alone.
     let lits: Vec<f32> = items.iter().map(|item| crate::ui::todo::lit(item, now)).collect();
     let shown = shown_first(&items, &lits).map(|n| row(n, 0.0));
-    vec![head, Block::Todo { lane: TodoLane { undone: shown.into_iter().collect(), done: Vec::new(), open: false, field: None, moving }, tall: ROW }]
+    vec![head, Block::Todo { lane: TodoLane { undone: shown.into_iter().collect(), done: Vec::new(), open: false, field: None, moving, edit: None }, tall: ROW }]
 }
 
 /// Of `items`, the one not done that is due soonest (else the first not done).
@@ -241,14 +270,20 @@ fn shown_first(items: &[&Item], lits: &[f32]) -> Option<usize> {
     (0..items.len()).find(|&n| !items[n].done && lits[n] > 0.0).or_else(|| soonest(items))
 }
 
-/// The field of `lanes`' to-do lane shown as it is being written (see `Field`).
+/// The field of `lanes`' to-do lane shown as it is being written (see `Field`), and the item written in where it shows
+/// as it is, in the lane whole, small or in a shape.
 pub fn write_in(lanes: &mut [Lane], field: &Field) {
     for lane in lanes.iter_mut().filter(|lane| lane.id == "todo") {
         for block in &mut lane.blocks {
-            if let Block::Todo { lane, .. } = block {
-                if lane.field.is_some() {
-                    lane.field = Some(field.clone());
+            match block {
+                Block::Todo { lane, .. } => {
+                    if lane.field.is_some() {
+                        lane.field = Some(field.clone());
+                    }
+                    lane.edit = field.edit.clone();
                 }
+                Block::Bench(Bench::Todo(_, edit)) => *edit = field.edit.clone(),
+                _ => {}
             }
         }
     }
@@ -335,7 +370,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f
     }
     frame.clip(left - 4.0, top, width + 8.0, tall);
     for (row, at, fade) in drawn {
-        paint_row(frame, scene, (left, top + at, width), row, fade, hits);
+        paint_row(frame, scene, (left, top + at, width), row, fade, lane.edit.as_ref(), hits);
     }
     let small = theme.small;
     let said_more = |frame: &dyn Canvas, n: usize, y: f32| {
@@ -415,16 +450,22 @@ fn paint_field(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f
         frame.fill(theme.text, words_left + caret_x - shift, caret_top, 1.2, caret_tall);
     }
     frame.unclip();
-    CARET.with(|caret| caret.set((words_left + caret_x - shift - left, caret_top - y, caret_tall, font.size)));
+    if field.writing {
+        CARET.with(|caret| caret.set((words_left + caret_x - shift - left, caret_top - y, caret_tall, font.size)));
+    }
     hits.push((left, y, width, FIELD, Hit::Todo(TodoHit::Field)));
 }
 
 /// An item's row at (`left`, `y`), `width` across, `fade` faded in (dropping from the field): its box, its words (struck
 /// through, done), its time; as the pointer is on it, the buttons that set its time (where it has none) and take it out.
-fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), row: &Row, fade: f32, hits: &mut Vec<HitBox>) {
+/// Where it is the one written in where it shows (`edit`), the words written there, scrolled for its caret to show, the
+/// caret in the accent and what is chosen marked, and no buttons.
+#[allow(clippy::too_many_arguments)]
+fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32), row: &Row, fade: f32, edit: Option<&Editing>, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     let (n, key) = (row.n, row.key);
-    let on = matches!(scene.hover, Some(Hit::Todo(hit)) if hit.item() == Some((n as usize, key)));
+    let edit = edit.filter(|edit| (edit.n, edit.key) == (n, key) && !row.done);
+    let on = edit.is_none() && matches!(scene.hover, Some(Hit::Todo(hit)) if hit.item() == Some((n as usize, key)));
     let (mark, on_mark) = mark(theme);
     let alpha = |color: Color| color.alpha(fade);
     // Lit, opened from its notification: a wash of the accent behind it all.
@@ -489,10 +530,19 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
         }
         right = x - 4.0;
     }
-    // Its words, struck through as it is ticked.
+    // Its words, struck through as it is ticked; written in where they show, those written (and pressed there, the caret
+    // put where they were pressed: see `ui::todo::caret_at`).
     let font = theme.body;
     let words_left = left + BOX + BOX_GAP;
     let room = (right - words_left).max(0.0);
+    if !row.done && row.tick == 0.0 {
+        hits.push((words_left, y, room, ROW, Hit::Todo(TodoHit::Words(n, key))));
+    }
+    if let Some(edit) = edit {
+        paint_edit(frame, scene, (words_left, y, room), edit);
+        hits.push((left, y, width, ROW, Hit::Todo(TodoHit::Row(n, key))));
+        return;
+    }
     let shown = fitted(frame, &row.text, font, room);
     let ink = if row.done || row.tick > 0.0 { theme.text3 } else { theme.text };
     let text_y = frame.line_in(font, y, ROW);
@@ -503,6 +553,31 @@ fn paint_row(frame: &dyn Canvas, scene: &Scene, (left, y, width): (f32, f32, f32
         frame.fill(alpha(ink), words_left, y + ROW / 2.0 + 0.5, wide * struck, 1.2);
     }
     hits.push((left, y, width, ROW, Hit::Todo(TodoHit::Row(n, key))));
+}
+
+/// The words of an item written in where it shows, in its row's room for them at (`left`, `y`), `room` across: as its
+/// words are drawn at rest, scrolled for the caret to show, what is chosen marked, the caret in the accent while it
+/// shows. Where the caret is (and how far they are scrolled) kept for the input method and for presses on them.
+fn paint_edit(frame: &dyn Canvas, scene: &Scene, (left, y, room): (f32, f32, f32), edit: &Editing) {
+    let theme = scene.theme;
+    let font = theme.body;
+    let middle = y + ROW / 2.0;
+    let (caret_top, caret_tall) = (middle - font.size * 0.65, font.size * 1.3);
+    let before = |at: usize| frame.measure(&String::from_utf16_lossy(&edit.text[..at.min(edit.text.len())]), font);
+    let caret_x = before(edit.caret);
+    let shift = (caret_x - room + 2.0).max(0.0);
+    frame.clip(left, y, room, ROW);
+    if edit.caret != edit.anchor {
+        let (from, to) = (before(edit.caret.min(edit.anchor)), before(edit.caret.max(edit.anchor)));
+        frame.fill(mark(theme).0.alpha(0.3), left + from - shift, caret_top, to - from, caret_tall);
+    }
+    frame.text(&String::from_utf16_lossy(&edit.text), font, theme.text, left - shift, frame.line_in(font, y, ROW), room + shift + 200.0, Align::Start);
+    if edit.caret_on {
+        frame.fill(soon(theme), left + caret_x - shift, caret_top, 1.2, caret_tall);
+    }
+    frame.unclip();
+    CARET.with(|caret| caret.set((caret_x - shift, caret_top - y, caret_tall, font.size)));
+    EDIT_SHIFT.with(|kept| kept.set(shift));
 }
 
 /// The line of those done at (`left`, `y`), `width` across: how many, folded or open (a press on it turns it), and what
@@ -537,7 +612,7 @@ pub(super) fn bench(lang: Lang) -> Bench {
     let items = list.items();
     let now = Instant::now();
     let lits: Vec<f32> = items.iter().map(|item| crate::ui::todo::lit(item, now)).collect();
-    Bench::Todo(bench_rows(&items, &lits, Day::today(), lang == Lang::Zh))
+    Bench::Todo(bench_rows(&items, &lits, Day::today(), lang == Lang::Zh), None)
 }
 
 /// The rows of `items` (each as lit as `lits` has it) in a shape on `today` (see `bench`).
@@ -551,8 +626,8 @@ fn bench_rows(items: &[&Item], lits: &[f32], today: Day, zh: bool) -> Vec<BenchR
 pub type BenchRow = (String, Option<String>, bool, u32, u64, u32);
 
 /// The to-dos in a shape (`x`, `y`, `w`, `h`: within its lane's padding): as many of those not done as fit, a row each,
-/// the one due soonest first; nothing to do, said.
-pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), rows: &[BenchRow], hits: &mut Vec<HitBox>) {
+/// the one due soonest first (the one written in where it shows, `edit`, as it is); nothing to do, said.
+pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32, f32, f32, f32), rows: &[BenchRow], edit: Option<&Editing>, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
     if rows.is_empty() {
         let says = scene.lang.pick("没有待办事项", "Nothing to do");
@@ -566,7 +641,7 @@ pub(super) fn paint_bench(frame: &dyn Canvas, scene: &Scene, (x, y, w, h): (f32,
     frame.clip(x - 4.0, y, w + 8.0, h);
     for (at, (text, label, soon, n, key, lit)) in rows.iter().take(fit).enumerate() {
         let row = Row { n: *n, key: *key, text: text.clone(), done: false, label: label.clone(), soon: *soon, tick: 0.0, lit: f32::from_bits(*lit) };
-        paint_row(frame, scene, (x, top + at as f32 * ROW, w), &row, 1.0, hits);
+        paint_row(frame, scene, (x, top + at as f32 * ROW, w), &row, 1.0, edit, hits);
     }
     frame.unclip();
 }
@@ -647,7 +722,7 @@ mod tests {
         let scene = Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
         let row = |n: u32, lit: f32| Row { n, key: 1000 + u64::from(n), text: format!("{n}"), done: false, label: None, soon: false, tick: 0.0, lit };
         let ticks = |lit: Option<u32>| {
-            let lane = TodoLane { undone: (0..8).map(|n| row(n, if Some(n) == lit { 1.0 } else { 0.0 })).collect(), done: Vec::new(), open: false, field: None, moving: 0 };
+            let lane = TodoLane { undone: (0..8).map(|n| row(n, if Some(n) == lit { 1.0 } else { 0.0 })).collect(), done: Vec::new(), open: false, field: None, moving: 0, edit: None };
             let mut hits = Vec::new();
             paint(&crate::ui::view::tests::Nothing, &scene, (0.0, 0.0, 300.0), 16.0, &lane, 3.0 * ROW + MORE, &mut hits);
             let mut ticked: Vec<u32> = hits.iter().filter_map(|hit| match hit.4 { Hit::Todo(TodoHit::Tick(n, _)) => Some(n), _ => None }).collect();
@@ -657,6 +732,48 @@ mod tests {
         assert_eq!(ticks(None), [0, 1, 2]);
         assert_eq!(ticks(Some(6)), [0, 1, 6]);
         assert_eq!(ticks(Some(1)), [0, 1, 2]);
+    }
+
+    /// The words of a to-do not done are pressed to write in it where it shows, not those of one done. Written in, its
+    /// row keeps its time but shows no buttons, the pointer on it or not, in the lane and in a shape alike.
+    #[test]
+    fn a_to_do_written_in_where_it_shows_puts_its_buttons_away() {
+        use crate::ui::theme::Skin;
+        let theme = Theme::new(Skin::Glass, true);
+        let info = crate::reading::StaticInfo { cpu_name: String::new(), memory_modules: None, memory_speed: None, drives: Vec::new(), drive_ids: Vec::new(), network_adapter: None, board: String::new(), threads: 1, mem_total: 0, gpus: Vec::new(), found: Vec::new() };
+        let prefs = crate::ui::prefs::Prefs::default();
+        let seen = crate::ui::seen::Seen::default();
+        let scene_on = |hover: Option<Hit>| Scene { info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &[], seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover, hint: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None, music_apart: false };
+        let row = |n: u32, done: bool, label: Option<&str>| Row { n, key: 500 + u64::from(n), text: format!("item {n}"), done, label: label.map(Into::into), soon: false, tick: if done { 1.0 } else { 0.0 }, lit: 0.0 };
+        let undone = vec![row(0, false, Some("18:00")), row(1, false, None)];
+        let done = vec![row(2, true, None)];
+        let editing = Editing { n: 0, key: 500, text: "item 0 written".encode_utf16().collect(), caret: 3, anchor: 3, caret_on: true };
+        let hits_of = |edit: Option<Editing>, hover: Option<Hit>| {
+            let lane = TodoLane { undone: undone.clone(), done: done.clone(), open: true, field: None, moving: 0, edit };
+            let mut hits = Vec::new();
+            paint(&crate::ui::view::tests::Nothing, &scene_on(hover), (0.0, 0.0, 300.0), 16.0, &lane, TODO_TALL, &mut hits);
+            hits.into_iter().filter_map(|hit| match hit.4 { Hit::Todo(hit) => Some(hit), _ => None }).collect::<Vec<_>>()
+        };
+        let rest = hits_of(None, None);
+        assert!(rest.contains(&TodoHit::Words(0, 500)) && rest.contains(&TodoHit::Words(1, 501)));
+        assert!(!rest.contains(&TodoHit::Words(2, 502)), "one done is unticked first");
+        let on = hits_of(None, Some(Hit::Todo(TodoHit::Row(0, 500))));
+        assert!(on.contains(&TodoHit::Remove(0, 500)), "its button to take it out, the pointer on it");
+        let written = hits_of(Some(editing.clone()), Some(Hit::Todo(TodoHit::Row(0, 500))));
+        assert!(!written.contains(&TodoHit::Remove(0, 500)), "no buttons, written in");
+        assert!(written.contains(&TodoHit::Due(0, 500)), "its time shown");
+        assert!(written.contains(&TodoHit::Words(0, 500)), "its words pressed again move the caret");
+        let other = hits_of(Some(editing.clone()), Some(Hit::Todo(TodoHit::Row(1, 501))));
+        assert!(other.contains(&TodoHit::Remove(1, 501)), "another's buttons as they were");
+        // In a shape.
+        let scene = scene_on(Some(Hit::Todo(TodoHit::Row(0, 500))));
+        let rows: Vec<BenchRow> = vec![("item 0".into(), Some("18:00".into()), false, 0, 500, 0f32.to_bits())];
+        for (edit, buttons) in [(None, true), (Some(&editing), false)] {
+            let mut hits = Vec::new();
+            paint_bench(&crate::ui::view::tests::Nothing, &scene, (0.0, 0.0, 300.0, ROW), &rows, edit, &mut hits);
+            assert_eq!(hits.iter().any(|hit| hit.4 == Hit::Todo(TodoHit::Remove(0, 500))), buttons, "in a shape, written in: {}", edit.is_some());
+            assert!(hits.iter().any(|hit| hit.4 == Hit::Todo(TodoHit::Words(0, 500))));
+        }
     }
 
     /// A to-do lit, opened from its notification, comes first in a shape too, and is drawn lit there.

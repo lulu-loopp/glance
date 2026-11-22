@@ -2676,9 +2676,15 @@ impl Widgets {
             if let Some(at) = widget.tend_writing(now) {
                 widget.next_frame = widget.next_frame.min(at);
             }
-            // A to-do written on it: its caret blinking.
+            // A to-do written on it: its caret blinking, the input method's words put at it (as it was last drawn).
             if let (_, Some(at)) = crate::ui::todo::field(widget.window.hwnd, now) {
                 widget.next_frame = widget.next_frame.min(at);
+            }
+            if crate::ui::todo::writing(widget.window.hwnd) {
+                let at = crate::ui::todo::caret_in(widget.window.hwnd);
+                if let Some((rect, _)) = widget.hits_on_screen().into_iter().find(|(_, hit)| *hit == view::Hit::Todo(at)) {
+                    crate::ui::todo::placed(widget.window.hwnd, rect, widget.contact.scale * widget.zoom);
+                }
             }
             // What is behind it, looked at as often as it is due, drawn only as it changes.
             let sees = look.skin.sees_backdrop() && widget.content.skinned(look.prefs.music.ground);
@@ -2974,7 +2980,7 @@ fn pointer_for(takes: &Takes, over: bool, hit: Option<view::Hit>, note_button: b
         Takes::Nothing => IDC_ARROW,
         Takes::Edges((left, right, top, bottom)) => crate::panel::sizing(*left, *right, *top, *bottom),
         _ if over => IDC_HAND,
-        _ if matches!(hit, Some(view::Hit::Words(_))) => IDC_IBEAM,
+        _ if matches!(hit, Some(view::Hit::Words(_) | view::Hit::Todo(view::TodoHit::Words(..)))) => IDC_IBEAM,
         _ if hit.is_some_and(view::Hit::takes_press) => IDC_HAND,
         _ => IDC_ARROW,
     }
@@ -3064,6 +3070,18 @@ impl Widget {
             return;
         }
         crate::ui::todo::begin(&self.window);
+        self.next_frame = Instant::now();
+    }
+
+    /// The `n`th to-do, as `item`, written in where it shows on it, its words pressed `into` DIPs across: the caret put
+    /// where they were pressed (see `ui::todo::edit`). (Not while a note on it takes the keys.)
+    fn edit_todo(&mut self, n: usize, item: crate::todo::Item, into: f32) {
+        if self.in_place.as_ref().is_some_and(|in_place| in_place.taking) {
+            return;
+        }
+        let font = crate::ui::theme::Theme::new(self.drawn_look.0, self.drawn_look.1).body;
+        let caret = crate::ui::todo::caret_at(&self.gfx, font, n, &item, into);
+        crate::ui::todo::edit(&self.window, n, item, caret);
         self.next_frame = Instant::now();
     }
 
@@ -4090,14 +4108,21 @@ impl Widget {
                         None => {
                             let (lx, ly) = (x - self.hits_from.0, y - self.hits_from.1);
                             let hit = self.hits.iter().find(|(hx, hy, w, h, _)| lx >= *hx && lx < hx + w && ly >= *hy && ly < hy + h).map(|hit| hit.4);
-                            // A to-do being written: a press away from its field gives back the keys.
-                            if !matches!(hit, Some(view::Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
+                            // A to-do being written: a press away from where it is written gives back the keys (see
+                            // `ui::todo::keeps`).
+                            if !matches!(hit, Some(view::Hit::Todo(hit)) if crate::ui::todo::keeps(hit)) {
                                 self.stop_todo(false);
                             }
                             match hit {
                                 Some(view::Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
                                     crate::ui::todo::Act::Nothing => {}
                                     crate::ui::todo::Act::Write => self.write_todo(),
+                                    crate::ui::todo::Act::Edit(n, item) => {
+                                        let into = self.hits.iter().find(|region| region.4 == view::Hit::Todo(hit)).map(|region| lx - region.0);
+                                        if let Some(into) = into {
+                                            self.edit_todo(n, item, into);
+                                        }
+                                    }
                                     crate::ui::todo::Act::Pick(of) => {
                                         if let Some(anchor) = self.hits_on_screen().into_iter().find(|(_, on)| *on == view::Hit::Todo(hit)).map(|(rect, _)| rect) {
                                             crate::ui::todo::pick::open(self.window.hwnd, of, anchor, self.menu_look(), crate::update::language());

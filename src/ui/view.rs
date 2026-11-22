@@ -808,8 +808,9 @@ pub enum Bench {
     /// The search box (see `Block::Search`).
     Search { keys: String },
     /// The to-dos not done, the one lit or due soonest first: each one's words, time, whether it is due by today, its
-    /// place among the note's, its key (see `todo::key_of`) and how lit it is (an `f32`'s bits).
-    Todo(Vec<todo::BenchRow>),
+    /// place among the note's, its key (see `todo::key_of`) and how lit it is (an `f32`'s bits); and the one written in
+    /// where it shows, where one is (see `todo::write_in`).
+    Todo(Vec<todo::BenchRow>, Option<todo::Editing>),
 }
 
 /// The most of a note's lines under its title a workbench lane in a shape shows (as many as its room takes).
@@ -6614,7 +6615,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 }
             }
         }
-        Bench::Todo(rows) => todo::paint_bench(frame, scene, (x, y, w, h), rows, hits),
+        Bench::Todo(rows, edit) => todo::paint_bench(frame, scene, (x, y, w, h), rows, edit.as_ref(), hits),
         Bench::Search { keys } => {
             // The lane itself what is searched in, where its words fit across it; else its mark alone, a button.
             if h >= SEARCH_BOX * 0.75 && w >= SEARCH_BOX * 4.0 {

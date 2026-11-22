@@ -3225,6 +3225,19 @@ impl<'a> Panel<'a> {
         }
     }
 
+    /// The `n`th to-do, as `item`, written in where it shows on it, pressed on its words (`hit`) at `client`: the caret
+    /// put where they were pressed (see `ui::todo::edit`).
+    fn edit_todo(&mut self, hit: view::TodoHit, n: usize, item: crate::todo::Item, client: POINT) {
+        if !self.is_open() {
+            return;
+        }
+        let (x, _) = self.dips(client);
+        let Some(into) = self.hits.iter().find(|region| region.4 == Hit::Todo(hit)).map(|region| x - region.0) else { return };
+        let caret = crate::ui::todo::caret_at(&self.gfx, self.theme.body, n, &item, into);
+        crate::ui::todo::edit(&self.window, n, item, caret);
+        self.next_frame = Instant::now();
+    }
+
     /// A to-do written on it no more: the keys given back (the front too, where `escaped`).
     fn stop_todo(&mut self, escaped: bool) {
         if crate::ui::todo::writing(self.window.hwnd) {
@@ -4705,7 +4718,7 @@ impl<'a> Panel<'a> {
             self.next_frame = self.next_frame.min(due);
         }
         if crate::ui::todo::writing(hwnd) {
-            if let Some(field) = self.on_screen(Hit::Todo(view::TodoHit::Field)) {
+            if let Some(field) = self.on_screen(Hit::Todo(crate::ui::todo::caret_in(hwnd))) {
                 crate::ui::todo::placed(hwnd, field, px);
             }
         }
@@ -5039,7 +5052,9 @@ impl<'a> Panel<'a> {
         // rest moves it too, under the reader's arrow).
         match self.drag.map(|drag| drag.edges).or_else(|| self.grip_at(client).filter(|edges| edges.any() || self.on_bar(client))) {
             Some(edges) => point_at(&self.window, edges),
-            // Over what a press does something with (a button, a drive's row): a hand.
+            // Over a to-do's words, written in where they show: the I-beam. Over what a press does something with (a
+            // button, a drive's row): a hand.
+            None if matches!(self.hit_at(client), Some(Hit::Todo(view::TodoHit::Words(..)))) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_IBEAM),
             None if self.hit_at(client).is_some_and(|hit| hit.takes_press()) => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_HAND),
             None => self.window.point(windows::Win32::UI::WindowsAndMessaging::IDC_ARROW),
         }
@@ -5076,8 +5091,8 @@ impl<'a> Panel<'a> {
         if pressed.is_some() {
             crate::ui::window::let_go_of_capture(self.window.hwnd);
         }
-        // A to-do being written: a press away from its field gives back the keys.
-        if !matches!(hit, Some(Hit::Todo(view::TodoHit::Field | view::TodoHit::Add | view::TodoHit::FieldDue))) {
+        // A to-do being written: a press away from where it is written gives back the keys (see `ui::todo::keeps`).
+        if !matches!(hit, Some(Hit::Todo(hit)) if crate::ui::todo::keeps(hit)) {
             self.stop_todo(false);
         }
         // Let go on what was pressed with Ctrl or Shift: chosen, and nothing more.
@@ -5090,6 +5105,7 @@ impl<'a> Panel<'a> {
             Some(Hit::Todo(hit)) => match crate::ui::todo::pressed(hit) {
                 crate::ui::todo::Act::Nothing => {}
                 crate::ui::todo::Act::Write => self.write_todo(),
+                crate::ui::todo::Act::Edit(n, item) => self.edit_todo(hit, n, item, client),
                 crate::ui::todo::Act::Pick(of) => {
                     if let Some(anchor) = self.on_screen(Hit::Todo(hit)) {
                         crate::ui::todo::pick::open(self.window.hwnd, of, anchor, self.menu_look(), self.lang);

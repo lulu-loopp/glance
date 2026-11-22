@@ -306,6 +306,13 @@ impl List {
         }
     }
 
+    /// The `n`th item's words.
+    pub fn set_text(&mut self, n: usize, text: String) {
+        if let Some(item) = self.item_mut(n) {
+            item.text = text;
+        }
+    }
+
     /// The `n`th item taken out.
     pub fn remove(&mut self, n: usize) {
         if let Some(at) = self.line_of(n) {
