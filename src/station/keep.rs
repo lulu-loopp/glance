@@ -52,6 +52,15 @@ impl Keep {
     /// Takes `content` onto the shelf at `now_ms` (`copied`: as it was copied, into Recently copied; `stays_here`: see
     /// `shelf::Item::stays_here`): its number; why not, where what it keeps of it has no room or cannot be written.
     pub fn take(&mut self, content: Content, copied: bool, stays_here: bool, now_ms: u64) -> Result<u64, Refused> {
+        // Copied again as it was before: the one before goes (the latest stands for both), but one pinned, which stays,
+        // its tags with it, the newest now.
+        let again: Vec<u64> = self.shelf.items.iter().filter(|item| copied && item.copied && self.is_of(item, &content)).map(|item| item.id).collect();
+        if let Some(id) = again.iter().copied().find(|id| self.shelf.get(*id).is_some_and(|item| item.pinned)) {
+            self.refused = None;
+            self.shelf.copied_again(id, stays_here, now_ms);
+            self.save();
+            return Ok(id);
+        }
         let made = self.made(content);
         let (what, own_bytes) = match made {
             Ok(made) => made,
@@ -61,17 +70,8 @@ impl Keep {
             }
         };
         self.refused = None;
-        // Copied again as it was before: the one before goes (the latest stands for both), but one pinned, which stays,
-        // its tags with it.
-        if copied {
-            if let Some(id) = self.shelf.copied_again(&what, now_ms) {
-                self.save();
-                return Ok(id);
-            }
-            let again: Vec<u64> = self.shelf.items.iter().filter(|item| item.copied && !item.pinned && item.what == what).map(|item| item.id).collect();
-            for id in again {
-                self.remove(id);
-            }
+        for id in again {
+            self.remove(id);
         }
         let id = self.shelf.put(what, now_ms, copied, stays_here, own_bytes);
         if copied {
@@ -82,6 +82,28 @@ impl Keep {
         }
         self.save();
         Ok(id)
+    }
+
+    /// Whether `item` is what `content` is made into (see `made`): the same words, picture, file or files, what it keeps
+    /// of them the same bytes, and files kept as a copy where they are to be.
+    fn is_of(&self, item: &Item, content: &Content) -> bool {
+        let holds = |file: &str, bytes: &[u8]| item.own_bytes == bytes.len() as u64 && self.folder.holds(file, bytes);
+        match (content, &item.what) {
+            (Content::Text(text), What::Link { url }) => url == text.trim(),
+            (Content::Text(text), What::Text { text: kept }) => kept == text,
+            (Content::Text(text), What::Saved { file, words: true, .. }) => holds(file, text.as_bytes()),
+            (Content::Png(png), What::Picture { file }) => holds(file, png),
+            (Content::Saved { name, bytes }, What::Saved { file, name: kept, words: false }) => kept == name && holds(file, bytes),
+            (Content::Files(paths), What::Files { paths: at, kept }) => {
+                paths == at
+                    && paths.iter().enumerate().all(|(index, path)| match kept.get(index).filter(|name| !name.is_empty()) {
+                        Some(name) => self.folder.holds_file(name, path),
+                        // (A folder is pointed to only.)
+                        None => !self.always_copy || !path.is_file(),
+                    })
+            }
+            _ => false,
+        }
     }
 
     /// What `content` is on the shelf, what it keeps of it written to its folder (room made for it first), and how many
@@ -456,6 +478,41 @@ mod tests {
         }
         assert_eq!(keep.shelf.items.iter().filter(|item| item.copied).count(), COPIED_MOST);
         assert!(keep.shelf.items.iter().any(|item| !item.copied));
+    }
+
+    /// What is copied again whose words or bytes are kept in a file of the station's own stands once too, pinned or not:
+    /// words too long for the shelf, a picture, a file that had no path, a file kept as a copy (as it is now: changed
+    /// since, it is another).
+    #[test]
+    fn what_is_kept_in_a_file_copied_again_stands_once() {
+        let dir = crate::settings::local_dir().join("keep-again-source");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        for pinned in [false, true] {
+            std::fs::write(&file, b"words").unwrap();
+            let mut keep = keep(if pinned { "again-kept-pinned" } else { "again-kept" }, Rules::default());
+            keep.always_copy = true;
+            let contents = [
+                Content::Text("long ".repeat(TEXT_MOST)),
+                Content::Png(vec![7; 900]),
+                Content::Saved { name: "mail.eml".into(), bytes: vec![1; 40] },
+                Content::Files(vec![file.clone(), dir.clone()]),
+            ];
+            for (at, content) in contents.iter().enumerate() {
+                let at = at as u64 * 10;
+                let first = keep.take(content.clone(), true, false, at).unwrap();
+                keep.pin(first, pinned);
+                let second = keep.take(content.clone(), true, true, at + 1).unwrap();
+                assert_eq!(second == first, pinned);
+                assert_eq!(keep.shelf.items.len() as u64, at / 10 + 1);
+                let item = keep.shelf.get(second).unwrap();
+                assert_eq!((item.pinned, item.added_ms, item.stays_here), (pinned, at + 1, true));
+            }
+            std::fs::write(&file, b"other").unwrap();
+            keep.take(contents[3].clone(), true, false, 90).unwrap();
+            assert_eq!(keep.shelf.items.len(), 5);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// What is pinned, copied again, is not listed twice: it stays, its tags with it, the newest now. Used from here, it

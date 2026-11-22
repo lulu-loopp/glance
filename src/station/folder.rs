@@ -66,6 +66,19 @@ impl Folder {
         self.written(extension, untrusted.then_some(INTERNET), |file| std::io::Write::write_all(file, bytes))
     }
 
+    /// Whether the kept file `name` holds `bytes` and nothing else.
+    pub fn holds(&self, name: &str, bytes: &[u8]) -> bool {
+        std::fs::File::open(self.path(name)).is_ok_and(|kept| same(kept, bytes).unwrap_or(false))
+    }
+
+    /// Whether the kept file `name` is a copy of the file at `path` as it is now.
+    pub fn holds_file(&self, name: &str, path: &Path) -> bool {
+        let opened = (std::fs::File::open(self.path(name)), std::fs::File::open(path));
+        let (Ok(kept), Ok(file)) = opened else { return false };
+        let long = |file: &std::fs::File| file.metadata().map(|meta| meta.len()).ok();
+        long(&kept) == long(&file) && same(kept, file).unwrap_or(false)
+    }
+
     /// Keeps a copy of the file at `path` in a file of its own, of its kind, marked where it came from as it is: its
     /// name.
     pub fn keep_file(&self, path: &Path) -> std::io::Result<String> {
@@ -210,6 +223,25 @@ impl Folder {
             if self.doomed.remove(name) {
                 self.delete(name);
             }
+        }
+    }
+}
+
+/// Whether `one` and `other` hold the same bytes.
+fn same(one: impl std::io::Read, other: impl std::io::Read) -> std::io::Result<bool> {
+    use std::io::Read;
+    const READ: usize = 64 << 10;
+    let (mut one, mut other) = (one, other);
+    let (mut of_one, mut of_other) = (Vec::with_capacity(READ), Vec::with_capacity(READ));
+    loop {
+        (of_one.clear(), of_other.clear());
+        (&mut one).take(READ as u64).read_to_end(&mut of_one)?;
+        (&mut other).take(READ as u64).read_to_end(&mut of_other)?;
+        if of_one != of_other {
+            return Ok(false);
+        }
+        if of_one.is_empty() {
+            return Ok(true);
         }
     }
 }

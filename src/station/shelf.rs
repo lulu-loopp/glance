@@ -388,15 +388,14 @@ impl Shelf {
         }
     }
 
-    /// What was copied as `what` at `now_ms`, where it is pinned of what was copied already: that, the newest now (its
-    /// number). None where it is not.
-    pub fn copied_again(&mut self, what: &What, now_ms: u64) -> Option<u64> {
-        let at = self.items.iter().position(|item| item.copied && item.pinned && item.what == *what)?;
-        let mut item = self.items.remove(at);
-        (item.added_ms, item.used_ms) = (now_ms, now_ms);
-        let id = item.id;
-        self.items.push(item);
-        Some(id)
+    /// The thing `id` copied again at `now_ms`: the newest now, staying here as its copier said this time (see
+    /// `Item::stays_here`).
+    pub fn copied_again(&mut self, id: u64, stays_here: bool, now_ms: u64) {
+        if let Some(at) = self.items.iter().position(|item| item.id == id) {
+            let mut item = self.items.remove(at);
+            (item.added_ms, item.used_ms, item.stays_here) = (now_ms, now_ms, stays_here);
+            self.items.push(item);
+        }
     }
 
     /// The things `ids` of the tag `tag` (pinned with it), or not of it any more.
