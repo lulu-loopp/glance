@@ -3856,8 +3856,8 @@ impl Widget {
             bottom: all.bottom.max(button.bottom),
         });
         let lane = on_screen.iter().find(|(_, hit)| *hit == view::Hit::FoldersArea).map(|(rect, _)| *rect);
-        let by = crate::ui::hover_card::beside(hit, by, lane, side);
-        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme, prefs, lang, look }, by, &spots, side, clear);
+        let (whole, by) = (by, crate::ui::hover_card::beside(hit, by, lane, side));
+        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme, prefs, lang, look, whole }, by, &spots, side, clear);
         self.carding = true;
     }
 

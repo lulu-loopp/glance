@@ -5038,7 +5038,7 @@ impl<'a> Panel<'a> {
         let clear = placement.rack.map(|(rack, _)| rack);
         let lane = self.hits.iter().find(|hit| hit.4 == Hit::FoldersArea).and_then(|&(x, y, w, h, _)| self.box_on_screen((x, y, w, h)));
         let by = crate::ui::hover_card::beside(hit, placement.panel, lane, side);
-        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, by, &spots, side, clear);
+        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look, whole: placement.panel }, by, &spots, side, clear);
         self.carding = true;
     }
 

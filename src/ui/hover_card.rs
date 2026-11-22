@@ -160,6 +160,13 @@ fn frost_over(tone: Option<(f32, f32)>, dark: bool, was: f32) -> f32 {
     }
 }
 
+/// How frosted the glass of a card at `sheet` is: as what is behind it asks (`read`), and all it can be where it lies over
+/// what it is of (`whole`), the words there (few in all that is behind it, and clear glass over them has them read through
+/// its own).
+fn frost_at(sheet: RECT, whole: RECT, read: f32) -> f32 {
+    if overlap(sheet, whole, 0) { 1.0 } else { read }
+}
+
 /// Where the cards at `sheets` (on the screen) show between them: the least that holds all of them.
 fn reach(sheets: impl IntoIterator<Item = RECT>) -> Option<RECT> {
     sheets.into_iter().reduce(|all, sheet| RECT { left: all.left.min(sheet.left), top: all.top.min(sheet.top), right: all.right.max(sheet.right), bottom: all.bottom.max(sheet.bottom) })
@@ -294,13 +301,15 @@ impl Resting {
 }
 
 /// What the card shows of: `hit`, in `theme`, as `prefs` show the components (their modules held: see
-/// `Prefs::holding`), in `lang`, on a sheet that looks as a menu opened there does (`look`).
+/// `Prefs::holding`), in `lang`, on a sheet that looks as a menu opened there does (`look`), in `whole` of a panel or a
+/// widget (on the screen).
 pub struct Of<'a> {
     pub hit: Hit,
     pub theme: &'a Theme,
     pub prefs: &'a Prefs,
     pub lang: Lang,
     pub look: Look,
+    pub whole: RECT,
 }
 
 /// Shows `of`'s card beside `by` (what it is drawn in, on the screen) on `side`, its middle by its spot's (among `spots`,
@@ -391,7 +400,8 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, cl
                     });
                     card.reach = reach(sheets.chain([sheet]));
                 }
-                of.look.frosted(card.frost(sheet, card.reach.unwrap_or(sheet), scale, of.theme.dark), true)
+                let read = card.frost(sheet, card.reach.unwrap_or(sheet), scale, of.theme.dark);
+                of.look.frosted(frost_at(sheet, of.whole, read), true)
             }
             _ => of.look,
         };
@@ -560,7 +570,7 @@ mod tests {
         let card = Card { window, gfx: gfx::for_main_screen().expect("graphics"), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: Some(7) };
         CARD.with(|kept| *kept.borrow_mut() = Some(card));
         let (theme, prefs) = (Theme::new(super::super::theme::Skin::Paper, false), Prefs::default());
-        let of = Of { hit: Hit::AiSlot(view::ai::Spot::Today), theme: &theme, prefs: &prefs, lang: Lang::En, look: Look::system() };
+        let of = Of { hit: Hit::AiSlot(view::ai::Spot::Today), theme: &theme, prefs: &prefs, lang: Lang::En, look: Look::system(), whole: RECT::default() };
         show(HWND::default(), of, RECT::default(), &[(Hit::AiSlot(view::ai::Spot::Sessions), RECT::default())], Side::Below, None);
         let card = CARD.with(|kept| kept.borrow_mut().take()).unwrap();
         assert_eq!(card.shown, None);
@@ -587,6 +597,12 @@ mod tests {
     /// dark ground under dark glass, frosted over text, and as it was while what is behind it is not read.
     #[test]
     fn the_cards_glass_is_frosted_as_what_is_behind_it_asks() {
+        let rect = |left, top, right, bottom| RECT { left, top, right, bottom };
+        // (Over what it is of, all it can be, beside it or by the spot: its words are behind it.)
+        let whole = rect(1000, 100, 1700, 700);
+        for (sheet, frost) in [(rect(660, 200, 990, 500), 0.1), (rect(1708, 200, 2000, 500), 0.1), (rect(1200, 200, 1450, 500), 1.0), (rect(900, 600, 1200, 800), 1.0)] {
+            assert_eq!(frost_at(sheet, whole, 0.1), frost, "{sheet:?}");
+        }
         let (calm, text) = ((0.05, 0.01), (0.12, 0.3));
         assert_eq!(frost_over(Some(calm), true, 1.0), 0.0);
         assert_eq!(frost_over(Some(text), true, 0.0), 1.0);
