@@ -1341,6 +1341,19 @@ fn paged_lane(part: &Part, theme: &Theme, width: f32, level: usize) -> Lane {
 /// `paint_one` and `view::keep_source`).
 pub const TODAY_PAGE: &str = "ai:today";
 
+/// The pages `sources` (by their ids, in their order) are turned round as, what every source spent today before them
+/// where that is one, as last drawn (`hits`); not drawn yet, where `shown` was kept on it. None where they are not
+/// turned round: all of them shown, the one kept to be shown first is left as it is.
+pub fn pages(hits: &[HitBox], shown: &super::SourceShown, sources: Vec<String>) -> Option<Vec<String>> {
+    let turned = hits.iter().find_map(|hit| if let Hit::AiPages(_, today_first) = hit.4 { Some(today_first) } else { None });
+    let today_first = match turned {
+        Some(today_first) => today_first,
+        None if hits.is_empty() => shown.id() == Some(TODAY_PAGE),
+        None => return None,
+    };
+    (!sources.is_empty()).then(|| today_first.then(|| TODAY_PAGE.to_string()).into_iter().chain(sources).collect())
+}
+
 /// The component in a widget too small for any form that holds every source (see `paint_shaped`), filling `room`: what
 /// every source spent today and the sessions at work at the left where there is room beside a source's part, then as
 /// many sources' parts side by side as fit whole (at least `PAGED_PART` wide), each telling as much as it has room for

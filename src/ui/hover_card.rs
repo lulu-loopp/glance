@@ -290,9 +290,9 @@ pub struct Of<'a> {
 /// Shows `of`'s card beside `by` (what it is drawn in, on the screen) on `side`, its middle by its spot's (among `spots`,
 /// every spot there that has a card and where it is), all of it on that screen (see `stood`), clear of `clear` (the
 /// buttons outside `by`), till `hide` or till `owner` (the window it is drawn in) is hidden or destroyed. Shown again as
-/// it is, nothing is drawn.
+/// it is, nothing is drawn. Its spot there no longer (an AI source turned away from by a dot), the card goes.
 pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, clear: Option<RECT>) {
-    let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.hit) else { return };
+    let Some(&(_, about)) = spots.iter().find(|(spot, _)| *spot == of.hit) else { return hide() };
     let _timed = crate::perf::Timed::start("card", || format!("{:?}", of.hit));
     // (Not sized by hand, whatever the dock it is shown from is: what is written on it is kept, see `gfx::sizing`.)
     let _at_rest = gfx::sizing(false);
@@ -533,6 +533,21 @@ mod tests {
         card.moved_to(&gfx::in_software());
         assert!(!card.drawn_as(7), "moved to another device: drawn again there though it shows the same");
         assert_eq!(draw(&mut card), 2, "what is written on it written again on its new device");
+    }
+
+    /// The spot a card is of no longer there (an AI source's page turned away from by a dot, the pointer on its way to
+    /// the card), the card goes.
+    #[test]
+    fn a_card_goes_with_its_spot() {
+        let _device = gfx::held().unwrap();
+        let window = Window::new().expect("a window");
+        let card = Card { window, gfx: gfx::for_main_screen().expect("graphics"), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: Some(7) };
+        CARD.with(|kept| *kept.borrow_mut() = Some(card));
+        let (theme, prefs) = (Theme::new(super::super::theme::Skin::Paper, false), Prefs::default());
+        let of = Of { hit: Hit::AiSlot(view::ai::Spot::Today), theme: &theme, prefs: &prefs, lang: Lang::En, look: Look::system() };
+        show(HWND::default(), of, RECT::default(), &[(Hit::AiSlot(view::ai::Spot::Sessions), RECT::default())], Side::Below, None);
+        let card = CARD.with(|kept| kept.borrow_mut().take()).unwrap();
+        assert_eq!(card.shown, None);
     }
 
     /// What the lane shows is as far in from every edge of the sheet as the sheet's corners are round, in every skin.

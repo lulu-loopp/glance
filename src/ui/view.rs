@@ -8310,6 +8310,31 @@ otepad.exe", "Notepad"),
         assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
     }
 
+    /// A widget kept on what every source spent today, in its smallest form, is put back on it as Glance starts; made
+    /// larger, all its sources shown, and small again, it is on the one it was on.
+    #[test]
+    fn the_ai_widget_is_put_back_on_today() {
+        let sources = || vec!["ai:claude".to_string(), "ai:codex".to_string()];
+        let turned = |today: bool| vec![(0.0, 0.0, 80.0, 60.0, Hit::AiPages(3, today))];
+        let all_shown: Vec<HitBox> = vec![(0.0, 0.0, 80.0, 60.0, Hit::AiSlot(ai::Spot::Today))];
+        let mut scrolls = Scrolls::default();
+        let mut shown = SourceShown::of(Some(ai::TODAY_PAGE.into()));
+        let mut frame = |hits: &[HitBox]| {
+            let changed = ai::pages(hits, &shown, sources()).is_some_and(|pages| keep_source(&mut scrolls, &mut shown, &pages));
+            (changed, scrolls.to(List::AiSources), shown.id().unwrap().to_string())
+        };
+        // (Nothing drawn yet; drawn, today's the first page.)
+        assert_eq!(frame(&[]), (false, 0.0, ai::TODAY_PAGE.to_string()));
+        assert_eq!(frame(&turned(true)), (false, 0.0, ai::TODAY_PAGE.to_string()));
+        assert_eq!(frame(&all_shown), (false, 0.0, ai::TODAY_PAGE.to_string()));
+        assert_eq!(frame(&turned(true)), (false, 0.0, ai::TODAY_PAGE.to_string()));
+        // (In a form whose pages are the sources alone: the first of them.)
+        assert_eq!(frame(&turned(false)), (true, 0.0, "ai:claude".to_string()));
+        // Kept on a source, one page on once today's is the first page.
+        assert_eq!(frame(&turned(true)), (false, PAGE, "ai:claude".to_string()));
+        assert_eq!(ai::pages(&turned(true), &SourceShown::of(None), Vec::new()), None);
+    }
+
     /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw (and every key
     /// what it draws is drawn under).
     #[derive(Default)]

@@ -4508,8 +4508,7 @@ impl Widget {
         // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.
         let note_pages = shows(|hit| matches!(hit, view::Hit::Pages(view::List::Notes, _)));
         let writing = if note_pages { crate::ui::beside::writing_for(self.window.hwnd) } else { None };
-        // (Whether what every AI source spent today is the first of the pages they are turned round, as last drawn.)
-        let today_page = self.hits.iter().any(|hit| matches!(hit.4, view::Hit::AiPages(_, true)));
+        let hits = &self.hits;
         // Its process list turned on toward where the wheel turned it, as the panel's is.
         let readings: Vec<&mut Readings> = match &mut self.content {
             Content::Readings(readings) => vec![readings],
@@ -4523,9 +4522,8 @@ impl Widget {
             }
             // The AI component's sources turned round: kept on the one it shows first, and that one kept with it.
             let sources = readings.ai_sources(look.prefs);
-            let pages: Vec<String> = if today_page { std::iter::once(view::ai::TODAY_PAGE.to_string()).chain(sources.iter().cloned()).collect() } else { sources.clone() };
-            if !sources.is_empty() && view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &pages) {
-                self.unsaved = true;
+            if let Some(pages) = view::ai::pages(hits, &readings.source_shown, sources) {
+                self.unsaved |= view::keep_source(&mut readings.scrolls, &mut readings.source_shown, &pages);
             }
             moving |= readings.scrolls.ease(dt / 1000.0, crate::panel::SCROLL_EASE);
         }
