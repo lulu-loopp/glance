@@ -56,6 +56,7 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Direct2D::ID2D1Multithread;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX,
     D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_FLAG_DO_NOT_WAIT, D3D11_MAP_READ, D3D11_RESOURCE_MISC_GENERATE_MIPS, D3D11_TEXTURE2D_DESC,
@@ -82,14 +83,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::backdrop::{Capture, Spare, Texture};
 
 /// The device a scene's frames are made and read back on: the one Glance draws with (see `gfx`), its use from
-/// several threads guarded by the device itself.
+/// several threads guarded by the device itself, and by `lock`, Direct2D's, where what is done on it from another
+/// thread than the one that draws with it could meet what Direct2D does on it (see `held`).
+#[derive(Clone)]
 struct Device {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     direct3d: IDirect3DDevice,
+    lock: ID2D1Multithread,
 }
 
-// (A Direct3D 11 device may be used from any thread; its context is guarded: see `gfx::Gfx::new`.)
+// (A Direct3D 11 device may be used from any thread; its context is guarded: see `gfx::Gfx::new`, and `held`.)
 unsafe impl Send for Device {}
 unsafe impl Sync for Device {}
 
@@ -99,16 +103,27 @@ impl Device {
         if !gfx.guarded {
             return None;
         }
-        Device::on(&gfx.d3d().ok()?)
-    }
-
-    /// `device`'s (one whose context is guarded).
-    fn on(device: &ID3D11Device) -> Option<Device> {
-        let device = device.clone();
+        let device = gfx.d3d().ok()?;
         let context = unsafe { device.GetImmediateContext() }.ok()?;
         let dxgi: IDXGIDevice = device.cast().ok()?;
         let direct3d: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.ok()?.cast().ok()?;
-        Some(Device { device, context, direct3d })
+        Some(Device { device, context, direct3d, lock: gfx.factory.cast().ok()? })
+    }
+
+    /// What `act` does on the device (its context, its textures, composition on it), done under Direct2D's lock, as
+    /// Direct2D asks of what is done with Direct3D or DXGI on another thread than its own: Direct2D's own calls,
+    /// guarded by it, wait meanwhile, and none is drawing on the device while it is used here. (The context's own
+    /// guard keeps each call whole, not Direct2D's drawing between them.) Not held while waiting for the card.
+    fn held<R>(&self, act: impl FnOnce() -> R) -> R {
+        struct Left<'a>(&'a ID2D1Multithread);
+        impl Drop for Left<'_> {
+            fn drop(&mut self) {
+                unsafe { self.0.Leave() };
+            }
+        }
+        unsafe { self.lock.Enter() };
+        let _left = Left(&self.lock);
+        act()
     }
 }
 
@@ -276,12 +291,14 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         let Halves { levels, view, readable, .. } = halves.as_ref()?;
         let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
         let context = &device.context;
-        context.CopySubresourceRegion(&kept, 0, 0, 0, 0, texture, 0, Some(&region));
-        context.CopySubresourceRegion(levels, 0, 0, 0, 0, texture, 0, Some(&region));
-        context.GenerateMips(view);
-        // (The second level: subresource 1.)
-        context.CopySubresourceRegion(readable, 0, 0, 0, 0, levels, 1, None);
-        context.Flush();
+        device.held(|| {
+            context.CopySubresourceRegion(&kept, 0, 0, 0, 0, texture, 0, Some(&region));
+            context.CopySubresourceRegion(levels, 0, 0, 0, 0, texture, 0, Some(&region));
+            context.GenerateMips(view);
+            // (The second level: subresource 1.)
+            context.CopySubresourceRegion(readable, 0, 0, 0, 0, levels, 1, None);
+            context.Flush();
+        });
         let staging = readable;
         let (row_width, rows) = ((width / 2).max(1) as usize, (height / 2).max(1) as usize);
         // Read once the copy is done, not waited for in the call (the device is the drawing's too, and held
@@ -289,7 +306,7 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         let began = std::time::Instant::now();
         loop {
-            match context.Map(staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut mapped)) {
+            match device.held(|| context.Map(staging, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT.0 as u32, Some(&mut mapped))) {
                 Ok(()) => break,
                 Err(error) if error.code() == DXGI_ERROR_WAS_STILL_DRAWING && began.elapsed() < std::time::Duration::from_secs(1) => {
                     std::thread::sleep(std::time::Duration::from_millis(1))
@@ -319,7 +336,7 @@ fn keep(device: &Device, halves: &mut Option<Halves>, spare: &Arc<Spare>, textur
                 }
             }
         }
-        context.Unmap(staging, 0);
+        device.held(|| context.Unmap(staging, 0));
         if looked && !held {
             crate::widget::note_sparingly("scene-clear", || format!("scene: a frame of {area:?} with the desktop not yet in it passed over"));
             // (The texture it was copied into, spare again.)
@@ -508,7 +525,8 @@ impl FeedShared {
         let area = held.area;
         let size = ((area.right - area.left).max(1), (area.bottom - area.top).max(1));
         let composer = self.composer.lock().unwrap();
-        unsafe {
+        // (On the device another thread draws on: see `Device::held`.)
+        self.device.held(|| unsafe {
             if held.surface.as_ref().is_none_or(|(_, made)| *made != size) {
                 let surface = composer.0.CreateSurface(size.0 as u32, size.1 as u32, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED).ok()?;
                 held.visual.SetContent(&surface).ok()?;
@@ -537,8 +555,8 @@ impl FeedShared {
             }
             surface.EndDraw().ok()?;
             composer.0.Commit().ok()?;
-        }
-        Some(())
+            Some(())
+        })
     }
 
     /// The layers that are, the gone forgotten.
@@ -591,14 +609,14 @@ fn borderless() -> bool {
 }
 
 impl Feed {
-    /// The desktop's window `shell` captured on the device `d3d`, each frame put in the layers as it comes (seldom
-    /// while none is shown, see `follow_use`); none where it may not be captured without a border.
-    fn new(shell: HWND, d3d: &ID3D11Device) -> Option<Feed> {
+    /// The desktop's window `shell` captured on `device` (a scene's), each frame put in the layers as it comes
+    /// (seldom while none is shown, see `follow_use`); none where it may not be captured without a border.
+    fn new(shell: HWND, device: &Device) -> Option<Feed> {
         let id = NEXT_FEED.fetch_add(1, Ordering::Relaxed);
         if !borderless() {
             return None;
         }
-        let device = Device::on(d3d)?;
+        let device = device.clone();
         let composer = unsafe { DCompositionCreateDevice2::<_, IDCompositionDesktopDevice>(&device.device.cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>().ok()?) }.ok()?;
         let item = unsafe { windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().ok()?.CreateForWindow::<GraphicsCaptureItem>(shell) }.ok()?;
         let size = item.Size().ok()?;
@@ -620,7 +638,7 @@ impl Feed {
                 let mut capacity = told.capacity.lock().unwrap();
                 if content.Width > capacity.Width || content.Height > capacity.Height {
                     let larger = SizeInt32 { Width: content.Width.max(capacity.Width), Height: content.Height.max(capacity.Height) };
-                    if pool.Recreate(&told.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, larger).is_ok() {
+                    if told.device.held(|| pool.Recreate(&told.device.direct3d, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, larger)).is_ok() {
                         *capacity = larger;
                     }
                 }
@@ -641,7 +659,7 @@ impl Feed {
         let _ = session.SetMinUpdateInterval(live_span());
         session.StartCapture().ok()?;
         crate::perf::mark(|| format!("desktop feed made {}x{}", size.Width, size.Height));
-        Some(Feed { id, adapter: super::gfx::adapter_of(d3d), shell, pool, session, seldom: false, shared, scenes: 0 })
+        Some(Feed { id, adapter: super::gfx::adapter_of(&shared.device.device), shell, pool, session, seldom: false, shared, scenes: 0 })
     }
 
     /// Taken as often as it changes (`LIVE` at most) while a layer does not rest, seldom while none does (where the system can be
@@ -660,13 +678,14 @@ impl Feed {
     fn layer(&mut self, window: HWND, area: RECT) -> Option<Arc<Layer>> {
         let (target, visual) = {
             let composer = self.shared.composer.lock().unwrap();
-            unsafe {
+            // (On the device another thread may draw on: see `Device::held`.)
+            self.shared.device.held(|| unsafe {
                 let target = composer.0.CreateTargetForHwnd(window, false).ok()?;
                 let visual: IDCompositionVisual2 = composer.0.CreateVisual().ok()?;
                 target.SetRoot(&visual).ok()?;
                 composer.0.Commit().ok()?;
-                (target, visual)
-            }
+                Some((target, visual))
+            })?
         };
         let layer = Arc::new(Layer { held: Mutex::new(LayerHeld { area, resting: false, _target: target, visual, surface: None }) });
         self.shared.layers.lock().unwrap().push(Arc::downgrade(&layer));
@@ -691,11 +710,11 @@ impl Feed {
     }
 }
 
-/// A layer of the desktop for a scene's `window` at `area`, from the feed of `d3d`'s adapter (`adapter`) for the
-/// desktop's window `shell` (made on `d3d` as first wanted, and made anew where it was another's, as Explorer started
+/// A layer of the desktop for a scene's `window` at `area`, from the feed of `device`'s adapter (`adapter`) for the
+/// desktop's window `shell` (made on `device` as first wanted, and made anew where it was another's, as Explorer started
 /// again, or its device was lost), and the feed's number. None where none can be made for it (not asked again for that
 /// window on that adapter till the screens or the adapters change: see `Refusals`).
-fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device, adapter: Option<super::gfx::Luid>) -> Option<(Arc<Layer>, u64)> {
+fn desktop_layer(shell: HWND, window: HWND, area: RECT, device: &Device, adapter: Option<super::gfx::Luid>) -> Option<(Arc<Layer>, u64)> {
     if feed_refused(shell, adapter) {
         return None;
     }
@@ -704,7 +723,7 @@ fn desktop_layer(shell: HWND, window: HWND, area: RECT, d3d: &ID3D11Device, adap
         feeds.swap_remove(stale).end();
     }
     if !feeds.iter().any(|feed| feed.adapter == adapter) {
-        match Feed::new(shell, d3d) {
+        match Feed::new(shell, device) {
             Some(feed) => feeds.push(feed),
             None => {
                 REFUSED.lock().unwrap().refuse(shell, adapter, super::gfx::screens_changes());
@@ -792,10 +811,10 @@ fn empty_layer(layer: &Layer, feed: u64) {
         held.surface = None;
         if let Some(shared) = &shared {
             let composer = shared.composer.lock().unwrap();
-            unsafe {
+            shared.device.held(|| unsafe {
                 let _ = held.visual.SetContent(None);
                 let _ = composer.0.Commit();
-            }
+            });
         }
     }
     if let Some(feed) = numbered(&mut FEEDS.lock().unwrap(), feed) {
@@ -822,9 +841,8 @@ pub struct Scene {
     shared: Arc<Shared>,
     /// The desktop, captured itself and put under the windows behind, where a thumbnail of its window would leave out
     /// what it shows (see `Feed`): the window it is put in, its layer, the desktop's window it is of and the feed's
-    /// number. The device to start that on, and its adapter.
+    /// number. The adapter of the device to start that on (its own, see `shared`).
     desktop: Option<(HWND, Arc<Layer>, HWND, u64)>,
-    d3d: ID3D11Device,
     adapter: Option<super::gfx::Luid>,
 }
 
@@ -1007,9 +1025,8 @@ impl Scene {
                 let _ = DestroyWindow(owner);
                 return None;
             };
-            let d3d = shared.device.device.clone();
-            let adapter = super::gfx::adapter_of(&d3d);
-            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, paced, shared, desktop: None, d3d, adapter })
+            let adapter = super::gfx::adapter_of(&shared.device.device);
+            Some(Scene { owner, window, area, shown: Vec::new(), pool, session, arrived, size, paced, shared, desktop: None, adapter })
         }
     }
 
@@ -1080,7 +1097,7 @@ impl Scene {
                 move_layer(layer, *feed, area);
                 Some(*window)
             }
-            (None, true) => self.desktop_window(area).and_then(|window| match desktop_layer(shell, window, area, &self.d3d, self.adapter) {
+            (None, true) => self.desktop_window(area).and_then(|window| match desktop_layer(shell, window, area, &self.shared.device, self.adapter) {
                 Some((layer, feed)) => {
                     self.desktop = Some((window, layer, shell, feed));
                     Some(window)
@@ -1349,6 +1366,49 @@ mod tests {
         assert!(!refusals.refused(explorer_again, discrete, 7), "a feed refused for a desktop's window refused for the next");
         assert!(!refusals.refused(shell, discrete, 8), "a feed refused not asked for again once the screens or the adapters changed");
         assert!(refusals.0.is_empty(), "a refusal from before the screens or the adapters changed kept");
+    }
+
+    /// A frame read back on the thread frames are read on, from the device a window draws with, waits while Direct2D
+    /// is drawing on it (holds its lock), and is read once it is done. (Read back meanwhile, as Direct2D asks it not
+    /// to be, what it did on the device's context came between Direct2D's own calls: on a report's PC, widgets whose
+    /// desktop was taken again and again lost their words and failed frames.)
+    #[test]
+    fn a_frame_read_back_waits_for_direct2d_drawing_on_its_device() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = super::super::gfx::Gfx::new().expect("graphics");
+        let device = Device::of(&gfx).expect("a guarded device");
+        let (width, height) = (64u32, 32u32);
+        let plain = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ..Default::default()
+        };
+        let mut texture = None;
+        unsafe { device.device.CreateTexture2D(&plain, None, Some(&mut texture)) }.expect("a texture");
+        struct Sent(Device, ID3D11Texture2D);
+        unsafe impl Send for Sent {}
+        let sent = Sent(device.clone(), texture.expect("a texture"));
+        let (done, read) = std::sync::mpsc::channel();
+        // Direct2D drawing on it: its lock held, as its calls hold it.
+        let direct2d: ID2D1Multithread = gfx.factory.cast().expect("Direct2D's lock");
+        unsafe { direct2d.Enter() };
+        let reader = std::thread::spawn(move || {
+            let sent = sent;
+            let area = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+            let kept = keep(&sent.0, &mut None, &Arc::default(), &sent.1, width, height, area, &[]).is_some();
+            done.send(kept).unwrap();
+        });
+        let meanwhile = read.recv_timeout(std::time::Duration::from_millis(500));
+        unsafe { direct2d.Leave() };
+        assert!(meanwhile.is_err(), "read back while Direct2D was drawing on the device");
+        assert_eq!(read.recv_timeout(std::time::Duration::from_secs(5)), Ok(true), "read back once it was done");
+        reader.join().unwrap();
     }
 
     /// A window over the desktop is in the first frame taken after a scene is arranged, as the desktop is (a frame of
