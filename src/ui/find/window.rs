@@ -1817,6 +1817,8 @@ impl Finder {
 
     /// `act` done with the name picked; the window gone after it opened something, or showed it.
     fn act(&mut self, act: Act) {
+        // (One asked for before, not done yet, is not done after it.)
+        self.act_found = None;
         let Some(row) = self.picked().cloned() else { return };
         let lang = self.lang;
         let opens = matches!(act, Act::Open | Act::Admin | Act::Show);
@@ -2741,6 +2743,11 @@ mod tests {
         finder.ask(false);
         assert_eq!(finder.act_found, Some(Act::Open));
         finder.ask(true);
+        assert_eq!(finder.act_found, None);
+        // One done at once (a name shown picked by the arrows) takes the place of one waiting.
+        finder.act_by_key(Act::Copy);
+        finder.picked_for = finder.asked;
+        finder.act_by_key(Act::Copy);
         assert_eq!(finder.act_found, None);
         assert!(!acts_now(2, 1, 1) && acts_now(2, 2, 1) && acts_now(2, 1, 2));
     }

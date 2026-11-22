@@ -26,8 +26,9 @@ pub fn typed(typed: &str) -> Option<Address> {
     // (A dot as an input method types one.)
     let at = at.replace(['。', '．', '｡'], ".");
     let (host, port) = match at.rsplit_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (at.as_str(), None),
+        // (A number of the newer kind holds colons itself, within its brackets.)
+        Some((host, port)) if !port.ends_with(']') => (host, Some(port)),
+        _ => (at.as_str(), None),
     };
     if port.is_some_and(|port| port.is_empty() || port.parse::<u16>().is_err() || !port.bytes().all(|c| c.is_ascii_digit())) {
         return None;
@@ -37,7 +38,7 @@ pub fn typed(typed: &str) -> Option<Address> {
     let told = port.is_some() || !asked.is_empty();
     let (scheme, sure) = match (scheme, kind) {
         // (Reached as told, whatever host: one of the user's own network has a name of its own.)
-        (Some(scheme), _) if labelled(host) => (scheme, true),
+        (Some(scheme), kind) if labelled(host) || kind.is_some() => (scheme, true),
         (None, Some(HostKind::Number)) => ("http://", true),
         (None, _) if local && told => ("http://", true),
         (None, Some(HostKind::Named)) => ("https://", told || host.get(..4).is_some_and(|start| start.eq_ignore_ascii_case("www."))),
@@ -59,6 +60,9 @@ fn labelled(host: &str) -> bool {
 
 /// What kind of host `host` is: a number's, or one named, in a domain there is.
 fn host_kind(host: &str) -> Option<HostKind> {
+    if let Some(number) = host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
+        return number.parse::<std::net::Ipv6Addr>().ok().map(|_| HostKind::Number);
+    }
     let labels: Vec<&str> = host.split('.').collect();
     if labels.len() < 2 || !labelled(host) {
         return None;
@@ -116,11 +120,14 @@ mod tests {
             ("192.168.1.1", sure("http://192.168.1.1")),
             ("10.0.0.2:8080/x", sure("http://10.0.0.2:8080/x")),
             ("localhost:3000", sure("http://localhost:3000")),
+            ("http://[::1]:3000/x", sure("http://[::1]:3000/x")),
+            ("https://[2001:db8::1]/", sure("https://[2001:db8::1]/")),
+            ("[fe80::1]", sure("http://[fe80::1]")),
             ("example.com/搜索?q=\"a\"", sure("https://example.com/%E6%90%9C%E7%B4%A2?q=%22a%22")),
         ] {
             assert_eq!(typed(words), address, "{words}");
         }
-        for words in ["", "readme", "readme.txt", "two words.com", "1.2", "1.2.3", "v1.2.3", "256.1.1.1", "192.168.01.1", "localhost", "a@b.com", ".com", "com.", "a..com", "-a.com", r"D:\a.com", "file:///c:/a", "ms-settings:display", "http://", "example.com:99999", "example.com:", "https://a b"] {
+        for words in ["", "readme", "readme.txt", "two words.com", "1.2", "1.2.3", "v1.2.3", "256.1.1.1", "192.168.01.1", "localhost", "a@b.com", ".com", "com.", "a..com", "-a.com", r"D:\a.com", "file:///c:/a", "ms-settings:display", "http://", "example.com:99999", "example.com:", "https://a b", "[::1", "::1", "[::g]", "https://[::1]x"] {
             assert_eq!(typed(words), None, "{words}");
         }
     }

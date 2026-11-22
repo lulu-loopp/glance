@@ -89,24 +89,31 @@ impl Number {
         (other.real() != 0.0).then(|| self.with(other, |a, b, c, d| exact(a.checked_mul(d)? % c.checked_mul(b)?, b.checked_mul(d)?), |a, b| a % b))
     }
 
-    /// To the power `other`: none where that is no number (a root of less than nothing, nothing over nothing).
+    /// To the power `other`: none where that is no number (a square root of less than nothing, nothing over nothing).
     fn power(self, other: Number) -> Option<Number> {
         let exactly = match (self, other) {
             (Exact(n, d), Exact(up, root)) => rooted(n, root).zip(rooted(d, root)).and_then(|(n, d)| raised(n, d, up)),
             _ => None,
         };
-        let value = exactly.unwrap_or_else(|| Real(self.real().powf(other.real())));
+        let value = exactly.unwrap_or_else(|| {
+            let (base, by) = (self.real(), other.real());
+            Real(match other {
+                // (A third root of less than nothing, and every odd one, is less than nothing.)
+                Exact(up, root) if base < 0.0 && root % 2 != 0 => (-base).powf(by) * if up % 2 == 0 { 1.0 } else { -1.0 },
+                _ => base.powf(by),
+            })
+        });
         value.real().is_finite().then_some(value)
     }
 }
 
-/// `n`'s root (2, its square root), where it is a whole number.
+/// `n`'s root (2, its square root), where it is a whole number: of less than nothing, an odd one.
 fn rooted(n: i128, root: i128) -> Option<i128> {
     if root == 1 || n == 0 || n == 1 {
         return Some(n);
     }
     if n < 0 {
-        return None;
+        return if root % 2 == 0 { None } else { rooted(n.checked_neg()?, root).map(|whole| -whole) };
     }
     let power = u32::try_from(root).ok()?;
     let near = (n as f64).powf(1.0 / root as f64).round() as i128;
@@ -123,8 +130,10 @@ fn raised(n: i128, d: i128, up: i128) -> Option<Number> {
     exact(n, d)
 }
 
-/// How many figures of a number are shown where that is not all of it.
+/// How many figures of a number are shown where that is not all of it, and how small it is then written as so many
+/// times a power of ten (its first figure past so many places).
 const FIGURES: usize = 15;
+const SMALL: usize = 7;
 
 /// `value` written in figures alone, and whether that is all of it.
 fn written(value: Number) -> (String, bool) {
@@ -141,6 +150,9 @@ fn written(value: Number) -> (String, bool) {
                 left = left * 10 % d;
             }
             let whole_of_it = left == 0;
+            if !whole_of_it && whole == 0 && places.iter().take(SMALL).all(|&place| place == b'0') {
+                return written(Real(value.real()));
+            }
             if !whole_of_it {
                 let kept = if whole > 0 { FIGURES.saturating_sub(point).max(2) } else { places.iter().take_while(|&&place| place == b'0').count() + FIGURES };
                 while left > 0 && places.len() <= kept {
@@ -171,7 +183,7 @@ fn written(value: Number) -> (String, bool) {
             let rounded = format!("{value:.*e}", FIGURES - 1);
             let (figures, power) = rounded.split_once('e').unwrap_or((&rounded, "0"));
             let power: i32 = power.parse().unwrap_or(0);
-            if (-7..21).contains(&power) {
+            if (-(SMALL as i32)..21).contains(&power) {
                 let places = (FIGURES as i32 - 1 - power).max(0) as usize;
                 let text = format!("{value:.places$}");
                 return (trimmed(&text).to_string(), false);
@@ -523,6 +535,15 @@ mod tests {
             ("999999999999999999/3.0000001", "≈ 333,333,322,222,222,592.26"),
             ("2^0.5", "≈ 1.4142135623731"),
             ("10^60", "≈ 1×10^60"),
+            ("10^-8", "= 0.00000001"),
+            ("1/3/10^6", "≈ 0.000000333333333333333"),
+            ("10^-31", "≈ 1×10^-31"),
+            ("1/3/10^20", "≈ 3.33333333333333×10^-21"),
+            // Odd roots of less than nothing.
+            ("(-8)^(1/3)", "= -2"),
+            ("(-8)^(2/3)", "= 4"),
+            ("(-2)^(1/3)", "≈ -1.25992104989487"),
+            ("(-8)^(-1/3)", "= -0.5"),
             ("(1-1/10^20)*10", "≈ 10"),
         ] {
             assert_eq!(shown(typed), answer, "{typed}");
