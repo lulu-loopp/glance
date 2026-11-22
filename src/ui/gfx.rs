@@ -3117,6 +3117,9 @@ unsafe fn glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct
 #[derive(Default)]
 pub struct Layer {
     bitmap: Option<(u64, ID2D1Bitmap1)>,
+    /// What it showed (its key) when painting it into its bitmap failed: drawn where it shows while it shows that, its
+    /// bitmap tried again as it shows something else (see `draw`).
+    unkept: Option<u64>,
 }
 
 impl Layer {
@@ -3144,7 +3147,10 @@ impl Layer {
         // again at the size it comes to rest at. What shows as it did (the settings' library, while the window
         // around it is sized) is drawn from what is kept, as at rest.
         let kept = self.bitmap.as_ref().is_some_and(|(shown, _)| *shown == key);
-        if SIZING.with(Cell::get) && !kept {
+        // Painted into its bitmap and failed, as it shows the same: drawn where it shows, as while it is sized. (A
+        // report: a widget blank at rest whose content showed as it was sized. The bitmap painted into had failed on
+        // the graphics card, was kept as though it had not, and was drawn, blank, till what it shows changed.)
+        if (SIZING.with(Cell::get) && !kept) || self.unkept == Some(key) {
             self.bitmap = None;
             return unsafe { Self::draw_through(frame, local, area, halo, paint) };
         }
@@ -3198,7 +3204,7 @@ impl Layer {
                 // drawn recorded, then drawn over its glow.
                 let painted = match halo {
                     None => paint(frame),
-                    Some(color) => {
+                    Some(color) => (|| {
                         let list = dc.CreateCommandList()?;
                         dc.SetTarget(&list);
                         // (Setting a target can change the context's DPI: the layer's, as it is painted at.)
@@ -3211,14 +3217,26 @@ impl Layer {
                         dc.DrawImage(&glow(dc, &list, color)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                         dc.DrawImage(&list, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                         painted
-                    }
+                    })(),
                 };
+                // (Whatever failed: on its bitmap again, its clip taken off, the frame's target, DPI and place put back.)
+                dc.SetTarget(&bitmap);
                 dc.PopAxisAlignedClip();
+                // What was painted into it done now, on the card, and whether it could be: what fails there is told
+                // only as the frame ends, after the bitmap would have been kept.
+                let done = dc.Flush(None, None);
                 dc.SetTarget(&target);
                 dc.SetDpi(dpi.0, dpi.1);
                 dc.SetTransform(&transform);
-                painted?;
+                if let Err(error) = painted.and(done) {
+                    // Not kept: drawn where it shows from the next frame (this one's failed with it) while it shows
+                    // this, told (sparingly).
+                    self.unkept = Some(key);
+                    crate::widget::note_sparingly("layer-unkept", || format!("a layer could not be painted into its bitmap ({error}); drawn where it shows"));
+                    return Err(error);
+                }
             }
+            self.unkept = None;
             self.bitmap = Some((key, bitmap));
             frame.gfx.last_painted.set(Some(Instant::now()));
             frame.gfx.settled.set(false);
@@ -3295,6 +3313,7 @@ impl Layer {
 
     pub fn release(&mut self) {
         self.bitmap = None;
+        self.unkept = None;
     }
 }
 
@@ -3548,6 +3567,64 @@ mod tests {
         }
         assert_eq!(draw(2), 4);
         assert_eq!(draw(2), 4);
+    }
+
+    /// A layer whose painting into its bitmap failed on the graphics card is not kept: drawn where it shows from the
+    /// next frame while it shows the same, its bitmap tried again as it shows something else, with or without a halo.
+    /// (A report: a widget blank at rest, its content shown as it was sized. The bitmap that failed was kept as though
+    /// it had not and drawn, blank, frame after frame.) The failure here: a bitmap of another device drawn in it.
+    #[test]
+    fn a_layer_whose_painting_failed_is_drawn_where_it_shows() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::Canvas;
+        use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT, D2D_SIZE_U};
+        use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR};
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        let gfx = super::Gfx::new().expect("graphics");
+        let other = super::Gfx::new().expect("another device");
+        let foreign = unsafe {
+            let dc = other.device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE).unwrap();
+            let properties = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                ..Default::default()
+            };
+            dc.CreateBitmap(D2D_SIZE_U { width: 4, height: 4 }, None, 0, &properties).unwrap()
+        };
+        let red = super::Color::hex(0xFF0000, 1.0);
+        for halo in [None, Some(super::Color::hex(0x000000, 0.5))] {
+            let mut layer = super::Layer::default();
+            let painted = std::cell::Cell::new(0);
+            // (Each frame: the layer showing `key`, painted red, failing on the card where `fails`. How much of it is red;
+            // none where drawing it failed.)
+            let mut draw = |key: u64, fails: bool| -> Option<usize> {
+                let failed = std::cell::Cell::new(false);
+                let pixels = gfx.draw_offscreen((48, 48), 1.0, |frame| {
+                    let drawn = layer.draw(frame, key, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, 48.0, 48.0), 1.0, halo, |frame| {
+                        painted.set(painted.get() + 1);
+                        // (Failed first: the card draws nothing after, what was painted left blank.)
+                        if fails {
+                            unsafe { frame.dc.DrawBitmap(&foreign, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                        }
+                        frame.fill(red, 8.0, 8.0, 32.0, 32.0);
+                        Ok(())
+                    });
+                    failed.set(drawn.is_err());
+                });
+                pixels.ok().filter(|_| !failed.get()).map(|pixels| pixels.chunks(4).filter(|p| p[2] > 200 && p[0] < 60 && p[3] > 200).count())
+            };
+            assert_eq!(draw(1, true), None, "{halo:?}: failed on the card");
+            assert_eq!(draw(1, false), Some(1024), "{halo:?}: the same shown, drawn where it shows");
+            assert_eq!(painted.get(), 2, "{halo:?}");
+            assert_eq!(draw(1, false), Some(1024), "{halo:?}");
+            assert_eq!(painted.get(), 3, "{halo:?}: drawn where it shows each frame");
+            // Something else shown: kept again.
+            assert_eq!(draw(2, false), Some(1024), "{halo:?}");
+            assert_eq!(draw(2, false), Some(1024), "{halo:?}");
+            assert_eq!(painted.get(), 4, "{halo:?}: kept");
+        }
     }
 
     #[test]
