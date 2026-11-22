@@ -209,6 +209,13 @@ pub enum Hit {
     /// A list turned through by pages (see `PAGE`), as far as it turns; and the way to its next page.
     Pages(List, u32),
     NextPage(List, u32),
+    /// The AI component's sources turned round by the wheel, a source a page (see `ai::paint_paged`): how many pages
+    /// they are, and whether the first is what every source spent today (see `ai::paint_one`). Past the last comes the
+    /// first again, and before the first the last. Turned by the wheel and its dots alone, a press there the widget's
+    /// (moved, sized) as ever.
+    AiPages(u32, bool),
+    /// One of the dots beside the AI component's sources turned round (see `AiPages`): a press turns them to its page.
+    AiPage(u32),
     /// The overlay's switch.
     Overlay,
     /// The game button: the window in front taken for a game, or games turned off (see `presents::GameMode`).
@@ -293,7 +300,7 @@ impl Hit {
     /// Whether a press on it does something of its own (and so moves nothing): the process list and the threads'
     /// cells only scroll and show, under the wheel and the pointer.
     pub fn takes_press(self) -> bool {
-        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_))
+        !matches!(self, Hit::List(..) | Hit::Thread(_) | Hit::Station | Hit::AppsArea | Hit::FoldersArea | Hit::Shortened | Hit::AppSlot(_) | Hit::Todo(TodoHit::Row(..)) | Hit::AiSlot(_) | Hit::AiPages(..))
     }
 
     /// Whether it is lit as the pointer is over it: what takes a press, and an AI source in the dock (its card shown
@@ -403,10 +410,13 @@ pub enum List {
     /// A note's words on its card stuck on the desktop, while it is not written in (written in, the box it is written
     /// in scrolls them).
     Words,
+    /// The AI component's sources, in a widget too small for all of them, turned through a source a page (see
+    /// `ai::paint_paged`).
+    AiSources,
 }
 
 /// How many lists there are.
-const LISTS: usize = 8;
+const LISTS: usize = List::AiSources as usize + 1;
 
 /// Which of its pages the station's lane shows: what is on it, what was copied lately, or the files come lately (each
 /// of the last two, those its filter takes).
@@ -479,6 +489,30 @@ impl Scrolls {
         }
         *turning = (*turning + by).clamp(0.0, most);
         *to = ((*turning / page).round() * page).clamp(0.0, most);
+    }
+
+    /// `list`, turned round through pages `page` long (past the last, on to the first, and before the first, back to
+    /// the last: see `fold`), to be turned `by` more (DIPs): to the page nearest where that comes to, as `turn_pages`.
+    pub fn turn_round(&mut self, list: List, by: f32, page: f32) {
+        let (to, turning) = (&mut self.to[list as usize], &mut self.turning[list as usize]);
+        if (*turning - *to).abs() > page / 2.0 {
+            *turning = *to;
+        }
+        *turning += by;
+        *to = (*turning / page).round() * page;
+    }
+
+    /// `list`, turned round through all its pages in `round` (DIPs), kept within one turn of them: where it is, where
+    /// it is going and where it is turned to, moved back or on together by whole turns, so that where it is going is
+    /// within the first. (Drawn the same: a page comes again a turn on.)
+    pub fn fold(&mut self, list: List, round: f32) {
+        let list = list as usize;
+        let by = (self.to[list] / round).floor() * round;
+        if by != 0.0 {
+            self.at[list] -= by;
+            self.to[list] -= by;
+            self.turning[list] -= by;
+        }
     }
 
     /// How far `list` is going (see `at`: how far it is now, on its way there).
@@ -577,6 +611,11 @@ pub fn under(hits: &[HitBox], (x, y): (f32, f32)) -> impl Iterator<Item = &HitBo
 pub fn wheel(scrolls: &mut Scrolls, under: &[Hit], delta: i16, across: bool) -> bool {
     let notches = delta as f32 / 120.0;
     let down = -notches * crate::panel::WHEEL_ROWS * TABLE_ROW;
+    // (The AI component's sources: turned round, past the last on to the first.)
+    if under.iter().any(|hit| matches!(hit, Hit::AiPages(..))) {
+        scrolls.turn_round(List::AiSources, if across { notches * PAGE } else { down }, PAGE);
+        return true;
+    }
     if let Some((list, most)) = under.iter().find_map(|hit| hit.pages()) {
         scrolls.turn_pages(list, if across { notches * PAGE } else { down }, PAGE, most);
         return true;
@@ -660,6 +699,52 @@ pub fn keep_note(scrolls: &mut Scrolls, shown: &mut NoteShown, notes: &[crate::n
     }
     let at = ((scrolls.to(List::Notes) / PAGE).round().max(0.0) as usize).min(notes.len().saturating_sub(1));
     shown.kept = notes.get(at).map(|note| (note.name.clone(), at));
+}
+
+/// Which of the AI component's sources a widget too small for all of them shows first (see `keep_source`): its id and
+/// its place as last kept.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct SourceShown {
+    kept: Option<(String, usize)>,
+}
+
+impl SourceShown {
+    /// The source `id` shown first, as a widget was kept (put where it is at its first frame).
+    pub fn of(id: Option<String>) -> Self {
+        SourceShown { kept: id.map(|id| (id, usize::MAX)) }
+    }
+
+    /// The source it shows first, by its id.
+    pub fn id(&self) -> Option<&str> {
+        self.kept.as_ref().map(|(id, _)| id.as_str())
+    }
+}
+
+/// The AI component's pages turned round by the wheel (`pages`, their ids in their order: its sources, after what every
+/// source spent today where that is a page of them, see `Hit::AiPages`) kept within a turn of them (see
+/// `Scrolls::fold`), and on the page shown first as their order changes or as a widget kept on one is put back: the
+/// same page shown, where it is now, at once; the first, where it is no longer shown. Whether the one shown first
+/// changed.
+pub fn keep_source(scrolls: &mut Scrolls, shown: &mut SourceShown, pages: &[String]) -> bool {
+    let count = pages.len();
+    if count == 0 {
+        let changed = shown.kept.is_some();
+        shown.kept = None;
+        return changed;
+    }
+    scrolls.fold(List::AiSources, count as f32 * PAGE);
+    if let Some((id, at)) = &shown.kept {
+        // (Its place holding another: the order changed, or it was just put back, not the pages turned.)
+        if pages.get(*at).is_none_or(|page| page != id) {
+            let now = pages.iter().position(|page| page == id).unwrap_or(0);
+            scrolls.hold(List::AiSources, now as f32 * PAGE, (count - 1) as f32 * PAGE);
+        }
+    }
+    let at = (scrolls.to(List::AiSources) / PAGE).round() as usize % count;
+    let kept = pages.get(at).map(|page| (page.clone(), at));
+    let changed = kept.as_ref().map(|(id, _)| id) != shown.kept.as_ref().map(|(id, _)| id);
+    shown.kept = kept;
+    changed
 }
 
 /// Sliders' knobs all at rest (for what keeps none of its own).
@@ -7341,7 +7426,7 @@ otepad.exe", "Notepad"),
                 let held = Prefs::resolve(&stored, &[]).holding(crate::settings::Part::Ai);
                 let scene = Scene { prefs: &held, hover: Some(Hit::AiSlot(ai::Spot::Ring(ai::Source::Codex))), ..scene };
                 let dock = ai::dock_of(&held, Lang::Zh, Some(&usage), now);
-                let (down, across) = (ai::dock_size(false, dock.slots.len()), ai::dock_size(true, dock.slots.len()));
+                let (down, across) = (ai::dock_size(false, dock.slots.len(), dock.today.is_some()), ai::dock_size(true, dock.slots.len(), dock.today.is_some()));
                 let card = Lane { id: "ai:codex".into(), blocks: ai::lane_of("ai:codex", &held, Lang::Zh, Some(&usage), now, None).unwrap(), ink: theme.ink("ai:codex") };
                 let card_h = card.height(&theme);
                 let (w, h) = ((across.0 + 16.0).max(down.0 + 16.0 + w), down.1.max(card_h) + across.1 + 24.0);
@@ -7401,8 +7486,8 @@ otepad.exe", "Notepad"),
                     let laid_across = held.clone().laid_across(true);
                     let across_lane = || Lane { id: AI_LANE.into(), blocks: ai::together(&laid_across, Lang::Zh, Some(&usage), now, Detail::Full, |source| source == ai::Source::Codex, &theme).unwrap(), ink: theme.ink(AI_LANE) };
                     let across_closed = || Lane { id: AI_LANE.into(), blocks: ai::together(&laid_across, Lang::Zh, Some(&usage), now, Detail::Full, |_| false, &theme).unwrap(), ink: theme.ink(AI_LANE) };
-                    let across = ai::dock_size(true, 2);
-                    let down = ai::dock_size(false, 2);
+                    let across = ai::dock_size(true, 2, true);
+                    let down = ai::dock_size(false, 2, true);
                     // Each: its shape, its size, where it is.
                     let widgets: Vec<(Option<Shape>, (f32, f32), (f32, f32))> = vec![
                         (None, (COLUMN_WIDTH, full.height(&theme)), (30.0, 30.0)),
@@ -7543,8 +7628,8 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
         let lane_at = |detail: Detail, opened: Option<ai::Source>| Lane { id: AI_LANE.into(), blocks: ai::together(&held, Lang::Zh, Some(&usage), now, detail, |source| Some(source) == opened, &theme).unwrap(), ink: theme.ink(AI_LANE) };
-        let dock = ai::dock_size(true, 4);
-        let down = ai::dock_size(false, 4);
+        let dock = ai::dock_size(true, 4, true);
+        let down = ai::dock_size(false, 4, true);
         // Each page: what it holds, each its form (none: as in the panel, a source opened), its size, where, how large.
         type Piece = (Option<Shape>, Option<ai::Source>, (f32, f32), (f32, f32), f32);
         // The sizes, all drawn as large, in rows of a grid the page's width (DIPs of the widgets, from its corner):
@@ -7731,8 +7816,8 @@ otepad.exe", "Notepad"),
         let seen = Seen::of(history);
         let prefs = Prefs::default();
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
-        let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
+        let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let rich = ai::Rich::default();
         use ai::{Source, Spot};
         let every = [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot).to_vec();
@@ -7745,7 +7830,7 @@ otepad.exe", "Notepad"),
             }
             hits.into_iter().map(|(.., hit)| hit).collect::<Vec<_>>()
         };
-        let (across, down) = (ai::dock_size(true, 2), ai::dock_size(false, 2));
+        let (across, down) = (ai::dock_size(true, 2, true), ai::dock_size(false, 2, true));
         assert_eq!(spots(Shape::Across, across), every);
         assert_eq!(spots(Shape::Down, (down.0 + 20.0, down.1)), every);
         // (A little narrower than designed: the strip, its slots narrower. The dock not fitting it: as near a square as
@@ -7754,7 +7839,8 @@ otepad.exe", "Notepad"),
         assert_eq!(spots(Shape::Down, (down.0, down.1 - 40.0)), rings);
         assert_eq!(spots(Shape::Least, (156.0, 156.0)), rings);
         assert_eq!(spots(Shape::Least, (300.0, 240.0)), every);
-        assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today)]);
+        // (Today's figure first, the sources' turned to after it, by the wheel or its dots.)
+        assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today), Hit::AiPage(0), Hit::AiPage(1), Hit::AiPage(2), Hit::AiPages(3, true)]);
     }
 
     /// The AI component's widget shows more the larger it is made, each form drawn only a little larger than designed
@@ -7839,7 +7925,9 @@ otepad.exe", "Notepad"),
     /// no room under the head and showed today's figure alone. Made larger, wider or taller, it tells no less: what was
     /// spent by model never gone, and never fewer things told while it is so (a little narrower than the dock's strip, 530
     /// by 95, it showed today's figure alone, where 562 by 70 showed the strip, and a little taller than the strip as near
-    /// a square it told less than the strip).
+    /// a square it told less than the strip). Too small for every source, it turns through them (see
+    /// `the_ai_widget_too_small_for_its_sources_turns_through_them`): made larger, it holds them all before it tells
+    /// more of one.
     #[test]
     fn the_ai_widget_tells_its_models_before_its_sessions() {
         let theme = Theme::new(Skin::Glass, true);
@@ -7861,7 +7949,7 @@ otepad.exe", "Notepad"),
         // (Sessions at work, as the owner's were.)
         let mut dock = ai::Dock { working: 2, ..dock.clone() };
         // (And a source with a balance, as the owner's three were.)
-        dock.slots.push(ai::Slot { source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
+        dock.slots.push(ai::Slot { flag: None, faint: false, left: false, source: ai::Source::DeepSeek, used: None, figure: "$4.3".into(), label: "余额".into(), resets: String::new(), windows: Vec::new() });
         let dock = &dock;
         let drawn = |size: (f32, f32)| {
             let said = Said::default();
@@ -7870,7 +7958,10 @@ otepad.exe", "Notepad"),
             let texts = said.0.into_inner();
             let rings = hits.iter().filter(|hit| matches!(hit.4, Hit::AiSlot(ai::Spot::Ring(_)))).count();
             let told = texts.iter().filter(|text| !text.trim().is_empty()).count();
-            (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings, told)
+            // (Its sources all shown: not turned through, and not today's figure alone.)
+            let turned = hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..)));
+            let every = !turned && (rings > 0 || dock.slots.iter().any(|slot| texts.iter().any(|text| text == slot.source.name(Lang::Zh))));
+            (models.iter().any(|name| texts.iter().any(|text| text == name)), sessions.iter().any(|title| texts.iter().any(|text| text == title)), rings, told, every)
         };
         // As the owner sized it: what was spent by model, and then its sessions.
         assert_eq!(drawn((761.0, 613.0)).0, true, "{:?}", drawn((761.0, 613.0)));
@@ -7878,12 +7969,12 @@ otepad.exe", "Notepad"),
         assert_eq!(drawn((500.0, 203.0)).2, dock.slots.len());
         assert_eq!(drawn((530.0, 95.0)).2, dock.slots.len());
         let sizes: Vec<(f32, f32)> = (60..=1300).step_by(20).flat_map(|w| (40..=950).step_by(15).map(move |h| (w as f32, h as f32))).collect();
-        let all: std::collections::HashMap<(u32, u32), (bool, usize)> = sizes
+        let all: std::collections::HashMap<(u32, u32), (bool, bool, usize)> = sizes
             .iter()
             .map(|&(w, h)| {
-                let (models, sessions, _, told) = drawn((w, h));
+                let (models, sessions, _, told, every) = drawn((w, h));
                 assert!(models || !sessions, "{w} by {h}: its sessions without what was spent by model");
-                ((w as u32, h as u32), (models, told))
+                ((w as u32, h as u32), (every, models, told))
             })
             .collect();
         for (&(w, h), &says) in &all {
@@ -7972,11 +8063,262 @@ otepad.exe", "Notepad"),
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw.
+    /// The AI component's widget too small for any form that holds every source shows as many sources as fit whole, the
+    /// rest turned round to by the wheel, a source a notch (past the last, the first again, and back from the first to
+    /// the last: it stopped at the last, and the owner asked for them to go on round), and dots telling which is shown
+    /// of how many, a press on one turning to it. A source's head shows its card as the pointer rests on it. As the
+    /// owner sized it, 379 by 106 with three sources, it showed today's figure alone. Made larger, it tells no less;
+    /// holding them all, it shows no dots and the wheel turns nothing. Too small for more than one figure, today's is the
+    /// first page and the sources' come after it (with today shown, it showed that alone and turned to none).
+    #[test]
+    fn the_ai_widget_too_small_for_its_sources_turns_through_them() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        assert_eq!(dock.slots.len(), 3);
+        let titles: Vec<String> = dock.slots.iter().map(|slot| slot.source.name(Lang::Zh).to_string()).collect();
+        let drawn = |size: (f32, f32), scrolls: Scrolls| {
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let said = Said::default();
+            let mut hits = Vec::new();
+            ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
+            (said.0.into_inner(), hits)
+        };
+        let heads = |texts: &[String]| titles.iter().filter(|title| texts.contains(title)).cloned().collect::<Vec<String>>();
+        // As the owner sized it: a source whole (its head, its limits), the rest turned to by the wheel.
+        let (texts, hits) = drawn((379.0, 106.0), Scrolls::default());
+        assert_eq!(heads(&texts), [titles[0].clone()], "{texts:?}");
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiPages(3, false)), "turned round");
+        // Its head, the source's card beside it; its dots, each to be pressed.
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[0].source))));
+        assert_eq!(hits.iter().filter(|hit| matches!(hit.4, Hit::AiPage(_))).count(), 3);
+        // A notch of the wheel over it: the next source, and the next, then the first again; and back, the last.
+        let mut scrolls = Scrolls::default();
+        let over: Vec<Hit> = under(&hits, (200.0, 50.0)).map(|hit| hit.4).collect();
+        for (notch, (delta, shown)) in [(-120, 1), (-120, 2), (-120, 0), (-120, 1), (120, 0), (120, 2), (120, 1)].into_iter().enumerate() {
+            assert!(wheel(&mut scrolls, &over, delta, false));
+            // (Its slide done.)
+            while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
+            let (texts, hits) = drawn((379.0, 106.0), scrolls);
+            assert_eq!(heads(&texts), [titles[shown].clone()], "notch {notch}: {texts:?}");
+            assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[shown].source))), "notch {notch}");
+            // (Codex's every window, each with how much of it is used.)
+            if shown == 1 {
+                assert_eq!(texts.iter().filter(|text| text.ends_with('%')).count(), 3, "{texts:?}");
+            }
+        }
+        // Halfway from the last on to the first: the two of them, the first coming in after the last.
+        let mut scrolls = Scrolls::default();
+        scrolls.hold(List::AiSources, 2.5 * PAGE, f32::MAX);
+        let (texts, _) = drawn((379.0, 106.0), scrolls);
+        assert_eq!(heads(&texts), [titles[0].clone(), titles[2].clone()], "{texts:?}");
+        // The smallest: today's figure, then each source's, then today's again.
+        let (texts, hits) = drawn((120.0, 80.0), Scrolls::default());
+        assert!(texts.iter().any(|text| text == "今日"), "{texts:?}");
+        assert!(hits.iter().any(|hit| hit.4 == Hit::AiPages(4, true)));
+        let over: Vec<Hit> = under(&hits, (60.0, 40.0)).map(|hit| hit.4).collect();
+        let mut scrolls = Scrolls::default();
+        for slot in dock.slots.iter().map(Some).chain([None]) {
+            assert!(wheel(&mut scrolls, &over, -120, false));
+            while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
+            let (texts, _) = drawn((120.0, 80.0), scrolls);
+            match slot {
+                Some(slot) => assert!(texts.iter().any(|text| text.starts_with(slot.source.name(Lang::Zh))) && texts.contains(&slot.figure), "{texts:?}"),
+                None => assert!(texts.iter().any(|text| text == "今日"), "{texts:?}"),
+            }
+        }
+        // Made larger, it tells no less (wider, sources side by side; taller, when each window starts again, then what
+        // was spent by model), and holds them all before it tells more of one: once it does, it is not turned through.
+        let told = |size: (f32, f32)| {
+            let (texts, hits) = drawn(size, Scrolls::default());
+            (!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))), texts.iter().filter(|text| !text.trim().is_empty()).count())
+        };
+        for w in (380..=700).step_by(20) {
+            for h in (100..=260).step_by(10) {
+                let (w, h) = (w as f32, h as f32);
+                for larger in [(w + 20.0, h), (w, h + 10.0)] {
+                    assert!(told(larger) >= told((w, h)), "{w} by {h} tells {:?}, {larger:?} larger tells {:?}", told((w, h)), told(larger));
+                }
+            }
+        }
+        // Wide enough for all of them: no dots, and the wheel turns nothing.
+        let (texts, hits) = drawn((900.0, 106.0), Scrolls::default());
+        assert!(titles.iter().all(|title| texts.iter().any(|text| text.starts_with(title.as_str()))), "{texts:?}");
+        assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))));
+    }
+
+    /// "Today" (what every source spent today) switched off is drawn nowhere: in no form of the widget at any size, in
+    /// neither dock, nor in the room either is sized for. The widget too small for more than one figure shows a source's
+    /// figure (its tightest window's share used) in its place, the others turned to by the wheel, not a lone "0".
+    #[test]
+    fn today_switched_off_is_drawn_nowhere() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let prefs = |today: bool| {
+            let shown = [("ai:today", today), ("ai:claude", true), ("ai:codex", true), ("ai:deepseek", true)].map(|(id, on)| serde_json::json!({ "id": id, "on": on }));
+            Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai)
+        };
+        let (on, off) = (prefs(true), prefs(false));
+        assert!(ai::shows_today(&on) && !ai::shows_today(&off));
+        let figure = ai::dock_of(&on, Lang::Zh, Some(&usage), now).today.expect("shown");
+        let dock = ai::dock_of(&off, Lang::Zh, Some(&usage), now);
+        assert_eq!(dock.today, None);
+        // (Drawn under its keys, "ai:today", and as its figure where none of the sources' is the same.)
+        let today_in = |keys: &[String]| keys.iter().any(|key| key.starts_with("ai:today"));
+        assert!(!dock.slots.iter().any(|slot| slot.figure == figure));
+        let scene = |prefs, scrolls| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls, tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        // Its docks, each as large as it is sized for: one spot fewer, no "Today" among them.
+        for across in [true, false] {
+            let room = ai::dock_size(across, dock.slots.len(), false);
+            assert!(room.0 + room.1 < ai::dock_size(across, dock.slots.len(), true).0 + ai::dock_size(across, dock.slots.len(), true).1);
+            let said = Said::default();
+            let hits = ai::draw_dock(&said, &scene(&off, Scrolls::default()), &dock, across, (0.0, 0.0, room.0, room.1));
+            let keys = said.1.into_inner();
+            assert!(!today_in(&keys) && !said.0.into_inner().contains(&figure), "{across} {keys:?}");
+            assert!(!hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Today)), "{across}");
+        }
+        assert_eq!(crate::ui::forms::Small::ladder(crate::ui::forms::shows(&scene(&off, Scrolls::default()))), [false, true].map(|across| crate::ui::forms::Small::Dock { across, today: false }));
+        // The widget at every size.
+        let shaped = ai::together(&off, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        let drawn = |size: (f32, f32), scrolls: Scrolls| {
+            let said = Said::default();
+            let mut hits = Vec::new();
+            ai::paint_shaped(&said, &scene(&off, scrolls), theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
+            (said.0.into_inner(), hits, said.1.into_inner())
+        };
+        for w in (60..=900).step_by(20) {
+            for h in (40..=700).step_by(20) {
+                let (texts, _, keys) = drawn((w as f32, h as f32), Scrolls::default());
+                assert!(!today_in(&keys) && !texts.contains(&figure), "{w} by {h}: {keys:?} {texts:?}");
+            }
+        }
+        // Too small for more than one figure: the first source's, then the next by the wheel.
+        let (texts, hits, _) = drawn((120.0, 80.0), Scrolls::default());
+        assert!(texts.contains(&dock.slots[0].figure), "{texts:?}");
+        let under: Vec<Hit> = under(&hits, (60.0, 40.0)).map(|hit| hit.4).collect();
+        let mut scrolls = Scrolls::default();
+        assert!(wheel(&mut scrolls, &under, -120, false));
+        while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
+        let (texts, _, _) = drawn((120.0, 80.0), scrolls);
+        assert!(texts.iter().any(|text| text.starts_with(dock.slots[1].source.name(Lang::Zh))), "{texts:?}");
+    }
+
+    /// The AI widget draws nothing past its edges, at any size, in either language, with every source shown: the smallest
+    /// form's words (a source's name and its window's, "Codex · Weekly left", in a widget 80 wide) and its page dots (ten
+    /// sources' a column 84 DIPs tall, in a widget 40 tall) went past them.
+    #[test]
+    fn the_ai_widget_draws_within_itself() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        for today in [true, false] {
+            let shown = [("ai:today", today), ("ai:claude", true), ("ai:codex", true), ("ai:deepseek", true)].map(|(id, on)| serde_json::json!({ "id": id, "on": on }));
+            let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+            for lang in [Lang::Zh, Lang::En] {
+                let shaped = ai::together(&held, lang, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+                let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+                // (Every source, each told by its window's share left, named as long as the longest.)
+                let mut dock = dock.clone();
+                let like = dock.slots[0].clone();
+                let missing: Vec<ai::Source> = ai::SOURCES.iter().copied().filter(|source| !dock.slots.iter().any(|slot| slot.source == *source)).collect();
+                dock.slots.extend(missing.into_iter().map(|source| ai::Slot { source, ..like.clone() }));
+                for slot in &mut dock.slots {
+                    slot.label = lang.pick("每周剩余", "Weekly left").into();
+                }
+                let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+                for w in (60..=420).step_by(20) {
+                    for h in (40..=320).step_by(20) {
+                        let (w, h) = (w as f32, h as f32);
+                        let reach = Reach { shadows_left_out: true, ..Reach::default() };
+                        let mut hits = Vec::new();
+                        ai::paint_shaped(&reach, &scene, theme.ink(AI_LANE), (&dock, mounted, rich), (0.0, 0.0, w, h), &mut hits);
+                        let (left, top, right, bottom) = reach.reach.get().expect("drawn");
+                        assert!(left >= -0.5 && top >= -0.5 && right <= w + 0.5 && bottom <= h + 0.5, "{} today {today}, {w} by {h}: drawn over {:?}", lang.pick("zh", "en"), (left, top, right, bottom));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The widget's sources (and today's figure before them, where it is a page) turn round: a notch of the wheel past
+    /// the last turns to the first, a notch back from the first to the last, kept within a turn however often they go
+    /// round. Turned to the last, then made wider, two to a page, the last stays the one shown first (the first after
+    /// it), and a notch back turns to the one before it at once.
+    #[test]
+    fn the_ai_widget_turns_its_sources_round() {
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<String>>();
+        for pages in [ids(&["ai:claude", "ai:codex", "ai:deepseek"]), ids(&[ai::TODAY_PAGE, "ai:claude", "ai:codex"])] {
+            let under = [Hit::AiPages(pages.len() as u32, pages[0] == ai::TODAY_PAGE)];
+            let mut scrolls = Scrolls::default();
+            let mut shown = SourceShown::of(None);
+            keep_source(&mut scrolls, &mut shown, &pages);
+            let mut turned = |delta: i16| {
+                assert!(wheel(&mut scrolls, &under, delta, false));
+                keep_source(&mut scrolls, &mut shown, &pages);
+                let to = scrolls.to(List::AiSources);
+                assert!((0.0..3.0 * PAGE).contains(&to), "{to}");
+                shown.id().unwrap().to_string()
+            };
+            let on: Vec<String> = (0..7).map(|_| turned(-120)).collect();
+            assert_eq!(on, [1, 2, 0, 1, 2, 0, 1].map(|at| pages[at].clone()));
+            let back: Vec<String> = (0..4).map(|_| turned(120)).collect();
+            assert_eq!(back, [0, 2, 1, 0].map(|at| pages[at].clone()));
+        }
+        // Made wider at the last: kept there.
+        let sources = ids(&["ai:claude", "ai:codex", "ai:deepseek"]);
+        let mut scrolls = Scrolls::default();
+        let mut shown = SourceShown::of(None);
+        scrolls.hold(List::AiSources, 2.0 * PAGE, f32::MAX);
+        assert!(keep_source(&mut scrolls, &mut shown, &sources));
+        assert!(!keep_source(&mut scrolls, &mut shown, &sources));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (2.0 * PAGE, Some("ai:deepseek")));
+        assert!(wheel(&mut scrolls, &[Hit::AiPages(3, false)], 120, false));
+        assert_eq!(scrolls.to(List::AiSources), PAGE);
+    }
+
+    /// The widget's sources turned through stay on the source shown first as their order changes, go back to the first
+    /// where it is switched off, and are put back on the source the widget was kept on.
+    #[test]
+    fn the_ai_widget_keeps_the_source_it_shows() {
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<String>>();
+        let mut scrolls = Scrolls::default();
+        // Put back on the one it was kept on.
+        let mut shown = SourceShown::of(Some("ai:codex".into()));
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:claude", "ai:codex", "ai:deepseek"])));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (PAGE, Some("ai:codex")));
+        // Its order changed: held on it where it is now.
+        assert!(!keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
+        // Turned by the wheel: the next one kept.
+        scrolls.turn_round(List::AiSources, PAGE, PAGE);
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:claude", "ai:deepseek"])));
+        assert_eq!(shown.id(), Some("ai:claude"));
+        // Switched off: the first.
+        assert!(keep_source(&mut scrolls, &mut shown, &ids(&["ai:codex", "ai:deepseek"])));
+        assert_eq!((scrolls.to(List::AiSources), shown.id()), (0.0, Some("ai:codex")));
+    }
+
+    /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw (and every key
+    /// what it draws is drawn under).
     #[derive(Default)]
-    struct Said(std::cell::RefCell<Vec<String>>);
+    struct Said(std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<f32>>);
 
     impl Canvas for Said {
+        fn key(&self, key: &str) {
+            self.1.borrow_mut().push(key.to_string());
+        }
         fn text(&self, text: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {
             self.0.borrow_mut().push(text.to_string());
         }
@@ -8004,10 +8346,72 @@ otepad.exe", "Notepad"),
         fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
-        fn arc(&self, _: Point, _: f32, _: f32, _: f32, _: Color, _: f32) {}
+        fn arc(&self, _: Point, _: f32, _: f32, sweep: f32, _: Color, _: f32) {
+            self.2.borrow_mut().push(sweep);
+        }
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}
         fn picture_within(&self, _: &super::super::canvas::Picture, _: (f32, f32, f32, f32), _: (f32, f32, f32, f32, f32), _: f32) {}
+    }
+
+    /// The AI component's limits told by how much of each is left (the setting "Limits shown": "Left", kept as
+    /// `aiLeft`): each window's figure as what is left, said so where it fits, its bar drawn to it and the mark of how
+    /// much of it has gone by drawn as how much is to come; the dock's ring drawn to what is left of the tightest window
+    /// and its figure that, of that window's name and "left". Still drawn hot as it is used up, and told as before where
+    /// it is not chosen.
+    #[test]
+    fn ai_limits_told_by_what_is_left() {
+        let theme = Theme::new(Skin::Glass, true);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let prefs = |left: bool| {
+            let shown = ["ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+            Prefs::resolve(&serde_json::json!({ "ai": shown, "aiLeft": left }), &[]).holding(crate::settings::Part::Ai)
+        };
+        let scene = |prefs| Scene { music_apart: false, hint: None, info: &info, prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        // Codex's windows: five hours 62% used, 0.6 of it gone by; a week 95% used; a day started again, none used.
+        let windows = |prefs: &Prefs| match ai::lane_of("ai:codex", prefs, Lang::Zh, Some(&usage), now, Some(false)).unwrap().as_slice() {
+            [_, Block::Ai(block @ ai::AiBlock::Windows(windows))] => (block.clone(), windows.clone()),
+            blocks => panic!("{} blocks", blocks.len()),
+        };
+        let told = |scene: &Scene, block: &ai::AiBlock| {
+            let said = Said::default();
+            ai::paint(&said, scene, theme.ink(AI_LANE), block, (0.0, 0.0, 300.0), &|_| {}, &mut Vec::new());
+            said.0.into_inner()
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let (left, used) = (prefs(true), prefs(false));
+        let (on_left, on_used) = (scene(&left), scene(&used));
+        let (block, shown) = windows(&left);
+        assert!(near(shown[0].shown(), 0.38) && near(shown[0].mark().unwrap(), 0.4) && near(shown[1].shown(), 0.05) && near(shown[2].shown(), 1.0), "{shown:?}");
+        assert!(shown[1].used >= 0.9);
+        let texts = told(&on_left, &block);
+        for figure in ["剩余 38%", "剩余 5%", "剩余 100%"] {
+            assert!(texts.iter().any(|text| text == figure), "{figure} in {texts:?}");
+        }
+        let (block, shown) = windows(&used);
+        assert!(near(shown[0].shown(), 0.62) && near(shown[0].mark().unwrap(), 0.6), "{shown:?}");
+        let texts = told(&on_used, &block);
+        assert!(texts.iter().any(|text| text == "62%") && !texts.iter().any(|text| text.contains("剩余")), "{texts:?}");
+        // The dock: Codex's ring and figure, its week the tightest.
+        let codex = |scene: &Scene| {
+            let dock = ai::dock_of(scene.prefs, Lang::Zh, Some(&usage), now);
+            let slot = dock.slots.iter().find(|slot| slot.source == ai::Source::Codex).unwrap().clone();
+            let said = Said::default();
+            let one = ai::Dock { slots: vec![slot.clone()], ..dock };
+            let (w, h) = ai::dock_size(false, 1, one.today.is_some());
+            ai::draw_dock(&said, scene, &one, false, (0.0, 0.0, w, h));
+            (slot, said.2.into_inner())
+        };
+        let (slot, arcs) = codex(&on_left);
+        assert_eq!((slot.figure.as_str(), slot.label.as_str()), ("5%", "每周剩余"));
+        assert!(slot.used.is_some_and(|used| used >= 0.9));
+        assert!(arcs.iter().any(|sweep| near(*sweep, std::f32::consts::TAU * 0.05)), "{arcs:?}");
+        let (slot, arcs) = codex(&on_used);
+        assert_eq!((slot.figure.as_str(), slot.label.as_str()), ("95%", "每周"));
+        assert!(arcs.iter().any(|sweep| near(*sweep, std::f32::consts::TAU * 0.95)), "{arcs:?}");
     }
 
     /// The AI component's dock offers a card for what every source spent today at its start and for the sessions at
@@ -8019,15 +8423,15 @@ otepad.exe", "Notepad"),
         let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
         let seen = Seen::of(history);
         let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Shelf, hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
-        let slot = |source| ai::Slot { source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
-        let dock = ai::Dock { today: "20 万".into(), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
+        let slot = |source| ai::Slot { flag: None, faint: false, left: false, source, used: Some(0.4), figure: "40%".into(), label: String::new(), resets: String::new(), windows: Vec::new() };
+        let dock = ai::Dock { today: Some("20 万".into()), slots: vec![slot(ai::Source::Claude), slot(ai::Source::Codex)], at_work: vec![ai::Source::Codex], working: 1 };
         let spots = |hits: Vec<HitBox>| hits.into_iter().map(|(x, y, w, h, hit)| (hit, (x, y, w, h))).collect::<Vec<_>>();
         use ai::{Source, Spot};
-        let (w, h) = ai::dock_size(true, 2);
+        let (w, h) = ai::dock_size(true, 2, true);
         let across = spots(ai::draw_dock(&Nothing, &scene, &dock, true, (0.0, 0.0, w, h)));
         assert_eq!(across.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
         assert_eq!((across[0].1, across[3].1), ((12.0, 0.0, 76.0, h), (12.0 + 76.0 + 2.0 * 120.0, 0.0, 76.0, h)));
-        let (w, h) = ai::dock_size(false, 2);
+        let (w, h) = ai::dock_size(false, 2, true);
         let down = spots(ai::draw_dock(&Nothing, &scene, &dock, false, (0.0, 0.0, w, h)));
         assert_eq!(down.iter().map(|(hit, _)| *hit).collect::<Vec<_>>(), [Spot::Today, Spot::Ring(Source::Claude), Spot::Ring(Source::Codex), Spot::Sessions].map(Hit::AiSlot));
         assert_eq!((down[0].1, down[3].1), ((0.0, 12.0, w, 42.0), (0.0, 12.0 + 42.0 + 2.0 * 92.0, w, 50.0)));
@@ -10550,16 +10954,21 @@ seven".into()));
     /// A list shown another way, or under another filter, starts at its top; shown as before, it stays where it was.
     #[test]
     fn a_list_shown_another_way_starts_at_its_top() {
+        let notes = |shown: u32| {
+            let mut shows = [0; LISTS];
+            shows[List::Notes as usize] = shown;
+            shows
+        };
         let mut scrolls = Scrolls::default();
-        scrolls.follow([0, 0, 0, 0, 0, 1, 0, 0]);
+        scrolls.follow(notes(1));
         scrolls.turn(List::Notes, 80.0, 500.0);
         scrolls.turn(List::Recent, 40.0, 500.0);
         for _ in 0..200 {
             scrolls.ease(1.0, 0.1);
         }
-        scrolls.follow([0, 0, 0, 0, 0, 1, 0, 0]);
+        scrolls.follow(notes(1));
         assert!(scrolls.at(List::Notes) > 79.0 && scrolls.at(List::Recent) > 39.0);
-        scrolls.follow([0, 0, 0, 0, 0, 2, 0, 0]);
+        scrolls.follow(notes(2));
         assert_eq!(scrolls.at(List::Notes), 0.0);
         assert!(scrolls.at(List::Recent) > 39.0);
         scrolls.ease(1.0, 0.1);

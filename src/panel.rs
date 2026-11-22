@@ -4426,8 +4426,8 @@ impl<'a> Panel<'a> {
                 // else laid out itself.
                 let shows = crate::ui::forms::shows(&scene);
                 let want = match shows {
-                    crate::ui::forms::Shows::Ai(count) if self.docked && count > 0 => {
-                        let dock = crate::ui::forms::Small::Dock { across: self.edge == Edge::Top };
+                    crate::ui::forms::Shows::Ai(count, today) if self.docked && count > 0 => {
+                        let dock = crate::ui::forms::Small::Dock { across: self.edge == Edge::Top, today };
                         arrange::Want::Kept(arrange::Choice { form: arrange::Form::Small(dock), scale: 1.0, extra: (0.0, 0.0) })
                     }
                     _ => arrange::Want::Itself,
@@ -4663,16 +4663,7 @@ impl<'a> Panel<'a> {
             }
             if let Some((rx, ry, rw, _)) = racked {
                 frame.origin(x, y);
-                let side = crate::ui::buttons::SIZE;
-                for (index, hit) in [Hit::Pin, Hit::Settings].into_iter().enumerate() {
-                    let (bx, by) = (rx + rw - side - index as f32 * (side + crate::ui::buttons::GAP), ry + RACK_INSET);
-                    let (button, settings) = if hit == Hit::Pin { (crate::ui::buttons::Button::Pin, false) } else { (crate::ui::buttons::Button::Settings, true) };
-                    let lit = (hit == Hit::Pin && scene.pinned) || (settings && settings_lit.is_some()) || hover == Some(hit);
-                    let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
-                    let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
-                    crate::ui::buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown);
-                    rack_hits.push((bx, by, side, side, hit));
-                }
+                paint_rack(frame, theme, (rx, ry, rw), scene.pinned, settings_lit, hover, &mut rack_hits);
                 frame.origin(0.0, 0.0);
             }
             if let Some((size, limit)) = sizing {
@@ -4888,13 +4879,13 @@ impl<'a> Panel<'a> {
                     let (bx, by) = (right - side - index as f32 * (side + gap), top);
                     let over = px_x >= bx && px_x < bx + side && px_y >= by && px_y < by + side;
                     let settings = button == crate::ui::buttons::Button::Settings;
-                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (settings && settings_lit.is_some()) || over;
+                    let lit = (button == crate::ui::buttons::Button::Pin && pinned) || (settings && settings_lit.is_some());
                     let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
                     let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
                     // (On the skin, as the readings' are; else in the colour of its own ground there.)
                     match ground {
-                        crate::ui::music::Ground::Skin { .. } => crate::ui::buttons::paint(frame, centre, button, lit, theme.dark, theme.text3.alpha(0.5), grown),
-                        _ => crate::ui::buttons::paint_on(frame, centre, button, lit, colour, grown),
+                        crate::ui::music::Ground::Skin { .. } => crate::ui::buttons::paint(frame, centre, button, lit, over, theme.dark, theme.text3.alpha(0.5), grown),
+                        _ => crate::ui::buttons::paint_on(frame, centre, button, lit, over, colour, grown),
                     }
                     buttons.push((bx, by, side, side, hit));
                 }
@@ -5333,6 +5324,24 @@ unsafe extern "system" fn sink_procedure(hwnd: HWND, message: u32, wparam: WPARA
 const RACK: (f32, f32) = (3.0 * crate::ui::buttons::SIZE + 2.0 * crate::ui::buttons::GAP, crate::ui::buttons::SIZE + 2.0 * RACK_INSET);
 /// The room between such a row and the panel, and round it.
 const RACK_INSET: f32 = 6.0;
+
+/// The rack's buttons along the top of `rack` (its left, top and width), at its right: the pin, then the settings.
+/// Each lit while it is on (pinned, the settings asked from it open, grown as they open), as a widget's are; the one
+/// `hover` names (the pointer over it) tinted, not lit: lit then too, the pin unpinned by a press stayed lit, as if
+/// pinned still, while the pointer was on it. Where each is pressed, into `hits`.
+#[allow(clippy::too_many_arguments)]
+fn paint_rack(frame: &dyn crate::ui::canvas::Canvas, theme: &Theme, (rx, ry, rw): (f32, f32, f32), pinned: bool, settings_lit: Option<f32>, hover: Option<Hit>, hits: &mut Vec<view::HitBox>) {
+    let side = crate::ui::buttons::SIZE;
+    for (index, hit) in [Hit::Pin, Hit::Settings].into_iter().enumerate() {
+        let (bx, by) = (rx + rw - side - index as f32 * (side + crate::ui::buttons::GAP), ry + RACK_INSET);
+        let (button, settings) = if hit == Hit::Pin { (crate::ui::buttons::Button::Pin, false) } else { (crate::ui::buttons::Button::Settings, true) };
+        let lit = (hit == Hit::Pin && pinned) || (settings && settings_lit.is_some());
+        let grown = if settings { settings_lit.unwrap_or(1.0) } else { 1.0 };
+        let centre = crate::ui::canvas::Point { x: bx + side / 2.0, y: by + side / 2.0 };
+        crate::ui::buttons::paint(frame, centre, button, lit, hover == Some(hit), theme.dark, theme.text3.alpha(0.5), grown);
+        hits.push((bx, by, side, side, hit));
+    }
+}
 /// The least rectangle holding both `a` and `b`.
 fn union(a: RECT, b: RECT) -> RECT {
     RECT { left: a.left.min(b.left), top: a.top.min(b.top), right: a.right.max(b.right), bottom: a.bottom.max(b.bottom) }
@@ -5772,6 +5781,37 @@ fn let_go(message: &MSG) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The AI component's rack: its pin unpinned under the pointer (as a press on it leaves it) is drawn tinted, not
+    /// lit as pinned (it stayed lit, so that a press seemed not to unpin it), nor as it rests; pinned, lit. The
+    /// settings' button alike.
+    #[test]
+    fn the_rack_s_pin_unpinned_under_the_pointer_is_not_lit() {
+        let _device = crate::ui::gfx::held().unwrap();
+        let gfx = crate::ui::gfx::Gfx::new().expect("graphics");
+        for dark in [false, true] {
+            let theme = Theme::new(crate::ui::theme::Skin::Glass, dark);
+            let side = crate::ui::buttons::SIZE;
+            let (w, h) = (2.0 * side + crate::ui::buttons::GAP, side + RACK_INSET);
+            // (The plate's colour by the button's edge, clear of its mark.)
+            let plate = |hit: Hit, pinned: bool, settings: Option<f32>, hover: Option<Hit>| {
+                let mut hits = Vec::new();
+                let pixels = gfx.draw_offscreen((w.ceil() as u32, h.ceil() as u32), 1.0, |frame| paint_rack(frame, &theme, (0.0, 0.0, w), pinned, settings, hover, &mut hits)).unwrap();
+                let &(bx, by, bw, bh, _) = hits.iter().find(|box_| box_.4 == hit).unwrap();
+                let (x, y) = ((bx + bw / 2.0) as usize, (by + bh * 0.85) as usize);
+                let at = (y * w.ceil() as usize + x) * 4;
+                [pixels[at], pixels[at + 1], pixels[at + 2]]
+            };
+            let apart = |a: [u8; 3], b: [u8; 3]| a.iter().zip(b).map(|(a, b)| (*a as i32 - b as i32).abs()).max().unwrap();
+            for (hit, lit) in [(Hit::Pin, (true, None)), (Hit::Settings, (false, Some(1.0)))] {
+                let resting = plate(hit, false, None, None);
+                let hovered = plate(hit, false, None, Some(hit));
+                let on = plate(hit, lit.0, lit.1, None);
+                assert!(apart(hovered, on) > 100, "{hit:?} dark {dark}: under the pointer {hovered:?}, lit {on:?}");
+                assert!(apart(hovered, resting) > 8, "{hit:?} dark {dark}: under the pointer {hovered:?}, resting {resting:?}");
+            }
+        }
+    }
+
     use super::*;
 
     /// The samples drawn from are held as they were taken while a new one comes and others are taken: a drawing however

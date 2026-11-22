@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 pub use time::today_start;
 #[cfg(windows)]
-pub use watch::{keys_changed, look_now, stamp, start, usage};
+pub use watch::{keys_changed, look_now, refresh, stamp, start, usage};
 
 /// How long what was spent is kept: a month, and a day more for a month counted from any day of it.
 pub const KEPT_DAYS: u64 = 32;
@@ -537,6 +537,12 @@ impl Ledger {
             }
             Err(failed) => self.failed.insert(tool, failed) != Some(failed),
         }
+    }
+
+    /// `tool`'s account no longer asked, though what else tells of it stands (Codex signed out of ChatGPT, its logs
+    /// telling its limits still): how asking it last failed let go of. Whether it had.
+    pub(crate) fn unasked(&mut self, tool: Tool) -> bool {
+        self.failed.remove(&tool).is_some()
     }
 
     /// Provider `tool`'s account no longer read (its key taken away): what it told let go of. Whether there was any.

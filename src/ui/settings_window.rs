@@ -1232,6 +1232,7 @@ enum Field {
     MusicSource,
     /// What an edge holding the AI component opens: its card, or its dock.
     AiForm,
+    AiLeft,
     /// The station's (see `settings::StationSettings`): the folders the files come lately are not listed from (all
     /// listed again: under Recent files' group, see `Ui::recent_rows`), how long what is not pinned stays, files kept
     /// as a copy too, and what is dragged off it taken off. (What is copied kept, and the files come lately listed, are
@@ -3122,6 +3123,7 @@ impl Ui {
             (Page::Ai, _) => {
                 // (No columns to choose: the component is one lane, see `view::AI_LANE`.)
                 rows.push(Row::Choice(Field::AiForm));
+                rows.push(Row::Choice(Field::AiLeft));
                 // (Only where Claude Code is on this PC.)
                 if self.claude_limits != crate::ai::statusline::Standing::NoClaude {
                     rows.push(Row::ClaudeLimits);
@@ -4349,6 +4351,7 @@ impl Ui {
                 self.nearby.as_ref().map(|nearby| usize::from(nearby.others_refused)),
             ),
             Field::AiForm => (pick(lang, "划出时显示", "Shown from the edge"), vec![s("卡片", "Card"), s("边条", "Dock")], Some(usize::from(settings.ai_form == crate::settings::AiForm::Dock))),
+            Field::AiLeft => (pick(lang, "额度显示", "Limits shown"), vec![s("已用", "Used"), s("剩余", "Left")], Some(usize::from(prefs.ai_left))),
             Field::MusicSource => {
                 let mut options = vec![s("自动", "Automatic")];
                 options.extend(self.sources.iter().map(|(_, name)| name.clone()));
@@ -4467,6 +4470,7 @@ impl Ui {
             Field::OverlayRows => settings.overlay.rows = ROWS[index],
             Field::OverlayShow => settings.overlay.show(OVERLAY_SHOWN[index]),
             Field::AiForm => settings.ai_form = [crate::settings::AiForm::Card, crate::settings::AiForm::Dock][index],
+            Field::AiLeft => prefs.ai_left = index == 1,
             Field::MusicSource => {
                 settings.music_source = index.checked_sub(1).and_then(|at| self.sources.get(at)).map(|(id, name)| crate::settings::MusicSource { id: id.clone(), name: name.clone() });
             }
@@ -4874,6 +4878,7 @@ impl Ui {
     fn choice_hint(&self, field: Field) -> Option<&'static str> {
         match field {
             Field::NearbyOthers => Some(pick(self.lang, "已信任的设备直接接收", "What devices trusted send is taken without asking")),
+            Field::AiLeft => Some(pick(self.lang, "按已用多少显示，或按还剩多少显示", "By how much of each limit is used, or how much is left")),
             Field::AiForm => Some(pick(
                 self.lang,
                 "边条贴于屏幕边缘，鼠标停在某一来源上时在旁边显示其详情。位于顶部边缘时横向排列",
@@ -8490,7 +8495,7 @@ It can be disconnected here at any time, and the status line command put back.",
         // sources to dock, as the panel lays it out (see `Panel::arrange_lanes`); else its lanes.
         let shows = crate::ui::forms::shows(&probe);
         let dock = match shows {
-            crate::ui::forms::Shows::Ai(count) if part == Part::Ai && self.settings.ai_form == crate::settings::AiForm::Dock && count > 0 => Some(crate::ui::forms::Small::Dock { across: edge == Edge::Top }),
+            crate::ui::forms::Shows::Ai(count, today) if part == Part::Ai && self.settings.ai_form == crate::settings::AiForm::Dock && count > 0 => Some(crate::ui::forms::Small::Dock { across: edge == Edge::Top, today }),
             _ => None,
         };
         // What it is (another drawn in its place is not turned into: see `render::Turn::follow`).
@@ -8985,7 +8990,7 @@ mod pictures {
                     ui.settings.ai_form = form;
                     let prefs = ui.prefs.clone().holding(Part::Ai);
                     let edge = ui.preview_edge();
-                    let dock = view::ai::dock_size(edge == Edge::Top, view::ai::docked(&prefs).len());
+                    let dock = view::ai::dock_size(edge == Edge::Top, view::ai::docked(&prefs).len(), view::ai::shows_today(&prefs));
                     let panel = ui.stage_panel(frame, area, Some((edge, &prefs, Part::Ai)), Staging { draw: false, ..Staging::default() }).panel.unwrap();
                     (panel, dock)
                 });

@@ -29,6 +29,8 @@ const WHOLE: Duration = Duration::from_secs(60 * 60);
 const ASKED_EVERY: Duration = Duration::from_secs(5 * 60);
 /// How often the providers' thread looks whether one is due.
 const ASK_TICK: Duration = Duration::from_secs(60);
+/// How long after an account was last read it is read again as soon as someone wants to see it (see `refresh`).
+const FRESH: Duration = Duration::from_secs(30);
 /// How long after Windows tells a file was written to it is read (what else is written meanwhile read with it).
 const GATHER: Duration = Duration::from_secs(2);
 /// How often what was read is kept, while more is.
@@ -51,6 +53,9 @@ enum Heard {
     Read(Tool, u64, Result<super::Limit, super::Failed>),
     /// A provider's key was taken away.
     Unkeyed(Tool),
+    /// An account is no longer asked (Codex signed out of ChatGPT, or signed in with a key alone): how its asking last
+    /// failed let go of, what else told of it standing.
+    Unasked(Tool),
 }
 
 /// What was spent as last read (none: not yet read, or not wanted), and a number that changes as it does (see `stamp`).
@@ -58,8 +63,16 @@ static NOW: Mutex<Option<Arc<Usage>>> = Mutex::new(None);
 static STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The thread's ear, once it has started.
 static EAR: Mutex<Option<Sender<Heard>>> = Mutex::new(None);
-/// The providers' thread's ear: told to look whether one is due, or (true) that keys changed.
-static ASK: Mutex<Option<Sender<bool>>> = Mutex::new(None);
+/// The providers' thread's ear (see `Asked`).
+static ASK: Mutex<Option<Sender<Asked>>> = Mutex::new(None);
+
+/// What the providers' thread is told: to look whether one is due (something that shows them came on or went, their
+/// keys changed), or that someone wants to see them now (see `refresh`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Asked {
+    Look,
+    Fresh,
+}
 
 /// What was spent as last read. Asked for, it is shown: its first reading begins now, the machine settled or not.
 pub fn usage() -> Option<Arc<Usage>> {
@@ -85,14 +98,22 @@ pub fn look_now() {
         let _ = ear.send(Heard::Look);
     }
     if let Some(ask) = &*ASK.lock().unwrap() {
-        let _ = ask.send(false);
+        let _ = ask.send(Asked::Look);
+    }
+}
+
+/// Someone wants to see the accounts' limits as they are now (a source's card opened, the network back): each read
+/// longer than `FRESH` ago is read again at once, not when it is next due.
+pub fn refresh() {
+    if let Some(ask) = &*ASK.lock().unwrap() {
+        let _ = ask.send(Asked::Fresh);
     }
 }
 
 /// A provider's keys were given or taken away: each provider read again at once (where it is wanted).
 pub fn keys_changed() {
     if let Some(ask) = &*ASK.lock().unwrap() {
-        let _ = ask.send(true);
+        let _ = ask.send(Asked::Look);
     }
 }
 
@@ -111,15 +132,50 @@ fn start_in(roots: impl Fn() -> Vec<(Tool, PathBuf)> + Send + 'static, wanted: i
     let (providers_wanted, providers_ear) = (wanted.clone(), ear.clone());
     std::thread::Builder::new().name("glance: AI usage".into()).spawn(move || keep(roots, wanted, told, ear, heard)).expect("a thread started");
     std::thread::Builder::new().name("glance: AI providers".into()).spawn(move || ask_providers(providers_wanted, on, providers_ear, asked)).expect("a thread started");
+    follow_the_network();
+}
+
+/// Whether Windows last told this PC could reach the internet (see `follow_the_network`).
+static ONLINE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The accounts read again at once as the PC can reach the internet again (asked while it could not, they failed, and
+/// stood failed till they were next due): Windows tells each change of how far the network reaches.
+fn follow_the_network() {
+    use windows::Win32::NetworkManagement::IpHelper::NotifyNetworkConnectivityHintChange;
+    use windows::Win32::Networking::WinSock::{NetworkConnectivityLevelHintInternetAccess, NL_NETWORK_CONNECTIVITY_HINT};
+    unsafe extern "system" fn changed(_: *const core::ffi::c_void, hint: NL_NETWORK_CONNECTIVITY_HINT) {
+        let online = hint.ConnectivityLevel == NetworkConnectivityLevelHintInternetAccess;
+        if online && !ONLINE.swap(online, std::sync::atomic::Ordering::Relaxed) {
+            refresh();
+        }
+        ONLINE.store(online, std::sync::atomic::Ordering::Relaxed);
+    }
+    // (Told for as long as Glance runs: the handle is never let go of.)
+    let mut handle = HANDLE::default();
+    let _ = unsafe { NotifyNetworkConnectivityHintChange(Some(changed), None, false, &mut handle) };
+}
+
+/// Whether an account is to be read now: never read, read `ASKED_EVERY` ago or longer, its keys changed since
+/// (`last`: how long ago it was read and the hash of the keys it was read with, `hash` theirs now), its lane just
+/// switched on (`turned_on`), or someone wanting to see it now (`fresh`) and read `FRESH` ago or longer.
+fn due(last: Option<(Duration, u64)>, hash: u64, turned_on: bool, fresh: bool) -> bool {
+    match last {
+        None => true,
+        Some((ago, with)) => ago >= ASKED_EVERY || with != hash || turned_on || (fresh && ago >= FRESH),
+    }
 }
 
 /// Reads each provider's account whose lane `on` says is on and whose keys are set, while `wanted`, as it is due
 /// (`ASKED_EVERY` after it was last read, or at once where its keys changed since), telling `ear` how it went; one
 /// whose keys are not set, that they are not (once, till they are). Looks again as `asked` tells it to, or every `ASK_TICK`.
-fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Sender<Heard>, asked: Receiver<bool>) {
+fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Sender<Heard>, asked: Receiver<Asked>) {
     use std::hash::{Hash, Hasher};
     // When each was last read, and a hash of the keys it was read with (only in memory).
     let mut read: HashMap<Tool, (Instant, u64)> = HashMap::new();
+    // Those whose lanes were on as last looked at (one switched on since is read at once), and whether someone wants
+    // to see them now (see `refresh`).
+    let mut were_on: std::collections::HashSet<Tool> = std::collections::HashSet::new();
+    let mut fresh = false;
     // Those told to have no keys (once each, till they have some again).
     let mut unkeyed: std::collections::HashSet<Tool> = std::collections::HashSet::new();
     loop {
@@ -135,12 +191,14 @@ fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Send
                 };
                 unkeyed.remove(&tool);
                 if !on(tool) {
+                    were_on.remove(&tool);
                     continue;
                 }
+                let turned_on = were_on.insert(tool);
                 let mut hash = std::hash::DefaultHasher::new();
                 keys.hash(&mut hash);
                 let hash = hash.finish();
-                if read.get(&tool).is_some_and(|(at, with)| at.elapsed() < ASKED_EVERY && *with == hash) {
+                if !due(read.get(&tool).map(|(at, with)| (at.elapsed(), *with)), hash, turned_on, fresh) {
                     continue;
                 }
                 let told = provider.read(&keys, crate::station::now_ms());
@@ -149,9 +207,36 @@ fn ask_providers(wanted: impl Fn() -> bool, on: impl Fn(Tool) -> bool, ear: Send
                     return;
                 }
             }
+            // Codex's limits, asked of the ChatGPT account it is signed in with (its logs here tell them only as Codex
+            // last worked here: see `codex`). Where it cannot be asked, what its logs tell stands: its sign-in expired or
+            // ChatGPT not reached, that is told too (a problem the user may set right), signed out nothing is (no
+            // problem: the account is not asked).
+            let codex_on = on(Tool::Codex);
+            let turned_on = codex_on && were_on.insert(Tool::Codex);
+            if !codex_on {
+                were_on.remove(&Tool::Codex);
+            }
+            if codex_on {
+                if let Some((token, account)) = super::codex::signed_in() {
+                    let mut hash = std::hash::DefaultHasher::new();
+                    (&token, &account).hash(&mut hash);
+                    let hash = hash.finish();
+                    if due(read.get(&Tool::Codex).map(|(at, with)| (at.elapsed(), *with)), hash, turned_on, fresh) {
+                        let told = super::providers::codex(&token, account.as_deref(), crate::station::now_ms());
+                        read.insert(Tool::Codex, (Instant::now(), hash));
+                        if ear.send(Heard::Read(Tool::Codex, hash, told)).is_err() {
+                            return;
+                        }
+                    }
+                } else if read.remove(&Tool::Codex).is_some() && ear.send(Heard::Unasked(Tool::Codex)).is_err() {
+                    return;
+                }
+            }
         }
+        fresh = false;
         match asked.recv_timeout(ASK_TICK) {
-            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            Ok(Asked::Fresh) => fresh = true,
+            Ok(Asked::Look) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -207,7 +292,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
             match heard.recv_timeout(TICK.saturating_sub(ticked.elapsed())) {
                 Ok(Heard::Look) => continue,
                 Ok(Heard::Told) => limits = true,
-                Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_))) => accounts.push(account),
+                Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_) | Heard::Unasked(_))) => accounts.push(account),
                 Ok(Heard::Written(tool, paths)) => written.push((tool, paths)),
                 Ok(Heard::Lost) => lost = true,
                 Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
@@ -224,7 +309,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
                         Ok(Heard::Ended(root)) => watched.retain(|watched| *watched != root),
                         Ok(Heard::Look) => {}
                         Ok(Heard::Told) => limits = true,
-                        Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_))) => accounts.push(account),
+                        Ok(account @ (Heard::Read(..) | Heard::Unkeyed(_) | Heard::Unasked(_))) => accounts.push(account),
                         Err(_) => break,
                     }
                 }
@@ -238,6 +323,7 @@ fn keep(roots: impl Fn() -> Vec<(Tool, PathBuf)>, wanted: impl Fn() -> bool, tol
                 changed |= match account {
                     Heard::Read(tool, key, told) => ledger.read_of(tool, key, told, now),
                     Heard::Unkeyed(tool) => ledger.unkeyed(tool),
+                    Heard::Unasked(tool) => ledger.unasked(tool),
                     _ => false,
                 };
             }
@@ -360,6 +446,26 @@ mod tests {
     use super::*;
     use std::io::Write as _;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// An account is read again at once as someone wants to see it (its card opened, the network back) where it was
+    /// read `FRESH` ago or longer, and at once as its lane is switched on; else as it is due (`ASKED_EVERY` after it
+    /// was read, or its keys changed). (It was read only as it was due: a card opened showed limits up to five minutes
+    /// old, and a source switched on showed nothing till then.)
+    #[test]
+    fn an_account_is_read_again_as_it_is_wanted() {
+        let secs = Duration::from_secs;
+        // As it was: due by its time, or its keys.
+        assert!(due(None, 1, false, false));
+        assert!(!due(Some((secs(60), 1)), 1, false, false));
+        assert!(due(Some((ASKED_EVERY, 1)), 1, false, false));
+        assert!(due(Some((secs(1), 1)), 2, false, false));
+        // Wanted now: read again where it was read 30 seconds ago or longer, not where it was read just now.
+        assert!(due(Some((secs(60), 1)), 1, false, true));
+        assert!(due(Some((FRESH, 1)), 1, false, true));
+        assert!(!due(Some((secs(10), 1)), 1, false, true));
+        // Switched on: read at once, however lately.
+        assert!(due(Some((secs(1), 1)), 1, true, false));
+    }
 
     /// What was spent asked for (to be shown: the AI component's lanes, its dock, its card) has its first reading begin
     /// at once, the machine settled or not (one kept busy would otherwise show it being read for as long as it is).

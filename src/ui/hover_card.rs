@@ -353,6 +353,10 @@ pub fn show(owner: HWND, of: Of, by: RECT, spots: &[(Hit, RECT)], side: Side, cl
             *kept = Some(Card { window, gfx: gfx.clone(), surface: None, words: gfx::Layer::default(), holds: None, reach: None, seen: None, behind: None, asked: None, frost: 1.0, showing: None, shown: None });
         }
         let card = kept.as_mut().unwrap();
+        // (Opened: the accounts' limits read again now where they were read a while ago, as the card shows them.)
+        if card.shown.is_none() {
+            crate::ai::refresh();
+        }
         OWNER.set(owner);
         card.moved_to(&gfx);
         card.holds = holds;

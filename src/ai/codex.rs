@@ -5,9 +5,17 @@
 //!
 //! Codex's input counts what came from its cache among it, and its output its reasoning: here input is only what was
 //! read afresh.
+//!
+//! The limits are the ChatGPT account's, shared by every place it is used in (another PC, another person signed in
+//! with it): what the logs on this PC tell is only what they stood at as Codex last worked here. So they are also
+//! asked of the account itself, as Codex asks for them, with the sign-in Codex keeps (see `signed_in`,
+//! `providers::codex`): read, never changed, and sent only to ChatGPT.
 
 use super::{key, moment, Limit, Read, TitleKind, Told, Tokens, Tool, Window};
 use serde::Deserialize;
+
+/// The id of the account's own limit (others are those of a model limited apart).
+pub(super) const ACCOUNT_LIMIT: &str = "codex";
 
 const WORTH: [&[u8]; 4] = [b"\"token_count\"", b"\"session_meta\"", b"\"turn_context\"", b"\"thread_name\""];
 
@@ -127,6 +135,31 @@ pub(super) fn line(bytes: &[u8], read: &mut Read, told: &mut Vec<Told>) {
     }
 }
 
+/// The sign-in Codex keeps in its folder (`CODEX_HOME`, else `.codex`), where it signed in with a ChatGPT account and
+/// keeps it in a file (as it does unless told to keep it in Windows' own store): its access token, and the account's
+/// id where it names one. Read as it stands each time, never written: Codex renews it itself.
+pub fn signed_in() -> Option<(String, Option<String>)> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(std::path::PathBuf::from);
+    let folder = std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from).or_else(|| home.map(|home| home.join(".codex")))?;
+    sign_in_of(&std::fs::read(folder.join("auth.json")).ok()?)
+}
+
+/// The access token and the account's id `bytes` (Codex's `auth.json`) keep, where it is a ChatGPT account's.
+fn sign_in_of(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    #[derive(Deserialize)]
+    struct Auth {
+        tokens: Option<Tokens>,
+    }
+    #[derive(Deserialize)]
+    struct Tokens {
+        access_token: String,
+        account_id: Option<String>,
+    }
+    let tokens = serde_json::from_slice::<Auth>(bytes).ok()?.tokens?;
+    let token = tokens.access_token.trim();
+    (!token.is_empty()).then(|| (token.to_string(), tokens.account_id.filter(|id| !id.trim().is_empty())))
+}
+
 /// The session worked in `folder`.
 fn folder(read: &Read, folder: Option<String>, told: &mut Vec<Told>) {
     if let (Some(session), Some(folder)) = (read.session.clone(), folder) {
@@ -147,6 +180,23 @@ fn limit(limits: Limits, at: u64, told: &mut Vec<Told>) {
     if windows.is_empty() {
         return;
     }
-    let id = limits.limit_id.unwrap_or_else(|| "codex".to_string());
+    let id = limits.limit_id.unwrap_or_else(|| ACCOUNT_LIMIT.to_string());
     told.push(Told::Limit(Limit { tool: Tool::Codex, id, name: limits.limit_name, plan: limits.plan_type, windows, balance: None, told: at }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sign-in Codex keeps, as it writes it: a ChatGPT account's access token and its id; none where it is signed
+    /// in with an API key alone, or not at all.
+    #[test]
+    fn reads_the_chatgpt_sign_in_codex_keeps() {
+        let chatgpt = br#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"x.y.z","access_token":"a.b.c","refresh_token":"r","account_id":"acct-1"},"last_refresh":"2026-11-19T22:03:24Z"}"#;
+        assert_eq!(sign_in_of(chatgpt), Some(("a.b.c".to_string(), Some("acct-1".to_string()))));
+        let no_account = br#"{"tokens":{"id_token":"x.y.z","access_token":"a.b.c","refresh_token":"r"}}"#;
+        assert_eq!(sign_in_of(no_account), Some(("a.b.c".to_string(), None)));
+        assert_eq!(sign_in_of(br#"{"OPENAI_API_KEY":"sk-1"}"#), None);
+        assert_eq!(sign_in_of(b"not json"), None);
+    }
 }
