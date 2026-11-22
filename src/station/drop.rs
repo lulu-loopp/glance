@@ -144,9 +144,9 @@ pub(super) fn takes(data: &IDataObject) -> bool {
         .any(|format| unsafe { data.QueryGetData(&asked(format, -1, TYMED_HGLOBAL.0)) }.is_ok())
 }
 
-/// Whether `data` holds a folder, with its path.
+/// Whether `data` holds a folder that can be told of, with its path.
 fn holds_folder(data: &IDataObject) -> bool {
-    memory(data, formats().files, -1).is_some_and(|bytes| paths_of(&bytes).iter().any(|path| path.is_dir()))
+    memory(data, formats().files, -1).is_some_and(|bytes| paths_of(&bytes).iter().any(|path| crate::folders::told_of(path)))
 }
 
 /// What `data` gives: its files where it has paths; else its files with none (read now); else its picture, its web

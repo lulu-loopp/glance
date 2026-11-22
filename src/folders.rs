@@ -173,13 +173,21 @@ pub fn follow(list: &[String]) {
 /// `paths`' folders told of from now on, after those told of (as many as `MOST`), those told of already left where they
 /// are.
 pub fn add(paths: Vec<PathBuf>) {
-    let added: Vec<String> = paths.into_iter().filter(|path| path.is_dir()).map(|path| path.display().to_string()).collect();
+    let added: Vec<String> = paths.into_iter().filter(|path| told_of(path)).map(|path| path.display().to_string()).collect();
     if added.is_empty() {
         return;
     }
     // (Their sizes come from search's index: made now, where it is not yet.)
     crate::search::asked();
     crate::app().change(move |settings| put(&mut settings.storage_folders, added));
+}
+
+/// Whether the folder at `path` can be told of, dropped here: a folder (or a link to one, not followed) on a drive search
+/// finds names on (the network not asked: a server that does not answer is waited for a long while).
+pub fn told_of(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+    crate::search::local(path) && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
 }
 
 /// `added` put after `list`'s, as many as `MOST`, none twice.
@@ -248,8 +256,9 @@ fn write_kept(dir: &Path, kept: &HashMap<String, Kept>) {
     }
 }
 
-/// A folder being told of, as the thread counting it has it: how it is told, and, counted since Glance started, what
-/// tells whether anything in it changed since, and when it was last tried, with how long it rests after being counted.
+/// A folder being told of, as the thread counting it has it: how it is told, and, counted since Glance started (with
+/// all that changed while it was not running), what tells whether anything in it changed since, and when it was last
+/// tried, with how long it rests after being counted.
 struct Counted {
     folder: Folder,
     watch: Option<Watch>,
@@ -295,16 +304,21 @@ impl Counted {
     fn count(&mut self, today: i64) -> (bool, bool) {
         let begun = Instant::now();
         let holds = crate::search::within(Path::new(&self.folder.path), LARGEST);
-        let took = begun.elapsed();
+        self.tried = Some((begun, (begun.elapsed() * REST).max(COUNT_EVERY)));
+        self.holds(holds, today)
+    }
+
+    /// Told to hold `holds` (see `count`).
+    fn holds(&mut self, holds: Holds, today: i64) -> (bool, bool) {
         let was = self.folder.clone();
         let mut day = false;
-        self.tried = Some((begun, (took * REST).max(COUNT_EVERY)));
         match holds {
             Holds::Told { bytes, files, largest, watch } => {
                 self.folder.held = Some(Held { bytes, files, largest });
                 self.folder.away = false;
-                day = kept_on(&mut self.folder.days, today, bytes);
-                self.watch = Some(watch);
+                // (What it may have held as Glance last ran is no counting of today.)
+                day = watch.is_some() && kept_on(&mut self.folder.days, today, bytes);
+                self.watch = watch;
             }
             Holds::Listing => {
                 self.folder.away = false;
@@ -319,12 +333,31 @@ impl Counted {
     }
 }
 
+/// When what is kept was last written, and whether anything is news since.
+struct Keeping {
+    at: Instant,
+    news: bool,
+}
+
+impl Keeping {
+    /// Whether what is kept is to be written `now` (counted as written): at once (`at_once`), or a while after it was
+    /// last written, where there is news since (`news`: there is now).
+    fn due(&mut self, now: Instant, news: bool, at_once: bool) -> bool {
+        self.news |= news;
+        let due = at_once || (self.news && now.duration_since(self.at) >= KEEP_EVERY);
+        if due {
+            (self.at, self.news) = (now, false);
+        }
+        due
+    }
+}
+
 fn run() {
     crate::settle::background("folder sizes");
     let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED) };
     let dir = crate::settings::local_dir();
     let mut kept = read_kept(&dir);
-    let mut kept_at = Instant::now();
+    let mut keeping = Keeping { at: Instant::now(), news: false };
     let mut folders: Vec<Counted> = Vec::new();
     loop {
         let (list, looked) = {
@@ -369,9 +402,8 @@ fn run() {
                 told();
             }
         }
-        if keep || (news && kept_at.elapsed() >= KEEP_EVERY) {
+        if keeping.due(Instant::now(), news, keep) {
             write_kept(&dir, &kept);
-            kept_at = Instant::now();
         }
         let wait = if looked {
             Duration::from_secs(1)
@@ -442,6 +474,41 @@ mod tests {
         assert!(!counted.due(after(TRY_EVERY), 100, false));
         assert!(counted.due(after(TRY_EVERY), 100, true));
         assert!(counted.due(after(TRY_RESTING), 100, false));
+    }
+
+    /// What it may have held as Glance last ran is told, and is no counting of the day: the day's is kept once all that
+    /// changed while Glance was not running is found.
+    #[test]
+    fn what_it_held_as_glance_last_ran_is_no_counting_of_today() {
+        let mut counted = Counted::new(folder(5, &[(99, 5)]));
+        let holds = |bytes: u64, watch| Holds::Told { bytes, files: 1, largest: Vec::new(), watch };
+        assert_eq!(counted.holds(holds(7, None), 100), (true, false));
+        assert_eq!((counted.folder.held.as_ref().unwrap().bytes, counted.folder.days.as_slice()), (7, [(99, 5)].as_slice()));
+        assert_eq!(counted.holds(holds(6, Some(crate::search::Watch::none())), 100), (true, true));
+        assert_eq!(counted.folder.days, [(99, 5), (100, 6)]);
+    }
+
+    /// News is written a while after what is kept was last written, whether or not there is more by then.
+    #[test]
+    fn news_is_written_a_while_after() {
+        let begun = Instant::now();
+        let mut keeping = Keeping { at: begun, news: false };
+        assert!(!keeping.due(begun, true, false));
+        assert!(keeping.due(begun + KEEP_EVERY, false, false));
+        assert!(!keeping.due(begun + KEEP_EVERY * 2, false, false));
+        assert!(keeping.due(begun + KEEP_EVERY * 2, true, true));
+    }
+
+    /// A folder here can be told of; a file cannot, nor one that is not there, nor one on the network, which is not
+    /// asked (its server not answering, the drag over the storage panel was held for as long as it was waited for).
+    #[test]
+    fn a_folder_on_the_network_is_not_asked_for() {
+        assert!(told_of(&std::env::temp_dir()));
+        assert!(!told_of(&std::env::current_exe().unwrap()));
+        assert!(!told_of(&std::env::temp_dir().join("glance-nowhere-at-all")));
+        let begun = Instant::now();
+        assert!(!told_of(Path::new(r"\\192.0.2.1\share\folder")));
+        assert!(begun.elapsed() < Duration::from_millis(200), "{:?}", begun.elapsed());
     }
 
     /// As many as there is room for, none twice (a path's case being no other folder).

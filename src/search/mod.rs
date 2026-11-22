@@ -75,14 +75,30 @@ pub struct Volume {
     /// Asked to be kept (Glance quitting), and how many times it was kept or found to have nothing to keep since.
     keep_asked: AtomicBool,
     kept_times: AtomicU64,
-    /// The folders whose sizes were told (see `within`), by their ids, and whether anything in each may have changed
-    /// since.
-    told: Mutex<HashMap<u64, bool>>,
+    /// Whether its index holds its sizes as they are now, or as they were since Glance started: listed whole, or read
+    /// as kept and all that changed since found.
+    current: AtomicBool,
+    /// The folders whose sizes were told (see `within`), by their ids.
+    told: Mutex<HashMap<u64, Told>>,
+}
+
+/// A folder whose size was told: the number what it held then goes by (another each time it may have changed, never
+/// given again), and whether anything in it may have changed since it was told last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Told {
+    stamp: u64,
+    changed: bool,
+}
+
+/// A number never given before.
+fn stamp() -> u64 {
+    static STAMPS: AtomicU64 = AtomicU64::new(0);
+    STAMPS.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Volume {
     fn new(drive: Arc<Drive>, index: Index) -> Volume {
-        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), told: Mutex::new(HashMap::new()) }
+        Volume { drive, index: RwLock::new(index), names: AtomicUsize::new(0), ready: AtomicBool::new(false), gone: AtomicBool::new(false), kept: Mutex::new(None), keep_asked: AtomicBool::new(false), kept_times: AtomicU64::new(0), current: AtomicBool::new(false), told: Mutex::new(HashMap::new()) }
     }
 
     /// Whether it is no longer followed: gone, or let go of as Windows asked to take it out.
@@ -90,26 +106,42 @@ impl Volume {
         self.gone.load(Ordering::Relaxed) || self.drive.left()
     }
 
+    /// Whether anything in the folder `watch` is of may have changed since its size was told.
+    fn changed(&self, watch: &Watch) -> bool {
+        self.told.lock().unwrap().get(&watch.id).is_none_or(|told| told.stamp != watch.stamp)
+    }
+
     /// The folders at `listed` (by their places) listed again: those told that they are, are in, or are on the way to
     /// may have changed.
     fn relisted(&self, listed: &[u32]) {
         let mut told = self.told.lock().unwrap();
-        if told.values().all(|changed| *changed) {
+        if told.values().all(|told| told.changed) {
             return;
         }
         let index = self.index.read().unwrap();
-        for (id, changed) in told.iter_mut().filter(|(_, changed)| !**changed) {
-            *changed = index.folder(*id).is_none_or(|place| listed.iter().any(|&folder| index.concerns(folder, place)));
+        for (id, told) in told.iter_mut().filter(|(_, told)| !told.changed) {
+            if index.folder(*id).is_none_or(|place| listed.iter().any(|&folder| index.concerns(folder, place))) {
+                *told = Told { stamp: stamp(), changed: true };
+            }
         }
     }
 }
 
-/// What tells whether anything in a folder whose size was told may have changed since (see `changed`): its drive, and
-/// its id there.
+/// What tells whether anything in a folder whose size was told may have changed since (see `changed`): its drive, its
+/// id there, and the number what it held then goes by (see `Told`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Watch {
     root: String,
     id: u64,
+    stamp: u64,
+}
+
+#[cfg(test)]
+impl Watch {
+    /// One of nothing.
+    pub fn none() -> Watch {
+        Watch { root: String::new(), id: 0, stamp: 0 }
+    }
 }
 
 /// What a folder holds, as far as it is known.
@@ -120,8 +152,9 @@ pub enum Holds {
     /// It is not there, or on a drive search finds no names on (a network drive).
     Nowhere,
     /// How large the files in it at any depth are together and how many there are (see `index::Within`), and what lies
-    /// in it directly that is largest, by name; and what tells whether that may have changed since.
-    Told { bytes: u64, files: u64, largest: Vec<(String, u64)>, watch: Watch },
+    /// in it directly that is largest, by name; and what tells whether that may have changed since: none where it may
+    /// be what it held as Glance last ran (its drive's index read as kept, what changed since not found yet).
+    Told { bytes: u64, files: u64, largest: Vec<(String, u64)>, watch: Option<Watch> },
 }
 
 /// What the folder at `path` holds, with its `most` largest (a folder by its path, or by where that leads through
@@ -145,6 +178,16 @@ fn rooted(path: &Path) -> Option<(String, PathBuf)> {
     (parts.next() == Some(Component::RootDir)).then(|| (format!("{}:\\", letter.to_ascii_uppercase() as char), parts.as_path().to_path_buf()))
 }
 
+/// Whether `path` is on a drive whose names are found, by its letter (the network not asked).
+pub fn local(path: &Path) -> bool {
+    rooted(path).is_some_and(|(root, _)| found_on(&root))
+}
+
+/// Whether the names on the drive at `root` are found: one fixed in this PC, or one that can be taken out.
+fn found_on(root: &str) -> bool {
+    matches!(unsafe { GetDriveTypeW(&HSTRING::from(root)) }, DRIVE_FIXED | DRIVE_REMOVABLE)
+}
+
 fn held_at(path: &Path, most: usize) -> Holds {
     let Some((root, rest)) = rooted(path) else { return Holds::Nowhere };
     let volume = {
@@ -165,11 +208,18 @@ fn held_at(path: &Path, most: usize) -> Holds {
 fn held_on(volume: &Volume, rest: &Path, most: usize) -> Holds {
     let index = volume.index.read().unwrap();
     let Some((place, id)) = index.place_of(rest).and_then(|place| Some((place, index.id(place)?))) else { return Holds::Nowhere };
-    // (Before it is counted, the index as it is meanwhile: what changes it after is told.)
-    volume.told.lock().unwrap().insert(id, false);
+    // (Before it is counted, the index as it is meanwhile: what changes it after is told. Several paths may lead to it,
+    // each told by what it held as that one was told.)
+    let stamp = {
+        let mut told = volume.told.lock().unwrap();
+        let told = told.entry(id).or_insert_with(|| Told { stamp: stamp(), changed: false });
+        told.changed = false;
+        told.stamp
+    };
+    let current = volume.current.load(Ordering::Relaxed);
     let held = index.within(place, most);
     let largest = held.largest.iter().map(|&(place, bytes)| (index.name(place).to_string_lossy().into_owned(), bytes)).collect();
-    Holds::Told { bytes: held.bytes, files: held.files, largest, watch: Watch { root: volume.drive.path.clone(), id } }
+    Holds::Told { bytes: held.bytes, files: held.files, largest, watch: current.then(|| Watch { root: volume.drive.path.clone(), id, stamp }) }
 }
 
 /// Whether anything in the folder `watch` is of may have changed since its size was told (its drive gone, or come again
@@ -177,8 +227,7 @@ fn held_on(volume: &Volume, rest: &Path, most: usize) -> Holds {
 pub fn changed(watch: &Watch) -> bool {
     let volumes = VOLUMES.lock().unwrap();
     let Some(volume) = volumes.iter().find(|volume| volume.drive.path == watch.root) else { return true };
-    let told = volume.told.lock().unwrap();
-    told.get(&watch.id).copied().unwrap_or(true)
+    volume.changed(watch)
 }
 
 /// How a drive's search stands.
@@ -227,7 +276,7 @@ fn drives() {
         let roots: Vec<String> = (0..26u8)
             .filter(|bit| present & (1 << bit) != 0)
             .map(|bit| format!("{}:\\", (b'A' + bit) as char))
-            .filter(|root| matches!(unsafe { GetDriveTypeW(&HSTRING::from(root.as_str())) }, DRIVE_FIXED | DRIVE_REMOVABLE))
+            .filter(|root| found_on(root))
             .collect();
         // Each drive asked without the list held (this thread alone changes it): a drive slow to answer holds none
         // searching meanwhile.
@@ -363,6 +412,7 @@ fn marked(index: &Index, failed: &HashSet<u64>) -> Vec<u32> {
 /// Every live folder of the drive (followed: no links) marked to be listed: its changes lost, it is listed whole
 /// again (see `sweep`).
 fn mark_all(volume: &Volume) {
+    volume.current.store(false, Ordering::Relaxed);
     let mut index = volume.index.write().unwrap();
     let folders: Vec<u32> = (0..index.len()).filter(|&place| index.entry(place).alive() && index.entry(place).flags & (flag::FOLDER | flag::LINK) == flag::FOLDER).collect();
     for place in folders {
@@ -494,9 +544,13 @@ fn follow_journal(volume: &Volume, pool: &Arc<walk::Pool>, mut keeping: Keeping)
         std::thread::sleep(JOURNAL_EVERY);
         let Some(cursor) = volume.kept.lock().unwrap().and_then(|kept| kept.journal) else { return };
         match journal::read(drive, cursor.journal, cursor.next, JOURNAL_BATCH) {
-            Ok(journal::Read::Changed { folders, next, .. }) => {
+            Ok(journal::Read::Changed { folders, next, more }) => {
                 if pacing.list(volume, folders, pool) {
                     keeping.changed = true;
+                }
+                // (Read to its end: all that changed while Glance was not running is found.)
+                if !more {
+                    volume.current.store(true, Ordering::Relaxed);
                 }
                 // (Only once what changed is in the index, or marked in it to be listed again: kept now, it holds all
                 // before `next`.)
@@ -545,6 +599,8 @@ fn coalesce(seen: watch::Seen, told: &mpsc::Receiver<watch::Seen>) -> watch::See
 
 /// A drive with no journal kept current as Windows tells of names changed in its folders.
 fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &Arc<walk::Pool>, mut keeping: Keeping) {
+    // (Listed whole since it was watched.)
+    volume.current.store(true, Ordering::Relaxed);
     let mut pacing = Pacing::new(volume);
     while !volume.away() {
         let changed = match told.recv_timeout(JOURNAL_EVERY).map(|seen| coalesce(seen, told)) {
@@ -559,6 +615,7 @@ fn follow_watch(volume: &Volume, told: &mpsc::Receiver<watch::Seen>, pool: &Arc<
             Ok(watch::Seen::Lost) => {
                 mark_all(volume);
                 sweep(volume, pool, &mut keeping, true);
+                volume.current.store(true, Ordering::Relaxed);
                 pacing = Pacing::new(volume);
                 false
             }
@@ -859,15 +916,25 @@ mod tests {
         *volume.index.write().unwrap() = Index::new(volume.drive.root_id, true);
         sweep(&volume, &pool, &mut Keeping::new(), false);
         let folder = Path::new("folder 0");
-        let told = |volume: &Volume| match held_on(volume, folder, 3) {
-            Holds::Told { bytes, files, watch, .. } => (bytes, files, watch.id),
+        let held = |volume: &Volume| match held_on(volume, folder, 3) {
+            Holds::Told { bytes, files, watch, .. } => (bytes, files, watch),
             holds => panic!("{holds:?}"),
+        };
+        // (What changed while Glance was not running not found yet: nothing tells what changes after it was told.)
+        assert_eq!(held(&volume).2, None);
+        volume.current.store(true, Ordering::Relaxed);
+        let watch = std::cell::RefCell::new(None);
+        let told = |volume: &Volume| {
+            let (bytes, files, told) = held(volume);
+            *watch.borrow_mut() = told;
+            (bytes, files)
         };
         let files = std::fs::read_dir(root.join(folder)).unwrap().flatten().filter(|entry| entry.path().is_file()).count();
         assert!(files > 0);
-        let (bytes, counted, id) = told(&volume);
-        let changed = |volume: &Volume| volume.told.lock().unwrap()[&id];
+        let (bytes, counted) = told(&volume);
+        let changed = |volume: &Volume| volume.changed(watch.borrow().as_ref().unwrap());
         assert!(!changed(&volume));
+        let by_another_path = watch.borrow().clone().unwrap();
         let list = |place: u32| {
             walk::round(&volume.index, &volume.drive, &[place], &pool, None);
             volume.relisted(&[place]);
@@ -882,8 +949,10 @@ mod tests {
         std::fs::write(root.join("folder 0").join("folder 1").join("new.txt"), [0u8; 100]).unwrap();
         list(within);
         assert!(changed(&volume));
-        assert_eq!(told(&volume), (bytes + 100, counted + 1, id));
+        assert_eq!(told(&volume), (bytes + 100, counted + 1));
         assert!(!changed(&volume));
+        // (Told by one path that leads to it, and not again by another yet: changed for that one.)
+        assert!(volume.changed(&by_another_path));
         // On the way to it (it may be gone): changed.
         list(ROOT);
         assert!(changed(&volume));
