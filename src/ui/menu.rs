@@ -253,7 +253,10 @@ const INSET: f32 = 4.0;
 pub const LIST_ROWS: usize = 9;
 const RADIUS: f32 = 8.0;
 const ICON: f32 = 16.0;
+/// Where its words start: past the marks before them, or (no choice of it with one) as far in as its ticks are from its
+/// other side. How wide it is at the least, with marks.
 const TEXT_LEFT: f32 = 44.0;
+const TEXT_LEFT_UNMARKED: f32 = 14.0;
 const MIN_WIDTH: f32 = 200.0;
 /// The shadow under the sheet: how blurred (the Gaussian's deviation) and how far down it falls.
 const SHADOW_BLUR: f32 = 12.0;
@@ -743,6 +746,7 @@ impl Menu {
 pub struct Sheet {
     pub width: f32,
     pub height: f32,
+    text_left: f32,
     tops: Vec<f32>,
     pub shown: f32,
     scroll: f32,
@@ -753,7 +757,8 @@ impl Sheet {
         // As wide as its longest choice (or what is said under one).
         let detail = look.detail_font();
         let widest = items.iter().map(|item| gfx.measure(&item.label, look.font()).max(item.detail.as_deref().map_or(0.0, |words| gfx.measure(words, detail)))).fold(0.0, f32::max);
-        let width = (TEXT_LEFT + widest + 48.0).max(MIN_WIDTH);
+        let text_left = if items.iter().any(|item| item.mark.is_some()) { TEXT_LEFT } else { TEXT_LEFT_UNMARKED };
+        let width = (text_left + widest + 48.0).max(MIN_WIDTH - TEXT_LEFT + text_left);
         let tops: Vec<f32> = items
             .iter()
             .scan(INSET, |y, item| {
@@ -764,7 +769,7 @@ impl Sheet {
             })
             .collect();
         let height = tops.last().zip(items.last()).map_or(INSET, |(top, item)| top + item.tall()) + INSET;
-        Sheet { width, height, tops, shown: height, scroll: 0.0 }
+        Sheet { width, height, text_left, tops, shown: height, scroll: 0.0 }
     }
 
     /// No more than `most` of its rows shown at once (as many as there are, where there are no more), the next row's
@@ -856,11 +861,11 @@ impl Sheet {
             // (Its words above the middle where more is said under them.)
             let words = if item.detail.is_some() { middle - 8.0 } else { middle };
             let (ink_top, ink_bottom) = frame.ink(&item.label, look.font());
-            frame.text(&item.label, look.font(), seen(colours.text), TEXT_LEFT, words - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+            frame.text(&item.label, look.font(), seen(colours.text), self.text_left, words - (ink_top + ink_bottom) / 2.0, width - self.text_left - 36.0, Align::Start);
             if let Some(detail) = item.detail.as_deref() {
                 let font = look.detail_font();
                 let (ink_top, ink_bottom) = frame.ink(detail, font);
-                frame.text(detail, font, seen(colours.icon), TEXT_LEFT, middle + 9.0 - (ink_top + ink_bottom) / 2.0, width - TEXT_LEFT - 36.0, Align::Start);
+                frame.text(detail, font, seen(colours.icon), self.text_left, middle + 9.0 - (ink_top + ink_bottom) / 2.0, width - self.text_left - 36.0, Align::Start);
             }
             if item.checked {
                 frame.icon(Icon::Check, Point { x: width - INSET - 18.0, y: middle }, ICON, seen(colours.text));
@@ -921,11 +926,11 @@ impl Colours {
         match (look.skin, theme) {
             (Some(Skin::Glass), Some(theme)) => Colours {
                 // (Over the screen frosted, tinted as the lanes of the glass it is opened on are, as frosted as they
-                // are; else near opaque, what is behind it sharp.)
+                // are; else whole, as every sheet not frosted is: what is behind it would show through it sharp.)
                 sheet: match (dark, frosted) {
                     (_, true) => super::skins::glass_tint(&theme, look.frost, true),
-                    (true, false) => Color::hex(0x2A2D35, 0.94),
-                    (false, false) => Color::hex(0xF7F8FA, 0.94),
+                    (true, false) => Color::hex(0x2A2D35, 1.0),
+                    (false, false) => Color::hex(0xF7F8FA, 1.0),
                 },
                 stroke: if dark { Color::hex(0x000000, 0.35) } else { Color::hex(0x000000, 0.08) },
                 rim: Some(Color::hex(0xFFFFFF, if dark { 0.16 } else { 0.9 })),
@@ -948,7 +953,7 @@ impl Colours {
                 radius: 8.0,
             },
             _ if dark => Colours {
-                sheet: Color::hex(0x2C2C2C, if frosted { 0.78 } else { 0.98 }),
+                sheet: Color::hex(0x2C2C2C, if frosted { 0.78 } else { 1.0 }),
                 stroke: Color::hex(0x000000, 0.2),
                 rim: None,
                 shadow: Color::hex(0x000000, 0.35),
@@ -959,7 +964,7 @@ impl Colours {
                 radius: RADIUS,
             },
             _ => Colours {
-                sheet: Color::hex(0xF9F9F9, if frosted { 0.78 } else { 0.98 }),
+                sheet: Color::hex(0xF9F9F9, if frosted { 0.78 } else { 1.0 }),
                 stroke: Color::hex(0x000000, 0.08),
                 rim: None,
                 shadow: Color::hex(0x000000, 0.16),
@@ -995,6 +1000,67 @@ mod sized {
             .unwrap();
         let red: Vec<(usize, usize)> = (0..160 * 120).filter(|at| pixels[at * 4 + 2] > 240 && pixels[at * 4 + 1] < 20 && pixels[at * 4 + 3] > 240).map(|at| (at % 160, at / 160)).collect();
         assert_eq!((red.len(), red.first().copied()), (200, Some((SHADOW as usize + 4, SHADOW as usize + 6))));
+    }
+
+    /// Nothing behind a sheet not frosted shows through it, in any skin or Windows' own: a menu of the settings, at
+    /// their edge, showed the desktop past it as a strip down its side a little darker, and the rows under it faintly.
+    #[test]
+    fn nothing_shows_through_a_sheet_not_frosted() {
+        use super::super::canvas::{Canvas, Color};
+        use super::super::theme::Skin;
+        let _device = gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().expect("graphics");
+        for skin in [None, Some(Skin::Glass), Some(Skin::Paper), Some(Skin::Fluent)] {
+            for dark in [false, true] {
+                let look = Look { skin, dark, frost: 1.0, zoom: 1.0 };
+                let over = |ground: u32| {
+                    gfx.draw_offscreen((200, 160), 1.0, |frame| {
+                        frame.fill(Color::hex(ground, 1.0), 0.0, 0.0, 200.0, 160.0);
+                        plain(frame, look, SHADOW, (120.0, 80.0), 8.0, |_| {});
+                    })
+                    .unwrap()
+                };
+                let (black, white) = (over(0x000000), over(0xFFFFFF));
+                // (Inside its edge: the edge is a little clear over the sheet alone.)
+                let (left, top) = (SHADOW as usize + 12, SHADOW as usize + 12);
+                for (x, y) in [(left, top), (left + 48, top + 28), (left + 95, top + 55)] {
+                    let at = (y * 200 + x) * 4;
+                    assert_eq!(black[at..at + 4], white[at..at + 4], "{skin:?}, dark {dark}, at {x}, {y}");
+                }
+            }
+        }
+    }
+
+    /// A menu none of whose choices has a mark keeps no room for one: its words start as far in as its ticks end from its
+    /// other side, and it is as much narrower. (The hours of the to-dos' list, and the orders of the search, were
+    /// written 44 in, nothing before them.) One choice with a mark, and all are written past it, one under another.
+    #[test]
+    fn a_menu_with_no_marks_keeps_no_room_for_them() {
+        use super::super::theme::Skin;
+        let _device = gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().expect("graphics");
+        for skin in [None, Some(Skin::Glass), Some(Skin::Paper), Some(Skin::Fluent)] {
+            let look = Look { skin, dark: true, frost: 1.0, zoom: 1.0 };
+            // How far in from either side what is drawn on it is: its words, and its tick.
+            let ink = |marks: [Option<Mark>; 2]| {
+                let items = [Item::new("H", marks[0], true, false), Item::new("H", marks[1], false, false)];
+                let sheet = Sheet::new(&gfx, &items, look);
+                let (w, h) = (sheet.width.ceil() as usize, sheet.height.ceil() as usize);
+                let pixels = gfx.draw_offscreen((w as u32, h as u32), 1.0, |frame| sheet.paint_choices(frame, &items, look, false)).unwrap();
+                let inked = |row: usize| {
+                    let (top, tall) = (sheet.tops[row] as usize, ROW as usize);
+                    let columns: Vec<usize> = (0..w).filter(|x| (top..top + tall).any(|y| pixels[(y * w + x) * 4 + 3] > 60)).collect();
+                    (columns[0], w - 1 - columns[columns.len() - 1])
+                };
+                (inked(0), inked(1).0, sheet.width)
+            };
+            let ((left, right), other, width) = ink([None, None]);
+            assert!((13..=17).contains(&left) && (13..=17).contains(&right) && left == other, "{skin:?}: {left} in, its tick {right}");
+            assert_eq!(width, MIN_WIDTH - TEXT_LEFT + TEXT_LEFT_UNMARKED, "{skin:?}");
+            let (_, other, width) = ink([Some(Mark::Icon(Icon::File)), None]);
+            assert!((44..=47).contains(&other), "{skin:?}: {other} in beside a choice with a mark");
+            assert_eq!(width, MIN_WIDTH, "{skin:?}");
+        }
     }
 
     /// A menu opened on a panel or a widget made smaller on its screen is as small as it: its words as large as theirs.

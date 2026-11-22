@@ -55,6 +55,15 @@ thread_local! {
     static OWNER: Cell<HWND> = const { Cell::new(HWND(std::ptr::null_mut())) };
 }
 
+/// Its plate (whole: what is behind it would show through it sharp), its edge and its words, light or `dark`.
+fn colours(dark: bool) -> (Color, Color, Color) {
+    if dark {
+        (Color::hex(0x2B2B2B, 1.0), Color::hex(0xFFFFFF, 0.16), Color::hex(0xFFFFFF, 0.92))
+    } else {
+        (Color::hex(0xF9F9F9, 1.0), Color::hex(0x000000, 0.14), Color::hex(0x1A1A1A, 1.0))
+    }
+}
+
 /// How far from what it speaks of it shows, its height, and the room beside its words (DIPs).
 const UNDER: f32 = 8.0;
 const TALL: f32 = 28.0;
@@ -142,7 +151,7 @@ pub fn show(owner: HWND, text: &str, about: RECT, dark: bool) {
         };
         let Ok(mut surface) = surface else { return };
         tip.shown();
-        let (plate, rim, ink) = if dark { (Color::hex(0x2B2B2B, 0.98), Color::hex(0xFFFFFF, 0.16), Color::hex(0xFFFFFF, 0.92)) } else { (Color::hex(0xF9F9F9, 0.98), Color::hex(0x000000, 0.14), Color::hex(0x1A1A1A, 1.0)) };
+        let (plate, rim, ink) = colours(dark);
         let drawn = surface.draw(&gfx, (width as u32, height as u32), scale, |frame| {
             frame.fill_rounded(plate, 0.0, 0.0, wide, tall, 6.0);
             frame.stroke_rounded(Fill::Solid(rim), 0.0, 0.0, wide, tall, 6.0, 1.0);
@@ -230,6 +239,12 @@ mod tests {
         crate::ui::gfx::let_go_of_strays();
         assert!(super::TIP.with(|tip| tip.borrow().is_none()), "a tip saying nothing on a device no screen needs kept");
         assert!(stray.upgrade().is_none(), "a device no screen needs kept");
+    }
+
+    /// Nothing behind a tip shows through it.
+    #[test]
+    fn nothing_shows_through_a_tip() {
+        assert_eq!([super::colours(false).0.a, super::colours(true).0.a], [1.0, 1.0]);
     }
 
     /// Words too many for a tip: as many as fit its tallest on its widest lines, "…" after them; a name that fits on

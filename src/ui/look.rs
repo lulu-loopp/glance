@@ -2158,8 +2158,7 @@ impl Looker {
             return;
         };
         let at = self.body_on_screen(self.shape(Instant::now()));
-        let ground = if self.dark { Color::hex(0x000000, 1.0) } else { Color::hex(0xFFFFFF, 1.0) };
-        let colours = pane::Colours { ground: over(self.colours(false).sheet, ground), text: Theme::new(self.skin, self.dark).text };
+        let colours = pane::Colours { ground: self.colours(false).sheet, text: Theme::new(self.skin, self.dark).text };
         let radius = (self.body_radius() * self.scale).round() as i32;
         let Some(pane) = self.pane.as_mut() else {
             self.pane_making = false;
@@ -3539,12 +3538,6 @@ fn shapes(members: &[Member]) -> Vec<f32> {
 fn on_screen(body: Rect, sheet: Rect, scale: f32, monitor: RECT) -> RECT {
     let (x, y) = (monitor.left as f32 + (sheet.x + body.x) * scale, monitor.top as f32 + (sheet.y + body.y) * scale);
     RECT { left: x.round() as i32, top: y.round() as i32, right: (x + body.w * scale).round() as i32, bottom: (y + body.h * scale).round() as i32 }
-}
-
-/// `color` laid over the solid `ground`: what shows, solid.
-fn over(color: Color, ground: Color) -> Color {
-    let mix = |a: f32, b: f32| a * color.a + b * (1.0 - color.a);
-    Color { r: mix(color.r, ground.r), g: mix(color.g, ground.g), b: mix(color.b, ground.b), a: 1.0 }
 }
 
 /// How light `color` is (0 black, 1 white).

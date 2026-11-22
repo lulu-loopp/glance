@@ -98,6 +98,9 @@ pub enum Icon {
     ArrowLeftToLine,
     /// An arrow up beside one down: what puts things in another order (Lucide's arrow-up-down).
     ArrowUpDown,
+    /// Either of its two alone, where it is in both: which way they go.
+    ArrowUpOfTwo,
+    ArrowDownOfTwo,
     ArrowRightToLine,
     /// What a note's writing menu does to a link: it edited, its mark taken off (Lucide's square-pen, unlink).
     SquarePen,
@@ -235,6 +238,8 @@ impl Icon {
             Icon::CircleCheck => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "m9 12 2 2 4-4"],
             Icon::CircleX => &["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20z", "m15 9-6 6", "m9 9 6 6"],
             Icon::ArrowUpDown => &["m21 16-4 4-4-4", "M17 20V4", "m3 8 4-4 4 4", "M7 4v16"],
+            Icon::ArrowUpOfTwo => &["m3 8 4-4 4 4", "M7 4v16"],
+            Icon::ArrowDownOfTwo => &["m21 16-4 4-4-4", "M17 20V4"],
             Icon::AppWindow => &["M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M10 4v4", "M2 8h20", "M6 4v4"],
             Icon::Wrench => &["M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"],
             Icon::StickyNote => &["M16 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8z", "M15 3v4a2 2 0 0 0 2 2h4"],

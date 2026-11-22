@@ -335,6 +335,8 @@ enum Hit {
     Chip(View),
     /// The button that offers the orders the files and folders can be put in.
     Sort,
+    /// Its arrows, which put them the other way.
+    Turn,
     /// A name, by its place among the names shown.
     Row(usize),
     ShowAll,
@@ -1040,8 +1042,12 @@ impl Finder {
         if self.ordering() {
             let form = button.widest_within(WIDTH - SORT_RIGHT - SORT_GAP - end);
             let menu_up = matches!(self.menu, Some((_, MenuOf::Sort)));
-            let r = button.paint(frame, ink, &theme, (WIDTH - SORT_RIGHT, y, tall), form, hovered == Some(Hit::Sort) || menu_up);
+            let lit = if menu_up { Some(Hit::Sort) } else { hovered.filter(|hit| matches!(hit, Hit::Sort | Hit::Turn)) };
+            let (turn, r) = button.paint(frame, ink, &theme, (WIDTH - SORT_RIGHT, y, tall), form, lit);
             self.hits.push((r, Hit::Sort));
+            if let Some(turn) = turn {
+                self.hits.push((turn, Hit::Turn));
+            }
         }
         let chosen = View::EVERY.iter().position(|&view| view == self.view).unwrap_or(0);
         let hovered_at = View::EVERY.iter().position(|&view| hovered == Some(Hit::Chip(view)));
@@ -1426,6 +1432,10 @@ impl Finder {
             }
             Hit::Chip(view) => self.choose(view),
             Hit::Sort => self.sort_menu(),
+            Hit::Turn => {
+                self.put_in(chosen(self.order, self.order.by));
+                self.draw();
+            }
             Hit::ShowAll => {
                 self.expanded = true;
                 self.ask(false);
@@ -1935,10 +1945,14 @@ fn ready_said(lang: Lang, roots: &[&str], names: usize) -> String {
 }
 
 /// The button offering the orders (see `Finder::sort_menu`): an arrow up and one down, what they are put in order by,
-/// which way, and a chevron, as much of it as there is room for (see `Form`).
+/// which way, and a chevron, as much of it as there is room for (see `Form`). Where they go one way or the other, its
+/// arrows are a button of their own, which puts them the other way: the arrow of the way they go is shown, the other
+/// faintly.
 struct SortButton {
     label: &'static str,
     way: Option<&'static str>,
+    /// They go down as it goes: the newest, the largest, the last of their names first.
+    down: bool,
     widths: (f32, f32),
     fonts: (Font, Font),
 }
@@ -1954,6 +1968,8 @@ enum Form {
 /// The order's button's measures (DIPs): the room before its arrows and after its chevron, between what it shows, and
 /// how large its icons are.
 const SORT_PAD: (f32, f32) = (10.0, 8.0);
+/// The room on either side of its arrows where they are a button of their own (DIPs).
+const TURN_PAD: f32 = 7.0;
 const SORT_SPACE: f32 = 6.0;
 const SORT_ICON: f32 = 15.0;
 const SORT_CHEVRON: f32 = 14.0;
@@ -1964,14 +1980,23 @@ impl SortButton {
         let label = sort_said(order.by, finder.lang);
         let way = way_said(order.by, order.reversed, finder.lang);
         let widths = (frame.gfx.measure(label, fonts.0), way.map_or(0.0, |way| frame.gfx.measure(way, fonts.1)));
-        SortButton { label, way, widths, fonts }
+        SortButton { label, way, down: goes_down(order), widths, fonts }
+    }
+
+    /// How far in its arrows end: with the room past them, where they are a button of their own (they go either way).
+    fn arrows_end(&self) -> f32 {
+        if self.way.is_some() {
+            TURN_PAD + SORT_ICON + TURN_PAD
+        } else {
+            SORT_PAD.0 + SORT_ICON
+        }
     }
 
     /// How wide it is, as much of it shown as `form` says.
     fn width(&self, form: Form) -> f32 {
         let named = if form == Form::Bare { 0.0 } else { SORT_SPACE + self.widths.0 };
         let way = if form == Form::Whole && self.way.is_some() { SORT_SPACE + self.widths.1 } else { 0.0 };
-        SORT_PAD.0 + SORT_ICON + named + way + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1
+        self.arrows_end() + named + way + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1
     }
 
     /// The most of it that fits in `room` (DIPs): the arrows alone where nothing more does. (Within a thousandth of a
@@ -1981,19 +2006,29 @@ impl SortButton {
         [Form::Whole, Form::Named].into_iter().find(|&form| self.width(form) <= room + 0.001).unwrap_or(Form::Bare)
     }
 
-    /// Drawn as `form` says, its right edge at `right`, at `y` and `tall` (DIPs), `lit` (under the pointer, or its menu
-    /// up): where it is.
-    fn paint(&self, frame: &Frame, ink: &Inks, theme: &Theme, (right, y, tall): (f32, f32, f32), form: Form, lit: bool) -> Rect {
+    /// Drawn as `form` says, its right edge at `right`, at `y` and `tall` (DIPs), what of it is `lit` (under the pointer,
+    /// or its menu up): where its arrows are, where they are a button of their own, and where the rest of it is.
+    fn paint(&self, frame: &Frame, ink: &Inks, theme: &Theme, (right, y, tall): (f32, f32, f32), form: Form, lit: Option<Hit>) -> (Option<Rect>, Rect) {
         let w = self.width(form);
-        let r = Rect { x: right - w, y, w, h: tall };
-        if lit {
-            frame.fill_rounded(theme.hover, r.x, r.y, r.w, r.h, theme.control_radius.min(tall / 2.0));
+        let whole = Rect { x: right - w, y, w, h: tall };
+        let turn = self.way.map(|_| Rect { w: self.arrows_end(), ..whole });
+        let rest = turn.map_or(whole, |turn| Rect { x: whole.x + turn.w, w: w - turn.w, ..whole });
+        for (r, hit) in turn.map(|turn| (turn, Hit::Turn)).into_iter().chain([(rest, Hit::Sort)]) {
+            if lit == Some(hit) {
+                frame.fill_rounded(theme.hover, r.x, r.y, r.w, r.h, theme.control_radius.min(tall / 2.0));
+            }
         }
-        let (text, quiet) = if lit { (ink.text, ink.text2) } else { (ink.text2, ink.text3) };
+        let (text, quiet) = if lit == Some(Hit::Sort) { (ink.text, ink.text2) } else { (ink.text2, ink.text3) };
         let middle = y + tall / 2.0;
-        let mut x = r.x + SORT_PAD.0;
-        frame.icon(Icon::ArrowUpDown, Point { x: x + SORT_ICON / 2.0, y: middle }, SORT_ICON, text);
-        x += SORT_ICON;
+        let mut x = whole.x + self.arrows_end();
+        if turn.is_some() {
+            let arrows = Point { x: whole.x + TURN_PAD + SORT_ICON / 2.0, y: middle };
+            let (on, off) = if self.down { (Icon::ArrowDownOfTwo, Icon::ArrowUpOfTwo) } else { (Icon::ArrowUpOfTwo, Icon::ArrowDownOfTwo) };
+            frame.icon(off, arrows, SORT_ICON, ink.text3.alpha(ink.text3.a * 0.6));
+            frame.icon(on, arrows, SORT_ICON, if lit == Some(Hit::Turn) { ink.text } else { ink.text2 });
+        } else {
+            frame.icon(Icon::ArrowUpDown, Point { x: x - SORT_ICON / 2.0, y: middle }, SORT_ICON, text);
+        }
         let mut words = |said: &str, font: Font, w: f32, colour: Color| {
             let (ascent, descent) = frame.gfx.baseline(font);
             frame.text(said, font, colour, x + SORT_SPACE, middle - (ascent + descent) / 2.0, w + 1.0, Align::Start);
@@ -2006,12 +2041,17 @@ impl SortButton {
             words(way, self.fonts.1, self.widths.1, quiet);
         }
         frame.icon(Icon::ChevronDown, Point { x: x + SORT_SPACE + SORT_CHEVRON / 2.0, y: middle }, SORT_CHEVRON, quiet);
-        r
+        (turn, rest)
     }
 }
 
-/// The order `by` chosen in its menu, the files and folders in `now`: the one they are in chosen again, the other way
-/// (how well they meet goes one way only); another, its first way.
+/// Whether they go down as `order` goes (the newest, the largest, the last of their names first), as its arrow shows.
+fn goes_down(order: Order) -> bool {
+    (order.by == Sort::Name) == order.reversed
+}
+
+/// The order `by` chosen in its menu, the files and folders in `now`: the one they are in chosen again (or its arrows
+/// pressed), the other way (how well they meet goes one way only); another, its first way.
 fn chosen(now: Order, by: Sort) -> Order {
     Order { by, reversed: by == now.by && by != Sort::Match && !now.reversed }
 }
@@ -2369,6 +2409,37 @@ mod tests {
         assert_eq!(chosen(order(Sort::Written, true), Sort::Name), order(Sort::Name, false));
         assert_eq!(chosen(order(Sort::Size, true), Sort::Match), Order::default());
         assert_eq!(chosen(Order::default(), Sort::Match), Order::default());
+        // The arrow lit: down, the newest and the largest first, Z to A; up, the other way.
+        for (by, first) in [(Sort::Written, true), (Sort::Name, false), (Sort::Size, true)] {
+            assert_eq!([goes_down(order(by, false)), goes_down(order(by, true))], [first, !first], "{by:?}");
+        }
+    }
+
+    /// The order's arrows are a button of their own beside the rest of it where they go either way, as much of it as is
+    /// shown: the two side by side, all of it theirs. By how well they meet (one way only), all of it opens its menu.
+    #[test]
+    fn the_order_s_arrows_are_a_button_of_their_own() {
+        let _device = gfx::held().unwrap();
+        let gfx = gfx::Gfx::new().expect("graphics");
+        let font = Font::new(Family::Segoe, 12.0, 400.0);
+        let theme = Theme::new(Skin::Glass, true);
+        let (asks, _asked) = std::sync::mpsc::channel();
+        let finder = Finder::new(HWND::default(), asks);
+        let ink = Inks::of(&finder, &finder.colours(false));
+        for form in [Form::Whole, Form::Named, Form::Bare] {
+            for way in [Some("新的在前"), None] {
+                let button = SortButton { label: "修改时间", way, down: true, widths: (50.0, if way.is_some() { 46.0 } else { 0.0 }), fonts: (font, font) };
+                let mut painted = None;
+                gfx.draw_offscreen((300, 40), 1.0, |frame| painted = Some(button.paint(frame, &ink, &theme, (290.0, 6.0, 26.0), form, None))).unwrap();
+                let (turn, rest) = painted.unwrap();
+                assert_eq!(turn.is_some(), way.is_some(), "{form:?}");
+                let left = turn.map_or(rest.x, |turn| turn.x);
+                assert_eq!((left, rest.x + rest.w), (290.0 - button.width(form), 290.0), "{form:?}");
+                if let Some(turn) = turn {
+                    assert_eq!((turn.x + turn.w, turn.w), (rest.x, SORT_ICON + 2.0 * TURN_PAD), "{form:?}");
+                }
+            }
+        }
     }
 
     /// The order's button shows as much as there is room for: what they are in order by and which way, else what
@@ -2376,8 +2447,8 @@ mod tests {
     #[test]
     fn the_order_s_button_shows_as_much_as_there_is_room_for() {
         let font = Font::new(Family::Segoe, 12.0, 400.0);
-        let button = SortButton { label: "修改时间", way: Some("新的在前"), widths: (50.0, 46.0), fonts: (font, font) };
-        let bare = SORT_PAD.0 + SORT_ICON + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1;
+        let button = SortButton { label: "修改时间", way: Some("新的在前"), down: true, widths: (50.0, 46.0), fonts: (font, font) };
+        let bare = 2.0 * TURN_PAD + SORT_ICON + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1;
         assert_eq!(button.width(Form::Bare), bare);
         assert_eq!(button.width(Form::Whole), bare + 2.0 * SORT_SPACE + 96.0);
         assert_eq!(button.widest_within(bare + 200.0), Form::Whole);
@@ -2385,7 +2456,7 @@ mod tests {
         assert_eq!(button.widest_within(bare + 10.0), Form::Bare);
         assert_eq!(button.widest_within(0.0), Form::Bare);
         // (By how well they meet: no way to say.)
-        let matched = SortButton { label: "匹配度", way: None, widths: (38.0, 0.0), fonts: (font, font) };
+        let matched = SortButton { label: "匹配度", way: None, down: true, widths: (38.0, 0.0), fonts: (font, font) };
         assert_eq!(matched.width(Form::Whole), matched.width(Form::Named));
 
         // Two names 100 wide, 12 round each and 4 between, the first one's room before it within the 26: 26 + 200 + 40 = 266
@@ -2396,7 +2467,7 @@ mod tests {
         assert_eq!(chips_spaced(&[100.0, 100.0], (12.0, 4.0), 200.0), 0.0);
 
         // Room for the widest button of all orders where the kinds keep half their room at least, else for less of it.
-        let way = |w: f32| SortButton { label: "", way: Some(""), widths: (40.0, w), fonts: (font, font) };
+        let way = |w: f32| SortButton { label: "", way: Some(""), down: true, widths: (40.0, w), fonts: (font, font) };
         let names = [100.0, 100.0, 100.0, 100.0];
         let spacing = (12.0, 4.0);
         let whole = |w: f32| WIDTH - SORT_RIGHT - SORT_GAP - way(w).width(Form::Whole);
