@@ -146,6 +146,8 @@ pub struct Gfx {
     /// The context that draws on it: Glance's own, made once (the compositor's, its target changed to the bitmap and
     /// back, failed now and then, and the window showed nothing for a frame, or another window's drawing).
     scratch_context: RefCell<Option<ID2D1DeviceContext>>,
+    /// A frame is being drawn on them now (see `Frame::whole`).
+    drawing: Cell<bool>,
 }
 
 /// How much contrast grayscale text's edges are given by `crisp_text` (the
@@ -694,6 +696,7 @@ impl Gfx {
             software,
             scratch: RefCell::new(None),
             scratch_context: RefCell::new(None),
+            drawing: Cell::new(false),
             guarded,
             factory,
             device,
@@ -1971,11 +1974,25 @@ impl<'a> Frame<'a> {
 
     /// A frame drawn apart by `paint` (see `apart`) and finished, ready to be put where it shows; failed, if anything
     /// of it did, and then the surface it was for left as it was.
+    ///
+    /// One at a time: a frame asked for while another is being drawn (a window drawn as a message is handed out in
+    /// the middle of another's frame, by a dialog put up as it is drawn, or a call that waits on another thread and
+    /// hands messages out meanwhile) is not begun, and not drawn: the device's context and bitmap are the one being
+    /// drawn on, and begun on them it ended the other's drawing and drew on what it was drawing. (Reports: a dialog
+    /// put up by the settings as they were drawn, and the settings' frame under it, failed together. What a layer
+    /// paints could be cut off by it, and kept so: see `Layer::draw`.) It is drawn again as its window next draws.
     pub(super) fn whole(gfx: &'a Gfx, size: (u32, u32), scale: f32, paint: impl FnOnce(&Frame)) -> Result<Self> {
-        let frame = Frame::apart(gfx, size, scale)?;
-        paint(&frame);
-        frame.finish()?;
-        Ok(frame)
+        if gfx.drawing.replace(true) {
+            return Err(windows::core::Error::new(windows::Win32::Foundation::D2DERR_WRONG_STATE, "asked for while another frame was being drawn"));
+        }
+        let drawn = (|| {
+            let frame = Frame::apart(gfx, size, scale)?;
+            paint(&frame);
+            frame.finish()?;
+            Ok(frame)
+        })();
+        gfx.drawing.set(false);
+        drawn
     }
 
     /// Something of the frame failed as it was drawn (a layer, a bitmap not made): the frame is not shown (see
@@ -3571,6 +3588,41 @@ mod tests {
 
     /// A layer whose painting into its bitmap failed on the graphics card is not kept: drawn where it shows from the
     /// next frame while it shows the same, its bitmap tried again as it shows something else, with or without a halo.
+    /// A frame asked for on a device while another is being drawn on it (a window drawn as a message is handed out
+    /// in the middle of another's frame: a dialog the settings put up as they were drawn) is not drawn, and the one
+    /// being drawn is drawn whole, what a layer of it paints after kept as it is painted. (Begun on the context and
+    /// bitmap being drawn on, it ended the other's drawing: both failed, the layer kept nothing.)
+    #[test]
+    fn a_frame_asked_for_while_another_is_drawn_leaves_that_one_whole() {
+        let _device = crate::ui::gfx::held().unwrap();
+        use super::Canvas;
+        let gfx = super::Gfx::new().expect("graphics");
+        let mut layer = super::Layer::default();
+        let (green, red) = (super::Color::hex(0x00FF00, 1.0), super::Color::hex(0xFF0000, 1.0));
+        let mut inner = None;
+        let outer = super::Frame::whole(&gfx, (200, 100), 1.0, |frame| {
+            let painted = layer.draw(frame, 7, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, 200.0, 100.0), 1.0, None, |frame| {
+                frame.fill(green, 0.0, 0.0, 100.0, 100.0);
+                // (Another window's frame, as a message handed out meanwhile draws it.)
+                inner = Some(super::Frame::whole(&gfx, (50, 50), 1.0, |other| other.fill(red, 0.0, 0.0, 50.0, 50.0)).map(|_| ()));
+                frame.fill(red, 100.0, 0.0, 100.0, 100.0);
+                Ok(())
+            });
+            assert!(painted.is_ok(), "{painted:?}");
+        });
+        assert!(outer.is_ok(), "the frame being drawn: {:?}", outer.err());
+        assert!(inner.as_ref().is_some_and(|inner| inner.is_err()), "the one asked for meanwhile: {inner:?}");
+        // What the layer keeps, drawn from its bitmap (the same shown): both halves.
+        let pixels = gfx.draw_offscreen((200, 100), 1.0, |frame| {
+            layer.draw(frame, 7, windows_numerics::Matrix3x2::identity(), (0.0, 0.0, 200.0, 100.0), 1.0, None, |_| Ok(())).unwrap();
+        });
+        let pixels = pixels.unwrap();
+        let count = |green: bool| pixels.chunks(4).filter(|p| if green { p[1] > 200 && p[2] < 60 } else { p[2] > 200 && p[1] < 60 }).count();
+        assert_eq!((count(true), count(false)), (10000, 10000));
+        // And frames are drawn after, one at a time, as before.
+        assert!(super::Frame::whole(&gfx, (20, 20), 1.0, |frame| frame.fill(green, 0.0, 0.0, 20.0, 20.0)).is_ok());
+    }
+
     /// (A report: a widget blank at rest, its content shown as it was sized. The bitmap that failed was kept as though
     /// it had not and drawn, blank, frame after frame.) The failure here: a bitmap of another device drawn in it.
     #[test]

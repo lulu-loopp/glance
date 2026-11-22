@@ -1974,10 +1974,6 @@ impl SortButton {
         SORT_PAD.0 + SORT_ICON + named + way + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1
     }
 
-    fn least(&self) -> f32 {
-        self.width(Form::Bare)
-    }
-
     /// The most of it that fits in `room` (DIPs): the arrows alone where nothing more does. (Within a thousandth of a
     /// DIP: room kept for it exactly, the kinds' widths added up one by one ended a rounding past it, and it was shown
     /// with less than there was room for.)
@@ -2382,7 +2378,7 @@ mod tests {
         let font = Font::new(Family::Segoe, 12.0, 400.0);
         let button = SortButton { label: "修改时间", way: Some("新的在前"), widths: (50.0, 46.0), fonts: (font, font) };
         let bare = SORT_PAD.0 + SORT_ICON + SORT_SPACE + SORT_CHEVRON + SORT_PAD.1;
-        assert_eq!(button.least(), bare);
+        assert_eq!(button.width(Form::Bare), bare);
         assert_eq!(button.width(Form::Whole), bare + 2.0 * SORT_SPACE + 96.0);
         assert_eq!(button.widest_within(bare + 200.0), Form::Whole);
         assert_eq!(button.widest_within(bare + 60.0), Form::Named);

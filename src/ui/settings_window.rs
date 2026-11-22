@@ -6511,6 +6511,7 @@ It can be disconnected here at any time, and the status line command put back.",
             return;
         }
         self.shown();
+        self.advance(now);
         let gfx = self.gfx.clone();
         let mut surface = self.surface.take().unwrap();
         let mut creep = None;
@@ -6565,120 +6566,13 @@ It can be disconnected here at any time, and the status line command put back.",
         self.draw_guide(now);
     }
 
-    /// Draws everything, and returns how fast the preview's charts move
-    /// (physical pixels a second).
-    fn paint(&mut self, frame: &Frame, now: Instant) -> Option<f32> {
-        // (The guide's demonstration on the layout page moved on, where what it moves to is as last drawn.)
-        self.play_drag(now);
-        let palette = self.palette.clone();
-        let (width, height) = self.client();
-        if !self.mica {
-            fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
-        }
-        let hovered = self.hovered();
-        // The pointer come onto the AI page's row: Qiuqiu greets it there, once (see `icons::ai_waving`), unless
-        // Windows is told to show no animations.
-        if hovered == Some(Target::Nav(Page::Ai)) && self.hovered_now != hovered && !crate::panel::reduced_motion() {
-            self.waved = Some(now);
-        }
-        self.hovered_now = hovered;
-        self.targets.clear();
-        self.follows_pointer.clear();
-        self.paint_nav(frame, &palette, now);
-        // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
-        // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
-        // largest there is, and its knob jumped as the window first showed).
-        self.send.area = None;
-        let creep = {
-            let _timed = crate::perf::Timed::start("settings preview", String::new);
-            self.paint_preview(frame, &palette, width, height)
-        };
-        self.tell_send_area();
-        unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
-        {
-            let _timed = crate::perf::Timed::start("settings list", String::new);
-            self.paint_list(frame, &palette, now, height);
-        }
-        unsafe { frame.dc.PopAxisAlignedClip() };
-        self.paint_played_pointer(frame);
-        creep
-    }
-
-    /// The pages' list: the window's name, then each page, the one shown lit and marked in the accent. The components'
-    /// own pages come under their heading (a name, not a page), and a rule sets them apart from the phone's and
-    /// Glance's own after them.
-    fn paint_nav(&mut self, frame: &Frame, palette: &Palette, now: Instant) {
+    /// What was under way, taken as it is now, before a frame is drawn: work done on threads of their own (a report put
+    /// together, sent, closed; a switch turned; what the remote's helper said) and what is read again now and then.
+    /// Not as it is drawn: what is taken may put up a dialog over the window (a report to be sent), which draws as it
+    /// waits on it, and its frames, begun while this window's was being drawn, were not drawn, nor this one after
+    /// (see `gfx::Frame::whole`).
+    fn advance(&mut self, now: Instant) {
         let lang = self.lang;
-        let hovered = self.hovered_now.clone();
-        let left = 16.0;
-        let width = NAV - 2.0 * left + 8.0;
-        let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
-        text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left + 8.0, PAD_TOP + 18.0, width, Align::Start);
-        let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let heading = Font::new(Family::Segoe, 12.0, 600.0);
-        let mut y = PAD_TOP + 52.0;
-        for item in NAV_ITEMS {
-            let page = match item {
-                NavItem::Components => {
-                    y += NAV_GAP;
-                    text_centred(frame, item.name(lang), heading, palette.text3, left + 12.0, y + NAV_HEADING / 2.0, width, Align::Start);
-                    y += NAV_HEADING;
-                    continue;
-                }
-                NavItem::Page(page) => page,
-            };
-            if page == Page::Devices {
-                y += NAV_GAP / 2.0;
-                fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
-                y += NAV_GAP / 2.0;
-            }
-            let r = Rect { x: left, y, w: width, h: NAV_ITEM };
-            y += NAV_ITEM + 4.0;
-            let target = Target::Nav(page);
-            // (The reports' page is General's own.)
-            let (shown, hover) = (page == self.page || (page == Page::General && self.page == Page::Reports), hovered.as_ref() == Some(&target));
-            if shown || hover {
-                fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
-            }
-            if shown {
-                fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
-            }
-            let cy = r.y + r.h / 2.0;
-            let at = Point { x: r.x + 22.0, y: cy };
-            match self.waving(now).filter(|_| page == Page::Ai) {
-                Some(ms) => frame.ai_waving(ms, at, 16.0, palette.text),
-                None => frame.icon(page.icon(), at, 16.0, palette.text),
-            }
-            text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
-            // A newer Glance is out, the site has a notice unread, or a report sent has news unread: a dot on the page
-            // they are seen from.
-            if page == Page::General && self.general_has_news() {
-                fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
-            }
-            self.targets.push((r, target));
-        }
-    }
-
-    /// How far Qiuqiu, the AI page's icon in the pages' list, is into greeting the pointer (ms), while it is.
-    fn waving(&self, now: Instant) -> Option<f32> {
-        let gone = now.saturating_duration_since(self.waved?);
-        (gone < crate::ui::icons::AI_WAVE).then_some(gone.as_secs_f32() * 1000.0)
-    }
-
-    fn paint_list(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {
-        let lang = self.lang;
-        let left = NAV + PAD_SIDE;
-        let width = self.cards();
-        let scroll = self.scroll;
-        let hovered = self.hovered_now.clone();
-        let over = match hovered {
-            Some(Target::Slider(field)) => Some(field),
-            _ => None,
-        };
-        self.dots_moving = self.slider_dots.step(now, over, self.sliding.map(|(field, _)| field));
-        let label = Font::new(Family::Segoe, 14.0, 400.0);
-        let hint = Font::new(Family::Segoe, HINT, 400.0);
-        let mut dragged = None;
         // The diagnostics sent: how that went, once it is over.
         if self.sending.as_ref().is_some_and(|sending| sending.is_finished()) {
             self.sent = Some(self.sending.take().unwrap().join().ok().flatten());
@@ -6910,6 +6804,122 @@ It can be disconnected here at any time, and the status line command put back.",
         } else {
             self.announced_at = None;
         }
+    }
+
+    /// Draws everything, and returns how fast the preview's charts move
+    /// (physical pixels a second).
+    fn paint(&mut self, frame: &Frame, now: Instant) -> Option<f32> {
+        // (The guide's demonstration on the layout page moved on, where what it moves to is as last drawn.)
+        self.play_drag(now);
+        let palette = self.palette.clone();
+        let (width, height) = self.client();
+        if !self.mica {
+            fill(frame, palette.window, 0.0, 0.0, width, height, 0.0);
+        }
+        let hovered = self.hovered();
+        // The pointer come onto the AI page's row: Qiuqiu greets it there, once (see `icons::ai_waving`), unless
+        // Windows is told to show no animations.
+        if hovered == Some(Target::Nav(Page::Ai)) && self.hovered_now != hovered && !crate::panel::reduced_motion() {
+            self.waved = Some(now);
+        }
+        self.hovered_now = hovered;
+        self.targets.clear();
+        self.follows_pointer.clear();
+        self.paint_nav(frame, &palette, now);
+        // The preview before the list (they do not meet): it finds how large the panel can be on its screen, which the
+        // panel size's slider reaches to (drawn first, the list's slider took the size before it was found, the
+        // largest there is, and its knob jumped as the window first showed).
+        self.send.area = None;
+        let creep = {
+            let _timed = crate::perf::Timed::start("settings preview", String::new);
+            self.paint_preview(frame, &palette, width, height)
+        };
+        self.tell_send_area();
+        unsafe { frame.dc.PushAxisAlignedClip(&rect(NAV, 0.0, self.pane(), height), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        {
+            let _timed = crate::perf::Timed::start("settings list", String::new);
+            self.paint_list(frame, &palette, now, height);
+        }
+        unsafe { frame.dc.PopAxisAlignedClip() };
+        self.paint_played_pointer(frame);
+        creep
+    }
+
+    /// The pages' list: the window's name, then each page, the one shown lit and marked in the accent. The components'
+    /// own pages come under their heading (a name, not a page), and a rule sets them apart from the phone's and
+    /// Glance's own after them.
+    fn paint_nav(&mut self, frame: &Frame, palette: &Palette, now: Instant) {
+        let lang = self.lang;
+        let hovered = self.hovered_now.clone();
+        let left = 16.0;
+        let width = NAV - 2.0 * left + 8.0;
+        let title = Font::new(Family::SegoeDisplay, 20.0, 600.0);
+        text_centred(frame, pick(lang, "设置", "Settings"), title, palette.text, left + 8.0, PAD_TOP + 18.0, width, Align::Start);
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
+        let heading = Font::new(Family::Segoe, 12.0, 600.0);
+        let mut y = PAD_TOP + 52.0;
+        for item in NAV_ITEMS {
+            let page = match item {
+                NavItem::Components => {
+                    y += NAV_GAP;
+                    text_centred(frame, item.name(lang), heading, palette.text3, left + 12.0, y + NAV_HEADING / 2.0, width, Align::Start);
+                    y += NAV_HEADING;
+                    continue;
+                }
+                NavItem::Page(page) => page,
+            };
+            if page == Page::Devices {
+                y += NAV_GAP / 2.0;
+                fill(frame, palette.rule, left + 12.0, y - 0.5, width - 24.0, 1.0, 0.0);
+                y += NAV_GAP / 2.0;
+            }
+            let r = Rect { x: left, y, w: width, h: NAV_ITEM };
+            y += NAV_ITEM + 4.0;
+            let target = Target::Nav(page);
+            // (The reports' page is General's own.)
+            let (shown, hover) = (page == self.page || (page == Page::General && self.page == Page::Reports), hovered.as_ref() == Some(&target));
+            if shown || hover {
+                fill(frame, if shown { palette.control } else { palette.hover }, r.x, r.y, r.w, r.h, 6.0);
+            }
+            if shown {
+                fill(frame, palette.selection, r.x, r.y + 12.0, 3.0, r.h - 24.0, 1.5);
+            }
+            let cy = r.y + r.h / 2.0;
+            let at = Point { x: r.x + 22.0, y: cy };
+            match self.waving(now).filter(|_| page == Page::Ai) {
+                Some(ms) => frame.ai_waving(ms, at, 16.0, palette.text),
+                None => frame.icon(page.icon(), at, 16.0, palette.text),
+            }
+            text_centred(frame, item.name(lang), label, palette.text, r.x + 46.0, cy, r.w - 50.0, Align::Start);
+            // A newer Glance is out, the site has a notice unread, or a report sent has news unread: a dot on the page
+            // they are seen from.
+            if page == Page::General && self.general_has_news() {
+                fill(frame, palette.selection, r.x + r.w - 20.0, cy - 3.0, 6.0, 6.0, 3.0);
+            }
+            self.targets.push((r, target));
+        }
+    }
+
+    /// How far Qiuqiu, the AI page's icon in the pages' list, is into greeting the pointer (ms), while it is.
+    fn waving(&self, now: Instant) -> Option<f32> {
+        let gone = now.saturating_duration_since(self.waved?);
+        (gone < crate::ui::icons::AI_WAVE).then_some(gone.as_secs_f32() * 1000.0)
+    }
+
+    fn paint_list(&mut self, frame: &Frame, palette: &Palette, now: Instant, height: f32) {
+        let lang = self.lang;
+        let left = NAV + PAD_SIDE;
+        let width = self.cards();
+        let scroll = self.scroll;
+        let hovered = self.hovered_now.clone();
+        let over = match hovered {
+            Some(Target::Slider(field)) => Some(field),
+            _ => None,
+        };
+        self.dots_moving = self.slider_dots.step(now, over, self.sliding.map(|(field, _)| field));
+        let label = Font::new(Family::Segoe, 14.0, 400.0);
+        let hint = Font::new(Family::Segoe, HINT, 400.0);
+        let mut dragged = None;
         let placed = self.layout();
         // How far each card that opens reaches down (a module's, a phone's): its row, and as it opens, that share of
         // the rows inside it; and where the card's top is. A card's rows follow its head's.
