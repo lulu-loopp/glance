@@ -27,10 +27,10 @@ give it, or torn off onto the desktop.
 - **Memory**: use, its speed (and what the modules are rated for, if it runs below that), and each module's temperature
 - **Network and disk**: traffic, the name of the Wi-Fi network if you like, and each drive's temperature, every drive on a line of its own
 - **Processes**: the busiest programs by CPU, memory, I/O or GPU
-- **Storage**: space on each drive
+- **Storage**: space on each drive, and the sizes of up to twelve folders you choose in the settings or drop on the panel, with how each changed in the last week and what is largest in it as the pointer rests on it
 - **Motherboard**: temperatures and fan speeds
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
-- **Time and media** (off until chosen): the time and the date (on a 12-hour clock if you like), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
+- **Time and media** (off until chosen): the time and the date (on a 12-hour clock, and with the Chinese lunar date, if you like), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
 - **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
@@ -42,7 +42,8 @@ blocks out for the room.
 
 - **Station**: drop or paste files, pictures, text and links onto it, and
   they wait there until you drag them into another program. *Recently
-  copied* keeps what passed through the clipboard (it can be paused), and
+  copied* keeps what passed through the clipboard (it can be paused), what
+  is pinned of it first and sorted by tags, and
   *Recent files* lists what was just downloaded or saved. Double-click to
   open, right-click to pin, as cards or as a list. What sits too long is
   cleared away.
@@ -73,7 +74,9 @@ blocks out for the room.
   things. Files are found by name on every NTFS drive, from the drive's
   change journal, as Everything reads it, opened read-only and kept current
   from the moment Glance starts. A USB drive being searched can still be
-  ejected safely.
+  ejected safely. A sum typed is worked out (Enter copies the answer), a web
+  address is opened, and **Alt+Enter** looks for the words in the browser,
+  with the search engine chosen in the settings. Nothing is sent until then.
 - **Quick look**: press **Ctrl+Q** with the pointer over something on the
   station, in Recently copied or Recent files, or with a search result
   picked, and it is shown larger without opening a program. Pictures show
