@@ -244,7 +244,7 @@ pub enum Hit {
     /// A thing on the station, by its number (see `station::shelf::Item`); something copied lately, by its.
     Shelf(u64),
     Copied(u64),
-    /// Something copied lately pinned, or not any more (the pin on its row, by its number). What is pinned, where it is
+    /// Something copied lately pinned, or not any more (the pin on its line or its card, by its number). What is pinned, where it is
     /// listed first, folded away or shown. A new tag made.
     PinCopy(u64),
     PinsHead,
@@ -3650,7 +3650,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "time" => {
             let now = text::Local::at(s.t);
             let (figure, unit) = now.time(text::twelve_hours(), lang);
-            let mut blocks = vec![Block::Dated { title: lang.pick("时间", "Time").into(), dates: now.dates(lang, on("lunar")) }, Block::Readout { figure, unit, hot: false, plot: None }];
+            let mut blocks = vec![Block::Dated { title: lang.pick("时间", "Time").into(), dates: now.dates(lang, super::prefs::lunar(&scene.prefs.modules, lang)) }, Block::Readout { figure, unit, hot: false, plot: None }];
             // Each of what plays as the panel was laid out for it (see `Seen::note_playing`): not there yet, nothing
             // (drawn as it came, it was drawn over the lane under, the panel laid out before it was known); there and
             // gone a while, its room kept, as a reading's is.
@@ -5313,9 +5313,10 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
                 let font = Font { size: if small > 80.0 { 12.0 } else { 11.0 }, ..theme.small };
                 let line = font.size * 1.28;
                 let room = w - 10.0;
-                // (The first row short of a pin in the corner.)
-                let first = room - if tile.pinned { 14.0 } else { 0.0 };
-                for (at, row) in face_rows(frame, text, font, first, room, ((h - 10.0) / line) as usize).iter().enumerate() {
+                // (Its first rows short of a pin in the corner, those that reach down beside it.)
+                let mark = pin_mark(tile, (x, y, w, h));
+                let short = if tile.pinned { (((mark.1 + mark.3 - y - 5.0) / line).ceil() as usize, mark.0 - 3.0 - x - 5.0) } else { (0, room) };
+                for (at, row) in face_rows(frame, text, font, short, room, ((h - 10.0) / line) as usize).iter().enumerate() {
                     frame.text(row, font, theme.text2, x + 5.0, y + 5.0 + at as f32 * line, room, Align::Start);
                 }
             }
@@ -5345,9 +5346,7 @@ fn paint_face(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, tile: &
             frame.icon(badge, corner, 11.0, ink_on(ink.trace));
         }
         if tile.pinned {
-            let corner = Point { x: x + w - if tile.badge.is_some() { 27.0 } else { 9.0 }, y: y + 9.0 };
-            frame.fill_circle(ink.trace, corner, 8.0);
-            frame.icon(Icon::Pin, corner, 10.0, ink_on(ink.trace));
+            paint_pin(frame, theme, ink, pin_mark(tile, (x, y, w, h)), true, false);
         }
     }
 }
@@ -5498,7 +5497,8 @@ fn paint_shelf(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
 /// A page's things (`tiles`, each pressed as `hit` says, by it and its place) from (`left`, `top`), `width` across,
 /// laid out as `shows` says, what is pinned of them apart (see `Groups`), in room `tall` high, scrolled through past it
 /// (as `list`): a card each (its picture, its name and what it is under it; larger, two across), a line each, or (a
-/// small lane) one row of pictures, named. One copied lately is pinned from its line, as the pointer is over it.
+/// small lane) one row of pictures, named. One copied lately is pinned from its line or its card, as the pointer is over
+/// it.
 #[allow(clippy::too_many_arguments)]
 fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left, top, width): (f32, f32, f32), tiles: &[Tile], groups: Groups, shows: Shows, tall: f32, list: List, hit: &dyn Fn(&Tile, usize) -> Hit, hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
@@ -5521,8 +5521,8 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
             continue;
         }
         let pressed = hit(tile, at);
-        // (Copied lately, in a line: its pin, pressed apart from it.)
-        let pins = matches!((pressed, shows), (Hit::Copied(_), Shows::View(ShelfView::List))).then_some(Hit::PinCopy(tile.id));
+        // (Copied lately: its pin, pressed apart from it.)
+        let pins = matches!(pressed, Hit::Copied(_)).then_some(Hit::PinCopy(tile.id));
         let on_pin = pins.is_some() && scene.hover == pins;
         // (Named, each, that it moves from where it was as they flow anew: see `morph`; and that what is carried off
         // the lane is drawn as it is here, see `carry`.)
@@ -5561,7 +5561,15 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 frame.text(&fitted(frame, &tile.about, theme.small, place.w), theme.small, theme.text3, x, y + plate + 5.0 + LINE, place.w, Align::Start);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + place.w / 2.0, y + plate / 2.0, place.w - 8.0));
                 if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, hint_top(tile, (fy, fw, fh)), fw));
+                    hint_mark(frame, theme, says, said, Mark::Centre(fx + fw, hint_top(tile, pins.is_some(), (fy, fw, fh)), fw));
+                }
+                // (Shown where it is pinned, its mark there, and as the pointer is over its card.)
+                if let Some(pin) = pins.filter(|_| tile.pinned || lit) {
+                    let at = pin_mark(tile, (fx, fy, fw, fh));
+                    if lit {
+                        paint_pin(frame, theme, ink, at, tile.pinned, on_pin);
+                    }
+                    hits.extend(shown_in((at.0, at.1, at.2, at.3, pin), (left - 4.0, top, width + 8.0, tall)));
                 }
                 shown
             }
@@ -5575,7 +5583,7 @@ fn paint_tiles(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (left,
                 centred(frame, &shown, theme.small, words, x, y + TILE_PICTURE + 4.0, TILE_W);
                 copied_mark(frame, theme, scene.lang, ink.trace, copied, Mark::Centre(x + TILE_W / 2.0, y + TILE_PICTURE / 2.0, TILE_W));
                 if let Some((_, said, says)) = scene.hint.filter(|hint| hint.0 == pressed && copied <= 0.0) {
-                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, hint_top(tile, (y, TILE_PICTURE, TILE_PICTURE)), TILE_W));
+                    hint_mark(frame, theme, says, said, Mark::Centre(x + TILE_W, hint_top(tile, false, (y, TILE_PICTURE, TILE_PICTURE)), TILE_W));
                 }
                 shown
             }
@@ -5826,15 +5834,46 @@ impl Hint {
     }
 }
 
+/// Where on a thing's picture (x, y, width, height) its pin's plate is (the same: see `paint_pin`): in its top right
+/// corner, beside its device's mark where it has one.
+fn pin_mark(tile: &Tile, (x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+    let (wide, high, inset) = match w.min(h) {
+        small if small < 64.0 => (18.0, 18.0, 3.0),
+        small if small < 84.0 => (20.0, 20.0, 5.0),
+        _ => (24.0, 22.0, HINT_INSET),
+    };
+    (x + w - inset - wide - if tile.badge.is_some() { 12.0 } else { 0.0 }, y + inset, wide, high)
+}
+
+/// A pin on a thing's picture, on a plate as the preview's shortcut is said on (see `hint_mark`): in the lane's ink where
+/// it is `pinned`, lit with the pointer `on` it (where it is pressed).
+fn paint_pin(frame: &dyn Canvas, theme: &Theme, ink: super::theme::Ink, (x, y, w, h): (f32, f32, f32, f32), pinned: bool, on: bool) {
+    let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
+    let radius = mark_round(theme, &colours, h);
+    frame.fill_rounded(colours.sheet, x, y, w, h, radius);
+    if on {
+        frame.fill_rounded(colours.text.alpha(0.08), x, y, w, h, radius);
+    }
+    frame.stroke_rounded(Fill::Solid(colours.stroke), x, y, w, h, radius, 1.0);
+    let mark = if pinned { ink.trace } else if on { colours.text } else { colours.text.alpha(colours.text.a * 0.75) };
+    frame.icon(Icon::Pin, Point { x: x + w / 2.0, y: y + h / 2.0 }, (h * 0.6).min(13.0), mark);
+}
+
+/// How round a plate `tall` on a thing's picture is: as the skin's menus are, no rounder than 8.
+fn mark_round(theme: &Theme, colours: &super::menu::Colours, tall: f32) -> f32 {
+    colours.radius.min(8.0).min(tall / 2.0).min(theme.control_radius.max(4.0))
+}
+
 /// Whether a thing's picture, `small` its lesser side, has a mark in its top right corner: its pin, or its device's.
 fn corner_marked(tile: &Tile, small: f32) -> bool {
     small >= 40.0 && (tile.pinned || tile.badge.is_some())
 }
 
 /// Where the preview's shortcut is said from, on a thing's picture from `y` down, `w` by `h` (see `hint_mark`): its
-/// top, or, its top corner marked, so far down that it is said at its foot.
-fn hint_top(tile: &Tile, (y, w, h): (f32, f32, f32)) -> f32 {
-    if corner_marked(tile, w.min(h)) { y + h - HINT_TALL - 2.0 * HINT_INSET } else { y }
+/// top, or, its top corner marked or its pin there as the pointer is on it (`pins`), so far down that it is said at its
+/// foot.
+fn hint_top(tile: &Tile, pins: bool, (y, w, h): (f32, f32, f32)) -> f32 {
+    if pins || corner_marked(tile, w.min(h)) { y + h - HINT_TALL - 2.0 * HINT_INSET } else { y }
 }
 
 const HINT_TALL: f32 = 20.0;
@@ -5848,7 +5887,7 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark
     const PAD: f32 = 7.0;
     const INSET: f32 = HINT_INSET;
     let colours = super::menu::Colours::new(super::menu::Look::of(theme.skin, theme.dark), false);
-    let font = Font { weight: 600.0, ..theme.small };
+    let font = Font { size: theme.small.size.min(11.5), weight: 600.0, ..theme.small };
     let wide = PAD + frame.measure(says, font) + PAD;
     let drop = (1.0 - shown) * 2.0;
     let (left, top) = match at {
@@ -5857,7 +5896,7 @@ fn hint_mark(frame: &dyn Canvas, theme: &Theme, says: &str, shown: f32, at: Mark
         Mark::Centre(right, top, room) => (right - room / 2.0 - wide / 2.0, top + INSET - drop),
         Mark::Right(right, middle) => (right - wide, middle - TALL / 2.0 - drop),
     };
-    let radius = colours.radius.min(TALL / 2.0).min(theme.control_radius.max(4.0));
+    let radius = mark_round(theme, &colours, TALL);
     let faded = |color: Color| color.alpha(color.a * shown);
     frame.fill_rounded(faded(colours.sheet), left, top, wide, TALL, radius);
     frame.stroke_rounded(Fill::Solid(faded(colours.stroke)), left, top, wide, TALL, radius, 1.0);
@@ -6397,7 +6436,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
         "time" => {
             let now = text::Local::at(scene.latest().t);
             let (figure, unit) = now.time(text::twelve_hours(), lang);
-            Bench::Time { figure, unit: unit.to_string(), dates: now.dates(lang, scene.prefs.shows("time", "lunar")) }
+            Bench::Time { figure, unit: unit.to_string(), dates: now.dates(lang, super::prefs::lunar(&scene.prefs.modules, lang)) }
         }
         "search" => Bench::Search { keys: crate::tray::search_keys() },
         "todo" => todo::bench(lang),
@@ -6606,18 +6645,18 @@ fn paint_grid(frame: &dyn Canvas, scene: &Scene, hits: &mut Vec<HitBox>, room: (
 /// `text` in rows `width` wide in `font`, at most `most` of them (the last cut short with an ellipsis where it runs
 /// on): broken between words, or between characters where a word is too long for a row (and in Chinese).
 fn rows_of(frame: &dyn Canvas, text: &str, font: Font, width: f32, most: usize) -> Vec<String> {
-    rows_within(frame, text, font, width, width, most)
+    rows_within(frame, text, font, &|_| width, most)
 }
 
-/// `text` in rows as `rows_of` lays it out, its first row `first` wide (short of something in its corner), the rest
-/// `width`.
-fn rows_within(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
+/// `text` in rows as `rows_of` lays it out, each as wide as `wide` says (by its place; a row may be short of something
+/// in a corner).
+fn rows_within(frame: &dyn Canvas, text: &str, font: Font, wide: &dyn Fn(usize) -> f32, most: usize) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
     let mut row = String::new();
     for c in text.chars() {
         let mut longer = row.clone();
         longer.push(c);
-        if frame.measure(&longer, font) <= if rows.is_empty() { first } else { width } || row.is_empty() {
+        if frame.measure(&longer, font) <= wide(rows.len()) || row.is_empty() {
             row = longer;
             continue;
         }
@@ -6641,7 +6680,7 @@ fn rows_within(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f3
     }
     if rows.len() > most {
         rows.truncate(most);
-        let room = if rows.len() == 1 { first } else { width };
+        let room = wide(rows.len().saturating_sub(1));
         if let Some(last) = rows.last_mut() {
             *last = fitted(frame, &format!("{last}…"), font, room).to_string();
         }
@@ -6649,18 +6688,20 @@ fn rows_within(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f3
     rows
 }
 
-/// A text's lines (see `Face::Text`) in at most `most` rows `width` wide, the first `first` wide: each line broken
-/// into rows as `rows_of` breaks it, a new line on a new row, the last row cut short with an ellipsis where more of
-/// it is left off.
-fn face_rows(frame: &dyn Canvas, text: &str, font: Font, first: f32, width: f32, most: usize) -> Vec<String> {
+/// A text's lines (see `Face::Text`) in at most `most` rows `width` wide, the first so many short (how many, and how wide
+/// those are): each line broken into rows as `rows_of` breaks it, a new line on a new row, the last row cut short with an
+/// ellipsis where more of it is left off.
+fn face_rows(frame: &dyn Canvas, text: &str, font: Font, short: (usize, f32), width: f32, most: usize) -> Vec<String> {
+    let wide = |row: usize| if row < short.0 { short.1 } else { width };
     let mut rows: Vec<String> = Vec::new();
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty()).peekable();
     while let Some(line) = lines.next() {
         let left = most - rows.len();
-        let mut laid = rows_within(frame, line, font, if rows.is_empty() { first } else { width }, width, left);
+        let from = rows.len();
+        let mut laid = rows_within(frame, line, font, &|row| wide(from + row), left);
         let full = rows.len() + laid.len() == most;
         if full && lines.peek().is_some() && laid.last().is_some_and(|last| !last.ends_with('…')) {
-            let room = if rows.is_empty() && laid.len() == 1 { first } else { width };
+            let room = wide(from + laid.len() - 1);
             let last = laid.last_mut().unwrap();
             *last = fitted(frame, &format!("{last}…"), font, room).to_string();
         }
@@ -8648,7 +8689,7 @@ otepad.exe", "Notepad"),
                         _ => None,
                     };
                     // (What is under the pointer with the preview's shortcut said on it, as after a rest there.)
-                    let hint = hover.map(|hit| (hit, 1.0, "Ctrl+Q 预览"));
+                    let hint = hover.map(|hit| (hit, 1.0, "Ctrl+Q"));
                     let scene = Scene { music_apart: false, hint, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab, hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
                     let lane = Lane { id: "station".into(), blocks: station_lane(true, tab, Lang::Zh), ink: theme.ink("station") };
                     let area = Rect { x, y, w: lane_w, h: lane.height(&theme) };
@@ -8954,7 +8995,9 @@ otepad.exe", "Notepad"),
         let columns = [
             (Tab::Copies(Filter::All), ShelfView::List, few(), false, Some(Hit::Copied(12)), 0.0),
             (Tab::Copies(Filter::All), ShelfView::List, few(), true, Some(Hit::PinsHead), 0.0),
-            (Tab::Copies(Filter::All), ShelfView::Cards, few(), false, None, 0.0),
+            (Tab::Copies(Filter::All), ShelfView::Cards, few(), false, Some(Hit::Copied(13)), 0.0),
+            (Tab::Copies(Filter::All), ShelfView::Large, few(), false, Some(Hit::Copied(4)), 0.0),
+            (Tab::Copies(Filter::Words), ShelfView::Large, few(), false, Some(Hit::PinCopy(13)), 0.0),
             (Tab::Copies(Filter::Pinned(None)), ShelfView::List, few(), false, Some(Hit::PinCopy(4)), 0.0),
             (Tab::Copies(Filter::Pinned(Some(2))), ShelfView::List, few(), false, Some(Hit::NewTag), 0.0),
             (Tab::Copies(Filter::Pinned(Some(4))), ShelfView::List, many(), false, None, 60.0),
@@ -9022,10 +9065,10 @@ otepad.exe", "Notepad"),
         assert_eq!(places[0].y, 2.0 * HEADING + shelf_places(list, 1, 324.0, 300.0).0[0].y);
     }
 
-    /// What was copied lately is pinned from its line by its pin: there where it is pinned, and as the pointer is over
-    /// its line (or the pin itself), pressed before its line. As cards, and on the station, there is none.
+    /// What was copied lately is pinned by its pin, on its line and on its card alike: there where it is pinned, and as
+    /// the pointer is over it (or the pin itself), pressed before it.
     #[test]
-    fn a_line_copied_lately_is_pinned_by_its_pin() {
+    fn what_was_copied_lately_is_pinned_by_its_pin() {
         let (info, prefs, theme, history) = (info(), Prefs::resolve(&serde_json::Value::Null, &[]), Theme::new(Skin::Glass, true), [Arc::new(sample(None, None, None))]);
         let seen = Seen::of(&history);
         let scene = |hover| Scene { music_apart: false, hint: None, info: &info, prefs: &prefs, theme: &theme, lang: Lang::Zh, history: &history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::Copies(Default::default()), hover, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
@@ -9038,15 +9081,18 @@ otepad.exe", "Notepad"),
             for (at, hit) in hits.iter().enumerate() {
                 if let Hit::PinCopy(id) = hit.4 {
                     let line = hits.iter().position(|one| one.4 == Hit::Copied(id)).unwrap();
-                    assert!(at < line, "its line is pressed before its pin");
+                    assert!(at < line, "it is pressed before its pin");
+                    let (pin, all) = (hits[at], hits[line]);
+                    assert!(pin.0 >= all.0 && pin.1 >= all.1 && pin.0 + pin.2 <= all.0 + all.2 && pin.1 + pin.3 <= all.1 + all.3, "{view:?}");
                 }
             }
             hits.iter().filter_map(|hit| if let Hit::PinCopy(id) = hit.4 { Some(id) } else { None }).collect::<Vec<_>>()
         };
-        assert_eq!(pins(None, ShelfView::List), [1]);
-        assert_eq!(pins(Some(Hit::Copied(2)), ShelfView::List), [1, 2]);
-        assert_eq!(pins(Some(Hit::PinCopy(3)), ShelfView::List), [1, 3]);
-        assert_eq!(pins(Some(Hit::Copied(2)), ShelfView::Cards), [0u64; 0]);
+        for view in [ShelfView::List, ShelfView::Cards, ShelfView::Large] {
+            assert_eq!(pins(None, view), [1], "{view:?}");
+            assert_eq!(pins(Some(Hit::Copied(2)), view), [1, 2], "{view:?}");
+            assert_eq!(pins(Some(Hit::PinCopy(3)), view), [1, 3], "{view:?}");
+        }
     }
 
     /// The tags what is pinned is sorted by stand in a row under the filters there alone, each pressed to show what is
@@ -9569,13 +9615,17 @@ seven".into()));
     fn a_text_face_is_broken_into_rows() {
         let font = Font::new(super::super::canvas::Family::Segoe, 10.0, 400.0);
         // (Six DIPs a character: ten to a row 61 wide.)
-        assert_eq!(face_rows(&Nothing, "把起点钉放开 4/4 都解得出", font, 61.0, 61.0, 4), ["把起点钉放开 4/4", "都解得出"]);
-        assert_eq!(face_rows(&Nothing, "abc\n\n  def  \nghi", font, 61.0, 61.0, 4), ["abc", "def", "ghi"]);
-        assert_eq!(face_rows(&Nothing, "abc\ndef\nghi", font, 61.0, 61.0, 2), ["abc", "def…"]);
-        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbbcccccccccc", font, 61.0, 61.0, 2), ["aaaaaaaaaa", "bbbbbbbbb…"]);
+        assert_eq!(face_rows(&Nothing, "把起点钉放开 4/4 都解得出", font, (0, 61.0), 61.0, 4), ["把起点钉放开 4/4", "都解得出"]);
+        assert_eq!(face_rows(&Nothing, "abc\n\n  def  \nghi", font, (0, 61.0), 61.0, 4), ["abc", "def", "ghi"]);
+        assert_eq!(face_rows(&Nothing, "abc\ndef\nghi", font, (0, 61.0), 61.0, 2), ["abc", "def…"]);
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbbcccccccccc", font, (0, 61.0), 61.0, 2), ["aaaaaaaaaa", "bbbbbbbbb…"]);
         // (Short of a pin, the first row only.)
-        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbb", font, 37.0, 61.0, 3), ["aaaaaa", "aaaabbbbbb", "bbbb"]);
-        assert!(face_rows(&Nothing, "abc", font, 61.0, 61.0, 0).is_empty());
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbb", font, (1, 37.0), 61.0, 3), ["aaaaaa", "aaaabbbbbb", "bbbb"]);
+        // (So many rows short, over a new line too, the last of them cut short to its own room.)
+        assert_eq!(face_rows(&Nothing, "aaaaaaaaaabbbbbbbbbb", font, (2, 37.0), 61.0, 3), ["aaaaaa", "aaaabb", "bbbbbbbb"]);
+        assert_eq!(face_rows(&Nothing, "ab\naaaaaaaabbbb", font, (2, 37.0), 61.0, 3), ["ab", "aaaaaa", "aabbbb"]);
+        assert_eq!(face_rows(&Nothing, "ab\naaaaaaaabbbb", font, (2, 37.0), 61.0, 2), ["ab", "aaaaa…"]);
+        assert!(face_rows(&Nothing, "abc", font, (0, 61.0), 61.0, 0).is_empty());
     }
 
     /// A canvas that draws nothing, measuring text as so many DIPs a character: for what is drawn's places alone.

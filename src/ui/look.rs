@@ -324,11 +324,11 @@ pub fn key_taken() -> bool {
     TAKEN.load(Ordering::Relaxed)
 }
 
-/// What is said on a thing that may be looked at larger as the pointer rests on it (see `view::Hint`): its shortcut, and
-/// what it does. None while it has none, or another program has it.
-pub fn hint_says(lang: Lang) -> Option<String> {
+/// What is said on a thing that may be looked at larger as the pointer rests on it (see `view::Hint`): its shortcut. None
+/// while it has none, or another program has it.
+pub fn hint_says() -> Option<String> {
     let shortcut = crate::app().settings.lock().unwrap().preview_shortcut?;
-    (!key_taken()).then(|| format!("{} {}", crate::tray::shortcut_name(shortcut), lang.pick("预览", "Preview")))
+    (!key_taken()).then(|| crate::tray::shortcut_name(shortcut))
 }
 
 /// Its shortcut, as it was just taken: had, or another program's.

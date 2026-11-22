@@ -117,6 +117,7 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
+/// (The lunar date's as the language has it: see `lunar`.)
 const TIME: [Item; 4] = [item("lunar", false), item("sound", true), item("media", true), item("lyrics", false)];
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
 /// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing. (What
@@ -379,12 +380,18 @@ fn shows_by_default(entries: &[ModuleEntry], id: &str, name: &str) -> bool {
     }
 }
 
+/// Whether the time among `entries` tells the lunar date, shown in `lang`: as it was switched, else in Chinese.
+pub fn lunar(entries: &[ModuleEntry], lang: super::text::Lang) -> bool {
+    let chosen = entries.iter().find(|entry| entry.id == "time").and_then(|entry| entry.items.get("lunar").copied());
+    chosen.unwrap_or(lang == super::text::Lang::Zh)
+}
+
 /// Turns module `id`'s item `name` among `entries` on or off.
 pub fn set_item_in(entries: &mut [ModuleEntry], id: &str, name: &str, on: bool) {
     let default = shows_by_default(entries, id, name);
     if let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) {
-        // Only what differs from the default is kept.
-        if on == default {
+        // Only what differs from the default is kept (the lunar date's, always: its default is the language's).
+        if on == default && (id, name) != ("time", "lunar") {
             entry.items.remove(name);
         } else {
             entry.items.insert(name.to_string(), on);
@@ -586,6 +593,25 @@ mod tests {
         let kept = serde_json::to_value(&chosen).unwrap();
         assert_eq!(kept["ping"], "gateway");
         assert_eq!(serde_json::from_value::<NetworkPrefs>(kept).unwrap().ping, Some(PingTarget::Gateway));
+    }
+
+    /// The time tells the lunar date in Chinese and not in English, unless it was switched: then as it was in either.
+    #[test]
+    fn the_lunar_date_is_told_in_chinese_unless_switched() {
+        use super::{lunar, set_item_in, Prefs};
+        use crate::ui::text::Lang;
+        let mut prefs = Prefs::resolve(&serde_json::Value::Null, &["time".to_string()]);
+        for list in [&mut prefs.modules, &mut prefs.workbench] {
+            assert_eq!((lunar(list, Lang::Zh), lunar(list, Lang::En)), (true, false));
+            for on in [false, true] {
+                set_item_in(list, "time", "lunar", on);
+                assert_eq!((lunar(list, Lang::Zh), lunar(list, Lang::En)), (on, on));
+            }
+        }
+        // (Kept as it was switched before, through the file.)
+        let stored = serde_json::json!({ "workbench": [{ "id": "time", "on": true, "items": { "lunar": false } }] });
+        let kept = super::kept(&Prefs::resolve(&stored, &[]), &stored);
+        assert!(!lunar(&Prefs::resolve(&kept, &[]).workbench, Lang::Zh));
     }
 
     /// A module of what is not here now is kept as it was, where it was, through a change of another preference.

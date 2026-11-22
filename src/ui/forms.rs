@@ -299,7 +299,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     if on("time") {
         let now = text::Local::at(s.t);
         let (figure, half) = now.time(text::twelve_hours(), lang);
-        let mut dates = now.dates(lang, prefs.shows("time", "lunar")).into_iter();
+        let mut dates = now.dates(lang, super::prefs::lunar(&prefs.modules, lang)).into_iter();
         readings.push(Reading {
             kind: Kind::Time,
             id: "time".into(),

@@ -3836,7 +3836,8 @@ impl Widget {
             return;
         }
         // (Every spot that has one: what is behind each one's card is taken with this one's, see `hover_card::show`.)
-        let spots: Vec<_> = self.hits_on_screen().into_iter().filter(|(_, hit)| hit.carded()).map(|(rect, hit)| (hit, rect)).collect();
+        let on_screen = self.hits_on_screen();
+        let spots: Vec<_> = on_screen.iter().filter(|(_, hit)| hit.carded()).map(|&(rect, hit)| (hit, rect)).collect();
         use crate::ui::hover_card::Side;
         let (by, screen) = (self.rect(), self.contact.monitor);
         let side = if by.right - by.left > by.bottom - by.top {
@@ -3854,6 +3855,8 @@ impl Widget {
             right: all.right.max(button.right),
             bottom: all.bottom.max(button.bottom),
         });
+        let lane = on_screen.iter().find(|(_, hit)| *hit == view::Hit::FoldersArea).map(|(rect, _)| *rect);
+        let by = crate::ui::hover_card::beside(hit, by, lane, side);
         crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme, prefs, lang, look }, by, &spots, side, clear);
         self.carding = true;
     }
@@ -4502,7 +4505,7 @@ impl Widget {
         let thumbs = self.thumbs.clone();
         // The preview's shortcut said on what the pointer rests on that may be looked at larger: not while a look is up
         // from it, or it is written in where it is (its keys are its own then).
-        let says = crate::ui::look::hint_says(look.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd) && self.in_place.is_none());
+        let says = crate::ui::look::hint_says().filter(|_| !crate::ui::look::up_for(self.window.hwnd) && self.in_place.is_none());
         let hint = self.preview_hint.step(self.hit_hover.filter(|_| says.is_some()), now);
         let hint = hint.zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
         // Its notes turned through by pages: kept on the note they show as their order changes, on one opened beside.

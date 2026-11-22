@@ -2,8 +2,8 @@
 //! of the AI component's dock, a source's ring (the source's lane, all it tells: its limit's windows, what it spent
 //! today by model and by kind, its sessions), what every source spent today, or the sessions at work (see
 //! `view::ai::card`); of a folder in the storage lane, what it holds (see `view::folders::card`). On a sheet of its skin
-//! as a menu opened there is (glass's a piece of the glass, frosted as what it is of is), beside it, its middle by that
-//! spot's, on its screen. A window of its own, one for this thread, that goes as the window it is beside is hidden or
+//! as a menu opened there is (glass's a piece of the glass, frosted as what it is of is), beside it (a folder's beside
+//! its lane, see `beside`), its middle by that spot's, on its screen. A window of its own, one for this thread, that goes as the window it is beside is hidden or
 //! destroyed. A dock's takes the pointer on its sheet alone, and stays while the pointer is on the spot, on the card or
 //! on its way between them (see `holds`); a folder's lets the pointer through, and goes as it leaves the folder's row.
 
@@ -201,6 +201,22 @@ fn placed(by: RECT, at: POINT, side: Side, (plate_w, plate_h): (i32, i32), gap: 
     match side {
         Side::Below | Side::Above => RECT { left: to, right: to + plate_w, ..sheet },
         Side::Left | Side::Right => RECT { top: to, bottom: to + plate_h, ..sheet },
+    }
+}
+
+/// What the card of `hit` shows beside, drawn in `whole` (all of a panel or a widget, on the screen), on `side` of it:
+/// all of that for a dock's spot; for a folder, the lane it is in (`lane`, where it is on the screen), with lanes between
+/// that and the edge of `whole` on that side (the card stood past all of them, columns away from its row), and the edge
+/// itself with none.
+pub fn beside(hit: Hit, whole: RECT, lane: Option<RECT>, side: Side) -> RECT {
+    let Some(lane) = lane.filter(|_| matches!(hit, Hit::Folder(_))) else { return whole };
+    // (A lane lies there where there is room for another such as it.)
+    let (across, down) = (lane.right - lane.left, lane.bottom - lane.top);
+    match side {
+        Side::Left => RECT { left: if lane.left - whole.left >= across { lane.left } else { whole.left }, ..whole },
+        Side::Right => RECT { right: if whole.right - lane.right >= across { lane.right } else { whole.right }, ..whole },
+        Side::Below => RECT { bottom: if whole.bottom - lane.bottom >= down { lane.bottom } else { whole.bottom }, ..whole },
+        Side::Above => RECT { top: if lane.top - whole.top >= down { lane.top } else { whole.top }, ..whole },
     }
 }
 
@@ -644,6 +660,29 @@ mod tests {
         // With room there, beside it as ever.
         let narrow = RECT { left: 100, top: 40, right: 800, bottom: 1000 };
         assert_eq!(stood(narrow, row(100), Side::Right, plate, gap, work, None), placed(narrow, middle(row(100)), Side::Right, plate, gap, work, None));
+    }
+
+    /// A folder's card stands beside the lane it is in where columns lie between that and the panel's edge, past the
+    /// edge where none does; a dock's past the dock, whatever it is in.
+    #[test]
+    fn a_folders_card_stands_beside_its_lane() {
+        let (work, gap, plate) = (RECT { left: 0, top: 0, right: 2560, bottom: 1400 }, 8, (450, 290));
+        // (A panel of three columns at the right edge, the lane in each of them.)
+        let whole = RECT { left: 1180, top: 20, right: 2540, bottom: 1300 };
+        let lane = |column: i32| RECT { left: 1192 + column * 448, top: 600, right: 1192 + column * 448 + 438, bottom: 820 };
+        let row = |column: i32| RECT { left: lane(column).left + 12, top: 780, right: lane(column).right - 12, bottom: 808 };
+        let card = |column, side| stood(beside(Hit::Folder(1), whole, Some(lane(column)), side), row(column), side, plate, gap, work, None);
+        for column in [1, 2] {
+            let sheet = card(column, Side::Left);
+            assert_eq!(sheet.right, lane(column).left - gap);
+            assert!(sheet.top < row(column).top && sheet.bottom > row(column).bottom);
+        }
+        assert_eq!(card(0, Side::Left).right, whole.left - gap);
+        assert_eq!((card(0, Side::Right).left, card(2, Side::Right).right <= work.right), (lane(0).right + gap, true));
+        // (Along the top edge: under the lane, lanes under it.)
+        assert_eq!(card(1, Side::Below).top, lane(1).bottom + gap);
+        assert_eq!(beside(Hit::AiSlot(view::ai::Spot::Today), whole, Some(lane(2)), Side::Left), whole);
+        assert_eq!(beside(Hit::Folder(1), whole, None, Side::Left), whole);
     }
 
     /// A folder's card shows once the pointer has rested on it, at once while another's is up; a dock's at once.

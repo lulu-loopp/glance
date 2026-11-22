@@ -1057,8 +1057,14 @@ fn module_fields(id: &str) -> &'static [Field] {
         "processes" => &[Field::ProcessCount],
         "station" => &[Field::StationKeep, Field::StationCopy, Field::StationAfterDrag],
         "todo" => &[Field::TodoLead, Field::TodoDayAt],
+        "search" => &[Field::WebSearch],
         _ => &[],
     }
+}
+
+/// Whether module `id`'s setting `field` is in force with the module off: search's are, opened by its shortcut as it is.
+fn holds_off(field: Field) -> bool {
+    matches!(field, Field::WebSearch)
 }
 
 /// The drives Recent files' rows offer (see `Row::Drive`), by their letters: `drives`, those it reads now, and those
@@ -3092,8 +3098,6 @@ impl Ui {
                 Row::Shortcut(Keys::Panel),
                 Row::Shortcut(Keys::Search),
                 Row::Shortcut(Keys::Preview),
-                Row::Group(pick(self.lang, "搜索", "Search")),
-                Row::Choice(Field::WebSearch),
             ]),
             (Page::Look, _) => {
                 rows.extend([Row::Skins, Row::Choice(Field::Theme)]);
@@ -3541,7 +3545,11 @@ impl Ui {
                 // (In its module's card, as its items are.)
                 // (Its box on its name's line, its words across the row under them: see `paint_list`.)
                 Row::AiKey(..) => (0.0, self.words_height(&row) + KEY_TALLER),
-                // Its choices under its name where they do not fit beside it.
+                // Its choices under its name where they do not fit beside it, and under its word where it has one.
+                Row::ModuleChoice(_, field) if self.choice_hint(*field).is_some() => {
+                    let lines = self.choice_lines(&self.choices(*field).1, self.module_choices_room()).len() as f32;
+                    (0.0, self.words_height(&row).max(ROW) + CHOICE_LINE * lines)
+                }
                 Row::ModuleChoice(_, field) => {
                     let (name, options, _) = self.choices(*field);
                     let room = self.module_choices_room();
@@ -3902,6 +3910,10 @@ impl Ui {
                 let room = if self.stacked(&options) { width - 2.0 * ROW_SIDE } else { width - 2.0 * ROW_SIDE - self.segmented_width(&options) - 16.0 };
                 (Cow::Borrowed(word), room)
             }
+            Row::ModuleChoice(_, field) => match self.choice_hint(*field) {
+                Some(word) => (Cow::Borrowed(word), self.module_choices_room()),
+                None => return 0.0,
+            },
             Row::Drive(volume) => match self.drive_row(volume).1 {
                 Some(word) => (Cow::Borrowed(word), width - 2.0 * ROW_SIDE - 40.0 - 16.0),
                 None => return 0.0,
@@ -5469,6 +5481,11 @@ It can be disconnected here at any time, and the status line command put back.",
         }
     }
 
+    /// Whether module `id`'s setting `field` is in force: the module on, or in force with it off.
+    fn choice_on(&self, id: &str, field: Field) -> bool {
+        holds_off(field) || self.module_on(id)
+    }
+
     /// The list a row's module (`id`) is in, the readings', the workbench's, the AI component's or the overlay's, and
     /// its id there.
     fn list<'a>(&mut self, id: &'a str) -> (&mut Vec<super::prefs::ModuleEntry>, &'a str) {
@@ -5488,6 +5505,11 @@ It can be disconnected here at any time, and the status line command put back.",
     fn item_on(&self, id: &str, name: &str) -> bool {
         if let Some(on) = self.settings_item(id, name) {
             return on;
+        }
+        match (id, name) {
+            ("time", "lunar") => return prefs::lunar(&self.prefs.modules, self.lang),
+            ("workbench:time", "lunar") => return prefs::lunar(&self.prefs.workbench, self.lang),
+            _ => {}
         }
         if let Some(bare) = id.strip_prefix(WORKBENCH) {
             return prefs::shows_in(&self.prefs.workbench, bare, name);
@@ -6221,8 +6243,8 @@ It can be disconnected here at any time, and the status line command put back.",
                 // A sensor of the board's switch, then the button that names it.
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) && sensor_of(&name).is_some() => vec![Target::Item(id.clone(), name.clone()), Target::Rename(id, name)],
                 Row::Item(id, name) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Item(id, name)],
-                Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) && Self::in_menu(field) => vec![Target::ChoiceMenu(field)],
-                Row::ModuleChoice(id, field) if self.module_on(&id) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
+                Row::ModuleChoice(id, field) if self.choice_on(&id, field) && self.expanded.contains(&id) && Self::in_menu(field) => vec![Target::ChoiceMenu(field)],
+                Row::ModuleChoice(id, field) if self.choice_on(&id, field) && self.expanded.contains(&id) => vec![Target::Choice(field, self.choices(field).2.unwrap_or(0))],
                 Row::Item(..) | Row::ModuleChoice(..) => vec![],
                 Row::AiKey(id, field) if self.expanded.contains(&id) => match self.ai_key(&id, field).map(|(_, kept)| kept) {
                     Some(crate::ai::keys::Kept::Given) => vec![Target::AiKeyRemove(id.clone(), field), Target::AiKey(id, field)],
@@ -7484,13 +7506,17 @@ It can be disconnected here at any time, and the status line command put back.",
                 Row::ModuleChoice(id, field) => {
                     let y = y + self.motion.get(&format!("row:{id}")).map_or(0.0, |t| t.value(now));
                     fill(frame, palette.rule, left + 1.0, y, width - 2.0, 1.0, 0.0);
-                    let active = self.module_on(&id);
+                    let active = self.choice_on(&id, field);
                     let (name, options, chosen) = self.choices(field);
                     let color = if active { palette.text } else { palette.text3 };
                     let right = left + width - ROW_SIDE - CHEVRON_ROOM;
                     let targets = self.targets.len();
                     let room = self.module_choices_room();
-                    if Self::in_menu(field) {
+                    if let Some(word) = self.choice_hint(field) {
+                        let words = row_height - CHOICE_LINE * self.choice_lines(&options, room).len() as f32;
+                        field_label_in(frame, (color, if active { palette.text2 } else { palette.text3 }), name, Some(word), label, hint, left + ITEM_INSET, y + words / 2.0, room);
+                        self.segmented(frame, palette, field, &options, chosen, active, right, y + words + CHOICE_LINE / 2.0 - 8.0, room, now, &hovered);
+                    } else if Self::in_menu(field) {
                         text_centred(frame, name, label, color, left + ITEM_INSET, y + row_height / 2.0, width / 2.0 - ITEM_INSET, Align::Start);
                         let shown = self.choice_shown(field);
                         let kind = if active { Button::Menu } else { Button::QuietMenu };
@@ -9490,6 +9516,64 @@ mod pictures {
             assert_eq!(targets, vec![Target::NoticeRead]);
         });
         crate::notice::pretend(None);
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
+        if let Err(failed) = outcome {
+            std::panic::resume_unwind(failed);
+        }
+    }
+
+    /// What search looks for on the web with is chosen in search's card on the workbench's page, with search on the
+    /// workbench or not (its shortcut opens it as well), and on no other page. The time's card has the lunar date on in
+    /// Chinese.
+    #[test]
+    fn web_search_is_chosen_with_search() {
+        let (gfx, hwnd) = pretended();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let search = format!("{WORKBENCH}search");
+            let (cw, ch) = with_ui(|ui| ui.client()).unwrap();
+            for on in [true, false] {
+                with_ui(|ui| {
+                    ui.turn_to(Page::Workbench);
+                    for entry in ui.prefs.workbench.iter_mut().filter(|entry| entry.id == "search") {
+                        entry.on = on;
+                    }
+                    ui.settings.web_search = WebSearch::Bing;
+                    assert!(ui.opens(&search));
+                    ui.set_open(&search, true, true);
+                });
+                let paint = || {
+                    gfx.draw_offscreen((cw.ceil() as u32, ch.ceil() as u32), 1.0, |frame| {
+                        with_ui(|ui| ui.paint(frame, Instant::now()));
+                    })
+                    .unwrap()
+                };
+                paint();
+                with_ui(|ui| {
+                    ui.focus = Some(Target::Choice(Field::WebSearch, 0));
+                    ui.reveal_focus();
+                    ui.scroll = ui.scroll_target;
+                });
+                paint();
+                with_ui(|ui| {
+                    assert!(ui.stops().contains(&Target::Choice(Field::WebSearch, 0)), "on: {on}");
+                    for at in 0..WebSearch::ALL.len() {
+                        assert!(ui.targets.iter().any(|(_, target)| *target == Target::Choice(Field::WebSearch, at)), "on: {on}, {at} drawn");
+                    }
+                    // (Its word over its choices, none of them over another row.)
+                    let row = ui.layout().into_iter().find(|(row, ..)| matches!(row, Row::ModuleChoice(_, Field::WebSearch))).unwrap();
+                    assert!(row.2 >= ui.words_height(&row.0) + CHOICE_LINE);
+                    for page in [Page::Layout, Page::General] {
+                        ui.turn_to(page);
+                        assert!(!ui.rows().iter().any(|row| matches!(row, Row::Choice(Field::WebSearch))));
+                    }
+                    let zh = ui.lang == Lang::Zh;
+                    assert_eq!((ui.item_on("workbench:time", "lunar"), ui.item_on("time", "lunar")), (zh, zh));
+                })
+                .unwrap();
+            }
+        }));
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }

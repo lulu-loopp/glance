@@ -4580,7 +4580,7 @@ impl<'a> Panel<'a> {
         let thumbs_moving = self.thumbs.apps(now, &order, hold) | thumbs_moving;
         // (The preview's shortcut said on what the pointer rests on that may be looked at larger: not while a look is
         // up from it.)
-        let says = crate::ui::look::hint_says(self.lang).filter(|_| !crate::ui::look::up_for(self.window.hwnd));
+        let says = crate::ui::look::hint_says().filter(|_| !crate::ui::look::up_for(self.window.hwnd));
         let hint = self.hint.step(self.hover.filter(|_| says.is_some()), now).zip(says.as_deref()).map(|((hit, shown), says)| (hit, shown, says));
         let scene = Scene { thumbs: &self.thumbs, settings_lit: self.settings_lit(), hint, ..scene(controller, &info, &self.drawn, &self.theme, self.lang, self.scrolls, self.tab, self.hover_shown(), self.pinned, &history, seen) };
         let edge = (!self.floating()).then_some(self.edge);
@@ -5036,7 +5036,9 @@ impl<'a> Panel<'a> {
         let look = self.menu_look();
         // (Clear of its buttons' row, where it has one outside it: the card lay over them.)
         let clear = placement.rack.map(|(rack, _)| rack);
-        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, placement.panel, &spots, side, clear);
+        let lane = self.hits.iter().find(|hit| hit.4 == Hit::FoldersArea).and_then(|&(x, y, w, h, _)| self.box_on_screen((x, y, w, h)));
+        let by = crate::ui::hover_card::beside(hit, placement.panel, lane, side);
+        crate::ui::hover_card::show(self.window.hwnd, crate::ui::hover_card::Of { hit, theme: &self.theme, prefs: &self.drawn, lang: self.lang, look }, by, &spots, side, clear);
         self.carding = true;
     }
 
