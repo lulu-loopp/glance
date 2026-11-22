@@ -114,7 +114,7 @@ const BOARD: [Item; 2] = [item("temps", true), item("fans", true)];
 const STORAGE: [Item; 1] = [item("volumes", true)];
 const BATTERY: [Item; 3] = [item("chart", true), item("power", true), item("health", true)];
 const WSL: [Item; 4] = [item("chart", true), item("memory", true), item("gpu", true), item("distros", true)];
-const TIME: [Item; 3] = [item("sound", true), item("media", true), item("lyrics", false)];
+const TIME: [Item; 4] = [item("lunar", false), item("sound", true), item("media", true), item("lyrics", false)];
 /// What plays, as the music widgets show it (see `music::Shows`): the translation under the line sung now, else the
 /// next line; the cover, what plays, the lines round the one sung now, the spectrum, the controls kept showing. (What
 /// they are drawn on is a choice of its own: see `MusicGround`.)

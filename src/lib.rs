@@ -133,6 +133,7 @@ mod station;
 #[cfg(windows)]
 mod nearby;
 
+mod lunar;
 mod notes;
 mod todo;
 mod remind;

@@ -213,6 +213,8 @@ struct Reading {
     module: &'static str,
     icon: Icon,
     label: String,
+    /// What its name is for less room, in turn (the time's, named by its day).
+    shorter: Vec<String>,
     /// How full its ring is (0–1); none where it has no share of anything.
     share: Option<f32>,
     figure: String,
@@ -292,13 +294,15 @@ fn readings(scene: &Scene) -> Vec<Reading> {
     if on("time") {
         let now = text::Local::at(s.t);
         let (figure, half) = now.time(text::twelve_hours(), lang);
+        let mut dates = now.dates(lang, prefs.shows("time", "lunar")).into_iter();
         readings.push(Reading {
             kind: Kind::Time,
             id: "time".into(),
             module: "time",
             icon: Icon::Clock,
             // (Named by its day: a tile says the time under it.)
-            label: now.date(lang),
+            label: dates.next().unwrap_or_default(),
+            shorter: dates.collect(),
             // (No ring round its mark: the time is no share of anything.)
             share: None,
             figure,
@@ -328,6 +332,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             module: "game",
             icon: Icon::Game,
             // Whose frames they are, by its name: what is taken for a game is then seen to be one or not.
+            shorter: Vec::new(),
             label: game.map(|game| game.name.trim()).filter(|name| !name.is_empty()).unwrap_or(lang.pick("帧率", "Frame rate")).into(),
             share: Some(game.and_then(|g| g.fps).map_or(0.0, |fps| if most > 0.0 { fps / most } else { 0.0 })),
             figure: game.and_then(|game| game.fps).map_or("—".into(), |fps| format!("{fps:.0}")),
@@ -351,6 +356,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             id: "cpu".into(),
             module: "cpu",
             icon: Icon::Cpu,
+            shorter: Vec::new(),
             label: "CPU".into(),
             share: s.cpu.map(|v| v / 100.0),
             figure: percent(s.cpu),
@@ -376,6 +382,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             id,
             module: "gpu",
             icon: Icon::Gpu,
+            shorter: Vec::new(),
             label: "GPU".into(),
             share: usage.map(|v| v / 100.0),
             figure: percent(usage),
@@ -395,6 +402,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
             id: "memory".into(),
             module: "memory",
             icon: Icon::Memory,
+            shorter: Vec::new(),
             label: lang.pick("内存", "Memory").into(),
             share: Some(share),
             figure: format!("{:.0}", share * 100.0),
@@ -413,6 +421,7 @@ fn readings(scene: &Scene) -> Vec<Reading> {
         id: module.into(),
         module,
         icon,
+        shorter: Vec::new(),
         label: label.into(),
         share: None,
         figure: String::new(),
@@ -792,7 +801,9 @@ impl Painter<'_> {
             self.name(reading, "label");
             // (In the room there is before what is said at the tile's other end.)
             let beyond = if reading.detail.is_empty() { 0.0 } else { self.frame.measure(&reading.detail, theme.small) + 10.0 };
-            self.level(&self.fitted(&reading.label, theme.small, tw - 40.0 - 12.0 - beyond), theme.small, theme.text2, x + 40.0, y + 22.0, Align::Start);
+            let room = tw - 40.0 - 12.0 - beyond;
+            let said = [&reading.label].into_iter().chain(&reading.shorter).find(|name| self.frame.measure(name, theme.small) <= room).or(reading.shorter.last()).unwrap_or(&reading.label);
+            self.level(&self.fitted(said, theme.small, room), theme.small, theme.text2, x + 40.0, y + 22.0, Align::Start);
             if !reading.detail.is_empty() {
                 self.name(reading, "detail");
                 self.level(&reading.detail, theme.small, self.warmth(reading, theme.text3), x + tw - 12.0, y + 22.0, Align::End);

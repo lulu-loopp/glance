@@ -744,6 +744,8 @@ pub enum Pass {
 
 enum Block {
     Head { title: String, device: String, aside: String, aside_hot: bool },
+    /// A head whose second words are the first of `dates` there is room for (the fullest first).
+    Dated { title: String, dates: Vec<String> },
     /// A figure, and its chart unless the module's chart is switched off.
     Readout { figure: String, unit: &'static str, hot: bool, plot: Option<Plot> },
     /// Two rates by name, and their chart unless the module's chart is switched off, with what its top stands for.
@@ -847,7 +849,7 @@ pub enum Bench {
     /// What is kept at hand.
     Apps(Vec<(String, String)>),
     /// The time, and the day.
-    Time { figure: String, unit: String, date: String },
+    Time { figure: String, unit: String, dates: Vec<String> },
     /// The search box (see `Block::Search`).
     Search { keys: String },
     /// The to-dos not done, the one lit or due soonest first: each one's words, time, whether it is due by today, its
@@ -2532,7 +2534,7 @@ impl Block {
 
     fn height(&self) -> f32 {
         match self {
-            Block::Head { .. } => HEAD + HEAD_GAP,
+            Block::Head { .. } | Block::Dated { .. } => HEAD + HEAD_GAP,
             Block::Readout { .. } => PLOT,
             Block::Rates { .. } => RATE_PLOT,
             Block::Trace { gap, .. } => gap + RATE_PLOT,
@@ -2568,6 +2570,7 @@ impl Hash for Block {
         std::mem::discriminant(self).hash(state);
         match self {
             Block::Head { title, device, aside, aside_hot } => (title, device, aside, aside_hot).hash(state),
+            Block::Dated { title, dates } => (title, dates).hash(state),
             Block::Room(tall) => tall.to_bits().hash(state),
             Block::Readout { figure, unit, hot, .. } => (figure, unit, hot).hash(state),
             Block::Rates { rows, plot, scale } => (rows, plot.as_ref().map(|plot| plot.max.to_bits()), scale).hash(state),
@@ -2845,6 +2848,11 @@ pub fn lanes_at(scene: &Scene, detail: impl Fn(&str) -> Detail) -> Vec<Lane> {
 
 fn head(title: impl Into<String>, device: impl Into<String>, aside: impl Into<String>, aside_hot: bool) -> Block {
     Block::Head { title: title.into(), device: device.into(), aside: aside.into(), aside_hot }
+}
+
+/// The first of `said` (the fullest first) that `room` holds; else the last.
+fn roomy<'a>(frame: &dyn Canvas, said: &'a [String], font: Font, room: f32) -> &'a str {
+    said.iter().find(|one| frame.measure(one, font) <= room).or(said.last()).map_or("", String::as_str)
 }
 
 fn celsius(value: f32) -> String {
@@ -3557,7 +3565,7 @@ fn lane(scene: &Scene, id: &str, detail: Detail) -> Option<Vec<Block>> {
         "time" => {
             let now = text::Local::at(s.t);
             let (figure, unit) = now.time(text::twelve_hours(), lang);
-            let mut blocks = vec![head(lang.pick("时间", "Time"), now.date(lang), "", false), Block::Readout { figure, unit, hot: false, plot: None }];
+            let mut blocks = vec![Block::Dated { title: lang.pick("时间", "Time").into(), dates: now.dates(lang, on("lunar")) }, Block::Readout { figure, unit, hot: false, plot: None }];
             // Each of what plays as the panel was laid out for it (see `Seen::note_playing`): not there yet, nothing
             // (drawn as it came, it was drawn over the lane under, the panel laid out before it was known); there and
             // gone a while, its room kept, as a reading's is.
@@ -4094,7 +4102,7 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
     let (mut ink, mut source) = (ink, None);
     for block in &lane.blocks {
         let kind = match block {
-            Block::Head { .. } => "head",
+            Block::Head { .. } | Block::Dated { .. } => "head",
             Block::Room(_) => "room",
             Block::Readout { .. } => "readout",
             Block::Rates { .. } => "rates",
@@ -4214,6 +4222,15 @@ fn paint_lane(frame: &dyn Canvas, scene: &Scene, lane: &Lane, area: Rect, grow: 
                 let color = if *aside_hot { theme.signal } else { theme.text2 };
                 name("detail");
                 frame.text(aside, theme.body, color, left, row, width, Align::End);
+            }
+            (Block::Dated { title, dates }, Pass::Content) => {
+                let title_width = frame.measure(title, theme.title);
+                let row = y + (HEAD - theme.title.size) / 2.0 - 1.0;
+                name("label");
+                frame.text(title, theme.title, theme.text, left, row, width, Align::Start);
+                let room = width - title_width - 8.0;
+                name("device");
+                frame.text(roomy(frame, dates, theme.small, room), theme.small, theme.text3, left + title_width + 8.0, row + 1.0, room, Align::Start);
             }
             (Block::Readout { figure, unit, hot, plot }, Pass::Content) => {
                 let color = if *hot { theme.signal } else { theme.text };
@@ -6295,7 +6312,7 @@ fn bench(scene: &Scene, id: &str) -> Option<Bench> {
         "time" => {
             let now = text::Local::at(scene.latest().t);
             let (figure, unit) = now.time(text::twelve_hours(), lang);
-            Bench::Time { figure, unit: unit.to_string(), date: now.date(lang) }
+            Bench::Time { figure, unit: unit.to_string(), dates: now.dates(lang, scene.prefs.shows("time", "lunar")) }
         }
         "search" => Bench::Search { keys: crate::tray::search_keys() },
         "todo" => todo::bench(lang),
@@ -6821,7 +6838,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
             hits.push((lane.x, lane.y, lane.w, lane.h, Hit::Note(note.number)));
             hits.push((lane.x, lane.y, lane.w, lane.h, Hit::Pages(List::Notes, (last * PAGE).to_bits())));
         }
-        Bench::Time { figure, unit, date } => {
+        Bench::Time { figure, unit, dates } => {
             let big = Font { size: theme.figure.size.min(h * 0.6).min(w / 3.2), ..theme.figure };
             match shape {
                 Shape::Down => {
@@ -6841,6 +6858,7 @@ fn paint_bench(frame: &dyn Canvas, scene: &Scene, ink: super::theme::Ink, (x, y,
                 _ => {
                     let shown = if unit.is_empty() { figure.clone() } else { format!("{figure} {unit}") };
                     let fig_w = frame.measure(&shown, big);
+                    let date = roomy(frame, dates, theme.small, w - fig_w - 12.0);
                     let date_w = frame.measure(date, theme.small);
                     let with_date = shape == Shape::Across && fig_w + 12.0 + date_w <= w;
                     let start = x + (w - fig_w - if with_date { 12.0 + date_w } else { 0.0 }) / 2.0;

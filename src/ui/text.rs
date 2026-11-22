@@ -150,10 +150,11 @@ pub fn link_speed(bits_per_second: u64) -> String {
     }
 }
 
-/// A moment where this PC is: the hour and minute of its day, the month
+/// A moment where this PC is: the hour and minute of its day, the year, the month
 /// and the day of it, and the day of the week (0, Sunday).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Local {
+    pub year: i32,
     pub hour: u32,
     pub minute: u32,
     pub month: u32,
@@ -210,7 +211,7 @@ impl Local {
             let _ = FileTimeToSystemTime(&file, &mut utc);
             let _ = SystemTimeToTzSpecificLocalTime(None, &utc, &mut local);
         }
-        Local { hour: local.wHour as u32, minute: local.wMinute as u32, month: local.wMonth as u32, day: local.wDay as u32, weekday: local.wDayOfWeek as u32 }
+        Local { year: i32::from(local.wYear), hour: local.wHour as u32, minute: local.wMinute as u32, month: local.wMonth as u32, day: local.wDay as u32, weekday: local.wDayOfWeek as u32 }
     }
 
     #[cfg(target_os = "macos")]
@@ -218,7 +219,7 @@ impl Local {
         let seconds = (t / 1000) as libc::time_t;
         let mut local: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::localtime_r(&seconds, &mut local) };
-        Local { hour: local.tm_hour as u32, minute: local.tm_min as u32, month: local.tm_mon as u32 + 1, day: local.tm_mday as u32, weekday: local.tm_wday as u32 }
+        Local { year: local.tm_year + 1900, hour: local.tm_hour as u32, minute: local.tm_min as u32, month: local.tm_mon as u32 + 1, day: local.tm_mday as u32, weekday: local.tm_wday as u32 }
     }
 
     /// Hours and minutes: of a 24-hour clock ("15:05"), or of one of
@@ -247,6 +248,21 @@ impl Local {
                 ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month],
                 self.day
             ),
+        }
+    }
+
+    /// The day as it is told in the time component, the fullest first, each after it for less room: where it is to say
+    /// the `lunar` day, the date, the lunar day, and the festival or solar term it is; the date with that; the date.
+    pub fn dates(self, lang: Lang, lunar: bool) -> Vec<String> {
+        let date = self.date(lang);
+        let told = lunar.then(|| crate::lunar::Lunar::of(crate::todo::Day { year: self.year, month: self.month, day: self.day })).flatten();
+        let Some(told) = told else { return vec![date] };
+        let apart = lang.pick(" ", " · ");
+        let with = |what: &[&str]| [&[date.as_str()], what].concat().join(apart);
+        let day = told.told(lang);
+        match told.marked(lang) {
+            Some(marked) => vec![with(&[&day, marked]), with(&[marked]), date],
+            None => vec![with(&[&day]), date],
         }
     }
 }
@@ -316,6 +332,17 @@ mod tests {
         }
     }
 
+    /// The date with its lunar day and what it is, for less room with that alone, then alone; not asked for, alone.
+    #[test]
+    fn a_date_says_its_lunar_day() {
+        let on = |month, day, weekday| Local { year: 2026, hour: 9, minute: 5, month, day, weekday };
+        assert_eq!(on(11, 7, 6).dates(Lang::Zh, true), ["11月7日 周六 九月廿九 立冬", "11月7日 周六 立冬", "11月7日 周六"]);
+        assert_eq!(on(11, 8, 0).dates(Lang::Zh, true), ["11月8日 周日 九月三十", "11月8日 周日"]);
+        assert_eq!(on(11, 7, 6).dates(Lang::Zh, false), ["11月7日 周六"]);
+        assert_eq!(on(11, 7, 6).dates(Lang::En, true), ["Sat, Nov 7 · Lunar 9/29 · Start of Winter", "Sat, Nov 7 · Start of Winter", "Sat, Nov 7"]);
+        assert_eq!(Local { year: 2101, ..on(1, 1, 6) }.dates(Lang::Zh, true), ["1月1日 周六"]);
+    }
+
     #[test]
     fn writes_readings() {
         assert_eq!(rate(1536.0, false), "1.5 KB/s");
@@ -330,7 +357,7 @@ mod tests {
         assert_eq!(usage(1024 * 1024 * 1024, 1024 * 1024 * 1024), "1.0 / 1.0 GB");
         assert_eq!(link_speed(2_402_000_000), "2.4 Gbps");
         assert_eq!(Lang::Zh.duration(3 * 3600 + 5 * 60), "3 小时 5 分");
-        let noon = Local { hour: 9, minute: 5, month: 10, day: 11, weekday: 0 };
+        let noon = Local { year: 2026, hour: 9, minute: 5, month: 10, day: 11, weekday: 0 };
         assert_eq!((noon.time(false, Lang::Zh).0.as_str(), noon.date(Lang::Zh).as_str(), noon.date(Lang::En).as_str()), ("09:05", "10月11日 周日", "Sun, Oct 11"));
         assert_eq!(noon.time(true, Lang::En), ("9:05".to_string(), "AM"));
         assert_eq!(Local { hour: 0, ..noon }.time(true, Lang::Zh), ("12:05".to_string(), "上午"));
