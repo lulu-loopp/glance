@@ -200,6 +200,54 @@ const FLICK: f32 = 0.3;
 /// `view::Shape`) down to this.
 const SHAPE_LEAST: (f32, f32) = (40.0, 40.0);
 
+/// A widget of the workbench's lanes or the AI component's (`lanes`), as `choice` has it, laid out again for the size
+/// it is made (its columns as wide, its lists as tall), not scaled to it, down to its least (see `view::LANE_LEAST`,
+/// `view::gives`): as the hand sizes it to `sized_to` (the room on the screen), else as it was made (see `made_size`), no
+/// larger than `most` (the screen's room for it); a note stuck alone (`page`) as its page is. What it is then made as, its
+/// lanes laid out, and how much of each it shows.
+pub(crate) fn laid_out(scene: &view::Scene, theme: &Theme, lanes: crate::settings::Part, choice: Choice, page: bool, sized_to: Option<(f32, f32)>, most: (f32, f32)) -> (Choice, view::Layout, view::Detail) {
+    let heights = view::heights(scene);
+    let columns = match choice.form {
+        Form::Lanes { columns, .. } => columns.min(heights.len()).max(1),
+        Form::Small(_) => 1,
+    };
+    // (Made shorter, its lists give way; its other lanes are as designed: see `view::Layout::giving`.)
+    let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, theme).giving(view::gives(scene));
+    let (designed, least, shape_least) = match page {
+        true => (designed.clone().fitted(view::STUCK_NOTE), view::STUCK_NOTE_LEAST, view::STUCK_NOTE_LEAST),
+        false => {
+            let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
+            (designed, least, SHAPE_LEAST)
+        }
+    };
+    // Drawn as large as it was made: torn off a panel shown smaller or larger (its size in the settings), as large as
+    // there, and kept so (it came off larger than the panel showed it, drawn as large as its lanes are designed). The
+    // hand's room is on the screen: its lanes', so much smaller or larger.
+    let zoom = choice.scale;
+    let wanted = match sized_to {
+        Some(room) => (room.0 / zoom, room.1 / zoom),
+        None => made_size(choice, (designed.width(), designed.height()), forms::shows(scene).count(), theme.radius),
+    };
+    let size = (wanted.0 * zoom, wanted.1 * zoom);
+    let floor = (shape_least.0 * zoom, shape_least.1 * zoom);
+    let size = (size.0.clamp(floor.0, most.0.max(floor.0)) / zoom, size.1.clamp(floor.1, most.1.max(floor.1)) / zoom);
+    let extra = (size.0 - designed.width(), size.1 - designed.height());
+    // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across side by side, else one
+    // over another. The AI component's always: it shows more in the room it has the larger it is (see
+    // `view::ai::paint_shaped`), where all of its lane laid out down left the rest of a widget made larger empty under it.
+    let (detail, layout) = if lanes != crate::settings::Part::Ai && size.0 >= least.0 && size.1 >= least.1 {
+        (view::Detail::Full, designed.fitted(size))
+    } else {
+        let shape = view::Shape::of(size);
+        let detail = view::Detail::Shape(shape);
+        let shaped: Vec<f32> = heights.iter().filter_map(|(id, _)| view::lane_height(scene, id, scene.seen, detail)).collect();
+        let columns = shape.columns(shaped.len());
+        (detail, view::Layout::with_columns(shaped, columns, theme).fitted(size))
+    };
+    // (Its columns kept as chosen, whatever its shape: sized up again, it is laid out as it was.)
+    (Choice { form: Form::Lanes { detail, columns }, scale: zoom, extra }, layout, detail)
+}
+
 /// How large a widget of the workbench's lanes or the AI component's is made, as `choice` has it (DIPs): all of its lanes
 /// as designed (`designed`, laid out in its columns) with what it was made larger or smaller by; or, torn off a panel
 /// that showed a form of its own (the AI component's dock), as large as that form showed there for `count` readings, in
@@ -4649,52 +4697,11 @@ impl Widget {
             Content::Readings(readings) => {
                 let shown = match readings.last.clone().filter(|last| only_moved && last.form == readings.choice.form) {
                     Some(last) => last,
-                    // The workbench's lanes, or the AI component's: laid out again for the size it is made (its columns as
-                    // wide, its lists as tall), not scaled to it, down to its least (see `view::LANE_LEAST`, `view::gives`).
+                    // The workbench's lanes, or the AI component's: laid out again for the size it is made (see `laid_out`).
                     None if readings.lanes != crate::settings::Part::Monitor => {
-                        let heights = view::heights(&scene);
-                        let columns = match readings.choice.form {
-                            Form::Lanes { columns, .. } => columns.min(heights.len()).max(1),
-                            Form::Small(_) => 1,
-                        };
-                        // (Made shorter, its lists give way; its other lanes are as designed: see `view::Layout::giving`.)
-                        let designed = view::Layout::with_columns(heights.iter().map(|(_, h)| h[0]).collect(), columns, &theme).giving(view::gives(&scene));
-                        let (designed, least, shape_least) = match page {
-                            true => (designed.clone().fitted(view::STUCK_NOTE), view::STUCK_NOTE_LEAST, view::STUCK_NOTE_LEAST),
-                            false => {
-                                let least = (designed.width() - columns as f32 * (view::COLUMN_WIDTH - view::LANE_LEAST), designed.least_height());
-                                (designed, least, SHAPE_LEAST)
-                            }
-                        };
-                        // Drawn as large as it was made: torn off a panel shown smaller or larger (its size in the
-                        // settings), as large as there, and kept so (it came off larger than the panel showed it, drawn
-                        // as large as its lanes are designed). The hand's room is on the screen: its lanes', so much
-                        // smaller or larger.
-                        let zoom = readings.choice.scale;
-                        let wanted = match sized_to {
-                            Some(room) => (room.0 / zoom, room.1 / zoom),
-                            None => made_size(readings.choice, (designed.width(), designed.height()), forms::shows(&scene).count(), theme.radius),
-                        };
-                        let size = within((wanted.0 * zoom, wanted.1 * zoom), (shape_least.0 * zoom, shape_least.1 * zoom));
-                        let size = (size.0 / zoom, size.1 / zoom);
-                        let extra = (size.0 - designed.width(), size.1 - designed.height());
-                        // Smaller than all of it fits in: each lane in a shape of its own (see `view::Shape`), across
-                        // side by side, else one over another. The AI component's always: it shows more in the room it
-                        // has the larger it is (see `view::ai::fit_of`), where all of its lane laid out down left the
-                        // rest of a widget made larger empty under it.
-                        let (detail, layout) = if readings.lanes != crate::settings::Part::Ai && size.0 >= least.0 && size.1 >= least.1 {
-                            (view::Detail::Full, designed.fitted(size))
-                        } else {
-                            let shape = view::Shape::of(size);
-                            let detail = view::Detail::Shape(shape);
-                            let shaped: Vec<f32> = heights.iter().filter_map(|(id, _)| view::lane_height(&scene, id, scene.seen, detail)).collect();
-                            let columns = shape.columns(shaped.len());
-                            (detail, view::Layout::with_columns(shaped, columns, &theme).fitted(size))
-                        };
-                        // (Its columns kept as chosen, whatever its shape: sized up again, it is laid out as it was.)
-                        let form = Form::Lanes { detail, columns };
-                        readings.choice = Choice { form, scale: zoom, extra };
-                        Shown { form, zoom, size: (layout.width(), layout.height()), layout, small: None, detail }
+                        let (choice, layout, detail) = laid_out(&scene, &theme, readings.lanes, readings.choice, page, sized_to, (work.0 - 2.0 * margin, work.1 - 2.0 * margin));
+                        readings.choice = choice;
+                        Shown { form: choice.form, zoom: choice.scale, size: (layout.width(), layout.height()), layout, small: None, detail }
                     }
                     None => {
                         let heights = view::heights(&scene);

@@ -86,6 +86,12 @@ pub fn stamp() -> u64 {
     STAMP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// What was spent, made up, shown as if it was read (the studio's pictures: see `studio`).
+#[cfg(feature = "studio")]
+pub fn pretend(usage: Usage) {
+    publish(Some(Arc::new(usage)), &mut NOW.lock().unwrap());
+}
+
 /// What was spent as last read, as it now is.
 fn publish(usage: Option<Arc<Usage>>, held: &mut Option<Arc<Usage>>) {
     *held = usage;

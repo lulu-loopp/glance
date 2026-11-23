@@ -138,6 +138,17 @@ struct Shot {
     /// The devices nearby risen at the station's foot, as while something is dragged off it (see `station::send`).
     #[serde(default)]
     strip: Option<Vec<ChipShot>>,
+    /// The AI component as a widget on the desktop, made each size in turn, instead of the panel.
+    #[serde(default)]
+    ai: Option<AiShot>,
+}
+
+/// The AI component as a widget on the desktop (see `film_ai`): what it shows, in order ("ai:today", what every source
+/// spent today, and the sources' ids, "ai:claude" and so on), and the sizes it is made, a picture each (DIPs).
+#[derive(Deserialize)]
+struct AiShot {
+    sources: Vec<String>,
+    sizes: Vec<(f32, f32)>,
 }
 
 /// A device on the station's strip of devices nearby: what it calls itself, its kind (as LocalSend names kinds:
@@ -765,9 +776,143 @@ pub fn run(script: &Path, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The room round the widget in each of its pictures (DIPs): the desktop under its shadow.
+const AI_ROOM: f32 = 28.0;
+
+/// The AI component as a widget in the middle of the desktop, made each of `ai`'s sizes as the hand makes it, and
+/// laid out for it as the widget is (see `widget::laid_out`), what made-up tools spent shown (see `made_up_usage`): a
+/// picture of each, named by the size asked and the size it came to (DIPs), into `folder`.
+fn film_ai(gfx: &Gfx, script: &Script, shot: &Shot, ai: &AiShot, info: &StaticInfo, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
+    use crate::settings::Part;
+    let skin = Skin::named(&shot.skin);
+    let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };
+    let px = script.scale;
+    let (sw, sh) = (script.width as f32 / px, script.height as f32 / px);
+    // Filmed at twenty past three in the afternoon, a working day's spending well along.
+    let now = crate::ai::today_start(crate::station::now_ms()) + (15 * 60 + 20) * 60_000;
+    crate::station::pretend_now(now);
+    crate::ai::pretend(made_up_usage(now));
+    let mut prefs = Prefs::resolve(&serde_json::Value::Null, &[]).holding(Part::Ai);
+    prefs.modules.sort_by_key(|entry| ai.sources.iter().position(|id| *id == entry.id).unwrap_or(usize::MAX));
+    prefs.modules.iter_mut().for_each(|entry| entry.on = ai.sources.contains(&entry.id));
+    let history = [Arc::new(made_up(info, now as f64, 0, 0.2, None))];
+    let seen = Seen::of(&history);
+    for &(w, h) in &ai.sizes {
+        // In the middle of the desktop, toned by what is behind it there.
+        let at = (((sw - w) / 2.0).round(), ((sh - h) / 2.0).round());
+        let behind = RECT { left: (at.0 * px) as i32, top: (at.1 * px) as i32, right: ((at.0 + w) * px) as i32, bottom: ((at.1 + h) * px) as i32 };
+        let tone = desktop.luminance(behind, px);
+        let dark = match shot.theme.as_str() {
+            "light" => false,
+            "dark" => true,
+            _ => theme::is_dark(crate::ui::prefs::ThemePref::Backdrop, Some(tone.0).filter(|_| skin.sees_backdrop())),
+        };
+        let theme = crate::widget::workbench_dressed(Theme::new(skin, dark));
+        let frost = if skin == Skin::Glass { skins::frost(tone.0, tone.1, dark) } else { 0.0 };
+        let scene = Scene {
+            music_apart: false,
+            hint: None,
+            thumbs: &crate::ui::view::RESTING,
+            info,
+            prefs: &prefs,
+            theme: &theme,
+            lang,
+            history: &history,
+            seen: &seen,
+            pen_ms: now as f64,
+            scrolls: crate::ui::view::Scrolls::default(),
+            tab: crate::ui::view::Tab::default(),
+            hover: None,
+            pinned: false,
+            overlay: false,
+            buttons: false,
+            newer: false,
+            settings_lit: None,
+        };
+        let made = Choice { form: Form::Lanes { detail: view::Detail::Full, columns: 1 }, scale: 1.0, extra: (0.0, 0.0) };
+        let (_, layout, detail) = crate::widget::laid_out(&scene, &theme, Part::Ai, made, false, Some((w, h)), (sw, sh));
+        let size = (layout.width(), layout.height());
+        let lanes = view::lanes_at(&scene, |_| detail);
+        let (fw, fh) = (((size.0 + 2.0 * AI_ROOM) * px).ceil() as u32, ((size.1 + 2.0 * AI_ROOM) * px).ceil() as u32);
+        let mut layers = PanelLayers::default();
+        let pixels = gfx
+            .draw_offscreen((fw, fh), px, |frame| {
+                let Ok(bitmap) = desktop.bitmap(&frame.dc, px) else { return };
+                frame.place(Matrix3x2::translation(AI_ROOM - at.0, AI_ROOM - at.1));
+                unsafe { frame.dc.DrawBitmap(&bitmap, None, 1.0, D2D1_INTERPOLATION_MODE_LINEAR, None, None) };
+                frame.origin(0.0, 0.0);
+                let backdrop = Some((&bitmap, Vector2 { X: at.0, Y: at.1 }, desktop.digest, px));
+                let picture = render::Picture { scene: &scene, lanes: &lanes, layout: &layout, small: None, size, at: (0.0, 0.0), edge: None, backdrop, frost, rough: false };
+                let _ = layers.draw(frame, &picture, Matrix3x2::translation(AI_ROOM, AI_ROOM), px);
+            })
+            .map_err(|e| e.to_string())?;
+        let name = format!("{:04}x{:04}_{:04}x{:04}.png", w.round() as u32, h.round() as u32, size.0.round() as u32, size.1.round() as u32);
+        save_png(&folder.join(name), fw, fh, &pixels).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// What AI tools spent, made up, at `now` (ms since 1970, an afternoon): a working day of Claude Code and Codex, by model and in
+/// sessions (two at work), their limits as they last told them, and DeepSeek's balance.
+fn made_up_usage(now: u64) -> crate::ai::Usage {
+    use crate::ai::{Balance, Limit, Session, Tokens, Tool, Usage, Window, QUARTER_MS};
+    const MINUTE: u64 = 60_000;
+    const HOUR: u64 = 60 * MINUTE;
+    let today = crate::ai::today_start(now);
+    let tokens = |input, output, cache_read, cache_write, reasoning| Tokens { input, output, cache_read, cache_write, reasoning };
+    let spent_today = vec![
+        (Tool::Claude, "claude-opus-4-6".to_string(), tokens(2_400_000, 3_100_000, 182_000_000, 9_600_000, 0)),
+        (Tool::Codex, "gpt-5.5-codex".to_string(), tokens(28_000_000, 2_400_000, 96_000_000, 0, 1_100_000)),
+        (Tool::Claude, "claude-sonnet-4-6".to_string(), tokens(600_000, 900_000, 31_000_000, 2_200_000, 0)),
+        (Tool::Codex, "gpt-5.5".to_string(), tokens(1_200_000, 300_000, 4_000_000, 0, 120_000)),
+    ];
+    let total = |tool: Tool| spent_today.iter().filter(|(of, _, _)| *of == tool).map(|(_, _, tokens)| tokens.total()).sum::<u64>();
+    // Each quarter hour of the day so far: nothing before nine, then a working day's rise and fall.
+    let quarters = |tool: Tool, phase: f64| {
+        let count = ((now - today) / QUARTER_MS + 1) as usize;
+        let weights: Vec<f64> = (0..count).map(|q| if q < 36 { 0.0 } else { 1.0 + 0.8 * (q as f64 * 0.45 + phase).sin() }).collect();
+        let sum: f64 = weights.iter().sum::<f64>().max(1.0);
+        weights.iter().map(|weight| (total(tool) as f64 * weight / sum) as u64).collect::<Vec<u64>>()
+    };
+    let session = |tool: Tool, id: &str, title: &str, folder: &str, model: &str, ago: u64, spent: u64| {
+        let mut session: Session = serde_json::from_value(serde_json::json!({ "tool": tool, "id": id, "title": title, "folder": folder, "model": model, "last": now - ago, "spent": {} })).expect("a session");
+        session.spent.insert(crate::ai::quarter(now - ago), spent);
+        session
+    };
+    let limit = |tool: Tool, id: &str, plan: Option<&str>, windows: Vec<Window>, balance: Option<Balance>, ago: u64| Limit { tool, id: id.into(), name: None, plan: plan.map(String::from), windows, balance, told: now - ago };
+    Usage {
+        now,
+        today,
+        days: vec![
+            (Tool::Claude, [210_000_000, 344_000_000, 0, 96_000_000, 288_000_000, 402_000_000, total(Tool::Claude)]),
+            (Tool::Codex, [80_000_000, 122_000_000, 41_000_000, 0, 150_000_000, 133_000_000, total(Tool::Codex)]),
+        ],
+        quarters: vec![(Tool::Claude, quarters(Tool::Claude, 0.0)), (Tool::Codex, quarters(Tool::Codex, 1.7))],
+        spent_today,
+        sessions: vec![
+            session(Tool::Claude, "s1", "整理发布说明", "notes-app", "claude-opus-4-6", 2 * MINUTE, 38_000_000),
+            session(Tool::Codex, "s2", "Review the payment flow", "shop-api", "gpt-5.5-codex", 6 * MINUTE, 52_000_000),
+            session(Tool::Claude, "s3", "重构设置页", "notes-app", "claude-opus-4-6", 50 * MINUTE, 61_000_000),
+            session(Tool::Codex, "s4", "补全单元测试", "shop-api", "gpt-5.5-codex", 3 * HOUR, 24_000_000),
+            session(Tool::Claude, "s5", "Write the onboarding copy", "website", "claude-sonnet-4-6", 5 * HOUR, 17_000_000),
+            session(Tool::Claude, "s6", "排查内存泄漏", "desktop-tool", "claude-opus-4-6", 7 * HOUR, 40_000_000),
+        ],
+        limits: vec![
+            limit(Tool::Claude, "claude", Some("max"), vec![Window { minutes: 300, used: 42.0, resets: Some(now + 2 * HOUR + 13 * MINUTE) }, Window { minutes: 10080, used: 63.0, resets: Some(now + 77 * HOUR) }], None, MINUTE),
+            limit(Tool::Codex, "codex", Some("plus"), vec![Window { minutes: 300, used: 18.0, resets: Some(now + 3 * HOUR + 40 * MINUTE) }, Window { minutes: 10080, used: 35.0, resets: Some(now + 122 * HOUR) }], None, 4 * MINUTE),
+            limit(Tool::DeepSeek, "", None, Vec::new(), Some(Balance { currency: "CNY".into(), amount: Some(86.4), today: Some(3.27), since: None, spent: None }), 3 * MINUTE),
+        ],
+        failed: Vec::new(),
+        unkeyed: Vec::new(),
+    }
+}
+
 fn film(gfx: &Gfx, script: &Script, shot: &Shot, info: &StaticInfo, desktop: &crate::ui::backdrop::Capture, folder: &Path) -> Result<(), String> {
     if let Some(music) = &shot.music {
         return film_music(gfx, script, shot, music, desktop, folder);
+    }
+    if let Some(ai) = &shot.ai {
+        return film_ai(gfx, script, shot, ai, info, desktop, folder);
     }
     let skin = Skin::named(&shot.skin);
     let lang = if shot.lang == "en" { Lang::En } else { Lang::Zh };

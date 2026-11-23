@@ -35,6 +35,8 @@ use std::path::{Path, PathBuf};
 pub use time::today_start;
 #[cfg(windows)]
 pub use watch::{keys_changed, look_now, refresh, stamp, start, usage};
+#[cfg(feature = "studio")]
+pub use watch::pretend;
 
 /// How long what was spent is kept: a month, and a day more for a month counted from any day of it.
 pub const KEPT_DAYS: u64 = 32;

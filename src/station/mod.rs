@@ -694,9 +694,24 @@ pub fn head_chose(choice: HeadChoice, place: Option<windows::Win32::Foundation::
     }
 }
 
-/// Now, in ms since 1970 (as the shelf keeps when things were put on it).
+/// Now, in ms since 1970 (as the shelf keeps when things were put on it). (The studio's: as it films, see `pretend_now`.)
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    #[cfg(feature = "studio")]
+    let now = now.saturating_add_signed(SHIFT.load(std::sync::atomic::Ordering::Relaxed));
+    now
+}
+
+/// How far the studio's moment is from the clock's (ms).
+#[cfg(feature = "studio")]
+static SHIFT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Now is `ms` (since 1970) from here on, the clock going on from it: what the studio films is shown at the moment it
+/// says, not at the moment it is filmed.
+#[cfg(feature = "studio")]
+pub fn pretend_now(ms: u64) {
+    let clock = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    SHIFT.store(ms as i64 - clock, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[cfg(test)]
