@@ -209,7 +209,7 @@ pub enum Hit {
     /// A list turned through by pages (see `PAGE`), as far as it turns; and the way to its next page.
     Pages(List, u32),
     NextPage(List, u32),
-    /// The AI component's sources turned round by the wheel, a source a page (see `ai::paint_paged`): how many pages
+    /// The AI component's sources turned round by the wheel, a source a page (see `ai::paint_strip`): how many pages
     /// they are, and whether the first is what every source spent today (see `ai::paint_one`). Past the last comes the
     /// first again, and before the first the last. Turned by the wheel and its dots alone, a press there the widget's
     /// (moved, sized) as ever.
@@ -435,7 +435,7 @@ pub enum List {
     /// in scrolls them).
     Words,
     /// The AI component's sources, in a widget too small for all of them, turned through a source a page (see
-    /// `ai::paint_paged`).
+    /// `ai::paint_strip`).
     AiSources,
 }
 
@@ -8207,11 +8207,11 @@ otepad.exe", "Notepad"),
         assert!(ai::board_of(rich, &theme, Lang::Zh, (830.0, 400.0)).is_some());
         // Made taller: what each source spent by model, then its sessions, all within it.
         let told = |h: f32| {
-            let rows = ai::board_of(rich, &theme, Lang::Zh, (830.0, h))?;
-            let blocks: Vec<&Block> = rows.iter().flatten().flat_map(|lane| &lane.blocks).collect();
+            let board = ai::board_of(rich, &theme, Lang::Zh, (830.0, h))?;
+            let blocks: Vec<&Block> = board.lanes().flat_map(|lane| &lane.blocks).collect();
             let models = blocks.iter().any(|block| matches!(block, Block::Ai(ai::AiBlock::Models(_))));
             let sessions: usize = blocks.iter().map(|block| if let Block::Ai(ai::AiBlock::Sessions(rows)) = block { rows.len() } else { 0 }).sum();
-            let tall = rows.iter().map(|row| across_tall(row)).sum::<f32>() + (rows.len() - 1) as f32 * ACROSS_ROW_GAP;
+            let tall = board.tall();
             assert!(tall <= h - theme.pad_top - theme.pad_bottom + 1e-3, "{h}: {tall}");
             Some((models, sessions))
         };
@@ -8398,13 +8398,14 @@ otepad.exe", "Notepad"),
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The AI component's widget too small for any form that holds every source shows as many sources as fit whole, the
-    /// rest turned round to by the wheel, a source a notch (past the last, the first again, and back from the first to
-    /// the last: it stopped at the last, and the owner asked for them to go on round), and dots telling which is shown
-    /// of how many, a press on one turning to it. A source's head shows its card as the pointer rests on it. As the
-    /// owner sized it, 379 by 106 with three sources, it showed today's figure alone. Made larger, it tells no less;
-    /// holding them all, it shows no dots and the wheel turns nothing. Too small for more than one figure, today's is the
-    /// first page and the sources' come after it (with today shown, it showed that alone and turned to none).
+    /// The AI component's widget too small for any form that holds every source shows today's figure and as many
+    /// sources' rings as fit beside it, the rest turned round to by the wheel, a source a notch (past the last, the first
+    /// again, and back from the first to the last: it stopped at the last, and the owner asked for them to go on round),
+    /// and dots telling which are shown of how many, a press on one turning to it. A source's ring shows its card as the
+    /// pointer rests on it. As the owner sized it, 379 by 106 with three sources, it showed today's figure alone, then a
+    /// source whole a page at a time: it holds all three, as a strip. Made larger, it tells no less; holding them all, it
+    /// shows no dots and the wheel turns nothing. Too small for more than one figure, today's is the first page and the
+    /// sources' come after it (with today shown, it showed that alone and turned to none).
     #[test]
     fn the_ai_widget_too_small_for_its_sources_turns_through_them() {
         let theme = Theme::new(Skin::Glass, true);
@@ -8425,34 +8426,44 @@ otepad.exe", "Notepad"),
             ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, size.0, size.1), &mut hits);
             (said.0.into_inner(), hits)
         };
-        let heads = |texts: &[String]| titles.iter().filter(|title| texts.contains(title)).cloned().collect::<Vec<String>>();
-        // As the owner sized it: a source whole (its head, its limits), the rest turned to by the wheel.
+        // The sources whose rings are drawn (each with its card under the pointer), from the left.
+        let rings = |hits: &[HitBox]| -> Vec<usize> {
+            let mut drawn: Vec<(f32, usize)> = hits
+                .iter()
+                .filter_map(|hit| match hit.4 {
+                    Hit::AiSlot(ai::Spot::Ring(source)) => Some((hit.0, dock.slots.iter().position(|slot| slot.source == source)?)),
+                    _ => None,
+                })
+                .collect();
+            drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
+            drawn.into_iter().map(|(_, at)| at).collect()
+        };
+        // As the owner sized it: every source beside today's, none turned to.
         let (texts, hits) = drawn((379.0, 106.0), Scrolls::default());
-        assert_eq!(heads(&texts), [titles[0].clone()], "{texts:?}");
+        assert_eq!(rings(&hits), [0, 1, 2], "{texts:?}");
+        assert!(texts.iter().any(|text| text == "今日") && !hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))), "{texts:?}");
+        // Narrower: today's and two of them, the third turned to by the wheel; its dots, each to be pressed.
+        const NARROW: (f32, f32) = (260.0, 80.0);
+        let (texts, hits) = drawn(NARROW, Scrolls::default());
+        assert_eq!(rings(&hits), [0, 1], "{texts:?}");
+        assert!(texts.iter().any(|text| text == "今日"), "{texts:?}");
         assert!(hits.iter().any(|hit| hit.4 == Hit::AiPages(3, false)), "turned round");
-        // Its head, the source's card beside it; its dots, each to be pressed.
-        assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[0].source))));
         assert_eq!(hits.iter().filter(|hit| matches!(hit.4, Hit::AiPage(_))).count(), 3);
-        // A notch of the wheel over it: the next source, and the next, then the first again; and back, the last.
+        // A notch of the wheel over it: the next source first, and the next, then the first again; and back, the last.
         let mut scrolls = Scrolls::default();
-        let over: Vec<Hit> = under(&hits, (200.0, 50.0)).map(|hit| hit.4).collect();
-        for (notch, (delta, shown)) in [(-120, 1), (-120, 2), (-120, 0), (-120, 1), (120, 0), (120, 2), (120, 1)].into_iter().enumerate() {
+        let over: Vec<Hit> = under(&hits, (150.0, 40.0)).map(|hit| hit.4).collect();
+        for (notch, (delta, first)) in [(-120, 1), (-120, 2), (-120, 0), (-120, 1), (120, 0), (120, 2), (120, 1)].into_iter().enumerate() {
             assert!(wheel(&mut scrolls, &over, delta, false));
             // (Its slide done.)
             while scrolls.ease(1.0 / 60.0, crate::panel::SCROLL_EASE) {}
-            let (texts, hits) = drawn((379.0, 106.0), scrolls);
-            assert_eq!(heads(&texts), [titles[shown].clone()], "notch {notch}: {texts:?}");
-            assert!(hits.iter().any(|hit| hit.4 == Hit::AiSlot(ai::Spot::Ring(dock.slots[shown].source))), "notch {notch}");
-            // (Codex's every window, each with how much of it is used.)
-            if shown == 1 {
-                assert_eq!(texts.iter().filter(|text| text.ends_with('%')).count(), 3, "{texts:?}");
-            }
+            let (_, hits) = drawn(NARROW, scrolls);
+            assert_eq!(rings(&hits), [first, (first + 1) % 3], "notch {notch}");
         }
-        // Halfway from the last on to the first: the two of them, the first coming in after the last.
+        // Halfway from the last on to the first: the last going, the first and the second coming in after it.
         let mut scrolls = Scrolls::default();
         scrolls.hold(List::AiSources, 2.5 * PAGE, f32::MAX);
-        let (texts, _) = drawn((379.0, 106.0), scrolls);
-        assert_eq!(heads(&texts), [titles[0].clone(), titles[2].clone()], "{texts:?}");
+        let (_, hits) = drawn(NARROW, scrolls);
+        assert_eq!(rings(&hits), [2, 0, 1]);
         // The smallest: today's figure, then each source's, then today's again.
         let (texts, hits) = drawn((120.0, 80.0), Scrolls::default());
         assert!(texts.iter().any(|text| text == "今日"), "{texts:?}");
@@ -8486,6 +8497,126 @@ otepad.exe", "Notepad"),
         let (texts, hits) = drawn((900.0, 106.0), Scrolls::default());
         assert!(titles.iter().all(|title| texts.iter().any(|text| text.starts_with(title.as_str()))), "{texts:?}");
         assert!(!hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..))));
+    }
+
+    /// The AI component's widget low and wide shows every source's ring and figure beside today's, not today's figure
+    /// alone (as the owner saw it at 260, 330 and 420 by 50 and by 80), what each figure is of where it is wide enough;
+    /// too narrow for all of them, as many as fit beside today's, the rest turned to by the wheel. Made wider or taller,
+    /// it tells no less: it holds more of its sources before it tells more of one.
+    #[test]
+    fn the_ai_widget_low_and_wide_shows_its_sources() {
+        let theme = Theme::new(Skin::Glass, false);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        assert_eq!(dock.slots.len(), 3);
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        // What it draws: its texts, how many sources' rings, and whether it is turned through.
+        let drawn = |(w, h): (f32, f32)| {
+            let said = Said::default();
+            let mut hits = Vec::new();
+            ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, w, h), &mut hits);
+            let keys = said.1.into_inner();
+            let rings = dock.slots.iter().filter(|slot| keys.contains(&format!("{}.ring", slot.source.id()))).count();
+            let turned = hits.iter().any(|hit| matches!(hit.4, Hit::AiPages(..)));
+            (said.0.into_inner(), rings, turned, hits)
+        };
+        let today = dock.today.clone().expect("today shown");
+        for h in [50.0, 80.0] {
+            // Wide enough: every source, and today's, none turned to. (330 wide holds them all in the fonts drawn, see
+            // the studio's pictures; measured here a character at a time, a little wider.)
+            for w in [420.0, 520.0, 780.0] {
+                let (texts, rings, turned, _) = drawn((w, h));
+                assert_eq!((rings, turned), (3, false), "{w} by {h}: {texts:?}");
+                assert!(texts.contains(&today) && dock.slots.iter().all(|slot| texts.contains(&slot.figure)), "{w} by {h}: {texts:?}");
+            }
+            // Wider, what each figure is of.
+            let (texts, ..) = drawn((420.0, h));
+            assert!(dock.slots.iter().all(|slot| slot.label.is_empty() || texts.contains(&slot.label)), "420 by {h}: {texts:?}");
+            // Too narrow for all of them: today's and as many as fit, the rest turned to.
+            for w in [260.0, 330.0] {
+                let (texts, rings, turned, hits) = drawn((w, h));
+                assert!(rings >= 2 && texts.contains(&today), "{w} by {h}: {rings} {texts:?}");
+                assert!(rings == 3 || (turned && hits.iter().any(|hit| hit.4 == Hit::AiPages(3, false))), "{w} by {h}");
+            }
+        }
+        // As low as the room a widget 50 high has in the Windows 11 skin (its plate keeps 16 of it): the same.
+        let (texts, rings, turned, _) = drawn((420.0, 34.0));
+        assert_eq!((rings, turned), (3, false), "{texts:?}");
+        // Made wider or taller, it tells no less: all of them before more of one, then as many things told.
+        let told = |size: (f32, f32)| {
+            let (texts, rings, turned, _) = drawn(size);
+            (!turned, rings, texts.iter().filter(|text| !text.trim().is_empty()).count())
+        };
+        for w in (160..=800).step_by(20) {
+            for h in (30..=124).step_by(2) {
+                let (w, h) = (w as f32, h as f32);
+                for larger in [(w + 20.0, h), (w, h + 4.0)] {
+                    assert!(told(larger) >= told((w, h)), "{w} by {h} tells {:?}, {larger:?} larger tells {:?}", told((w, h)), told(larger));
+                }
+            }
+        }
+    }
+
+    /// The AI component's widget with its parts side by side puts each part after the first row under the column that
+    /// ends highest: as the owner's was, 640 by 500, DeepSeek's (a balance alone) was on a row of its own under Claude's
+    /// part, the room under the shorter part of today's left empty. Every part's head drawn as high as the column it is
+    /// in lets it be, at every size where its parts are side by side.
+    #[test]
+    fn the_ai_widget_side_by_side_leaves_no_room_under_a_short_part() {
+        let theme = Theme::new(Skin::Glass, false);
+        let info = info();
+        let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+        let seen = Seen::of(history);
+        let shown = ["ai:today", "ai:claude", "ai:codex", "ai:deepseek"].map(|id| serde_json::json!({ "id": id, "on": true }));
+        let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+        let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+        let shaped = ai::together(&held, Lang::Zh, Some(&usage), now, Detail::Shape(Shape::Least), |_| false, &theme).unwrap();
+        let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+        let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang: Lang::Zh, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+        // The heads of its parts (today's, then each source's by name) where they are drawn, and everything drawn.
+        let heads = ["AI 用量".to_string()].into_iter().chain(dock.slots.iter().map(|slot| slot.source.name(Lang::Zh).to_string())).collect::<Vec<String>>();
+        let drawn = |(w, h): (f32, f32)| {
+            let said = Said::default();
+            ai::paint_shaped(&said, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, w, h), &mut Vec::new());
+            said.3.into_inner()
+        };
+        let mut side_by_side = 0;
+        for (w, h) in (480..=900).step_by(40).flat_map(|w| (300..=700).step_by(40).map(move |h| (w as f32, h as f32))) {
+            let texts = drawn((w, h));
+            let placed: Vec<(f32, f32)> = heads.iter().filter_map(|head| texts.iter().find(|text| &text.0 == head).map(|text| (text.1, text.2))).collect();
+            let columns: Vec<f32> = placed.iter().fold(Vec::new(), |mut columns, &(x, _)| {
+                if !columns.iter().any(|&at: &f32| (at - x).abs() < 1.0) {
+                    columns.push(x);
+                }
+                columns
+            });
+            // (Its parts side by side, some under others.)
+            if placed.len() < heads.len() || columns.len() < 2 || columns.len() == placed.len() {
+                continue;
+            }
+            side_by_side += 1;
+            let top = placed.iter().map(|&(_, y)| y).fold(f32::MAX, f32::min);
+            // Where what is drawn in the column of the head at `column` ends above `y`: the foot of the lowest thing drawn
+            // above it. (A column starts at its heads' marks, before their names.)
+            let ends = |column: f32, y: f32| {
+                const MARK: f32 = 24.0;
+                let next = columns.iter().copied().filter(|&other| other > column + 1.0).fold(f32::MAX, f32::min);
+                texts.iter().filter(|drawn| drawn.1 >= column - MARK && drawn.1 < next - MARK && drawn.3 <= y).map(|drawn| drawn.3).fold(f32::MIN, f32::max)
+            };
+            for &(x, y) in placed.iter().filter(|&&(_, y)| y > top + 1.0) {
+                // Right under what is above it in its column, as far as two rows of parts are apart. (Laid out in rows,
+                // it was under the tallest of the row before, the room under the shorter ones empty.)
+                let room = y - ends(x, y);
+                assert!(room <= ACROSS_ROW_GAP + HEAD, "{w} by {h}: the head at {x}, {y} is {room} under what is above it");
+            }
+        }
+        assert!(side_by_side > 0);
     }
 
     /// "Today" (what every source spent today) switched off is drawn nowhere: in no form of the widget at any size, in
@@ -8673,14 +8804,23 @@ otepad.exe", "Notepad"),
     /// A canvas that draws nothing, measuring as `Nothing` does, and keeps every text it is asked to draw (and every key
     /// what it draws is drawn under).
     #[derive(Default)]
-    struct Said(std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<f32>>);
+    struct Said(std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<String>>, std::cell::RefCell<Vec<f32>>, std::cell::RefCell<Vec<(String, f32, f32, f32)>>);
+
+    impl Said {
+        /// A line or shape through `points` drawn: its left, its top and its foot (see `Said`'s fourth).
+        fn drew(&self, points: &[Point]) {
+            let fold = |pick: fn(&Point) -> f32, f: fn(f32, f32) -> f32, from: f32| points.iter().map(pick).fold(from, f);
+            self.3.borrow_mut().push((String::new(), fold(|p| p.x, f32::min, f32::MAX), fold(|p| p.y, f32::min, f32::MAX), fold(|p| p.y, f32::max, f32::MIN)));
+        }
+    }
 
     impl Canvas for Said {
         fn key(&self, key: &str) {
             self.1.borrow_mut().push(key.to_string());
         }
-        fn text(&self, text: &str, _: Font, _: Color, _: f32, _: f32, _: f32, _: Align) {
+        fn text(&self, text: &str, font: Font, _: Color, x: f32, y: f32, _: f32, _: Align) {
             self.0.borrow_mut().push(text.to_string());
+            self.3.borrow_mut().push((text.to_string(), x, y, y + font.size));
         }
         fn markdown(&self, _: &str, _: Font, _: super::super::canvas::Inks, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn markdown_tall(&self, _: &str, _: Font, _: f32) -> f32 {
@@ -8697,17 +8837,30 @@ otepad.exe", "Notepad"),
         }
         fn clip(&self, _: f32, _: f32, _: f32, _: f32) {}
         fn unclip(&self) {}
-        fn fill(&self, _: Color, _: f32, _: f32, _: f32, _: f32) {}
-        fn fill_rounded(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32) {}
-        fn fill_circle(&self, _: Color, _: Point, _: f32) {}
-        fn stroke(&self, _: &[Point], _: Color, _: f32) {}
-        fn stroke_dashed(&self, _: &[Point], _: Color, _: f32) {}
-        fn fill_shape(&self, _: &[Point], _: Fill) {}
+        fn fill(&self, _: Color, x: f32, y: f32, _: f32, h: f32) {
+            self.3.borrow_mut().push((String::new(), x, y, y + h));
+        }
+        fn fill_rounded(&self, _: Color, x: f32, y: f32, _: f32, h: f32, _: f32) {
+            self.3.borrow_mut().push((String::new(), x, y, y + h));
+        }
+        fn fill_circle(&self, _: Color, centre: Point, radius: f32) {
+            self.3.borrow_mut().push((String::new(), centre.x - radius, centre.y - radius, centre.y + radius));
+        }
+        fn stroke(&self, points: &[Point], _: Color, _: f32) {
+            self.drew(points);
+        }
+        fn stroke_dashed(&self, points: &[Point], _: Color, _: f32) {
+            self.drew(points);
+        }
+        fn fill_shape(&self, points: &[Point], _: Fill) {
+            self.drew(points);
+        }
         fn stroke_rounded(&self, _: Fill, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn shadow(&self, _: Color, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {}
         fn frosted(&self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32, _: &dyn Fn(&dyn Canvas)) {}
-        fn arc(&self, _: Point, _: f32, _: f32, sweep: f32, _: Color, _: f32) {
+        fn arc(&self, centre: Point, radius: f32, _: f32, sweep: f32, _: Color, _: f32) {
             self.2.borrow_mut().push(sweep);
+            self.3.borrow_mut().push((String::new(), centre.x - radius, centre.y - radius, centre.y + radius));
         }
         fn icon(&self, _: super::super::icons::Icon, _: Point, _: f32, _: Color) {}
         fn mark(&self, _: super::super::marks::Mark, _: Point, _: f32, _: Color, _: f32) {}

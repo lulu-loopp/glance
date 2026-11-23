@@ -199,9 +199,6 @@ pub enum AiBlock {
     Sessions(Vec<(String, String, String, bool, Option<Source>)>),
     /// The sessions of the sources shown: how many are at work, and how many spent today.
     Working { at_work: usize, today: usize },
-    /// A source's windows all side by side in one row, without when each starts again (a source's part in a widget too
-    /// small for all of them: see `paint_paged`).
-    WindowsRow(Vec<Window>),
     /// The whole component in a widget too small for all of it, in `shape`: what the dock shows, how today's spending
     /// mounted, and what it tells in a widget roomy enough for more (see `paint_shaped`).
     Shaped { shape: Shape, dock: Dock, mounted: Vec<f32>, rich: Box<Rich> },
@@ -351,7 +348,7 @@ impl Hash for AiBlock {
         match self {
             AiBlock::Head { source, title, device, aside, opened, flag } => (source, title, device, aside, opened, flag).hash(state),
             AiBlock::Today { figure, unit, mounted } => (figure, unit, mounted.iter().map(|f| f.to_bits()).collect::<Vec<_>>()).hash(state),
-            AiBlock::Windows(windows) | AiBlock::WindowsRow(windows) => windows.iter().for_each(|w| (&w.name, w.used.to_bits(), w.gone.map(f32::to_bits), &w.resets, w.left, w.stale).hash(state)),
+            AiBlock::Windows(windows) => windows.iter().for_each(|w| (&w.name, w.used.to_bits(), w.gone.map(f32::to_bits), &w.resets, w.left, w.stale).hash(state)),
             AiBlock::Models(rows) => rows.iter().for_each(|(name, share, value)| (name, share.to_bits(), value).hash(state)),
             AiBlock::Sources(rows) => rows.iter().for_each(|(source, name, share, value)| (source, name, share.to_bits(), value).hash(state)),
             AiBlock::Pairs(rows) => rows.hash(state),
@@ -418,7 +415,6 @@ impl AiBlock {
                 let rows = windows.len().div_ceil(2) as f32;
                 GAP + rows * window_tall(windows) + (rows - 1.0).max(0.0) * WINDOW_GAP
             }
-            AiBlock::WindowsRow(_) => GAP + LINE + BAR_BAND,
             AiBlock::Models(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Sources(rows) => GAP + MODELS_BAR + MODELS_BAR_GAP + rows.len() as f32 * (LINE + ROW_GAP) - ROW_GAP,
             AiBlock::Pairs(pairs) => GAP + pairs.len().div_ceil(2) as f32 * (LINE + ROW_GAP) - ROW_GAP,
@@ -434,7 +430,7 @@ impl AiBlock {
         match self {
             AiBlock::Head { .. } => "head",
             AiBlock::Today { .. } => "today",
-            AiBlock::Windows(_) | AiBlock::WindowsRow(_) => "windows",
+            AiBlock::Windows(_) => "windows",
             AiBlock::Models(_) => "models",
             AiBlock::Sources(_) => "sources",
             AiBlock::Pairs(_) => "pairs",
@@ -1142,9 +1138,9 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 frame.fill_circle(ink.trace, *last, 2.6);
             }
         }
-        AiBlock::Windows(windows) | AiBlock::WindowsRow(windows) => {
-            // (Two to a row, or all in one.)
-            let across = if matches!(block, AiBlock::WindowsRow(_)) { windows.len().max(1) } else { 2 };
+        AiBlock::Windows(windows) => {
+            // (Two to a row.)
+            let across = 2;
             let column = (width - (across - 1) as f32 * WINDOW_GAP) / across as f32;
             let tall = window_tall(windows);
             for (at, window) in windows.iter().enumerate() {
@@ -1280,9 +1276,9 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
     let (_, _, w, h) = room;
     let squares = (0..LEAST_PLANS).flat_map(|plan| [Form::Square { plan, listing: false }, Form::Square { plan, listing: true }]);
     let forms: Vec<Form> = if w >= h {
-        [Form::Across, Form::Board].into_iter().chain(squares).chain([Form::Column, Form::Down, Form::Today]).collect()
+        [Form::Across, Form::Board].into_iter().chain(squares).chain([Form::Column, Form::Down, Form::Strip, Form::Today]).collect()
     } else {
-        [Form::Down, Form::Column].into_iter().chain(squares).chain([Form::Board, Form::Across, Form::Today]).collect()
+        [Form::Down, Form::Column].into_iter().chain(squares).chain([Form::Board, Form::Across, Form::Strip, Form::Today]).collect()
     };
     let tally = Tally::new(frame);
     let mut best: Option<(Form, (bool, usize))> = None;
@@ -1294,10 +1290,10 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
             best = Some((form, says));
         }
     }
-    // No form holding every source (one figure alone fits): as many sources as fit whole, the rest turned to by
-    // the wheel (see `paint_paged`). (A widget only a little smaller than one holding them all showed today's figure
-    // alone, as the owner saw.)
-    if best.is_none_or(|(form, _)| form == Form::Today) && paint_paged(frame, scene, told, room, hits) {
+    // No form holding every source (one figure alone fits): today's and as many sources as fit in a strip, the rest
+    // turned to by the wheel (see `paint_strip`). (A widget only a little smaller than one holding them all showed
+    // today's figure alone, as the owner saw: 379 by 106, and low ones 260 to 420 wide.)
+    if best.is_none_or(|(form, _)| form == Form::Today) && paint_strip(frame, scene, told.0, room, true, hits) {
         return;
     }
     if let Some((form, _)) = best {
@@ -1305,37 +1301,19 @@ pub(super) fn paint_shaped(frame: &dyn Canvas, scene: &Scene, ink: Ink, told: (&
     }
 }
 
-/// Laid out a page at a time (see `paint_paged`): how wide a source's part is at least, what every source spent beside
-/// the parts and the room between them, and the room the dots that tell the page take at the right (DIPs).
-const PAGED_PART: f32 = 200.0;
-const PAGED_TODAY: f32 = 92.0;
-const PAGED_GAP: f32 = 14.0;
+/// Laid out low and wide (see `paint_strip`): the least room down its band (its two lines over each other reach 17 over
+/// its middle: twice that, as a widget 50 high has in the Windows 11 skin, whose plate keeps 16 of it); the room at its
+/// ends; a ring's radius at most, and where its source's words start and how much room is after them; the room at each
+/// side of today's and the sessions'; the least room between two parts; and the room the dots that tell the page take
+/// at the right (DIPs).
+const STRIP_LOW: f32 = 34.0;
+const STRIP_PAD: f32 = 8.0;
+const STRIP_RING: f32 = 13.0;
+const STRIP_WORDS: f32 = 6.0 + 2.0 * STRIP_RING + 2.0 + 7.0;
+const STRIP_TAIL: f32 = 6.0;
+const STRIP_END: f32 = 8.0;
+const STRIP_APART: f32 = 6.0;
 const PAGER: f32 = 12.0;
-
-/// How much a source's part tells laid out a page at a time, as there is room down: its head and its limits (or what
-/// it has and spent), then when each window starts again, then what it spent by model.
-const PAGED_LEVELS: usize = 3;
-
-/// The least a window is wide, its windows side by side in one row (see `AiBlock::WindowsRow`).
-const ROW_WINDOW_LEAST: f32 = 64.0;
-
-/// `part` (a source's) as a lane `width` wide telling as much as `level` (see `PAGED_LEVELS`): telling least, its
-/// windows in one row where they fit so, two to a row where they do not.
-fn paged_lane(part: &Part, theme: &Theme, width: f32, level: usize) -> Lane {
-    let mut lane = part_lane(part, theme, level >= 2);
-    if level == 0 {
-        for block in &mut lane.blocks {
-            if let Block::Ai(AiBlock::Windows(windows)) = block {
-                windows.iter_mut().for_each(|window| window.resets.clear());
-                let across = windows.len() as f32;
-                if windows.len() > 2 && (width - (across - 1.0) * WINDOW_GAP) / across >= ROW_WINDOW_LEAST {
-                    *block = Block::Ai(AiBlock::WindowsRow(std::mem::take(windows)));
-                }
-            }
-        }
-    }
-    lane
-}
 
 /// The id of the page what every source spent today is, first of the pages the smallest form turns round (see
 /// `paint_one` and `view::keep_source`).
@@ -1354,105 +1332,153 @@ pub fn pages(hits: &[HitBox], shown: &super::SourceShown, sources: Vec<String>) 
     (!sources.is_empty()).then(|| today_first.then(|| TODAY_PAGE.to_string()).into_iter().chain(sources).collect())
 }
 
-/// The component in a widget too small for any form that holds every source (see `paint_shaped`), filling `room`: what
-/// every source spent today and the sessions at work at the left where there is room beside a source's part, then as
-/// many sources' parts side by side as fit whole (at least `PAGED_PART` wide), each telling as much as it has room for
-/// down (see `PAGED_LEVELS`); the rest turned round to by the wheel, a source a notch (`List::AiSources`: past the
-/// last, the first again), one under another a part alone, else side by side, and dots at the right telling which are
-/// shown of how many, a press on one turning to it. A part's head shows the source's card beside the widget as the
-/// pointer rests on it, as the dock's spot does (a part tells no more than its limits). Whether it fits (else nothing
-/// drawn): a source's part, as little as it tells.
-pub(super) fn paint_paged(frame: &dyn Canvas, scene: &Scene, (dock, _, rich): (&Dock, &[f32], &Rich), (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) -> bool {
+/// The component low and wide in `room`, as the dock's strip across is (see `draw_dock`) where that does not fit (lower,
+/// or narrower): what every source spent today at the left, then each source's ring with its figure beside it, then the
+/// sessions at work at the right; what each figure is of under it as there is room across, and after that the sessions
+/// at work. Each part as wide as it needs, the room left between them, so far apart at most, the rest round them all;
+/// its rings smaller than the dock's, smaller still in a lower band, each in the room it is designed to have (so it
+/// tells no less taller). `turn`, where not all the sources fit beside today's even so: as
+/// many as fit, the rest turned round to by the wheel, a source a notch (`List::AiSources`: past the last, the first
+/// again), and dots at the right telling which are shown of how many, a press on one turning to it. Its spots show
+/// their cards as the pointer rests on them, as the dock's do. Whether it fits (else nothing drawn): every source, or,
+/// `turn`, today's and one source at least.
+pub(super) fn paint_strip(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), turn: bool, hits: &mut Vec<HitBox>) -> bool {
     let (theme, lang) = (scene.theme, scene.lang);
-    let parts: Vec<(&Slot, &Part)> = dock.slots.iter().filter_map(|slot| rich.parts.iter().find(|part| part.id == slot.source.id()).map(|part| (slot, part))).collect();
-    let count = parts.len();
-    // (Inset as the least forms are: see `paint_least`.)
-    let (inset_x, inset_y) = (14.0_f32.min(w / 6.0), 14.0_f32.min(h / 6.0));
-    let (left, top, width, height) = (x + inset_x, y + inset_y, (w - 2.0 * inset_x).max(0.0), (h - 2.0 * inset_y).max(0.0));
-    if count == 0 || width < PAGED_PART {
+    let count = dock.slots.len();
+    let band = h.min(BAR_HEIGHT);
+    if count == 0 || band < STRIP_LOW {
         return false;
     }
-    let tall = |lane: &Lane| lane.blocks.iter().map(Block::height).sum::<f32>();
-    // Laid out with `per` parts side by side, what every source spent beside them or not: the room the parts take (the
-    // dots' taken where some are turned to), each part's width, and each part as much as it has room for down; none
-    // where a part is narrower than `PAGED_PART` or fits not even as little as it tells.
-    let laid = |per: usize, today: bool| -> Option<(f32, f32, Vec<Lane>)> {
-        let room = width - if today { PAGED_TODAY + PAGED_GAP } else { 0.0 } - if per < count { PAGER } else { 0.0 };
-        let each = (room - (per as f32 - 1.0) * PAGED_GAP) / per as f32;
-        if each < PAGED_PART {
-            return None;
-        }
-        let lanes = parts.iter().map(|(_, part)| (0..PAGED_LEVELS).rev().map(|level| paged_lane(part, theme, each, level)).find(|lane| tall(lane) <= height)).collect::<Option<Vec<Lane>>>()?;
-        Some((room, each, lanes))
+    let label = Font { size: 11.0, weight: 500.0, ..theme.body };
+    let big = Font { size: 14.0, weight: 650.0, ..theme.figure };
+    let (figure, under) = slot_fonts(theme);
+    let today_said = lang.pick("今日", "Today");
+    let today_w = dock.today.as_deref().map_or(0.0, |today| frame.measure(today_said, label).max(frame.measure(today, big)) + 2.0 * STRIP_END);
+    let sessions = (lang.pick("会话", "Sessions"), dock.working.to_string());
+    let count_w = frame.measure(&sessions.1, big);
+    let marks_w = if dock.at_work.is_empty() { 0.0 } else { dock.at_work.len() as f32 * 15.0 + 2.0 };
+    let sessions_w = frame.measure(sessions.0, label).max(count_w + marks_w) + 2.0 * STRIP_END;
+    // Each slot as wide as its ring's room and its figure (and what it is of, `told`) take.
+    let widths = |told: bool| -> Vec<f32> {
+        dock.slots
+            .iter()
+            .map(|slot| {
+                let said = frame.measure(&slot.figure, figure);
+                STRIP_WORDS + if told { said.max(frame.measure(&slot.label, under)) } else { said } + STRIP_TAIL
+            })
+            .collect()
     };
-    // As many side by side as fit, then what every source spent beside them where it fits too. (So, made wider, it
-    // shows no fewer: what fits narrower fits wider.)
-    let today_shown = dock.today.is_some();
-    let Some((per, today, (room, each, lanes))) = (1..=count).rev().flat_map(|per| [(per, true), (per, false)]).filter(|(_, today)| today_shown || !today).find_map(|(per, today)| Some((per, today, laid(per, today)?))) else { return false };
+    let inner = w - 2.0 * STRIP_PAD;
+    let ends = |sessions: bool| today_w + if sessions { sessions_w } else { 0.0 };
+    let apart = |shown: usize, sessions: bool| (shown + usize::from(dock.today.is_some()) + usize::from(sessions) - 1) as f32;
+    // What each figure is of and the sessions at work where they fit, else what each is of, else neither.
+    let whole = [(true, true), (true, false), (false, false)].into_iter().find(|&(told, sessions)| ends(sessions) + widths(told).iter().sum::<f32>() + apart(count, sessions) * STRIP_APART <= inner);
+    let pill = band - 10.0;
+    // Not all of them: as many as fit beside today's and the dots, each as wide as the widest, and the dots fit down
+    // the band.
+    let widest = widths(false).into_iter().fold(0.0, f32::max);
+    let room = inner - PAGER - STRIP_APART;
+    let per = match whole {
+        Some(_) => count,
+        None if turn => (1..count).rev().find(|&per| ends(false) + per as f32 * widest + apart(per, false) * STRIP_APART <= room && pager_fits(count, per, pill)).unwrap_or(0),
+        None => 0,
+    };
+    if per == 0 {
+        return false;
+    }
+    let (told, with_sessions) = whole.unwrap_or((false, false));
     let paged = per < count;
-    let parts_left = left + if today { PAGED_TODAY + PAGED_GAP } else { 0.0 };
-    // What every source spent today, and the sessions at work under it, in the middle down.
-    if today {
-        let label = Font { size: 11.0, weight: 500.0, ..theme.body };
-        let figure = Font { size: 20.0, weight: 650.0, ..theme.figure };
-        let working = dock.working > 0;
-        let column = label.size + 4.0 + figure.size + if working { 6.0 + LINE } else { 0.0 };
-        let mut row = top + (height - column) / 2.0;
-        if scene.hover == Some(Hit::AiSlot(Spot::Today)) {
-            frame.fill_rounded(theme.hover, left - 6.0, row - 4.0, PAGED_TODAY + 12.0, label.size + 4.0 + figure.size + 8.0, 10.0);
+    let shown_widths = if paged { vec![widest; count] } else { widths(told) };
+    // The room left, between the parts (so far apart at most), the rest round them all (beside the dots, turned).
+    let room = if paged { room } else { inner };
+    let taken = ends(with_sessions) + shown_widths.iter().take(per).sum::<f32>();
+    let between = apart(per, with_sessions);
+    let gap = if between > 0.0 { ((room - taken) / between).min(STRIP_GAP) } else { 0.0 };
+    let left = x + STRIP_PAD + (room - taken - gap * between) / 2.0;
+    let middle = y + h / 2.0;
+    let k = (band / 50.0).min(1.0);
+    let radius = STRIP_RING * k;
+    let lit = |spot: Spot| scene.hover == Some(Hit::AiSlot(spot));
+    let at = |x: f32, wide: f32| ((x, middle - band / 2.0, wide, band), (x, middle - pill / 2.0, wide, pill, pill / 2.0));
+    let spot = |hits: &mut Vec<HitBox>, spot: Spot, ((hx, hy, hw, hh), (px, py, pw, ph, round)): ((f32, f32, f32, f32), (f32, f32, f32, f32, f32))| {
+        if lit(spot) {
+            frame.fill_rounded(theme.hover, px, py, pw, ph, round);
         }
-        hits.push((left, row, PAGED_TODAY, label.size + 4.0 + figure.size, Hit::AiSlot(Spot::Today)));
+        hits.push((hx, hy, hw, hh, Hit::AiSlot(spot)));
+    };
+    let mut part_x = left;
+    if let Some(today) = &dock.today {
+        spot(hits, Spot::Today, at(part_x, today_w));
         frame.key("ai:today.label");
-        frame.text(lang.pick("今日", "Today"), label, theme.text3, left, row, PAGED_TODAY, Align::Start);
-        row += label.size + 4.0;
+        centred(frame, today_said, label, theme.text3, part_x + today_w / 2.0, middle - 17.0, today_w);
         frame.key("ai:today.value");
-        frame.text(dock.today.as_deref().unwrap_or_default(), figure, theme.text, left, row, PAGED_TODAY, Align::Start);
-        row += figure.size + 6.0;
-        if working {
-            frame.key("ai:dock.at_work");
-            frame.fill_circle(theme.ink(AI_LANE).trace, Point { x: left + 3.5, y: row + LINE / 2.0 }, 3.5);
-            let said = match lang {
-                Lang::Zh => format!("{} 个会话", dock.working),
-                Lang::En => format!("{} at work", dock.working),
-            };
-            frame.text(&said, theme.small, theme.text2, left + 13.0, row, PAGED_TODAY - 13.0, Align::Start);
-        }
+        centred(frame, today, big, theme.text, part_x + today_w / 2.0, middle - 2.0, today_w);
+        part_x += today_w + gap;
     }
-    // The parts, turned round to where the wheel turned them: a part alone one under another, else side by side.
-    let at = if paged { scene.scrolls.at(List::AiSources) / PAGE } else { 0.0 };
-    let step = if per == 1 { height } else { each + PAGED_GAP };
-    let reach = if per == 1 { height } else { room };
-    let round = count as f32;
-    frame.clip(parts_left, top, room, height);
-    for (n, (lane, (slot, _))) in lanes.iter().zip(&parts).enumerate() {
-        // (Each where it comes round to: past the last, the first again, a turn on.)
-        let turns = ((at - n as f32 - 1.0) / round).ceil() as i32..=((at - n as f32 + per as f32) / round).floor() as i32;
-        for turn in turns {
-            let off = (n as f32 + turn as f32 * round - at) * step;
-            // (Not drawn where less than half a DIP of it would show: the wheel's slide settles within a twentieth of one.)
-            if off <= 0.5 - step || off >= reach - 0.5 {
-                continue;
-            }
-            let lane_tall = tall(lane);
-            let (px, py) = if per == 1 { (parts_left, top + off + (height - lane_tall) / 2.0) } else { (parts_left + off, top + (height - lane_tall) / 2.0) };
-            // Its head (the source's mark and name): its card beside the widget as the pointer rests there.
-            if let Some(Block::Ai(AiBlock::Head { title, .. })) = lane.blocks.first() {
-                let spot = Spot::Ring(slot.source);
-                let named = (HEAD_MARK + frame.measure(title, theme.title)).min(each);
-                if scene.hover == Some(Hit::AiSlot(spot)) {
-                    frame.fill_rounded(theme.hover, px - 5.0, py - 3.0, named + 10.0, HEAD + 6.0, 6.0);
-                }
-                hits.push((px, py, named, HEAD, Hit::AiSlot(spot)));
-            }
-            let area = Rect { x: px - theme.pad_x, y: py - theme.pad_top, w: each + 2.0 * theme.pad_x, h: lane_tall + theme.pad_top + theme.pad_bottom };
-            paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
-        }
-    }
-    frame.unclip();
+    // Where each source is drawn: one after another; turned, each where the wheel turned it to (past the last, the
+    // first again, a turn on), within the room of those shown.
+    let reach = shown_widths.iter().take(per).sum::<f32>() + (per - 1) as f32 * gap;
+    let turned = if paged { scene.scrolls.at(List::AiSources) / PAGE } else { 0.0 };
+    let mut places: Vec<(usize, f32)> = Vec::new();
     if paged {
+        let (step, round) = (widest + gap, count as f32);
+        for n in 0..count {
+            let laps = ((turned - n as f32 - 1.0) / round).ceil() as i32..=((turned - n as f32 + per as f32) / round).floor() as i32;
+            for lap in laps {
+                let off = (n as f32 + lap as f32 * round - turned) * step;
+                // (Not drawn where less than half a DIP of it would show: the wheel's slide settles within a twentieth of one.)
+                if off > 0.5 - step && off < reach - 0.5 {
+                    places.push((n, part_x + off));
+                }
+            }
+        }
+        frame.clip(part_x, y, reach, h);
+    } else {
+        let mut slot_x = part_x;
+        for (n, wide) in shown_widths.iter().enumerate() {
+            places.push((n, slot_x));
+            slot_x += wide + gap;
+        }
+    }
+    for (n, slot_x) in places {
+        let slot = &dock.slots[n];
+        let slot_wide = shown_widths[n];
+        spot(hits, Spot::Ring(slot.source), at(slot_x, slot_wide));
+        // (Its ring as large as the band lets it be, against its words, in the room it is designed to have.)
+        ring(frame, theme, slot, Point { x: slot_x + STRIP_WORDS - 7.0 - 1.0 - radius, y: middle }, radius, 2.4 * k, 12.0 * k);
+        let words = slot_x + STRIP_WORDS;
+        // (Its words given the room after them too: in just as much room as they measure, drawn on whole pixels, they
+        // were cut short.)
+        let room = slot_x + slot_wide - words;
+        let figure_top = if told && !slot.label.is_empty() { middle - 17.0 } else { middle - 9.0 };
+        frame.key(&format!("{}.value", slot.source.id()));
+        frame.text(&slot.figure, figure, figure_ink(theme, slot), words, figure_top, room, Align::Start);
+        if told {
+            frame.key(&format!("{}.label", slot.source.id()));
+            frame.text(&slot.label, under, theme.text3, words, middle + 1.0, room, Align::Start);
+        }
+    }
+    if paged {
+        frame.unclip();
         // Which are shown, of how many.
-        pager_dots(frame, scene, (left + width - PAGER / 2.0, top, height), count, (round_page(at, count), per), hits);
+        pager_dots(frame, scene, (x + w - STRIP_PAD - PAGER / 2.0, middle - pill / 2.0, pill), count, (round_page(turned, count), per), hits);
         hits.push((x, y, w, h, Hit::AiPages(count as u32, false)));
+        return true;
+    }
+    if with_sessions {
+        let sessions_x = part_x + reach + gap;
+        spot(hits, Spot::Sessions, at(sessions_x, sessions_w));
+        frame.key("ai:dock.sessions");
+        centred(frame, sessions.0, label, theme.text3, sessions_x + sessions_w / 2.0, middle - 17.0, sessions_w);
+        let start = sessions_x + sessions_w / 2.0 - (count_w + marks_w) / 2.0;
+        frame.key("ai:dock.at_work");
+        frame.text(&sessions.1, big, theme.text, start, middle - 2.0, count_w + 2.0, Align::Start);
+        const MARK: f32 = 12.0;
+        let marks_left = start + count_w + 2.0;
+        for (at, source) in dock.at_work.iter().enumerate() {
+            frame.key(&format!("ai:dock.at_work.{at}"));
+            frame.mark(source.mark(), Point { x: marks_left + at as f32 * (MARK + 3.0) + MARK / 2.0, y: middle + 7.0 }, MARK, theme.text2, 1.0);
+        }
     }
     true
 }
@@ -1478,6 +1504,9 @@ enum Form {
     Board,
     /// Its parts one over another, as its lane is, then what each spent by model, then its sessions.
     Column,
+    /// Low and wide, as the dock's strip across is where that does not fit: each source's ring and figure beside
+    /// today's (see `paint_strip`).
+    Strip,
     /// One figure alone: today's, where it is shown, else a source's, the rest turned to by the wheel (see `paint_one`).
     Today,
 }
@@ -1502,9 +1531,9 @@ fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         }
         Form::Square { plan, listing } => paint_least(frame, scene, ink, (dock, mounted, rich), room, (plan, listing), hits),
         Form::Board => {
-            let rows = board_of(rich, theme, lang, (w, h))?;
-            let told = models(rows.iter().flatten().flat_map(|lane| &lane.blocks));
-            draw_board(frame, scene, &rows, room, hits);
+            let board = board_of(rich, theme, lang, (w, h))?;
+            let told = models(board.lanes().flat_map(|lane| &lane.blocks));
+            draw_board(frame, scene, &board, room, hits);
             Some(told)
         }
         Form::Column => {
@@ -1514,6 +1543,7 @@ fn paint_form(form: Form, frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
             draw_column(frame, scene, ink, lane, room, hits);
             Some(told)
         }
+        Form::Strip => paint_strip(frame, scene, dock, room, false, hits).then_some(false),
         Form::Today => {
             paint_one(frame, scene, dock, room, hits);
             Some(false)
@@ -1599,9 +1629,36 @@ fn sessions_lanes(sessions: &[SessionRow], columns: usize, theme: &Theme, lang: 
         .collect()
 }
 
-/// `rich`'s parts in rows of `per`, the sessions at work under the first, each source with what it spent by model where
-/// `models`, and the first `sessions` of its sessions in a row under them, in as many columns.
-fn board_rows(rich: &Rich, theme: &Theme, lang: Lang, per: usize, models: bool, sessions: usize) -> Vec<Vec<Lane>> {
+/// The component's parts side by side (see `board_of`): in columns, each part under the one before it in its column,
+/// and its sessions in a row under them all, a column of them under each.
+pub(super) struct Board {
+    pub(super) columns: Vec<Vec<Lane>>,
+    pub(super) sessions: Vec<Lane>,
+}
+
+impl Board {
+    /// How tall a column of parts is, each under the one before it, as far apart as rows of parts are.
+    fn column_tall(column: &[Lane]) -> f32 {
+        column.iter().map(|lane| lane.blocks.iter().map(Block::height).sum::<f32>()).sum::<f32>() + column.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP
+    }
+
+    /// How tall it is: its tallest column, and its sessions under them all.
+    pub(super) fn tall(&self) -> f32 {
+        let columns = self.columns.iter().map(|column| Self::column_tall(column)).fold(0.0, f32::max);
+        columns + if self.sessions.is_empty() { 0.0 } else { ACROSS_ROW_GAP + across_tall(&self.sessions) }
+    }
+
+    /// Every lane of it, its parts' and its sessions'.
+    pub(super) fn lanes(&self) -> impl Iterator<Item = &Lane> {
+        self.columns.iter().flatten().chain(&self.sessions)
+    }
+}
+
+/// `rich`'s parts in `per` columns, the sessions at work under the first, each source with what it spent by model where
+/// `models`, and the first `sessions` of its sessions in a row under them, in as many columns. The first `per` side by
+/// side at the top, each after them under the column that ends highest (the leftmost of those that end as high): laid
+/// out in rows, a part on a row of its own left the room beside it empty, under the shorter parts of the row before.
+fn board_in(rich: &Rich, theme: &Theme, lang: Lang, per: usize, models: bool, sessions: usize) -> Board {
     let mut parts: Vec<Lane> = rich.parts.iter().map(|part| part_lane(part, theme, models)).collect();
     if let Some(working) = &rich.working {
         match parts.first_mut() {
@@ -1609,20 +1666,13 @@ fn board_rows(rich: &Rich, theme: &Theme, lang: Lang, per: usize, models: bool, 
             None => parts.push(Lane { id: "ai:sessions".into(), blocks: vec![Block::Ai(working.clone())], ink: theme.ink("ai:sessions") }),
         }
     }
-    let mut rows = Vec::new();
-    let mut parts = parts.into_iter().peekable();
-    while parts.peek().is_some() {
-        rows.push(parts.by_ref().take(per).collect());
+    let mut columns: Vec<Vec<Lane>> = (0..per.min(parts.len()).max(1)).map(|_| Vec::new()).collect();
+    for part in parts {
+        let lowest = (0..columns.len()).min_by(|&a, &b| Board::column_tall(&columns[a]).total_cmp(&Board::column_tall(&columns[b])).then(a.cmp(&b))).unwrap_or(0);
+        columns[lowest].push(part);
     }
-    if sessions > 0 {
-        rows.push(sessions_lanes(&rich.sessions[..sessions], per, theme, lang));
-    }
-    rows
-}
-
-/// How tall `rows` of parts side by side are (see `paint_across`).
-fn rows_tall(rows: &[Vec<Lane>]) -> f32 {
-    rows.iter().map(|row| across_tall(row)).sum::<f32>() + rows.len().saturating_sub(1) as f32 * ACROSS_ROW_GAP
+    let sessions = if sessions > 0 { sessions_lanes(&rich.sessions[..sessions], per, theme, lang) } else { Vec::new() };
+    Board { columns, sessions }
 }
 
 /// `rich` laid out side by side in a widget `room` large (DIPs): its parts in rows of as many as leave each the least
@@ -1630,14 +1680,14 @@ fn rows_tall(rows: &[Vec<Lane>]) -> f32 {
 /// as many to a row as tell the most so (each count to a row it may be given as it is made wider: the fewest to a row
 /// that left each its room took over from all in one, and might tell less), else as few rows as leave each its room,
 /// else as few as fit. None where its parts do not fit in any, or it has none (drawn empty).
-pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32)) -> Option<Vec<Vec<Lane>>> {
+pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32)) -> Option<Board> {
     if rich.parts.is_empty() {
         return None;
     }
     let count = rich.parts.len();
     let (width, room) = (w - 2.0 * theme.pad_x, h - theme.pad_top - theme.pad_bottom);
     let column = |per: usize| (width - (per as f32 - 1.0) * ACROSS_GAP) / per as f32;
-    let fits = |per: usize, models: bool, sessions: usize| rows_tall(&board_rows(rich, theme, lang, per, models, sessions)) <= room;
+    let fits = |per: usize, models: bool, sessions: usize| board_in(rich, theme, lang, per, models, sessions).tall() <= room;
     let told = |per: usize| -> Option<(bool, usize)> {
         fits(per, false, 0).then_some(())?;
         if !fits(per, true, 0) {
@@ -1657,14 +1707,34 @@ pub(super) fn board_of(rich: &Rich, theme: &Theme, lang: Lang, (w, h): (f32, f32
         .filter(|&per| column(per) >= BOARD_COLUMN_LEAST)
         .filter_map(|per| Some((per, told(per)?)))
         .max_by_key(|&(per, told)| (told, column(per) >= BOARD_COLUMN, per))?;
-    Some(board_rows(rich, theme, lang, per, models, sessions))
+    Some(board_in(rich, theme, lang, per, models, sessions))
 }
 
-/// Draws `rows` of parts side by side (see `board_of`) in the middle of `room`.
-fn draw_board(frame: &dyn Canvas, scene: &Scene, rows: &[Vec<Lane>], (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
+/// Draws `board` (see `board_of`) in the middle of `room`: its columns side by side, as a lane's parts laid out across
+/// are (see `paint_across`), and its sessions under them all, each under its column.
+fn draw_board(frame: &dyn Canvas, scene: &Scene, board: &Board, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
     let theme = scene.theme;
-    let room = h - theme.pad_top - theme.pad_bottom;
-    paint_across(frame, scene, rows, (x + theme.pad_x, y + theme.pad_top + (room - rows_tall(rows)) / 2.0, w - 2.0 * theme.pad_x), Pass::Content, hits);
+    let (left, width) = (x + theme.pad_x, w - 2.0 * theme.pad_x);
+    let per = board.columns.len().max(board.sessions.len()).max(1) as f32;
+    let column = (width - (per - 1.0) * ACROSS_GAP) / per;
+    let top = y + theme.pad_top + (h - theme.pad_top - theme.pad_bottom - board.tall()) / 2.0;
+    let mut paint = |lane: &Lane, at: usize, lane_top: f32, tall: f32| {
+        let area = Rect { x: left + at as f32 * (column + ACROSS_GAP) - theme.pad_x, y: lane_top - theme.pad_top, w: column + 2.0 * theme.pad_x, h: tall + theme.pad_top + theme.pad_bottom };
+        paint_lane(frame, scene, lane, area, 0.0, Pass::Content, hits);
+    };
+    for (at, lanes) in board.columns.iter().enumerate() {
+        let mut lane_top = top;
+        for lane in lanes {
+            let tall = lane.blocks.iter().map(Block::height).sum::<f32>();
+            paint(lane, at, lane_top, tall);
+            lane_top += tall + ACROSS_ROW_GAP;
+        }
+    }
+    let sessions_top = top + board.columns.iter().map(|lanes| Board::column_tall(lanes)).fold(0.0, f32::max) + ACROSS_ROW_GAP;
+    let tall = across_tall(&board.sessions);
+    for (at, lane) in board.sessions.iter().enumerate() {
+        paint(lane, at, sessions_top, tall);
+    }
 }
 
 /// `rich`'s parts one over another, each source with what it spent by model where `models`, the sessions at work, and the
@@ -1909,7 +1979,7 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
 
 /// One figure alone in the middle of `room`, too small for anything more, and what it is of over it where it is tall
 /// enough: what every source spent today first, where it is shown, then each source's (its tightest window's share
-/// used, or what it has), turned round to by the wheel, a figure a notch (`List::AiSources`, as in `paint_paged`: past
+/// used, or what it has), turned round to by the wheel, a figure a notch (`List::AiSources`, as in `paint_strip`: past
 /// the last, the first again), with dots at the right telling which is shown of how many where there is room for them
 /// beside it, a press on one turning to it.
 fn paint_one(frame: &dyn Canvas, scene: &Scene, dock: &Dock, (x, y, w, h): (f32, f32, f32, f32), hits: &mut Vec<HitBox>) {
@@ -2071,7 +2141,7 @@ pub fn docked(prefs: &Prefs) -> Vec<Source> {
 }
 
 /// The ids of the sources shown, in their order: those a widget too small for all of them turns through (see
-/// `paint_paged`).
+/// `paint_strip`).
 pub fn sources_shown(prefs: &Prefs) -> Vec<String> {
     docked(prefs).into_iter().map(|source| source.id().to_string()).collect()
 }
