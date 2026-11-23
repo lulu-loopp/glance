@@ -30,7 +30,7 @@ give it, or torn off onto the desktop.
 - **Storage**: space on each drive, and the sizes of up to twelve folders you choose in the settings or drop on the panel, with how each changed in the last week and what is largest in it as the pointer rests on it
 - **Motherboard**: temperatures and fan speeds
 - **Battery**, on laptops: its charge, the power going in or out (on battery, what the whole machine draws) and its health
-- **Time and media** (off until chosen): the time and the date (on a 12-hour clock, and with the Chinese lunar date, if you like), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
+- **Time and media** (off until chosen): the time and the date (on a 12-hour clock if you like, and with the Chinese lunar date, shown by default when Glance is in Chinese), the sound's level on a track you drag, with mute, and what is playing, paused, played and skipped
 - **WSL and Docker**, for developers (off until chosen, under *More modules*): WSL 2's processors, memory and GPU and the distributions running, read from Windows alone so that no distribution is started or kept running; the containers Docker's current engine runs, each with its processors, memory, network and disk
 - **Games**: while a fullscreen game runs, at the top: its frame rate, 1% low, a chart of its frame times and the screen's refresh rate; the game's own CPU, GPU, memory and video memory; whether the graphics card is held back by its power or temperature limit (NVIDIA); how long you have played; and whether your microphone is muted
 
@@ -42,11 +42,11 @@ blocks out for the room.
 
 - **Station**: drop or paste files, pictures, text and links onto it, and
   they wait there until you drag them into another program. *Recently
-  copied* keeps what passed through the clipboard (it can be paused), what
-  is pinned of it first and sorted by tags, and
-  *Recent files* lists what was just downloaded or saved. Double-click to
-  open, right-click to pin, as cards or as a list. What sits too long is
-  cleared away.
+  copied* keeps what passed through the clipboard (it can be paused), and
+  *Recent files* lists what was just downloaded or saved. On all three, what
+  you pin comes first and tags sort things by what they are, and a thing
+  pinned or tagged stays. Double-click to open, as cards or as a list. What
+  sits too long is cleared away.
 - **Notes**, in Markdown: each note is a `.md` file in `Documents\Glance 便签`
   (or a folder you choose), so any editor opens it too. Headings, emphasis,
   to-do boxes and links show as they read: tick a box or open a link with a
@@ -71,7 +71,7 @@ blocks out for the room.
   and a search sheet comes up on the screen the pointer is on, in the panel's
   look, with results as you type: apps, Windows settings and tools, folders
   and files, and Glance's own notes, to-dos, station and recently copied
-  things. Files are found by name on every NTFS drive, from the drive's
+  things, also by their tags. Files are found by name on every NTFS drive, from the drive's
   change journal, as Everything reads it, opened read-only and kept current
   from the moment Glance starts. A USB drive being searched can still be
   ejected safely. A sum typed is worked out (Enter copies the answer), a web
