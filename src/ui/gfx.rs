@@ -1358,7 +1358,7 @@ impl Gfx {
             dc.SetTransform(&Matrix3x2::identity());
             dc.Clear(Some(&D2D1_COLOR_F::default()));
             let brush = dc.CreateSolidColorBrush(&D2D1_COLOR_F::default(), None)?;
-            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Cell::new(Matrix3x2::identity()), on: None, failed: Default::default(), moving: Cell::new(false), clips: Default::default() });
+            paint(&Frame { gfx: self, dc: dc.clone(), brush, base: Cell::new(Matrix3x2::identity()), on: None, failed: Default::default(), moving: Cell::new(false), clips: Default::default(), rings: Default::default() });
             dc.EndDraw(None, None)?;
             let read = dc.CreateBitmap(pixels, None, 0, &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW))?;
             read.CopyFromBitmap(None, &target, None)?;
@@ -1479,6 +1479,17 @@ pub struct Frame<'a> {
     moving: Cell<bool>,
     /// The canvas's clips on now, each fading (a layer) or not (see `Canvas::clip_fading`).
     clips: std::cell::RefCell<Vec<bool>>,
+    /// The rings begun and not yet ended (see `Canvas::ring`), the latest last.
+    rings: std::cell::RefCell<Vec<Ring>>,
+}
+
+/// A ring begun on a frame (see `Canvas::ring`): what is drawn in it recorded, to be drawn over its glow, on the
+/// target it was begun on, at that target's DPI.
+struct Ring {
+    list: windows::Win32::Graphics::Direct2D::ID2D1CommandList,
+    target: ID2D1Image,
+    dpi: (f32, f32),
+    halo: Color,
 }
 
 impl Canvas for Frame<'_> {
@@ -1551,6 +1562,44 @@ impl Canvas for Frame<'_> {
         match self.clips.borrow_mut().pop() {
             Some(true) => unsafe { self.dc.PopLayer() },
             _ => unsafe { self.dc.PopAxisAlignedClip() },
+        }
+    }
+
+    fn ring(&self, halo: Color) {
+        let begun = unsafe {
+            (|| -> Result<Ring> {
+                let list = self.dc.CreateCommandList()?;
+                let target = self.dc.GetTarget()?;
+                let mut dpi = (0.0, 0.0);
+                self.dc.GetDpi(&mut dpi.0, &mut dpi.1);
+                // (Recorded where it is drawn, so on the pixels it lands on, as what is drawn straight is; drawn back
+                // as it is. Setting a target can change the context's DPI: it is put back.)
+                self.dc.SetTarget(&list);
+                self.dc.SetDpi(dpi.0, dpi.1);
+                Ok(Ring { list, target, dpi, halo })
+            })()
+        };
+        match begun {
+            Ok(ring) => self.rings.borrow_mut().push(ring),
+            Err(error) => self.fail(error),
+        }
+    }
+
+    fn unring(&self) {
+        let Some(ring) = self.rings.borrow_mut().pop() else { return };
+        let mut here = Matrix3x2::default();
+        let drawn = unsafe {
+            self.dc.GetTransform(&mut here);
+            // (On its target again first, whatever failed.)
+            self.dc.SetTarget(&ring.target);
+            self.dc.SetDpi(ring.dpi.0, ring.dpi.1);
+            self.dc.SetTransform(&Matrix3x2::identity());
+            let drawn = ring.list.Close().and_then(|()| over_its_outline(&self.dc, &ring.list, ring.halo, ring.dpi.0));
+            self.dc.SetTransform(&here);
+            drawn
+        };
+        if let Err(error) = drawn {
+            self.fail(error);
         }
     }
 
@@ -2012,7 +2061,7 @@ impl<'a> Frame<'a> {
                 return Err(error);
             }
         };
-        Ok(Frame { gfx, dc, brush, base: Cell::new(base), on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false), clips: Default::default() })
+        Ok(Frame { gfx, dc, brush, base: Cell::new(base), on: Some((scratch, size)), failed: Default::default(), moving: Cell::new(false), clips: Default::default(), rings: Default::default() })
     }
 
     /// A frame drawn apart by `paint` (see `apart`) and finished, ready to be put where it shows; failed, if anything
@@ -3215,6 +3264,32 @@ fn stretch(transform: &Matrix3x2) -> f32 {
 /// Direct2D itself makes of a clip that is turned) were in use, and neither was drawn (D2DERR_LAYER_ALREADY_IN_USE).
 unsafe fn over_its_glow(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color) -> Result<()> {
     dc.DrawImage(&glow(dc, drawn, halo)?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    dc.Flush(None, None)?;
+    dc.DrawImage(drawn, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+    Ok(())
+}
+
+/// Draws `drawn`, as it was recorded, over an outline of `halo` about every stroke of it, a DIP and a half wide (at
+/// `dpi`) and fading a little past that (see `Canvas::ring`): words kept apart from whatever is under them, as subtitles are.
+/// The outline drawn first, on the card, as the glow is (see `over_its_glow`).
+unsafe fn over_its_outline(dc: &ID2D1DeviceContext, drawn: &windows::Win32::Graphics::Direct2D::ID2D1CommandList, halo: Color, dpi: f32) -> Result<()> {
+    use windows::Win32::Graphics::Direct2D::{
+        CLSID_D2D1Morphology, D2D1_MORPHOLOGY_MODE_DILATE, D2D1_MORPHOLOGY_PROP_HEIGHT, D2D1_MORPHOLOGY_PROP_MODE, D2D1_MORPHOLOGY_PROP_WIDTH,
+        D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_UINT32,
+    };
+    // A DIP and a half each way, in pixels (as the effect counts): its strokes grown by that, then softened.
+    let across = 2 * (1.5 * dpi / 96.0).round().max(1.0) as u32 + 1;
+    let grown = dc.CreateEffect(&CLSID_D2D1Morphology)?;
+    grown.SetInput(0, drawn, true);
+    grown.SetValue(D2D1_MORPHOLOGY_PROP_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_MORPHOLOGY_MODE_DILATE.0 as u32).to_ne_bytes())?;
+    grown.SetValue(D2D1_MORPHOLOGY_PROP_WIDTH.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &across.to_ne_bytes())?;
+    grown.SetValue(D2D1_MORPHOLOGY_PROP_HEIGHT.0 as u32, D2D1_PROPERTY_TYPE_UINT32, &across.to_ne_bytes())?;
+    let outline = dc.CreateEffect(&CLSID_D2D1Shadow)?;
+    outline.SetInput(0, &grown.GetOutput()?, true);
+    outline.SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &0.5f32.to_ne_bytes())?;
+    let rgba = [halo.r, halo.g, halo.b, halo.a];
+    outline.SetValue(D2D1_SHADOW_PROP_COLOR.0 as u32, D2D1_PROPERTY_TYPE_VECTOR4, std::slice::from_raw_parts(rgba.as_ptr().cast(), 16))?;
+    dc.DrawImage(&outline.GetOutput()?, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
     dc.Flush(None, None)?;
     dc.DrawImage(drawn, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
     Ok(())

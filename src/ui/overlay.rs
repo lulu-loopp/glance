@@ -180,9 +180,10 @@ pub struct Glass {
     /// How much of the glass there is: 1, all of it; 0, none (its tint,
     /// rim, tiles and shadow gone, the words alone over the screen).
     pub presence: f32,
-    /// The darkest and the brightest of what was seen around it (relative luminance, 0–1; unseen, 0 and 1): what its
-    /// words are read over, through as much of the glass as there is (see `words`).
-    pub behind: (f32, f32),
+    /// What was seen around it, from its darkest to its brightest: the relative luminance (0–1) a tenth of it is
+    /// darker than, two tenths, and so on to nine (unseen, spread evenly from black to white). What its words are read
+    /// over, through as much of the glass as there is (see `words`).
+    pub behind: [f32; 9],
 }
 
 /// The colours of a tone.
@@ -258,7 +259,7 @@ impl Tone {
 /// The glass while it is dragged: deep blue, whatever is behind.
 const DRAGGED: Glass = Glass { tone: Tone::Dark, opacity: 0.9, presence: 1.0, behind: UNSEEN };
 /// What is behind taken as unseen: anything from black to white.
-const UNSEEN: (f32, f32) = (0.0, 1.0);
+const UNSEEN: [f32; 9] = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0];
 const DRAGGED_TINT: u32 = 0x1D4F91;
 
 /// The contrast every word on the glass keeps over what is behind (WCAG's
@@ -272,6 +273,14 @@ const SWITCH: f32 = 0.1;
 /// The share of what is behind taken as its brightest and its darkest: a
 /// few stray pixels do not decide the tint.
 const EXTREME: f32 = 0.1;
+/// The share of what is behind taken as the strokes of what is drawn there (a page's words, a terminal's), its
+/// darkest and its brightest: fewer than the extremes, more than a few stray pixels.
+const DETAIL: f32 = 0.03;
+/// The most contrast those strokes keep through the glass (WCAG's ratio, as words have): faint beside its own words,
+/// so that what is written behind it does not read through them.
+const FAINT: f32 = 2.0;
+/// How opaque the glow about its words and marks is where there is none of the glass (see `paint`).
+const HALO: f32 = 0.95;
 
 // The kinds of reading, by the mark each has.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -834,7 +843,8 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
     let m = Metrics { width: &|text, font| frame.measure(text, font), line: &|font| frame.baseline(font) };
     let arranged = arrange(readings, shape, &m, px);
     let (glass, tint) = if dragged { (DRAGGED, DRAGGED_TINT) } else { (glass, glass.tone.palette().tint) };
-    let (palette, written) = (glass.tone.palette(), if dragged { DRAGGED.tone } else { words(glass) }.palette());
+    let words = if dragged { DRAGGED.tone } else { words(glass) };
+    let (palette, written) = (glass.tone.palette(), words.palette());
     let (width, height) = arranged.size;
     let (x0, y0, radius) = (0.0, 0.0, arranged.radius);
     frame.fill_rounded(Color::hex(tint, glass.opacity * glass.presence), x0, y0, width, height, radius);
@@ -843,17 +853,31 @@ pub fn paint(frame: &dyn Canvas, readings: &[Reading], frames: &[Option<f32>], s
         Ink::Second => written.second,
         Ink::Hot => written.hot,
     };
+    // The glass's own pieces, then what is written on it, ringed by a glow as the glass is not there (see `halo`).
     for piece in &arranged.pieces {
         match *piece {
             Piece::Tile { x, y, width, height } => frame.fill_rounded(palette.tile.alpha(glass.presence), x0 + x, y0 + y, width, height, TILE_RADIUS),
+            Piece::Rule { x, y, height } => frame.fill(palette.rim.1.alpha(glass.presence), x0 + x, y0 + y, 1.0 / px, height),
+            _ => {}
+        }
+    }
+    let ringed = halo(glass, words);
+    if let Some(halo) = ringed {
+        frame.ring(halo);
+    }
+    for piece in &arranged.pieces {
+        match *piece {
             Piece::Mark { kind, x, y } => frame.fill_circle(kind.mark(written), Point { x: x0 + x + MARK / 2.0, y: y0 + y }, MARK / 2.0),
             Piece::Text { ref text, font, ink: color, x, baseline } => {
                 let (ascent, _) = frame.baseline(font);
                 frame.text(text, font, ink(color), x0 + x, y0 + baseline - ascent, frame.measure(text, font) + 1.0, Align::Start);
             }
-            Piece::Rule { x, y, height } => frame.fill(palette.rim.1.alpha(glass.presence), x0 + x, y0 + y, 1.0 / px, height),
             Piece::Chart { x, y, width, height } => chart(frame, frames, Kind::Frames.mark(written), x0 + x, y0 + y, width, height, px),
+            Piece::Tile { .. } | Piece::Rule { .. } => {}
         }
+    }
+    if ringed.is_some() {
+        frame.unring();
     }
     // The rim: one pixel inside the glass's edge, lit from above.
     let line = 1.0 / px;
@@ -937,19 +961,23 @@ fn contrast(color: Color, ground: Tone, tint: f32, tile: f32, behind: f32) -> f3
 }
 
 /// The least contrast `words`' colours of words keep on `glass` as it is drawn (its tint and tiles as much as there
-/// is of it), on a tile or not, over the darkest and the brightest of what is behind it.
-fn least_contrast(words: Tone, glass: Glass) -> f32 {
+/// is of it), on a tile or not, over a grey of luminance `behind`.
+fn least_contrast(words: Tone, glass: Glass, behind: f32) -> f32 {
     let palette = words.palette();
     let (tint, tile) = (glass.opacity * glass.presence, glass.tone.palette().tile.a * glass.presence);
     let mut least = f32::INFINITY;
     for color in [palette.ink, palette.second, palette.hot] {
         for tile in [0.0, tile] {
-            for behind in [glass.behind.0, glass.behind.1] {
-                least = least.min(contrast(color, glass.tone, tint, tile, behind));
-            }
+            least = least.min(contrast(color, glass.tone, tint, tile, behind));
         }
     }
     least
+}
+
+/// How many tenths of what is behind `glass` (see `Glass::behind`) `words`' colours of words keep WCAG's contrast
+/// over, through the glass as it is drawn.
+fn legible_over(words: Tone, glass: Glass) -> usize {
+    glass.behind.iter().filter(|&&behind| least_contrast(words, glass, behind) >= LEGIBLE).count()
 }
 
 /// The least tint `tone`'s glass needs for every colour of words on it to
@@ -958,21 +986,58 @@ fn least_contrast(words: Tone, glass: Glass) -> f32 {
 fn least_tint(tone: Tone, behind: f32) -> f32 {
     (0..=100)
         .map(|i| i as f32 / 100.0)
-        .find(|&opacity| least_contrast(tone, Glass { tone, opacity, presence: 1.0, behind: (behind, behind) }) >= LEGIBLE)
+        .find(|&opacity| least_contrast(tone, Glass { tone, opacity, presence: 1.0, behind: [behind; 9] }, behind) >= LEGIBLE)
         .unwrap_or(1.0)
         .max(LEAST)
 }
 
+/// The least tint `tone`'s glass needs for the strokes of what is drawn behind it, from luminance `darkest` to
+/// `brightest`, to keep no more than a faint contrast through it (see `FAINT`): a page of words behind it taken out of
+/// its own words' way, an even screen left as it is.
+fn quiet_tint(tone: Tone, darkest: f32, brightest: f32) -> f32 {
+    let glass = Color::hex(tone.palette().tint, 1.0);
+    let through = |opacity: f32, behind: f32| {
+        let over = |top: f32| opacity * top + (1.0 - opacity) * grey(behind);
+        luminance(over(glass.r), over(glass.g), over(glass.b))
+    };
+    (0..=100)
+        .map(|i| i as f32 / 100.0)
+        .find(|&opacity| {
+            let (a, b) = (through(opacity, darkest), through(opacity, brightest));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05) <= FAINT
+        })
+        .unwrap_or(1.0)
+}
+
 /// The tone whose colours `glass`'s words are written in: its own, where they keep WCAG's contrast on it as it is
-/// drawn over what is behind it; else the other's, where they keep more of it. Glass made clearer than its words need
-/// leaves them over what is behind as much as over it: dark words over a white page, light glass or dark.
+/// drawn over all of what is behind it; else the one whose keep it over more of what is behind (the other's, where
+/// the glass is made clearer than its words need: dark words over a white page, light glass or dark, and light words
+/// over a dark terminal for all its white words), the one keeping more of it over the middle of what is behind where
+/// both keep it over as much.
 pub fn words(glass: Glass) -> Tone {
-    let own = least_contrast(glass.tone, glass);
     let other = match glass.tone {
         Tone::Dark => Tone::Light,
         Tone::Light => Tone::Dark,
     };
-    if own < LEGIBLE && least_contrast(other, glass) > own { other } else { glass.tone }
+    let (own, theirs) = (legible_over(glass.tone, glass), legible_over(other, glass));
+    let middle = glass.behind[4];
+    let closer = least_contrast(other, glass, middle) > least_contrast(glass.tone, glass, middle);
+    if own < glass.behind.len() && (theirs > own || (theirs == own && closer)) {
+        other
+    } else {
+        glass.tone
+    }
+}
+
+/// The glow about `glass`'s words and marks, written in `words`' colours: of the other tone's ink, as opaque as the
+/// glass is not there (see `HALO`), what the glass did of keeping them apart from what is behind done by it.
+fn halo(glass: Glass, words: Tone) -> Option<Color> {
+    let ring = match words {
+        Tone::Dark => Color::hex(0x000000, 1.0),
+        Tone::Light => Color::hex(0xFFFFFF, 1.0),
+    };
+    let strength = HALO * (1.0 - glass.presence);
+    (strength > 0.0).then(|| ring.alpha(strength))
 }
 
 /// The tone the glass is held to by the panel's theme `pref` (light or dark as chosen, or as the system's apps are);
@@ -995,15 +1060,17 @@ pub fn held_to(pref: crate::ui::prefs::ThemePref) -> Option<Tone> {
 /// once, for the words' sake, and clears as soon as two looks in a row see it may: what is behind changed, not a
 /// flash that came and went). With the tint this look needed, for the next.
 pub fn glass(behind: &mut [f32], before: Option<(Glass, f32)>, chosen: Option<Tone>) -> (Glass, f32) {
-    let (darkest, brightest) = if behind.is_empty() {
-        UNSEEN
+    let (tenths, strokes) = if behind.is_empty() {
+        (UNSEEN, (0.0, 1.0))
     } else {
         behind.sort_by(f32::total_cmp);
         let at = |share: f32| behind[((behind.len() - 1) as f32 * share).round() as usize];
-        (at(EXTREME), at(1.0 - EXTREME))
+        (std::array::from_fn(|i| at((i + 1) as f32 / 10.0)), (at(DETAIL), at(1.0 - DETAIL)))
     };
-    let dark = least_tint(Tone::Dark, brightest);
-    let light = least_tint(Tone::Light, darkest);
+    let (darkest, brightest) = (at_share(&tenths, EXTREME), at_share(&tenths, 1.0 - EXTREME));
+    let quiet = |tone: Tone| quiet_tint(tone, strokes.0, strokes.1);
+    let dark = least_tint(Tone::Dark, brightest).max(quiet(Tone::Dark));
+    let light = least_tint(Tone::Light, darkest).max(quiet(Tone::Light));
     let tone = match (chosen, before.map(|(glass, _)| glass.tone)) {
         (Some(tone), _) => tone,
         (None, Some(Tone::Dark)) if light + SWITCH >= dark => Tone::Dark,
@@ -1016,7 +1083,12 @@ pub fn glass(behind: &mut [f32], before: Option<(Glass, f32)>, chosen: Option<To
         Some((before, needed_before)) if before.tone == tone => needed.max(needed_before),
         _ => needed,
     };
-    (Glass { tone, opacity, presence: 1.0, behind: (darkest, brightest) }, needed)
+    (Glass { tone, opacity, presence: 1.0, behind: tenths }, needed)
+}
+
+/// Of the tenths of what is behind (see `Glass::behind`), the one at `share` of it (0.1 the first, 0.9 the last).
+fn at_share(tenths: &[f32; 9], share: f32) -> f32 {
+    tenths[((share * 10.0).round() as usize).clamp(1, 9) - 1]
 }
 
 #[cfg(test)]
@@ -1055,7 +1127,7 @@ mod tests {
         assert_eq!(page.tone, Tone::Light);
         // A few bright pixels do not decide it.
         let mut specks = dark_scene();
-        specks[..5].fill(1.0);
+        specks[..2].fill(1.0);
         assert_eq!(glass(&mut specks, Some(first), None).0, first.0);
         // Darkening at once; clearing once two looks in a row see it may: a flash for one look does not pump it.
         let (bright, dark) = (least_tint(Tone::Dark, 0.25), least_tint(Tone::Dark, 0.02));
@@ -1073,36 +1145,84 @@ mod tests {
         assert!(unseen.opacity >= least_tint(unseen.tone, if unseen.tone == Tone::Dark { 1.0 } else { 0.0 }));
     }
 
-    /// However clear the glass is made, its words are written in the colours that keep more of their contrast over
-    /// what is behind it, its own while they keep enough: a report's overlay made wholly clear over a white page wrote
-    /// its words white, for the dark glass no longer there. Over even greys, a white page with a dark bar along it,
-    /// in the tone the theme holds it to or as it follows what is behind, at every clarity.
+    /// However clear the glass is made, its words are written in the colours legible over more of what is behind it,
+    /// its own while they are legible over all of it, and ringed by a glow as the glass is not there: a report's
+    /// overlay made wholly clear over a white page wrote its words white, for the dark glass no longer there, and one
+    /// over a dark terminal wrote them dark, for the terminal's few white words. Over even greys, a white page with a
+    /// dark bar along it, a terminal, in the tone the theme holds it to or as it follows what is behind, at every
+    /// clarity.
     #[test]
     fn its_words_stay_legible_however_clear_its_glass() {
-        let mut bar = vec![1.0; 100];
-        bar[..30].fill(0.01);
-        let scenes = [vec![0.0; 100], vec![0.02; 100], vec![0.1; 100], vec![0.3; 100], vec![0.6; 100], vec![1.0; 100], bar];
+        let (mut page, mut terminal) = (vec![1.0; 100], vec![0.9; 100]);
+        page[..30].fill(0.01);
+        terminal[..85].fill(0.01);
+        let mut scenes = vec![page.clone(), terminal.clone()];
+        scenes.extend([0.0, 0.02, 0.1, 0.3, 0.6, 1.0].map(|grey| vec![grey; 100]));
+        let other = |tone: Tone| if tone == Tone::Dark { Tone::Light } else { Tone::Dark };
         for chosen in [None, Some(Tone::Dark), Some(Tone::Light)] {
             for scene in &scenes {
                 let looked = glass(&mut scene.clone(), None, chosen).0;
                 for tenth in 0..=10 {
                     let glass = Glass { presence: tenth as f32 / 10.0, ..looked };
-                    let (written, other) = (words(glass), if words(glass) == Tone::Dark { Tone::Light } else { Tone::Dark });
+                    let written = words(glass);
                     let said = format!("{chosen:?} behind {:?} presence {}", glass.behind, glass.presence);
-                    assert!(least_contrast(written, glass) >= least_contrast(other, glass), "{said}: {written:?} words read worse");
-                    if least_contrast(glass.tone, glass) >= LEGIBLE {
+                    assert!(legible_over(written, glass) >= legible_over(other(written), glass), "{said}: {written:?} words legible over less");
+                    if legible_over(glass.tone, glass) == glass.behind.len() {
                         assert_eq!(written, glass.tone, "{said}");
                     }
+                    // Ringed in the other colour as the glass is not there.
+                    let ring = halo(glass, written);
+                    assert_eq!(ring.map(|ring| ring.a), (glass.presence < 1.0).then_some(HALO * (1.0 - glass.presence)), "{said}");
+                    assert!(ring.is_none_or(|ring| (ring.r > 0.5) == (written == Tone::Light)), "{said}");
                 }
                 // All of the glass there, its own words, legible where its tint can make them so.
                 let whole = Glass { presence: 1.0, ..looked };
                 assert_eq!(words(whole), whole.tone, "{chosen:?} {:?}", whole.behind);
             }
         }
-        // The report's: dark glass made wholly clear over a white page writes dark words, as legible as on light glass.
-        let clear = Glass { presence: 0.0, ..glass(&mut vec![1.0; 100], None, Some(Tone::Dark)).0 };
-        assert_eq!(words(clear), Tone::Light);
-        assert!(least_contrast(Tone::Light, clear) >= LEGIBLE);
+        // The reports': with no glass, dark words over a white page, light words over a dark terminal, in either tone.
+        for tone in [Tone::Dark, Tone::Light] {
+            let clear = Glass { presence: 0.0, ..glass(&mut vec![1.0; 100], None, Some(tone)).0 };
+            assert_eq!(words(clear), Tone::Light);
+            assert_eq!(legible_over(Tone::Light, clear), clear.behind.len());
+            let clear = Glass { presence: 0.0, ..glass(&mut terminal.clone(), None, Some(tone)).0 };
+            assert_eq!(words(clear), Tone::Dark, "{tone:?}");
+        }
+    }
+
+    /// What is written behind the glass is taken out of its words' way: the glass over a terminal's white words on
+    /// black, or a page's black words on white, is tinted till those strokes keep no more than a faint contrast through
+    /// it; over an even screen, as little as its words need, as before.
+    #[test]
+    fn its_glass_quiets_what_is_written_behind_it() {
+        let through = |glass: Glass, behind: f32| {
+            let tint = Color::hex(glass.tone.palette().tint, 1.0);
+            let over = |top: f32| glass.opacity * top + (1.0 - glass.opacity) * grey(behind);
+            luminance(over(tint.r), over(tint.g), over(tint.b))
+        };
+        let faint = |glass: Glass, dark: f32, bright: f32| {
+            let (a, b) = (through(glass, dark), through(glass, bright));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05) <= FAINT + 1e-3
+        };
+        let (mut terminal, mut page) = (vec![0.01; 100], vec![1.0; 100]);
+        terminal[..8].fill(0.9);
+        page[..8].fill(0.01);
+        for tone in [Tone::Dark, Tone::Light] {
+            for (scene, even) in [(&terminal, 0.01), (&page, 1.0)] {
+                let busy = glass(&mut scene.clone(), None, Some(tone)).0;
+                let plain = glass(&mut vec![even; 100], None, Some(tone)).0;
+                assert!(faint(busy, 0.01, if even < 0.5 { 0.9 } else { 1.0 }) || busy.opacity == 1.0, "{tone:?} {:?}", busy.opacity);
+                assert!(busy.opacity >= plain.opacity, "{tone:?} {} {}", busy.opacity, plain.opacity);
+                assert_eq!(plain.opacity, least_tint(tone, even));
+            }
+        }
+        // Where its words alone need little of it: dark glass over a terminal, light glass over a page.
+        assert!(glass(&mut terminal.clone(), None, Some(Tone::Dark)).0.opacity > least_tint(Tone::Dark, 0.01));
+        assert!(glass(&mut page.clone(), None, Some(Tone::Light)).0.opacity > least_tint(Tone::Light, 1.0));
+        // A stray pixel or two do not.
+        let mut specks = vec![0.01; 100];
+        specks[..2].fill(1.0);
+        assert_eq!(glass(&mut specks, None, Some(Tone::Dark)).0.opacity, least_tint(Tone::Dark, 0.01));
     }
 
     /// The glass takes the tone the panel's theme holds it to, whatever is behind it, as tinted as its words need
@@ -1113,10 +1233,10 @@ mod tests {
         let (page, scene) = (|| vec![1.0; 100], || vec![0.02; 100]);
         let dark = glass(&mut page(), None, Some(Tone::Dark)).0;
         assert_eq!((dark.tone, dark.opacity), (Tone::Dark, least_tint(Tone::Dark, 1.0)));
-        assert!(least_contrast(Tone::Dark, dark) >= LEGIBLE || dark.opacity == 1.0);
+        assert!(legible_over(Tone::Dark, dark) == dark.behind.len() || dark.opacity == 1.0);
         let light = glass(&mut scene(), None, Some(Tone::Light)).0;
         assert_eq!((light.tone, light.opacity), (Tone::Light, least_tint(Tone::Light, 0.02)));
-        assert!(least_contrast(Tone::Light, light) >= LEGIBLE || light.opacity == 1.0);
+        assert!(legible_over(Tone::Light, light) == light.behind.len() || light.opacity == 1.0);
         // Following what is behind, a page is light glass; held dark, the same page is dark glass at once.
         let followed = glass(&mut page(), None, None);
         assert_eq!(followed.0.tone, Tone::Light);

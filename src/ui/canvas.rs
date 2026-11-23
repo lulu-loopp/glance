@@ -385,4 +385,10 @@ pub trait Canvas {
     fn scope(&self, _name: &str) {}
     /// Ends the scope begun last (see `scope`).
     fn unscope(&self) {}
+    /// Rings what is drawn from here on till `unring` with an outline of `halo` about every stroke of it, a DIP and a
+    /// half wide and softened: words kept apart from what is under them, as subtitles are. A canvas that draws no
+    /// outline draws it plainly.
+    fn ring(&self, _halo: Color) {}
+    /// Ends the ring begun last (see `ring`): what was drawn in it drawn, over its glow.
+    fn unring(&self) {}
 }
