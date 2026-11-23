@@ -408,6 +408,18 @@ impl Part {
         self.bounds().map(|b| (b.x, b.y, b.w, b.h))
     }
 
+    /// The words it writes, each with where it writes them: left, top, width, height (for tests of where things are).
+    #[cfg(test)]
+    pub(crate) fn words(&self) -> Vec<(String, (f32, f32, f32, f32))> {
+        self.ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Text { text, .. } if !text.is_empty() => op.bounds().map(|b| (text.clone(), (b.x, b.y, b.w, b.h))),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// What of it shows (see `Op::shows`), clips left round nothing
     /// dropped; nothing, if none of it does. A turn broken off by another
     /// starts from what showed, so what has faded out is not carried on

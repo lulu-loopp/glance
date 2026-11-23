@@ -1181,7 +1181,9 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + ROW_GAP);
                 part(&at.to_string());
                 frame.fill_rounded(ink.trace.alpha(strength(at)), left, row_y + (LINE - 8.0) / 2.0, 8.0, 8.0, 2.0);
-                frame.text(model, theme.small, theme.text2, left + 14.0, row_y, width - 14.0, Align::Start);
+                // (Its name cut short before its figure: written in all the row, the two were written over each other
+                // where the row was narrow.)
+                frame.text(model, theme.small, theme.text2, left + 14.0, row_y, before(frame, theme, value, width - 14.0), Align::Start);
                 frame.text(value, theme.small, theme.text, left, row_y, width, Align::End);
             }
         }
@@ -1195,7 +1197,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 let row_y = bar_y + MODELS_BAR + MODELS_BAR_GAP + at as f32 * (LINE + ROW_GAP);
                 part(&at.to_string());
                 frame.mark(source.mark(), Point { x: left + MARK / 2.0, y: row_y + LINE / 2.0 }, MARK, theme.text2, 1.0);
-                frame.text(name, theme.small, theme.text2, left + MARK + 6.0, row_y, width - MARK - 6.0, Align::Start);
+                frame.text(name, theme.small, theme.text2, left + MARK + 6.0, row_y, before(frame, theme, value, width - MARK - 6.0), Align::Start);
                 frame.text(value, theme.small, theme.text, left, row_y, width, Align::End);
             }
         }
@@ -1204,7 +1206,7 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
             for (at, (label, value)) in pairs.iter().enumerate() {
                 let (x, row_y) = (left + (at % 2) as f32 * (column + WINDOW_GAP), y + GAP + (at / 2) as f32 * (LINE + ROW_GAP));
                 part(&at.to_string());
-                frame.text(label, theme.small, theme.text2, x, row_y, column, Align::Start);
+                frame.text(label, theme.small, theme.text2, x, row_y, before(frame, theme, value, column), Align::Start);
                 frame.text(value, theme.small, theme.text, x, row_y, column, Align::End);
             }
         }
@@ -1253,12 +1255,12 @@ pub(super) fn paint(frame: &dyn Canvas, scene: &Scene, ink: Ink, block: &AiBlock
                 Lang::Zh => format!("{at_work} 个会话进行中"),
                 Lang::En => format!("{at_work} {} at work", if *at_work == 1 { "session" } else { "sessions" }),
             };
-            part("at_work");
-            frame.text(&said, theme.small, theme.text2, left + 2.0 * DOT + 8.0, row_y, width - 2.0 * DOT - 8.0, Align::Start);
             let all = match lang {
                 Lang::Zh => format!("今日共 {today} 个"),
                 Lang::En => format!("{today} today"),
             };
+            part("at_work");
+            frame.text(&said, theme.small, theme.text2, left + 2.0 * DOT + 8.0, row_y, before(frame, theme, &all, width - 2.0 * DOT - 8.0), Align::Start);
             part("today");
             frame.text(&all, theme.small, theme.text3, left, row_y, width, Align::End);
         }
@@ -1536,6 +1538,12 @@ enum Form {
     Strip,
     /// One figure alone: today's, where it is shown, else a source's, the rest turned to by the wheel (see `paint_one`).
     Today,
+}
+
+/// How much of `room` (DIPs) is left for what a row says at its start, `value` written at its end in the small type, and
+/// a little room between them.
+fn before(frame: &dyn Canvas, theme: &Theme, value: &str, room: f32) -> f32 {
+    (room - frame.measure(value, theme.small) - 6.0).max(0.0)
 }
 
 /// How wide the chart of how today's spending mounted is beside today's `figure` and `unit` in a lane `width` wide
@@ -2050,7 +2058,9 @@ pub(super) fn paint_least(frame: &dyn Canvas, scene: &Scene, ink: Ink, (dock, mo
         for (at, lane) in models.iter().enumerate() {
             let Some(lane) = lane else { continue };
             let cell_left = left + (at % columns) as f32 * (cell + 8.0);
-            paint_lane(frame, scene, lane, Rect { x: cell_left + 4.0, y: list_top, w: cell - 8.0, h: models_tall }, 0.0, Pass::Content, hits);
+            // (Its list as wide as its ring's room, a little in from it: given a lane's room, inset by a lane's pads too, it
+            // had half of it.)
+            paint_lane(frame, scene, lane, Rect { x: cell_left + 4.0 - theme.pad_x, y: list_top, w: cell - 8.0 + 2.0 * theme.pad_x, h: models_tall }, 0.0, Pass::Content, hits);
         }
         list_top += models_tall + LIST_ABOVE;
     }

@@ -8200,6 +8200,52 @@ otepad.exe", "Notepad"),
         assert_eq!(spots(Shape::Least, (72.0, 72.0)), [Hit::AiSlot(Spot::Today), Hit::AiPage(0), Hit::AiPage(1), Hit::AiPage(2), Hit::AiPages(3, true)]);
     }
 
+    /// The AI component's widget, at every size from the least to large, in every look and both languages, writes no
+    /// words over others: what each source spent by model, as near a square with its rings over the lists (the owner
+    /// saw a model's name and its figure written over each other, the list in half its ring's room), and everything
+    /// else it tells.
+    #[test]
+    fn the_ai_widget_writes_no_words_over_others() {
+        use crate::ui::morph::Recorder;
+        let mut over = Vec::new();
+        for (skin, lang) in [(Skin::Glass, Lang::Zh), (Skin::Fluent, Lang::En), (Skin::Paper, Lang::Zh)] {
+            let theme = Theme::new(skin, true);
+            let info = info();
+            let history: &'static [Arc<Sample>] = Box::leak(Box::new([Arc::new(sample(None, None, None))]));
+            let seen = Seen::of(history);
+            let shown = ["ai:today", "ai:claude", "ai:codex"].map(|id| serde_json::json!({ "id": id, "on": true }));
+            let held = Prefs::resolve(&serde_json::json!({ "ai": shown }), &[]).holding(crate::settings::Part::Ai);
+            let scene = Scene { music_apart: false, hint: None, info: &info, prefs: &held, theme: &theme, lang, history, seen: &seen, pen_ms: 0.0, scrolls: Scrolls::default(), tab: Tab::default(), hover: None, thumbs: &RESTING, pinned: false, overlay: false, buttons: true, newer: false, settings_lit: None };
+            let (usage, now) = (ai::tests::lanes::day(), ai::tests::lanes::NOON);
+            let shaped = ai::together(&held, lang, Some(&usage), now, Detail::Shape(Shape::Across), |_| false, &theme).unwrap();
+            let [Block::Ai(ai::AiBlock::Shaped { dock, mounted, rich, .. })] = shaped.as_slice() else { panic!("not shaped") };
+            for w in (60..=1000).step_by(7) {
+                for h in (40..=900).step_by(7) {
+                    let recorder = Recorder::new(&Nothing, 1.0, (0.0, 0.0));
+                    ai::paint_shaped(&recorder, &scene, theme.ink(AI_LANE), (dock, mounted, rich), (0.0, 0.0, w as f32, h as f32), &mut Vec::new());
+                    let words: Vec<(String, (f32, f32, f32, f32))> = recorder.parts().iter().flat_map(|part| part.words()).collect();
+                    for (at, (one, a)) in words.iter().enumerate() {
+                        // (Over each other more than a DIP across, and more than a few down: the boxes of two lines one
+                        // under another reach a little into each other.)
+                        if let Some((other, b)) = words[at + 1..].iter().find(|(_, b)| a.0.max(b.0) + 1.0 < (a.0 + a.2).min(b.0 + b.2) && a.1.max(b.1) + 4.0 < (a.1 + a.3).min(b.1 + b.3)) {
+                            over.push(format!("{skin:?} {w} by {h}: {one:?} {a:?} over {other:?} {b:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        // (Told apart by what is written over what, wherever it is.)
+        let mut kinds: Vec<String> = Vec::new();
+        for line in &over {
+            let quoted: Vec<&str> = line.split('"').collect();
+            let said: String = format!("{} / {}", quoted.get(1).unwrap_or(&""), quoted.get(3).unwrap_or(&"")).chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
+            if !kinds.iter().any(|kind| kind.ends_with(&said)) {
+                kinds.push(format!("{line} :: {said}"));
+            }
+        }
+        assert!(over.is_empty(), "{} words over others, {} kinds, the first of each: {:#?}", over.len(), kinds.len(), &kinds[..kinds.len().min(30)]);
+    }
+
     /// The AI component's widget sized a DIP at a time, wider at several heights and taller at several widths: wherever
     /// it is laid out alike (`ai::arranged`), it draws the same parts, each no more than a few DIPs from where it was;
     /// where any of them would leap, or come or go, it is laid out otherwise, and a widget turns into that as into
